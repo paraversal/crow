@@ -48,6 +48,8 @@ Branch: `ui-u2-menu-bar` · PR: https://github.com/paraversal/file-crow/pull/9 �
 - [x] Find Everything: ⇧⌘A from root opens search with "Search everything, all rules off"; typing `needle` finds `node_modules/pkg/needle.txt`. (2026-11-13)
 - [x] Typing is not stolen: rename field accepts `/` and Space (`/ `); filter field accepts `a/b `; Go to Folder/search/palette are covered by `plain_keys_stay_in_every_text_field`. (2026-11-13)
 - [x] Help search: Help, type `trash` → Menu Items: Move to Trash. (2026-11-13)
+- [x] App menu: About Crow opens the standard panel; Hide Crow hides the app and it un-hides. (2026-11-13)
+- [ ] Settings… and Hide Others/Show All: not exercised by hand (Settings opens `settings.toml` in the external default app); code path reviewed.
 
 ## Found along the way
 - The first hand-check attempt sent `keystroke "down" using command down` (the letters d-o-w-n), which fired Open, Close Tab and New Window in sequence and made the app look like it crashed. The app was fine; use `key code 125` for the arrow. No product change needed.
