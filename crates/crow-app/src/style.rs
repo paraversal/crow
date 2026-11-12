@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crow_theme::{Rgb, Variant};
-use gpui::{Image, ImageFormat, Rgba, WindowAppearance, rgb, rgba};
+use gpui::{Image, ImageFormat, Pixels, Rgba, SharedString, TextRun, Window, WindowAppearance, rgb, rgba};
 
 pub fn color(c: Rgb) -> Rgba {
     rgb(c.0)
@@ -55,20 +55,41 @@ pub fn format_time(t: Option<std::time::SystemTime>) -> String {
     }
 }
 
-/// A Finder-like kind. M2 replaces this with the system's UTType descriptions.
-pub fn kind_of(entry: &crow_fs::Entry) -> String {
-    if entry.is_dir {
-        return if entry.ext() == "app" { "Application".into() } else { "Folder".into() };
+/// Finder's kind for an entry, from the system's type descriptions (cached per extension).
+pub fn kind(entry: &crow_fs::Entry) -> Arc<str> {
+    let ext = if entry.is_dir && !entry.is_package() { "" } else { entry.ext() };
+    crow_macos::kind_name(ext, entry.is_dir && !entry.is_package())
+}
+
+/// Shorten `text` in the middle to fit `max` (Finder keeps both the start and the
+/// extension visible: `8b184f2a-90…app_icon.png`). Only long names are measured twice or more.
+pub fn truncate_middle(text: &str, max: Pixels, font_size: Pixels, window: &Window) -> SharedString {
+    let font = window.text_style().font();
+    let measure = |s: &str| {
+        let run = TextRun {
+            len: s.len(),
+            font: font.clone(),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window.text_system().shape_line(SharedString::from(s.to_owned()), font_size, &[run], None).width
+    };
+    if measure(text) <= max {
+        return SharedString::from(text.to_owned());
     }
-    match entry.ext().to_lowercase().as_str() {
-        "rs" => "Rust source".into(),
-        "md" => "Markdown".into(),
-        "toml" => "TOML".into(),
-        "json" | "jsonl" => "JSON".into(),
-        "txt" => "Plain text".into(),
-        "png" | "jpg" | "jpeg" | "heic" | "gif" | "webp" => "Image".into(),
-        "pdf" => "PDF document".into(),
-        "" => "Document".into(),
-        other => format!("{} file", other.to_uppercase()),
+    let chars: Vec<char> = text.chars().collect();
+    let shortened = |keep: usize| -> String {
+        let head = keep.div_ceil(2);
+        let tail = keep - head;
+        chars[..head].iter().chain(['…'].iter()).chain(chars[chars.len() - tail..].iter()).collect()
+    };
+    // The longest shortening that still fits.
+    let (mut lo, mut hi) = (0, chars.len().saturating_sub(1));
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if measure(&shortened(mid)) <= max { lo = mid } else { hi = mid - 1 }
     }
+    shortened(lo).into()
 }

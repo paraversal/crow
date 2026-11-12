@@ -2,18 +2,19 @@
 
 use std::path::{Path, PathBuf};
 
-use crow_core::{Favorite, Tabs};
+use crow_core::{Favorite, PreviewContent, Tabs};
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, FontWeight, IntoElement, Render, Role, SharedString, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, point, prelude::*, px, size,
+    App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role, SharedString,
+    Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, point, prelude::*, px, size,
 };
 
 use crate::actions::{
-    CloseTab, GoBack, GoForward, MoveDown, MoveUp, NewTab, NextTab, OpenParent, OpenSelection, PreviousTab,
+    CloseTab, GoBack, GoForward, GoToFolder, MoveDown, MoveUp, NewTab, NextTab, OpenParent, OpenSelection, PreviousTab,
     SwitchFocus, ToggleHiddenFiles,
 };
 use crate::pane::Pane;
-use crate::style::{color, color_alpha, format_time, icon, kind_of, ui_font};
+use crate::style::{color, color_alpha, format_time, icon, kind, ui_font};
+use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::{Ui, reload_theme};
 
 /// Open a window on `dir`. New windows share one size from settings and step
@@ -43,6 +44,8 @@ pub struct CrowWindow {
     sidebar_focus: FocusHandle,
     sidebar_cursor: usize,
     show_hidden: bool,
+    /// The Go to Folder sheet, while open.
+    go_to: Option<(Entity<TextInput>, Subscription)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -65,6 +68,7 @@ impl CrowWindow {
             sidebar_focus: cx.focus_handle(),
             sidebar_cursor: 0,
             show_hidden,
+            go_to: None,
             _subscriptions: subscriptions,
         }
     }
@@ -128,6 +132,71 @@ impl CrowWindow {
         for (_, pane) in self.tabs.iter() {
             pane.update(cx, |pane, cx| pane.set_show_hidden(show, cx));
         }
+    }
+
+    fn go_to_folder(&mut self, _: &GoToFolder, window: &mut Window, cx: &mut Context<Self>) {
+        let current = home_relative(self.pane().read(cx).dir());
+        let input = cx.new(|cx| TextInput::new(current, "Go to Folder", cx));
+        let subscription = cx.subscribe_in(&input, window, |this, input, event: &TextInputEvent, window, cx| {
+            let typed = input.read(cx).text().to_owned();
+            let cwd = this.pane().read(cx).dir().to_path_buf();
+            let home = home_dir();
+            match event {
+                TextInputEvent::CompletionRequested => {
+                    if let Some(completed) = crow_core::complete_typed(&typed, &cwd, &home) {
+                        input.update(cx, |input, cx| input.set_text(completed, window, cx));
+                    }
+                }
+                TextInputEvent::Cancelled => this.close_go_to(window, cx),
+                TextInputEvent::Confirmed => {
+                    let target = crow_core::resolve_typed(&typed, &cwd, &home);
+                    if target.is_dir() {
+                        this.pane().update(cx, |pane, cx| pane.navigate(target, cx));
+                    } else if target.exists() {
+                        this.pane().update(cx, |pane, cx| pane.reveal(target, cx));
+                    } else {
+                        window.play_system_bell();
+                        return;
+                    }
+                    this.close_go_to(window, cx);
+                }
+            }
+        });
+        let focus = input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.go_to = Some((input, subscription));
+        cx.notify();
+    }
+
+    fn close_go_to(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.go_to = None;
+        self.focus_pane(window, cx);
+        cx.notify();
+    }
+
+    fn render_go_to(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let (input, _) = self.go_to.as_ref()?;
+        let theme = &cx.global::<Ui>().theme;
+        Some(
+            div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
+                div()
+                    .id("go-to-folder")
+                    .role(Role::Dialog)
+                    .aria_label("Go to Folder")
+                    .w(px(520.))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(color(theme.role("surface")))
+                    .border_1()
+                    .border_color(color(theme.role("border")))
+                    .shadow_lg()
+                    .child(div().text_size(px(12.)).text_color(color(theme.role("fg-muted"))).child("Go to Folder"))
+                    .child(input.clone()),
+            ),
+        )
     }
 
     fn open_parent(&mut self, _: &OpenParent, _: &mut Window, cx: &mut Context<Self>) {
@@ -334,12 +403,18 @@ impl CrowWindow {
             .flex_col()
             .gap_3()
             .overflow_hidden();
-        let Some(entry) = pane.selected_entry().cloned() else { return base.aria_label("Preview") };
+        let Some(entry) = pane.cursor_entry().cloned() else { return base.aria_label("Preview") };
         let size = if entry.is_dir { "--".to_owned() } else { crow_fs::human_size(entry.size) };
-        let kind = kind_of(&entry);
-        let (created, modified) = (format_time(entry.created), format_time(entry.modified));
-        let preview = match pane.preview_text().cloned() {
-            Some(text) => div()
+        let kind = kind(&entry);
+        let (created, modified, added) =
+            (format_time(entry.created), format_time(entry.modified), format_time(entry.added));
+        let preview = pane.preview();
+        let tags = preview.map(|p| p.tags.join(", ")).filter(|t| !t.is_empty());
+        let picture = match (preview.and_then(|p| p.image.clone()), preview.and_then(|p| p.content.clone())) {
+            (Some(image), _) => {
+                div().h(px(220.)).flex().items_center().justify_center().child(img(image).max_w_full().max_h(px(220.)))
+            }
+            (None, Some(PreviewContent::Text(text))) => div()
                 .h(px(220.))
                 .p_2()
                 .rounded_md()
@@ -350,7 +425,7 @@ impl CrowWindow {
                 .font_family("Menlo")
                 .text_size(px(11.))
                 .child(text),
-            None => div()
+            _ => div()
                 .h(px(220.))
                 .flex()
                 .items_center()
@@ -361,26 +436,35 @@ impl CrowWindow {
             div()
                 .flex()
                 .justify_between()
+                .gap_2()
                 .py_1()
                 .border_b_1()
                 .border_color(border)
-                .child(div().text_color(muted).child(label.to_owned()))
-                .child(div().child(value))
+                .child(div().flex_none().text_color(muted).child(label.to_owned()))
+                .child(div().text_right().child(value))
         };
-        base.aria_label(format!("Preview: {}, {kind}, {size}, created {created}, modified {modified}", entry.name))
-            .child(preview)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(div().text_size(px(15.)).child(entry.name.clone()))
-                    .child(div().text_color(muted).child(format!("{kind} · {size}"))),
-            )
-            .child(div().pt_2().font_weight(FontWeight::SEMIBOLD).child("Information"))
-            .child(info_row("Created", created))
-            .child(info_row("Modified", modified))
-            .child(div().pt_2().font_weight(FontWeight::SEMIBOLD).child("Tags"))
-            .child(div().text_color(muted).child("Add Tags…"))
+        base.aria_label(format!(
+            "Preview: {}, {kind}, {size}, created {created}, modified {modified}{}",
+            entry.name,
+            tags.as_ref().map(|t| format!(", tags {t}")).unwrap_or_default()
+        ))
+        .child(picture)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(div().text_size(px(15.)).child(entry.name.clone()))
+                .child(div().text_color(muted).child(format!("{kind} · {size}"))),
+        )
+        .child(div().pt_2().font_weight(FontWeight::SEMIBOLD).child("Information"))
+        .child(info_row("Created", created))
+        .child(info_row("Modified", modified))
+        .when(entry.added.is_some(), |pane| pane.child(info_row("Added", added)))
+        .child(div().pt_2().font_weight(FontWeight::SEMIBOLD).child("Tags"))
+        .child(match tags {
+            Some(tags) => div().child(tags),
+            None => div().text_color(muted).child("No tags"),
+        })
     }
 
     fn render_path_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -388,13 +472,16 @@ impl CrowWindow {
         let theme = ui.theme.clone();
         let settings_error = ui.settings_error.clone();
         let pane = self.pane().read(cx);
-        let target = pane.selected_entry().map_or_else(|| pane.dir().to_path_buf(), |e| e.path.clone());
+        let target = pane.cursor_entry().map_or_else(|| pane.dir().to_path_buf(), |e| e.path.clone());
         let parts = crow_macos::display_components(&target);
         let last = parts.len().saturating_sub(1);
         let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
         let (status, is_error): (SharedString, bool) = match (pane.error().cloned(), settings_error) {
             (Some(e), _) | (None, Some(e)) => (e, true),
             _ if pane.is_loading() && pane.item_count() == 0 => ("Loading…".into(), false),
+            _ if pane.selected_count() > 1 => {
+                (format!("{} of {} selected", pane.selected_count(), pane.item_count()).into(), false)
+            }
             _ => (format!("{} items", pane.item_count()).into(), false),
         };
         div()
@@ -411,29 +498,48 @@ impl CrowWindow {
             .border_color(color(theme.role("border")))
             .text_size(px(12.))
             .text_color(color(theme.role("fg-muted")))
-            .children(parts.into_iter().enumerate().map({
-                let fg = color(theme.role("fg"));
-                move |(i, (name, path))| {
-                    let is_dir = i < last || path.is_dir();
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .when(i == last, |part| part.text_color(fg))
-                        .children(icon(&path, is_dir, 14).map(|i| img(i).size(px(14.))))
-                        .child(name)
-                        .when(i < last, |part| part.child(div().pl_1().child("›")))
-                }
-            }))
-            .child(div().flex_1())
+            .child(
+                // Long paths give way to the status line instead of pushing it out.
+                div().flex_1().min_w_0().overflow_hidden().flex().items_center().gap_1().children(
+                    parts.into_iter().enumerate().map({
+                        let fg = color(theme.role("fg"));
+                        move |(i, (name, path))| {
+                            let is_dir = i < last || path.is_dir();
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .when(i == last, |part| part.text_color(fg))
+                                .children(icon(&path, is_dir, 14).map(|i| img(i).size(px(14.))))
+                                .child(name)
+                                .when(i < last, |part| part.child(div().pl_1().child("›")))
+                        }
+                    }),
+                ),
+            )
             .child(
                 div()
                     .id("status")
+                    .flex_none()
+                    .pl_3()
                     .role(Role::Status)
                     .aria_label(status.clone())
                     .when(is_error, |s| s.text_color(color(theme.role("error"))))
                     .child(status),
             )
+    }
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
+}
+
+/// `~/Documents` for paths in the home folder, like Finder's Go to Folder.
+fn home_relative(path: &Path) -> String {
+    match path.strip_prefix(home_dir()) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
     }
 }
 
@@ -453,6 +559,7 @@ impl Render for CrowWindow {
         let sidebar = self.render_sidebar(window, cx);
         let preview = self.render_preview(cx);
         let path_bar = self.render_path_bar(cx);
+        let go_to = self.render_go_to(cx);
         div()
             .id("crow")
             .role(Role::Application)
@@ -467,6 +574,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::open_parent))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
+            .on_action(cx.listener(Self::go_to_folder))
             .size_full()
             .flex()
             .flex_col()
@@ -486,6 +594,7 @@ impl Render for CrowWindow {
                     .child(preview),
             )
             .child(path_bar)
+            .children(go_to)
     }
 }
 
@@ -511,6 +620,7 @@ mod tests {
         cx.update(|cx| {
             crate::ui::init_for_tests(cx);
             cx.bind_keys(crate::actions::finder_keymap());
+            cx.bind_keys(crate::text_input::keymap());
         });
         let dir = dir.to_path_buf();
         let window: WindowHandle<CrowWindow> = cx
@@ -520,8 +630,22 @@ mod tests {
             .expect("open window");
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let view = window.root(&mut cx).expect("root view");
-        cx.run_until_parked();
+        settle(&view, &mut cx);
         (view, cx)
+    }
+
+    /// Folders load on real threads; wait until every tab has finished.
+    fn settle(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+        for _ in 0..400 {
+            cx.run_until_parked();
+            let busy = view.read_with(cx, |w, cx| w.tabs.iter().any(|(_, pane)| pane.read(cx).is_loading()));
+            if !busy {
+                cx.run_until_parked();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("folders never finished loading");
     }
 
     fn pane(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Entity<Pane> {
@@ -529,7 +653,7 @@ mod tests {
     }
 
     fn selected(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Option<String> {
-        pane(view, cx).read_with(cx, |p, _| p.selected_entry().map(|e| e.name.clone()))
+        pane(view, cx).read_with(cx, |p, _| p.cursor_entry().map(|e| e.name.clone()))
     }
 
     fn dir(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> PathBuf {
@@ -556,7 +680,7 @@ mod tests {
         assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "…and leaves the list alone");
 
         cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
+        settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root.join("beta"), "Return in the sidebar opens the favorite");
         let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
         assert!(cx.update(|window, _| list_focus.is_focused(window)), "…and moves focus to the list");
@@ -572,21 +696,21 @@ mod tests {
         let (view, mut cx) = open(cx, &root.join("alpha"));
 
         cx.simulate_keystrokes("cmd-up");
-        cx.run_until_parked();
+        settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root);
         assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "Going up selects the folder you came from");
 
         cx.simulate_keystrokes("down cmd-down");
-        cx.run_until_parked();
+        settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root.join("beta"));
 
         cx.simulate_keystrokes("cmd-[");
-        cx.run_until_parked();
+        settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root);
         assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "Back selects the folder you left");
 
         cx.simulate_keystrokes("cmd-]");
-        cx.run_until_parked();
+        settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root.join("beta"));
     }
 
@@ -596,12 +720,12 @@ mod tests {
         let (view, mut cx) = open(cx, &root);
 
         cx.simulate_keystrokes("cmd-t");
-        cx.run_until_parked();
+        settle(&view, &mut cx);
         assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2);
         assert_eq!(dir(&view, &cx), root, "A new tab opens on the current folder");
 
         cx.simulate_keystrokes("down cmd-down");
-        cx.run_until_parked();
+        settle(&view, &mut cx);
         cx.simulate_keystrokes("cmd-shift-[");
         assert_eq!(dir(&view, &cx), root, "Each tab keeps its own folder");
 
@@ -618,9 +742,87 @@ mod tests {
         assert_eq!(count(&cx), 3);
 
         cx.simulate_keystrokes("cmd-t cmd-shift-.");
-        cx.run_until_parked();
+        settle(&view, &mut cx);
         assert_eq!(count(&cx), 4);
         cx.simulate_keystrokes("cmd-shift-[");
         assert_eq!(count(&cx), 4, "The other tab shows hidden files too");
+    }
+
+    fn selected_names(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Vec<String> {
+        pane(view, cx).read_with(cx, |p, _| p.selected_names())
+    }
+
+    fn names(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Vec<String> {
+        pane(view, cx).read_with(cx, |p, _| p.names())
+    }
+
+    #[gpui::test]
+    fn shift_arrows_extend_and_cmd_a_selects_all(cx: &mut TestAppContext) {
+        let root = fixture("multi");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down shift-down");
+        assert_eq!(selected_names(&view, &cx), ["beta", "notes.txt"]);
+        cx.simulate_keystrokes("shift-up shift-up");
+        assert_eq!(selected_names(&view, &cx), ["alpha", "beta"], "the range pivots on where it started");
+        cx.simulate_keystrokes("cmd-a");
+        assert_eq!(selected_names(&view, &cx), ["alpha", "beta", "notes.txt"]);
+        cx.simulate_keystrokes("down");
+        assert_eq!(selected_names(&view, &cx), ["beta"], "a plain arrow collapses to one item");
+    }
+
+    #[gpui::test]
+    fn typing_selects_by_name_and_space_continues_a_name(cx: &mut TestAppContext) {
+        let root = fixture("typeselect");
+        std::fs::write(root.join("my file.txt"), "").expect("create fixture");
+        std::fs::write(root.join("my_other.txt"), "").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("b e");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+        std::thread::sleep(crow_core::TypeSelect::TIMEOUT + std::time::Duration::from_millis(50));
+        cx.simulate_keystrokes("m y space f");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("my file.txt"), "Space mid-name is part of the name");
+    }
+
+    #[gpui::test]
+    fn sorting_keeps_folders_first_and_the_selection(cx: &mut TestAppContext) {
+        let root = fixture("sort");
+        std::fs::write(root.join("big.bin"), vec![0u8; 5000]).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down down");
+        let picked = selected(&view, &cx);
+        pane(&view, &cx)
+            .update(&mut cx, |p, cx| p.set_sort(crow_fs::Sort::default().toggled(crow_fs::SortKey::Size), cx));
+        settle(&view, &mut cx);
+        assert_eq!(names(&view, &cx), ["alpha", "beta", "big.bin", "notes.txt"], "largest file first, folders on top");
+        assert_eq!(selected(&view, &cx), picked, "the selection follows the item, not the row");
+    }
+
+    #[gpui::test]
+    fn go_to_folder_completes_navigates_and_reveals_files(cx: &mut TestAppContext) {
+        let root = fixture("goto");
+        let (view, mut cx) = open(cx, &root);
+        let sheet_open = |cx: &VisualTestContext| view.read_with(cx, |w, _| w.go_to.is_some());
+
+        cx.simulate_keystrokes("cmd-shift-g cmd-a");
+        cx.simulate_input("al");
+        cx.simulate_keystrokes("tab");
+        let typed = view.read_with(&cx, |w, cx| w.go_to.as_ref().map(|(i, _)| i.read(cx).text().to_owned()));
+        assert_eq!(typed.as_deref(), Some("alpha/"), "Tab completes a unique folder");
+        cx.simulate_input("inner");
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha/inner"));
+        assert!(!sheet_open(&cx), "Return closes the sheet");
+
+        cx.simulate_keystrokes("cmd-shift-g cmd-a");
+        cx.simulate_input(&root.join("notes.txt").display().to_string());
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root, "a file opens its folder…");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "…with the file selected");
+
+        cx.simulate_keystrokes("cmd-shift-g escape");
+        assert!(!sheet_open(&cx), "Escape closes the sheet");
+        assert_eq!(dir(&view, &cx), root, "…without going anywhere");
     }
 }

@@ -6,11 +6,13 @@
 
 mod drag;
 mod icons;
+mod metadata;
 mod names;
 mod quick_look;
 
 pub use drag::begin_drag;
 pub use icons::icon_png;
+pub use metadata::{kind_name, tags, thumbnail_png};
 pub use names::display_components;
 pub use quick_look::{toggle_quick_look, update_quick_look};
 

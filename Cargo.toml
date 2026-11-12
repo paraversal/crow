@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "spike"]
+members = ["crates/*"]
 # vendor/zed is its own workspace (fetched by scripts/fetch-gpui.sh).
 exclude = ["vendor"]
 

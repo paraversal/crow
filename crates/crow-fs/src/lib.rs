@@ -1,14 +1,16 @@
-//! Folder snapshots, watching and, from M4, the file operation engine.
+//! Folder listings, sorting, watching and, from M4, the file operation engine.
 //!
 //! No UI types here: everything is plain data so it can be tested without a window.
 
+mod listing;
 mod snapshot;
 mod sort;
 mod watch;
 
-pub use snapshot::{Entry, Snapshot, make_fixture, read_dir};
-pub use sort::natural_cmp;
-pub use watch::{FolderWatcher, watch_folder};
+pub use listing::{Entry, list_dir, stat_entry};
+pub use snapshot::{KindOf, Snapshot, apply_changes, make_fixture, read_dir};
+pub use sort::{Sort, SortKey, compare, natural_cmp, sort_entries};
+pub use watch::{FolderChange, FolderWatcher, watch_folder};
 
 /// Finder-style byte counts: decimal units, one decimal place.
 pub fn human_size(bytes: u64) -> String {

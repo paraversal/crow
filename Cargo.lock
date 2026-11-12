@@ -1051,18 +1051,21 @@ dependencies = [
  "crow-fs",
  "crow-macos",
  "crow-theme",
+ "futures",
  "gpui",
  "gpui_platform",
  "notify",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "unicode-segmentation",
 ]
 
 [[package]]
 name = "crow-core"
 version = "0.1.0"
 dependencies = [
+ "crow-fs",
  "serde",
  "toml 1.2.1+spec-1.1.0",
 ]
@@ -1071,41 +1074,29 @@ dependencies = [
 name = "crow-fs"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "notify",
+ "rayon",
 ]
 
 [[package]]
 name = "crow-macos"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
+ "objc2-quick-look-thumbnailing",
  "objc2-quick-look-ui",
+ "objc2-uniform-type-identifiers",
  "raw-window-handle",
 ]
 
 [[package]]
 name = "crow-search"
 version = "0.1.0"
-
-[[package]]
-name = "crow-spike"
-version = "0.0.0"
-dependencies = [
- "chrono",
- "crow-theme",
- "gpui",
- "gpui_platform",
- "notify",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-core-graphics",
- "objc2-foundation 0.3.2",
- "objc2-quick-look-ui",
- "raw-window-handle",
-]
 
 [[package]]
 name = "crow-theme"
@@ -3510,6 +3501,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-quick-look-thumbnailing"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac8e00da1ca87ffe3ea8d20981026f013df91072a140432f0f88da9a356d9b3c"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit",
+]
+
+[[package]]
 name = "objc2-quick-look-ui"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3554,6 +3561,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7902ac02859fc1f7045f8b598c63f1ae0cc7efeaa06a9bc9f3d9a3c955974fa4"
 dependencies = [
+ "block2 0.6.2",
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
 ]

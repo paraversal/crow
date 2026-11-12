@@ -1,47 +1,80 @@
-//! A file list pane: one folder, its selection and history. One per tab.
+//! A file list pane: one folder, its selection, sort and history. One per tab.
 
+use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use crow_core::History;
-use crow_fs::{Entry, FolderWatcher, Snapshot};
+use crow_core::{
+    Align, Column, ColumnContext, ColumnWidth, History, PreviewContent, ResizeDrag, Selection, TableLayout, TypeSelect,
+};
+use crow_fs::{Entry, FolderChange, FolderWatcher, Sort, SortKey};
+use futures::StreamExt;
+use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{
-    ClickEvent, Context, FocusHandle, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, Render, Role, ScrollStrategy, SharedString, Task, UniformListScrollHandle, Window, div, img, prelude::*, px,
-    uniform_list,
+    ClickEvent, Context, FocusHandle, Image, ImageFormat, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Role, ScrollStrategy, SharedString, Task,
+    UniformListScrollHandle, Window, div, img, prelude::*, px, uniform_list,
 };
 
-use crate::actions::{MoveDown, MoveToFirst, MoveToLast, MoveUp, OpenSelection, QuickLook, Rename};
-use crate::style::{color, color_alpha, format_time, icon, kind_of};
+use crate::actions::{
+    ExtendDown, ExtendUp, MoveDown, MoveToFirst, MoveToLast, MoveUp, OpenSelection, QuickLook, Rename, SelectAll,
+};
+use crate::extensions::Ext;
+use crate::style::{color, color_alpha, format_time, icon, kind, truncate_middle};
 use crate::ui::Ui;
 
 const ROW_HEIGHT: f32 = 24.0;
-/// Text previews read at most this much of a file.
-const PREVIEW_BYTES: usize = 4096;
+/// Show what has been read so far at most this often while a big folder loads.
+const PARTIAL_EVERY: Duration = Duration::from_millis(50);
+/// More changes than this at once: relisting is cheaper than diffing.
+const MAX_DIFF: usize = 500;
+
+enum Load {
+    Partial(Vec<Entry>),
+    Done(std::io::Result<(Vec<Entry>, f64)>),
+}
+
+/// What the preview pane shows for the cursor item, loaded off the main thread.
+pub struct Preview {
+    pub path: PathBuf,
+    pub content: Option<PreviewContent>,
+    pub image: Option<Arc<Image>>,
+    pub tags: Vec<String>,
+}
 
 pub struct Pane {
     history: History,
     entries: Arc<Vec<Entry>>,
     load_ms: f64,
+    first_paint_ms: Option<f64>,
     loading: bool,
-    rescan_pending: bool,
-    /// After going up, Finder selects the folder you came from.
+    /// Increments per load, so results from an earlier load are dropped.
+    generation: u64,
+    sort: Sort,
+    selection: Selection<PathBuf>,
+    /// Row of the selection's cursor in `entries`, kept in step with it.
+    cursor_ix: Option<usize>,
+    /// After going up or back, Finder selects the folder you came from.
     select_after_load: Option<PathBuf>,
-    selected: Option<usize>,
+    type_select: TypeSelect,
     show_hidden: bool,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
-    fs_tx: Sender<()>,
-    fs_rx: Receiver<()>,
+    changes_tx: Sender<FolderChange>,
+    changes_rx: Receiver<FolderChange>,
     watcher: Option<FolderWatcher>,
     error: Option<SharedString>,
     drag_origin: Option<(usize, Point<Pixels>)>,
     dragging: bool,
-    preview_text: Option<(PathBuf, SharedString)>,
+    preview: Option<Preview>,
     bench: Option<Bench>,
+    /// The columns after Name, and the widths shared by the header and every row.
+    columns: Vec<Arc<dyn Column>>,
+    table: TableLayout,
+    resize: Option<ResizeDrag>,
     _poll: Task<()>,
 }
 
@@ -49,47 +82,55 @@ struct Bench {
     frame: usize,
     intervals: Vec<f64>,
     last: Option<Instant>,
+    /// Scroll results, kept while the folder is reopened to time first paint in a warm app.
+    scrolled: Option<String>,
 }
 
 impl Pane {
     pub fn new(dir: PathBuf, show_hidden: bool, bench: bool, cx: &mut Context<Self>) -> Self {
-        let (fs_tx, fs_rx) = mpsc::channel();
+        let (changes_tx, changes_rx) = mpsc::channel();
+        // 100 ms between checks doubles as the debounce for bursts of file changes.
         let poll = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(100)).await;
-                let Ok(()) = this.update(cx, |this, cx| {
-                    if this.fs_rx.try_iter().count() > 0 {
-                        this.load(cx);
-                    }
-                }) else {
+                if this.update(cx, |this, cx| this.apply_folder_changes(cx)).is_err() {
                     break;
-                };
+                }
             }
         });
         let mut pane = Self {
             history: History::new(dir.clone()),
             entries: Arc::new(Vec::new()),
             load_ms: 0.0,
+            first_paint_ms: None,
             loading: false,
-            rescan_pending: false,
+            generation: 0,
+            sort: Sort::default(),
+            selection: Selection::default(),
+            cursor_ix: None,
             select_after_load: None,
-            selected: None,
+            type_select: TypeSelect::default(),
             show_hidden,
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
-            fs_tx,
-            fs_rx,
+            changes_tx,
+            changes_rx,
             watcher: None,
             error: None,
             drag_origin: None,
             dragging: false,
-            preview_text: None,
-            bench: bench.then(|| Bench { frame: 0, intervals: Vec::new(), last: None }),
+            preview: None,
+            bench: bench.then(|| Bench { frame: 0, intervals: Vec::new(), last: None, scrolled: None }),
+            columns: cx.global::<Ext>().0.default_columns(),
+            table: default_table(&cx.global::<Ext>().0.default_columns()),
+            resize: None,
             _poll: poll,
         };
         pane.enter(dir, cx);
         pane
     }
+
+    // ----- read access for the window -----
 
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus
@@ -101,6 +142,10 @@ impl Pane {
 
     pub fn item_count(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn selected_count(&self) -> usize {
+        self.selection.len()
     }
 
     pub fn is_loading(&self) -> bool {
@@ -119,13 +164,26 @@ impl Pane {
         self.history.can_go_forward()
     }
 
-    pub fn selected_entry(&self) -> Option<&Entry> {
-        self.selected.and_then(|i| self.entries.get(i))
+    /// The item the preview and path bar describe.
+    pub fn cursor_entry(&self) -> Option<&Entry> {
+        self.cursor_ix.and_then(|i| self.entries.get(i))
     }
 
-    pub fn preview_text(&self) -> Option<&SharedString> {
-        let entry = self.selected_entry()?;
-        self.preview_text.as_ref().filter(|(path, _)| *path == entry.path).map(|(_, text)| text)
+    pub fn preview(&self) -> Option<&Preview> {
+        self.preview.as_ref().filter(|p| self.cursor_entry().is_some_and(|e| e.path == p.path))
+    }
+
+    #[cfg(test)]
+    pub fn selected_names(&self) -> Vec<String> {
+        let mut names: Vec<String> =
+            self.entries.iter().filter(|e| self.selection.contains(&e.path)).map(|e| e.name.clone()).collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(test)]
+    pub fn names(&self) -> Vec<String> {
+        self.entries.iter().map(|e| e.name.clone()).collect()
     }
 
     // ----- navigation -----
@@ -139,8 +197,8 @@ impl Pane {
     pub fn go_back(&mut self, cx: &mut Context<Self>) {
         let from = self.dir().to_path_buf();
         if let Some(dir) = self.history.back().map(Path::to_path_buf) {
-            self.select_after_load = Some(from);
             self.enter(dir, cx);
+            self.select_after_load = Some(from);
         }
     }
 
@@ -158,6 +216,14 @@ impl Pane {
         }
     }
 
+    /// Show `path` selected in its folder (Go to Folder with a file, Finder's "Reveal").
+    pub fn reveal(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(parent) = path.parent().map(Path::to_path_buf) {
+            self.navigate(parent, cx);
+            self.select_after_load = Some(path);
+        }
+    }
+
     pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
         if self.show_hidden != show {
             self.show_hidden = show;
@@ -165,105 +231,232 @@ impl Pane {
         }
     }
 
-    fn enter(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        self.entries = Arc::new(Vec::new());
-        self.selected = None;
-        self.preview_text = None;
-        self.error = None;
-        self.watcher = crow_fs::watch_folder(&dir, self.fs_tx.clone())
-            .inspect_err(|e| tracing::warn!("watch {}: {e}", dir.display()))
-            .ok();
-        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
-        self.load(cx);
-        cx.notify();
-    }
-
-    fn load(&mut self, cx: &mut Context<Self>) {
-        if self.loading {
-            self.rescan_pending = true;
+    pub fn set_sort(&mut self, sort: Sort, cx: &mut Context<Self>) {
+        if self.sort == sort {
             return;
         }
-        self.loading = true;
-        let (dir, hidden) = (self.dir().to_path_buf(), self.show_hidden);
+        self.sort = sort;
+        let mut entries = self.entries.as_ref().clone();
         cx.spawn(async move |this, cx| {
-            let snapshot = cx.background_spawn(async move { crow_fs::read_dir(&dir, hidden) }).await;
-            this.update(cx, |this, cx| this.apply(snapshot, cx)).ok();
-        })
-        .detach();
-    }
-
-    fn apply(&mut self, snapshot: std::io::Result<Snapshot>, cx: &mut Context<Self>) {
-        self.loading = false;
-        match snapshot {
-            Ok(snapshot) if snapshot.dir == self.dir() => {
-                let keep = self.select_after_load.take().or_else(|| self.selected_entry().map(|e| e.path.clone()));
-                self.entries = snapshot.entries;
-                self.load_ms = snapshot.load_ms;
-                self.selected = keep
-                    .and_then(|path| self.entries.iter().position(|e| e.path == path))
-                    .or((!self.entries.is_empty()).then_some(0));
-                if let Some(ix) = self.selected {
-                    self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
-                }
-                tracing::debug!(items = self.entries.len(), ms = self.load_ms, dir = %self.dir().display(), "loaded");
-                self.load_preview(cx);
-            }
-            // A load for a folder we have already left.
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("open {}: {e}", self.dir().display());
-                self.error = Some(format!("Can't open “{}”: {e}", self.dir().display()).into());
-            }
-        }
-        if std::mem::take(&mut self.rescan_pending) {
-            self.load(cx);
-        }
-        cx.notify();
-    }
-
-    fn load_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(entry) = self.selected_entry().filter(|e| !e.is_dir && e.size > 0).cloned() else {
-            self.preview_text = None;
-            return;
-        };
-        cx.spawn(async move |this, cx| {
-            let path = entry.path.clone();
-            let text = cx
+            let entries = cx
                 .background_spawn(async move {
-                    use std::io::Read;
-                    let mut head = Vec::with_capacity(PREVIEW_BYTES);
-                    std::fs::File::open(&path).ok()?.take(PREVIEW_BYTES as u64).read_to_end(&mut head).ok()?;
-                    // Cut at the last full line so a split UTF-8 sequence never reaches the check.
-                    let end = head.iter().rposition(|b| *b == b'\n').map_or(head.len(), |i| i + 1);
-                    let text = std::str::from_utf8(&head[..end]).ok()?;
-                    Some(text.lines().take(40).collect::<Vec<_>>().join("\n"))
+                    crow_fs::sort_entries(&mut entries, &sort, &kind);
+                    entries
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.preview_text = text.map(|t| (entry.path, t.into()));
-                cx.notify();
+                if this.sort == sort {
+                    this.replace_entries(entries, cx);
+                }
             })
             .ok();
         })
         .detach();
     }
 
-    fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if ix >= self.entries.len() || self.selected == Some(ix) {
+    fn enter(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        self.entries = Arc::new(Vec::new());
+        self.selection.clear();
+        self.cursor_ix = None;
+        self.select_after_load = None;
+        self.preview = None;
+        self.error = None;
+        self.first_paint_ms = None;
+        self.watcher = crow_fs::watch_folder(&dir, self.changes_tx.clone())
+            .inspect_err(|e| tracing::warn!("watch {}: {e}", dir.display()))
+            .ok();
+        // Changes queued for the folder we are leaving no longer apply.
+        while self.changes_rx.try_recv().is_ok() {}
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.load(cx);
+        cx.notify();
+    }
+
+    // ----- loading -----
+
+    /// List the folder on a background thread. Big folders appear in stages:
+    /// what has been read so far is shown (sorted) every 50 ms until done.
+    fn load(&mut self, cx: &mut Context<Self>) {
+        self.generation += 1;
+        self.loading = true;
+        let (generation, dir, hidden, sort) = (self.generation, self.dir().to_path_buf(), self.show_hidden, self.sort);
+        let (tx, mut rx) = unbounded();
+        let started = Instant::now();
+        cx.background_spawn(async move { list_in_stages(&dir, hidden, sort, started, &tx) }).detach();
+        cx.spawn(async move |this, cx| {
+            while let Some(update) = rx.next().await {
+                let current = this.update(cx, |this, cx| {
+                    if this.generation != generation {
+                        return false;
+                    }
+                    if this.first_paint_ms.is_none() {
+                        this.first_paint_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    match update {
+                        Load::Partial(entries) => this.replace_entries(entries, cx),
+                        Load::Done(Ok((entries, ms))) => {
+                            this.loading = false;
+                            this.load_ms = ms;
+                            tracing::debug!(items = entries.len(), ms, first_paint = ?this.first_paint_ms, "loaded");
+                            this.replace_entries(entries, cx);
+                        }
+                        Load::Done(Err(e)) => {
+                            this.loading = false;
+                            tracing::warn!("open {}: {e}", this.dir().display());
+                            this.error = Some(format!("Can't open “{}”: {e}", this.dir().display()).into());
+                            cx.notify();
+                        }
+                    }
+                    true
+                });
+                if !matches!(current, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Swap in a new listing, keeping the selection on the same items.
+    fn replace_entries(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
+        self.entries = Arc::new(entries);
+        let present: HashSet<&PathBuf> = self.entries.iter().map(|e| &e.path).collect();
+        self.selection.retain(|p| present.contains(p));
+        if let Some(target) = self.select_after_load.clone()
+            && present.contains(&target)
+        {
+            self.select_after_load = None;
+            self.selection.select_only(target);
+        }
+        if self.selection.is_empty()
+            && !self.loading
+            && let Some(first) = self.entries.first()
+        {
+            self.selection.select_only(first.path.clone());
+        }
+        let previous = self.cursor_ix;
+        self.cursor_ix = self.selection.cursor().and_then(|c| self.entries.iter().position(|e| &e.path == c));
+        if self.cursor_ix != previous
+            && let Some(ix) = self.cursor_ix
+        {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+        }
+        self.load_preview(cx);
+        cx.notify();
+    }
+
+    fn apply_folder_changes(&mut self, cx: &mut Context<Self>) {
+        let mut paths = Vec::new();
+        let mut rescan = false;
+        for change in self.changes_rx.try_iter() {
+            match change {
+                FolderChange::Paths(p) => paths.extend(p),
+                FolderChange::Rescan => rescan = true,
+            }
+        }
+        if paths.is_empty() && !rescan {
             return;
         }
-        self.selected = Some(ix);
+        if rescan || self.loading || paths.len() > MAX_DIFF {
+            self.load(cx);
+            return;
+        }
+        let (entries, dir, hidden, sort, generation) =
+            (self.entries.clone(), self.dir().to_path_buf(), self.show_hidden, self.sort, self.generation);
+        cx.spawn(async move |this, cx| {
+            let updated = cx
+                .background_spawn(async move { crow_fs::apply_changes(&entries, &dir, &paths, hidden, &sort, &kind) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.generation == generation && this.sort == sort {
+                    this.replace_entries(updated, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn load_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.cursor_entry().cloned() else {
+            self.preview = None;
+            return;
+        };
+        if self.preview.as_ref().is_some_and(|p| p.path == entry.path) {
+            return;
+        }
+        let extensions = cx.global::<Ext>().0.clone();
+        cx.spawn(async move |this, cx| {
+            let path = entry.path.clone();
+            let (content, tags) =
+                cx.background_spawn(async move { (extensions.preview(&entry), crow_macos::tags(&entry.path)) }).await;
+            let image = match &content {
+                Some(PreviewContent::Image(png)) => Some(Arc::new(Image::from_bytes(ImageFormat::Png, png.to_vec()))),
+                _ => None,
+            };
+            this.update(cx, |this, cx| {
+                if this.cursor_entry().is_some_and(|e| e.path == path) {
+                    this.preview = Some(Preview { path, content, image, tags });
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    // ----- selection -----
+
+    fn set_cursor(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.cursor_ix = Some(ix);
         // Non-strict: scrolls only when the row is out of view, like Finder.
         self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
-        if let Some(entry) = self.selected_entry() {
+        if let Some(entry) = self.entries.get(ix) {
             crow_macos::update_quick_look(&entry.path);
         }
         self.load_preview(cx);
         cx.notify();
     }
 
+    fn select_only(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(entry) = self.entries.get(ix) else { return };
+        self.selection.select_only(entry.path.clone());
+        self.set_cursor(ix, cx);
+    }
+
+    fn toggle(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(entry) = self.entries.get(ix) else { return };
+        self.selection.toggle(entry.path.clone());
+        let cursor = self.selection.cursor().and_then(|c| self.entries.iter().position(|e| &e.path == c));
+        match cursor {
+            Some(ix) => self.set_cursor(ix, cx),
+            None => {
+                self.cursor_ix = None;
+                cx.notify();
+            }
+        }
+    }
+
+    fn extend_to(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix >= self.entries.len() {
+            return;
+        }
+        let entries = self.entries.clone();
+        self.selection.extend_to(ix, |p| entries.iter().position(|e| &e.path == p), |i| entries[i].path.clone());
+        self.set_cursor(ix, cx);
+    }
+
+    fn step(&self, delta: isize) -> usize {
+        let last = self.entries.len().saturating_sub(1);
+        match self.cursor_ix {
+            Some(ix) => ix.saturating_add_signed(delta).min(last),
+            None if delta < 0 => last,
+            None => 0,
+        }
+    }
+
     fn open_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(entry) = self.selected_entry().cloned() else { return };
+        let Some(entry) = self.cursor_entry().cloned() else { return };
         if entry.is_dir && !entry.is_package() {
             self.navigate(entry.path, cx);
         } else if let Err(e) = std::process::Command::new("open").arg(&entry.path).spawn() {
@@ -275,20 +468,32 @@ impl Pane {
     // ----- actions -----
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.select(self.selected.map_or(0, |i| i.saturating_sub(1)), cx);
+        self.select_only(self.step(-1), cx);
     }
 
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        let last = self.entries.len().saturating_sub(1);
-        self.select(self.selected.map_or(0, |i| (i + 1).min(last)), cx);
+        self.select_only(self.step(1), cx);
+    }
+
+    fn extend_up(&mut self, _: &ExtendUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.extend_to(self.step(-1), cx);
+    }
+
+    fn extend_down(&mut self, _: &ExtendDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.extend_to(self.step(1), cx);
     }
 
     fn move_to_first(&mut self, _: &MoveToFirst, _: &mut Window, cx: &mut Context<Self>) {
-        self.select(0, cx);
+        self.select_only(0, cx);
     }
 
     fn move_to_last(&mut self, _: &MoveToLast, _: &mut Window, cx: &mut Context<Self>) {
-        self.select(self.entries.len().saturating_sub(1), cx);
+        self.select_only(self.entries.len().saturating_sub(1), cx);
+    }
+
+    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.selection.select_all(self.entries.iter().map(|e| e.path.clone()));
+        cx.notify();
     }
 
     fn open(&mut self, _: &OpenSelection, _: &mut Window, cx: &mut Context<Self>) {
@@ -301,9 +506,34 @@ impl Pane {
         cx.notify();
     }
 
-    fn quick_look(&mut self, _: &QuickLook, _: &mut Window, _: &mut Context<Self>) {
-        if let Some(entry) = self.selected_entry() {
+    fn quick_look(&mut self, _: &QuickLook, _: &mut Window, cx: &mut Context<Self>) {
+        // Mid-word, Space belongs to type-to-select ("my file"), not Quick Look.
+        if self.type_select.is_active(Instant::now()) {
+            self.type_char(' ', cx);
+            return;
+        }
+        if let Some(entry) = self.cursor_entry() {
             crow_macos::toggle_quick_look(&entry.path);
+        }
+    }
+
+    fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let m = &event.keystroke.modifiers;
+        if m.platform || m.control || m.alt {
+            return;
+        }
+        let Some(c) = event.keystroke.key_char.as_deref().and_then(|s| s.chars().next()) else { return };
+        if c.is_control() || (c == ' ' && !self.type_select.is_active(Instant::now())) {
+            return;
+        }
+        self.type_char(c, cx);
+        cx.stop_propagation();
+    }
+
+    fn type_char(&mut self, c: char, cx: &mut Context<Self>) {
+        let prefix = self.type_select.push(c, Instant::now()).to_owned();
+        if let Some(ix) = TypeSelect::find(&prefix, self.entries.iter().map(|e| e.name.as_str())) {
+            self.select_only(ix, cx);
         }
     }
 
@@ -312,7 +542,7 @@ impl Pane {
     fn bench_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bench) = self.bench.as_mut() else { return };
         window.request_animation_frame();
-        if self.entries.is_empty() {
+        if self.loading || self.entries.is_empty() {
             return;
         }
         let now = Instant::now();
@@ -323,15 +553,15 @@ impl Pane {
         // About 3 rows per frame: a fast, continuous trackpad scroll.
         let ix = (bench.frame * 3) % self.entries.len();
         self.scroll.scroll_to_item_strict(ix, ScrollStrategy::Top);
-        self.selected = Some(ix);
-        if bench.frame >= 600 {
+        if bench.frame == 600 {
             let mut v = std::mem::take(&mut bench.intervals);
             v.sort_by(f64::total_cmp);
             let at = |q: f64| v[((v.len() - 1) as f64 * q) as usize];
             let avg = v.iter().sum::<f64>() / v.len() as f64;
-            println!(
-                "BENCH items={} load={:.0}ms frames={} avg={avg:.2}ms ({:.0} fps) p50={:.2}ms p95={:.2}ms p99={:.2}ms max={:.2}ms",
+            bench.scrolled = Some(format!(
+                "items={} cold_first_paint={:.0}ms cold_load={:.0}ms frames={} avg={avg:.2}ms ({:.0} fps) p50={:.2}ms p95={:.2}ms p99={:.2}ms max={:.2}ms",
                 self.entries.len(),
+                self.first_paint_ms.unwrap_or_default(),
                 self.load_ms,
                 v.len(),
                 1000.0 / avg,
@@ -339,6 +569,16 @@ impl Pane {
                 at(0.95),
                 at(0.99),
                 at(1.0),
+            ));
+            // Reopen the folder: the first paint of a warm app is what navigating feels like.
+            let dir = self.dir().to_path_buf();
+            self.enter(dir, cx);
+        } else if bench.frame > 600 {
+            println!(
+                "BENCH {} warm_first_paint={:.0}ms warm_load={:.0}ms",
+                bench.scrolled.as_deref().unwrap_or_default(),
+                self.first_paint_ms.unwrap_or_default(),
+                self.load_ms
             );
             cx.quit();
         }
@@ -350,74 +590,230 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<impl IntoElement + use<>> {
-        let theme = &cx.global::<Ui>().theme;
+        let ui = cx.global::<Ui>();
+        let theme = &ui.theme;
+        let font_size = px(ui.settings.font_size);
+        let columns = self.columns.clone();
         let muted = color(theme.role("fg-muted"));
-        let selection = if self.focus.is_focused(window) {
-            color_alpha(theme.role("accent"), 0x55)
-        } else {
-            color(theme.role("selection"))
-        };
+        let stripe = color_alpha(theme.role("surface"), 0x70);
+        let focused = self.focus.is_focused(window);
+        let selection_bg =
+            if focused { color_alpha(theme.role("accent"), 0x55) } else { color(theme.role("selection")) };
+        let column_cx = ColumnContext { kind: &kind, time: &format_time };
+        let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
+        let last = widths.len() - 1;
+        let name_room = px(widths[0] - NAME_INSET - 16.0 - 8.0 - CELL_PADDING);
         let total = self.entries.len();
         let entries = self.entries.clone();
         range
             .filter_map(|ix| entries.get(ix).map(|e| (ix, e)))
             .map(|(ix, entry)| {
-                let selected = self.selected == Some(ix);
-                let size = if entry.is_dir { "--".to_owned() } else { crow_fs::human_size(entry.size) };
-                let spoken_size = if entry.is_dir { String::new() } else { format!(", {size}") };
-                let modified = format_time(entry.modified);
-                div()
+                let selected = self.selection.contains(&entry.path);
+                let is_cursor = self.cursor_ix == Some(ix);
+                let cells: Vec<(String, Align)> =
+                    columns.iter().map(|c| (c.text(entry, &column_cx), c.align())).collect();
+                let spoken =
+                    cells.iter().map(|(text, _)| text.as_str()).filter(|t| *t != "--").collect::<Vec<_>>().join(", ");
+                let name = truncate_middle(&entry.name, name_room, font_size, window);
+                let row = div()
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
                     .role(Role::ListBoxOption)
-                    .aria_label(format!("{}, {}{spoken_size}, modified {modified}", entry.name, kind_of(entry)))
+                    .aria_label(format!("{}, {spoken}", entry.name))
                     .aria_position_in_set(ix + 1)
                     .aria_size_of_set(total)
                     .aria_selected(selected)
-                    .when(selected, |row| row.aria_active_descendant().bg(selection))
+                    .when(is_cursor, |row| row.aria_active_descendant())
                     .h(px(ROW_HEIGHT))
-                    .px_2()
-                    .mx_1()
+                    .mx_2()
                     .rounded_md()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .when(ix % 2 == 1, |row| row.bg(stripe))
+                    .when(selected, |row| row.bg(selection_bg))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             window.focus(&this.focus, cx);
                             this.drag_origin = Some((ix, event.position));
-                            this.select(ix, cx);
+                            if event.modifiers.platform {
+                                this.toggle(ix, cx);
+                            } else if event.modifiers.shift {
+                                this.extend_to(ix, cx);
+                            } else if !this.entries.get(ix).is_some_and(|e| this.selection.contains(&e.path)) {
+                                // Clicking inside a multi-selection keeps it, so it can be dragged.
+                                this.select_only(ix, cx);
+                            } else {
+                                this.set_cursor(ix, cx);
+                            }
                         }),
                     )
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         if event.click_count() == 2 {
-                            this.selected = Some(ix);
+                            this.select_only(ix, cx);
                             this.open_selected(cx);
                         }
                     }))
                     .child(
                         div()
-                            .size(px(16.))
+                            .w(px(widths[0]))
                             .flex_none()
-                            .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
-                    )
-                    .child(
-                        div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone()),
-                    )
-                    .child(div().w(px(90.)).flex_none().text_right().text_color(muted).child(size))
-                    .child(div().w(px(190.)).flex_none().pl_4().text_color(muted).child(modified))
+                            .pl(px(NAME_INSET))
+                            .pr(px(CELL_PADDING))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .size(px(16.))
+                                    .flex_none()
+                                    .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
+                            )
+                            .child(div().whitespace_nowrap().child(name)),
+                    );
+                row.children(cells.into_iter().enumerate().map(|(i, (text, align))| {
+                    let width = px(widths[i + 1]);
+                    div()
+                        .when(i + 1 == last, |cell| cell.flex_1().min_w(width))
+                        .when(i + 1 != last, |cell| cell.w(width).flex_none())
+                        .px(px(CELL_PADDING))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(muted)
+                        .when(align == Align::Right, |cell| cell.text_right())
+                        .child(text)
+                }))
             })
             .collect()
     }
+
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.global::<Ui>().theme.clone();
+        let sort = self.sort;
+        let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
+        let last = widths.len() - 1;
+        let border = color(theme.role("border"));
+        // (title, sort key, alignment) for the name column and each registered column.
+        let mut specs = vec![("Name".to_owned(), Some(SortKey::Name), Align::Left)];
+        specs.extend(self.columns.iter().map(|c| (c.title().to_owned(), c.sort_key(), c.align())));
+        let mut header = div()
+            .id("table-header")
+            .h(px(28.))
+            .flex_none()
+            .mx_2()
+            .flex()
+            .items_center()
+            .text_size(px(12.))
+            .text_color(color(theme.role("fg-muted")))
+            .border_b_1()
+            .border_color(border);
+        for (i, (title, key, align)) in specs.into_iter().enumerate() {
+            let sorted = key.is_some_and(|k| k == sort.key);
+            let chevron = match (sorted, sort.ascending) {
+                (false, _) => "",
+                (true, true) => "⌃",
+                (true, false) => "⌄",
+            };
+            let width = px(widths[i]);
+            let cell = div()
+                .id(("column", i))
+                .role(Role::ColumnHeader)
+                .aria_label(format!("{title}{}", if sorted { ", sorted" } else { "" }))
+                .relative()
+                .h_full()
+                .when(i == last, |cell| cell.flex_1().min_w(width))
+                .when(i != last, |cell| cell.w(width).flex_none())
+                .pl(px(if i == 0 { NAME_INSET } else { CELL_PADDING }))
+                .pr(px(CELL_PADDING))
+                .flex()
+                .items_center()
+                .gap_1()
+                .when(i != last, |cell| cell.border_r_1().border_color(border))
+                .when(sorted, |cell| cell.text_color(color(theme.role("fg"))).font_weight(gpui::FontWeight::SEMIBOLD))
+                .when_some(key, |cell, key| {
+                    cell.on_click(cx.listener(move |this, _, _, cx| this.set_sort(this.sort.toggled(key), cx)))
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .when(align == Align::Right, |t| t.text_right())
+                        .child(title),
+                )
+                .child(div().w(px(10.)).flex_none().child(chevron))
+                // The divider's grab area, a little wider than the line.
+                .when(i != last, |cell| {
+                    cell.child(
+                        div()
+                            .id(("resize", i))
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right(px(-4.))
+                            .w(px(8.))
+                            .cursor(gpui::CursorStyle::ResizeLeftRight)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.resize = this.table.begin_resize(i, f32::from(event.position.x));
+                                    cx.stop_propagation();
+                                }),
+                            ),
+                    )
+                });
+            header = header.child(cell);
+        }
+        header
+    }
+}
+
+/// Space before the name for a folder's disclosure triangle (inline expansion comes later).
+const NAME_INSET: f32 = 22.0;
+const CELL_PADDING: f32 = 8.0;
+
+/// The name column plus the shown columns, at their default widths.
+fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
+    let mut columns = vec![ColumnWidth { id: "name".into(), width: 300.0, min_width: 140.0 }];
+    columns.extend(shown.iter().map(|c| ColumnWidth {
+        id: c.id().to_owned(),
+        width: c.width(),
+        min_width: c.min_width(),
+    }));
+    TableLayout::new(columns)
+}
+
+/// Runs on a background thread: list `dir`, sending sorted partial listings at most every
+/// 50 ms, then the full sorted listing.
+fn list_in_stages(dir: &Path, hidden: bool, sort: Sort, started: Instant, tx: &UnboundedSender<Load>) {
+    let mut all: Vec<Entry> = Vec::new();
+    let mut last_partial = started;
+    let result = crow_fs::list_dir(dir, hidden, |batch| {
+        all.extend(batch);
+        if last_partial.elapsed() >= PARTIAL_EVERY || (last_partial == started && !all.is_empty()) {
+            last_partial = Instant::now();
+            let mut partial = all.clone();
+            crow_fs::sort_entries(&mut partial, &sort, &kind);
+            // The pane may have moved on; nobody listening is fine.
+            tx.unbounded_send(Load::Partial(partial)).ok();
+        }
+    });
+    let done = result.map(|()| {
+        crow_fs::sort_entries(&mut all, &sort, &kind);
+        (all, started.elapsed().as_secs_f64() * 1000.0)
+    });
+    tx.unbounded_send(Load::Done(done)).ok();
 }
 
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.bench_step(window, cx);
-        let theme = cx.global::<Ui>().theme.clone();
         let title =
             self.dir().file_name().map_or_else(|| "Macintosh HD".to_owned(), |n| n.to_string_lossy().into_owned());
+        let header = self.render_header(cx);
         div()
             .id("file-list")
             .role(Role::ListBox)
@@ -426,21 +822,43 @@ impl Render for Pane {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
+            .on_action(cx.listener(Self::extend_up))
+            .on_action(cx.listener(Self::extend_down))
             .on_action(cx.listener(Self::move_to_first))
             .on_action(cx.listener(Self::move_to_last))
+            .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::rename))
             .on_action(cx.listener(Self::quick_look))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, _| {
+            .on_key_down(cx.listener(Self::key_down))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if let Some(drag) = this.resize {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.table.drag_to(&drag, f32::from(event.position.x));
+                        cx.notify();
+                    } else {
+                        this.resize = None;
+                    }
+                    return;
+                }
                 let Some((ix, origin)) = this.drag_origin else { return };
                 if this.dragging || event.pressed_button != Some(MouseButton::Left) {
                     return;
                 }
                 let (dx, dy) = (event.position.x - origin.x, event.position.y - origin.y);
-                if f32::from(dx).hypot(f32::from(dy)) > 5.0
-                    && let Some(entry) = this.entries.get(ix)
-                {
-                    this.dragging = crow_macos::begin_drag(window, std::slice::from_ref(&entry.path));
+                if f32::from(dx).hypot(f32::from(dy)) > 5.0 {
+                    // Drag the whole selection when the drag starts on a selected row.
+                    let paths: Vec<PathBuf> = match this.entries.get(ix) {
+                        Some(e) if this.selection.contains(&e.path) => this
+                            .entries
+                            .iter()
+                            .filter(|e| this.selection.contains(&e.path))
+                            .map(|e| e.path.clone())
+                            .collect(),
+                        Some(e) => vec![e.path.clone()],
+                        None => return,
+                    };
+                    this.dragging = crow_macos::begin_drag(window, &paths);
                 }
             }))
             .on_mouse_up(
@@ -448,29 +866,23 @@ impl Render for Pane {
                 cx.listener(|this, _: &MouseUpEvent, _, _| {
                     this.drag_origin = None;
                     this.dragging = false;
+                    this.resize = None;
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| {
+                    this.drag_origin = None;
+                    this.dragging = false;
+                    this.resize = None;
                 }),
             )
             .size_full()
+            // Wider-than-pane tables are clipped for now; horizontal scrolling comes with view settings.
+            .overflow_hidden()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .h(px(26.))
-                    .flex_none()
-                    .px_3()
-                    .mx_1()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(12.))
-                    .text_color(color(theme.role("fg-muted")))
-                    .border_b_1()
-                    .border_color(color(theme.role("border")))
-                    .child(div().w(px(16.)))
-                    .child(div().flex_1().child("Name"))
-                    .child(div().w(px(90.)).text_right().child("Size"))
-                    .child(div().w(px(190.)).pl_4().child("Date Modified")),
-            )
+            .child(header)
             .child(
                 uniform_list("entries", self.entries.len(), cx.processor(Self::render_rows))
                     .track_scroll(&self.scroll)

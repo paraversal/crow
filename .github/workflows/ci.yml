@@ -39,13 +39,12 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        # spike/ is frozen reference code, deleted with M2.
-        run: cargo clippy --workspace --exclude crow-spike --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Tests
         run: cargo test --workspace
 
       # The frame-time benchmark needs a GPU; hosted macOS runners have none,
-      # so it runs locally (see spike/README.md) until a self-hosted runner exists.
+      # so it runs locally (see docs/testing.md) until a self-hosted runner exists.
       - name: Build release
         run: cargo build --release -p crow-app

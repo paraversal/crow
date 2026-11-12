@@ -3,7 +3,7 @@
 A Finder-style file explorer for macOS, written in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 It keeps Finder's directness and aims to be faster, more predictable and keyboard-first.
 
-Status: Phase 1 (the "daily driver" MVP), milestone M1.
+Status: Phase 1 (the "daily driver" MVP), milestone M2.
 
 ## Build and run
 
@@ -20,12 +20,11 @@ Running as `Crow.app` makes macOS privacy prompts name Crow instead of your term
 | Crate | What it does |
 | --- | --- |
 | `crates/crow-app` | The `crow` binary: windows, tabs, sidebar, file list, preview, path bar |
-| `crates/crow-core` | UI-free model: settings, tabs, history |
-| `crates/crow-fs` | Folder snapshots and watching; the file operation engine from M4 |
-| `crates/crow-macos` | The only AppKit code: icons, Finder names, Quick Look, dragging |
+| `crates/crow-core` | UI-free model: settings, tabs, history, selection, extension points |
+| `crates/crow-fs` | Fast folder listing (`getattrlistbulk`), sorting, change diffs; file operations from M4 |
+| `crates/crow-macos` | The only AppKit code: icons, kinds, tags, thumbnails, Finder names, Quick Look, dragging |
 | `crates/crow-search` | Search and exclusion rules (M6) |
 | `crates/crow-theme` | Reader for the global theme index in `~/.config/themes` |
-| `spike/` | Phase 0 spike, kept for reference until M2 |
 
 ## Configuration
 
@@ -35,5 +34,9 @@ Logs go to `~/Library/Logs/Crow/crow.log`.
 
 ## Keys
 
-Finder's keys work as in Finder: arrows, Cmd-Up/Down, Cmd-[ and Cmd-], Cmd-T, Cmd-W,
-Cmd-Shift-[ and ], Cmd-Shift-. and Space. Tab moves focus between the sidebar and the list.
+Finder's keys work as in Finder: arrows (Shift extends), Option-Up/Down, Cmd-Up/Down,
+Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (Tab completes),
+Cmd-Shift-. and Space. Typing a name selects it. Tab moves focus between the sidebar and the list.
+Column headers sort; click again to reverse.
+
+Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).
