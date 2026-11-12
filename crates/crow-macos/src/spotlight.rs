@@ -40,6 +40,7 @@ pub fn spotlight_names(
     for line in BufReader::new(stdout).lines() {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
+            let _ = child.wait();
             return Ok(());
         }
         let Ok(line) = line else { break };

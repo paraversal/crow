@@ -1269,7 +1269,7 @@ impl CrowWindow {
             search.update(cx, |search, cx| search.focus_input(window, cx));
             return;
         }
-        if self.picker.is_some() || self.go_to.is_some() || self.sheet.is_some() {
+        if self.picker.is_some() || self.go_to.is_some() || self.sheet.is_some() || self.palette.is_some() {
             return;
         }
         let folder = self.pane().read(cx).current_dir(cx);
@@ -1338,7 +1338,12 @@ impl CrowWindow {
     // ----- command palette -----
 
     fn show_palette(&mut self, _: &ShowCommandPalette, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.is_some() || self.picker.is_some() || self.go_to.is_some() || self.sheet.is_some() {
+        if self.palette.is_some()
+            || self.picker.is_some()
+            || self.go_to.is_some()
+            || self.sheet.is_some()
+            || self.search.is_some()
+        {
             return;
         }
         let (home, favorites, recents) = {
