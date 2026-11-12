@@ -44,9 +44,10 @@ Branch: `ui-u3-top-band` · PR: none · Last updated: 2026-11-13
 ## Log
 - 2026-11-13: answers: Q1 close search on tab change; Q2 focus + select all; Q3 reset to All; Q4 min 640×400; Q5 no match keys; Q6 aria \", unavailable\"; Q7 left edge 86 px; Q8 leave board-D tokens out; Q9 U6 fixes SearchResults vim.
 - 2026-11-13: I1 done. Note: the first traffic-light measurement hit a stale running Crow (old 44 px band); killed it and re-measured the new build. `cargo clippy -p crow-app --all-targets` clean, `cargo test -p crow-app` 90 passed.
+- 2026-11-13: README ▸ Keys and `docs/testing.md` updated (band wording, Go to, match modes, five new hand rows; automated paragraph names the new tests).
 - 2026-11-13: I7 done, including the minimum window size. `cargo test --workspace` green (101 app tests), clippy clean.
 - 2026-11-13: I2–I6 done in one commit: the bare input, match modes and the band B/D surfaces are interdependent through `render_title_bar`/`render_band`, so they landed together. `cargo test -p crow-app` 100 passed, workspace clippy clean. Hand-viewed B and D in the bundle; both match the boards.
 - 2026-11-13: read AGENTS.md, execute-plan skill, index README, U3 plan, U1 progress, `docs/testing.md`; confirmed U1 and U2 merged on `main`; created branch and this file; asked Q1–Q9.
 
 ## Next
-Finish: README and `docs/testing.md` updates (done in the next commit), then bundle + hand checks + PR.
+Bundle and run the hand checks (band, search field, narrow window, light/dark), then push and open the PR.
