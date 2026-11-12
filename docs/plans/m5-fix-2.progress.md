@@ -54,4 +54,4 @@ Changes since the D7/D8 handoff:
 Still for the user's hand check: drags to Finder/Mail, column highlight feel, and any source-row flash.
 
 ## Next
-D9 is waiting to be committed and pushed to PR #6. The user hand-tests: drag-out to Finder/Mail, a Finder→Crow drag highlight, and the drag/chevron feel. Do not merge.
+D9 is committed and pushed to PR #6; PR #5 (M5) is merged and PR #6 was rebased onto `main`. The user hand-tests: drag-out to Finder/Mail, a Finder→Crow drag highlight, and the drag/chevron feel.
