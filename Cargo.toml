@@ -9,6 +9,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+raw-window-handle = "0.6"
 crow-core = { path = "crates/crow-core" }
 crow-fs = { path = "crates/crow-fs" }
 crow-macos = { path = "crates/crow-macos" }

@@ -72,6 +72,25 @@ This document lists **observed behavior and wanted behavior**. Causes below mark
 - **Plan:** paint the chevron as a stroked path (`canvas` + `PathBuilder`) in a fixed 14 px box; collapsed and expanded differ only in the vertex coordinates.
 - **Done when:** visual check shows the same box; expand/collapse tests still pass.
 
+## D7 Drag handoff: keep the combo, smooth the swap
+
+- **Observed:** after drag-out-and-back the native icon is back but the name pill is gone. Crossing the window edge is jumpy: the GPUI combo is clipped by the window (the “pushes below the top edge” frame), then the native image appears; the native image can flash at the source row for a frame. The handoff is a hard swap.
+- **Wanted:** one combo (icon + pill) throughout, including the native session, with a smooth handoff at the window edge and no flash at the source row. If the native image cannot carry the pill, say so plainly.
+- **Where to look:** `crates/crow-app/src/pane.rs` (`DraggedFiles`, `external_drag_payload`, `PLATFORM_DRAG`), `crates/crow-macos` (no drag module today), `vendor/zed/crates/gpui` (`promote_external_drag_to_platform`, `restore_platform_drag`), `vendor/zed/crates/gpui_macos` (`start_external_drag`, which builds a 32 px `NSDraggingItem` at the mouse-down event).
+- **Plan (answers: own native image, seamless swap, measured start, “N items”):**
+  1. Preferred: own the native image. When a GPUI file drag leaves the viewport (detected from the drag’s own move events), start an `NSDraggingSession` from `crow-macos` with a composite image (icon + name pill, same look and anchor rule), then end the GPUI drag. Re-entry then shows that native combo and no second image; GPUI’s platform-created `ExternalPaths` drag has an empty view and keeps the drop targets working.
+  2. Alternative: keep GPUI’s native image (plain icon) and only smooth the in-window side with a fade at the edge; the pill cannot follow outside the window.
+  3. Anchor the native image at the cursor from the first frame (fixes the flash at the source row), and trigger the handoff before the GPUI combo would be clipped by the window bounds.
+  4. Transition polish: choose from no animation (seamless swap), a short cross-fade, or a fade + tiny scale (see Q2). The combo should never visibly clip at the edge.
+- **Done when:** dragging out and back shows the icon + pill the whole time (or the agreed fallback), no source-row flash, no clipped frame; drops and drag-out to Finder/Mail still work.
+
+## D8 Combo start and attraction easing
+
+- **Observed:** when the drag starts, the combo first appears near the source row and then slides very quickly to the cursor/anchor once the pill width is known. The attraction shift is jarring.
+- **Wanted:** no visible first-frame jump. The combo appears already anchored (grab point or right edge at the cursor); if the anchor changes discontinuously, ease it.
+- **Plan:** measure the pill before the first paint (text shaping at drag start) so the initial left is correct on frame one. Optional 100–150 ms ease only for the first placement / anchor flips, never for normal cursor tracking.
+- **Done when:** a recording shows no slide from the row to the cursor at drag start; the anchor rule still tests green.
+
 ---
 
 ## Finish
