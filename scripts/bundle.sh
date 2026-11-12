@@ -17,6 +17,7 @@ app=target/bundle/Crow.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/crow "$app/Contents/MacOS/crow"
+cp crates/crow-app/assets/icons/LICENSE "$app/Contents/Resources/Lucide-LICENSE.txt"
 
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

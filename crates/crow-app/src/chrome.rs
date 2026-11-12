@@ -3,8 +3,8 @@
 //! everywhere.
 
 use gpui::{
-    App, Context, Div, IntoElement, KeyBinding, Render, RenderOnce, Role, SharedString, StatefulInteractiveElement,
-    Window, div, prelude::*, px,
+    App, Context, Div, IntoElement, KeyBinding, Render, RenderOnce, Role, SharedString, Stateful,
+    StatefulInteractiveElement, Window, div, prelude::*, px,
 };
 
 use crate::keys::{self, KeyScope};
@@ -220,4 +220,65 @@ mod tests {
                 .child(Keycap::text("esc", KeycapWeight::Text))
         });
     }
+}
+
+/// Width of a sheet panel, as the boards show them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SheetWidth {
+    Compact,
+    Narrow,
+    Wide,
+}
+
+impl SheetWidth {
+    fn px(self) -> f32 {
+        match self {
+            SheetWidth::Compact => 360.,
+            SheetWidth::Narrow => 520.,
+            SheetWidth::Wide => 620.,
+        }
+    }
+}
+
+/// The panel inside a sheet: 12 px radius, raised border, deep shadow. Callers
+/// add their padding, context, actions and children.
+pub fn sheet_panel(id: impl Into<gpui::ElementId>, width: SheetWidth, theme: &crow_theme::Theme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(|| "sheet-panel".into())
+        .role(Role::Dialog)
+        .w(px(width.px()))
+        .rounded(px(12.))
+        .bg(color(theme.role("surface")))
+        .border_1()
+        .border_color(color(theme.role("surface-raised")))
+        .shadow_2xl()
+        .overflow_hidden()
+        // A click inside never reaches the scrim's dismiss handler.
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+}
+
+/// A full-window scrim with a centered panel. A left mouse-down outside the
+/// panel runs the overlay's own cancel path (`on_dismiss`), exactly like Esc.
+pub fn sheet(
+    panel: impl IntoElement,
+    theme: &crow_theme::Theme,
+    on_dismiss: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id("sheet-scrim")
+        .debug_selector(|| "sheet-scrim".into())
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .bg(crate::style::scrim(theme))
+        .occlude()
+        .flex()
+        .flex_col()
+        .items_center()
+        .pt(px(52.))
+        .on_mouse_down(gpui::MouseButton::Left, on_dismiss)
+        .child(panel)
 }

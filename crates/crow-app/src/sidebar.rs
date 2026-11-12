@@ -21,7 +21,7 @@ use crate::actions::{Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, 
 use crate::chrome::with_tooltip;
 use crate::palette::CommandId;
 use crate::pane::DraggedSelection;
-use crate::style::{color, color_alpha, icon};
+use crate::style::{active_selection, color, current_location, drop_target, icon};
 use crate::ui::{self, Ui};
 
 pub enum SidebarEvent {
@@ -386,7 +386,7 @@ impl Render for Sidebar {
         let selectable_count = rows.iter().filter(|r| !matches!(r, Row::Header(..))).count();
         self.cursor = self.cursor.min(selectable_count.saturating_sub(1));
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
-        let drop_bg = color_alpha(accent, 0x40);
+        let drop_bg = drop_target(&theme);
 
         // A drag's target comes from the pointer and the last layout, so the
         // highlight only changes when the pointer enters a different row.
@@ -492,8 +492,8 @@ impl Render for Sidebar {
                 .flex()
                 .flex_col()
                 .relative()
-                .when(here, |row| row.bg(color(theme.role("selection"))))
-                .when(focused && cursor, |row| row.bg(color_alpha(accent, 0x55)))
+                .when(here, |row| row.bg(current_location(&theme)))
+                .when(focused && cursor, |row| row.bg(active_selection(&theme)))
                 .when(!self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Row(i)), |row| {
                     row.bg(drop_bg)
                 })

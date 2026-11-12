@@ -35,7 +35,9 @@ use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
-use crate::style::{color, color_alpha, format_time, icon, kind, truncate_middle};
+use crate::style::{
+    active_selection, color, color_alpha, drop_target, format_time, icon, inactive_selection, kind, truncate_middle,
+};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
 use crow_fs::ops::Request;
@@ -1159,8 +1161,12 @@ impl Pane {
         let font_size = px(ui.settings.font_size);
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
-        let selection_bg = selection_color(self.focus.is_focused(window) || self.filtering.is_some(), theme);
-        let drop_bg = color_alpha(theme.role("accent"), 0x40);
+        let selection_bg = if self.focus.is_focused(window) || self.filtering.is_some() {
+            active_selection(theme)
+        } else {
+            inactive_selection(theme)
+        };
+        let drop_bg = drop_target(theme);
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
         let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
         let last = widths.len() - 1;
@@ -1446,8 +1452,8 @@ impl Pane {
         let font_size = px(ui.settings.font_size);
         // Spec: only the focused column shows its selection in the accent color.
         let active = k == self.focused && (self.focus.is_focused(window) || self.filtering.is_some());
-        let selection_bg = selection_color(active, theme);
-        let drop_bg = color_alpha(theme.role("accent"), 0x40);
+        let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
+        let drop_bg = drop_target(theme);
         let subtle = color(theme.role("fg-subtle"));
         let Some(folder) = self.folders.get(k).map(|f| f.read(cx)) else { return Vec::new() };
         let width = column_width(folder.entries());
@@ -1719,10 +1725,6 @@ fn chevron_glyph(expanded: bool, chevron: gpui::Rgba) -> impl IntoElement {
     )
     .w(px(14.))
     .h(px(14.))
-}
-
-fn selection_color(active: bool, theme: &crow_theme::Theme) -> gpui::Rgba {
-    if active { color_alpha(theme.role("accent"), 0x55) } else { color(theme.role("selection")) }
 }
 
 /// Column view: the shared width, widened for long names up to a cap. Estimated from

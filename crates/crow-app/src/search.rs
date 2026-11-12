@@ -28,7 +28,7 @@ use crate::actions::{
 use crate::chrome::with_action_tooltip;
 use crate::keys::{self, KeyScope};
 use crate::pane::DraggedSelection;
-use crate::style::{color, color_alpha, format_time, icon};
+use crate::style::{active_selection, color, color_alpha, format_time, icon, inactive_selection};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
 
@@ -764,7 +764,8 @@ impl SearchView {
             color(theme.role("fg-subtle")),
             theme.role("accent"),
         );
-        let selection_bg = color_alpha(accent, if self.focus.is_focused(window) { 0x55 } else { 0x30 });
+        let selection_bg =
+            if self.focus.is_focused(window) { active_selection(theme) } else { inactive_selection(theme) };
         let count = self.results.len();
         let cursor = self.cursor;
         range

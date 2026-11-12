@@ -5,8 +5,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crow_theme::{Rgb, Variant};
-use gpui::{Image, ImageFormat, Pixels, Rgba, SharedString, TextRun, Window, WindowAppearance, rgb, rgba};
+use crow_theme::{Rgb, Theme, Variant};
+use gpui::{
+    BoxShadow, Image, ImageFormat, Pixels, Rgba, SharedString, TextRun, Window, WindowAppearance, px, rgb, rgba,
+};
 
 pub fn color(c: Rgb) -> Rgba {
     rgb(c.0)
@@ -21,6 +23,42 @@ pub fn variant_of(appearance: WindowAppearance) -> Variant {
         WindowAppearance::Light | WindowAppearance::VibrantLight => Variant::Light,
         _ => Variant::Dark,
     }
+}
+
+/// The dimming layer under a sheet. Dark themes darken with `bg`; light themes
+/// darken with `fg`, because a `bg` scrim would lighten a light window.
+pub fn scrim(theme: &Theme) -> Rgba {
+    match theme.variant {
+        Variant::Dark => color_alpha(theme.role("bg"), 0x8c),
+        Variant::Light => color_alpha(theme.role("fg"), 0x40),
+    }
+}
+
+/// Where the keys go: the focused selection.
+pub fn active_selection(theme: &Theme) -> Rgba {
+    color_alpha(theme.role("accent"), 0x55)
+}
+
+/// A selection without focus.
+pub fn inactive_selection(theme: &Theme) -> Rgba {
+    color(theme.role("selection"))
+}
+
+/// The folder you are in (the sidebar's current row).
+pub fn current_location(theme: &Theme) -> Rgba {
+    color(theme.role("selection"))
+}
+
+/// A drag's target.
+pub fn drop_target(theme: &Theme) -> Rgba {
+    color_alpha(theme.role("accent"), 0x40)
+}
+
+/// A keyboard cursor ring, for a focused item drawn without a fill. An inset
+/// zero-blur shadow, so it never changes layout and list overflow can't clip it.
+#[allow(dead_code)] // U8 draws it.
+pub fn cursor_ring(theme: &Theme) -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.), px(0.), color_alpha(theme.role("accent"), 0x99).into()).spread_radius(px(1.5)).inset()]
 }
 
 pub fn ui_font(family: &str) -> String {
@@ -92,4 +130,23 @@ pub fn truncate_middle(text: &str, max: Pixels, font_size: Pixels, window: &Wind
         if measure(&shortened(mid)) <= max { lo = mid } else { hi = mid - 1 }
     }
     shortened(lo).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tints_follow_roles() {
+        let theme = crow_theme::fallback();
+        assert_eq!(active_selection(&theme), color_alpha(theme.role("accent"), 0x55));
+        assert_eq!(inactive_selection(&theme), color(theme.role("selection")));
+        assert_eq!(current_location(&theme), color(theme.role("selection")));
+        assert_eq!(drop_target(&theme), color_alpha(theme.role("accent"), 0x40));
+        let ring = cursor_ring(&theme);
+        assert_eq!(ring.len(), 1);
+        assert!(ring[0].inset);
+        assert_eq!(ring[0].spread_radius, px(1.5));
+        assert_eq!(ring[0].blur_radius, px(0.));
+    }
 }
