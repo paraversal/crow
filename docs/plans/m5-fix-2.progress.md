@@ -39,5 +39,14 @@ Branch: m5-fix · PR: https://github.com/paraversal/file-crow/pull/6 · Last upd
 - 2026-11-12: Bug after the handoff work: the combo sometimes did not appear for in-window drags until the pointer travelled far or left the window. Cause: the “hide the GPUI view outside the window” check compared `window.bounds()` (screen coordinates) with `window.mouse_position()` (window-relative), so it hid the combo over much of the window. Now it compares the position with the bounds’ size only. Verified with folder and file drags inside the window: both show the combo at the cursor.
 - 2026-11-12: Drop-target flicker on Crow→native→Crow. Cause: list and column rows still used style-based `drag_over` highlights, which flicker on the platform drag updates. Both views now compute the target from state (the pointer against the list/column viewport bounds and scroll offset) on mouse moves; rows draw that state. Also, AppKit sends no destination callbacks and accepts no drop when the window itself is the drag source, so a dedicated `NSDraggingSource` object now starts the session. Verified: target stays on one row over repeated updates (tests `platform_drag_updates_keep_one_list_target` and `..._column_target`); dropping a file back into Crow moved it into the folder; the native combo tracks the cursor (cursor-included screenshot). Hand checks: list and column highlights, drag-out to Finder/Mail.
 
+## Session note (2026-11-12, hand-test follow-up)
+Changes since the D7/D8 handoff:
+- In-window combo: fixed the outside-window check, which compared screen-space bounds with the window-relative mouse position and hid the GPUI image over much of the window.
+- Native drag source: a dedicated `NSDraggingSource` replaces the window. AppKit then delivers re-entry updates and accepts drops back into Crow; the native image stays the icon+pill and tracks the cursor after re-entry.
+- Drop target: list and column rows render a state target (pointer, viewport bounds, scroll offset) instead of drag-over styles, so it is steady across platform drag updates. Leaving the list clears it.
+- Tests: `platform_drag_updates_keep_one_list_target`, `platform_drag_updates_keep_one_column_target`; 40 app tests, clippy/fmt clean; bench scroll p99 8.89 ms.
+- Verified by hand/automation: combo inside for folder and file drags; icon+pill outside and after re-entry with the cursor visible; a drop back inside moved the file into the target folder.
+Still for the user's hand check: drags to Finder/Mail, column highlight feel, and any source-row flash.
+
 ## Next
 PR #6 updated with the follow-up. The user hand-tests: drag-out to Finder/Mail, a Finder→Crow drag highlight, and the drag/chevron feel. Do not merge.
