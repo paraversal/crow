@@ -1,0 +1,17 @@
+diff --git a/crates/gpui_macos/src/window.rs b/crates/gpui_macos/src/window.rs
+index b3492c0..a597d00 100644
+--- a/crates/gpui_macos/src/window.rs
++++ b/crates/gpui_macos/src/window.rs
+@@ -3949,6 +3949,12 @@ async fn synthetic_drag(
+         if lock.synthetic_drag_counter != drag_id {
+             break;
+         }
++        // A file drag that entered the window (e.g. an app-started native drag coming back)
++        // reports its own positions; replaying the stale move would fight with them.
++        if lock.external_files_dragged {
++            lock.synthetic_drag_counter += 1;
++            break;
++        }
+         // Native menu tracking can consume mouse-up, leaving stale drag events replaying.
+         // Check whether the original mouse button is still physically pressed before replaying.
+         let pressed: NSUInteger = unsafe { msg_send![class!(NSEvent), pressedMouseButtons] };

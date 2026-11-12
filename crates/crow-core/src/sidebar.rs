@@ -332,6 +332,21 @@ mod tests {
     }
 
     #[test]
+    fn move_down_one_and_onto_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        load_sidebar(d).unwrap();
+        // Documents past Downloads: the bottom half of a row inserts after that row.
+        edit(d, SidebarEdit::Move { from: (0, 2), to: (0, 4) });
+        assert_eq!(paths(d, 0), ["~", "~/Desktop", "~/Downloads", "~/Documents", "/Applications"]);
+        let before = paths(d, 0);
+        // Dropping on either half of the dragged favorite itself changes nothing.
+        edit(d, SidebarEdit::Move { from: (0, 2), to: (0, 2) });
+        edit(d, SidebarEdit::Move { from: (0, 2), to: (0, 3) });
+        assert_eq!(paths(d, 0), before);
+    }
+
+    #[test]
     fn add_remove_and_keys() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();

@@ -22,4 +22,11 @@ fi
 git -C "$dest" sparse-checkout set "${CRATES[@]/#/crates/}"
 git -C "$dest" fetch -q --depth 1 --filter=blob:none origin "$ZED_REV"
 git -C "$dest" checkout -q --detach FETCH_HEAD
+# Crow's small fixes to GPUI, kept as patches so a fresh fetch (and CI) has them.
+for patch in patches/gpui-*.patch; do
+  [ -e "$patch" ] || continue
+  if ! git -C "$dest" apply --reverse --check "$PWD/$patch" 2>/dev/null; then
+    git -C "$dest" apply "$PWD/$patch"
+  fi
+done
 echo "GPUI at $(git -C "$dest" rev-parse --short HEAD) in $dest"

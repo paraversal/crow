@@ -413,9 +413,13 @@ impl CrowWindow {
         let theme = ui.theme.clone();
         let settings_error = ui.config_error();
         let pane = self.pane().read(cx);
-        let target = pane.cursor_entry(cx).map_or_else(|| pane.current_dir(cx), |e| e.path.clone());
+        let selected_entry = pane.cursor_entry(cx);
+        let target = selected_entry.as_ref().map_or_else(|| pane.current_dir(cx), |e| e.path.clone());
         let parts = crow_macos::display_components(&target);
         let last = parts.len().saturating_sub(1);
+        // The last segment is a file when a file is selected; every other segment is a folder.
+        let last_is_dir = selected_entry.as_ref().is_none_or(|e| e.is_dir);
+        let path_pane = self.pane().clone();
         let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
         let (count, selected) = (pane.item_count(cx), pane.selected_count(cx));
         let ops = cx.global::<Operations>();
@@ -454,16 +458,41 @@ impl CrowWindow {
                 div().flex_1().min_w_0().overflow_hidden().flex().items_center().gap_1().children(
                     parts.into_iter().enumerate().map({
                         let fg = color(theme.role("fg"));
+                        let hover = color(theme.role("surface-raised"));
                         move |(i, (name, path))| {
-                            let is_dir = i < last || path.is_dir();
-                            div()
+                            let pane = path_pane.clone();
+                            let is_dir = i < last || last_is_dir;
+                            let spoke = if is_dir { format!("Go to {name}") } else { format!("Open {name}") };
+                            let mut part = div()
+                                .id(("path-segment", i))
+                                .debug_selector(move || format!("path-segment-{i}"))
+                                .role(Role::Button)
+                                .aria_label(spoke)
                                 .flex()
                                 .items_center()
                                 .gap_1()
+                                .px_1()
+                                .rounded_sm()
                                 .when(i == last, |part| part.text_color(fg))
+                                .hover(move |s| s.bg(hover))
                                 .children(icon(&path, is_dir, 14).map(|i| img(i).size(px(14.))))
                                 .child(name)
-                                .when(i < last, |part| part.child(div().pl_1().child("›")))
+                                .when(i < last, |part| part.child(div().pl_1().child("›")));
+                            let target = path.clone();
+                            part = part.on_click(move |_, _, cx| {
+                                let target = target.clone();
+                                pane.update(cx, |pane, cx| {
+                                    if is_dir {
+                                        // Clicking where you already are changes nothing.
+                                        if pane.current_dir(cx) != target {
+                                            pane.navigate(target.clone(), cx);
+                                        }
+                                    } else {
+                                        pane.open_file(target.clone(), cx);
+                                    }
+                                });
+                            });
+                            part
                         }
                     }),
                 ),
@@ -1368,6 +1397,11 @@ impl Render for CrowWindow {
             .id("crow")
             .role(Role::Application)
             .aria_label("Crow")
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if cx.has_active_drag() {
+                    this.pane().update(cx, |pane, cx| pane.update_drag_target(event.position, cx));
+                }
+            }))
             .key_context("Crow")
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_tab))
@@ -1492,6 +1526,11 @@ mod tests {
         pane(view, cx).read_with(cx, |p, cx| p.current_dir(cx))
     }
 
+    /// The visible list rows as (name, indent depth).
+    fn rows(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Vec<(String, usize)> {
+        pane(view, cx).read_with(cx, |p, cx| p.rows(cx))
+    }
+
     fn config_dir(cx: &VisualTestContext) -> PathBuf {
         cx.read(|cx| cx.global::<Ui>().config_dir.clone())
     }
@@ -1570,6 +1609,39 @@ mod tests {
     }
 
     #[gpui::test]
+    fn dragging_a_favorite_down_inserts_below_the_row(cx: &mut TestAppContext) {
+        let root = fixture("favorite-drag");
+        let (view, mut cx) = open(cx, &root);
+        let (alpha, beta) = (root.join("alpha"), root.join("beta"));
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha, &beta]));
+        let from = cx.debug_bounds("sidebar-0").expect("first favorite row");
+        let to = cx.debug_bounds("sidebar-1").expect("second favorite row");
+        let start = gpui::point(from.left() + gpui::px(20.), from.top() + gpui::px(6.));
+        let over = gpui::point(to.left() + gpui::px(20.), to.bottom() - gpui::px(3.));
+
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(over, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.insert_slot()), Some((0, 2)), "one slot below beta");
+        cx.simulate_mouse_up(over, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), [beta.clone(), alpha.clone()], "the lower half of a row drops after it");
+
+        // And the upper half of a row is the single slot before it.
+        let alpha_row = cx.debug_bounds("sidebar-1").expect("alpha row");
+        let start = gpui::point(alpha_row.left() + gpui::px(20.), alpha_row.center().y);
+        let beta_row = cx.debug_bounds("sidebar-0").expect("beta row");
+        let top = gpui::point(beta_row.left() + gpui::px(20.), beta_row.top() + gpui::px(6.));
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(top, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.insert_slot()), Some((0, 0)), "one slot above alpha");
+        cx.simulate_mouse_up(top, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), [alpha, beta], "…and dropping there moves it back");
+    }
+
+    #[gpui::test]
     fn dropping_on_a_favorite_moves_into_it(cx: &mut TestAppContext) {
         let root = fixture("drop-favorite");
         let (view, mut cx) = open(cx, &root);
@@ -1625,6 +1697,24 @@ mod tests {
     }
 
     #[gpui::test]
+    fn path_bar_segments_navigate_as_history_steps(cx: &mut TestAppContext) {
+        let root = fixture("path-bar");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+
+        // The bar ends in the selected item, so its first segment is `/`'s own entry.
+        let bounds = cx.debug_bounds("path-segment-0").expect("path bar segment is laid out");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), PathBuf::from("/"), "clicking a segment opens that folder");
+        cx.simulate_keystrokes("cmd-[");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"), "and it left a history step to go back to");
+    }
+
+    #[gpui::test]
     fn rules_apply_live_and_why_explains(cx: &mut TestAppContext) {
         let root = fixture("rules");
         let (view, mut cx) = open(cx, &root);
@@ -1674,7 +1764,10 @@ mod tests {
         assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "letters don't select by name");
         cx.simulate_keystrokes("l");
         settle(&view, &mut cx);
-        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        assert_eq!(dir(&view, &cx), root, "l expands the folder first");
+        cx.simulate_keystrokes("l");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"), "l again goes into it");
         cx.simulate_keystrokes("h");
         settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root);
@@ -1937,6 +2030,133 @@ mod tests {
     }
 
     #[gpui::test]
+    fn column_view_left_on_the_leftmost_column_goes_up(cx: &mut TestAppContext) {
+        let root = fixture("columns-left");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        assert_eq!(columns(&view, &cx, 0).2, Some(root.clone()));
+
+        let parent = root.parent().expect("the fixture has a parent").to_path_buf();
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        let (_, focused, first, cursor) = columns(&view, &cx, 0);
+        assert_eq!(focused, 0);
+        assert_eq!(first, Some(parent.clone()), "the parent is pushed in from the left");
+        assert_eq!(
+            cursor.as_deref(),
+            Some(root.file_name().unwrap().to_str().unwrap()),
+            "…with the old folder selected"
+        );
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.mode()), ViewMode::Columns, "and column view stays on");
+        assert_eq!(dir(&view, &cx), parent);
+
+        cx.simulate_keystrokes("cmd-[");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root, "Back returns to where the columns started");
+
+        // At the root of the disk there is nowhere to go up to.
+        pane(&view, &cx).update(&mut cx, |p, cx| p.navigate(PathBuf::from("/"), cx));
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), PathBuf::from("/"), "Left at / does nothing");
+    }
+
+    #[gpui::test]
+    fn list_view_expands_folders_inline(cx: &mut TestAppContext) {
+        let root = fixture("expand");
+        std::fs::write(root.join("alpha/a.txt"), "").expect("create fixture");
+        std::fs::write(root.join("alpha/b.txt"), "").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0), ("beta".to_owned(), 0), ("notes.txt".to_owned(), 0)]);
+
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        assert_eq!(
+            rows(&view, &cx),
+            [
+                ("alpha".to_owned(), 0),
+                ("inner".to_owned(), 1),
+                ("a.txt".to_owned(), 1),
+                ("b.txt".to_owned(), 1),
+                ("beta".to_owned(), 0),
+                ("notes.txt".to_owned(), 0),
+            ],
+            "Right opens the folder inline, indented under it"
+        );
+        assert_eq!(dir(&view, &cx), root, "…without going anywhere");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "the folder stays selected");
+
+        cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("inner"), "Right expands a nested folder");
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha/inner"), "Right again goes into the open folder");
+
+        cx.simulate_keystrokes("cmd-[");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root);
+        assert!(!rows(&view, &cx).iter().any(|(_, depth)| *depth > 0), "coming back starts collapsed");
+    }
+
+    #[gpui::test]
+    fn list_view_left_steps_to_the_parent_row_then_collapses(cx: &mut TestAppContext) {
+        let root = fixture("left-parent");
+        std::fs::write(root.join("alpha/a.txt"), "").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("inner"), "a nested row is selected");
+
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "Left selects the row that contains it");
+        assert!(rows(&view, &cx).iter().any(|(name, _)| name == "inner"), "…and leaves it open");
+
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert!(!rows(&view, &cx).iter().any(|(name, _)| name == "inner"), "Left again collapses it");
+
+        cx.simulate_keystrokes("down down");
+        settle(&view, &mut cx);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.parent().unwrap(), "Left on a top-level row goes up a folder");
+        assert_eq!(selected(&view, &cx).as_deref(), Some(root.file_name().unwrap().to_str().unwrap()));
+    }
+
+    #[gpui::test]
+    fn selection_and_trash_span_expanded_levels(cx: &mut TestAppContext) {
+        let root = fixture("expand-select");
+        let (a, b) = (root.join("alpha/a.txt"), root.join("alpha/b.txt"));
+        std::fs::write(&a, "").expect("create fixture");
+        std::fs::write(&b, "").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("down down");
+        settle(&view, &mut cx);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("a.txt"));
+        cx.simulate_keystrokes("shift-down");
+        let selected_paths = pane(&view, &cx).read_with(&cx, |p, cx| p.selected_paths(cx));
+        assert_eq!(selected_paths, [a.clone(), b.clone()], "a range over rows of the expanded folder");
+
+        cx.simulate_keystrokes("cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!a.exists() && !b.exists(), "both nested files went to the trash");
+        assert!(root.join("alpha").is_dir(), "their folder stays");
+    }
+
+    #[gpui::test]
     fn switching_to_list_view_keeps_the_folder_you_are_in(cx: &mut TestAppContext) {
         let root = fixture("switch");
         let (view, mut cx) = open(cx, &root);
@@ -2062,6 +2282,135 @@ mod tests {
         cx.simulate_event(gpui::FileDropEvent::Entered { position: at, paths: gpui::ExternalPaths(paths.into()) });
         cx.simulate_event(gpui::FileDropEvent::Pending { position: at });
         cx.simulate_event(gpui::FileDropEvent::Submit { position: at });
+    }
+
+    #[gpui::test]
+    fn platform_drag_updates_keep_one_list_target(cx: &mut TestAppContext) {
+        let root = fixture("drop-steady-list");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let alpha = cx.debug_bounds("row-alpha").expect("alpha row").center();
+        let notes = cx.debug_bounds("row-notes.txt").expect("notes row").center();
+        let pane = view.read_with(&cx, |window, _| window.tabs.active().clone());
+        let target = |cx: &VisualTestContext| pane.read_with(cx, |pane, _| pane.drop_row());
+
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position: alpha,
+            paths: gpui::ExternalPaths(vec![root.join("dropped.txt")].into()),
+        });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: alpha });
+        cx.run_until_parked();
+        assert_eq!(target(&cx), Some(0), "the row under the pointer is the target");
+        for _ in 0..8 {
+            cx.simulate_event(gpui::FileDropEvent::Pending { position: alpha });
+            cx.run_until_parked();
+            assert_eq!(target(&cx), Some(0), "platform updates keep one steady target");
+        }
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: notes });
+        cx.run_until_parked();
+        assert_eq!(target(&cx), Some(2), "moving the pointer moves the target");
+        cx.simulate_event(gpui::FileDropEvent::Exited);
+        cx.run_until_parked();
+        assert_eq!(target(&cx), None, "leaving the window clears it");
+    }
+
+    #[gpui::test]
+    fn platform_drag_updates_keep_one_column_target(cx: &mut TestAppContext) {
+        let root = fixture("drop-steady-columns");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let pane = view.read_with(&cx, |window, _| window.tabs.active().clone());
+        assert_eq!(pane.read_with(&cx, |pane, _| pane.mode()), ViewMode::Columns, "column view is active");
+        let at = gpui::point(px(320.), px(90.));
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position: at,
+            paths: gpui::ExternalPaths(vec![root.join("dropped.txt")].into()),
+        });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: at });
+        cx.run_until_parked();
+        assert_eq!(pane.read_with(&cx, |pane, _| pane.drop_column()), Some((0, 1)));
+        for _ in 0..8 {
+            cx.simulate_event(gpui::FileDropEvent::Pending { position: at });
+            cx.run_until_parked();
+            assert_eq!(
+                pane.read_with(&cx, |pane, _| pane.drop_column()),
+                Some((0, 1)),
+                "platform updates keep one steady target in a column"
+            );
+        }
+        cx.simulate_event(gpui::FileDropEvent::Exited);
+        cx.run_until_parked();
+        assert_eq!(pane.read_with(&cx, |pane, _| pane.drop_column()), None);
+    }
+
+    #[gpui::test]
+    fn sidebar_drop_highlight_is_steady_while_the_pointer_stays_on_a_row(cx: &mut TestAppContext) {
+        let root = fixture("drop-steady");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let first = cx.debug_bounds("sidebar-0").expect("first favorite row").center();
+        let second = cx.debug_bounds("sidebar-1").expect("second favorite row").center();
+        let header = cx.debug_bounds("sidebar-header-Favorites").expect("favorites title").center();
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        let target = |cx: &VisualTestContext| sidebar.read_with(cx, |s, _| s.drop_target());
+
+        let paths = gpui::ExternalPaths(vec![root.join("notes.txt")].into());
+        cx.simulate_event(gpui::FileDropEvent::Entered { position: second, paths });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: second });
+        cx.run_until_parked();
+        assert_eq!(target(&cx), Some((true, 1)), "the row under the pointer is highlighted");
+        for _ in 0..8 {
+            cx.simulate_event(gpui::FileDropEvent::Pending { position: second });
+            cx.run_until_parked();
+            assert_eq!(target(&cx), Some((true, 1)), "…and stays highlighted while the pointer rests on it");
+        }
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: first });
+        cx.run_until_parked();
+        assert_eq!(target(&cx), Some((true, 0)), "moving to another row moves the highlight");
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: header });
+        cx.run_until_parked();
+        assert_eq!(target(&cx), Some((false, 0)), "a group title highlights as a drop target");
+        cx.simulate_event(gpui::FileDropEvent::Exited);
+        cx.run_until_parked();
+        assert_eq!(target(&cx), None, "leaving the window clears it");
+    }
+
+    #[gpui::test]
+    fn dragging_a_row_onto_a_sidebar_favorite_moves_it(cx: &mut TestAppContext) {
+        let root = fixture("drag-sidebar");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("beta")]));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let from = cx.debug_bounds("row-notes.txt").expect("notes.txt row").center();
+        let to = cx.debug_bounds("sidebar-0").expect("beta favorite row").center();
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert!(root.join("beta/notes.txt").exists(), "the dragged file moved into the favorite's folder");
+    }
+
+    #[gpui::test]
+    fn dragging_a_row_onto_a_folder_moves_it(cx: &mut TestAppContext) {
+        let root = fixture("drag-row");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let from = cx.debug_bounds("row-notes.txt").expect("notes.txt row").center();
+        let to = cx.debug_bounds("row-alpha").expect("alpha row").center();
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert!(root.join("alpha/notes.txt").exists(), "the dragged file moved into the folder under the pointer");
+        assert!(!root.join("notes.txt").exists(), "…and left its old place");
     }
 
     #[gpui::test]

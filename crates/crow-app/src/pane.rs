@@ -7,8 +7,11 @@
 //!   you move into it (Right arrow or a click);
 //! - typing and filtering always act on the focused column.
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -17,9 +20,10 @@ use crow_core::{
 };
 use crow_fs::{Entry, Sort, SortKey};
 use gpui::{
-    ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Role, ScrollHandle,
-    SharedString, Subscription, Window, div, img, prelude::*, px, uniform_list,
+    Action, Bounds, ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalDragPayload, ExternalPaths,
+    FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle, SharedString, Subscription,
+    Window, canvas, div, img, point, prelude::*, px, uniform_list,
 };
 
 use crate::actions::{
@@ -36,8 +40,10 @@ use crate::ui::Ui;
 use crow_fs::ops::Request;
 
 const ROW_HEIGHT: f32 = 24.0;
-/// Space before the name for a folder's disclosure triangle (inline expansion comes later).
-const NAME_INSET: f32 = 22.0;
+/// Left padding before a row's disclosure chevron, and the indent per tree level.
+const NAME_INSET: f32 = 4.0;
+const INDENT: f32 = 18.0;
+const TRIANGLE_WIDTH: f32 = 20.0;
 const CELL_PADDING: f32 = 8.0;
 /// Column view: every column starts this wide; one with long names widens up to the cap.
 const COLUMN_WIDTH: f32 = 220.0;
@@ -74,6 +80,110 @@ enum MarkPending {
 
 impl EventEmitter<PaneEvent> for Pane {}
 
+/// Files dragged from inside Crow: paths and whether each is a folder. The selection is
+/// shared, so rendering a selected row does not clone the whole selection.
+#[derive(Clone)]
+pub(crate) struct DraggedSelection {
+    pub entries: Arc<Vec<(PathBuf, bool)>>,
+}
+
+impl DraggedSelection {
+    /// What the platform and `ExternalPaths` drop handlers expect.
+    pub fn external(&self) -> ExternalPaths {
+        ExternalPaths(self.entries.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>().into())
+    }
+}
+
+/// Handed from the drag constructor to the native-promotion resolver: the measured
+/// combo and the grab point, so the native image starts in exactly the same place.
+#[derive(Clone)]
+struct DragHandoff {
+    cursor: Rc<Cell<Point<Pixels>>>,
+    width: Rc<Cell<f32>>,
+    pill_width: Rc<Cell<f32>>,
+    label: Rc<RefCell<SharedString>>,
+}
+
+impl DragHandoff {
+    fn new() -> Self {
+        Self {
+            cursor: Rc::new(Cell::new(Point::default())),
+            width: Rc::new(Cell::new(0.0)),
+            pill_width: Rc::new(Cell::new(0.0)),
+            label: Rc::new(RefCell::new(SharedString::default())),
+        }
+    }
+}
+
+/// The image that follows the pointer while dragging with GPUI inside the window:
+/// a small icon and a pill with the name.
+struct DraggedFiles {
+    icon: Option<Arc<Image>>,
+    label: SharedString,
+    pill_width: f32,
+    width: f32,
+    cursor: Point<Pixels>,
+}
+
+impl Render for DraggedFiles {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = &cx.global::<Ui>().theme;
+        let left = drag_combo_left(f32::from(self.cursor.x), self.width);
+        // Once the pointer leaves the window, the native image takes over; don't let the
+        // GPUI image clip at the edge for that frame. `bounds()` is in screen coordinates,
+        // while the mouse position is window-relative, so compare against the size only.
+        let position = window.mouse_position();
+        let size = window.bounds().size;
+        let inside =
+            position.x >= px(0.) && position.y >= px(0.) && position.x < size.width && position.y < size.height;
+        div()
+            .when(!inside, |element| element.invisible())
+            .ml(px(left))
+            .flex()
+            .items_center()
+            .gap_2()
+            .when_some(self.icon.clone(), |element, icon| element.child(img(icon).size(px(22.))))
+            .child(
+                div()
+                    .w(px(self.pill_width))
+                    .h(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(color(theme.role("surface-raised")))
+                    .text_color(color(theme.role("fg")))
+                    .text_size(px(12.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(self.label.clone()),
+            )
+    }
+}
+
+/// Measure the name pill before the first frame so the combo appears already anchored.
+fn measure_combo(label: &SharedString, window: &mut Window) -> (SharedString, f32, f32) {
+    let font_size = px(12.);
+    let run = gpui::TextRun {
+        len: label.len(),
+        font: gpui::Font::default(),
+        color: gpui::Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let raw = f32::from(window.text_system().layout_line(label.clone(), font_size, &[run], None).width);
+    let max_text = 200.0;
+    let (display, text_width) = if raw > max_text {
+        (truncate_middle(label, px(max_text), font_size, window), max_text)
+    } else {
+        (label.clone(), raw)
+    };
+    let pill = text_width + 16.0;
+    let width = 22.0 + 8.0 + pill;
+    (display, pill, width)
+}
+
 /// An inline rename in progress.
 struct Renaming {
     path: PathBuf,
@@ -96,9 +206,6 @@ pub struct Pane {
     columns: Vec<Arc<dyn Column>>,
     table: TableLayout,
     resize: Option<ResizeDrag>,
-    /// A press that may become a drag: (folder index, row, where).
-    drag_origin: Option<(usize, usize, Point<Pixels>)>,
-    dragging: bool,
     preview: Option<Preview>,
     strip_scroll: ScrollHandle,
     status: Option<SharedString>,
@@ -108,6 +215,14 @@ pub struct Pane {
     bench: Option<Bench>,
     /// The `views.toml` reload and folder whose view was applied last.
     applied_view: Option<(u64, PathBuf)>,
+    /// List view: the uniform list's viewport, captured at prepaint.
+    list_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The list row a drag would drop on, drawn from state rather than drag-over styles.
+    drop_row: Option<usize>,
+    /// Column view: each column's list viewport, captured at prepaint.
+    column_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
+    /// The column and row a drag would drop on in column view.
+    drop_column: Option<(usize, usize)>,
     mark_pending: Option<MarkPending>,
 }
 
@@ -134,8 +249,6 @@ impl Pane {
             table: default_table(&columns),
             columns,
             resize: None,
-            drag_origin: None,
-            dragging: false,
             preview: None,
             strip_scroll: ScrollHandle::new(),
             status: None,
@@ -143,6 +256,10 @@ impl Pane {
             rename_when_present: None,
             bench: bench.then(|| Bench { frame: 0, intervals: Vec::new(), last: None, scrolled: None }),
             applied_view: None,
+            list_bounds: Rc::new(Cell::new(None)),
+            drop_row: None,
+            column_bounds: Rc::new(RefCell::new(HashMap::new())),
+            drop_column: None,
             mark_pending: None,
         };
         pane.enter(dir, cx);
@@ -182,7 +299,14 @@ impl Pane {
     }
 
     pub fn is_loading(&self, cx: &gpui::App) -> bool {
-        self.folders.iter().any(|f| f.read(cx).is_loading())
+        self.folders.iter().any(|f| f.read(cx).is_loading_deep(cx))
+    }
+
+    /// The visible (name, depth) rows of the focused folder, for tests.
+    #[cfg(test)]
+    pub fn rows(&self, cx: &gpui::App) -> Vec<(String, usize)> {
+        let folder = self.focused_folder().read(cx);
+        (0..folder.row_count()).filter_map(|ix| folder.row(ix).map(|(e, d)| (e.name.clone(), d))).collect()
     }
 
     pub fn error(&self, cx: &gpui::App) -> Option<SharedString> {
@@ -328,7 +452,12 @@ impl Pane {
                 resolved.columns.0.iter().filter_map(|id| available.iter().find(|c| c.id() == id).cloned()).collect();
             self.table = default_table(&self.columns);
         }
-        self.apply_mode(resolved.view.0, cx);
+        // Columns are one browsing session: entering a folder may switch to column
+        // view, but a views.toml reload while its columns are open (the parent's
+        // setting, say) must not yank the mode out from under the chain.
+        if self.mode != ViewMode::Columns || self.folders.len() == 1 {
+            self.apply_mode(resolved.view.0, cx);
+        }
         cx.notify();
     }
 
@@ -451,8 +580,16 @@ impl Pane {
         let Some(entry) = self.cursor_entry(cx) else { return };
         if entry.is_dir && !entry.is_package() {
             self.navigate(entry.path, cx);
-        } else if let Err(e) = std::process::Command::new("open").arg(&entry.path).spawn() {
-            self.status = Some(format!("Can't open “{}”: {e}", entry.name).into());
+        } else {
+            self.open_file(entry.path, cx);
+        }
+    }
+
+    /// Open `path` in the app that owns it, as a double-click on that row would.
+    pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
+            self.status = Some(format!("Can't open “{name}”: {e}").into());
             cx.notify();
         }
     }
@@ -494,6 +631,10 @@ impl Pane {
 
     /// Column view: move into the column showing the selected folder's contents.
     fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == ViewMode::List {
+            self.list_right(cx);
+            return;
+        }
         if self.focused + 1 >= self.folders.len() {
             return;
         }
@@ -504,14 +645,63 @@ impl Pane {
         cx.notify();
     }
 
-    /// Column view: back to the parent column. The column you leave stays, unselected.
-    fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
-        if self.focused == 0 {
+    /// List view: open the selected folder inline, or go into it when it is already open.
+    fn list_right(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.cursor_entry(cx) else { return };
+        if !entry.is_dir || entry.is_package() {
             return;
         }
-        let leaving = self.focused_folder().clone();
-        self.focused -= 1;
-        leaving.update(cx, |f, cx| f.clear_selection(cx));
+        let folder = self.focused_folder().clone();
+        let expanded = folder.read(cx).is_expanded(&entry.path, cx);
+        if expanded {
+            self.navigate(entry.path, cx);
+        } else {
+            folder.update(cx, |folder, cx| folder.expand(entry.path, cx));
+        }
+    }
+
+    /// List view: close an open folder, step to the row that contains a nested one, or
+    /// leave the folder from the top level, as Finder does.
+    fn list_left(&mut self, cx: &mut Context<Self>) {
+        let folder = self.focused_folder().clone();
+        let read = folder.read(cx);
+        let Some(ix) = read.cursor_ix() else { return };
+        let Some((entry, _)) = read.row(ix) else { return };
+        let (path, expanded, parent) = (entry.path.clone(), read.is_expanded(&entry.path, cx), read.parent_row(ix));
+        if expanded {
+            folder.update(cx, |folder, cx| folder.collapse(&path, cx));
+        } else if let Some(parent) = parent {
+            folder.update(cx, |folder, cx| folder.select_only(parent, cx));
+        } else {
+            self.open_parent(cx);
+        }
+    }
+
+    /// Column view: back to the parent column. The column you leave stays, unselected.
+    /// On the leftmost column there is no column to go back to, so the parent folder
+    /// is pushed in from the left, with the folder we came from selected in it.
+    fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == ViewMode::List {
+            self.list_left(cx);
+            return;
+        }
+        if self.focused > 0 {
+            let leaving = self.focused_folder().clone();
+            self.focused -= 1;
+            leaving.update(cx, |f, cx| f.clear_selection(cx));
+        } else {
+            let child = self.folders[0].read(cx).dir().to_path_buf();
+            let Some(parent) = child.parent().map(Path::to_path_buf) else { return };
+            self.history.visit(parent.clone());
+            self.push_folder(parent.clone(), false, cx);
+            let folder = self.folders.pop().expect("pushed above");
+            let subscription = self.subscriptions.pop().expect("pushed above");
+            self.folders.insert(0, folder.clone());
+            self.subscriptions.insert(0, subscription);
+            folder.update(cx, |f, _| f.select_after_load(child));
+            self.focused = 0;
+            cx.emit(PaneEvent::Entered(parent));
+        }
         self.strip_scroll.scroll_to_item(self.focused);
         self.load_preview(cx);
         cx.notify();
@@ -622,15 +812,29 @@ impl Pane {
         }
     }
 
-    fn quick_look(&mut self, _: &QuickLook, _: &mut Window, cx: &mut Context<Self>) {
+    fn quick_look(&mut self, _: &QuickLook, window: &mut Window, cx: &mut Context<Self>) {
         // Mid-word, Space belongs to type-to-select ("my file"), not Quick Look.
         if self.focused_folder().read(cx).type_select_active() {
             self.with_focused(cx, |f, cx| f.type_char(' ', cx));
             return;
         }
-        if let Some(entry) = self.cursor_entry(cx) {
-            crow_macos::toggle_quick_look(&entry.path);
-        }
+        let Some(entry) = self.cursor_entry(cx) else { return };
+        // The panel is key while it is open, so the arrows come back through its
+        // delegate instead of the window. Run them as the arrows those keys are bound to.
+        let handle = window.window_handle();
+        let async_cx = cx.to_async();
+        crow_macos::set_quick_look_key_handler(move |key| {
+            async_cx.update(|cx| {
+                let action: Box<dyn Action> = match key {
+                    crow_macos::QuickLookKey::Up => Box::new(MoveUp),
+                    crow_macos::QuickLookKey::Down => Box::new(MoveDown),
+                    crow_macos::QuickLookKey::Left => Box::new(MoveLeft),
+                    crow_macos::QuickLookKey::Right => Box::new(MoveRight),
+                };
+                let _ = handle.update(cx, |_, window, cx| window.dispatch_action(action, cx));
+            });
+        });
+        crow_macos::toggle_quick_look(&entry.path);
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -683,10 +887,9 @@ impl Pane {
 
     /// A press on row `ix` of folder `k`: Finder's click, Cmd-click and Shift-click.
     fn press(&mut self, k: usize, ix: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // AppKit wants the mouse-down event when a GPUI drag later leaves the window.
+        crow_macos::remember_mouse_down();
         window.focus(&self.focus, cx);
-        // A system drag can end without GPUI seeing the mouse go up; a new press starts fresh.
-        self.dragging = false;
-        self.drag_origin = Some((k, ix, event.position));
         if k != self.focused {
             self.focused = k;
             self.strip_scroll.scroll_to_item(k);
@@ -706,6 +909,70 @@ impl Pane {
     }
 
     // ----- benchmark -----
+
+    /// The list row under `pointer`: rows are uniform, and the scroll offset is known.
+    fn drag_row_at(&self, cx: &gpui::App, pointer: Point<Pixels>) -> Option<usize> {
+        let bounds = self.list_bounds.get()?;
+        if pointer.x < bounds.left()
+            || pointer.x >= bounds.right()
+            || pointer.y < bounds.top()
+            || pointer.y >= bounds.bottom()
+        {
+            return None;
+        }
+        let folder = self.folders[0].read(cx);
+        let row_height = px(ROW_HEIGHT);
+        let y = pointer.y - bounds.top() + folder.scroll().0.borrow().base_handle.offset().y;
+        let row = (f32::from(y) / f32::from(row_height)).floor();
+        if row < 0.0 {
+            return None;
+        }
+        let row = row as usize;
+        (row < folder.row_count()).then_some(row)
+    }
+
+    /// The column row under `pointer`, if any: each column has its own list and scroll.
+    fn column_row_at(&self, cx: &gpui::App, pointer: Point<Pixels>) -> Option<(usize, usize)> {
+        let (k, bounds) = self
+            .column_bounds
+            .borrow()
+            .iter()
+            .find(|(_, bounds)| bounds.contains(&pointer))
+            .map(|(k, bounds)| (*k, *bounds))?;
+        let folder = self.folders.get(k)?.read(cx);
+        let row_height = px(ROW_HEIGHT);
+        let y = pointer.y - bounds.top() + folder.scroll().0.borrow().base_handle.offset().y;
+        let row = (f32::from(y) / f32::from(row_height)).floor();
+        if row < 0.0 {
+            return None;
+        }
+        let row = row as usize;
+        (row < folder.entries().len()).then_some((k, row))
+    }
+
+    pub fn update_drag_target(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.update_drag_row(position, cx);
+    }
+
+    fn update_drag_row(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let row = if self.mode == ViewMode::List { self.drag_row_at(cx, position) } else { None };
+        let column = if self.mode == ViewMode::Columns { self.column_row_at(cx, position) } else { None };
+        if row != self.drop_row || column != self.drop_column {
+            self.drop_row = row;
+            self.drop_column = column;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn drop_row(&self) -> Option<usize> {
+        self.drop_row
+    }
+
+    #[cfg(test)]
+    pub fn drop_column(&self) -> Option<(usize, usize)> {
+        self.drop_column
+    }
 
     fn bench_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bench) = self.bench.as_mut() else { return };
@@ -770,20 +1037,36 @@ impl Pane {
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
         let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
         let last = widths.len() - 1;
-        let name_room = px(widths[0] - NAME_INSET - 16.0 - 8.0 - CELL_PADDING);
         let folder = self.folders[0].read(cx);
-        let total = folder.entries().len();
+        let list_folder = self.folders[0].clone();
+        let selected_entries = folder.selected_entries();
+        let total = folder.row_count();
         let cursor = folder.cursor_ix();
-        let rows: Vec<(usize, Entry, bool)> = range
-            .filter_map(|ix| folder.entries().get(ix).map(|e| (ix, e.clone(), folder.is_selected(&e.path))))
+        let rows: Vec<(usize, Entry, usize, bool)> = range
+            .filter_map(|ix| {
+                folder.row(ix).map(|(entry, depth)| (ix, entry.clone(), depth, folder.is_selected(&entry.path)))
+            })
             .collect();
         rows.into_iter()
-            .map(|(ix, entry, selected)| {
+            .map(|(ix, entry, depth, selected)| {
                 let cells: Vec<(String, Align)> =
                     self.columns.iter().map(|c| (c.text(&entry, &column_cx), c.align())).collect();
                 let spoken =
                     cells.iter().map(|(text, _)| text.as_str()).filter(|t| *t != "--").collect::<Vec<_>>().join(", ");
+                let indent = NAME_INSET + depth as f32 * INDENT;
+                let name_room = px(widths[0] - indent - TRIANGLE_WIDTH - 8.0 - 16.0 - 8.0 - CELL_PADDING);
                 let name = truncate_middle(&entry.name, name_room, font_size, window);
+                let expanded = folder.is_expanded(&entry.path, cx);
+                let drag_entries = if selected {
+                    selected_entries.clone()
+                } else {
+                    Arc::new(vec![(entry.path.clone(), entry.is_dir)])
+                };
+                let drag_icon = icon(&entry.path, entry.is_dir, 22);
+                let drag_count = drag_entries.len();
+                let drag_label: SharedString =
+                    if drag_count > 1 { format!("{drag_count} items").into() } else { entry.name.clone().into() };
+                let handoff = DragHandoff::new();
                 let row = div()
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
@@ -801,15 +1084,65 @@ impl Pane {
                     .when(ix % 2 == 1, |row| row.bg(stripe))
                     .when(selected, |row| row.bg(selection_bg))
                     .debug_selector(|| format!("row-{}", entry.name))
+                    .on_drag(DraggedSelection { entries: drag_entries }, {
+                        let handoff = handoff.clone();
+                        move |_value, offset, window, cx| {
+                            let (display, pill_width, width) = measure_combo(&drag_label, window);
+                            handoff.cursor.set(offset);
+                            handoff.width.set(width);
+                            handoff.pill_width.set(pill_width);
+                            *handoff.label.borrow_mut() = display.clone();
+                            cx.new(|_| DraggedFiles {
+                                icon: drag_icon.clone(),
+                                label: display,
+                                pill_width,
+                                width,
+                                cursor: offset,
+                            })
+                        }
+                    })
+                    .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
+                        let width = handoff.width.get();
+                        let pill_width = handoff.pill_width.get();
+                        let cursor = handoff.cursor.get();
+                        let label = handoff.label.borrow().clone();
+                        let entries = selection.entries.as_slice();
+                        if let Some((path, is_dir)) = entries.first()
+                            && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
+                            && crow_macos::begin_drag(
+                                window,
+                                &crow_macos::ComboDrag {
+                                    paths: entries,
+                                    icon_png: png.as_slice(),
+                                    label: label.as_ref(),
+                                    width,
+                                    height: 24.0,
+                                    pill_width,
+                                    cursor_from_left: f32::from(cursor.x).min(width),
+                                    cursor_from_top: f32::from(cursor.y).min(24.0),
+                                },
+                            )
+                        {
+                            cx.stop_active_drag(window);
+                            return None;
+                        }
+                        Some(ExternalDragPayload::Files(FileDragPaths::new(entries.iter().cloned())))
+                    })
                     .when(entry.is_dir && !entry.is_package(), |row| {
                         let target = entry.path.clone();
-                        row.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg)).on_drop(cx.listener(
-                            move |this, paths: &ExternalPaths, window, cx| {
-                                this.drop_into(target.clone(), paths, window, cx);
+                        let target_selection = entry.path.clone();
+                        row.on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                            this.drop_into(target.clone(), paths, window, cx);
+                            cx.stop_propagation();
+                        }))
+                        .on_drop(cx.listener(
+                            move |this, selection: &DraggedSelection, window, cx| {
+                                this.drop_into(target_selection.clone(), &selection.external(), window, cx);
                                 cx.stop_propagation();
                             },
                         ))
                     })
+                    .when(entry.is_dir && !entry.is_package() && self.drop_row == Some(ix), |row| row.bg(drop_bg))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -825,12 +1158,44 @@ impl Pane {
                         div()
                             .w(px(widths[0]))
                             .flex_none()
-                            .pl(px(NAME_INSET))
+                            .pl(px(indent))
                             .pr(px(CELL_PADDING))
                             .flex()
                             .items_center()
                             .gap_2()
                             .overflow_hidden()
+                            .child(if entry.is_dir && !entry.is_package() {
+                                let path = entry.path.clone();
+                                let pane = list_folder.clone();
+                                div()
+                                    .id(("disclosure", ix))
+                                    .debug_selector({
+                                        let name = entry.name.clone();
+                                        move || format!("disclosure-{name}")
+                                    })
+                                    .role(Role::Button)
+                                    .aria_label(if expanded {
+                                        format!("Collapse {}", entry.name)
+                                    } else {
+                                        format!("Expand {}", entry.name)
+                                    })
+                                    .w(px(TRIANGLE_WIDTH))
+                                    .h(px(ROW_HEIGHT))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .hover(move |s| s.bg(color(theme.role("surface-raised"))))
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        pane.update(cx, |folder, cx| folder.toggle_expansion(path.clone(), cx));
+                                    }))
+                                    .child(chevron_glyph(expanded, muted))
+                                    .into_any_element()
+                            } else {
+                                div().w(px(TRIANGLE_WIDTH)).flex_none().into_any_element()
+                            })
                             .child(
                                 div()
                                     .size(px(16.))
@@ -895,7 +1260,7 @@ impl Pane {
                 .h_full()
                 .when(i == last, |cell| cell.flex_1().min_w(width))
                 .when(i != last, |cell| cell.w(width).flex_none())
-                .pl(px(if i == 0 { NAME_INSET } else { CELL_PADDING }))
+                .pl(px(if i == 0 { NAME_INSET + TRIANGLE_WIDTH + 8.0 } else { CELL_PADDING }))
                 .pr(px(CELL_PADDING))
                 .flex()
                 .items_center()
@@ -962,6 +1327,7 @@ impl Pane {
         let name_room = px(width - 16.0 - 8.0 - 16.0 - 2.0 * CELL_PADDING - 8.0);
         let total = folder.entries().len();
         let cursor = folder.cursor_ix();
+        let selected_entries = folder.selected_entries();
         let rows: Vec<(usize, Entry, bool)> = range
             .filter_map(|ix| folder.entries().get(ix).map(|e| (ix, e.clone(), folder.is_selected(&e.path))))
             .collect();
@@ -969,6 +1335,16 @@ impl Pane {
             .map(|(ix, entry, selected)| {
                 let name = truncate_middle(&entry.name, name_room, font_size, window);
                 let navigable = entry.is_dir && !entry.is_package();
+                let drag_entries = if selected {
+                    selected_entries.clone()
+                } else {
+                    Arc::new(vec![(entry.path.clone(), entry.is_dir)])
+                };
+                let drag_icon = icon(&entry.path, entry.is_dir, 22);
+                let drag_count = drag_entries.len();
+                let drag_label: SharedString =
+                    if drag_count > 1 { format!("{drag_count} items").into() } else { entry.name.clone().into() };
+                let handoff = DragHandoff::new();
                 div()
                     .id(ix)
                     .role(Role::ListBoxOption)
@@ -986,15 +1362,65 @@ impl Pane {
                     .gap_2()
                     .when(selected, |row| row.bg(selection_bg))
                     .debug_selector(|| format!("column-{k}-row-{}", entry.name))
+                    .on_drag(DraggedSelection { entries: drag_entries }, {
+                        let handoff = handoff.clone();
+                        move |_value, offset, window, cx| {
+                            let (display, pill_width, width) = measure_combo(&drag_label, window);
+                            handoff.cursor.set(offset);
+                            handoff.width.set(width);
+                            handoff.pill_width.set(pill_width);
+                            *handoff.label.borrow_mut() = display.clone();
+                            cx.new(|_| DraggedFiles {
+                                icon: drag_icon.clone(),
+                                label: display,
+                                pill_width,
+                                width,
+                                cursor: offset,
+                            })
+                        }
+                    })
+                    .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
+                        let width = handoff.width.get();
+                        let pill_width = handoff.pill_width.get();
+                        let cursor = handoff.cursor.get();
+                        let label = handoff.label.borrow().clone();
+                        let entries = selection.entries.as_slice();
+                        if let Some((path, is_dir)) = entries.first()
+                            && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
+                            && crow_macos::begin_drag(
+                                window,
+                                &crow_macos::ComboDrag {
+                                    paths: entries,
+                                    icon_png: png.as_slice(),
+                                    label: label.as_ref(),
+                                    width,
+                                    height: 24.0,
+                                    pill_width,
+                                    cursor_from_left: f32::from(cursor.x).min(width),
+                                    cursor_from_top: f32::from(cursor.y).min(24.0),
+                                },
+                            )
+                        {
+                            cx.stop_active_drag(window);
+                            return None;
+                        }
+                        Some(ExternalDragPayload::Files(FileDragPaths::new(entries.iter().cloned())))
+                    })
                     .when(navigable, |row| {
                         let target = entry.path.clone();
-                        row.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg)).on_drop(cx.listener(
-                            move |this, paths: &ExternalPaths, window, cx| {
-                                this.drop_into(target.clone(), paths, window, cx);
+                        let target_selection = entry.path.clone();
+                        row.on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                            this.drop_into(target.clone(), paths, window, cx);
+                            cx.stop_propagation();
+                        }))
+                        .on_drop(cx.listener(
+                            move |this, selection: &DraggedSelection, window, cx| {
+                                this.drop_into(target_selection.clone(), &selection.external(), window, cx);
                                 cx.stop_propagation();
                             },
                         ))
                     })
+                    .when(navigable && self.drop_column == Some((k, ix)), |row| row.bg(drop_bg))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1032,6 +1458,14 @@ impl Pane {
             let title = f.dir().file_name().map_or_else(|| "/".to_owned(), |n| n.to_string_lossy().into_owned());
             strip = strip.child(
                 div()
+                    .on_children_prepainted({
+                        let bounds = self.column_bounds.clone();
+                        move |children, _, _| {
+                            if let Some(child) = children.first() {
+                                bounds.borrow_mut().insert(k, *child);
+                            }
+                        }
+                    })
                     .id(("column-view", k))
                     .role(Role::ListBox)
                     .aria_label(format!("{title}, {count} items"))
@@ -1047,6 +1481,9 @@ impl Pane {
                             this.drop_files(k, paths, window, cx)
                         }),
                     )
+                    .on_drop(cx.listener(move |this, selection: &DraggedSelection, window, cx| {
+                        this.drop_files(k, &selection.external(), window, cx)
+                    }))
                     .child(
                         uniform_list(
                             ("column-list", k),
@@ -1079,6 +1516,40 @@ impl Pane {
     }
 }
 
+/// Where the drag combo's left edge goes: the grab point stays under the cursor, but a
+/// combo narrower than that is shifted until its right side just touches the cursor.
+fn drag_combo_left(cursor_x: f32, width: f32) -> f32 {
+    if cursor_x > width { cursor_x - width } else { 0.0 }
+}
+
+/// A chevron drawn as a path: expanding rotates the same glyph instead of swapping in a
+/// different one that sits lower in its box.
+fn chevron_glyph(expanded: bool, chevron: gpui::Rgba) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let (width, height) = (bounds.size.width, bounds.size.height);
+            let origin = bounds.origin;
+            let p = |x: f32, y: f32| point(origin.x + width * x, origin.y + height * y);
+            let mut builder = PathBuilder::stroke(px(2.));
+            if expanded {
+                builder.move_to(p(0.2, 0.35));
+                builder.line_to(p(0.5, 0.65));
+                builder.line_to(p(0.8, 0.35));
+            } else {
+                builder.move_to(p(0.35, 0.2));
+                builder.line_to(p(0.65, 0.5));
+                builder.line_to(p(0.35, 0.8));
+            }
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, chevron);
+            }
+        },
+    )
+    .w(px(14.))
+    .h(px(14.))
+}
+
 fn selection_color(active: bool, theme: &crow_theme::Theme) -> gpui::Rgba {
     if active { color_alpha(theme.role("accent"), 0x55) } else { color(theme.role("selection")) }
 }
@@ -1104,6 +1575,19 @@ fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.bench_step(window, cx);
+        // A drag inside the list highlights the row under the pointer from this state; the
+        // style-based drag-over highlight flickers on the platform drag path used when a
+        // drag leaves the window and comes back.
+        self.drop_row = if cx.has_active_drag() && self.mode == ViewMode::List {
+            self.drag_row_at(cx, window.mouse_position())
+        } else {
+            None
+        };
+        self.drop_column = if cx.has_active_drag() && self.mode == ViewMode::Columns {
+            self.column_row_at(cx, window.mouse_position())
+        } else {
+            None
+        };
         if let Some(path) = self.rename_when_present.clone()
             && self.focused_folder().read(cx).entries().iter().any(|e| e.path == path)
         {
@@ -1127,22 +1611,35 @@ impl Render for Pane {
             ViewMode::List => {
                 let (rows, scroll) = {
                     let root = self.folders[0].read(cx);
-                    (root.entries().len(), root.scroll().clone())
+                    (root.row_count(), root.scroll().clone())
                 };
                 div()
                     .size_full()
                     .flex()
                     .flex_col()
                     .child(self.render_table_header(cx))
-                    .child(
-                        uniform_list("entries", rows, cx.processor(Self::render_table_rows))
-                            .track_scroll(&scroll)
-                            .flex_1(),
-                    )
+                    .child({
+                        let bounds = self.list_bounds.clone();
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .on_children_prepainted(move |children, _, _| {
+                                bounds.set(children.first().copied());
+                            })
+                            .child(
+                                uniform_list("entries", rows, cx.processor(Self::render_table_rows))
+                                    .track_scroll(&scroll)
+                                    .flex_1(),
+                            )
+                    })
                     // Dropped on the list but not on a folder row: into the folder shown.
                     .on_drop(
                         cx.listener(|this, paths: &ExternalPaths, window, cx| this.drop_files(0, paths, window, cx)),
                     )
+                    .on_drop(cx.listener(|this, selection: &DraggedSelection, window, cx| {
+                        this.drop_files(0, &selection.external(), window, cx)
+                    }))
                     .into_any_element()
             }
             ViewMode::Columns => self.render_columns(cx).into_any_element(),
@@ -1176,7 +1673,10 @@ impl Render for Pane {
             .on_action(cx.listener(Self::begin_mark))
             .on_action(cx.listener(Self::begin_jump))
             .on_key_down(cx.listener(Self::key_down))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if cx.has_active_drag() {
+                    this.update_drag_row(event.position, cx);
+                }
                 if let Some(drag) = this.resize {
                     if event.pressed_button == Some(MouseButton::Left) {
                         this.table.drag_to(&drag, f32::from(event.position.x));
@@ -1184,40 +1684,10 @@ impl Render for Pane {
                     } else {
                         this.resize = None;
                     }
-                    return;
-                }
-                let Some((k, ix, origin)) = this.drag_origin else { return };
-                if this.dragging || event.pressed_button != Some(MouseButton::Left) {
-                    return;
-                }
-                let (dx, dy) = (event.position.x - origin.x, event.position.y - origin.y);
-                if f32::from(dx).hypot(f32::from(dy)) > 5.0 {
-                    let Some(folder) = this.folders.get(k).map(|f| f.read(cx)) else { return };
-                    // Drag the whole selection when the drag starts on a selected row.
-                    let paths = match folder.entries().get(ix) {
-                        Some(e) if folder.is_selected(&e.path) => folder.selected_paths(),
-                        Some(e) => vec![e.path.clone()],
-                        None => return,
-                    };
-                    this.dragging = crow_macos::begin_drag(window, &paths);
                 }
             }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, _| {
-                    this.drag_origin = None;
-                    this.dragging = false;
-                    this.resize = None;
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, _| {
-                    this.drag_origin = None;
-                    this.dragging = false;
-                    this.resize = None;
-                }),
-            )
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.resize = None))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.resize = None))
             .size_full()
             // Wider-than-pane tables are clipped for now; horizontal scrolling comes with view settings.
             .overflow_hidden()
@@ -1257,5 +1727,17 @@ impl Pane {
 
     pub fn selected_names(&self, cx: &gpui::App) -> Vec<String> {
         self.focused_folder().read(cx).selected_names()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drag_combo_left;
+
+    #[test]
+    fn drag_combo_touches_the_cursor_only_when_it_has_to() {
+        assert_eq!(drag_combo_left(200.0, 80.0), 120.0, "right edge lands on the cursor");
+        assert_eq!(drag_combo_left(80.0, 80.0), 0.0, "cursor at the right edge needs no shift");
+        assert_eq!(drag_combo_left(30.0, 80.0), 0.0, "inside the combo: the grab point tracks");
     }
 }

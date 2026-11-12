@@ -23,7 +23,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: vendor/zed
-          key: zed-${{ hashFiles('scripts/fetch-gpui.sh') }}
+          key: zed-${{ hashFiles('scripts/fetch-gpui.sh', 'patches/gpui-*.patch') }}
 
       - name: Fetch GPUI
         run: ./scripts/fetch-gpui.sh
