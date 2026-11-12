@@ -79,7 +79,16 @@ actions!(
         NewWindow,
         SwitchFocus,
         ToggleHiddenFiles,
+        Minimize,
+        Zoom,
+        KeyboardShortcuts,
         Quit,
+        // App menu
+        About,
+        OpenSettings,
+        HideApp,
+        HideOthers,
+        ShowAll,
     ]
 );
 
@@ -136,6 +145,10 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-tab", NextTab, Some("Crow")),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("Crow")),
         KeyBinding::new("cmd-n", NewWindow, None),
+        KeyBinding::new("cmd-m", Minimize, Some("Crow")),
+        KeyBinding::new("cmd-h", HideApp, None),
+        KeyBinding::new("cmd-alt-h", HideOthers, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("tab", SwitchFocus, Some("Crow")),
         KeyBinding::new("cmd-shift-.", ToggleHiddenFiles, Some("Crow")),
         KeyBinding::new("cmd-q", Quit, None),
@@ -152,6 +165,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-k", ShowCommandPalette, Some("Crow")),
         KeyBinding::new("cmd-f", ShowSearch, Some("Crow")),
         KeyBinding::new("cmd-shift-a", SearchEverything, Some("Search")),
+        KeyBinding::new("cmd-shift-a", SearchEverything, Some("Crow")),
         KeyBinding::new("escape", CloseSearch, Some("SearchResults")),
         KeyBinding::new("up", MoveUp, Some("SearchResults")),
         KeyBinding::new("down", MoveDown, Some("SearchResults")),

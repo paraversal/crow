@@ -15,6 +15,7 @@ mod folder;
 mod icons;
 mod keys;
 mod logging;
+mod menus;
 mod operations;
 mod palette;
 mod pane;
@@ -29,12 +30,7 @@ mod window;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use gpui::{App, Menu, MenuItem};
-
-use crate::actions::{
-    AddToSidebar, NewFolder, NewTab, NewWindow, Quit, Redo, ResetFolderView, ShowThemePicker, ToggleHiddenFiles, Undo,
-    UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
-};
+use gpui::App;
 
 /// A nested tree for search benches: 32 groups x 16 subfolders, each file a few
 /// lines with `needle` so both name and content searches do real work.
@@ -175,45 +171,7 @@ fn main() -> ExitCode {
         cx.bind_keys(actions::finder_keymap());
         cx.bind_keys(actions::vim_keymap());
         cx.bind_keys(text_input::keymap());
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_action(|_: &NewWindow, cx| {
-            let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
-            window::open(home, false, cx);
-        });
-        cx.set_menus([
-            Menu { name: "Crow".into(), items: vec![MenuItem::action("Quit Crow", Quit)], disabled: false },
-            Menu {
-                name: "File".into(),
-                items: vec![
-                    MenuItem::action("New Window", NewWindow),
-                    MenuItem::action("New Tab", NewTab),
-                    MenuItem::action("New Folder", NewFolder),
-                    MenuItem::separator(),
-                    MenuItem::action("Add to Sidebar", AddToSidebar),
-                ],
-                disabled: false,
-            },
-            Menu {
-                name: "Edit".into(),
-                items: vec![MenuItem::action("Undo", Undo), MenuItem::action("Redo", Redo)],
-                disabled: false,
-            },
-            Menu {
-                name: "View".into(),
-                items: vec![
-                    MenuItem::action("as List", ViewAsList),
-                    MenuItem::action("as Columns", ViewAsColumns),
-                    MenuItem::separator(),
-                    MenuItem::action("Why This View?", WhyThisView),
-                    MenuItem::action("Use as Defaults", UseViewAsDefaults),
-                    MenuItem::action("Reset View for This Folder", ResetFolderView),
-                    MenuItem::separator(),
-                    MenuItem::action("Show Hidden Files", ToggleHiddenFiles),
-                    MenuItem::action("Theme…", ShowThemePicker),
-                ],
-                disabled: false,
-            },
-        ]);
+        menus::init(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();

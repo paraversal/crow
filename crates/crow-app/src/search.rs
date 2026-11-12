@@ -105,8 +105,15 @@ impl Drop for SearchView {
 }
 
 impl SearchView {
-    pub fn new(folder: PathBuf, home: PathBuf, show_hidden: bool, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| TextInput::new("", "Search names and contents", cx));
+    pub fn new(
+        folder: PathBuf,
+        home: PathBuf,
+        show_hidden: bool,
+        query: String,
+        everything: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| TextInput::new(query.clone(), "Search names and contents", cx));
         let focus = cx.focus_handle();
         let subscription = cx.subscribe(&input, |this, input, event, cx| match event {
             TextInputEvent::Changed => {
@@ -128,12 +135,12 @@ impl SearchView {
                 }
             }
         });
-        Self {
+        let mut search = Self {
             folder,
             home,
             show_hidden,
             scope: Scope::Folder,
-            everything: false,
+            everything,
             input,
             focus,
             results: Vec::new(),
@@ -151,7 +158,11 @@ impl SearchView {
             show_skipped: false,
             _subscription: subscription,
             _ui_subscription: ui_subscription,
+        };
+        if !query.is_empty() {
+            search.start_search(&query, cx);
         }
+        search
     }
 
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
@@ -382,7 +393,6 @@ impl SearchView {
         self.skipped.len()
     }
 
-    #[cfg(test)]
     pub fn everything(&self) -> bool {
         self.everything
     }
@@ -494,10 +504,19 @@ impl SearchView {
         cx.emit(SearchEvent::Close);
     }
 
-    fn search_everything(&mut self, _: &SearchEverything, _: &mut Window, cx: &mut Context<Self>) {
-        self.everything = !self.everything;
+    pub fn set_everything(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.everything == on {
+            return;
+        }
+        self.everything = on;
         let query = self.query(cx);
-        self.start_search(&query, cx);
+        if !query.trim().is_empty() {
+            self.start_search(&query, cx);
+        }
+    }
+
+    fn search_everything(&mut self, _: &SearchEverything, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_everything(!self.everything, cx);
     }
 
     fn move_up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
