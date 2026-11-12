@@ -2,11 +2,12 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{AnyThread, msg_send};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSBezierPath, NSColor, NSDraggingItem, NSEvent, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSImage, NSStringDrawing, NSView,
+    NSApplication, NSBezierPath, NSColor, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession,
+    NSDraggingSource, NSEvent, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSStringDrawing,
+    NSView,
 };
 use objc2_foundation::{NSArray, NSAttributedStringKey, NSData, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -39,6 +40,37 @@ pub struct ComboDrag<'a> {
     /// Where the cursor sits inside the combo.
     pub cursor_from_left: f32,
     pub cursor_from_top: f32,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements; no Drop impl.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "CrowDragSource"]
+    struct DragSource;
+
+    unsafe impl NSObjectProtocol for DragSource {}
+
+    unsafe impl NSDraggingSource for DragSource {
+        #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
+        fn operation_mask(&self, _session: &NSDraggingSession, context: NSDraggingContext) -> NSDragOperation {
+            let allowed = NSDragOperation::Copy | NSDragOperation::Move | NSDragOperation::Generic;
+            if context == NSDraggingContext::OutsideApplication { allowed | NSDragOperation::Link } else { allowed }
+        }
+    }
+);
+
+impl DragSource {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: plain NSObject init.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+thread_local! {
+    static SOURCE: Retained<DragSource> =
+        DragSource::new(MainThreadMarker::new().expect("only touched after a main-thread check"));
 }
 
 const ICON: f64 = 22.0;
@@ -128,17 +160,11 @@ pub fn begin_drag(window: &impl HasWindowHandle, drag: &ComboDrag) -> bool {
         })
         .collect();
     let items = NSArray::from_retained_slice(&items);
-    let Some(native_window) = view.window() else { return false };
-    // GPUI's window implements the dragging source protocol; using it, like GPUI's own
-    // promotion does, keeps AppKit's tracking of the image consistent.
-    // SAFETY: the view, array, event and window are all live for this call.
-    let session: *mut AnyObject = unsafe {
-        msg_send![
-            &*view,
-            beginDraggingSessionWithItems: Retained::as_ptr(&items),
-            event: Retained::as_ptr(&event),
-            source: Retained::as_ptr(&native_window),
-        ]
-    };
-    !session.is_null()
+    // A dedicated source object (not the window) lets the window accept this drag
+    // when it comes back: AppKit does not deliver destination callbacks for a drag
+    // whose source is the window itself.
+    SOURCE.with(|source| {
+        view.beginDraggingSessionWithItems_event_source(&items, &event, ProtocolObject::from_ref(&**source));
+    });
+    true
 }

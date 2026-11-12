@@ -1397,6 +1397,11 @@ impl Render for CrowWindow {
             .id("crow")
             .role(Role::Application)
             .aria_label("Crow")
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if cx.has_active_drag() {
+                    this.pane().update(cx, |pane, cx| pane.update_drag_target(event.position, cx));
+                }
+            }))
             .key_context("Crow")
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_tab))
@@ -2277,6 +2282,69 @@ mod tests {
         cx.simulate_event(gpui::FileDropEvent::Entered { position: at, paths: gpui::ExternalPaths(paths.into()) });
         cx.simulate_event(gpui::FileDropEvent::Pending { position: at });
         cx.simulate_event(gpui::FileDropEvent::Submit { position: at });
+    }
+
+    #[gpui::test]
+    fn platform_drag_updates_keep_one_list_target(cx: &mut TestAppContext) {
+        let root = fixture("drop-steady-list");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let alpha = cx.debug_bounds("row-alpha").expect("alpha row").center();
+        let notes = cx.debug_bounds("row-notes.txt").expect("notes row").center();
+        let pane = view.read_with(&cx, |window, _| window.tabs.active().clone());
+        let target = |cx: &VisualTestContext| pane.read_with(cx, |pane, _| pane.drop_row());
+
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position: alpha,
+            paths: gpui::ExternalPaths(vec![root.join("dropped.txt")].into()),
+        });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: alpha });
+        cx.run_until_parked();
+        assert_eq!(target(&cx), Some(0), "the row under the pointer is the target");
+        for _ in 0..8 {
+            cx.simulate_event(gpui::FileDropEvent::Pending { position: alpha });
+            cx.run_until_parked();
+            assert_eq!(target(&cx), Some(0), "platform updates keep one steady target");
+        }
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: notes });
+        cx.run_until_parked();
+        assert_eq!(target(&cx), Some(2), "moving the pointer moves the target");
+        cx.simulate_event(gpui::FileDropEvent::Exited);
+        cx.run_until_parked();
+        assert_eq!(target(&cx), None, "leaving the window clears it");
+    }
+
+    #[gpui::test]
+    fn platform_drag_updates_keep_one_column_target(cx: &mut TestAppContext) {
+        let root = fixture("drop-steady-columns");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let pane = view.read_with(&cx, |window, _| window.tabs.active().clone());
+        assert_eq!(pane.read_with(&cx, |pane, _| pane.mode()), ViewMode::Columns, "column view is active");
+        let at = gpui::point(px(320.), px(90.));
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position: at,
+            paths: gpui::ExternalPaths(vec![root.join("dropped.txt")].into()),
+        });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: at });
+        cx.run_until_parked();
+        assert_eq!(pane.read_with(&cx, |pane, _| pane.drop_column()), Some((0, 1)));
+        for _ in 0..8 {
+            cx.simulate_event(gpui::FileDropEvent::Pending { position: at });
+            cx.run_until_parked();
+            assert_eq!(
+                pane.read_with(&cx, |pane, _| pane.drop_column()),
+                Some((0, 1)),
+                "platform updates keep one steady target in a column"
+            );
+        }
+        cx.simulate_event(gpui::FileDropEvent::Exited);
+        cx.run_until_parked();
+        assert_eq!(pane.read_with(&cx, |pane, _| pane.drop_column()), None);
     }
 
     #[gpui::test]

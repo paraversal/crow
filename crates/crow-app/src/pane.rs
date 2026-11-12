@@ -8,6 +8,7 @@
 //! - typing and filtering always act on the focused column.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -19,10 +20,10 @@ use crow_core::{
 };
 use crow_fs::{Entry, Sort, SortKey};
 use gpui::{
-    Action, ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalDragPayload, ExternalPaths, FileDragPaths,
-    FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle, SharedString, Subscription, Window, canvas,
-    div, img, point, prelude::*, px, uniform_list,
+    Action, Bounds, ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalDragPayload, ExternalPaths,
+    FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle, SharedString, Subscription,
+    Window, canvas, div, img, point, prelude::*, px, uniform_list,
 };
 
 use crate::actions::{
@@ -214,6 +215,14 @@ pub struct Pane {
     bench: Option<Bench>,
     /// The `views.toml` reload and folder whose view was applied last.
     applied_view: Option<(u64, PathBuf)>,
+    /// List view: the uniform list's viewport, captured at prepaint.
+    list_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The list row a drag would drop on, drawn from state rather than drag-over styles.
+    drop_row: Option<usize>,
+    /// Column view: each column's list viewport, captured at prepaint.
+    column_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
+    /// The column and row a drag would drop on in column view.
+    drop_column: Option<(usize, usize)>,
     mark_pending: Option<MarkPending>,
 }
 
@@ -247,6 +256,10 @@ impl Pane {
             rename_when_present: None,
             bench: bench.then(|| Bench { frame: 0, intervals: Vec::new(), last: None, scrolled: None }),
             applied_view: None,
+            list_bounds: Rc::new(Cell::new(None)),
+            drop_row: None,
+            column_bounds: Rc::new(RefCell::new(HashMap::new())),
+            drop_column: None,
             mark_pending: None,
         };
         pane.enter(dir, cx);
@@ -897,6 +910,70 @@ impl Pane {
 
     // ----- benchmark -----
 
+    /// The list row under `pointer`: rows are uniform, and the scroll offset is known.
+    fn drag_row_at(&self, cx: &gpui::App, pointer: Point<Pixels>) -> Option<usize> {
+        let bounds = self.list_bounds.get()?;
+        if pointer.x < bounds.left()
+            || pointer.x >= bounds.right()
+            || pointer.y < bounds.top()
+            || pointer.y >= bounds.bottom()
+        {
+            return None;
+        }
+        let folder = self.folders[0].read(cx);
+        let row_height = px(ROW_HEIGHT);
+        let y = pointer.y - bounds.top() + folder.scroll().0.borrow().base_handle.offset().y;
+        let row = (f32::from(y) / f32::from(row_height)).floor();
+        if row < 0.0 {
+            return None;
+        }
+        let row = row as usize;
+        (row < folder.row_count()).then_some(row)
+    }
+
+    /// The column row under `pointer`, if any: each column has its own list and scroll.
+    fn column_row_at(&self, cx: &gpui::App, pointer: Point<Pixels>) -> Option<(usize, usize)> {
+        let (k, bounds) = self
+            .column_bounds
+            .borrow()
+            .iter()
+            .find(|(_, bounds)| bounds.contains(&pointer))
+            .map(|(k, bounds)| (*k, *bounds))?;
+        let folder = self.folders.get(k)?.read(cx);
+        let row_height = px(ROW_HEIGHT);
+        let y = pointer.y - bounds.top() + folder.scroll().0.borrow().base_handle.offset().y;
+        let row = (f32::from(y) / f32::from(row_height)).floor();
+        if row < 0.0 {
+            return None;
+        }
+        let row = row as usize;
+        (row < folder.entries().len()).then_some((k, row))
+    }
+
+    pub fn update_drag_target(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.update_drag_row(position, cx);
+    }
+
+    fn update_drag_row(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let row = if self.mode == ViewMode::List { self.drag_row_at(cx, position) } else { None };
+        let column = if self.mode == ViewMode::Columns { self.column_row_at(cx, position) } else { None };
+        if row != self.drop_row || column != self.drop_column {
+            self.drop_row = row;
+            self.drop_column = column;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn drop_row(&self) -> Option<usize> {
+        self.drop_row
+    }
+
+    #[cfg(test)]
+    pub fn drop_column(&self) -> Option<(usize, usize)> {
+        self.drop_column
+    }
+
     fn bench_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bench) = self.bench.as_mut() else { return };
         window.request_animation_frame();
@@ -1054,17 +1131,18 @@ impl Pane {
                     .when(entry.is_dir && !entry.is_package(), |row| {
                         let target = entry.path.clone();
                         let target_selection = entry.path.clone();
-                        row.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg))
-                            .drag_over::<DraggedSelection>(move |style, _, _, _| style.bg(drop_bg))
-                            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
-                                this.drop_into(target.clone(), paths, window, cx);
-                                cx.stop_propagation();
-                            }))
-                            .on_drop(cx.listener(move |this, selection: &DraggedSelection, window, cx| {
+                        row.on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                            this.drop_into(target.clone(), paths, window, cx);
+                            cx.stop_propagation();
+                        }))
+                        .on_drop(cx.listener(
+                            move |this, selection: &DraggedSelection, window, cx| {
                                 this.drop_into(target_selection.clone(), &selection.external(), window, cx);
                                 cx.stop_propagation();
-                            }))
+                            },
+                        ))
                     })
+                    .when(entry.is_dir && !entry.is_package() && self.drop_row == Some(ix), |row| row.bg(drop_bg))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1331,17 +1409,18 @@ impl Pane {
                     .when(navigable, |row| {
                         let target = entry.path.clone();
                         let target_selection = entry.path.clone();
-                        row.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg))
-                            .drag_over::<DraggedSelection>(move |style, _, _, _| style.bg(drop_bg))
-                            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
-                                this.drop_into(target.clone(), paths, window, cx);
-                                cx.stop_propagation();
-                            }))
-                            .on_drop(cx.listener(move |this, selection: &DraggedSelection, window, cx| {
+                        row.on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                            this.drop_into(target.clone(), paths, window, cx);
+                            cx.stop_propagation();
+                        }))
+                        .on_drop(cx.listener(
+                            move |this, selection: &DraggedSelection, window, cx| {
                                 this.drop_into(target_selection.clone(), &selection.external(), window, cx);
                                 cx.stop_propagation();
-                            }))
+                            },
+                        ))
                     })
+                    .when(navigable && self.drop_column == Some((k, ix)), |row| row.bg(drop_bg))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1379,6 +1458,14 @@ impl Pane {
             let title = f.dir().file_name().map_or_else(|| "/".to_owned(), |n| n.to_string_lossy().into_owned());
             strip = strip.child(
                 div()
+                    .on_children_prepainted({
+                        let bounds = self.column_bounds.clone();
+                        move |children, _, _| {
+                            if let Some(child) = children.first() {
+                                bounds.borrow_mut().insert(k, *child);
+                            }
+                        }
+                    })
                     .id(("column-view", k))
                     .role(Role::ListBox)
                     .aria_label(format!("{title}, {count} items"))
@@ -1488,6 +1575,19 @@ fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.bench_step(window, cx);
+        // A drag inside the list highlights the row under the pointer from this state; the
+        // style-based drag-over highlight flickers on the platform drag path used when a
+        // drag leaves the window and comes back.
+        self.drop_row = if cx.has_active_drag() && self.mode == ViewMode::List {
+            self.drag_row_at(cx, window.mouse_position())
+        } else {
+            None
+        };
+        self.drop_column = if cx.has_active_drag() && self.mode == ViewMode::Columns {
+            self.column_row_at(cx, window.mouse_position())
+        } else {
+            None
+        };
         if let Some(path) = self.rename_when_present.clone()
             && self.focused_folder().read(cx).entries().iter().any(|e| e.path == path)
         {
@@ -1518,11 +1618,21 @@ impl Render for Pane {
                     .flex()
                     .flex_col()
                     .child(self.render_table_header(cx))
-                    .child(
-                        uniform_list("entries", rows, cx.processor(Self::render_table_rows))
-                            .track_scroll(&scroll)
-                            .flex_1(),
-                    )
+                    .child({
+                        let bounds = self.list_bounds.clone();
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .on_children_prepainted(move |children, _, _| {
+                                bounds.set(children.first().copied());
+                            })
+                            .child(
+                                uniform_list("entries", rows, cx.processor(Self::render_table_rows))
+                                    .track_scroll(&scroll)
+                                    .flex_1(),
+                            )
+                    })
                     // Dropped on the list but not on a folder row: into the folder shown.
                     .on_drop(
                         cx.listener(|this, paths: &ExternalPaths, window, cx| this.drop_files(0, paths, window, cx)),
@@ -1564,6 +1674,9 @@ impl Render for Pane {
             .on_action(cx.listener(Self::begin_jump))
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if cx.has_active_drag() {
+                    this.update_drag_row(event.position, cx);
+                }
                 if let Some(drag) = this.resize {
                     if event.pressed_button == Some(MouseButton::Left) {
                         this.table.drag_to(&drag, f32::from(event.position.x));
