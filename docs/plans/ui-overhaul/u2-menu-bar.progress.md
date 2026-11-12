@@ -5,7 +5,7 @@ Branch: `ui-u2-menu-bar` · PR: none · Last updated: 2026-11-12
 | Item | State | Notes |
 | --- | --- | --- |
 | I1 Verify GPUI/AppKit menu behavior (spike) | done (2026-11-12) | Findings in Decisions; temporary menu changes and the `start_filter` counter reverted. |
-| I2 One command registry with menu slots | todo | U1 already changed `palette::Command` to `{ id, label, action, scope }`; add `menu`/`palette` to that shape. |
+| I2 One command registry with menu slots | done (120fae7) | `Command` gained `menu: Option<MenuSlot>` and `palette`; `MenuName`/`MenuSlot` added; `ShowSearch`, `SearchEverything`, `ShowCommandPalette`, `SearchReveal` added; all Target rows have slots. Tests: `palette::tests::*`, `palette_find_opens_search`. |
 | I3 Menu builder from the registry | todo | New `menus.rs`; move global handlers and `set_menus` out of `main.rs`. |
 | I4 Find Everything with no search open (Q8) | todo | Add `SearchStart`, `open_search`, Crow-context ⇧⌘A and `set_everything`. |
 | I5 App, Window and Help menus | todo | Q3/Q4 approved the full recommended sets; build About/Settings/Hide, Window, Help. |
@@ -38,6 +38,7 @@ Branch: `ui-u2-menu-bar` · PR: none · Last updated: 2026-11-12
 
 ## Log
 - 2026-11-12: Created `ui-u2-menu-bar`, recorded the plan and current code shape. Read `palette.rs`, `actions.rs`, `main.rs`, `window.rs` search/palette/listener sections, `search.rs` and `text_input.rs`.
+- 2026-11-12: I2: rewrote `COMMANDS` in menu-bar order, added menu slots for every Target row plus Q1/Q4/Q8, added the four new command ids, and wired `ShowSearch` (and temporarily `SearchEverything`) in `run_command`. Palette tests pass; new `palette_find_opens_search` passes. Recorded the new empty-`>` order: Crow, File, Edit, View, Go, Window, then palette-only Switch Focus, Remove from Sidebar, Move Favorite Up/Down.
 - 2026-11-12: Q2 fix: gated all list listeners on `!renaming`, taught `TextInput` the Crow clipboard/Select All actions, added the GPUI ↩ patch, and added `plain_keys_stay_in_every_text_field` (passes). Menu hand check still pending until the real menus exist.
 - 2026-11-12: I1 spike. Built temporary menus (File: Rename/Quick Look/Filter; Edit: Find/Find Everything/Cut/Copy/Paste/Select All; Go: Back; Window; Help) with `scripts/bundle.sh`, inspected them through System Events/AX, typed into the rename, filter and Go to Folder fields, and counted `start_filter` calls in the list. All temporary code reverted; findings above.
 

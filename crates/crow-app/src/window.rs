@@ -11,7 +11,7 @@ use gpui::{
 
 use crate::actions::{
     AddToSidebar, ApplyThemeEverywhere, CancelOperation, CloseTab, GoBack, GoForward, GoToFolder, MoveDown,
-    MoveToTrash, MoveUp, NewTab, NextTab, OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView,
+    MoveToTrash, MoveUp, NewTab, NextTab, OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView, SearchEverything,
     ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, UseViewAsDefaults, ViewAsColumns,
     ViewAsList, WhyThisView,
 };
@@ -1474,6 +1474,11 @@ impl CrowWindow {
             CommandId::UseViewAsDefaults => self.use_view_as_defaults(&UseViewAsDefaults, window, cx),
             CommandId::ResetFolderView => self.reset_folder_view(&ResetFolderView, window, cx),
             CommandId::ShowThemePicker => self.show_theme_picker(&ShowThemePicker, window, cx),
+            CommandId::ShowSearch => self.show_search(&ShowSearch, window, cx),
+            // I4 replaces this with the open/start-everything handler.
+            CommandId::SearchEverything => self.show_search(&ShowSearch, window, cx),
+            // Reached from the palette? No: ShowCommandPalette is menu-only and SearchReveal needs results.
+            CommandId::ShowCommandPalette | CommandId::SearchReveal => {}
             CommandId::ToggleActivity => {
                 self.show_activity = !self.show_activity;
                 cx.notify();
@@ -3020,6 +3025,22 @@ mod tests {
         assert!(root.join("Projects").is_dir(), "renamed on Return; folder now has {entries:?}");
         assert!(!root.join("untitled folder").exists());
         assert_eq!(selected(&view, &cx).as_deref(), Some("Projects"));
+    }
+
+    #[gpui::test]
+    fn palette_find_opens_search(cx: &mut TestAppContext) {
+        let root = fixture("palette-find");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.run_until_parked();
+        cx.simulate_input(">find");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "the palette closes");
+        let focus =
+            view.read_with(&cx, |w, cx| w.search.as_ref().expect("Find… opens search").read(cx).input_focus_handle(cx));
+        assert!(cx.update(|window, _| focus.is_focused(window)), "focus is in the search field");
     }
 
     #[gpui::test]

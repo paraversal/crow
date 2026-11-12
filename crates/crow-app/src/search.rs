@@ -393,6 +393,11 @@ impl SearchView {
     }
 
     #[cfg(test)]
+    pub fn input_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.input.read(cx).focus_handle(cx)
+    }
+
+    #[cfg(test)]
     pub fn scope(&self) -> Scope {
         self.scope
     }
