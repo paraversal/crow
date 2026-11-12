@@ -1,5 +1,5 @@
 # m5-fix progress
-Branch: m5-fix (based on `m5-sidebar-settings-themes`; PR #5 still open) · PR: none · Last updated: 2026-11-12
+Branch: m5-fix (based on `m5-sidebar-settings-themes`; PR #5 still open) · PR: https://github.com/paraversal/file-crow/pull/6 · Last updated: 2026-11-12
 
 ## Status
 | Item | State | Notes |
@@ -45,6 +45,7 @@ Branch: m5-fix (based on `m5-sidebar-settings-themes`; PR #5 still open) · PR: 
 - 2026-11-12: I4 implemented. Nested expansion initially failed because a row nested under an open folder lives in the child `Folder`, not the root; `expand`/`collapse`/`is_expanded` now recurse to the owning folder. The first keystroke tests pressed Right and Down in one batch before the child listing had loaded (rows were still the parent's own); they now settle between steps, matching what a user sees. Full workspace tests clean (36 app tests).
 - 2026-11-12: Bench on `target/fixture-100k`: cold first paint 183 ms, warm first paint 11 ms, scroll avg 8.34 ms, p99 8.92 ms at 120 Hz (`BENCH items=100000 … warm_first_paint=11ms`). Budgets hold.
 - 2026-11-12: Visual check: the triangle shows `▸`/`▾`; clicking it opened `folder` with `inside.txt` indented under it, and closed it again. README and `docs/testing.md` updated (inline folders, path bar, column Left, favorites drag, drop highlight, bench numbers).
+- 2026-11-12: Finish done. `cargo fmt --check`, clippy and `cargo test --workspace` clean; `./scripts/bundle.sh` built `target/bundle/Crow.app`; pushed `m5-fix` and opened PR #6 against `m5-sidebar-settings-themes` (stacked while #5 is open).
 
 ## Next
-Finish: run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `./scripts/bundle.sh`, push `m5-fix`, open the PR "M5-fix: Hand-test fixes" against `m5-sidebar-settings-themes` (PR #5 still open) with each issue's cause and verification; do not merge.
+PR open: the user hand-tests and reviews. Retarget the PR to `main` once #5 is merged (stacked base). Do not merge.
