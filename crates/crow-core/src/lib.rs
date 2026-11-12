@@ -1,15 +1,24 @@
 //! Crow's UI-free model. Everything here is plain data with unit tests;
 //! `crow-app` renders it and feeds it events.
 
+mod extensions;
 mod history;
+mod paths;
+mod selection;
 mod settings;
 mod tabs;
 
+pub use extensions::{Align, Column, ColumnContext, Extensions, PreviewContent, Previewer, TextPreviewer};
 pub use history::History;
+pub use paths::{complete_typed, resolve_typed};
+pub use selection::{Selection, TypeSelect};
 pub use settings::{DEFAULT_SETTINGS, KeymapLayer, Settings, SettingsError, config_dir, load_settings};
 pub use tabs::{TabId, Tabs};
 
 use std::path::{Path, PathBuf};
+
+/// Natural order for names, shared with `crow-fs` so type-to-select and sorting agree.
+pub use crow_fs::natural_cmp as natural_order;
 
 /// A sidebar favorite. M5 replaces the built-in list with `sidebar.toml`.
 #[derive(Clone, Debug, PartialEq, Eq)]

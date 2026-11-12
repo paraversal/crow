@@ -55,20 +55,8 @@ pub fn format_time(t: Option<std::time::SystemTime>) -> String {
     }
 }
 
-/// A Finder-like kind. M2 replaces this with the system's UTType descriptions.
-pub fn kind_of(entry: &crow_fs::Entry) -> String {
-    if entry.is_dir {
-        return if entry.ext() == "app" { "Application".into() } else { "Folder".into() };
-    }
-    match entry.ext().to_lowercase().as_str() {
-        "rs" => "Rust source".into(),
-        "md" => "Markdown".into(),
-        "toml" => "TOML".into(),
-        "json" | "jsonl" => "JSON".into(),
-        "txt" => "Plain text".into(),
-        "png" | "jpg" | "jpeg" | "heic" | "gif" | "webp" => "Image".into(),
-        "pdf" => "PDF document".into(),
-        "" => "Document".into(),
-        other => format!("{} file", other.to_uppercase()),
-    }
+/// Finder's kind for an entry, from the system's type descriptions (cached per extension).
+pub fn kind(entry: &crow_fs::Entry) -> Arc<str> {
+    let ext = if entry.is_dir && !entry.is_package() { "" } else { entry.ext() };
+    crow_macos::kind_name(ext, entry.is_dir && !entry.is_package())
 }

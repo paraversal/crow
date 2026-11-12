@@ -68,6 +68,7 @@ pub fn init(cx: &mut App) {
 #[cfg(test)]
 pub fn init_for_tests(cx: &mut App) {
     cx.set_global(Ui { settings: Settings::default(), theme: crow_theme::fallback(), settings_error: None });
+    crate::extensions::init(cx);
 }
 
 fn poll(cx: &mut App) {

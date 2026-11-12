@@ -8,3 +8,7 @@ description = "Folder snapshots, watching and (from M4) the file operation engin
 
 [dependencies]
 notify.workspace = true
+rayon = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

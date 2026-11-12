@@ -7,9 +7,11 @@
 //! ```
 
 mod actions;
+mod extensions;
 mod logging;
 mod pane;
 mod style;
+mod text_input;
 mod ui;
 mod window;
 
@@ -59,7 +61,9 @@ fn main() -> ExitCode {
 
     gpui_platform::application().run(move |cx: &mut App| {
         ui::init(cx);
+        extensions::init(cx);
         cx.bind_keys(actions::finder_keymap());
+        cx.bind_keys(text_input::keymap());
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &NewWindow, cx| {
             let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
