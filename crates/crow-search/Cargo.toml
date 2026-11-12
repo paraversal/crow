@@ -1,0 +1,9 @@
+[package]
+name = "crow-search"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Walking, fuzzy and content search, exclusion rule sets (M6)"
+
+[dependencies]

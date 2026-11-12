@@ -55,11 +55,7 @@ pub fn read_dir(dir: &Path, show_hidden: bool) -> std::io::Result<Snapshot> {
         })
         .collect();
     entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| natural_cmp(&a.name, &b.name)));
-    Ok(Snapshot {
-        dir: dir.to_path_buf(),
-        entries: Arc::new(entries),
-        load_ms: start.elapsed().as_secs_f64() * 1000.0,
-    })
+    Ok(Snapshot { dir: dir.to_path_buf(), entries: Arc::new(entries), load_ms: start.elapsed().as_secs_f64() * 1000.0 })
 }
 
 /// Case-insensitive natural order; ties broken by exact bytes so the order is total.
