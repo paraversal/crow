@@ -25,7 +25,8 @@ use crate::actions::{
     CloseSearch, CopyFiles, CutFiles, DeletePermanently, MoveDown, MoveToFirst, MoveToLast, MoveToTrash, MoveUp,
     OpenSelection, QuickLook, SearchEverything, SearchReveal, SelectAll,
 };
-use crate::chrome::with_action_tooltip;
+use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
+use crate::icons::{self, Glyph};
 use crate::keys::{self, KeyScope};
 use crate::pane::DraggedSelection;
 use crate::style::{active_selection, color, color_alpha, format_time, icon, inactive_selection};
@@ -42,6 +43,44 @@ pub enum Scope {
     Everywhere,
 }
 
+impl Scope {
+    /// What the field's placeholder says for this scope.
+    fn label(&self, folder: &str) -> SharedString {
+        match self {
+            Scope::Folder => format!("Search {folder}").into(),
+            Scope::Home => "Search Home".into(),
+            // U6 renames Everywhere to "This Mac"; this placeholder follows for free.
+            Scope::Everywhere => "Search Everywhere".into(),
+        }
+    }
+}
+
+/// Which part of each file the query matches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Match {
+    /// Names and contents: M6's behavior.
+    #[default]
+    All,
+    /// Names only; no file is read.
+    Names,
+    /// Contents only; name-only hits are dropped.
+    Contents,
+}
+
+fn query_parts(text: &str, matching: Match) -> (Option<String>, Option<String>) {
+    let text = text.trim().to_owned();
+    match matching {
+        Match::All => (Some(text.clone()), Some(text)),
+        Match::Names => (Some(text), None),
+        Match::Contents => (None, Some(text)),
+    }
+}
+
+/// Spotlight indexes names only, so the match control never applies there.
+fn effective_match_for(scope: Scope, matching: Match) -> Match {
+    if scope == Scope::Everywhere { Match::Names } else { matching }
+}
+
 pub enum SearchEvent {
     Close,
     FocusResults,
@@ -55,9 +94,12 @@ impl EventEmitter<SearchEvent> for SearchView {}
 
 pub struct SearchView {
     folder: PathBuf,
+    /// The folder's own name, for the field's placeholder.
+    folder_label: String,
     home: PathBuf,
     show_hidden: bool,
     scope: Scope,
+    matching: Match,
     everything: bool,
     input: Entity<TextInput>,
     focus: FocusHandle,
@@ -113,7 +155,11 @@ impl SearchView {
         everything: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| TextInput::new(query.clone(), "Search names and contents", cx));
+        let folder_label = crow_macos::display_components(&folder)
+            .pop()
+            .map_or_else(|| folder.display().to_string(), |(name, _)| name);
+        let placeholder = Scope::Folder.label(&folder_label);
+        let input = cx.new(|cx| TextInput::new(query.clone(), placeholder, cx).bare().with_role(Role::SearchInput));
         let focus = cx.focus_handle();
         let subscription = cx.subscribe(&input, |this, input, event, cx| match event {
             TextInputEvent::Changed => {
@@ -137,9 +183,11 @@ impl SearchView {
         });
         let mut search = Self {
             folder,
+            folder_label,
             home,
             show_hidden,
             scope: Scope::Folder,
+            matching: Match::All,
             everything,
             input,
             focus,
@@ -168,6 +216,14 @@ impl SearchView {
     pub fn focus_input(&self, window: &mut Window, cx: &mut App) {
         let focus = self.input.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
+    }
+
+    /// Focus the field and select the whole query, so Cmd-F then typing starts a new search.
+    pub fn select_all_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_input(window, cx);
+        let len = self.input.read(cx).text().len();
+        let input = self.input.clone();
+        input.update(cx, |input, cx| input.select_range(0..len, window, cx));
     }
 
     pub fn focus_results(&self, window: &mut Window, cx: &mut App) {
@@ -243,13 +299,8 @@ impl SearchView {
                 Scope::Folder => self.folder.clone(),
                 Scope::Home | Scope::Everywhere => self.home.clone(),
             };
-            let query = Query {
-                names: Some(query.to_owned()),
-                contents: Some(query.to_owned()),
-                show_hidden: self.show_hidden,
-                rules,
-                everything: self.everything,
-            };
+            let (names, contents) = query_parts(query, self.effective_match());
+            let query = Query { names, contents, show_hidden: self.show_hidden, rules, everything: self.everything };
             cx.background_spawn(async move {
                 let tx = tx;
                 let summary = crow_search::search(
@@ -417,8 +468,30 @@ impl SearchView {
             return;
         }
         self.scope = scope;
+        let placeholder = scope.label(&self.folder_label);
+        let input = self.input.clone();
+        input.update(cx, |input, cx| input.set_placeholder(placeholder, cx));
         let query = self.query(cx);
         self.start_search(&query, cx);
+    }
+
+    pub fn effective_match(&self) -> Match {
+        effective_match_for(self.scope, self.matching)
+    }
+
+    /// Store the user's choice and rerun the current query. Spotlight ignores it.
+    pub fn set_match(&mut self, matching: Match, cx: &mut Context<Self>) {
+        if self.scope == Scope::Everywhere || self.matching == matching {
+            return;
+        }
+        self.matching = matching;
+        let query = self.query(cx);
+        self.start_search(&query, cx);
+    }
+
+    #[cfg(test)]
+    pub fn matching(&self) -> Match {
+        self.matching
     }
 
     fn select_only(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -581,6 +654,118 @@ impl SearchView {
 
     // ----- rendering -----
 
+    /// The window's band while search is open: the query field and Done.
+    /// The window places this between Back/Forward and the window edge.
+    pub fn render_band(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.global::<Ui>().theme.clone();
+        let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let narrow = window.viewport_size().width < px(640.);
+        let ring = if focused { color_alpha(theme.role("accent"), 0x8c) } else { color(theme.role("surface")) };
+        let field = div()
+            .id("search-field")
+            .debug_selector(|| "search-field".into())
+            // keys::context_stack (KeyScope::Search) mirrors this.
+            .key_context("Search")
+            .on_action(cx.listener(Self::search_everything))
+            .on_action(cx.listener(Self::close_action))
+            .flex_1()
+            .min_w(px(160.))
+            .h(px(32.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .pl(px(10.))
+            .pr(px(4.))
+            .rounded(px(8.))
+            .bg(color(theme.role("surface")))
+            .border_2()
+            .border_color(ring)
+            .text_size(px(14.))
+            .text_color(color(theme.role("fg")))
+            .child(icons::glyph(Glyph::Search, 15., "fg-muted", &theme))
+            .child(div().flex_1().min_w_0().child(self.input.clone()))
+            .child(self.render_match_control(focused, cx));
+        let done = div()
+            .id("search-done")
+            .debug_selector(|| "search-done".into())
+            .role(Role::Button)
+            .aria_label("Done, close search, Escape")
+            .aria_keyshortcuts("Escape")
+            .flex_none()
+            .h(px(30.))
+            .px(px(10.))
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(13.))
+            .text_color(color(theme.role("fg")))
+            .hover(move |style| style.bg(color(theme.role("surface"))))
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(SearchEvent::Close)))
+            .child("Done")
+            .when(!narrow, |button| button.child(Keycap::text("esc", KeycapWeight::Outline)));
+        div().flex_1().min_w_0().flex().items_center().gap(px(10.)).child(field).child(done)
+    }
+
+    fn render_match_control(&self, focused: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.global::<Ui>().theme.clone();
+        let spotlight = self.scope == Scope::Everywhere;
+        let selected = self.effective_match();
+        let fg = color(theme.role("fg"));
+        let muted = color(theme.role("fg-muted"));
+        let hover_fg = fg;
+        let button = |matching: Match, label: &'static str, tooltip: &'static str| {
+            let (id, aria) = match matching {
+                Match::All => ("search-match-all", "All"),
+                Match::Names => ("search-match-names", "Names"),
+                Match::Contents => ("search-match-contents", "Contents"),
+            };
+            let aria = if spotlight { format!("{aria}, unavailable") } else { aria.to_owned() };
+            let is_selected = selected == matching;
+            let segment = div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .role(Role::RadioButton)
+                .aria_label(aria)
+                .aria_selected(is_selected)
+                .h(px(22.))
+                .px(px(9.))
+                .rounded(px(4.))
+                .flex()
+                .items_center()
+                .text_size(px(12.))
+                .text_color(if is_selected { fg } else { muted })
+                .when(is_selected, |segment| segment.bg(color(theme.role("surface-raised"))))
+                .when(!is_selected && !spotlight, move |segment| segment.hover(move |style| style.text_color(hover_fg)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if spotlight {
+                        return;
+                    }
+                    this.set_match(matching, cx);
+                    if focused {
+                        this.focus_input(window, cx);
+                    }
+                }))
+                .child(label);
+            let tooltip = if spotlight { "Spotlight searches names only" } else { tooltip };
+            with_tooltip(segment, tooltip, None)
+        };
+        div()
+            .id("search-match")
+            .role(Role::RadioGroup)
+            .aria_label("Match")
+            .flex()
+            .flex_none()
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded(px(6.))
+            .bg(color(theme.role("bg")))
+            .when(spotlight, |control| control.opacity(0.4))
+            .child(button(Match::All, "All", "Names and contents"))
+            .child(button(Match::Names, "Names", "Names only: no file is read"))
+            .child(button(Match::Contents, "Contents", "Contents only"))
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
@@ -594,7 +779,6 @@ impl SearchView {
             .gap_2()
             .border_b_1()
             .border_color(color(theme.role("border")))
-            .child(self.input.clone())
             .child(
                 div()
                     .flex()
@@ -643,6 +827,7 @@ impl SearchView {
         let selected = self.scope == scope;
         div()
             .id(label)
+            .debug_selector(move || format!("search-scope-{label}"))
             .role(Role::Button)
             .aria_label(label)
             .aria_selected(selected)
@@ -1113,5 +1298,25 @@ impl Render for SearchDrag {
                     .whitespace_nowrap()
                     .child(self.label.clone()),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_parts_follow_the_match_mode() {
+        assert_eq!(query_parts("needle", Match::All), (Some("needle".to_owned()), Some("needle".to_owned())));
+        assert_eq!(query_parts("needle", Match::Names), (Some("needle".to_owned()), None));
+        assert_eq!(query_parts("needle", Match::Contents), (None, Some("needle".to_owned())));
+    }
+
+    #[test]
+    fn spotlight_forces_names() {
+        assert_eq!(effective_match_for(Scope::Everywhere, Match::Contents), Match::Names);
+        assert_eq!(effective_match_for(Scope::Everywhere, Match::All), Match::Names);
+        assert_eq!(effective_match_for(Scope::Folder, Match::Contents), Match::Contents);
+        assert_eq!(effective_match_for(Scope::Folder, Match::All), Match::All);
     }
 }
