@@ -129,10 +129,13 @@ impl Render for DraggedFiles {
         let theme = &cx.global::<Ui>().theme;
         let left = drag_combo_left(f32::from(self.cursor.x), self.width);
         // Once the pointer leaves the window, the native image takes over; don't let the
-        // GPUI image clip at the edge for that frame.
-        let inside = window.bounds().contains(&window.mouse_position());
+        // GPUI image clip at the edge for that frame. `bounds()` is in screen coordinates,
+        // while the mouse position is window-relative, so compare against the size only.
+        let position = window.mouse_position();
+        let size = window.bounds().size;
+        let inside =
+            position.x >= px(0.) && position.y >= px(0.) && position.x < size.width && position.y < size.height;
         div()
-            .when(inside, |element| element)
             .when(!inside, |element| element.invisible())
             .ml(px(left))
             .flex()
