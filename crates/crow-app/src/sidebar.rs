@@ -18,6 +18,7 @@ use gpui::{
 };
 
 use crate::actions::{Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, OpenSelection, RemoveFromSidebar};
+use crate::chrome::with_tooltip;
 use crate::palette::CommandId;
 use crate::pane::DraggedSelection;
 use crate::style::{color, color_alpha, icon};
@@ -458,6 +459,10 @@ impl Render for Sidebar {
                 Row::Volume(v) => (v.name.clone(), None, None),
                 _ => (display_name(&path), None, None),
             };
+            let volume_label = match &row {
+                Row::Volume(v) => Some(format!("{} free of {}", human_bytes(v.free_bytes), human_bytes(v.total_bytes))),
+                _ => None,
+            };
             let spoken = match &row {
                 Row::Volume(v) => format!(
                     "{label}, {} free of {}{}",
@@ -599,6 +604,9 @@ impl Render for Sidebar {
                         ),
                     );
             }
+            if let Some(label) = volume_label {
+                item = with_tooltip(item, label, None);
+            }
             children.push(item.into_any_element());
         }
 
@@ -619,6 +627,7 @@ impl Render for Sidebar {
             .id("sidebar")
             .role(Role::ListBox)
             .aria_label("Sidebar")
+            // keys::context_stack (KeyScope::Sidebar) mirrors this.
             .key_context(context.as_str())
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::move_up))

@@ -334,6 +334,15 @@ impl Pane {
         self.history.can_go_forward()
     }
 
+    /// The folder Back/Forward would show, for tooltip labels.
+    pub fn back_target(&self) -> Option<&std::path::Path> {
+        self.history.back_target()
+    }
+
+    pub fn forward_target(&self) -> Option<&std::path::Path> {
+        self.history.forward_target()
+    }
+
     /// The item the preview and path bar describe: the focused folder's cursor.
     pub fn cursor_entry(&self, cx: &gpui::App) -> Option<Entry> {
         self.focused_folder().read(cx).cursor_entry().cloned()
@@ -1646,6 +1655,7 @@ impl Pane {
                 .id("filter-bar")
                 .role(Role::Group)
                 .aria_label("Filter")
+                // keys::context_stack (KeyScope::Filter) mirrors this.
                 .key_context("Filter")
                 .h(px(34.))
                 .px_2()
@@ -1821,6 +1831,7 @@ impl Render for Pane {
             } else {
                 format!("{title}, {total} items")
             })
+            // keys::context_stack (KeyScope::List/Columns) mirrors this.
             .key_context(context.as_str())
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::move_up))

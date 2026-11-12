@@ -96,8 +96,9 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("escape", ClearFilter, Some("FileList && Filtered")),
         KeyBinding::new("up", MoveUp, Some("Filter")),
         KeyBinding::new("down", MoveDown, Some("Filter")),
-        KeyBinding::new("cmd-down", OpenSelection, Some("FileList")),
+        // cmd-o is added first so cmd-down stays the shown key (the last binding wins).
         KeyBinding::new("cmd-o", OpenSelection, Some("FileList")),
+        KeyBinding::new("cmd-down", OpenSelection, Some("FileList")),
         KeyBinding::new("enter", Rename, Some("FileList")),
         KeyBinding::new("space", QuickLook, Some("FileList")),
         KeyBinding::new("cmd-shift-n", NewFolder, Some("FileList")),

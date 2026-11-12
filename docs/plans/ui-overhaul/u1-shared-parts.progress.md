@@ -4,9 +4,9 @@ Branch: `ui-u1-shared-parts` · PR: none · Last updated: 2026-11-12
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| I1 Keys from the live keymap | todo | |
-| I2 Keycap element | todo | |
-| I3 Tooltip | todo | |
+| I1 Keys from the live keymap | done (this commit) | `keys.rs`; palette rows/footer, delete sheet, picker, search header read the live keymap; tests `keys::tests::*`, `command_palette_keys_follow_the_layer` pass; grep has only the sort arrow. |
+| I2 Keycap element | done (this commit) | three weights, three builders; unit + render smoke tests pass. Hand check FireBox/Paper pending. |
+| I3 Tooltip | done (this commit) | all Target-table elements have tooltips; `History`/`Pane` peeks added; `history_peeks_without_moving` and `back_button_tooltip_names_the_folder` (incl. hover after 600 ms) pass. |
 | I4 Sheet overlay | todo | |
 | I5 Icons | todo | |
 | I6 Selection tints | todo | |
@@ -23,6 +23,9 @@ Branch: `ui-u1-shared-parts` · PR: none · Last updated: 2026-11-12
 
 ## Log
 - 2026-11-12: read `AGENTS.md`, index README, U1 plan; asked the 8 U1 questions and recorded answers.
+- 2026-11-12: I1 done. `&'static dyn Action` in the const compiles (no `Box` fallback needed). `caps` treats a multi-key Vim sequence as one glued cap, modifiers split only for single chords.
+- 2026-11-12: I2/I3 done. Tests can show tooltips (verified with advance_clock + another mouse move); no asset registration needed here.
+- 2026-11-12: `cargo test -p crow-app` 66 passed; clippy clean.
 
 ## Next
-Create branch `ui-u1-shared-parts`, commit this progress file, start I1.
+I4: one sheet frame with a scrim for the five overlays.

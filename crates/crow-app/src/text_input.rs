@@ -635,6 +635,7 @@ impl Render for TextInput {
             .aria_label(self.placeholder.clone())
             .aria_value(self.content.clone())
             .flex()
+            // keys::context_stack adds TextInput for Filter, Search and Palette.
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)

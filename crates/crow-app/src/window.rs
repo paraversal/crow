@@ -10,10 +10,13 @@ use gpui::{
 };
 
 use crate::actions::{
-    AddToSidebar, ApplyThemeEverywhere, CloseTab, GoBack, GoForward, GoToFolder, MoveDown, MoveUp, NewTab, NextTab,
-    OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView, ShowCommandPalette, ShowSearch, ShowThemePicker,
-    SwitchFocus, ToggleHiddenFiles, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
+    AddToSidebar, ApplyThemeEverywhere, CancelOperation, CloseTab, GoBack, GoForward, GoToFolder, MoveDown,
+    MoveToTrash, MoveUp, NewTab, NextTab, OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView,
+    ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, UseViewAsDefaults, ViewAsColumns,
+    ViewAsList, WhyThisView,
 };
+use crate::chrome::{with_action_tooltip, with_tooltip};
+use crate::keys::{self, KeyScope};
 use crate::operations::{self, Clipboard, Operations};
 use crate::palette::{self, Item};
 use crate::pane::Pane;
@@ -95,6 +98,17 @@ struct Palette {
     folders: Vec<palette::FolderCandidate>,
     scroll: UniformListScrollHandle,
     _subscription: Subscription,
+}
+
+impl Palette {
+    /// The shortcut shown on row `i`, from the live keymap. Shared by
+    /// `render_palette_rows` and the layer test.
+    fn row_keys(&self, i: usize, cx: &App) -> Option<SharedString> {
+        match self.items.get(i)? {
+            Item::Command(command) => keys::text(command.action, command.scope, cx),
+            Item::Folder { .. } => None,
+        }
+    }
 }
 
 impl CrowWindow {
@@ -302,10 +316,16 @@ impl CrowWindow {
         let theme = &cx.global::<Ui>().theme;
         let pane = self.pane().read(cx);
         let (back, forward, mode) = (pane.can_go_back(), pane.can_go_forward(), pane.mode());
+        let back_label =
+            pane.back_target().map_or_else(|| "Back".to_owned(), |dir| format!("Back to {}", folder_name(dir)));
+        let forward_label = pane
+            .forward_target()
+            .map_or_else(|| "Forward".to_owned(), |dir| format!("Forward to {}", folder_name(dir)));
         let (fg, muted, subtle) = (theme.role("fg"), theme.role("fg-muted"), theme.role("fg-subtle"));
         let nav_button = |id: &'static str, label: &'static str, glyph: &'static str, enabled: bool| {
             div()
                 .id(id)
+                .debug_selector(move || id.into())
                 .role(Role::Button)
                 .aria_label(label)
                 .w(px(26.))
@@ -329,12 +349,18 @@ impl CrowWindow {
             .border_b_1()
             .border_color(color(theme.role("border")))
             .child(
-                nav_button("back", "Back", "‹", back)
+                with_action_tooltip(nav_button("back", "Back", "‹", back), back_label, &GoBack, KeyScope::Window, cx)
                     .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_back(cx)))),
             )
             .child(
-                nav_button("forward", "Forward", "›", forward)
-                    .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_forward(cx)))),
+                with_action_tooltip(
+                    nav_button("forward", "Forward", "›", forward),
+                    forward_label,
+                    &GoForward,
+                    KeyScope::Window,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_forward(cx)))),
             )
             .child(
                 div()
@@ -359,12 +385,30 @@ impl CrowWindow {
                     .p(px(2.))
                     .rounded_md()
                     .bg(color(theme.role("surface")))
-                    .child(view_button("view-list", "as List", "☰", mode == ViewMode::List, theme).on_click(
-                        cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.set_mode(ViewMode::List, cx))),
-                    ))
-                    .child(view_button("view-columns", "as Columns", "▥", mode == ViewMode::Columns, theme).on_click(
-                        cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.set_mode(ViewMode::Columns, cx))),
-                    )),
+                    .child(
+                        with_action_tooltip(
+                            view_button("view-list", "as List", "☰", mode == ViewMode::List, theme),
+                            "View as List",
+                            &ViewAsList,
+                            KeyScope::Window,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.pane().update(cx, |p, cx| p.set_mode(ViewMode::List, cx));
+                        })),
+                    )
+                    .child(
+                        with_action_tooltip(
+                            view_button("view-columns", "as Columns", "▥", mode == ViewMode::Columns, theme),
+                            "View as Columns",
+                            &ViewAsColumns,
+                            KeyScope::Window,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.pane().update(cx, |p, cx| p.set_mode(ViewMode::Columns, cx));
+                        })),
+                    ),
             )
     }
 
@@ -494,7 +538,7 @@ impl CrowWindow {
                                 .id(("path-segment", i))
                                 .debug_selector(move || format!("path-segment-{i}"))
                                 .role(Role::Button)
-                                .aria_label(spoke)
+                                .aria_label(spoke.clone())
                                 .flex()
                                 .items_center()
                                 .gap_1()
@@ -519,7 +563,7 @@ impl CrowWindow {
                                     }
                                 });
                             });
-                            part
+                            with_tooltip(part, spoke, None)
                         }
                     }),
                 ),
@@ -535,7 +579,7 @@ impl CrowWindow {
                     .child(status),
             )
             .when(running.is_some(), |bar| {
-                bar.child(
+                bar.child(with_action_tooltip(
                     div()
                         .id("cancel-operation")
                         .role(Role::Button)
@@ -547,7 +591,11 @@ impl CrowWindow {
                         .text_color(color(theme.role("fg")))
                         .on_click(|_, _, cx| operations::cancel_running(cx))
                         .child("Cancel"),
-                )
+                    "Cancel operation",
+                    &CancelOperation,
+                    KeyScope::Window,
+                    cx,
+                ))
             })
     }
 }
@@ -744,6 +792,10 @@ impl CrowWindow {
         let sheet = self.sheet.as_ref()?;
         let theme = cx.global::<Ui>().theme.clone();
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
+        let trash_hint = match keys::text(&MoveToTrash, KeyScope::List, cx) {
+            Some(keys) => format!("This can't be undone. Move to Trash ({keys}) can."),
+            None => "This can't be undone. Move to Trash can.".to_owned(),
+        };
         let button = |id: &'static str, label: String, primary: bool| {
             div()
                 .id(id)
@@ -768,7 +820,7 @@ impl CrowWindow {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .child(div().text_color(color(muted)).child("This can't be undone. Move to Trash (⌘⌫) can."))
+                        .child(div().text_color(color(muted)).child(trash_hint))
                         .child(
                             div()
                                 .flex()
@@ -873,6 +925,7 @@ impl CrowWindow {
                     .id("sheet")
                     .role(Role::Dialog)
                     .aria_label(title.clone())
+                    // keys::context_stack (KeyScope::Sheet) mirrors this.
                     .key_context("Sheet")
                     .track_focus(sheet.focus())
                     .on_action(
@@ -1120,6 +1173,7 @@ impl CrowWindow {
                     .id("why-this-view")
                     .role(Role::Dialog)
                     .aria_label(format!("Why this view: {folder}"))
+                    // keys::context_stack (KeyScope::Sheet) mirrors this.
                     .key_context("Sheet")
                     .track_focus(focus)
                     .on_action(
@@ -1498,12 +1552,18 @@ impl CrowWindow {
                 )
                 .into_any_element()
         };
+        let run = keys::text(&crate::text_input::Confirm, KeyScope::Palette, cx)
+            .map_or_else(|| "Return".to_owned(), |key| key.to_string());
+        let new_tab = keys::text(&PaletteOpenInTab, KeyScope::Palette, cx)
+            .map_or_else(|| "Return".to_owned(), |key| key.to_string());
+        let footer = format!("> commands · {run} runs · {new_tab} opens a folder in a new tab");
         Some(
             div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
                 div()
                     .id("palette")
                     .role(Role::Dialog)
                     .aria_label("Command Palette")
+                    // keys::context_stack (KeyScope::Palette/ThemePicker) mirrors this.
                     .key_context(context.as_str())
                     .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_palette(-1, cx)))
                     .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_palette(1, cx)))
@@ -1520,12 +1580,7 @@ impl CrowWindow {
                     .shadow_lg()
                     .child(input)
                     .child(list)
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(muted)
-                            .child("> commands · Return runs · ⌘Return opens a folder in a new tab"),
-                    ),
+                    .child(div().text_size(px(12.)).text_color(muted).child(footer)),
             ),
         )
     }
@@ -1545,9 +1600,10 @@ impl CrowWindow {
             .filter_map(|i| {
                 let item = palette.items.get(i)?;
                 let selected = i == cursor;
-                let (icon_path, label, keys) = match item {
-                    Item::Command(command) => (None, command.label.to_owned(), command.keys),
-                    Item::Folder { path, label } => (Some(path.clone()), label.clone(), ""),
+                let keys = palette.row_keys(i, cx);
+                let (icon_path, label) = match item {
+                    Item::Command(command) => (None, command.label.to_owned()),
+                    Item::Folder { path, label } => (Some(path.clone()), label.clone()),
                 };
                 let row = div()
                     .id(("palette-row", i))
@@ -1583,7 +1639,7 @@ impl CrowWindow {
                             .text_color(fg)
                             .child(label),
                     )
-                    .child(div().text_size(px(11.)).text_color(muted).child(keys));
+                    .child(div().text_size(px(11.)).text_color(muted).children(keys));
                 Some(row.into_any_element())
             })
             .collect()
@@ -1651,19 +1707,30 @@ impl CrowWindow {
                 .text_color(color(if primary { theme.role("on-accent") } else { fg }))
                 .child(label)
         };
+        let keep = keys::text(&crate::actions::SheetConfirm, KeyScope::ThemePicker, cx);
+        let everywhere = keys::text(&ApplyThemeEverywhere, KeyScope::ThemePicker, cx);
+        let hint = match (keep, everywhere) {
+            (Some(keep), Some(everywhere)) => format!(
+                "{keep} keeps it for Crow. Apply to All Apps ({everywhere}) sets it for every app that reads the theme index."
+            ),
+            _ => "Apply to All Apps sets it for every app that reads the theme index.".to_owned(),
+        };
         Some(
             div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
                 div()
                     .id("theme-picker")
                     .role(Role::Dialog)
                     .aria_label("Theme")
+                    // keys::context_stack (KeyScope::Palette/ThemePicker) mirrors this.
                     .key_context(context.as_str())
                     .track_focus(&picker.focus)
                     .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_picker(-1, cx)))
                     .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_picker(1, cx)))
-                    .on_action(cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| {
-                        this.confirm_picker(window, cx)
-                    }))
+                    .on_action(
+                        cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| {
+                            this.confirm_picker(window, cx)
+                        }),
+                    )
                     .on_action(
                         cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.cancel_picker(window, cx)),
                     )
@@ -1691,12 +1758,7 @@ impl CrowWindow {
                             .gap(px(1.))
                             .children(rows),
                     )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(color(muted))
-                            .child("Return keeps it for Crow. Apply to All Apps (⌘↩) sets it for every app that reads the theme index."),
-                    )
+                    .child(div().text_size(px(12.)).text_color(color(muted)).child(hint))
                     .child(
                         div()
                             .flex()
@@ -1753,6 +1815,7 @@ impl Render for CrowWindow {
                     this.pane().update(cx, |pane, cx| pane.update_drag_target(event.position, cx));
                 }
             }))
+            // keys::context_stack (KeyScope::Window) mirrors this; every overlay nests under it.
             .key_context("Crow")
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_tab))
@@ -2040,6 +2103,24 @@ mod tests {
         cx.simulate_keystrokes("cmd-[");
         settle(&view, &mut cx);
         assert_eq!(mode(&cx), ViewMode::Columns);
+    }
+
+    #[gpui::test]
+    fn back_button_tooltip_names_the_folder(cx: &mut TestAppContext) {
+        let root = fixture("back-tooltip");
+        let executor = cx.executor();
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        let back = view.read_with(&cx, |w, cx| w.pane().read(cx).back_target().map(Path::to_path_buf));
+        assert_eq!(back.as_deref(), Some(root.as_path()), "Back points at the folder we came from");
+
+        let bounds = cx.debug_bounds("back").expect("the back button is laid out");
+        cx.simulate_mouse_move(bounds.center(), None, gpui::Modifiers::default());
+        executor.advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.simulate_mouse_move(bounds.center(), None, gpui::Modifiers::default());
+        assert!(cx.debug_bounds("tooltip").is_some(), "the tooltip is drawn after the 500 ms delay");
     }
 
     #[gpui::test]
@@ -2348,6 +2429,36 @@ mod tests {
         assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2);
         assert_eq!(dir(&view, &cx), root.join("beta"));
         assert!(view.read_with(&cx, |w, _| w.palette.is_none()));
+    }
+
+    #[gpui::test]
+    fn command_palette_keys_follow_the_layer(cx: &mut TestAppContext) {
+        let root = fixture("palette-keys");
+        let (view, mut cx) = open(cx, &root);
+        let copy_keys = |cx: &VisualTestContext| {
+            view.read_with(cx, |w, cx| {
+                let palette = w.palette.as_ref().expect("palette is open");
+                let i = palette
+                    .items
+                    .iter()
+                    .position(
+                        |item| matches!(item, Item::Command(command) if command.id == crate::palette::CommandId::Copy),
+                    )
+                    .expect("the Copy row is listed");
+                palette.row_keys(i, cx).map(|keys| keys.to_string())
+            })
+        };
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">copy");
+        settle(&view, &mut cx);
+        assert_eq!(copy_keys(&cx).as_deref(), Some("⌘C"));
+        cx.simulate_keystrokes("escape");
+
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">copy");
+        settle(&view, &mut cx);
+        assert_eq!(copy_keys(&cx).as_deref(), Some("yy"), "the palette follows keymap = vim");
     }
 
     #[gpui::test]

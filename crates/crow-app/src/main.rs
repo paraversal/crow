@@ -9,8 +9,10 @@
 //! ```
 
 mod actions;
+mod chrome;
 mod extensions;
 mod folder;
+mod keys;
 mod logging;
 mod operations;
 mod palette;

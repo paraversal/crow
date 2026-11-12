@@ -25,6 +25,8 @@ use crate::actions::{
     CloseSearch, CopyFiles, CutFiles, DeletePermanently, MoveDown, MoveToFirst, MoveToLast, MoveToTrash, MoveUp,
     OpenSelection, QuickLook, SearchEverything, SearchReveal, SelectAll,
 };
+use crate::chrome::with_action_tooltip;
+use crate::keys::{self, KeyScope};
 use crate::pane::DraggedSelection;
 use crate::style::{color, color_alpha, format_time, icon};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -573,7 +575,7 @@ impl SearchView {
                     .child(self.scope_button(Scope::Home, "Home", cx))
                     .child(self.scope_button(Scope::Everywhere, "Everywhere", cx))
                     .child(div().flex_1())
-                    .child(
+                    .child(with_action_tooltip(
                         div()
                             .id("search-everything")
                             .role(Role::Button)
@@ -591,14 +593,20 @@ impl SearchView {
                                 }),
                             )
                             .child("Search everything"),
-                    ),
+                        "Search everything, all rules off",
+                        &SearchEverything,
+                        KeyScope::Search,
+                        cx,
+                    )),
             )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(muted)
-                    .child("⇧⌘A turns every exclusion set off · contents are literal; /pattern/ is a regex"),
-            )
+            .child(div().text_size(px(11.)).text_color(muted).child(
+                match keys::text(&SearchEverything, KeyScope::Search, cx) {
+                    Some(keys) => {
+                        format!("{keys} turns every exclusion set off · contents are literal; /pattern/ is a regex")
+                    }
+                    None => "Contents are literal; /pattern/ is a regex".to_owned(),
+                },
+            ))
     }
 
     fn scope_button(&self, scope: Scope, label: &'static str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -717,6 +725,7 @@ impl SearchView {
             .min_h_0()
             .flex()
             .flex_col()
+            // keys::context_stack (KeyScope::SearchResults) mirrors this.
             .key_context("SearchResults")
             .role(Role::ListBox)
             .aria_label(format!("Search results, {count} items"))
@@ -978,6 +987,7 @@ impl Render for SearchView {
             .id("search-view")
             .role(Role::Group)
             .aria_label("Search")
+            // keys::context_stack (KeyScope::Search) mirrors this.
             .key_context("Search")
             .on_action(cx.listener(Self::search_everything))
             .on_action(cx.listener(Self::close_action))
