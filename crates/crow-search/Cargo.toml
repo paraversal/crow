@@ -7,3 +7,11 @@ publish = false
 description = "Walking, fuzzy and content search, exclusion rule sets (M6)"
 
 [dependencies]
+crow-core.workspace = true
+globset = "0.4"
+grep-matcher = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
+nucleo-matcher = "0.3"
+regex-syntax = "0.8"

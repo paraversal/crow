@@ -1954,6 +1954,22 @@ mod tests {
     }
 
     #[gpui::test]
+    fn exclude_config_reloads_live_and_keeps_the_last_good_rules(cx: &mut TestAppContext) {
+        let root = fixture("exclude-reload");
+        let (view, mut cx) = open(cx, &root);
+        let names = |cx: &VisualTestContext| cx.read(|cx| cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).names);
+        assert!(names(&cx).contains(&"node_modules".to_owned()));
+
+        write_config(&view, &mut cx, "exclude.toml", "[dev]\nnames = [\"only_this\"]\n");
+        assert_eq!(names(&cx), vec!["only_this".to_owned()]);
+
+        write_config(&view, &mut cx, "exclude.toml", "this is not toml");
+        assert_eq!(names(&cx), vec!["only_this".to_owned()], "a broken file keeps the last good rules");
+        let error = cx.read(|cx| cx.global::<Ui>().config_error().map(|e| e.to_string()).unwrap_or_default());
+        assert!(error.contains("exclude.toml"), "{error}");
+    }
+
+    #[gpui::test]
     fn go_to_folder_completes_navigates_and_reveals_files(cx: &mut TestAppContext) {
         let root = fixture("goto");
         let (view, mut cx) = open(cx, &root);

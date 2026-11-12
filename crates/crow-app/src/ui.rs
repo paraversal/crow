@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crow_core::{Recent, Settings, SidebarConfig, Views, load_settings, load_sidebar, load_views};
+use crow_core::{Exclude, Recent, Settings, SidebarConfig, Views, load_settings, load_sidebar, load_views};
 use crow_theme::Theme;
 use gpui::{App, AppContext, Global, SharedString};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -30,6 +30,10 @@ pub struct Ui {
     /// Counts reloads of `views.toml`, so panes know to apply it again.
     pub views_generation: u64,
     pub sidebar: SidebarConfig,
+    /// Exclusions for search, reloaded with the other config files.
+    pub exclude: Exclude,
+    /// Counts `exclude.toml` reloads that changed it, so a running search can restart.
+    pub exclude_generation: u64,
     pub recent: Recent,
     zoxide: Vec<(f64, PathBuf)>,
     /// The folders Recent shows, best first (computed off the main thread).
@@ -39,7 +43,7 @@ pub struct Ui {
     pub state_dir: PathBuf,
     pub home: PathBuf,
     /// One message per config file that doesn't load; shown in the status line until fixed.
-    errors: [Option<SharedString>; 3],
+    errors: [Option<SharedString>; 4],
 }
 
 impl Global for Ui {}
@@ -47,6 +51,7 @@ impl Global for Ui {}
 const SETTINGS: usize = 0;
 const VIEWS: usize = 1;
 const SIDEBAR: usize = 2;
+const EXCLUDE: usize = 3;
 
 impl Ui {
     fn new(config_dir: PathBuf, state_dir: PathBuf, home: PathBuf, theme: Theme, fade_enabled: bool) -> Ui {
@@ -61,6 +66,8 @@ impl Ui {
             views: Views::default(),
             views_generation: 0,
             sidebar: SidebarConfig::parse(crow_core::DEFAULT_SIDEBAR).unwrap_or_default(),
+            exclude: Exclude::default(),
+            exclude_generation: 0,
             recent,
             zoxide: Vec::new(),
             recent_list: Vec::new(),
@@ -73,6 +80,7 @@ impl Ui {
         ui.load_settings();
         ui.load_views();
         ui.load_sidebar();
+        ui.load_exclude();
         ui
     }
 
@@ -123,6 +131,22 @@ impl Ui {
                 self.set_error(SIDEBAR, Ok(())) || changed
             }
             Err(e) => self.set_error(SIDEBAR, Err(e)),
+        }
+    }
+
+    /// Reload `exclude.toml`; a broken file keeps the last good rules.
+    pub fn load_exclude(&mut self) -> bool {
+        match crow_core::load_exclude(&self.config_dir) {
+            Ok(exclude) => {
+                let changed = exclude != self.exclude;
+                self.exclude = exclude;
+                self.set_error(EXCLUDE, Ok(()));
+                if changed {
+                    self.exclude_generation += 1;
+                }
+                changed
+            }
+            Err(e) => self.set_error(EXCLUDE, Err(e)),
         }
     }
 
@@ -241,7 +265,8 @@ pub fn reload_config(cx: &mut App) {
     let settings = ui.load_settings();
     ui.load_views();
     let sidebar = ui.load_sidebar();
-    if settings || sidebar {
+    let exclude = ui.load_exclude();
+    if settings || sidebar || exclude {
         tracing::info!("config reloaded");
     }
     if sidebar {
@@ -423,6 +448,9 @@ fn write_config(which: usize, write: impl FnOnce(&Path, &Path) -> Result<(), Str
                     SIDEBAR => {
                         ui.load_sidebar();
                         refresh_recent(cx);
+                    }
+                    EXCLUDE => {
+                        ui.load_exclude();
                     }
                     _ => {
                         ui.load_settings();
