@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crow_core::{Align, Column, ColumnContext, ColumnWidth, History, ResizeDrag, TableLayout, ViewMode};
+use crow_core::{
+    Align, Column, ColumnContext, ColumnWidth, History, KeymapLayer, ResizeDrag, TableLayout, ViewChange, ViewMode,
+};
 use crow_fs::{Entry, Sort, SortKey};
 use gpui::{
     ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, Focusable, IntoElement,
@@ -21,9 +23,9 @@ use gpui::{
 };
 
 use crate::actions::{
-    CopyFiles, CutFiles, DeletePermanently, Duplicate, ExtendDown, ExtendUp, MoveDown, MoveLeft, MoveRight,
-    MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFolder, OpenSelection, PasteFiles, PasteMoveFiles, QuickLook,
-    Rename, SelectAll,
+    BeginJump, BeginMark, CopyFiles, CutFiles, DeletePermanently, Duplicate, ExtendDown, ExtendUp, MoveDown, MoveLeft,
+    MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFolder, OpenSelection, PasteFiles, PasteMoveFiles,
+    QuickLook, Rename, SelectAll,
 };
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
@@ -46,8 +48,28 @@ const PREVIEW_COLUMN_WIDTH: f32 = 300.0;
 /// confirmations) and the clipboard is app-wide, so the window handles these.
 pub enum PaneEvent {
     Run(Request),
-    Copy { paths: Vec<PathBuf>, cut: bool },
-    Paste { into: PathBuf, move_items: bool },
+    Copy {
+        paths: Vec<PathBuf>,
+        cut: bool,
+    },
+    Paste {
+        into: PathBuf,
+        move_items: bool,
+    },
+    /// The tab went to a folder (for Recent).
+    Entered(PathBuf),
+    /// Vim marks: `m x` (set) or `'x` (jump) for the letter `key`.
+    Mark {
+        key: char,
+        set: bool,
+    },
+}
+
+/// Vim: after `m` or `'`, the next letter names a mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarkPending {
+    Set,
+    Jump,
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
@@ -84,6 +106,9 @@ pub struct Pane {
     /// Start renaming this item once it appears (a new folder).
     rename_when_present: Option<PathBuf>,
     bench: Option<Bench>,
+    /// The `views.toml` reload and folder whose view was applied last.
+    applied_view: Option<(u64, PathBuf)>,
+    mark_pending: Option<MarkPending>,
 }
 
 struct Bench {
@@ -95,11 +120,11 @@ struct Bench {
 }
 
 impl Pane {
-    pub fn new(dir: PathBuf, show_hidden: bool, mode: ViewMode, bench: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(dir: PathBuf, show_hidden: bool, bench: bool, cx: &mut Context<Self>) -> Self {
         let columns = cx.global::<Ext>().0.default_columns();
         let mut pane = Self {
             history: History::new(dir.clone()),
-            mode,
+            mode: ViewMode::List,
             show_hidden,
             sort: Sort::default(),
             folders: Vec::new(),
@@ -117,6 +142,8 @@ impl Pane {
             renaming: None,
             rename_when_present: None,
             bench: bench.then(|| Bench { frame: 0, intervals: Vec::new(), last: None, scrolled: None }),
+            applied_view: None,
+            mark_pending: None,
         };
         pane.enter(dir, cx);
         pane
@@ -235,7 +262,7 @@ impl Pane {
     }
 
     /// The selected items of the focused folder, in display order.
-    fn selected_paths(&self, cx: &gpui::App) -> Vec<PathBuf> {
+    pub fn selected_paths(&self, cx: &gpui::App) -> Vec<PathBuf> {
         self.focused_folder().read(cx).selected_paths()
     }
 
@@ -246,17 +273,69 @@ impl Pane {
         }
     }
 
+    /// Sort as the user asked (a header click), and remember it for this folder.
     pub fn set_sort(&mut self, sort: Sort, cx: &mut Context<Self>) {
+        if self.apply_sort(sort, cx) {
+            self.remember(ViewChange::Sort(sort), cx);
+        }
+    }
+
+    fn apply_sort(&mut self, sort: Sort, cx: &mut Context<Self>) -> bool {
+        if self.sort == sort {
+            return false;
+        }
         self.sort = sort;
         for folder in &self.folders {
             folder.update(cx, |f, cx| f.set_sort(sort, cx));
         }
+        cx.notify();
+        true
+    }
+
+    #[cfg(test)]
+    pub fn sort(&self) -> Sort {
+        self.sort
+    }
+
+    /// Switch view as the user asked (Cmd-2, Cmd-3), and remember it for the folder shown.
+    pub fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
+        if self.apply_mode(mode, cx) {
+            self.remember(ViewChange::View(mode), cx);
+        }
+    }
+
+    /// Write a view change to `views.toml` as this folder's own setting.
+    fn remember(&mut self, change: ViewChange, cx: &mut Context<Self>) {
+        let dir = self.dir().to_path_buf();
+        crate::ui::save_view_change(dir, change, cx);
+    }
+
+    /// Show this folder the way `views.toml` says, unless that was already done for
+    /// this folder and this version of the file.
+    pub fn apply_view(&mut self, cx: &mut Context<Self>) {
+        let ui = cx.global::<Ui>();
+        let key = (ui.views_generation, self.dir().to_path_buf());
+        if self.applied_view.as_ref() == Some(&key) {
+            return;
+        }
+        let resolved = ui.views.resolve(&key.1);
+        self.applied_view = Some(key);
+        self.apply_sort(resolved.sort(), cx);
+        let ids: Vec<&str> = self.columns.iter().map(|c| c.id()).collect();
+        if ids != resolved.columns.0 {
+            let available = cx.global::<Ext>().0.columns().to_vec();
+            self.columns =
+                resolved.columns.0.iter().filter_map(|id| available.iter().find(|c| c.id() == id).cloned()).collect();
+            self.table = default_table(&self.columns);
+        }
+        self.apply_mode(resolved.view.0, cx);
+        cx.notify();
     }
 
     /// Switch between list and column view, staying in the same folder with the same selection.
-    pub fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
+    fn apply_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) -> bool {
         if self.mode == mode {
-            return;
+            return false;
         }
         self.mode = mode;
         match mode {
@@ -273,6 +352,7 @@ impl Pane {
             ViewMode::Columns => self.update_chain(0, cx),
         }
         cx.notify();
+        true
     }
 
     fn enter(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
@@ -281,7 +361,13 @@ impl Pane {
         self.focused = 0;
         self.preview = None;
         self.status = None;
-        self.push_folder(dir, true, cx);
+        // The folder's view decides the sort before the listing starts.
+        let ui = cx.global::<Ui>();
+        let resolved = ui.views.resolve(&dir);
+        self.sort = resolved.sort();
+        self.push_folder(dir.clone(), true, cx);
+        self.apply_view(cx);
+        cx.emit(PaneEvent::Entered(dir));
         cx.notify();
     }
 
@@ -529,26 +615,11 @@ impl Pane {
         }
     }
 
-    /// Files dropped from Crow, Finder or another app: moved within a volume, copied
-    /// across volumes, like Finder; Option forces a copy. Items already in `into`, and
-    /// folders dropped onto themselves or into their own contents, are left alone.
+    /// Files dropped from Crow, Finder or another app (see `operations::drop_request`).
     fn drop_into(&mut self, into: PathBuf, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
-        let paths: Vec<PathBuf> = paths
-            .paths()
-            .iter()
-            .filter(|p| p.parent() != Some(into.as_path()) && !into.starts_with(p))
-            .cloned()
-            .collect();
-        if paths.is_empty() {
-            return;
+        if let Some(request) = crate::operations::drop_request(paths.paths(), into, window.modifiers().alt) {
+            cx.emit(PaneEvent::Run(request));
         }
-        let same_volume = paths.iter().all(|p| same_volume(p, &into));
-        let request = if same_volume && !window.modifiers().alt {
-            Request::Move { paths, into }
-        } else {
-            Request::Copy { paths, into }
-        };
-        cx.emit(PaneEvent::Run(request));
     }
 
     fn quick_look(&mut self, _: &QuickLook, _: &mut Window, cx: &mut Context<Self>) {
@@ -571,12 +642,43 @@ impl Pane {
         if m.platform || m.control || m.alt {
             return;
         }
-        let Some(c) = event.keystroke.key_char.as_deref().and_then(|s| s.chars().next()) else { return };
+        let c = event.keystroke.key_char.as_deref().and_then(|s| s.chars().next());
+        if let Some(pending) = self.mark_pending.take() {
+            if let Some(key) = c.filter(char::is_ascii_alphanumeric) {
+                cx.emit(PaneEvent::Mark { key, set: pending == MarkPending::Set });
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        // In the Vim layer letters are commands, never type-to-select.
+        if cx.global::<Ui>().settings.keymap == KeymapLayer::Vim {
+            return;
+        }
+        let Some(c) = c else { return };
         if c.is_control() || c == ' ' {
             return;
         }
         self.with_focused(cx, |f, cx| f.type_char(c, cx));
         cx.stop_propagation();
+    }
+
+    fn begin_mark(&mut self, _: &BeginMark, _: &mut Window, cx: &mut Context<Self>) {
+        self.mark_pending = Some(MarkPending::Set);
+        cx.notify();
+    }
+
+    fn begin_jump(&mut self, _: &BeginJump, _: &mut Window, cx: &mut Context<Self>) {
+        self.mark_pending = Some(MarkPending::Jump);
+        cx.notify();
+    }
+
+    /// What the status line should say while a Vim mark waits for its letter.
+    pub fn pending_hint(&self) -> Option<&'static str> {
+        self.mark_pending.map(|p| match p {
+            MarkPending::Set => "Mark this folder: type a letter",
+            MarkPending::Jump => "Go to mark: type a letter",
+        })
     }
 
     /// A press on row `ix` of folder `k`: Finder's click, Cmd-click and Shift-click.
@@ -1013,10 +1115,14 @@ impl Render for Pane {
         let title =
             focused.dir().file_name().map_or_else(|| "Macintosh HD".to_owned(), |n| n.to_string_lossy().into_owned());
         let count = focused.entries().len();
-        let context = match self.mode {
-            ViewMode::List => "FileList",
-            ViewMode::Columns => "FileList ColumnView",
+        let mut context = match self.mode {
+            ViewMode::List => "FileList".to_owned(),
+            ViewMode::Columns => "FileList ColumnView".to_owned(),
         };
+        if cx.global::<Ui>().settings.keymap == KeymapLayer::Vim {
+            // While a mark waits for its letter, the Vim bindings step aside so the letter arrives as typed.
+            context.push_str(if self.mark_pending.is_some() { " VimPending" } else { " vim" });
+        }
         let body = match self.mode {
             ViewMode::List => {
                 let (rows, scroll) = {
@@ -1045,7 +1151,7 @@ impl Render for Pane {
             .id("file-list")
             .role(Role::ListBox)
             .aria_label(format!("{title}, {count} items"))
-            .key_context(context)
+            .key_context(context.as_str())
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
@@ -1067,6 +1173,8 @@ impl Render for Pane {
             .on_action(cx.listener(Self::cut_files))
             .on_action(cx.listener(Self::paste_files))
             .on_action(cx.listener(Self::paste_move_files))
+            .on_action(cx.listener(Self::begin_mark))
+            .on_action(cx.listener(Self::begin_jump))
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 if let Some(drag) = this.resize {
@@ -1149,13 +1257,5 @@ impl Pane {
 
     pub fn selected_names(&self, cx: &gpui::App) -> Vec<String> {
         self.focused_folder().read(cx).selected_names()
-    }
-}
-
-fn same_volume(a: &Path, b: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (a.symlink_metadata(), b.metadata()) {
-        (Ok(x), Ok(y)) => x.dev() == y.dev(),
-        _ => false,
     }
 }

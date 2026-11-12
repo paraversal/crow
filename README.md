@@ -3,7 +3,7 @@
 A Finder-style file explorer for macOS, written in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 It keeps Finder's directness and aims to be faster, more predictable and keyboard-first.
 
-Status: Phase 1 (the "daily driver" MVP), milestone M4.
+Status: Phase 1 (the "daily driver" MVP), milestone M5.
 
 ## Build and run
 
@@ -28,8 +28,18 @@ Running as `Crow.app` makes macOS privacy prompts name Crow instead of your term
 
 ## Configuration
 
-`~/.config/crow/settings.toml` is created on first launch with every option documented.
-Changes apply immediately. The theme comes from `~/.config/themes`.
+Three files in `~/.config/crow/`, each created on first launch with every option documented.
+Changes apply immediately, and Crow keeps your comments when it writes to them.
+
+| File | What it holds |
+| --- | --- |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), font, hidden files, window size |
+| `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
+| `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
+
+Themes come from the global index in `~/.config/themes`. View ▸ Theme… (Cmd-Option-T)
+previews each theme as you move through the list; Apply to All Apps (Cmd-Return) sets it for every app that reads the index.
+Recent folders are kept in `~/.local/state/crow/recent.json`, merged with zoxide's list when it's installed.
 Logs go to `~/Library/Logs/Crow/crow.log`.
 
 ## Keys
@@ -39,7 +49,14 @@ Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (Tab comple
 Cmd-Shift-. and Space. Typing a name selects it. Tab moves focus between the sidebar and the list.
 Column headers sort (click again to reverse) and their dividers resize.
 Cmd-2 shows a list, Cmd-3 columns; in columns, Left and Right move between them.
-The default view is set by `view` in `settings.toml`.
+
+Sidebar: drag favorites to reorder them (or Cmd-Option-Up/Down), drop files on any row to move or
+copy them there, drop folders on a group's title to add them. Ctrl-Cmd-T adds the selected folder.
+In the sidebar, Cmd-Delete removes a favorite or forgets a recent folder, and Cmd-E ejects a disk.
+
+With `keymap = "vim"`: j/k, h/l (parent and open, or columns), gg/G, yy/dd/p (copy, cut, paste),
+u and Ctrl-R, cw renames, `-` goes up, `m x` marks the folder as favorite x and `'x` jumps there.
+Letters no longer select by name in this layer.
 
 File operations use Finder's keys: Return renames, Cmd-Shift-N new folder, Cmd-D duplicate,
 Cmd-Delete moves to the Trash, Cmd-Option-Delete deletes permanently (after asking),

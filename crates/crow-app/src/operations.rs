@@ -3,7 +3,7 @@
 //! The engine itself (planning, safety rules, undo) lives in `crow_fs::ops`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -12,6 +12,28 @@ use crow_fs::ops::{self, Outcome, Plan, Progress, Record, Resolution, Trash};
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use gpui::{App, Global, SharedString, prelude::*};
+
+/// What dropping `paths` on the folder `into` does, like Finder: a move within a
+/// volume, a copy across volumes; `copy` (Option held) forces a copy. Items already
+/// in `into`, and folders dropped onto themselves or into their own contents, are
+/// left out; `None` when nothing is left.
+pub fn drop_request(paths: &[PathBuf], into: PathBuf, copy: bool) -> Option<ops::Request> {
+    let paths: Vec<PathBuf> =
+        paths.iter().filter(|p| p.parent() != Some(into.as_path()) && !into.starts_with(p)).cloned().collect();
+    if paths.is_empty() {
+        return None;
+    }
+    let same_volume = paths.iter().all(|p| same_volume(p, &into));
+    Some(if same_volume && !copy { ops::Request::Move { paths, into } } else { ops::Request::Copy { paths, into } })
+}
+
+fn same_volume(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (a.symlink_metadata(), b.metadata()) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev(),
+        _ => false,
+    }
+}
 
 pub struct LogEntry {
     pub record: Record,

@@ -2,23 +2,25 @@
 
 use std::path::{Path, PathBuf};
 
-use crow_core::{Favorite, Tabs, ViewMode};
+use crow_core::{SidebarEdit, Tabs, ViewMode};
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role, SharedString,
     Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, point, prelude::*, px, size,
 };
 
 use crate::actions::{
-    CloseTab, GoBack, GoForward, GoToFolder, MoveDown, MoveUp, NewTab, NextTab, OpenParent, OpenSelection, PreviousTab,
-    SwitchFocus, ToggleHiddenFiles, ViewAsColumns, ViewAsList,
+    AddToSidebar, ApplyThemeEverywhere, CloseTab, GoBack, GoForward, GoToFolder, MoveDown, MoveUp, NewTab, NextTab,
+    OpenParent, PreviousTab, ResetFolderView, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, UseViewAsDefaults,
+    ViewAsColumns, ViewAsList, WhyThisView,
 };
 use crate::operations::{self, Clipboard, Operations};
 use crate::pane::Pane;
 use crate::pane::PaneEvent;
 use crate::preview;
+use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::style::{color, color_alpha, icon, ui_font};
 use crate::text_input::{TextInput, TextInputEvent};
-use crate::ui::{Ui, reload_theme};
+use crate::ui::{self, Ui, reload_theme};
 use crow_fs::ops::{Plan, Request, Resolution};
 use std::collections::HashMap;
 
@@ -45,42 +47,75 @@ pub fn open(dir: PathBuf, bench: bool, cx: &mut App) {
 
 pub struct CrowWindow {
     tabs: Tabs<Entity<Pane>>,
-    favorites: Vec<Favorite>,
-    sidebar_focus: FocusHandle,
-    sidebar_cursor: usize,
+    sidebar: Entity<Sidebar>,
+    /// Benchmark runs leave Recent alone, so its saves don't land in the measurement.
+    bench: bool,
     show_hidden: bool,
     /// The Go to Folder sheet, while open.
     go_to: Option<(Entity<TextInput>, Subscription)>,
     /// A sheet asking before an operation runs (conflicts, permanent delete).
     sheet: Option<Sheet>,
     show_activity: bool,
+    /// "Why this view?", while open.
+    why: Option<FocusHandle>,
+    picker: Option<ThemePicker>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// View ▸ Theme…: "System" first, then every theme in the index. Moving the
+/// cursor shows a theme at once; Return keeps it, Escape goes back.
+struct ThemePicker {
+    focus: FocusHandle,
+    /// `None` is "System".
+    entries: Vec<Option<crow_theme::ThemeInfo>>,
+    cursor: usize,
+}
+
+impl ThemePicker {
+    fn id(&self, i: usize) -> String {
+        match self.entries.get(i) {
+            Some(Some(info)) => info.id.clone(),
+            _ => "system".into(),
+        }
+    }
 }
 
 impl CrowWindow {
     fn new(dir: PathBuf, bench: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/".into()));
-        let mut favorites = crow_core::default_favorites(&home);
-        favorites.push(Favorite { name: "Macintosh HD".into(), path: PathBuf::from("/") });
         let show_hidden = cx.global::<Ui>().settings.show_hidden_files;
-        let mode = cx.global::<Ui>().settings.view;
-        let pane = cx.new(|cx| Pane::new(dir, show_hidden, mode, bench, cx));
+        if !bench {
+            ui::record_visit(&dir, cx);
+        }
+        let pane = cx.new(|cx| Pane::new(dir.clone(), show_hidden, bench, cx));
+        let sidebar = cx.new(|cx| {
+            let mut sidebar = Sidebar::new(cx);
+            sidebar.set_current(dir, cx);
+            sidebar
+        });
         let focus = pane.read(cx).focus_handle().clone();
         window.focus(&focus, cx);
         let subscriptions = vec![
             cx.observe(&pane, |_, _, cx| cx.notify()),
             cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)),
+            cx.subscribe_in(&sidebar, window, |this, _, event, window, cx| this.on_sidebar_event(event, window, cx)),
             cx.observe_window_appearance(window, |_, _, cx| reload_theme(cx)),
+            // A reloaded views.toml applies to every tab's folder at once.
+            cx.observe_global::<Ui>(|this, cx| {
+                for (_, pane) in this.tabs.iter() {
+                    pane.update(cx, |pane, cx| pane.apply_view(cx));
+                }
+            }),
         ];
         Self {
             tabs: Tabs::new(pane),
-            favorites,
-            sidebar_focus: cx.focus_handle(),
-            sidebar_cursor: 0,
+            sidebar,
+            bench,
             show_hidden,
             go_to: None,
             sheet: None,
             show_activity: false,
+            why: None,
+            picker: None,
             _subscriptions: subscriptions,
         }
     }
@@ -97,9 +132,9 @@ impl CrowWindow {
     // ----- window actions -----
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        let (dir, mode) = (self.pane().read(cx).current_dir(cx), self.pane().read(cx).mode());
+        let dir = self.pane().read(cx).current_dir(cx);
         let show_hidden = self.show_hidden;
-        let pane = cx.new(|cx| Pane::new(dir, show_hidden, mode, false, cx));
+        let pane = cx.new(|cx| Pane::new(dir, show_hidden, false, cx));
         self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
         self._subscriptions
             .push(cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)));
@@ -132,10 +167,11 @@ impl CrowWindow {
     }
 
     fn switch_focus(&mut self, _: &SwitchFocus, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar_focus.is_focused(window) {
+        let sidebar = self.sidebar.read(cx).focus_handle(cx);
+        if sidebar.is_focused(window) {
             self.focus_pane(window, cx);
         } else {
-            window.focus(&self.sidebar_focus, cx);
+            window.focus(&sidebar, cx);
         }
         cx.notify();
     }
@@ -231,26 +267,6 @@ impl CrowWindow {
 
     fn go_forward(&mut self, _: &GoForward, _: &mut Window, cx: &mut Context<Self>) {
         self.pane().update(cx, |pane, cx| pane.go_forward(cx));
-    }
-
-    // ----- sidebar actions (same keys as the list, different meaning) -----
-
-    fn sidebar_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_cursor = self.sidebar_cursor.saturating_sub(1);
-        cx.notify();
-    }
-
-    fn sidebar_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_cursor = (self.sidebar_cursor + 1).min(self.favorites.len().saturating_sub(1));
-        cx.notify();
-    }
-
-    fn sidebar_open(&mut self, _: &OpenSelection, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(favorite) = self.favorites.get(self.sidebar_cursor) {
-            let dir = favorite.path.clone();
-            self.pane().update(cx, |pane, cx| pane.navigate(dir, cx));
-            self.focus_pane(window, cx);
-        }
     }
 
     // ----- rendering -----
@@ -372,63 +388,6 @@ impl CrowWindow {
             }))
     }
 
-    fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.global::<Ui>().theme.clone();
-        let focused = self.sidebar_focus.is_focused(window);
-        let current = self.pane().read(cx).current_dir(cx);
-        let count = self.favorites.len();
-        let rows: Vec<(usize, Favorite)> = self.favorites.iter().cloned().enumerate().collect();
-        div()
-            .id("sidebar")
-            .role(Role::ListBox)
-            .aria_label("Favorites")
-            .key_context("Sidebar")
-            .track_focus(&self.sidebar_focus)
-            .on_action(cx.listener(Self::sidebar_up))
-            .on_action(cx.listener(Self::sidebar_down))
-            .on_action(cx.listener(Self::sidebar_open))
-            .w(px(200.))
-            .flex_none()
-            .h_full()
-            .p_2()
-            .bg(color(theme.role("bg-inset")))
-            .border_r_1()
-            .border_color(color(theme.role("border")))
-            .flex()
-            .flex_col()
-            .gap(px(1.))
-            .child(div().px_2().pb_1().text_size(px(11.)).text_color(color(theme.role("fg-muted"))).child("Favorites"))
-            .children(rows.into_iter().map(|(i, favorite)| {
-                let here = favorite.path == current;
-                let cursor = focused && i == self.sidebar_cursor;
-                let target = favorite.path.clone();
-                div()
-                    .id(("favorite", i))
-                    .role(Role::ListBoxOption)
-                    .aria_label(favorite.name.clone())
-                    .aria_position_in_set(i + 1)
-                    .aria_size_of_set(count)
-                    .aria_selected(i == self.sidebar_cursor)
-                    .when(i == self.sidebar_cursor, |row| row.aria_active_descendant())
-                    .h(px(26.))
-                    .px_2()
-                    .rounded_md()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .when(here, |row| row.bg(color(theme.role("selection"))))
-                    .when(cursor, |row| row.bg(color_alpha(theme.role("accent"), 0x55)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.sidebar_cursor = i;
-                        let dir = target.clone();
-                        this.pane().update(cx, |pane, cx| pane.navigate(dir, cx));
-                        this.focus_pane(window, cx);
-                    }))
-                    .children(icon(&favorite.path, true, 16).map(|i| img(i).size(px(16.))))
-                    .child(favorite.name)
-            }))
-    }
-
     /// List view's right-hand preview pane (column view shows it as its last column).
     fn render_preview(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
@@ -452,7 +411,7 @@ impl CrowWindow {
     fn render_path_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
-        let settings_error = ui.settings_error.clone();
+        let settings_error = ui.config_error();
         let pane = self.pane().read(cx);
         let target = pane.cursor_entry(cx).map_or_else(|| pane.current_dir(cx), |e| e.path.clone());
         let parts = crow_macos::display_components(&target);
@@ -466,7 +425,9 @@ impl CrowWindow {
             format!("{} — {} of {} · {percent}%", r.label, p.done_items, p.total_items)
         });
         let op_message = ops.message.clone();
+        let hint = pane.pending_hint();
         let (status, is_error): (SharedString, bool) = match (pane.error(cx), settings_error) {
+            _ if hint.is_some() => (hint.unwrap_or_default().into(), false),
             _ if running.is_some() => (running.clone().unwrap_or_default().into(), false),
             _ if op_message.is_some() => op_message.clone().unwrap_or_default(),
             (Some(e), _) | (None, Some(e)) => (e, true),
@@ -606,6 +567,14 @@ impl CrowWindow {
                 ));
                 cx.notify();
             }
+            PaneEvent::Entered(dir) => {
+                if !self.bench {
+                    ui::record_visit(dir, cx);
+                }
+                let dir = dir.clone();
+                self.sidebar.update(cx, |s, cx| s.set_current(dir, cx));
+            }
+            PaneEvent::Mark { key, set } => self.mark(*key, *set, window, cx),
             PaneEvent::Paste { into, move_items } => {
                 // Our clipboard if the pasteboard still holds what we put there; otherwise
                 // whatever another app (Finder) copied.
@@ -963,6 +932,418 @@ impl CrowWindow {
     }
 }
 
+impl CrowWindow {
+    fn on_sidebar_event(&mut self, event: &SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            SidebarEvent::Open(dir) => {
+                let dir = dir.clone();
+                self.pane().update(cx, |pane, cx| pane.navigate(dir, cx));
+                self.focus_pane(window, cx);
+            }
+            SidebarEvent::Run(request) => self.run_request(request.clone(), window, cx),
+            SidebarEvent::Message(text, error) => {
+                cx.global_mut::<Operations>().message = Some((text.clone(), *error));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Vim marks: `m x` marks the folder shown as favorite `x`; `'x` goes there.
+    fn mark(&mut self, key: char, set: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.pane().read(cx).current_dir(cx);
+        if set {
+            ui::edit_sidebar(SidebarEdit::SetKey { path: dir, key }, cx);
+            cx.global_mut::<Operations>().message = Some((format!("Marked as {key}").into(), false));
+            cx.notify();
+            return;
+        }
+        let ui = cx.global::<Ui>();
+        match ui.sidebar.find_key(key, &ui.home) {
+            Some(target) => self.pane().update(cx, |pane, cx| pane.navigate(target, cx)),
+            None => {
+                window.play_system_bell();
+                cx.global_mut::<Operations>().message = Some((format!("No mark {key}").into(), true));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Finder's File ▸ Add to Sidebar: the selected folders, or the folder shown.
+    fn add_to_sidebar(&mut self, _: &AddToSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.pane().read(cx);
+        let selected: Vec<PathBuf> = pane.selected_paths(cx).into_iter().filter(|p| p.is_dir()).collect();
+        let paths = if selected.is_empty() { vec![pane.current_dir(cx)] } else { selected };
+        let at = cx.global::<Ui>().favorites().first().map_or(0, |(_, f)| f.len());
+        for (n, path) in paths.into_iter().enumerate() {
+            ui::edit_sidebar(SidebarEdit::Add { path, at: (0, at + n) }, cx);
+        }
+    }
+
+    // ----- view settings -----
+
+    fn why_this_view(&mut self, _: &WhyThisView, window: &mut Window, cx: &mut Context<Self>) {
+        if self.why.take().is_some() {
+            self.focus_pane(window, cx);
+        } else {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            self.why = Some(focus);
+        }
+        cx.notify();
+    }
+
+    fn close_why(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.why = None;
+        self.focus_pane(window, cx);
+        cx.notify();
+    }
+
+    fn use_view_as_defaults(&mut self, _: &UseViewAsDefaults, _: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.pane().read(cx).dir().to_path_buf();
+        ui::use_view_as_defaults(dir, cx);
+        cx.global_mut::<Operations>().message = Some(("This view is now the default for all folders".into(), false));
+    }
+
+    fn reset_folder_view(&mut self, _: &ResetFolderView, _: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.pane().read(cx).dir().to_path_buf();
+        ui::reset_view(dir, cx);
+    }
+
+    fn render_why(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let focus = self.why.as_ref()?;
+        let ui = cx.global::<Ui>();
+        let theme = ui.theme.clone();
+        let dir = self.pane().read(cx).dir().to_path_buf();
+        let resolved = ui.views.resolve(&dir);
+        let has_override = ui.views.has_folder_override(&dir);
+        let views_file = ui.config_dir.join("views.toml");
+        let folder = crow_core::abbreviate_home(&dir, &ui.home);
+        let (fg, muted) = (theme.role("fg"), theme.role("fg-muted"));
+        let mode = match resolved.view.0 {
+            ViewMode::List => "List",
+            ViewMode::Columns => "Columns",
+        };
+        let sort_title = |key: crow_fs::SortKey| match key {
+            crow_fs::SortKey::Name => "Name",
+            crow_fs::SortKey::Size => "Size",
+            crow_fs::SortKey::Kind => "Kind",
+            crow_fs::SortKey::Modified => "Date Modified",
+            crow_fs::SortKey::Added => "Date Added",
+        };
+        let direction = match (resolved.sort.0, resolved.ascending.0) {
+            (crow_fs::SortKey::Name | crow_fs::SortKey::Kind, true) => "A to Z",
+            (crow_fs::SortKey::Name | crow_fs::SortKey::Kind, false) => "Z to A",
+            (crow_fs::SortKey::Size, true) => "smallest first",
+            (crow_fs::SortKey::Size, false) => "largest first",
+            (_, true) => "oldest first",
+            (_, false) => "newest first",
+        };
+        let columns = resolved.columns.0.join(", ");
+        let lines: Vec<(&str, String, String)> = vec![
+            ("View", mode.into(), resolved.view.1.to_string()),
+            ("Sort", sort_title(resolved.sort.0).into(), resolved.sort.1.to_string()),
+            ("Order", direction.into(), resolved.ascending.1.to_string()),
+            (
+                "Folders",
+                if resolved.folders_first.0 { "first" } else { "mixed with files" }.into(),
+                resolved.folders_first.1.to_string(),
+            ),
+            ("Columns", columns, resolved.columns.1.to_string()),
+        ];
+        let rules = if resolved.matched_rules.is_empty() {
+            "No rules in views.toml match this folder.".to_owned()
+        } else {
+            format!("Matching rules, in order: {}", resolved.matched_rules.join(", "))
+        };
+        let button = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(label)
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .bg(color(theme.role("surface-raised")))
+                .child(label)
+        };
+        Some(
+            div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
+                div()
+                    .id("why-this-view")
+                    .role(Role::Dialog)
+                    .aria_label(format!("Why this view: {folder}"))
+                    .key_context("Sheet")
+                    .track_focus(focus)
+                    .on_action(
+                        cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.close_why(window, cx)),
+                    )
+                    .on_action(
+                        cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_why(window, cx)),
+                    )
+                    .w(px(560.))
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(color(theme.role("surface")))
+                    .border_1()
+                    .border_color(color(theme.role("border")))
+                    .shadow_lg()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Why this view? {folder}")))
+                    .children(lines.into_iter().enumerate().map(|(i, (what, value, source))| {
+                        div()
+                            .id(("why-line", i))
+                            .role(Role::ListItem)
+                            .aria_label(format!("{what}: {value}, from {source}"))
+                            .flex()
+                            .gap_3()
+                            .child(div().w(px(70.)).text_color(color(muted)).child(what))
+                            .child(div().w(px(190.)).text_color(color(fg)).child(value))
+                            .child(div().flex_1().text_size(px(12.)).text_color(color(muted)).child(source))
+                    }))
+                    .child(div().pt_1().text_size(px(12.)).text_color(color(muted)).child(rules))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .pt_2()
+                            .child(button("why-open-file", "Edit views.toml").on_click(move |_, _, _| {
+                                if let Err(e) = std::process::Command::new("open").arg("-t").arg(&views_file).spawn() {
+                                    tracing::warn!("open views.toml: {e}");
+                                }
+                            }))
+                            .child(div().flex_1())
+                            .when(has_override, |row| {
+                                row.child(button("why-reset", "Reset This Folder").on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.reset_folder_view(&ResetFolderView, window, cx);
+                                        this.close_why(window, cx);
+                                    },
+                                )))
+                            })
+                            .child(button("why-defaults", "Use as Defaults").on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.use_view_as_defaults(&UseViewAsDefaults, window, cx);
+                                    this.close_why(window, cx);
+                                },
+                            )))
+                            .child(
+                                button("why-close", "Close")
+                                    .on_click(cx.listener(|this, _, window, cx| this.close_why(window, cx))),
+                            ),
+                    ),
+            ),
+        )
+    }
+
+    // ----- theme picker -----
+
+    fn show_theme_picker(&mut self, _: &ShowThemePicker, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker.is_some() {
+            self.cancel_picker(window, cx);
+            return;
+        }
+        let dir = crow_theme::themes_dir();
+        let task = cx.background_spawn(async move { crow_theme::list_theme_infos(&dir) });
+        cx.spawn_in(window, async move |this, cx| {
+            let infos = task.await;
+            this.update_in(cx, |this, window, cx| this.open_picker(infos, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn open_picker(&mut self, infos: Vec<crow_theme::ThemeInfo>, window: &mut Window, cx: &mut Context<Self>) {
+        // Grouped like the theme index's own split: dark themes, then light.
+        let mut infos = infos;
+        infos.sort_by_key(|i| (i.variant == crow_theme::Variant::Light, i.name.to_lowercase()));
+        let mut entries: Vec<Option<crow_theme::ThemeInfo>> = vec![None];
+        entries.extend(infos.into_iter().map(Some));
+        let current = cx.global::<Ui>().settings.theme.clone();
+        let cursor = entries.iter().position(|e| e.as_ref().is_some_and(|i| i.id == current)).unwrap_or(0);
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.picker = Some(ThemePicker { focus, entries, cursor });
+        cx.notify();
+    }
+
+    fn move_picker(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(picker) = &mut self.picker else { return };
+        let last = picker.entries.len().saturating_sub(1);
+        picker.cursor = picker.cursor.saturating_add_signed(delta).min(last);
+        let id = picker.id(picker.cursor);
+        cx.global_mut::<Ui>().preview_theme = Some(id);
+        reload_theme(cx);
+        cx.notify();
+    }
+
+    fn select_picker(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(picker) = &self.picker {
+            let delta = index as isize - picker.cursor as isize;
+            self.move_picker(delta, cx);
+        }
+    }
+
+    fn confirm_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.take() else { return };
+        ui::choose_theme(&picker.id(picker.cursor), cx);
+        self.focus_pane(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker = None;
+        cx.global_mut::<Ui>().preview_theme = None;
+        reload_theme(cx);
+        self.focus_pane(window, cx);
+        cx.notify();
+    }
+
+    /// "Apply to All Apps": the chosen theme becomes the global pick for its variant,
+    /// and Crow follows "System" from then on.
+    fn apply_everywhere(&mut self, _: &ApplyThemeEverywhere, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.take() else { return };
+        match picker.entries.get(picker.cursor) {
+            Some(Some(info)) => match crow_theme::load_theme(&crow_theme::themes_dir(), &info.id) {
+                Ok(theme) => ui::apply_theme_everywhere(&theme, cx),
+                Err(e) => cx.global_mut::<Operations>().message = Some((e.into(), true)),
+            },
+            _ => ui::choose_theme("system", cx),
+        }
+        self.focus_pane(window, cx);
+        cx.notify();
+    }
+
+    fn render_picker(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let picker = self.picker.as_ref()?;
+        let ui = cx.global::<Ui>();
+        let theme = ui.theme.clone();
+        let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
+        let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
+        let count = picker.entries.len();
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        let mut last_variant = None;
+        for (i, entry) in picker.entries.iter().enumerate() {
+            let variant = entry.as_ref().map(|e| e.variant);
+            if variant.is_some() && variant != last_variant {
+                let title = if variant == Some(crow_theme::Variant::Light) { "Light" } else { "Dark" };
+                rows.push(
+                    div()
+                        .px_2()
+                        .pt_2()
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(color(muted))
+                        .child(title)
+                        .into_any_element(),
+                );
+                last_variant = variant;
+            }
+            let label = entry.as_ref().map_or_else(|| "System (follows macOS)".to_owned(), |e| e.name.clone());
+            let selected = i == picker.cursor;
+            rows.push(
+                div()
+                    .id(("theme", i))
+                    .role(Role::ListBoxOption)
+                    .aria_label(label.clone())
+                    .aria_selected(selected)
+                    .aria_position_in_set(i + 1)
+                    .aria_size_of_set(count)
+                    .when(selected, |r| r.aria_active_descendant())
+                    .px_2()
+                    .py(px(3.))
+                    .rounded_md()
+                    .text_color(color(fg))
+                    .when(selected, |r| r.bg(color_alpha(accent, 0x55)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_picker(i, cx)))
+                    .child(label)
+                    .into_any_element(),
+            );
+        }
+        let mut context = "Sheet ThemePicker".to_owned();
+        if vim {
+            context.push_str(" vim");
+        }
+        let button = |id: &'static str, label: &'static str, primary: bool| {
+            div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(label)
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .bg(color(if primary { accent } else { theme.role("surface-raised") }))
+                .text_color(color(if primary { theme.role("on-accent") } else { fg }))
+                .child(label)
+        };
+        Some(
+            div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
+                div()
+                    .id("theme-picker")
+                    .role(Role::Dialog)
+                    .aria_label("Theme")
+                    .key_context(context.as_str())
+                    .track_focus(&picker.focus)
+                    .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_picker(-1, cx)))
+                    .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_picker(1, cx)))
+                    .on_action(cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| {
+                        this.confirm_picker(window, cx)
+                    }))
+                    .on_action(
+                        cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.cancel_picker(window, cx)),
+                    )
+                    .on_action(cx.listener(Self::apply_everywhere))
+                    .w(px(360.))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(color(theme.role("surface")))
+                    .border_1()
+                    .border_color(color(theme.role("border")))
+                    .shadow_lg()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Theme"))
+                    .child(
+                        div()
+                            .id("theme-list")
+                            .role(Role::ListBox)
+                            .aria_label("Themes")
+                            .max_h(px(380.))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .children(rows),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(color(muted))
+                            .child("Return keeps it for Crow. Apply to All Apps (⌘↩) sets it for every app that reads the theme index."),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(button("theme-everywhere", "Apply to All Apps", false).on_click(cx.listener(
+                                |this, _, window, cx| this.apply_everywhere(&ApplyThemeEverywhere, window, cx),
+                            )))
+                            .child(div().flex_1())
+                            .child(
+                                button("theme-cancel", "Cancel", false)
+                                    .on_click(cx.listener(|this, _, window, cx| this.cancel_picker(window, cx))),
+                            )
+                            .child(
+                                button("theme-ok", "Choose", true)
+                                    .on_click(cx.listener(|this, _, window, cx| this.confirm_picker(window, cx))),
+                            ),
+                    ),
+            ),
+        )
+    }
+}
+
 impl Render for CrowWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.global::<Ui>();
@@ -973,12 +1354,16 @@ impl Render for CrowWindow {
         window.set_window_title(&title);
         let title_bar = self.render_title_bar(&title, cx);
         let tab_bar = (self.tabs.len() > 1).then(|| self.render_tab_bar(cx));
-        let sidebar = self.render_sidebar(window, cx);
+        let current = self.pane().read(cx).current_dir(cx);
+        self.sidebar.update(cx, |s, cx| s.set_current(current, cx));
+        let sidebar = self.sidebar.clone();
         let preview = list_view.then(|| self.render_preview(cx));
         let path_bar = self.render_path_bar(cx);
         let go_to = self.render_go_to(cx);
         let sheet = self.render_sheet(cx);
         let activity = self.show_activity.then(|| self.render_activity(cx));
+        let why = self.render_why(cx);
+        let picker = self.render_picker(cx);
         div()
             .id("crow")
             .role(Role::Application)
@@ -999,6 +1384,11 @@ impl Render for CrowWindow {
             .on_action(cx.listener(|this, _: &crate::actions::Undo, _, cx| this.undo(None, cx)))
             .on_action(cx.listener(|this, _: &crate::actions::Redo, _, cx| this.redo(cx)))
             .on_action(cx.listener(|_, _: &crate::actions::CancelOperation, _, cx| operations::cancel_running(cx)))
+            .on_action(cx.listener(Self::add_to_sidebar))
+            .on_action(cx.listener(Self::why_this_view))
+            .on_action(cx.listener(Self::use_view_as_defaults))
+            .on_action(cx.listener(Self::reset_folder_view))
+            .on_action(cx.listener(Self::show_theme_picker))
             .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, _, cx| {
                 this.show_activity = !this.show_activity;
                 cx.notify();
@@ -1025,6 +1415,8 @@ impl Render for CrowWindow {
             .children(go_to)
             .children(sheet)
             .children(activity)
+            .children(why)
+            .children(picker)
     }
 }
 
@@ -1056,6 +1448,7 @@ mod tests {
             crate::ui::init_for_tests(cx);
             crate::operations::init(cx, std::sync::Arc::new(crate::operations::FolderTrash(trash)));
             cx.bind_keys(crate::actions::finder_keymap());
+            cx.bind_keys(crate::actions::vim_keymap());
             cx.bind_keys(crate::text_input::keymap());
         });
         let dir = dir.to_path_buf();
@@ -1099,24 +1492,42 @@ mod tests {
         pane(view, cx).read_with(cx, |p, cx| p.current_dir(cx))
     }
 
+    fn config_dir(cx: &VisualTestContext) -> PathBuf {
+        cx.read(|cx| cx.global::<Ui>().config_dir.clone())
+    }
+
+    /// Replace a config file and reload, as the file watcher would.
+    fn write_config(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, name: &str, text: &str) {
+        let dir = config_dir(cx);
+        std::fs::create_dir_all(&dir).expect("config dir");
+        std::fs::write(dir.join(name), text).expect("write config");
+        cx.update(|_, cx| crate::ui::reload_config(cx));
+        settle(view, cx);
+    }
+
+    fn favorites_toml(paths: &[&Path]) -> String {
+        let items: String = paths.iter().map(|p| format!("  {{ path = \"{}\" }},\n", p.display())).collect();
+        format!("[[group]]\nname = \"Favorites\"\nitems = [\n{items}]\n[recent]\nshow = false\n")
+    }
+
+    fn sidebar_paths(cx: &VisualTestContext) -> Vec<PathBuf> {
+        cx.read(Sidebar::paths)
+    }
+
     #[gpui::test]
     fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) {
         let root = fixture("contexts");
         std::fs::write(root.join("beta/b.txt"), "").expect("create fixture");
         let (view, mut cx) = open(cx, &root);
-        view.update(&mut cx, |w, _| {
-            w.favorites = vec![
-                Favorite { name: "alpha".into(), path: root.join("alpha") },
-                Favorite { name: "beta".into(), path: root.join("beta") },
-            ];
-        });
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
         assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
 
         cx.simulate_keystrokes("down");
         assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "Down in the list moves the selection");
 
         cx.simulate_keystrokes("tab down");
-        assert_eq!(view.read_with(&cx, |w, _| w.sidebar_cursor), 1, "Down in the sidebar moves its cursor");
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1, "Down in the sidebar moves its cursor");
         assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "…and leaves the list alone");
 
         cx.simulate_keystrokes("enter");
@@ -1127,6 +1538,219 @@ mod tests {
 
         cx.simulate_keystrokes("enter");
         assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "Return in the list means rename");
+    }
+
+    #[gpui::test]
+    fn favorites_reorder_remove_and_add_from_the_keyboard(cx: &mut TestAppContext) {
+        let root = fixture("favorites");
+        let (view, mut cx) = open(cx, &root);
+        let (alpha, beta) = (root.join("alpha"), root.join("beta"));
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha, &beta]));
+        assert_eq!(sidebar_paths(&cx), [alpha.clone(), beta.clone()]);
+
+        cx.simulate_keystrokes("tab cmd-alt-down");
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), [beta.clone(), alpha.clone()], "Cmd-Option-Down moves the favorite down");
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1, "…and the cursor goes with it");
+        let text = std::fs::read_to_string(config_dir(&cx).join("sidebar.toml")).unwrap();
+        assert!(text.find("beta").unwrap() < text.find("alpha").unwrap(), "saved in sidebar.toml: {text}");
+
+        cx.simulate_keystrokes("cmd-backspace");
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), std::slice::from_ref(&beta), "Cmd-Delete removes it from the sidebar");
+        assert!(alpha.is_dir(), "…and only from the sidebar");
+
+        // In the list, Ctrl-Cmd-T adds the selected folder (Finder's Add to Sidebar).
+        cx.simulate_keystrokes("tab");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+        cx.simulate_keystrokes("ctrl-cmd-t");
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), [beta, alpha]);
+    }
+
+    #[gpui::test]
+    fn dropping_on_a_favorite_moves_into_it(cx: &mut TestAppContext) {
+        let root = fixture("drop-favorite");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("beta")]));
+        drop_on(&mut cx, "sidebar-0", vec![root.join("notes.txt")]);
+        settle(&view, &mut cx);
+        assert!(root.join("beta/notes.txt").exists());
+
+        // Folders dropped on a group's title become favorites.
+        drop_on(&mut cx, "sidebar-header-Favorites", vec![root.join("alpha")]);
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), [root.join("beta"), root.join("alpha")]);
+        assert!(root.join("alpha").is_dir(), "added, not moved");
+    }
+
+    #[gpui::test]
+    fn recent_lists_visited_folders_that_are_not_favorites(cx: &mut TestAppContext) {
+        let root = fixture("recent");
+        let (view, mut cx) = open(cx, &root);
+        write_config(
+            &view,
+            &mut cx,
+            "sidebar.toml",
+            &favorites_toml(&[&root.join("beta")]).replace("show = false", "show = true"),
+        );
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        let paths = sidebar_paths(&cx);
+        assert!(paths.contains(&root.join("alpha")), "visited: {paths:?}");
+        assert_eq!(paths.iter().filter(|p| **p == root.join("beta")).count(), 1, "favorites aren't repeated");
+        let state = cx.update(|_, cx| cx.global::<Ui>().state_dir.clone());
+        assert!(state.join("recent.json").exists(), "saved for next time");
+    }
+
+    #[gpui::test]
+    fn view_changes_are_remembered_per_folder(cx: &mut TestAppContext) {
+        let root = fixture("views");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        let text = std::fs::read_to_string(config_dir(&cx).join("views.toml")).unwrap();
+        assert!(text.contains("view = \"columns\""), "saved as this folder's own setting: {text}");
+
+        // A folder without its own setting shows the defaults…
+        let mode = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.mode());
+        pane(&view, &cx).update(&mut cx, |p, cx| p.navigate(root.join("beta"), cx));
+        settle(&view, &mut cx);
+        assert_eq!(mode(&cx), ViewMode::List);
+        // …and going back shows the remembered one.
+        cx.simulate_keystrokes("cmd-[");
+        settle(&view, &mut cx);
+        assert_eq!(mode(&cx), ViewMode::Columns);
+    }
+
+    #[gpui::test]
+    fn rules_apply_live_and_why_explains(cx: &mut TestAppContext) {
+        let root = fixture("rules");
+        let (view, mut cx) = open(cx, &root);
+        let sort = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.sort());
+        assert_eq!(sort(&cx).key, crow_fs::SortKey::Name);
+
+        let rules = format!("{}\n[[rule]]\npath = \"{}\"\nsort = \"size\"\n", crow_core::DEFAULT_VIEWS, root.display());
+        write_config(&view, &mut cx, "views.toml", &rules);
+        assert_eq!(sort(&cx).key, crow_fs::SortKey::Size, "an edited views.toml applies to the open folder");
+        assert!(!sort(&cx).ascending, "sizes start largest first");
+
+        cx.simulate_keystrokes("cmd-j");
+        assert!(view.read_with(&cx, |w, _| w.why.is_some()), "Cmd-J asks why");
+        let spoken = cx.update(|window, cx| {
+            let _ = window;
+            let w = view.read(cx);
+            let ui = cx.global::<Ui>();
+            ui.views.resolve(&w.pane().read(cx).current_dir(cx)).sort.1.to_string()
+        });
+        assert_eq!(spoken, format!("rule \"{}\" in views.toml", root.display()));
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.why.is_none()));
+
+        // A broken file keeps the last good settings and says why.
+        write_config(&view, &mut cx, "views.toml", "[defaults]\nsort = \"colour\"\n");
+        assert_eq!(sort(&cx).key, crow_fs::SortKey::Size);
+        let error = cx.update(|_, cx| cx.global::<Ui>().config_error());
+        assert!(error.is_some_and(|e| e.contains("colour")));
+    }
+
+    fn use_vim(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+        write_config(view, cx, "settings.toml", "keymap = \"vim\"\n");
+    }
+
+    #[gpui::test]
+    fn vim_layer_moves_opens_and_goes_up(cx: &mut TestAppContext) {
+        let root = fixture("vim");
+        let (view, mut cx) = open(cx, &root);
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("j");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+        cx.simulate_keystrokes("shift-g");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+        cx.simulate_keystrokes("g g");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+        cx.simulate_keystrokes("n");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "letters don't select by name");
+        cx.simulate_keystrokes("l");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        cx.simulate_keystrokes("h");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "h selects where you came from");
+    }
+
+    #[gpui::test]
+    fn vim_marks_set_favorites_and_jump(cx: &mut TestAppContext) {
+        let root = fixture("marks");
+        let (view, mut cx) = open(cx, &root.join("alpha"));
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]));
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("m");
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.pending_hint().is_some()), "m waits for a letter");
+        cx.simulate_keystrokes("j");
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), [root.join("alpha")], "the folder became a favorite with mark j");
+        let text = std::fs::read_to_string(config_dir(&cx).join("sidebar.toml")).unwrap();
+        assert!(text.contains("key = \"j\""), "{text}");
+
+        cx.simulate_keystrokes("h");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root);
+        cx.simulate_keystrokes("' j");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"), "'j jumps to the mark");
+        cx.simulate_keystrokes("' q");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"), "an unknown mark goes nowhere");
+    }
+
+    /// Two themes in a temp theme index, shared by every test (the variable is process-wide).
+    fn theme_index() -> &'static Path {
+        static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("crow-app-theme-index-{}", std::process::id()));
+            std::fs::create_dir_all(dir.join("schemes")).unwrap();
+            let base = include_str!("../../crow-theme/src/fallback.json");
+            std::fs::write(dir.join("schemes/firebox.json"), base).unwrap();
+            let light = base.replace("\"dark\"", "\"light\"").replace("FireBox", "Paper").replace("#111111", "#fafafa");
+            std::fs::write(dir.join("schemes/paper.json"), light).unwrap();
+            std::fs::write(dir.join("defaults.json"), r#"{"dark":"firebox","light":"paper"}"#).unwrap();
+            // SAFETY: set once, before any test reads it; all tests see the same value.
+            unsafe {
+                std::env::set_var("THEMES_DIR", &dir);
+                std::env::set_var("THEMES_STATE_DIR", dir.join("state"));
+            }
+            dir
+        })
+    }
+
+    #[gpui::test]
+    fn theme_picker_previews_reverts_and_saves(cx: &mut TestAppContext) {
+        theme_index();
+        let root = fixture("themes");
+        let (view, mut cx) = open(cx, &root);
+        let theme = |cx: &VisualTestContext| cx.read(|cx| cx.global::<Ui>().theme.name.clone());
+        let start = theme(&cx);
+
+        cx.simulate_keystrokes("cmd-alt-t");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.picker.is_some()));
+        // System, then FireBox (dark), then Paper (light).
+        cx.simulate_keystrokes("down down");
+        assert_eq!(theme(&cx), "Paper", "moving the cursor shows the theme");
+        cx.simulate_keystrokes("escape");
+        assert_eq!(theme(&cx), start, "Escape goes back");
+
+        cx.simulate_keystrokes("cmd-alt-t");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("down down enter");
+        settle(&view, &mut cx);
+        assert_eq!(theme(&cx), "Paper");
+        let settings = std::fs::read_to_string(config_dir(&cx).join("settings.toml")).unwrap();
+        assert!(settings.contains("theme = \"paper\""), "{settings}");
+        assert!(view.read_with(&cx, |w, _| w.picker.is_none()));
     }
 
     #[gpui::test]
