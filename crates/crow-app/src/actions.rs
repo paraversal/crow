@@ -1,5 +1,5 @@
 //! Actions and the Finder keymap. Key contexts nest as
-//! `Crow > {Sidebar, FileList}`: the same key can mean different things in each.
+//! `Crow > {Sidebar, FileList [ColumnView]}`: the same key can mean different things in each.
 
 use gpui::{KeyBinding, actions};
 
@@ -17,11 +17,16 @@ actions!(
         OpenSelection,
         Rename,
         QuickLook,
+        // Column view
+        MoveLeft,
+        MoveRight,
         // Navigation within a tab
         OpenParent,
         GoBack,
         GoForward,
         GoToFolder,
+        ViewAsList,
+        ViewAsColumns,
         // Window
         NewTab,
         CloseTab,
@@ -47,6 +52,10 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-o", OpenSelection, Some("FileList")),
         KeyBinding::new("enter", Rename, Some("FileList")),
         KeyBinding::new("space", QuickLook, Some("FileList")),
+        KeyBinding::new("left", MoveLeft, Some("ColumnView")),
+        KeyBinding::new("right", MoveRight, Some("ColumnView")),
+        KeyBinding::new("cmd-2", ViewAsList, Some("Crow")),
+        KeyBinding::new("cmd-3", ViewAsColumns, Some("Crow")),
         KeyBinding::new("up", MoveUp, Some("Sidebar")),
         KeyBinding::new("down", MoveDown, Some("Sidebar")),
         KeyBinding::new("enter", OpenSelection, Some("Sidebar")),

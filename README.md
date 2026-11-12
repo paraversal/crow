@@ -3,7 +3,7 @@
 A Finder-style file explorer for macOS, written in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 It keeps Finder's directness and aims to be faster, more predictable and keyboard-first.
 
-Status: Phase 1 (the "daily driver" MVP), milestone M2.
+Status: Phase 1 (the "daily driver" MVP), milestone M3.
 
 ## Build and run
 
@@ -37,6 +37,8 @@ Logs go to `~/Library/Logs/Crow/crow.log`.
 Finder's keys work as in Finder: arrows (Shift extends), Option-Up/Down, Cmd-Up/Down,
 Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (Tab completes),
 Cmd-Shift-. and Space. Typing a name selects it. Tab moves focus between the sidebar and the list.
-Column headers sort; click again to reverse.
+Column headers sort (click again to reverse) and their dividers resize.
+Cmd-2 shows a list, Cmd-3 columns; in columns, Left and Right move between them.
+The default view is set by `view` in `settings.toml`.
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).
