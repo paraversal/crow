@@ -1,5 +1,5 @@
 # u3-top-band progress
-Branch: `ui-u3-top-band` · PR: none · Last updated: 2026-11-13
+Branch: `ui-u3-top-band` · PR: https://github.com/paraversal/file-crow/pull/10 · Last updated: 2026-11-13 · State: PR open (not merged)
 
 ## Status
 | Item | State | Notes |
@@ -46,6 +46,7 @@ Branch: `ui-u3-top-band` · PR: none · Last updated: 2026-11-13
 ## Log
 - 2026-11-13: answers: Q1 close search on tab change; Q2 focus + select all; Q3 reset to All; Q4 min 640×400; Q5 no match keys; Q6 aria \", unavailable\"; Q7 left edge 86 px; Q8 leave board-D tokens out; Q9 U6 fixes SearchResults vim.
 - 2026-11-13: I1 done. Note: the first traffic-light measurement hit a stale running Crow (old 44 px band); killed it and re-measured the new build. `cargo clippy -p crow-app --all-targets` clean, `cargo test -p crow-app` 90 passed.
+- 2026-11-13: pushed `ui-u3-top-band`, opened PR #10 with band B/D screenshots; rebuilt a clean bundle afterwards.
 - 2026-11-13: hand-verified in the bundle: band B and D in dark and light, traffic-light centring (measured 26.75 pt vs 26), narrow window at 660, Esc/Done/⌘F refocus with select-all, Tab moving focus to the results and the ring following both ways. Bundle rebuilt after each change; screenshot crops kept in `/tmp` only.
 - 2026-11-13: README ▸ Keys and `docs/testing.md` updated (band wording, Go to, match modes, five new hand rows; automated paragraph names the new tests).
 - 2026-11-13: I7 done, including the minimum window size. `cargo test --workspace` green (101 app tests), clippy clean.
@@ -53,4 +54,4 @@ Branch: `ui-u3-top-band` · PR: none · Last updated: 2026-11-13
 - 2026-11-13: read AGENTS.md, execute-plan skill, index README, U3 plan, U1 progress, `docs/testing.md`; confirmed U1 and U2 merged on `main`; created branch and this file; asked Q1–Q9.
 
 ## Next
-Commit the focus-ring fix, push `ui-u3-top-band`, open the PR (screenshots of B and D; no bench needed).
+None: PR #10 is open for review and hand testing. Do not merge. Remaining hand checks: tooltip hover pass, VoiceOver, Names-mode speed on a big tree.
