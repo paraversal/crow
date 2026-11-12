@@ -29,5 +29,21 @@ Branch: `ui-u1-shared-parts` · PR: none · Last updated: 2026-11-12
 - 2026-11-12: I4–I6 done. Sheets keep their ids; Wide is 620, so Why and the palette widen. Scrim click is mouse-down and the panel stops propagation (verified by clicking `sheet-cancel`). `cargo test --workspace` green (71 app tests), clippy clean.
 - 2026-11-12: Bench fixture exists at `target/fixture-100k`; bench vs `main` still to run.
 
+## Bench (100k fixture, same machine)
+| Run | warm first paint | p50 | p95 | p99 |
+| --- | --- | --- | --- | --- |
+| U1 branch | 10 ms | 8.33 ms | 8.66 ms | 8.79 ms |
+| `main` | 10 ms | 8.33 ms | 8.70 ms | 8.93 ms |
+
+Within run-to-run noise; recorded in `docs/testing.md` next to M6.
+
+## Hand checks done
+- Bundle (`scripts/bundle.sh`) built; `Lucide-LICENSE.txt` is in `Contents/Resources/`.
+- Title bar: back/forward and list/columns are drawn stroke icons, crisp on Retina, in FireBox.
+- Go to Folder sheet: scrim darkens the window (sampled pixels outside the panel darken; `bg`-on-`bg` areas stay equal, as expected for a dark theme), panel 12 px radius, input focused, traffic lights still visible.
+- Window drag with the sheet open: the mouse-down first cancels the sheet (outside-click semantics); the drag then moves the window, so dragging is not broken and no scrim-below-title-band change is needed.
+- Back tooltip over the disabled button: "Back ⌘[" with the key in `fg-muted`, as the boards show.
+- Not hand-checked yet: dark/light scrim pair on a light theme, tooltips for every other Target-table element, the Vim palette keys in the bundle, `cursor_ring` crispness (U8 uses it).
+
 ## Next
-Run the 100k bench on this branch and on `main`, record both; then README/docs/testing.md, bundle build and hand checks.
+Commit README/docs/progress, push, open the PR.
