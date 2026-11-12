@@ -38,6 +38,8 @@ actions!(
 );
 
 pub enum TextInputEvent {
+    /// The text changed (typing, deleting, pasting, or `set_text`).
+    Changed,
     Confirmed,
     Cancelled,
     CompletionRequested,
@@ -109,6 +111,7 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         window.notify_text_input_changed(&self.focus_handle);
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 
@@ -390,6 +393,7 @@ impl EntityInputHandler for TextInput {
         self.selection_reversed = false;
         self.marked_range.take();
         window.notify_text_input_changed(&self.focus_handle);
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 
@@ -426,6 +430,7 @@ impl EntityInputHandler for TextInput {
         self.selection_reversed = false;
 
         window.notify_text_input_changed(&self.focus_handle);
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 

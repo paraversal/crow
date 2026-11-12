@@ -60,6 +60,9 @@ actions!(
         GoToFolder,
         ViewAsList,
         ViewAsColumns,
+        // List filter
+        StartFilter,
+        ClearFilter,
         // Window
         NewTab,
         CloseTab,
@@ -81,6 +84,10 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("shift-up", ExtendUp, Some("FileList")),
         KeyBinding::new("shift-down", ExtendDown, Some("FileList")),
         KeyBinding::new("cmd-a", SelectAll, Some("FileList")),
+        KeyBinding::new("/", StartFilter, Some("FileList")),
+        KeyBinding::new("escape", ClearFilter, Some("FileList && Filtered")),
+        KeyBinding::new("up", MoveUp, Some("Filter")),
+        KeyBinding::new("down", MoveDown, Some("Filter")),
         KeyBinding::new("cmd-down", OpenSelection, Some("FileList")),
         KeyBinding::new("cmd-o", OpenSelection, Some("FileList")),
         KeyBinding::new("enter", Rename, Some("FileList")),

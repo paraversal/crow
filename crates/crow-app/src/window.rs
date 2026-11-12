@@ -192,6 +192,7 @@ impl CrowWindow {
             let cwd = this.pane().read(cx).current_dir(cx);
             let home = home_dir();
             match event {
+                TextInputEvent::Changed => {}
                 TextInputEvent::CompletionRequested => {
                     if let Some(completed) = crow_core::complete_typed(&typed, &cwd, &home) {
                         input.update(cx, |input, cx| input.set_text(completed, window, cx));
@@ -1937,6 +1938,115 @@ mod tests {
         std::thread::sleep(crow_core::TypeSelect::TIMEOUT + std::time::Duration::from_millis(50));
         cx.simulate_keystrokes("m y space f");
         assert_eq!(selected(&view, &cx).as_deref(), Some("my file.txt"), "Space mid-name is part of the name");
+    }
+
+    #[gpui::test]
+    fn filter_narrows_rows_and_escape_restores_focus(cx: &mut TestAppContext) {
+        let root = fixture("filter");
+        let (view, mut cx) = open(cx, &root);
+
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("AL");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)], "matching is case-insensitive");
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.item_count(cx)), 3, "the total stays visible");
+
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx).len(), 3, "Escape clears the filter");
+        cx.simulate_keystrokes("n");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "focus is back on the list for type-to-select");
+    }
+
+    #[gpui::test]
+    fn filter_arrows_and_return_act_on_matching_rows(cx: &mut TestAppContext) {
+        let root = fixture("filter-enter");
+        let (view, mut cx) = open(cx, &root);
+
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("a");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx).iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["alpha", "beta"]);
+
+        cx.simulate_keystrokes("down");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "arrows move within the matches");
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("beta"), "Return opens the selected match");
+        assert!(rows(&view, &cx).is_empty(), "the filter does not follow the navigation");
+
+        cx.simulate_keystrokes("cmd-up");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx).len(), 3, "going back shows the whole folder again");
+    }
+
+    #[gpui::test]
+    fn filter_commands_and_escape_work_with_the_list_focused(cx: &mut TestAppContext) {
+        let root = fixture("filter-list-focus");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("a");
+        settle(&view, &mut cx);
+
+        let focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+        cx.update(|window, cx| window.focus(&focus, cx));
+        cx.simulate_keystrokes("cmd-a");
+        assert_eq!(selected_names(&view, &cx), ["alpha", "beta"], "Cmd-A selects matching rows only");
+
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx).len(), 3, "Escape on the list clears the filter too");
+    }
+
+    #[gpui::test]
+    fn filter_ignores_inline_children_until_cleared(cx: &mut TestAppContext) {
+        let root = fixture("filter-inline");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        assert!(rows(&view, &cx).contains(&("inner".to_owned(), 1)), "alpha is open inline");
+
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("inner");
+        settle(&view, &mut cx);
+        assert!(rows(&view, &cx).is_empty(), "a filter shows this folder's own matches, flat");
+
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert!(rows(&view, &cx).contains(&("inner".to_owned(), 1)), "clearing restores the open folder");
+    }
+
+    #[gpui::test]
+    fn filter_letters_stay_in_the_field_in_the_vim_layer(cx: &mut TestAppContext) {
+        let root = fixture("filter-vim");
+        let (view, mut cx) = open(cx, &root);
+        use_vim(&view, &mut cx);
+
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("al");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)], "l filters instead of moving right");
+
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("j");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "Vim keys work again after the filter");
+    }
+
+    #[gpui::test]
+    fn filter_narrows_the_focused_column(cx: &mut TestAppContext) {
+        let root = fixture("filter-columns");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("al");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)]);
+
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx).len(), 3);
     }
 
     #[gpui::test]
