@@ -6,13 +6,15 @@
 //! dropped on any row move or copy into that folder; folders dropped on a group's
 //! title become favorites.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crow_core::{Favorite, SidebarEdit, Slot};
 use crow_fs::ops::Request;
 use gpui::{
-    Context, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role, SharedString,
-    Window, div, img, prelude::*, px,
+    Bounds, Context, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement, Pixels, Point,
+    Render, Role, SharedString, Window, div, img, prelude::*, px,
 };
 
 use crate::actions::{Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, OpenSelection, RemoveFromSidebar};
@@ -27,6 +29,16 @@ pub enum SidebarEvent {
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
+
+/// What a drag would drop on in the sidebar: a selectable row or a favorite group title.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DropTarget {
+    Row(usize),
+    Group(usize),
+}
+
+/// The sidebar's direct children as last prepainted: what a drop there does, and where it is.
+type RowLayout = Rc<RefCell<Vec<(Option<DropTarget>, Bounds<Pixels>)>>>;
 
 /// A favorite being dragged to a new place.
 #[derive(Clone)]
@@ -129,6 +141,14 @@ pub struct Sidebar {
     cursor: usize,
     /// The folder the window shows, highlighted when it's in the sidebar.
     current: PathBuf,
+    /// Where each direct child of the list sits, captured when it is prepainted.
+    /// A cell so prepaint can fill it without scheduling another render.
+    layout: RowLayout,
+    /// What a drag outside the list would drop on, drawn from state rather than a
+    /// drag-over style so the highlight cannot flicker between frames.
+    drop_target: Option<DropTarget>,
+    /// A favorite is being reordered: its insertion line is the indicator, not a row.
+    dragging_favorite: bool,
 }
 
 impl Focusable for Sidebar {
@@ -139,7 +159,14 @@ impl Focusable for Sidebar {
 
 impl Sidebar {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self { focus: cx.focus_handle(), cursor: 0, current: PathBuf::new() }
+        Self {
+            focus: cx.focus_handle(),
+            cursor: 0,
+            current: PathBuf::new(),
+            layout: Rc::default(),
+            drop_target: None,
+            dragging_favorite: false,
+        }
     }
 
     pub fn set_current(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
@@ -166,6 +193,37 @@ impl Sidebar {
     #[cfg(test)]
     pub fn paths(cx: &gpui::App) -> Vec<PathBuf> {
         Self::selectable(cx).iter().filter_map(|r| r.path().map(Path::to_path_buf)).collect()
+    }
+
+    /// The row or group title the last drag would drop on, for tests: (is a row, index).
+    #[cfg(test)]
+    pub fn drop_target(&self) -> Option<(bool, usize)> {
+        self.drop_target.map(|target| match target {
+            DropTarget::Row(i) => (true, i),
+            DropTarget::Group(g) => (false, g),
+        })
+    }
+
+    /// The row or group title under `position`; the 1 px gaps between rows snap to
+    /// the nearest side so a small pointer wobble cannot lose the highlight.
+    fn target_at(&self, position: Point<Pixels>) -> Option<DropTarget> {
+        let layout = self.layout.borrow();
+        let mut nearest: Option<(f32, DropTarget)> = None;
+        for (target, bounds) in layout.iter() {
+            let Some(target) = target else { continue };
+            if position.x < bounds.left() || position.x >= bounds.right() {
+                continue;
+            }
+            if position.y >= bounds.top() && position.y < bounds.bottom() {
+                return Some(*target);
+            }
+            let gap = if position.y < bounds.top() { bounds.top() - position.y } else { position.y - bounds.bottom() };
+            let gap = f32::from(gap);
+            if gap <= 4.0 && nearest.is_none_or(|(best, _)| gap < best) {
+                nearest = Some((gap, *target));
+            }
+        }
+        nearest.map(|(_, target)| target)
     }
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -273,6 +331,15 @@ impl Render for Sidebar {
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
         let drop_bg = color_alpha(accent, 0x40);
 
+        // A drag's target comes from the pointer and the last layout, so the
+        // highlight only changes when the pointer enters a different row.
+        if cx.has_active_drag() {
+            self.drop_target = self.target_at(window.mouse_position());
+        } else {
+            self.drop_target = None;
+            self.dragging_favorite = false;
+        }
+        let mut kinds: Vec<Option<DropTarget>> = Vec::with_capacity(rows.len());
         let mut index = 0;
         let mut children = Vec::with_capacity(rows.len());
         for row in rows {
@@ -296,19 +363,20 @@ impl Render for Sidebar {
                     .child(title.clone());
                 let header = match *group {
                     Some(g) => header
-                        .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop_bg))
+                        .when(self.drop_target == Some(DropTarget::Group(g)), |header| header.bg(drop_bg))
                         .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| this.add_dropped(g, paths, cx)))
-                        .drag_over::<DraggedFavorite>(move |s, _, _, _| s.bg(drop_bg))
                         .on_drop(cx.listener(move |_, dragged: &DraggedFavorite, _, cx| {
                             ui::edit_sidebar(SidebarEdit::Move { from: dragged.slot, to: (g, 0) }, cx);
                         })),
                     None => header,
                 };
+                kinds.push(group.map(DropTarget::Group));
                 children.push(header.into_any_element());
                 continue;
             }
             let i = index;
             index += 1;
+            kinds.push(Some(DropTarget::Row(i)));
             let path = row.path().map(Path::to_path_buf).unwrap_or_default();
             let here = path == self.current;
             let cursor = i == self.cursor;
@@ -349,13 +417,14 @@ impl Render for Sidebar {
                 .rounded_md()
                 .flex()
                 .flex_col()
+                .relative()
                 .when(here, |row| row.bg(color(theme.role("selection"))))
                 .when(focused && cursor, |row| row.bg(color_alpha(accent, 0x55)))
+                .when(!self.dragging_favorite && self.drop_target == Some(DropTarget::Row(i)), |row| row.bg(drop_bg))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.cursor = i;
                     cx.emit(SidebarEvent::Open(target.clone()));
                 }))
-                .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(drop_bg))
                 .on_drop({
                     let into = path.clone();
                     cx.listener(move |this, paths: &ExternalPaths, window, cx| {
@@ -364,14 +433,49 @@ impl Render for Sidebar {
                 });
             if let Row::Favorite(slot, _) = &row {
                 let slot = *slot;
+                let below = (slot.0, slot.1 + 1);
+                let above_line = color(accent);
+                let below_line = color(accent);
+                // Two drop halves per row: the line follows the pointer's half, so a favorite
+                // can move both ways and below the last one. Both lines sit inside a fixed
+                // 13 px box, so showing one never shifts the rows underneath. They only
+                // answer a dragged favorite; external drops still reach the row.
                 item = item
                     .on_drag(DraggedFavorite { slot, label: label.clone().into() }, |dragged, _, _, cx| {
                         cx.new(|_| dragged.clone())
                     })
-                    .drag_over::<DraggedFavorite>(move |s, _, _, _| s.border_t_2().border_color(color(accent)))
-                    .on_drop(cx.listener(move |_, dragged: &DraggedFavorite, _, cx| {
-                        ui::edit_sidebar(SidebarEdit::Move { from: dragged.slot, to: slot }, cx);
-                    }));
+                    .on_drag_move(cx.listener(|this, _: &gpui::DragMoveEvent<DraggedFavorite>, _, cx| {
+                        if !this.dragging_favorite {
+                            this.dragging_favorite = true;
+                            cx.notify();
+                        }
+                    }))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("favorite-above-{i}")))
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(13.))
+                            .drag_over::<DraggedFavorite>(move |s, _, _, _| s.border_t_2().border_color(above_line))
+                            .on_drop(cx.listener(move |_, dragged: &DraggedFavorite, _, cx| {
+                                ui::edit_sidebar(SidebarEdit::Move { from: dragged.slot, to: slot }, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("favorite-below-{i}")))
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(13.))
+                            .drag_over::<DraggedFavorite>(move |s, _, _, _| s.border_b_2().border_color(below_line))
+                            .on_drop(cx.listener(move |_, dragged: &DraggedFavorite, _, cx| {
+                                ui::edit_sidebar(SidebarEdit::Move { from: dragged.slot, to: below }, cx);
+                            })),
+                    );
             }
             let icon_element = match glyph {
                 Some(text) => div()
@@ -433,7 +537,11 @@ impl Render for Sidebar {
         if vim {
             context.push_str(" vim");
         }
+        let layout = self.layout.clone();
         div()
+            .on_children_prepainted(move |bounds, _, _| {
+                *layout.borrow_mut() = kinds.iter().copied().zip(bounds).collect();
+            })
             .id("sidebar")
             .role(Role::ListBox)
             .aria_label("Sidebar")

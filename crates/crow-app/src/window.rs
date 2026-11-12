@@ -1599,6 +1599,24 @@ mod tests {
     }
 
     #[gpui::test]
+    fn dragging_a_favorite_down_inserts_below_the_row(cx: &mut TestAppContext) {
+        let root = fixture("favorite-drag");
+        let (view, mut cx) = open(cx, &root);
+        let (alpha, beta) = (root.join("alpha"), root.join("beta"));
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha, &beta]));
+        let from = cx.debug_bounds("sidebar-0").expect("first favorite row");
+        let to = cx.debug_bounds("sidebar-1").expect("second favorite row");
+        let start = gpui::point(from.left() + gpui::px(20.), from.top() + gpui::px(6.));
+        let over = gpui::point(to.left() + gpui::px(20.), to.bottom() - gpui::px(3.));
+
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(over, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(over, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), [beta, alpha], "the lower half of a row drops after it");
+    }
+
+    #[gpui::test]
     fn dropping_on_a_favorite_moves_into_it(cx: &mut TestAppContext) {
         let root = fixture("drop-favorite");
         let (view, mut cx) = open(cx, &root);
@@ -2145,6 +2163,40 @@ mod tests {
         cx.simulate_event(gpui::FileDropEvent::Entered { position: at, paths: gpui::ExternalPaths(paths.into()) });
         cx.simulate_event(gpui::FileDropEvent::Pending { position: at });
         cx.simulate_event(gpui::FileDropEvent::Submit { position: at });
+    }
+
+    #[gpui::test]
+    fn sidebar_drop_highlight_is_steady_while_the_pointer_stays_on_a_row(cx: &mut TestAppContext) {
+        let root = fixture("drop-steady");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let first = cx.debug_bounds("sidebar-0").expect("first favorite row").center();
+        let second = cx.debug_bounds("sidebar-1").expect("second favorite row").center();
+        let header = cx.debug_bounds("sidebar-header-Favorites").expect("favorites title").center();
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        let target = |cx: &VisualTestContext| sidebar.read_with(cx, |s, _| s.drop_target());
+
+        let paths = gpui::ExternalPaths(vec![root.join("notes.txt")].into());
+        cx.simulate_event(gpui::FileDropEvent::Entered { position: second, paths });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: second });
+        cx.run_until_parked();
+        assert_eq!(target(&cx), Some((true, 1)), "the row under the pointer is highlighted");
+        for _ in 0..8 {
+            cx.simulate_event(gpui::FileDropEvent::Pending { position: second });
+            cx.run_until_parked();
+            assert_eq!(target(&cx), Some((true, 1)), "…and stays highlighted while the pointer rests on it");
+        }
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: first });
+        cx.run_until_parked();
+        assert_eq!(target(&cx), Some((true, 0)), "moving to another row moves the highlight");
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: header });
+        cx.run_until_parked();
+        assert_eq!(target(&cx), Some((false, 0)), "a group title highlights as a drop target");
+        cx.simulate_event(gpui::FileDropEvent::Exited);
+        cx.run_until_parked();
+        assert_eq!(target(&cx), None, "leaving the window clears it");
     }
 
     #[gpui::test]

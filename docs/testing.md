@@ -51,7 +51,7 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Column view | Cmd-3: arrows move within a column, Right moves into the selected folder, Left moves back. Only the focused column's selection is in the accent color. Selecting a file shows its preview as the last column. Cmd-2 returns to the list in the folder you were in. |
 | Trash and Put Back | Cmd-Delete a file in Crow, then use Finder's Put Back on it in the Trash. |
 | Finder clipboard | Copy in Crow, paste in Finder; copy in Finder, paste in Crow. |
-| Drop in | Drag files from Finder onto a Crow list and onto a column: same disk moves, other disk copies, Option copies. |
+| Drop in | Drag files from Finder onto a Crow list, onto a column, and onto sidebar rows and group titles: the row under the pointer keeps one steady highlight; same disk moves, other disk copies, Option copies. |
 | Progress and cancel | Copy a large folder to another disk: progress shows in the status line; Esc or Cancel stops it with nothing half-copied. |
 | Activity | Cmd-Option-L lists recent operations; Undo on an older one works or explains why not. |
 | Table | Drag header dividers to resize; click headers to sort and reverse. |
@@ -59,7 +59,7 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Live updates | With a folder open, create, rename and delete files from Terminal; the list follows without jumping. |
 | Live theme | Switch macOS light/dark, or edit a scheme in the theme index: colors fade over about half a second (faster with Reduce Motion). |
 | Theme picker | Cmd-Option-T, arrow through themes (each shows at once), Esc returns; Return keeps one and writes it to `settings.toml`. Apply to All Apps changes `~/.local/state/themes/current.json`. |
-| Favorites | Drag a favorite onto another to reorder; drag a folder from the list onto a group title; drop a file onto a favorite. Check `sidebar.toml` keeps your comments. Add `icon = "🚀"` and `color = "blue"` to one. |
+| Favorites | Drag a favorite up and down: the line follows the pointer's half and no rows shift; drop below the last one to move it to the end. Drag a folder from the list onto a group title; drop a file onto a favorite. Check `sidebar.toml` keeps your comments. Add `icon = "🚀"` and `color = "blue"` to one. |
 | Recent | Visit a few folders (and `cd` around with zoxide): they appear under Recent, favorites excluded. |
 | Locations | Mount a disk image: it appears without a restart, with a free-space bar; ⏏ ejects it. |
 | View settings | Cmd-3 in one folder, then visit another: it keeps its own view. Add a `[[rule]]` to `views.toml` with the folder open: it applies at once. Cmd-J explains each value. |
