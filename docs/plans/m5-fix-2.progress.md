@@ -33,4 +33,4 @@ Branch: m5-fix · PR: https://github.com/paraversal/file-crow/pull/6 · Last upd
 - 2026-11-12: Hand checks still needed: drag-out to Finder and Mail (native promotion), a Finder→Crow drag highlight, and the feel of the larger chevron.
 
 ## Next
-Finish: final fmt/clippy/tests, bundle, push, update PR #6 with the follow-up items and verification; user hand-tests drag-out and Finder→Crow.
+PR #6 updated with the follow-up. The user hand-tests: drag-out to Finder/Mail, a Finder→Crow drag highlight, and the drag/chevron feel. Do not merge.
