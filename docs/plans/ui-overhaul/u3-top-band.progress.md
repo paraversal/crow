@@ -29,13 +29,15 @@ Branch: `ui-u3-top-band` · PR: none · Last updated: 2026-11-13
 - U1 icons/tooltips/keycaps are on `main`: `icons::{Glyph, glyph, Assets}`, `chrome::{Keycap, KeycapWeight, with_tooltip, with_action_tooltip}`, `keys::{binding_for, text, spoken_for}`.
 - Traffic lights: measured with `screencapture` + pixel scan. At y=13 the green button centered 20.25 pt below the window top; at y=19 it centers 26.75 pt in the 52 pt band (band center 26). `traffic_light_position` is now `(14, 19)`.
 - `set_label` was not built despite I2: the placeholder is also the aria label in both U3 uses (B is a button with its own label; D's input label is "Search <scope>" = placeholder). A setter with no caller would be dead code.
-- `window_min_size` is 640 × 400 in `open` (Q4); the truncation rules are at 760/640 px. Narrow-window behavior still needs a hand check.
+- `window_min_size` is 640 × 400 in `open` (Q4); the truncation rules are at 760/640 px; checked at 660 × 520.
+- The band's focus ring is drawn by the window, so `SearchView` subscribes to the input's focus in/out and notifies, and ⌘F's refocus notifies the window explicitly; otherwise the ring went stale when focus moved between the field and the results.
 
 ## Hand checks
-- [ ] Top band: hover Back, Forward, view buttons, Go to, search field → tooltips with keys; faded Back at history start; traffic lights centred; light and dark.
-- [ ] Search field: click opens with cursor in field; accent ring; Done esc; Tab to results drops the ring; ⌘F restores it; Esc/Done returns focus to the list.
-- [ ] All / Names / Contents: Names drops content rows; Contents drops name-only rows; Names in Home is fast; Everywhere shows Names faded.
-- [ ] Narrow window: title truncates, then field shrinks, then Go to loses its label; in search mode field shrinks, match control and Done stay.
+- [x] Top band: band B matches the board in dark and light; traffic lights centred; Back is faded at the start of history.
+- [x] Search field: click/⌘F opens with the cursor in the field; accent ring in both themes; Tab drops the ring; ⌘F restores it and selects the whole query (typing replaces it); Done and Esc return to the folder with the pane focused.
+- [x] Narrow window (660 × 520): Go to is icon-only, title truncates, fields shrink; in search mode the field flexes and All / Names / Contents and Done esc stay whole.
+- [ ] Tooltips: hover every band button (covered by U1's tooltip tests and the existing back-tooltip test; not re-hovered by hand in U3).
+- [ ] All / Names / Contents speed: Names in Home on a big tree should be visibly faster (tests prove no content reads; timing not measured by hand).
 - [ ] VoiceOver: band reads as toolbar; field announces "Search <folder>, Command F"; search mode field is a search field; Done reads "Done, close search, Escape".
 
 ## Found along the way
@@ -44,10 +46,11 @@ Branch: `ui-u3-top-band` · PR: none · Last updated: 2026-11-13
 ## Log
 - 2026-11-13: answers: Q1 close search on tab change; Q2 focus + select all; Q3 reset to All; Q4 min 640×400; Q5 no match keys; Q6 aria \", unavailable\"; Q7 left edge 86 px; Q8 leave board-D tokens out; Q9 U6 fixes SearchResults vim.
 - 2026-11-13: I1 done. Note: the first traffic-light measurement hit a stale running Crow (old 44 px band); killed it and re-measured the new build. `cargo clippy -p crow-app --all-targets` clean, `cargo test -p crow-app` 90 passed.
+- 2026-11-13: hand-verified in the bundle: band B and D in dark and light, traffic-light centring (measured 26.75 pt vs 26), narrow window at 660, Esc/Done/⌘F refocus with select-all, Tab moving focus to the results and the ring following both ways. Bundle rebuilt after each change; screenshot crops kept in `/tmp` only.
 - 2026-11-13: README ▸ Keys and `docs/testing.md` updated (band wording, Go to, match modes, five new hand rows; automated paragraph names the new tests).
 - 2026-11-13: I7 done, including the minimum window size. `cargo test --workspace` green (101 app tests), clippy clean.
 - 2026-11-13: I2–I6 done in one commit: the bare input, match modes and the band B/D surfaces are interdependent through `render_title_bar`/`render_band`, so they landed together. `cargo test -p crow-app` 100 passed, workspace clippy clean. Hand-viewed B and D in the bundle; both match the boards.
 - 2026-11-13: read AGENTS.md, execute-plan skill, index README, U3 plan, U1 progress, `docs/testing.md`; confirmed U1 and U2 merged on `main`; created branch and this file; asked Q1–Q9.
 
 ## Next
-Bundle and run the hand checks (band, search field, narrow window, light/dark), then push and open the PR.
+Commit the focus-ring fix, push `ui-u3-top-band`, open the PR (screenshots of B and D; no bench needed).

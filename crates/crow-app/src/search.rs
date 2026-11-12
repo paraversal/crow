@@ -118,6 +118,8 @@ pub struct SearchView {
     show_skipped: bool,
     _subscription: Subscription,
     _ui_subscription: Subscription,
+    /// Repaint the band's focus ring when the field or the results take focus.
+    _focus_subscriptions: Vec<Subscription>,
 }
 
 struct Row {
@@ -153,6 +155,7 @@ impl SearchView {
         show_hidden: bool,
         query: String,
         everything: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let folder_label = crow_macos::display_components(&folder)
@@ -161,6 +164,11 @@ impl SearchView {
         let placeholder = Scope::Folder.label(&folder_label);
         let input = cx.new(|cx| TextInput::new(query.clone(), placeholder, cx).bare().with_role(Role::SearchInput));
         let focus = cx.focus_handle();
+        let input_focus = input.read(cx).focus_handle(cx);
+        let focus_subscriptions = vec![
+            cx.on_focus(&input_focus, window, |_, _, cx| cx.notify()),
+            cx.on_blur(&input_focus, window, |_, _, cx| cx.notify()),
+        ];
         let subscription = cx.subscribe(&input, |this, input, event, cx| match event {
             TextInputEvent::Changed => {
                 let query = input.read(cx).text().to_owned();
@@ -206,6 +214,7 @@ impl SearchView {
             show_skipped: false,
             _subscription: subscription,
             _ui_subscription: ui_subscription,
+            _focus_subscriptions: focus_subscriptions,
         };
         if !query.is_empty() {
             search.start_search(&query, cx);

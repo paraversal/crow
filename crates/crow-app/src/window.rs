@@ -1450,6 +1450,8 @@ impl CrowWindow {
     fn show_search(&mut self, _: &ShowSearch, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(search) = &self.search {
             search.update(cx, |search, cx| search.select_all_input(window, cx));
+            // The band's focus ring is drawn from the input's focus state.
+            cx.notify();
             return;
         }
         let folder = self.pane().read(cx).current_dir(cx);
@@ -1482,7 +1484,8 @@ impl CrowWindow {
             return false;
         }
         let (home, show_hidden) = (cx.global::<Ui>().home.clone(), self.show_hidden);
-        let search = cx.new(|cx| SearchView::new(start.folder, home, show_hidden, start.query, start.everything, cx));
+        let search =
+            cx.new(|cx| SearchView::new(start.folder, home, show_hidden, start.query, start.everything, window, cx));
         self._subscriptions.push(cx.observe(&search, |_, _, cx| cx.notify()));
         self._subscriptions.push(cx.subscribe_in(&search, window, |this, search, event, window, cx| {
             this.on_search_event(search.clone(), event, window, cx)
@@ -2831,6 +2834,8 @@ mod tests {
         cx.simulate_input("needle");
         wait_for_search(&view, &mut cx);
         cx.simulate_keystrokes("tab");
+        assert!(action_available(&crate::actions::ShowSearch, &mut cx), "results: Find stays available");
+        assert!(action_available(&crate::actions::SearchEverything, &mut cx), "results: Find Everything stays");
         assert!(action_available(&crate::actions::CopyFiles, &mut cx), "results: Copy");
         assert!(action_available(&crate::actions::SelectAll, &mut cx), "results: Select All");
         assert!(action_available(&crate::actions::MoveToTrash, &mut cx), "results: Move to Trash");
