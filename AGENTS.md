@@ -1,0 +1,27 @@
+# AGENTS.md — Crow
+
+Crow is a Finder-style file explorer for macOS in Rust on GPUI (vendored Zed, `vendor/`, fetched by `scripts/fetch-gpui.sh`). Read `README.md` (layout, config, keys) and `docs/testing.md` (tests, bench, hand checks).
+
+## Working on a plan
+Milestones and fix lists live in `docs/plans/*.md`. Implement them with the `execute-plan` skill (`.claude/skills/execute-plan/SKILL.md`): keep `docs/plans/<plan>.progress.md` current after every step, and **ask the user about anything unclear or undecided instead of choosing yourself.**
+
+## Crates
+`crow-app` (GPUI binary: windows, views, actions, keymaps) · `crow-core` (UI-free models: settings, views, sidebar, recent, tabs, selection; pure Rust, unit-tested) · `crow-fs` (listing, sort, watch, file-operation engine with undo) · `crow-macos` (the only AppKit/Foundation code) · `crow-search` (search engine, M6) · `crow-theme` (theme index reader).
+
+## Rules
+- No disk I/O on the main thread (use `background_spawn`, then update on the main thread). Startup loads are the exception.
+- Every file operation goes through `crow_fs::ops`. Nothing is ever overwritten in place; trash by default.
+- Every new keyboard behavior gets a GPUI keystroke test in `crates/crow-app/src/window.rs` (`simulate_keystrokes`; tests use `ui::init_for_tests`, which gives each test a temp config dir, never the real `~/.config/crow`).
+- Every interactive element has a role and an aria label.
+- Config files (`~/.config/crow/*.toml`): documented default written on first launch, live reload, errors in the status line, Crow's own edits through `crow_core::edit_toml` so user comments survive.
+- Style with theme roles only (`theme.role("fg")` etc.), never raw palette slots except for named colors.
+- Performance budgets (100k folder): warm first paint < 50 ms, scroll p99 < 1.5 × frame time. Bench: `cargo run --release -p crow-app -- --bench target/fixture-100k` (fixture: `--make-fixture target/fixture-100k 100000`). Bench numbers vary by a few ms run to run; compare with `main` before calling something a regression.
+
+## Before every commit
+`cargo fmt --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace`. CI runs the same on macOS.
+
+## Git
+One branch and PR per milestone or fix list; squash-merged to `main` by the user after CI is green and they've hand-tested. Don't merge yourself. `./scripts/bundle.sh` builds `target/bundle/Crow.app` for hand tests.
+
+## Ignore
+`vendor/zed/CLAUDE.md` and other files under `vendor/` describe Zed's own repo. Their rules (e.g. editing README banners, PR title formats) don't apply to Crow.

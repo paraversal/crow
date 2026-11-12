@@ -10,8 +10,14 @@ cargo fmt --check
 
 The keystroke tests (`crates/crow-app/src/window.rs`) drive a real window through
 GPUI's test platform: key contexts, history, tabs, hidden files, multiple
-selection, type-to-select, sorting, Go to Folder, the column view's focus rules and file operations
-(new folder and rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete).
+selection, type-to-select, sorting, Go to Folder, the column view's focus rules, file operations
+(new folder and rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete),
+drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent),
+view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
+(preview, revert, save) and the Vim layer (motions, marks). Each test gets its own temp config folder.
+
+`crates/crow-core` tests the config models on their own: view layers and glob rules, editing
+`views.toml` and `sidebar.toml` without losing comments, and frecency with zoxide's scores.
 
 The operation engine (`crates/crow-fs/src/ops_tests.rs`) is tested against real temp folders:
 every operation and its undo, each conflict choice, cancelling midway, a read-only destination,
@@ -31,8 +37,8 @@ It needs a GPU, so it runs locally, not in CI.
 
 | Measure | Budget |
 | --- | --- |
-| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms) |
-| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz) |
+| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms) |
+| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms) |
 
 ## By hand (each milestone)
 
@@ -51,6 +57,12 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Table | Drag header dividers to resize; click headers to sort and reverse. |
 | Preview pane | Select an image, a PDF, a text file and a folder: thumbnail, text, icon. Tags show for tagged files. |
 | Live updates | With a folder open, create, rename and delete files from Terminal; the list follows without jumping. |
-| Live theme | Switch macOS light/dark, or edit a scheme in the theme index. |
+| Live theme | Switch macOS light/dark, or edit a scheme in the theme index: colors fade over about half a second (faster with Reduce Motion). |
+| Theme picker | Cmd-Option-T, arrow through themes (each shows at once), Esc returns; Return keeps one and writes it to `settings.toml`. Apply to All Apps changes `~/.local/state/themes/current.json`. |
+| Favorites | Drag a favorite onto another to reorder; drag a folder from the list onto a group title; drop a file onto a favorite. Check `sidebar.toml` keeps your comments. Add `icon = "🚀"` and `color = "blue"` to one. |
+| Recent | Visit a few folders (and `cd` around with zoxide): they appear under Recent, favorites excluded. |
+| Locations | Mount a disk image: it appears without a restart, with a free-space bar; ⏏ ejects it. |
+| View settings | Cmd-3 in one folder, then visit another: it keeps its own view. Add a `[[rule]]` to `views.toml` with the folder open: it applies at once. Cmd-J explains each value. |
+| Vim layer | Set `keymap = "vim"`: hjkl, gg/G, `m a` then `'a` from elsewhere. |
 | VoiceOver | Cmd-F5, move through the list: each row reads name, details and "n of N". |
 | Privacy prompts | Open Desktop, Documents, Downloads: the prompt names Crow. |

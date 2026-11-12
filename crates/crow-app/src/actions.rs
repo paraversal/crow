@@ -1,5 +1,7 @@
 //! Actions and the Finder keymap. Key contexts nest as
 //! `Crow > {Sidebar, FileList [ColumnView]}`: the same key can mean different things in each.
+//! The Vim layer's bindings also need `vim` in the context, which views add only
+//! when `keymap = "vim"`, so switching layers needs no rebinding.
 
 use gpui::{KeyBinding, actions};
 
@@ -33,6 +35,21 @@ actions!(
         // Sheets (conflicts, confirmations)
         SheetConfirm,
         SheetCancel,
+        // Sidebar
+        AddToSidebar,
+        RemoveFromSidebar,
+        MoveFavoriteUp,
+        MoveFavoriteDown,
+        Eject,
+        // View settings and themes
+        WhyThisView,
+        UseViewAsDefaults,
+        ResetFolderView,
+        ShowThemePicker,
+        ApplyThemeEverywhere,
+        // Vim layer
+        BeginMark,
+        BeginJump,
         // Column view
         MoveLeft,
         MoveRight,
@@ -104,5 +121,49 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("tab", SwitchFocus, Some("Crow")),
         KeyBinding::new("cmd-shift-.", ToggleHiddenFiles, Some("Crow")),
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("ctrl-cmd-t", AddToSidebar, Some("Crow")),
+        KeyBinding::new("cmd-backspace", RemoveFromSidebar, Some("Sidebar")),
+        KeyBinding::new("cmd-alt-up", MoveFavoriteUp, Some("Sidebar")),
+        KeyBinding::new("cmd-alt-down", MoveFavoriteDown, Some("Sidebar")),
+        KeyBinding::new("cmd-e", Eject, Some("Sidebar")),
+        KeyBinding::new("cmd-j", WhyThisView, Some("Crow")),
+        KeyBinding::new("cmd-alt-t", ShowThemePicker, Some("Crow")),
+        KeyBinding::new("up", MoveUp, Some("ThemePicker")),
+        KeyBinding::new("down", MoveDown, Some("ThemePicker")),
+        KeyBinding::new("cmd-enter", ApplyThemeEverywhere, Some("ThemePicker")),
+    ]
+}
+
+/// The optional Vim layer, on top of the Finder keys.
+pub fn vim_keymap() -> Vec<KeyBinding> {
+    const LIST: &str = "FileList && vim && !ColumnView";
+    const COLUMNS: &str = "ColumnView && vim";
+    const ANY: &str = "FileList && vim";
+    vec![
+        KeyBinding::new("j", MoveDown, Some(ANY)),
+        KeyBinding::new("k", MoveUp, Some(ANY)),
+        KeyBinding::new("shift-j", ExtendDown, Some(ANY)),
+        KeyBinding::new("shift-k", ExtendUp, Some(ANY)),
+        KeyBinding::new("h", OpenParent, Some(LIST)),
+        KeyBinding::new("l", OpenSelection, Some(LIST)),
+        KeyBinding::new("h", MoveLeft, Some(COLUMNS)),
+        KeyBinding::new("l", MoveRight, Some(COLUMNS)),
+        KeyBinding::new("-", OpenParent, Some(ANY)),
+        KeyBinding::new("g g", MoveToFirst, Some(ANY)),
+        KeyBinding::new("shift-g", MoveToLast, Some(ANY)),
+        KeyBinding::new("y y", CopyFiles, Some(ANY)),
+        // Like Vim's dd: the items go to the clipboard and move on paste; nothing is deleted.
+        KeyBinding::new("d d", CutFiles, Some(ANY)),
+        KeyBinding::new("p", PasteFiles, Some(ANY)),
+        KeyBinding::new("u", Undo, Some(ANY)),
+        KeyBinding::new("ctrl-r", Redo, Some(ANY)),
+        KeyBinding::new("c w", Rename, Some(ANY)),
+        KeyBinding::new("m", BeginMark, Some(ANY)),
+        KeyBinding::new("'", BeginJump, Some(ANY)),
+        KeyBinding::new("j", MoveDown, Some("Sidebar && vim")),
+        KeyBinding::new("k", MoveUp, Some("Sidebar && vim")),
+        KeyBinding::new("l", OpenSelection, Some("Sidebar && vim")),
+        KeyBinding::new("j", MoveDown, Some("ThemePicker && vim")),
+        KeyBinding::new("k", MoveUp, Some("ThemePicker && vim")),
     ]
 }

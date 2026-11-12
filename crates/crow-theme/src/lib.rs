@@ -63,7 +63,7 @@ pub enum Variant {
 }
 
 impl Variant {
-    fn key(self) -> &'static str {
+    pub fn key(self) -> &'static str {
         match self {
             Variant::Dark => "dark",
             Variant::Light => "light",
@@ -92,6 +92,106 @@ impl Theme {
     pub fn slot(&self, slot: &str) -> Option<Rgb> {
         self.palette.get(slot).copied()
     }
+
+    /// The colors `t` of the way from `self` to `to` (0 = self, 1 = to), mixed in
+    /// OKLab so a fade between themes stays even in lightness. Names and ids are `to`'s.
+    pub fn mix(&self, to: &Theme, t: f32) -> Theme {
+        let t = t.clamp(0.0, 1.0);
+        let blend = |from: &HashMap<String, Rgb>, target: &HashMap<String, Rgb>| {
+            target.iter().map(|(k, &b)| (k.clone(), from.get(k).map_or(b, |&a| a.mix(b, t)))).collect::<HashMap<_, _>>()
+        };
+        let mut roles = blend(&self.roles, &to.roles);
+        for role in ROLES {
+            if !roles.contains_key(role) {
+                roles.insert(role.to_owned(), self.role(role).mix(to.role(role), t));
+            }
+        }
+        Theme {
+            id: to.id.clone(),
+            name: to.name.clone(),
+            variant: to.variant,
+            palette: blend(&self.palette, &to.palette),
+            roles,
+        }
+    }
+
+    /// Same colors for every role and slot.
+    pub fn same_colors(&self, other: &Theme) -> bool {
+        self.palette == other.palette && ROLES.iter().all(|r| self.role(r) == other.role(r))
+    }
+}
+
+impl Rgb {
+    /// `t` of the way to `to`, in OKLab.
+    pub fn mix(self, to: Rgb, t: f32) -> Rgb {
+        if self == to {
+            return self;
+        }
+        let (a, b) = (oklab(self), oklab(to));
+        let lerp = |x: f32, y: f32| x + (y - x) * t;
+        from_oklab([lerp(a[0], b[0]), lerp(a[1], b[1]), lerp(a[2], b[2])])
+    }
+}
+
+fn to_linear(c: u32) -> f32 {
+    let c = c as f32 / 255.0;
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+fn from_linear(c: f32) -> u32 {
+    let c = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    (c.clamp(0.0, 1.0) * 255.0).round() as u32
+}
+
+fn oklab(c: Rgb) -> [f32; 3] {
+    let (r, g, b) = (to_linear(c.0 >> 16 & 0xff), to_linear(c.0 >> 8 & 0xff), to_linear(c.0 & 0xff));
+    let l = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
+    let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+    let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+    [
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    ]
+}
+
+fn from_oklab([l, a, b]: [f32; 3]) -> Rgb {
+    let l_ = (l + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
+    let m_ = (l - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
+    let s_ = (l - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
+    let r = 4.076_741_7 * l_ - 3.307_711_6 * m_ + 0.230_969_94 * s_;
+    let g = -1.268_438 * l_ + 2.609_757_4 * m_ - 0.341_319_38 * s_;
+    let bl = -0.004_196_086_3 * l_ - 0.703_418_6 * m_ + 1.707_614_7 * s_;
+    Rgb(from_linear(r) << 16 | from_linear(g) << 8 | from_linear(bl))
+}
+
+/// What the theme picker shows for one theme.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThemeInfo {
+    pub id: String,
+    pub name: String,
+    pub variant: Variant,
+}
+
+/// Every theme in the index with its display name and variant, sorted by name.
+/// Files that don't parse are left out.
+pub fn list_theme_infos(dir: &Path) -> Vec<ThemeInfo> {
+    #[derive(Deserialize)]
+    struct Head {
+        name: String,
+        variant: String,
+    }
+    let mut infos: Vec<ThemeInfo> = list_themes(dir)
+        .into_iter()
+        .filter_map(|id| {
+            let text = fs::read_to_string(dir.join("schemes").join(format!("{id}.json"))).ok()?;
+            let head: Head = serde_json::from_str(&text).ok()?;
+            let variant = if head.variant == "light" { Variant::Light } else { Variant::Dark };
+            Some(ThemeInfo { id, name: head.name, variant })
+        })
+        .collect();
+    infos.sort_by_key(|i| i.name.to_lowercase());
+    infos
 }
 
 #[derive(Deserialize)]
@@ -323,6 +423,31 @@ mod tests {
         write(&dir, "schemes/broken.json", "{ not json");
         assert!(load_theme(&dir, "broken").is_err());
         assert!(list_themes(&dir).contains(&"broken".to_owned()));
+    }
+
+    #[test]
+    fn mixing_runs_from_one_theme_to_the_other() {
+        let (dir, _) = fixture();
+        let (from, to) = (fallback(), load_theme(&dir, "light-one").unwrap());
+        let mut to = to;
+        to.roles.insert("bg".into(), Rgb(0xffffff));
+        assert!(from.mix(&to, 0.0).same_colors(&from));
+        assert!(from.mix(&to, 1.0).same_colors(&to));
+        assert_eq!(from.mix(&to, 0.5).id, "light-one");
+        let mid = Rgb(0x000000).mix(Rgb(0xffffff), 0.5);
+        // OKLab's L = 0.5 is #636363, darker than sRGB's halfway #808080.
+        assert_eq!(mid, Rgb(0x636363));
+        assert_eq!(Rgb(0x123456).mix(Rgb(0x123456), 0.3), Rgb(0x123456));
+        assert_eq!(Rgb(0xfe8019).mix(Rgb(0x000000), 0.0), Rgb(0xfe8019), "round trip is exact");
+    }
+
+    #[test]
+    fn theme_infos_have_names_and_variants() {
+        let (dir, _) = fixture();
+        write(&dir, "schemes/broken.json", "{");
+        let infos = list_theme_infos(&dir);
+        let names: Vec<_> = infos.iter().map(|i| (i.name.as_str(), i.variant)).collect();
+        assert_eq!(names, [("FireBox", Variant::Dark), ("Light One", Variant::Light)]);
     }
 
     #[test]

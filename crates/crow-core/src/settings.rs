@@ -11,10 +11,11 @@ pub const DEFAULT_SETTINGS: &str = r#"# Crow settings. Changes apply immediately
 
 # Theme from ~/.config/themes: "system" follows macOS light/dark through the
 # theme index; otherwise a theme id such as "gruvbox-dark-hard".
+# View ▸ Theme… (Cmd-Option-T) picks one and writes it here.
 theme = "system"
 
-# "finder" (default) or "vim". The Vim layer adds hjkl, gg/G, marks and more
-# on top of the Finder keys.
+# "finder" (default) or "vim". The Vim layer adds hjkl, gg/G, yy/p, marks
+# (m x, 'x) and more on top of the Finder keys; letters then no longer select by name.
 keymap = "finder"
 
 # Interface font. Empty uses the system font.
@@ -23,8 +24,7 @@ font_size = 13.0
 
 show_hidden_files = false
 
-# How new windows and tabs show folders: "list" or "columns". Cmd-2 and Cmd-3 switch.
-view = "list"
+# How folders are shown (list or columns, sort, list columns) is set in views.toml.
 
 [window]
 # Size of every new window, in points. Restored sessions keep their own sizes.
@@ -70,7 +70,6 @@ pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
     pub show_hidden_files: bool,
-    pub view: ViewMode,
     pub window: WindowDefaults,
 }
 
@@ -82,7 +81,6 @@ impl Default for Settings {
             font_family: String::new(),
             font_size: 13.0,
             show_hidden_files: false,
-            view: ViewMode::List,
             window: WindowDefaults::default(),
         }
     }
@@ -122,6 +120,18 @@ pub fn config_dir() -> PathBuf {
         return PathBuf::from(dir).join("crow");
     }
     env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".config").join("crow")
+}
+
+/// Set one top-level key in `settings.toml`, keeping the rest of the file and its comments.
+pub fn save_setting(dir: &Path, key: &str, value: &str) -> Result<(), String> {
+    crate::config::edit_toml(&dir.join("settings.toml"), DEFAULT_SETTINGS, |doc| {
+        let mut new = toml_edit::Value::from(value);
+        if let Some(old) = doc.get(key).and_then(toml_edit::Item::as_value) {
+            *new.decor_mut() = old.decor().clone();
+        }
+        doc[key] = toml_edit::Item::Value(new);
+        Ok(())
+    })
 }
 
 /// Load `settings.toml` from `dir`. A missing file is written with the documented
@@ -170,6 +180,18 @@ mod tests {
         assert_eq!(s.keymap, KeymapLayer::Vim);
         assert_eq!(s.window, WindowDefaults { width: 900, height: 760 });
         assert_eq!(s.theme_id(), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn saving_a_setting_keeps_comments() {
+        let dir = temp_dir("save");
+        load_settings(&dir).unwrap();
+        save_setting(&dir, "theme", "gruvbox-dark-hard").unwrap();
+        let text = fs::read_to_string(dir.join("settings.toml")).unwrap();
+        assert!(text.starts_with("# Crow settings."));
+        assert!(text.contains("\ntheme = \"gruvbox-dark-hard\"\n"), "{text}");
+        assert_eq!(load_settings(&dir).unwrap().theme_id(), Some("gruvbox-dark-hard"));
         fs::remove_dir_all(&dir).ok();
     }
 
