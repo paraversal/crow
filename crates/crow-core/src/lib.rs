@@ -6,6 +6,7 @@ mod history;
 mod paths;
 mod selection;
 mod settings;
+mod table;
 mod tabs;
 
 pub use extensions::{Align, Column, ColumnContext, Extensions, PreviewContent, Previewer, TextPreviewer};
@@ -13,6 +14,7 @@ pub use history::History;
 pub use paths::{complete_typed, resolve_typed};
 pub use selection::{Selection, TypeSelect};
 pub use settings::{DEFAULT_SETTINGS, KeymapLayer, Settings, SettingsError, config_dir, load_settings};
+pub use table::{ColumnWidth, ResizeDrag, TableLayout};
 pub use tabs::{TabId, Tabs};
 
 use std::path::{Path, PathBuf};

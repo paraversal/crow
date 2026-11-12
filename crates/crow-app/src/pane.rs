@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use crow_core::{Align, ColumnContext, History, PreviewContent, Selection, TypeSelect};
+use crow_core::{
+    Align, Column, ColumnContext, ColumnWidth, History, PreviewContent, ResizeDrag, Selection, TableLayout, TypeSelect,
+};
 use crow_fs::{Entry, FolderChange, FolderWatcher, Sort, SortKey};
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
@@ -21,7 +23,7 @@ use crate::actions::{
     ExtendDown, ExtendUp, MoveDown, MoveToFirst, MoveToLast, MoveUp, OpenSelection, QuickLook, Rename, SelectAll,
 };
 use crate::extensions::Ext;
-use crate::style::{color, color_alpha, format_time, icon, kind};
+use crate::style::{color, color_alpha, format_time, icon, kind, truncate_middle};
 use crate::ui::Ui;
 
 const ROW_HEIGHT: f32 = 24.0;
@@ -69,6 +71,10 @@ pub struct Pane {
     dragging: bool,
     preview: Option<Preview>,
     bench: Option<Bench>,
+    /// The columns after Name, and the widths shared by the header and every row.
+    columns: Vec<Arc<dyn Column>>,
+    table: TableLayout,
+    resize: Option<ResizeDrag>,
     _poll: Task<()>,
 }
 
@@ -115,6 +121,9 @@ impl Pane {
             dragging: false,
             preview: None,
             bench: bench.then(|| Bench { frame: 0, intervals: Vec::new(), last: None, scrolled: None }),
+            columns: cx.global::<Ext>().0.default_columns(),
+            table: default_table(&cx.global::<Ext>().0.default_columns()),
+            resize: None,
             _poll: poll,
         };
         pane.enter(dir, cx);
@@ -581,13 +590,19 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<impl IntoElement + use<>> {
-        let theme = &cx.global::<Ui>().theme;
-        let extensions = cx.global::<Ext>().0.clone();
+        let ui = cx.global::<Ui>();
+        let theme = &ui.theme;
+        let font_size = px(ui.settings.font_size);
+        let columns = self.columns.clone();
         let muted = color(theme.role("fg-muted"));
+        let stripe = color_alpha(theme.role("surface"), 0x70);
         let focused = self.focus.is_focused(window);
         let selection_bg =
             if focused { color_alpha(theme.role("accent"), 0x55) } else { color(theme.role("selection")) };
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
+        let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
+        let last = widths.len() - 1;
+        let name_room = px(widths[0] - NAME_INSET - 16.0 - 8.0 - CELL_PADDING);
         let total = self.entries.len();
         let entries = self.entries.clone();
         range
@@ -595,11 +610,12 @@ impl Pane {
             .map(|(ix, entry)| {
                 let selected = self.selection.contains(&entry.path);
                 let is_cursor = self.cursor_ix == Some(ix);
-                let cells: Vec<(String, f32, Align)> =
-                    extensions.columns().iter().map(|c| (c.text(entry, &column_cx), c.width(), c.align())).collect();
+                let cells: Vec<(String, Align)> =
+                    columns.iter().map(|c| (c.text(entry, &column_cx), c.align())).collect();
                 let spoken =
-                    cells.iter().map(|(text, ..)| text.as_str()).filter(|t| *t != "--").collect::<Vec<_>>().join(", ");
-                div()
+                    cells.iter().map(|(text, _)| text.as_str()).filter(|t| *t != "--").collect::<Vec<_>>().join(", ");
+                let name = truncate_middle(&entry.name, name_room, font_size, window);
+                let row = div()
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
                     .role(Role::ListBoxOption)
@@ -608,14 +624,13 @@ impl Pane {
                     .aria_size_of_set(total)
                     .aria_selected(selected)
                     .when(is_cursor, |row| row.aria_active_descendant())
-                    .when(selected, |row| row.bg(selection_bg))
                     .h(px(ROW_HEIGHT))
-                    .px_2()
-                    .mx_1()
+                    .mx_2()
                     .rounded_md()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .when(ix % 2 == 1, |row| row.bg(stripe))
+                    .when(selected, |row| row.bg(selection_bg))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -641,75 +656,134 @@ impl Pane {
                     }))
                     .child(
                         div()
-                            .size(px(16.))
+                            .w(px(widths[0]))
                             .flex_none()
-                            .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
-                    )
-                    .child(
-                        div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(entry.name.clone()),
-                    )
-                    .children(cells.into_iter().map(move |(text, width, align)| {
-                        div()
-                            .w(px(width))
-                            .flex_none()
+                            .pl(px(NAME_INSET))
+                            .pr(px(CELL_PADDING))
+                            .flex()
+                            .items_center()
+                            .gap_2()
                             .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(muted)
-                            .when(align == Align::Right, |cell| cell.text_right())
-                            .child(text)
-                    }))
+                            .child(
+                                div()
+                                    .size(px(16.))
+                                    .flex_none()
+                                    .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
+                            )
+                            .child(div().whitespace_nowrap().child(name)),
+                    );
+                row.children(cells.into_iter().enumerate().map(|(i, (text, align))| {
+                    let width = px(widths[i + 1]);
+                    div()
+                        .when(i + 1 == last, |cell| cell.flex_1().min_w(width))
+                        .when(i + 1 != last, |cell| cell.w(width).flex_none())
+                        .px(px(CELL_PADDING))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(muted)
+                        .when(align == Align::Right, |cell| cell.text_right())
+                        .child(text)
+                }))
             })
             .collect()
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
-        let extensions = cx.global::<Ext>().0.clone();
         let sort = self.sort;
-        let arrow = move |key: SortKey| match (sort.key == key, sort.ascending) {
-            (false, _) => "",
-            (true, true) => " ▲",
-            (true, false) => " ▼",
-        };
-        let header_cell = |id: &'static str, title: String, key: SortKey, cx: &mut Context<Self>| {
-            div()
-                .id(id)
-                .role(gpui::Role::ColumnHeader)
-                .aria_label(format!("{title}{}", if sort.key == key { ", sorted" } else { "" }))
-                .when(sort.key == key, |cell| cell.text_color(color(theme.role("fg"))))
-                .on_click(cx.listener(move |this, _, _, cx| this.set_sort(this.sort.toggled(key), cx)))
-                .child(format!("{title}{}", arrow(key)))
-        };
+        let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
+        let last = widths.len() - 1;
+        let border = color(theme.role("border"));
+        // (title, sort key, alignment) for the name column and each registered column.
+        let mut specs = vec![("Name".to_owned(), Some(SortKey::Name), Align::Left)];
+        specs.extend(self.columns.iter().map(|c| (c.title().to_owned(), c.sort_key(), c.align())));
         let mut header = div()
-            .h(px(26.))
+            .id("table-header")
+            .h(px(28.))
             .flex_none()
-            .px_3()
-            .mx_1()
+            .mx_2()
             .flex()
             .items_center()
-            .gap_2()
             .text_size(px(12.))
             .text_color(color(theme.role("fg-muted")))
             .border_b_1()
-            .border_color(color(theme.role("border")))
-            .child(div().w(px(16.)))
-            .child(header_cell("sort-name", "Name".into(), SortKey::Name, cx).flex_1());
-        for column in extensions.columns() {
-            let cell = match column.sort_key() {
-                Some(key) => header_cell(column.id(), column.title().to_owned(), key, cx).into_any_element(),
-                None => div().child(column.title().to_owned()).into_any_element(),
+            .border_color(border);
+        for (i, (title, key, align)) in specs.into_iter().enumerate() {
+            let sorted = key.is_some_and(|k| k == sort.key);
+            let chevron = match (sorted, sort.ascending) {
+                (false, _) => "",
+                (true, true) => "⌃",
+                (true, false) => "⌄",
             };
-            header = header.child(
-                div()
-                    .w(px(column.width()))
-                    .flex_none()
-                    .when(column.align() == Align::Right, |c| c.flex().justify_end())
-                    .child(cell),
-            );
+            let width = px(widths[i]);
+            let cell = div()
+                .id(("column", i))
+                .role(Role::ColumnHeader)
+                .aria_label(format!("{title}{}", if sorted { ", sorted" } else { "" }))
+                .relative()
+                .h_full()
+                .when(i == last, |cell| cell.flex_1().min_w(width))
+                .when(i != last, |cell| cell.w(width).flex_none())
+                .pl(px(if i == 0 { NAME_INSET } else { CELL_PADDING }))
+                .pr(px(CELL_PADDING))
+                .flex()
+                .items_center()
+                .gap_1()
+                .when(i != last, |cell| cell.border_r_1().border_color(border))
+                .when(sorted, |cell| cell.text_color(color(theme.role("fg"))).font_weight(gpui::FontWeight::SEMIBOLD))
+                .when_some(key, |cell, key| {
+                    cell.on_click(cx.listener(move |this, _, _, cx| this.set_sort(this.sort.toggled(key), cx)))
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .when(align == Align::Right, |t| t.text_right())
+                        .child(title),
+                )
+                .child(div().w(px(10.)).flex_none().child(chevron))
+                // The divider's grab area, a little wider than the line.
+                .when(i != last, |cell| {
+                    cell.child(
+                        div()
+                            .id(("resize", i))
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right(px(-4.))
+                            .w(px(8.))
+                            .cursor(gpui::CursorStyle::ResizeLeftRight)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.resize = this.table.begin_resize(i, f32::from(event.position.x));
+                                    cx.stop_propagation();
+                                }),
+                            ),
+                    )
+                });
+            header = header.child(cell);
         }
         header
     }
+}
+
+/// Space before the name for a folder's disclosure triangle (inline expansion comes later).
+const NAME_INSET: f32 = 22.0;
+const CELL_PADDING: f32 = 8.0;
+
+/// The name column plus the shown columns, at their default widths.
+fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
+    let mut columns = vec![ColumnWidth { id: "name".into(), width: 300.0, min_width: 140.0 }];
+    columns.extend(shown.iter().map(|c| ColumnWidth {
+        id: c.id().to_owned(),
+        width: c.width(),
+        min_width: c.min_width(),
+    }));
+    TableLayout::new(columns)
 }
 
 /// Runs on a background thread: list `dir`, sending sorted partial listings at most every
@@ -757,7 +831,16 @@ impl Render for Pane {
             .on_action(cx.listener(Self::rename))
             .on_action(cx.listener(Self::quick_look))
             .on_key_down(cx.listener(Self::key_down))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, _| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if let Some(drag) = this.resize {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.table.drag_to(&drag, f32::from(event.position.x));
+                        cx.notify();
+                    } else {
+                        this.resize = None;
+                    }
+                    return;
+                }
                 let Some((ix, origin)) = this.drag_origin else { return };
                 if this.dragging || event.pressed_button != Some(MouseButton::Left) {
                     return;
@@ -783,9 +866,20 @@ impl Render for Pane {
                 cx.listener(|this, _: &MouseUpEvent, _, _| {
                     this.drag_origin = None;
                     this.dragging = false;
+                    this.resize = None;
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| {
+                    this.drag_origin = None;
+                    this.dragging = false;
+                    this.resize = None;
                 }),
             )
             .size_full()
+            // Wider-than-pane tables are clipped for now; horizontal scrolling comes with view settings.
+            .overflow_hidden()
             .flex()
             .flex_col()
             .child(header)

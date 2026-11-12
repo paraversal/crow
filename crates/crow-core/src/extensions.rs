@@ -24,8 +24,16 @@ pub trait Column: Send + Sync {
     /// Stable identifier, used in settings (`views.toml` from M5).
     fn id(&self) -> &'static str;
     fn title(&self) -> &str;
-    /// Width in points.
+    /// Default width in points.
     fn width(&self) -> f32;
+    /// The narrowest a user may drag it.
+    fn min_width(&self) -> f32 {
+        50.0
+    }
+    /// Shown unless the user hides it. Choosing columns per folder arrives with view settings (M5).
+    fn visible_by_default(&self) -> bool {
+        true
+    }
     fn align(&self) -> Align {
         Align::Left
     }
@@ -76,6 +84,11 @@ impl Extensions {
 
     pub fn columns(&self) -> &[Arc<dyn Column>] {
         &self.columns
+    }
+
+    /// The columns a new list view shows, in order.
+    pub fn default_columns(&self) -> Vec<Arc<dyn Column>> {
+        self.columns.iter().filter(|c| c.visible_by_default()).cloned().collect()
     }
 
     /// The first previewer that has something for `entry`.
@@ -161,6 +174,9 @@ impl Column for AddedColumn {
     fn text(&self, entry: &Entry, cx: &ColumnContext) -> String {
         (cx.time)(entry.added)
     }
+    fn visible_by_default(&self) -> bool {
+        false
+    }
 }
 
 /// Plain-text preview: the first 40 lines of files that are valid UTF-8 text.
@@ -228,7 +244,10 @@ mod tests {
 
     #[test]
     fn builtin_columns_are_registered_in_finder_order() {
-        let ids: Vec<_> = Extensions::with_builtins().columns().iter().map(|c| c.id()).collect();
+        let ext = Extensions::with_builtins();
+        let ids: Vec<_> = ext.columns().iter().map(|c| c.id()).collect();
         assert_eq!(ids, ["modified", "size", "kind", "added"]);
+        let shown: Vec<_> = ext.default_columns().iter().map(|c| c.id()).collect();
+        assert_eq!(shown, ["modified", "size", "kind"], "Finder's defaults; Date Added is optional");
     }
 }

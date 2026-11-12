@@ -498,24 +498,30 @@ impl CrowWindow {
             .border_color(color(theme.role("border")))
             .text_size(px(12.))
             .text_color(color(theme.role("fg-muted")))
-            .children(parts.into_iter().enumerate().map({
-                let fg = color(theme.role("fg"));
-                move |(i, (name, path))| {
-                    let is_dir = i < last || path.is_dir();
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .when(i == last, |part| part.text_color(fg))
-                        .children(icon(&path, is_dir, 14).map(|i| img(i).size(px(14.))))
-                        .child(name)
-                        .when(i < last, |part| part.child(div().pl_1().child("›")))
-                }
-            }))
-            .child(div().flex_1())
+            .child(
+                // Long paths give way to the status line instead of pushing it out.
+                div().flex_1().min_w_0().overflow_hidden().flex().items_center().gap_1().children(
+                    parts.into_iter().enumerate().map({
+                        let fg = color(theme.role("fg"));
+                        move |(i, (name, path))| {
+                            let is_dir = i < last || path.is_dir();
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .when(i == last, |part| part.text_color(fg))
+                                .children(icon(&path, is_dir, 14).map(|i| img(i).size(px(14.))))
+                                .child(name)
+                                .when(i < last, |part| part.child(div().pl_1().child("›")))
+                        }
+                    }),
+                ),
+            )
             .child(
                 div()
                     .id("status")
+                    .flex_none()
+                    .pl_3()
                     .role(Role::Status)
                     .aria_label(status.clone())
                     .when(is_error, |s| s.text_color(color(theme.role("error"))))
