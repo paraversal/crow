@@ -17,9 +17,10 @@ use crow_core::{
 };
 use crow_fs::{Entry, Sort, SortKey};
 use gpui::{
-    Action, ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Role, ScrollHandle,
-    SharedString, Subscription, Window, div, img, prelude::*, px, uniform_list,
+    Action, ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalDragPayload, ExternalPaths, FileDragPaths,
+    FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Render, Role, ScrollHandle, SharedString, Subscription, Window, div, img, prelude::*, px,
+    uniform_list,
 };
 
 use crate::actions::{
@@ -36,10 +37,10 @@ use crate::ui::Ui;
 use crow_fs::ops::Request;
 
 const ROW_HEIGHT: f32 = 24.0;
-/// Left padding before a row's disclosure triangle, and the indent per tree level.
+/// Left padding before a row's disclosure chevron, and the indent per tree level.
 const NAME_INSET: f32 = 4.0;
-const INDENT: f32 = 16.0;
-const TRIANGLE_WIDTH: f32 = 14.0;
+const INDENT: f32 = 18.0;
+const TRIANGLE_WIDTH: f32 = 20.0;
 const CELL_PADDING: f32 = 8.0;
 /// Column view: every column starts this wide; one with long names widens up to the cap.
 const COLUMN_WIDTH: f32 = 220.0;
@@ -76,6 +77,56 @@ enum MarkPending {
 
 impl EventEmitter<PaneEvent> for Pane {}
 
+/// Files dragged from inside Crow: paths and whether each is a folder. The selection is
+/// shared, so rendering a selected row does not clone the whole selection.
+#[derive(Clone)]
+pub(crate) struct DraggedSelection {
+    pub entries: Arc<Vec<(PathBuf, bool)>>,
+}
+
+impl DraggedSelection {
+    /// What the platform and `ExternalPaths` drop handlers expect.
+    pub fn external(&self) -> ExternalPaths {
+        ExternalPaths(self.entries.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>().into())
+    }
+}
+
+/// The image that follows the pointer while dragging files with GPUI inside the window.
+struct DraggedFiles {
+    icon: Option<Arc<Image>>,
+    count: usize,
+}
+
+impl Render for DraggedFiles {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = &cx.global::<Ui>().theme;
+        div()
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when_some(self.icon.clone(), |element, icon| element.child(img(icon).size(px(44.))))
+            .when(self.count > 1, |image| {
+                image.child(
+                    div()
+                        .absolute()
+                        .right(px(-6.))
+                        .bottom(px(-6.))
+                        .min_w(px(18.))
+                        .h(px(18.))
+                        .rounded_full()
+                        .bg(color(theme.role("accent")))
+                        .text_color(color(theme.role("bg")))
+                        .text_size(px(11.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(self.count.to_string()),
+                )
+            })
+    }
+}
+
 /// An inline rename in progress.
 struct Renaming {
     path: PathBuf,
@@ -98,9 +149,6 @@ pub struct Pane {
     columns: Vec<Arc<dyn Column>>,
     table: TableLayout,
     resize: Option<ResizeDrag>,
-    /// A press that may become a drag: (folder index, row, where).
-    drag_origin: Option<(usize, usize, Point<Pixels>)>,
-    dragging: bool,
     preview: Option<Preview>,
     strip_scroll: ScrollHandle,
     status: Option<SharedString>,
@@ -136,8 +184,6 @@ impl Pane {
             table: default_table(&columns),
             columns,
             resize: None,
-            drag_origin: None,
-            dragging: false,
             preview: None,
             strip_scroll: ScrollHandle::new(),
             status: None,
@@ -541,7 +587,7 @@ impl Pane {
         if expanded {
             self.navigate(entry.path, cx);
         } else {
-            folder.update(cx, |folder, cx| folder.expand(entry.path, false, cx));
+            folder.update(cx, |folder, cx| folder.expand(entry.path, cx));
         }
     }
 
@@ -773,9 +819,6 @@ impl Pane {
     /// A press on row `ix` of folder `k`: Finder's click, Cmd-click and Shift-click.
     fn press(&mut self, k: usize, ix: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
-        // A system drag can end without GPUI seeing the mouse go up; a new press starts fresh.
-        self.dragging = false;
-        self.drag_origin = Some((k, ix, event.position));
         if k != self.focused {
             self.focused = k;
             self.strip_scroll.scroll_to_item(k);
@@ -856,11 +899,13 @@ impl Pane {
         let stripe = color_alpha(theme.role("surface"), 0x70);
         let selection_bg = selection_color(self.focus.is_focused(window), theme);
         let drop_bg = color_alpha(theme.role("accent"), 0x40);
+        let chevron_hover = color(theme.role("fg"));
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
         let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
         let last = widths.len() - 1;
         let folder = self.folders[0].read(cx);
         let list_folder = self.folders[0].clone();
+        let selected_entries = folder.selected_entries();
         let total = folder.row_count();
         let cursor = folder.cursor_ix();
         let rows: Vec<(usize, Entry, usize, bool)> = range
@@ -878,6 +923,13 @@ impl Pane {
                 let name_room = px(widths[0] - indent - TRIANGLE_WIDTH - 8.0 - 16.0 - 8.0 - CELL_PADDING);
                 let name = truncate_middle(&entry.name, name_room, font_size, window);
                 let expanded = folder.is_expanded(&entry.path, cx);
+                let drag_entries = if selected {
+                    selected_entries.clone()
+                } else {
+                    Arc::new(vec![(entry.path.clone(), entry.is_dir)])
+                };
+                let drag_icon = icon(&entry.path, entry.is_dir, 44);
+                let drag_count = drag_entries.len();
                 let row = div()
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
@@ -895,14 +947,25 @@ impl Pane {
                     .when(ix % 2 == 1, |row| row.bg(stripe))
                     .when(selected, |row| row.bg(selection_bg))
                     .debug_selector(|| format!("row-{}", entry.name))
+                    .on_drag(DraggedSelection { entries: drag_entries }, move |_value, _, _, cx| {
+                        cx.new(|_| DraggedFiles { icon: drag_icon.clone(), count: drag_count })
+                    })
+                    .external_drag_payload::<DraggedSelection>(move |selection, _, _| {
+                        Some(ExternalDragPayload::Files(FileDragPaths::new(selection.entries.iter().cloned())))
+                    })
                     .when(entry.is_dir && !entry.is_package(), |row| {
                         let target = entry.path.clone();
-                        row.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg)).on_drop(cx.listener(
-                            move |this, paths: &ExternalPaths, window, cx| {
+                        let target_selection = entry.path.clone();
+                        row.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg))
+                            .drag_over::<DraggedSelection>(move |style, _, _, _| style.bg(drop_bg))
+                            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
                                 this.drop_into(target.clone(), paths, window, cx);
                                 cx.stop_propagation();
-                            },
-                        ))
+                            }))
+                            .on_drop(cx.listener(move |this, selection: &DraggedSelection, window, cx| {
+                                this.drop_into(target_selection.clone(), &selection.external(), window, cx);
+                                cx.stop_propagation();
+                            }))
                     })
                     .on_mouse_down(
                         MouseButton::Left,
@@ -941,17 +1004,20 @@ impl Pane {
                                         format!("Expand {}", entry.name)
                                     })
                                     .w(px(TRIANGLE_WIDTH))
+                                    .h(px(ROW_HEIGHT))
                                     .flex_none()
                                     .flex()
+                                    .items_center()
                                     .justify_center()
-                                    .text_size(px(10.))
+                                    .text_size(px(16.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(muted)
-                                    .on_click(cx.listener(move |_, _, window, cx| {
+                                    .hover(move |s| s.text_color(chevron_hover))
+                                    .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.stop_propagation();
-                                        let all = window.modifiers().alt;
-                                        pane.update(cx, |folder, cx| folder.toggle_expansion(path.clone(), all, cx));
+                                        pane.update(cx, |folder, cx| folder.toggle_expansion(path.clone(), cx));
                                     }))
-                                    .child(if expanded { "▾" } else { "▸" })
+                                    .child(if expanded { "⌄" } else { "›" })
                                     .into_any_element()
                             } else {
                                 div().w(px(TRIANGLE_WIDTH)).flex_none().into_any_element()
@@ -1087,6 +1153,7 @@ impl Pane {
         let name_room = px(width - 16.0 - 8.0 - 16.0 - 2.0 * CELL_PADDING - 8.0);
         let total = folder.entries().len();
         let cursor = folder.cursor_ix();
+        let selected_entries = folder.selected_entries();
         let rows: Vec<(usize, Entry, bool)> = range
             .filter_map(|ix| folder.entries().get(ix).map(|e| (ix, e.clone(), folder.is_selected(&e.path))))
             .collect();
@@ -1094,6 +1161,13 @@ impl Pane {
             .map(|(ix, entry, selected)| {
                 let name = truncate_middle(&entry.name, name_room, font_size, window);
                 let navigable = entry.is_dir && !entry.is_package();
+                let drag_entries = if selected {
+                    selected_entries.clone()
+                } else {
+                    Arc::new(vec![(entry.path.clone(), entry.is_dir)])
+                };
+                let drag_icon = icon(&entry.path, entry.is_dir, 44);
+                let drag_count = drag_entries.len();
                 div()
                     .id(ix)
                     .role(Role::ListBoxOption)
@@ -1111,14 +1185,25 @@ impl Pane {
                     .gap_2()
                     .when(selected, |row| row.bg(selection_bg))
                     .debug_selector(|| format!("column-{k}-row-{}", entry.name))
+                    .on_drag(DraggedSelection { entries: drag_entries }, move |_value, _, _, cx| {
+                        cx.new(|_| DraggedFiles { icon: drag_icon.clone(), count: drag_count })
+                    })
+                    .external_drag_payload::<DraggedSelection>(move |selection, _, _| {
+                        Some(ExternalDragPayload::Files(FileDragPaths::new(selection.entries.iter().cloned())))
+                    })
                     .when(navigable, |row| {
                         let target = entry.path.clone();
-                        row.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg)).on_drop(cx.listener(
-                            move |this, paths: &ExternalPaths, window, cx| {
+                        let target_selection = entry.path.clone();
+                        row.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg))
+                            .drag_over::<DraggedSelection>(move |style, _, _, _| style.bg(drop_bg))
+                            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
                                 this.drop_into(target.clone(), paths, window, cx);
                                 cx.stop_propagation();
-                            },
-                        ))
+                            }))
+                            .on_drop(cx.listener(move |this, selection: &DraggedSelection, window, cx| {
+                                this.drop_into(target_selection.clone(), &selection.external(), window, cx);
+                                cx.stop_propagation();
+                            }))
                     })
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1172,6 +1257,9 @@ impl Pane {
                             this.drop_files(k, paths, window, cx)
                         }),
                     )
+                    .on_drop(cx.listener(move |this, selection: &DraggedSelection, window, cx| {
+                        this.drop_files(k, &selection.external(), window, cx)
+                    }))
                     .child(
                         uniform_list(
                             ("column-list", k),
@@ -1268,6 +1356,9 @@ impl Render for Pane {
                     .on_drop(
                         cx.listener(|this, paths: &ExternalPaths, window, cx| this.drop_files(0, paths, window, cx)),
                     )
+                    .on_drop(cx.listener(|this, selection: &DraggedSelection, window, cx| {
+                        this.drop_files(0, &selection.external(), window, cx)
+                    }))
                     .into_any_element()
             }
             ViewMode::Columns => self.render_columns(cx).into_any_element(),
@@ -1301,7 +1392,7 @@ impl Render for Pane {
             .on_action(cx.listener(Self::begin_mark))
             .on_action(cx.listener(Self::begin_jump))
             .on_key_down(cx.listener(Self::key_down))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if let Some(drag) = this.resize {
                     if event.pressed_button == Some(MouseButton::Left) {
                         this.table.drag_to(&drag, f32::from(event.position.x));
@@ -1309,40 +1400,10 @@ impl Render for Pane {
                     } else {
                         this.resize = None;
                     }
-                    return;
-                }
-                let Some((k, ix, origin)) = this.drag_origin else { return };
-                if this.dragging || event.pressed_button != Some(MouseButton::Left) {
-                    return;
-                }
-                let (dx, dy) = (event.position.x - origin.x, event.position.y - origin.y);
-                if f32::from(dx).hypot(f32::from(dy)) > 5.0 {
-                    let Some(folder) = this.folders.get(k).map(|f| f.read(cx)) else { return };
-                    // Drag the whole selection when the drag starts on a selected row.
-                    let paths = match folder.entries().get(ix) {
-                        Some(e) if folder.is_selected(&e.path) => folder.selected_paths(),
-                        Some(e) => vec![e.path.clone()],
-                        None => return,
-                    };
-                    this.dragging = crow_macos::begin_drag(window, &paths);
                 }
             }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, _| {
-                    this.drag_origin = None;
-                    this.dragging = false;
-                    this.resize = None;
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, _| {
-                    this.drag_origin = None;
-                    this.dragging = false;
-                    this.resize = None;
-                }),
-            )
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.resize = None))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.resize = None))
             .size_full()
             // Wider-than-pane tables are clipped for now; horizontal scrolling comes with view settings.
             .overflow_hidden()

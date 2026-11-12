@@ -1,6 +1,7 @@
 //! One open folder: its listing, sort, selection and live updates. The list view
 //! shows one; the column view shows a chain of them.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,6 +35,12 @@ pub enum FolderEvent {
 
 /// The deepest folder list view expands inline; stops symlink cycles.
 const MAX_DEPTH: usize = 32;
+
+/// The selected rows as (path, is a folder), shared with drag values.
+type SelectionEntries = Arc<Vec<(PathBuf, bool)>>;
+
+/// The cached selection: the generation it was built for, and the entries.
+type SelectionCache = RefCell<Option<(u64, SelectionEntries)>>;
 
 /// One visible row: an entry of this folder, or one of an expanded folder under it.
 enum FlatRow {
@@ -78,10 +85,12 @@ pub struct Folder {
     /// List view: folders shown inline, by path.
     children: HashMap<PathBuf, ChildFolder>,
     expanded: HashSet<PathBuf>,
-    /// Option-click: keep expanding folders as they appear.
-    expand_all: bool,
     /// The rows list view draws: this folder's entries with expanded children flattened in.
     rows: Arc<Vec<FlatRow>>,
+    /// Bumped whenever the selection or the visible rows change.
+    selection_generation: u64,
+    /// The selected rows for dragging, rebuilt only after one of those changes.
+    selection_entries: SelectionCache,
     scroll: UniformListScrollHandle,
     changes_rx: Receiver<FolderChange>,
     _watcher: Option<FolderWatcher>,
@@ -123,8 +132,9 @@ impl Folder {
             show_hidden,
             children: HashMap::new(),
             expanded: HashSet::new(),
-            expand_all: false,
             rows: Arc::new(Vec::new()),
+            selection_generation: 0,
+            selection_entries: RefCell::new(None),
             scroll: UniformListScrollHandle::new(),
             changes_rx,
             _watcher: watcher,
@@ -235,6 +245,34 @@ impl Folder {
     }
 
     /// The selected entries, in display order.
+    /// The selected rows as (path, is a folder), in display order; used for dragging.
+    /// Cached: scanning a 100k folder per frame would show up in the scroll bench.
+    pub fn selected_entries(&self) -> SelectionEntries {
+        if let Some((generation, entries)) = &*self.selection_entries.borrow()
+            && *generation == self.selection_generation
+        {
+            return entries.clone();
+        }
+        let entries = Arc::new(
+            self.rows
+                .iter()
+                .filter_map(|row| match row {
+                    FlatRow::Own(i) => self.entries.get(*i),
+                    FlatRow::Child(entry, _) => Some(entry),
+                })
+                .filter(|entry| self.selection.contains(&entry.path))
+                .map(|entry| (entry.path.clone(), entry.is_dir))
+                .collect::<Vec<(PathBuf, bool)>>(),
+        );
+        *self.selection_entries.borrow_mut() = Some((self.selection_generation, entries.clone()));
+        entries
+    }
+
+    /// Whatever changed, the drag snapshot is stale.
+    fn selection_changed(&mut self) {
+        self.selection_generation += 1;
+    }
+
     pub fn selected_paths(&self) -> Vec<PathBuf> {
         self.rows
             .iter()
@@ -388,6 +426,7 @@ impl Folder {
         }
         self.prune_selection();
         self.settle_cursor(cx);
+        self.selection_changed();
         cx.emit(FolderEvent::Changed);
         cx.notify();
     }
@@ -397,9 +436,7 @@ impl Folder {
         let wanted: Vec<PathBuf> = self
             .entries
             .iter()
-            .filter(|entry| {
-                entry.is_dir && !entry.is_package() && (self.expand_all || self.expanded.contains(&entry.path))
-            })
+            .filter(|entry| entry.is_dir && !entry.is_package() && self.expanded.contains(&entry.path))
             .map(|entry| entry.path.clone())
             .collect();
         self.expanded.retain(|path| wanted.contains(path));
@@ -408,12 +445,8 @@ impl Folder {
             if self.children.contains_key(&path) {
                 continue;
             }
-            let (hidden, sort, all) = (self.show_hidden, self.sort, self.expand_all);
-            let child = cx.new(|cx| {
-                let mut child = Folder::new(path.clone(), hidden, sort, false, cx);
-                child.expand_all = all;
-                child
-            });
+            let (hidden, sort) = (self.show_hidden, self.sort);
+            let child = cx.new(|cx| Folder::new(path.clone(), hidden, sort, false, cx));
             let subscription = cx.subscribe(&child, |this, _, event, cx| {
                 if matches!(event, FolderEvent::Loaded | FolderEvent::Changed) {
                     this.child_changed(cx);
@@ -457,7 +490,11 @@ impl Folder {
         let entries = self.entries.clone();
         let rows = self.rows.clone();
         let present: HashSet<&Path> = rows.iter().filter_map(|row| Self::row_path(row, &entries)).collect();
+        let before = self.selection.len();
         self.selection.retain(|path| present.contains(path.as_path()));
+        if self.selection.len() != before {
+            self.selection_changed();
+        }
     }
 
     /// Point the cursor row at the selection's cursor; scroll if it moved.
@@ -482,17 +519,14 @@ impl Folder {
         cx.notify();
     }
 
-    /// List view: show `path`'s contents inline. `all` expands everything below it.
-    /// A row nested under an open folder is opened by the folder that lists it.
-    pub fn expand(&mut self, path: PathBuf, all: bool, cx: &mut Context<Self>) {
+    /// List view: show `path`'s contents inline. A row nested under an open
+    /// folder is opened by the folder that lists it.
+    pub fn expand(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !self.entries.iter().any(|entry| entry.path == path && entry.is_dir && !entry.is_package()) {
             if let Some(owner) = self.owner_of(&path, cx) {
-                owner.update(cx, |owner, cx| owner.expand(path, all, cx));
+                owner.update(cx, |owner, cx| owner.expand(path, cx));
             }
             return;
-        }
-        if all {
-            self.expand_all = true;
         }
         self.expanded.insert(path);
         self.sync_children(cx);
@@ -512,7 +546,6 @@ impl Folder {
             }
             return;
         }
-        self.expand_all = false;
         self.children.remove(path);
         self.sync_children(cx);
         self.rebuild_rows(cx);
@@ -522,12 +555,12 @@ impl Folder {
         cx.notify();
     }
 
-    /// The disclosure triangle: expand (`all`: with every folder below) or collapse.
-    pub fn toggle_expansion(&mut self, path: PathBuf, all: bool, cx: &mut Context<Self>) {
+    /// The disclosure triangle: expand or collapse.
+    pub fn toggle_expansion(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if self.is_expanded(&path, cx) {
             self.collapse(&path, cx);
         } else {
-            self.expand(path, all, cx);
+            self.expand(path, cx);
         }
     }
 
@@ -582,6 +615,7 @@ impl Folder {
     pub fn select_only(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(path) = self.row(ix).map(|(entry, _)| entry.path.clone()) else { return };
         self.selection.select_only(path);
+        self.selection_changed();
         self.set_cursor(ix, cx);
     }
 
@@ -597,6 +631,7 @@ impl Folder {
     pub fn toggle(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(path) = self.row(ix).map(|(entry, _)| entry.path.clone()) else { return };
         self.selection.toggle(path);
+        self.selection_changed();
         match self.selection.cursor().and_then(|cursor| self.index_of_path(cursor)) {
             Some(ix) => self.set_cursor(ix, cx),
             None => {
@@ -624,6 +659,7 @@ impl Folder {
             })
         };
         self.selection.extend_to(ix, position, at);
+        self.selection_changed();
         self.set_cursor(ix, cx);
     }
 
@@ -634,11 +670,13 @@ impl Folder {
             FlatRow::Child(entry, _) => entry.path.clone(),
         });
         self.selection.select_all(paths);
+        self.selection_changed();
         cx.notify();
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.selection.clear();
+        self.selection_changed();
         self.cursor_ix = None;
         cx.emit(FolderEvent::CursorMoved);
         cx.notify();

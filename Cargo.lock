@@ -1106,7 +1106,6 @@ dependencies = [
  "objc2-quick-look-thumbnailing",
  "objc2-quick-look-ui",
  "objc2-uniform-type-identifiers",
- "raw-window-handle",
 ]
 
 [[package]]

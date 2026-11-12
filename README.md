@@ -22,7 +22,7 @@ Running as `Crow.app` makes macOS privacy prompts name Crow instead of your term
 | `crates/crow-app` | The `crow` binary: windows, tabs, sidebar, file list, preview, path bar |
 | `crates/crow-core` | UI-free model: settings, tabs, history, selection, extension points |
 | `crates/crow-fs` | Fast folder listing (`getattrlistbulk`), sorting, change diffs; file operations from M4 |
-| `crates/crow-macos` | The only AppKit code: icons, kinds, tags, thumbnails, Finder names, Quick Look, dragging |
+| `crates/crow-macos` | The only AppKit code: icons, kinds, tags, thumbnails, Finder names, Quick Look |
 | `crates/crow-search` | Search and exclusion rules (M6) |
 | `crates/crow-theme` | Reader for the global theme index in `~/.config/themes` |
 
@@ -48,7 +48,7 @@ Finder's keys work as in Finder: arrows (Shift extends), Option-Up/Down, Cmd-Up/
 Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (Tab completes),
 Cmd-Shift-. and Space. Typing a name selects it. Tab moves focus between the sidebar and the list.
 Column headers sort (click again to reverse) and their dividers resize.
-Cmd-2 shows a list, Cmd-3 columns. In the list, Right opens the selected folder inline (Right again goes into it); Left steps to the row that contains a nested one, closes an open folder, or goes up from the top level. Option-click a triangle opens everything below it. In columns, Left and Right move between them, and Left in the leftmost column goes up a folder. Vim `h`/`l` follow the same keys.
+Cmd-2 shows a list, Cmd-3 columns. In the list, Right opens the selected folder inline (Right again goes into it); Left steps to the row that contains a nested one, closes an open folder, or goes up from the top level. In columns, Left and Right move between them, and Left in the leftmost column goes up a folder. Vim `h`/`l` follow the same keys.
 
 Sidebar: drag favorites to reorder them (or Cmd-Option-Up/Down), drop files on any row to move or
 copy them there, drop folders on a group's title to add them. Ctrl-Cmd-T adds the selected folder.

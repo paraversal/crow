@@ -1616,9 +1616,24 @@ mod tests {
 
         cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_move(over, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.insert_slot()), Some((0, 2)), "one slot below beta");
         cx.simulate_mouse_up(over, gpui::MouseButton::Left, gpui::Modifiers::default());
         settle(&view, &mut cx);
-        assert_eq!(sidebar_paths(&cx), [beta, alpha], "the lower half of a row drops after it");
+        assert_eq!(sidebar_paths(&cx), [beta.clone(), alpha.clone()], "the lower half of a row drops after it");
+
+        // And the upper half of a row is the single slot before it.
+        let alpha_row = cx.debug_bounds("sidebar-1").expect("alpha row");
+        let start = gpui::point(alpha_row.left() + gpui::px(20.), alpha_row.center().y);
+        let beta_row = cx.debug_bounds("sidebar-0").expect("beta row");
+        let top = gpui::point(beta_row.left() + gpui::px(20.), beta_row.top() + gpui::px(6.));
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(top, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.insert_slot()), Some((0, 0)), "one slot above alpha");
+        cx.simulate_mouse_up(top, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), [alpha, beta], "…and dropping there moves it back");
     }
 
     #[gpui::test]
@@ -2115,23 +2130,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn option_clicking_a_triangle_expands_everything_below(cx: &mut TestAppContext) {
-        let root = fixture("expand-all");
-        std::fs::create_dir_all(root.join("alpha/inner/leaf")).expect("create fixture");
-        std::fs::write(root.join("alpha/inner/leaf/deep.txt"), "").expect("create fixture");
-        let (view, mut cx) = open(cx, &root);
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
-        let at = cx.debug_bounds("disclosure-alpha").expect("alpha's triangle").center();
-        cx.simulate_click(at, gpui::Modifiers { alt: true, ..Default::default() });
-        settle(&view, &mut cx);
-        let rows = rows(&view, &cx);
-        assert!(rows.contains(&("inner".to_owned(), 1)), "alpha opened: {rows:?}");
-        assert!(rows.contains(&("leaf".to_owned(), 2)), "its folders opened too: {rows:?}");
-        assert!(rows.contains(&("deep.txt".to_owned(), 3)), "down to the last file: {rows:?}");
-    }
-
-    #[gpui::test]
     fn selection_and_trash_span_expanded_levels(cx: &mut TestAppContext) {
         let root = fixture("expand-select");
         let (a, b) = (root.join("alpha/a.txt"), root.join("alpha/b.txt"));
@@ -2313,6 +2311,38 @@ mod tests {
         cx.simulate_event(gpui::FileDropEvent::Exited);
         cx.run_until_parked();
         assert_eq!(target(&cx), None, "leaving the window clears it");
+    }
+
+    #[gpui::test]
+    fn dragging_a_row_onto_a_sidebar_favorite_moves_it(cx: &mut TestAppContext) {
+        let root = fixture("drag-sidebar");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("beta")]));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let from = cx.debug_bounds("row-notes.txt").expect("notes.txt row").center();
+        let to = cx.debug_bounds("sidebar-0").expect("beta favorite row").center();
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert!(root.join("beta/notes.txt").exists(), "the dragged file moved into the favorite's folder");
+    }
+
+    #[gpui::test]
+    fn dragging_a_row_onto_a_folder_moves_it(cx: &mut TestAppContext) {
+        let root = fixture("drag-row");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let from = cx.debug_bounds("row-notes.txt").expect("notes.txt row").center();
+        let to = cx.debug_bounds("row-alpha").expect("alpha row").center();
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert!(root.join("alpha/notes.txt").exists(), "the dragged file moved into the folder under the pointer");
+        assert!(!root.join("notes.txt").exists(), "…and left its old place");
     }
 
     #[gpui::test]

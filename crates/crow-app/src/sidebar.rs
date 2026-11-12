@@ -6,7 +6,7 @@
 //! dropped on any row move or copy into that folder; folders dropped on a group's
 //! title become favorites.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -18,6 +18,7 @@ use gpui::{
 };
 
 use crate::actions::{Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, OpenSelection, RemoveFromSidebar};
+use crate::pane::DraggedSelection;
 use crate::style::{color, color_alpha, icon};
 use crate::ui::{self, Ui};
 
@@ -37,8 +38,9 @@ enum DropTarget {
     Group(usize),
 }
 
-/// The sidebar's direct children as last prepainted: what a drop there does, and where it is.
-type RowLayout = Rc<RefCell<Vec<(Option<DropTarget>, Bounds<Pixels>)>>>;
+/// The sidebar's direct children as last prepainted: what a drop there does, whether it
+/// is a favorite and where it sits, and its bounds.
+type RowLayout = Rc<RefCell<Vec<(Option<DropTarget>, Option<Slot>, Bounds<Pixels>)>>>;
 
 /// A favorite being dragged to a new place.
 #[derive(Clone)]
@@ -148,7 +150,9 @@ pub struct Sidebar {
     /// drag-over style so the highlight cannot flicker between frames.
     drop_target: Option<DropTarget>,
     /// A favorite is being reordered: its insertion line is the indicator, not a row.
-    dragging_favorite: bool,
+    dragging_favorite: Rc<Cell<bool>>,
+    /// Where a dragged favorite would be inserted: group and index before the move.
+    insert_slot: Option<Slot>,
 }
 
 impl Focusable for Sidebar {
@@ -165,7 +169,8 @@ impl Sidebar {
             current: PathBuf::new(),
             layout: Rc::default(),
             drop_target: None,
-            dragging_favorite: false,
+            dragging_favorite: Rc::new(Cell::new(false)),
+            insert_slot: None,
         }
     }
 
@@ -204,12 +209,51 @@ impl Sidebar {
         })
     }
 
+    /// Where a dragged favorite would be inserted, for tests.
+    #[cfg(test)]
+    pub fn insert_slot(&self) -> Option<Slot> {
+        self.insert_slot
+    }
+
+    /// The one place a dragged favorite would go, from the pointer: the upper half of a
+    /// favorite inserts before it, the lower half after it; a group title inserts first.
+    fn favorite_slot_at(&self, position: Point<Pixels>) -> Option<Slot> {
+        let layout = self.layout.borrow();
+        let slot_of = |target: &Option<DropTarget>, favorite: &Option<Slot>, bounds: &Bounds<Pixels>| {
+            if let Some(slot) = favorite {
+                Some(if position.y < bounds.center().y { *slot } else { (slot.0, slot.1 + 1) })
+            } else if let Some(DropTarget::Group(group)) = target {
+                Some((*group, 0))
+            } else {
+                None
+            }
+        };
+        let mut nearest: Option<(f32, Slot)> = None;
+        for (target, favorite, bounds) in layout.iter() {
+            if position.x < bounds.left() || position.x >= bounds.right() {
+                continue;
+            }
+            if bounds.contains(&position) {
+                return slot_of(target, favorite, bounds);
+            }
+            let gap = if position.y < bounds.top() { bounds.top() - position.y } else { position.y - bounds.bottom() };
+            let gap = f32::from(gap);
+            if gap <= 4.0
+                && let Some(slot) = slot_of(target, favorite, bounds)
+                && nearest.is_none_or(|(best, _)| gap < best)
+            {
+                nearest = Some((gap, slot));
+            }
+        }
+        nearest.map(|(_, slot)| slot)
+    }
+
     /// The row or group title under `position`; the 1 px gaps between rows snap to
     /// the nearest side so a small pointer wobble cannot lose the highlight.
     fn target_at(&self, position: Point<Pixels>) -> Option<DropTarget> {
         let layout = self.layout.borrow();
         let mut nearest: Option<(f32, DropTarget)> = None;
-        for (target, bounds) in layout.iter() {
+        for (target, _, bounds) in layout.iter() {
             let Some(target) = target else { continue };
             if position.x < bounds.left() || position.x >= bounds.right() {
                 continue;
@@ -335,11 +379,14 @@ impl Render for Sidebar {
         // highlight only changes when the pointer enters a different row.
         if cx.has_active_drag() {
             self.drop_target = self.target_at(window.mouse_position());
+            self.insert_slot =
+                if self.dragging_favorite.get() { self.favorite_slot_at(window.mouse_position()) } else { None };
         } else {
             self.drop_target = None;
-            self.dragging_favorite = false;
+            self.insert_slot = None;
+            self.dragging_favorite.set(false);
         }
-        let mut kinds: Vec<Option<DropTarget>> = Vec::with_capacity(rows.len());
+        let mut kinds: Vec<(Option<DropTarget>, Option<Slot>)> = Vec::with_capacity(rows.len());
         let mut index = 0;
         let mut children = Vec::with_capacity(rows.len());
         for row in rows {
@@ -363,20 +410,30 @@ impl Render for Sidebar {
                     .child(title.clone());
                 let header = match *group {
                     Some(g) => header
-                        .when(self.drop_target == Some(DropTarget::Group(g)), |header| header.bg(drop_bg))
+                        .when(
+                            !self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Group(g)),
+                            |header| header.bg(drop_bg),
+                        )
                         .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| this.add_dropped(g, paths, cx)))
+                        .on_drop(cx.listener(move |this, selection: &DraggedSelection, _, cx| {
+                            this.add_dropped(g, &selection.external(), cx)
+                        }))
                         .on_drop(cx.listener(move |_, dragged: &DraggedFavorite, _, cx| {
                             ui::edit_sidebar(SidebarEdit::Move { from: dragged.slot, to: (g, 0) }, cx);
                         })),
                     None => header,
                 };
-                kinds.push(group.map(DropTarget::Group));
+                kinds.push((group.map(DropTarget::Group), None));
                 children.push(header.into_any_element());
                 continue;
             }
             let i = index;
             index += 1;
-            kinds.push(Some(DropTarget::Row(i)));
+            let favorite_slot = match &row {
+                Row::Favorite(slot, _) => Some(*slot),
+                _ => None,
+            };
+            kinds.push((Some(DropTarget::Row(i)), favorite_slot));
             let path = row.path().map(Path::to_path_buf).unwrap_or_default();
             let here = path == self.current;
             let cursor = i == self.cursor;
@@ -420,7 +477,9 @@ impl Render for Sidebar {
                 .relative()
                 .when(here, |row| row.bg(color(theme.role("selection"))))
                 .when(focused && cursor, |row| row.bg(color_alpha(accent, 0x55)))
-                .when(!self.dragging_favorite && self.drop_target == Some(DropTarget::Row(i)), |row| row.bg(drop_bg))
+                .when(!self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Row(i)), |row| {
+                    row.bg(drop_bg)
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.cursor = i;
                     cx.emit(SidebarEvent::Open(target.clone()));
@@ -430,52 +489,50 @@ impl Render for Sidebar {
                     cx.listener(move |this, paths: &ExternalPaths, window, cx| {
                         this.drop_on(into.clone(), paths, window, cx)
                     })
+                })
+                .on_drop({
+                    let into = path.clone();
+                    cx.listener(move |this, selection: &DraggedSelection, window, cx| {
+                        this.drop_on(into.clone(), &selection.external(), window, cx)
+                    })
                 });
             if let Row::Favorite(slot, _) = &row {
                 let slot = *slot;
-                let below = (slot.0, slot.1 + 1);
-                let above_line = color(accent);
-                let below_line = color(accent);
-                // Two drop halves per row: the line follows the pointer's half, so a favorite
-                // can move both ways and below the last one. Both lines sit inside a fixed
-                // 13 px box, so showing one never shifts the rows underneath. They only
-                // answer a dragged favorite; external drops still reach the row.
-                item = item
-                    .on_drag(DraggedFavorite { slot, label: label.clone().into() }, |dragged, _, _, cx| {
-                        cx.new(|_| dragged.clone())
-                    })
-                    .on_drag_move(cx.listener(|this, _: &gpui::DragMoveEvent<DraggedFavorite>, _, cx| {
-                        if !this.dragging_favorite {
-                            this.dragging_favorite = true;
-                            cx.notify();
-                        }
-                    }))
-                    .child(
+                let dragging = self.dragging_favorite.clone();
+                item = item.on_drag(DraggedFavorite { slot, label: label.clone().into() }, move |dragged, _, _, cx| {
+                    dragging.set(true);
+                    cx.new(|_| dragged.clone())
+                });
+                // The one insertion line: above the first favorite of a group for slot 0,
+                // below a favorite for the boundary after it. No row changes height.
+                let line = self.insert_slot.and_then(|target| {
+                    if target == slot {
+                        Some(false)
+                    } else if target == (slot.0, slot.1 + 1) {
+                        Some(true)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(at_bottom) = line {
+                    item = item.child(
                         div()
-                            .id(SharedString::from(format!("favorite-above-{i}")))
                             .absolute()
-                            .top_0()
                             .left_0()
                             .right_0()
-                            .h(px(13.))
-                            .drag_over::<DraggedFavorite>(move |s, _, _, _| s.border_t_2().border_color(above_line))
-                            .on_drop(cx.listener(move |_, dragged: &DraggedFavorite, _, cx| {
-                                ui::edit_sidebar(SidebarEdit::Move { from: dragged.slot, to: slot }, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("favorite-below-{i}")))
-                            .absolute()
-                            .bottom_0()
-                            .left_0()
-                            .right_0()
-                            .h(px(13.))
-                            .drag_over::<DraggedFavorite>(move |s, _, _, _| s.border_b_2().border_color(below_line))
-                            .on_drop(cx.listener(move |_, dragged: &DraggedFavorite, _, cx| {
-                                ui::edit_sidebar(SidebarEdit::Move { from: dragged.slot, to: below }, cx);
-                            })),
+                            .h(px(2.))
+                            .rounded_full()
+                            .bg(color(accent))
+                            .when(at_bottom, |line| line.bottom_0())
+                            .when(!at_bottom, |line| line.top_0()),
                     );
+                }
+                let target_slot = self.insert_slot;
+                item = item.on_drop(cx.listener(move |_, dragged: &DraggedFavorite, _, cx| {
+                    if let Some(to) = target_slot {
+                        ui::edit_sidebar(SidebarEdit::Move { from: dragged.slot, to }, cx);
+                    }
+                }));
             }
             let icon_element = match glyph {
                 Some(text) => div()
@@ -540,7 +597,12 @@ impl Render for Sidebar {
         let layout = self.layout.clone();
         div()
             .on_children_prepainted(move |bounds, _, _| {
-                *layout.borrow_mut() = kinds.iter().copied().zip(bounds).collect();
+                *layout.borrow_mut() = kinds
+                    .iter()
+                    .copied()
+                    .zip(bounds)
+                    .map(|((target, favorite), bounds)| (target, favorite, bounds))
+                    .collect();
             })
             .id("sidebar")
             .role(Role::ListBox)
