@@ -1,0 +1,22 @@
+[package]
+name = "crow-spike"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Phase 0 spike: does GPUI carry Crow?"
+
+[dependencies]
+crow-theme = { path = "../crates/crow-theme" }
+# Zed's GPUI with AccessKit accessibility, fetched by scripts/fetch-gpui.sh (crates.io's 0.2.2 has none).
+# runtime_shaders: compile Metal shaders at launch, so building needs no Metal Toolchain download.
+gpui = { path = "../vendor/zed/crates/gpui", default-features = false, features = ["font-kit"] }
+gpui_platform = { path = "../vendor/zed/crates/gpui_platform", default-features = false, features = ["font-kit", "runtime_shaders"] }
+notify.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+raw-window-handle = "0.6"
+objc2 = "0.6"
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGImage"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSGeometry", "NSObject", "NSData", "NSDictionary", "NSFileManager", "NSValue"] }
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSView", "NSWindow", "NSResponder", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSPasteboard", "NSEvent", "NSApplication", "objc2-core-graphics"] }
+objc2-quick-look-ui = { version = "0.3", features = ["QLPreviewPanel", "QLPreviewItem", "objc2-app-kit"] }

@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["crates/crow-theme", "spike"]
+# vendor/zed is its own workspace (fetched by scripts/fetch-gpui.sh).
+exclude = ["vendor"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "8"

@@ -1,0 +1,40 @@
+{
+  "name": "FireBox",
+  "author": "gental (https://github.com/7hebel/vscode-firebox-theme), Base24 port",
+  "variant": "dark",
+  "palette": {
+    "base00": "#111111",
+    "base01": "#272524",
+    "base02": "#3c3836",
+    "base03": "#928374",
+    "base04": "#a89984",
+    "base05": "#ebdbb2",
+    "base06": "#fbf1c7",
+    "base07": "#f9f5d7",
+    "base08": "#cc241d",
+    "base09": "#fe8019",
+    "base0A": "#d79921",
+    "base0B": "#98971a",
+    "base0C": "#689d6a",
+    "base0D": "#458588",
+    "base0E": "#b16286",
+    "base0F": "#d48250",
+    "base10": "#111111",
+    "base11": "#111111",
+    "base12": "#fb4934",
+    "base13": "#fabd2f",
+    "base14": "#b8bb26",
+    "base15": "#8ec07c",
+    "base16": "#83a598",
+    "base17": "#d3869b"
+  },
+  "roles": {
+    "selection": "#2c2725",
+    "accent": "base09",
+    "on-accent": "#000000",
+    "link": "base16",
+    "info": "base16",
+    "success": "base14",
+    "error": "#ff8678"
+  }
+}
