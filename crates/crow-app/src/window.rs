@@ -43,7 +43,7 @@ pub fn open(dir: PathBuf, bench: bool, cx: &mut App) {
         titlebar: Some(TitlebarOptions {
             title: Some("Crow".into()),
             appears_transparent: true,
-            traffic_light_position: Some(point(px(14.), px(16.))),
+            traffic_light_position: Some(point(px(14.), px(19.))),
         }),
         ..Default::default()
     };
@@ -325,7 +325,7 @@ impl CrowWindow {
 
     // ----- rendering -----
 
-    fn render_title_bar(&self, title: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_title_bar(&self, title: &str, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = &cx.global::<Ui>().theme;
         let pane = self.pane().read(cx);
         let (back, forward, mode) = (pane.can_go_back(), pane.can_go_forward(), pane.mode());
@@ -335,49 +335,83 @@ impl CrowWindow {
             .forward_target()
             .map_or_else(|| "Forward".to_owned(), |dir| format!("Forward to {}", folder_name(dir)));
         let fg = theme.role("fg");
-        let nav_button = |id: &'static str, label: &'static str, icon: Glyph, enabled: bool| {
-            div()
+        let hover_icon = color(theme.role("fg"));
+        let hover_surface = color(theme.role("surface"));
+        let pressed_surface = color(theme.role("surface-raised"));
+        let nav_button = |id: &'static str,
+                          aria: String,
+                          tooltip: String,
+                          icon: Glyph,
+                          enabled: bool,
+                          action: &dyn gpui::Action,
+                          cx: &App|
+         -> gpui::Stateful<gpui::Div> {
+            let group = match id {
+                "back" => "nav-back",
+                _ => "nav-forward",
+            };
+            let icon_id = match id {
+                "back" => "nav-back-icon",
+                _ => "nav-forward-icon",
+            };
+            let icon = icons::glyph(icon, 16., "fg-muted", theme).id(icon_id);
+            let icon = if enabled { icon.group_hover(group, move |s| s.text_color(hover_icon)) } else { icon };
+            let mut button = div()
                 .id(id)
                 .debug_selector(move || id.into())
                 .role(Role::Button)
-                .aria_label(label)
-                .w(px(26.))
-                .h(px(26.))
-                .rounded_md()
+                .aria_label(aria)
+                .w(px(28.))
+                .h(px(28.))
+                .rounded(px(6.))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icons::glyph(icon, 16., if enabled { "fg-muted" } else { "fg-subtle" }, theme))
+                .child(icon);
+            if enabled {
+                button = button.group(group).hover(move |s| s.bg(hover_surface)).active(move |s| s.bg(pressed_surface));
+            } else {
+                button = button.opacity(0.4);
+            }
+            if enabled {
+                with_action_tooltip(button, tooltip, action, KeyScope::Window, cx)
+            } else {
+                with_tooltip(button, tooltip, None)
+            }
         };
         div()
-            .h(px(44.))
+            .id("toolbar")
+            .role(Role::Toolbar)
+            .aria_label("Toolbar")
+            .h(px(52.))
             .flex_none()
             .pl(px(86.))
             .pr_3()
             .flex()
             .items_center()
-            .gap_1()
+            .gap(px(10.))
             .border_b_1()
             .border_color(color(theme.role("border")))
             .child(
-                with_action_tooltip(
-                    nav_button("back", "Back", Glyph::Back, back),
-                    back_label,
-                    &GoBack,
-                    KeyScope::Window,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_back(cx)))),
-            )
-            .child(
-                with_action_tooltip(
-                    nav_button("forward", "Forward", Glyph::Forward, forward),
-                    forward_label,
-                    &GoForward,
-                    KeyScope::Window,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_forward(cx)))),
+                div()
+                    .flex()
+                    .gap(px(2.))
+                    .child(
+                        nav_button("back", "Back".to_owned(), back_label, Glyph::Back, back, &GoBack, cx)
+                            .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_back(cx)))),
+                    )
+                    .child(
+                        nav_button(
+                            "forward",
+                            "Forward".to_owned(),
+                            forward_label,
+                            Glyph::Forward,
+                            forward,
+                            &GoForward,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_forward(cx)))),
+                    ),
             )
             .child(
                 div()
@@ -385,13 +419,16 @@ impl CrowWindow {
                     .role(Role::Heading)
                     .aria_level(1)
                     .aria_label(title.to_owned())
-                    .pl_2()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(14.))
+                    .text_size(px(15.))
                     .text_color(color(fg))
                     .child(title.to_owned()),
             )
-            .child(div().flex_1())
             .child(
                 div()
                     .id("view-switcher")
@@ -400,7 +437,7 @@ impl CrowWindow {
                     .flex()
                     .gap(px(2.))
                     .p(px(2.))
-                    .rounded_md()
+                    .rounded(px(8.))
                     .bg(color(theme.role("surface")))
                     .child(
                         with_action_tooltip(
@@ -624,19 +661,27 @@ fn view_button(
     selected: bool,
     theme: &crow_theme::Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    let hover_icon = color(theme.role("fg"));
+    let icon_id = if id == "view-list" { "view-list-icon" } else { "view-columns-icon" };
     div()
         .id(id)
+        .debug_selector(move || id.into())
         .role(Role::RadioButton)
         .aria_label(label)
         .aria_selected(selected)
-        .w(px(28.))
-        .h(px(22.))
-        .rounded_sm()
+        .w(px(32.))
+        .h(px(26.))
+        .rounded(px(6.))
         .flex()
         .items_center()
         .justify_center()
+        .group(id)
         .when(selected, |b| b.bg(color(theme.role("surface-raised"))))
-        .child(icons::glyph(icon, 16., if selected { "fg" } else { "fg-muted" }, theme))
+        .child(
+            icons::glyph(icon, 16., if selected { "fg" } else { "fg-muted" }, theme)
+                .id(icon_id)
+                .group_hover(id, move |s| s.text_color(hover_icon)),
+        )
 }
 
 fn home_dir() -> PathBuf {
@@ -1804,7 +1849,7 @@ impl Render for CrowWindow {
         let title = folder_name(&self.pane().read(cx).current_dir(cx));
         let list_view = self.pane().read(cx).mode() == ViewMode::List;
         window.set_window_title(&title);
-        let title_bar = self.render_title_bar(&title, cx);
+        let title_bar = self.render_title_bar(&title, window, cx);
         let tab_bar = (self.tabs.len() > 1).then(|| self.render_tab_bar(cx));
         let current = self.pane().read(cx).current_dir(cx);
         self.sidebar.update(cx, |s, cx| s.set_current(current, cx));
@@ -2129,6 +2174,22 @@ mod tests {
         cx.simulate_keystrokes("cmd-[");
         settle(&view, &mut cx);
         assert_eq!(mode(&cx), ViewMode::Columns);
+    }
+
+    #[gpui::test]
+    fn toolbar_view_buttons_switch_views(cx: &mut TestAppContext) {
+        let root = fixture("toolbar-views");
+        let (view, mut cx) = open(cx, &root);
+        let mode = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.mode());
+        assert_eq!(mode(&cx), ViewMode::List);
+        let columns = cx.debug_bounds("view-columns").expect("columns button");
+        cx.simulate_click(columns.center(), gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(mode(&cx), ViewMode::Columns);
+        let list = cx.debug_bounds("view-list").expect("list button");
+        cx.simulate_click(list.center(), gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(mode(&cx), ViewMode::List);
     }
 
     #[gpui::test]
