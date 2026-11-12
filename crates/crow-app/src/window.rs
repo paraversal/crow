@@ -12,11 +12,15 @@ use crate::actions::{
     CloseTab, GoBack, GoForward, GoToFolder, MoveDown, MoveUp, NewTab, NextTab, OpenParent, OpenSelection, PreviousTab,
     SwitchFocus, ToggleHiddenFiles, ViewAsColumns, ViewAsList,
 };
+use crate::operations::{self, Clipboard, Operations};
 use crate::pane::Pane;
+use crate::pane::PaneEvent;
 use crate::preview;
 use crate::style::{color, color_alpha, icon, ui_font};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::{Ui, reload_theme};
+use crow_fs::ops::{Plan, Request, Resolution};
+use std::collections::HashMap;
 
 /// Open a window on `dir`. New windows share one size from settings and step
 /// 24 pt down and right from the previous one, so they never land at random sizes.
@@ -47,6 +51,9 @@ pub struct CrowWindow {
     show_hidden: bool,
     /// The Go to Folder sheet, while open.
     go_to: Option<(Entity<TextInput>, Subscription)>,
+    /// A sheet asking before an operation runs (conflicts, permanent delete).
+    sheet: Option<Sheet>,
+    show_activity: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -62,6 +69,7 @@ impl CrowWindow {
         window.focus(&focus, cx);
         let subscriptions = vec![
             cx.observe(&pane, |_, _, cx| cx.notify()),
+            cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)),
             cx.observe_window_appearance(window, |_, _, cx| reload_theme(cx)),
         ];
         Self {
@@ -71,6 +79,8 @@ impl CrowWindow {
             sidebar_cursor: 0,
             show_hidden,
             go_to: None,
+            sheet: None,
+            show_activity: false,
             _subscriptions: subscriptions,
         }
     }
@@ -91,6 +101,8 @@ impl CrowWindow {
         let show_hidden = self.show_hidden;
         let pane = cx.new(|cx| Pane::new(dir, show_hidden, mode, false, cx));
         self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
+        self._subscriptions
+            .push(cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)));
         self.tabs.open(pane);
         self.focus_pane(window, cx);
         cx.notify();
@@ -447,7 +459,16 @@ impl CrowWindow {
         let last = parts.len().saturating_sub(1);
         let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
         let (count, selected) = (pane.item_count(cx), pane.selected_count(cx));
+        let ops = cx.global::<Operations>();
+        let running = ops.running.as_ref().map(|r| {
+            let p = &r.progress;
+            let percent = (p.done_bytes * 100).checked_div(p.total_bytes).unwrap_or(0);
+            format!("{} — {} of {} · {percent}%", r.label, p.done_items, p.total_items)
+        });
+        let op_message = ops.message.clone();
         let (status, is_error): (SharedString, bool) = match (pane.error(cx), settings_error) {
+            _ if running.is_some() => (running.clone().unwrap_or_default().into(), false),
+            _ if op_message.is_some() => op_message.clone().unwrap_or_default(),
             (Some(e), _) | (None, Some(e)) => (e, true),
             _ if pane.is_loading(cx) && count == 0 => ("Loading…".into(), false),
             _ if selected > 1 => (format!("{selected} of {count} selected").into(), false),
@@ -496,6 +517,21 @@ impl CrowWindow {
                     .when(is_error, |s| s.text_color(color(theme.role("error"))))
                     .child(status),
             )
+            .when(running.is_some(), |bar| {
+                bar.child(
+                    div()
+                        .id("cancel-operation")
+                        .role(Role::Button)
+                        .aria_label("Cancel operation")
+                        .ml_2()
+                        .px_2()
+                        .rounded_sm()
+                        .bg(color(theme.role("surface-raised")))
+                        .text_color(color(theme.role("fg")))
+                        .on_click(|_, _, cx| operations::cancel_running(cx))
+                        .child("Cancel"),
+                )
+            })
     }
 }
 
@@ -540,6 +576,393 @@ fn folder_name(dir: &Path) -> String {
     crow_macos::display_components(dir).pop().map_or_else(|| dir.display().to_string(), |(name, _)| name)
 }
 
+/// A question to answer before an operation runs.
+enum Sheet {
+    Conflicts { plan: Plan, choices: Vec<Resolution>, focus: FocusHandle },
+    ConfirmDelete { paths: Vec<PathBuf>, focus: FocusHandle },
+}
+
+impl Sheet {
+    fn focus(&self) -> &FocusHandle {
+        match self {
+            Sheet::Conflicts { focus, .. } | Sheet::ConfirmDelete { focus, .. } => focus,
+        }
+    }
+}
+
+impl CrowWindow {
+    fn on_pane_event(&mut self, event: &PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            PaneEvent::Run(request) => self.run_request(request.clone(), window, cx),
+            PaneEvent::Copy { paths, cut } => {
+                let change_count = crow_macos::write_file_urls(paths);
+                let n = paths.len();
+                let ops = cx.global_mut::<Operations>();
+                ops.clipboard = Some(Clipboard { paths: paths.clone(), cut: *cut, change_count });
+                let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
+                ops.message = Some((
+                    if *cut { format!("Cut {what}: paste to move") } else { format!("Copied {what}") }.into(),
+                    false,
+                ));
+                cx.notify();
+            }
+            PaneEvent::Paste { into, move_items } => {
+                // Our clipboard if the pasteboard still holds what we put there; otherwise
+                // whatever another app (Finder) copied.
+                let ops = cx.global::<Operations>();
+                let ours = ops.clipboard.as_ref().filter(|c| c.change_count == crow_macos::pasteboard_change_count());
+                let (paths, cut) = match ours {
+                    Some(c) => (c.paths.clone(), c.cut),
+                    None => (crow_macos::read_file_urls(), false),
+                };
+                if paths.is_empty() {
+                    return;
+                }
+                if cut {
+                    cx.global_mut::<Operations>().clipboard = None;
+                }
+                let into = into.clone();
+                let request =
+                    if cut || *move_items { Request::Move { paths, into } } else { Request::Copy { paths, into } };
+                self.run_request(request, window, cx);
+            }
+        }
+    }
+
+    /// Plan in the background; ask first when there are conflicts or the change is
+    /// permanent; otherwise run it.
+    fn run_request(&mut self, request: Request, window: &mut Window, cx: &mut Context<Self>) {
+        if let Request::DeletePermanently { paths } = request {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            self.sheet = Some(Sheet::ConfirmDelete { paths, focus });
+            cx.notify();
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let planned = cx.background_spawn(async move { crow_fs::ops::plan(request) }).await;
+            this.update_in(cx, |this, window, cx| match planned {
+                Err(e) => {
+                    cx.global_mut::<Operations>().message = Some((e.to_string().into(), true));
+                    cx.notify();
+                }
+                Ok(plan) if plan.items.is_empty() => {}
+                Ok(plan) if plan.conflicts().next().is_some() => {
+                    let focus = cx.focus_handle();
+                    window.focus(&focus, cx);
+                    let choices = vec![Resolution::KeepBoth; plan.conflicts().count()];
+                    this.sheet = Some(Sheet::Conflicts { plan, choices, focus });
+                    cx.notify();
+                }
+                Ok(plan) => this.start(plan, HashMap::new(), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start(&mut self, plan: Plan, resolutions: HashMap<PathBuf, Resolution>, cx: &mut Context<Self>) {
+        let rename_result = matches!(plan.request, Request::NewFolder { .. });
+        let pane = self.pane().downgrade();
+        operations::execute(plan, resolutions, cx, move |outcome, cx| {
+            let results = outcome.record.results();
+            pane.update(cx, |pane, cx| pane.show_results(results, rename_result, cx)).ok();
+        });
+    }
+
+    fn undo(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        let pane = self.pane().downgrade();
+        operations::undo(index, cx, move |restored, cx| {
+            pane.update(cx, |pane, cx| pane.show_results(restored, false, cx)).ok();
+        });
+    }
+
+    fn redo(&mut self, cx: &mut Context<Self>) {
+        let pane = self.pane().downgrade();
+        operations::redo(cx, move |results, cx| {
+            pane.update(cx, |pane, cx| pane.show_results(results, false, cx)).ok();
+        });
+    }
+
+    fn close_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sheet = None;
+        self.focus_pane(window, cx);
+        cx.notify();
+    }
+
+    fn confirm_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.sheet.take() {
+            Some(Sheet::Conflicts { plan, choices, .. }) => {
+                let targets: Vec<PathBuf> = plan.conflicts().map(|i| i.target.clone()).collect();
+                let resolutions = targets.into_iter().zip(choices).collect();
+                self.start(plan, resolutions, cx);
+            }
+            Some(Sheet::ConfirmDelete { paths, .. }) => {
+                match crow_fs::ops::plan(Request::DeletePermanently { paths }) {
+                    Ok(plan) => self.start(plan, HashMap::new(), cx),
+                    Err(e) => cx.global_mut::<Operations>().message = Some((e.to_string().into(), true)),
+                }
+            }
+            None => {}
+        }
+        self.focus_pane(window, cx);
+        cx.notify();
+    }
+
+    fn set_choice(&mut self, index: Option<usize>, choice: Resolution, cx: &mut Context<Self>) {
+        if let Some(Sheet::Conflicts { choices, .. }) = &mut self.sheet {
+            match index {
+                Some(i) => {
+                    if let Some(c) = choices.get_mut(i) {
+                        *c = choice;
+                    }
+                }
+                None => choices.iter_mut().for_each(|c| *c = choice),
+            }
+            cx.notify();
+        }
+    }
+
+    fn render_sheet(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let sheet = self.sheet.as_ref()?;
+        let theme = cx.global::<Ui>().theme.clone();
+        let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
+        let button = |id: &'static str, label: String, primary: bool| {
+            div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(label.clone())
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .bg(color(if primary { accent } else { theme.role("surface-raised") }))
+                .text_color(color(if primary { theme.role("on-accent") } else { fg }))
+                .child(label)
+        };
+        let (title, body): (String, gpui::AnyElement) = match sheet {
+            Sheet::ConfirmDelete { paths, .. } => {
+                let what = match paths.as_slice() {
+                    [one] => format!("“{}”", one.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()),
+                    many => format!("{} items", many.len()),
+                };
+                (
+                    format!("Delete {what} permanently?"),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(div().text_color(color(muted)).child("This can't be undone. Move to Trash (⌘⌫) can."))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    button("sheet-cancel", "Cancel".into(), false)
+                                        .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
+                                )
+                                .child(
+                                    button("sheet-confirm", "Delete".into(), true)
+                                        .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
+                                ),
+                        )
+                        .into_any_element(),
+                )
+            }
+            Sheet::Conflicts { plan, choices, .. } => {
+                let into = plan.items.first().and_then(|i| i.target.parent()).map(folder_name).unwrap_or_default();
+                let rows: Vec<(usize, String, Resolution)> = plan
+                    .conflicts()
+                    .zip(choices.iter().copied())
+                    .enumerate()
+                    .map(|(i, (item, choice))| {
+                        (
+                            i,
+                            item.target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                            choice,
+                        )
+                    })
+                    .collect();
+                let option = |row: usize,
+                              label: &'static str,
+                              value: Resolution,
+                              current: Resolution,
+                              cx: &mut Context<Self>| {
+                    let on = value == current;
+                    div()
+                        .id(("choice", row * 3 + value as usize))
+                        .role(Role::RadioButton)
+                        .aria_label(label)
+                        .aria_selected(on)
+                        .px_2()
+                        .rounded_sm()
+                        .text_size(px(12.))
+                        .when(on, |o| o.bg(color_alpha(accent, 0x55)).text_color(color(fg)))
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_choice(Some(row), value, cx)))
+                        .child(label)
+                };
+                let n = rows.len();
+                (
+                    if n == 1 {
+                        format!("An item named “{}” already exists in “{into}”", rows[0].1)
+                    } else {
+                        format!("{n} items already exist in “{into}”")
+                    },
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .children(rows.into_iter().map(|(i, name, choice)| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(name))
+                                .child(option(i, "Keep Both", Resolution::KeepBoth, choice, cx))
+                                .child(option(i, "Replace", Resolution::Replace, choice, cx))
+                                .child(option(i, "Skip", Resolution::Skip, choice, cx))
+                        }))
+                        .child(div().text_size(px(12.)).text_color(color(muted)).child(
+                            "Keep Both adds a number to the new name. Replace moves the existing item to the Trash.",
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .pt_2()
+                                .child(button("all-keep", "Keep Both for All".into(), false).on_click(
+                                    cx.listener(|this, _, _, cx| this.set_choice(None, Resolution::KeepBoth, cx)),
+                                ))
+                                .child(button("all-skip", "Skip All".into(), false).on_click(
+                                    cx.listener(|this, _, _, cx| this.set_choice(None, Resolution::Skip, cx)),
+                                ))
+                                .child(div().flex_1())
+                                .child(
+                                    button("sheet-cancel", "Cancel".into(), false)
+                                        .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
+                                )
+                                .child(
+                                    button("sheet-confirm", "Continue".into(), true)
+                                        .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
+                                ),
+                        )
+                        .into_any_element(),
+                )
+            }
+        };
+        Some(
+            div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
+                div()
+                    .id("sheet")
+                    .role(Role::Dialog)
+                    .aria_label(title.clone())
+                    .key_context("Sheet")
+                    .track_focus(sheet.focus())
+                    .on_action(
+                        cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| {
+                            this.confirm_sheet(window, cx)
+                        }),
+                    )
+                    .on_action(
+                        cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_sheet(window, cx)),
+                    )
+                    .w(px(520.))
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .rounded_lg()
+                    .bg(color(theme.role("surface")))
+                    .border_1()
+                    .border_color(color(theme.role("border")))
+                    .shadow_lg()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                    .child(body),
+            ),
+        )
+    }
+
+    /// Recent operations, newest first, each with its own Undo.
+    fn render_activity(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.global::<Ui>().theme.clone();
+        let muted = color(theme.role("fg-muted"));
+        let entries: Vec<(usize, String, String, bool)> = cx
+            .global::<Operations>()
+            .log
+            .iter()
+            .enumerate()
+            .rev()
+            .take(50)
+            .map(|(i, e)| {
+                let when: chrono::DateTime<chrono::Local> = e.at.into();
+                let state = match (&e.error, e.cancelled, e.undone) {
+                    (_, _, true) => "undone".to_owned(),
+                    (Some(err), _, _) => format!("stopped: {err}"),
+                    (None, true, _) => "cancelled".to_owned(),
+                    _ => String::new(),
+                };
+                (
+                    i,
+                    e.record.label.clone(),
+                    format!("{} {state}", when.format("%H:%M")),
+                    e.record.is_undoable() && !e.undone,
+                )
+            })
+            .collect();
+        div()
+            .id("activity")
+            .role(Role::List)
+            .aria_label("Activity")
+            .absolute()
+            .top(px(52.))
+            .right(px(12.))
+            .w(px(360.))
+            .max_h(px(420.))
+            .overflow_y_scroll()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_lg()
+            .bg(color(theme.role("surface")))
+            .border_1()
+            .border_color(color(theme.role("border")))
+            .shadow_lg()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Activity"))
+            .when(entries.is_empty(), |list| list.child(div().text_color(muted).child("Nothing yet")))
+            .children(entries.into_iter().map(|(i, label, when, undoable)| {
+                div()
+                    .id(("activity-entry", i))
+                    .role(Role::ListItem)
+                    .aria_label(format!("{label}, {when}"))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .child(label)
+                            .child(div().text_size(px(11.)).text_color(muted).child(when)),
+                    )
+                    .when(undoable, |row| {
+                        row.child(
+                            div()
+                                .id(("activity-undo", i))
+                                .role(Role::Button)
+                                .aria_label("Undo")
+                                .px_2()
+                                .rounded_sm()
+                                .bg(color(theme.role("surface-raised")))
+                                .on_click(cx.listener(move |this, _, _, cx| this.undo(Some(i), cx)))
+                                .child("Undo"),
+                        )
+                    })
+            }))
+    }
+}
+
 impl Render for CrowWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.global::<Ui>();
@@ -554,6 +977,8 @@ impl Render for CrowWindow {
         let preview = list_view.then(|| self.render_preview(cx));
         let path_bar = self.render_path_bar(cx);
         let go_to = self.render_go_to(cx);
+        let sheet = self.render_sheet(cx);
+        let activity = self.show_activity.then(|| self.render_activity(cx));
         div()
             .id("crow")
             .role(Role::Application)
@@ -571,6 +996,13 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::go_to_folder))
             .on_action(cx.listener(Self::view_as_list))
             .on_action(cx.listener(Self::view_as_columns))
+            .on_action(cx.listener(|this, _: &crate::actions::Undo, _, cx| this.undo(None, cx)))
+            .on_action(cx.listener(|this, _: &crate::actions::Redo, _, cx| this.redo(cx)))
+            .on_action(cx.listener(|_, _: &crate::actions::CancelOperation, _, cx| operations::cancel_running(cx)))
+            .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, _, cx| {
+                this.show_activity = !this.show_activity;
+                cx.notify();
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -591,6 +1023,8 @@ impl Render for CrowWindow {
             )
             .child(path_bar)
             .children(go_to)
+            .children(sheet)
+            .children(activity)
     }
 }
 
@@ -613,8 +1047,14 @@ mod tests {
     }
 
     fn open(cx: &mut TestAppContext, dir: &Path) -> (Entity<CrowWindow>, VisualTestContext) {
+        let trash = dir
+            .parent()
+            .unwrap_or(dir)
+            .join(format!(".trash-{}", dir.file_name().unwrap_or_default().to_string_lossy()));
+        std::fs::create_dir_all(&trash).expect("create test trash");
         cx.update(|cx| {
             crate::ui::init_for_tests(cx);
+            crate::operations::init(cx, std::sync::Arc::new(crate::operations::FolderTrash(trash)));
             cx.bind_keys(crate::actions::finder_keymap());
             cx.bind_keys(crate::text_input::keymap());
         });
@@ -634,7 +1074,10 @@ mod tests {
     fn settle(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
         for _ in 0..400 {
             cx.run_until_parked();
-            let busy = view.read_with(cx, |w, cx| w.tabs.iter().any(|(_, pane)| pane.read(cx).is_loading(cx)));
+            let busy = view.read_with(cx, |w, cx| {
+                w.tabs.iter().any(|(_, pane)| pane.read(cx).is_loading(cx))
+                    || cx.global::<Operations>().running.is_some()
+            });
             if !busy {
                 cx.run_until_parked();
                 return;
@@ -659,6 +1102,7 @@ mod tests {
     #[gpui::test]
     fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) {
         let root = fixture("contexts");
+        std::fs::write(root.join("beta/b.txt"), "").expect("create fixture");
         let (view, mut cx) = open(cx, &root);
         view.update(&mut cx, |w, _| {
             w.favorites = vec![
@@ -682,8 +1126,7 @@ mod tests {
         assert!(cx.update(|window, _| list_focus.is_focused(window)), "…and moves focus to the list");
 
         cx.simulate_keystrokes("enter");
-        let error = pane(&view, &cx).read_with(&cx, |p, cx| p.error(cx));
-        assert!(error.is_some_and(|e| e.contains("Rename")), "Return in the list means rename");
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "Return in the list means rename");
     }
 
     #[gpui::test]
@@ -885,5 +1328,99 @@ mod tests {
         cx.simulate_keystrokes("cmd-[");
         settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root, "and Back returns to where the columns started");
+    }
+
+    fn sheet_open(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> bool {
+        view.read_with(cx, |w, _| w.sheet.is_some())
+    }
+
+    #[gpui::test]
+    fn new_folder_starts_a_rename_and_return_applies_it(cx: &mut TestAppContext) {
+        let root = fixture("newfolder");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-shift-n");
+        settle(&view, &mut cx);
+        cx.run_until_parked();
+        let renaming = pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx));
+        assert_eq!(renaming.as_deref(), Some("untitled folder"), "the new folder is created and its rename starts");
+        cx.simulate_input("Projects");
+        let typed = pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx));
+        assert_eq!(typed.as_deref(), Some("Projects"), "the whole name was selected, so typing replaced it");
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        let entries =
+            std::fs::read_dir(&root).unwrap().filter_map(Result::ok).map(|e| e.file_name()).collect::<Vec<_>>();
+        assert!(root.join("Projects").is_dir(), "renamed on Return; folder now has {entries:?}");
+        assert!(!root.join("untitled folder").exists());
+        assert_eq!(selected(&view, &cx).as_deref(), Some("Projects"));
+    }
+
+    #[gpui::test]
+    fn trash_and_undo(cx: &mut TestAppContext) {
+        let root = fixture("trash");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down down"); // notes.txt
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+        cx.simulate_keystrokes("cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists());
+        assert!(!names(&view, &cx).contains(&"notes.txt".to_owned()));
+        cx.simulate_keystrokes("cmd-z");
+        settle(&view, &mut cx);
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.txt")).ok().as_deref(),
+            Some("hello\n"),
+            "undo puts it back"
+        );
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "…and selects it");
+    }
+
+    #[gpui::test]
+    fn duplicate_and_paste_into_another_folder(cx: &mut TestAppContext) {
+        let root = fixture("dup");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down down cmd-d");
+        settle(&view, &mut cx);
+        assert!(root.join("notes copy.txt").exists());
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes copy.txt"), "the duplicate is selected");
+
+        cx.simulate_keystrokes("cmd-c up up up cmd-down"); // copy, then into alpha
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        cx.simulate_keystrokes("cmd-v");
+        settle(&view, &mut cx);
+        assert!(root.join("alpha/notes copy.txt").exists(), "pasted into the folder you are in");
+        assert!(root.join("notes copy.txt").exists(), "copy leaves the original");
+    }
+
+    #[gpui::test]
+    fn conflicts_ask_first_and_keep_both_by_default(cx: &mut TestAppContext) {
+        let root = fixture("conflict");
+        std::fs::write(root.join("alpha/notes.txt"), "already here").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down down cmd-c up up cmd-down cmd-v");
+        settle(&view, &mut cx);
+        assert!(sheet_open(&view, &cx), "a conflict opens a sheet instead of overwriting");
+        assert_eq!(std::fs::read_to_string(root.join("alpha/notes.txt")).ok().as_deref(), Some("already here"));
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert!(!sheet_open(&view, &cx));
+        assert_eq!(std::fs::read_to_string(root.join("alpha/notes 2.txt")).ok().as_deref(), Some("hello\n"));
+        assert_eq!(std::fs::read_to_string(root.join("alpha/notes.txt")).ok().as_deref(), Some("already here"));
+    }
+
+    #[gpui::test]
+    fn permanent_delete_needs_confirmation(cx: &mut TestAppContext) {
+        let root = fixture("delete");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down down cmd-alt-backspace");
+        settle(&view, &mut cx);
+        assert!(sheet_open(&view, &cx));
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert!(root.join("notes.txt").exists(), "Escape cancels");
+        cx.simulate_keystrokes("cmd-alt-backspace enter");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists(), "Return confirms");
     }
 }

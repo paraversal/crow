@@ -5,12 +5,14 @@
 //! crashing: no icon, plain path names, no panel, no drag.
 
 mod drag;
+mod files;
 mod icons;
 mod metadata;
 mod names;
 mod quick_look;
 
 pub use drag::begin_drag;
+pub use files::{SystemTrash, pasteboard_change_count, read_file_urls, write_file_urls};
 pub use icons::icon_png;
 pub use metadata::{kind_name, tags, thumbnail_png};
 pub use names::display_components;

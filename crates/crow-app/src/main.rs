@@ -10,6 +10,7 @@ mod actions;
 mod extensions;
 mod folder;
 mod logging;
+mod operations;
 mod pane;
 mod preview;
 mod style;
@@ -22,7 +23,7 @@ use std::process::ExitCode;
 
 use gpui::{App, Menu, MenuItem};
 
-use crate::actions::{NewTab, NewWindow, Quit};
+use crate::actions::{NewFolder, NewTab, NewWindow, Quit, Redo, Undo};
 
 fn main() -> ExitCode {
     let _log_guard = logging::init();
@@ -64,6 +65,7 @@ fn main() -> ExitCode {
     gpui_platform::application().run(move |cx: &mut App| {
         ui::init(cx);
         extensions::init(cx);
+        operations::init(cx, std::sync::Arc::new(crow_macos::SystemTrash));
         cx.bind_keys(actions::finder_keymap());
         cx.bind_keys(text_input::keymap());
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -75,7 +77,16 @@ fn main() -> ExitCode {
             Menu { name: "Crow".into(), items: vec![MenuItem::action("Quit Crow", Quit)], disabled: false },
             Menu {
                 name: "File".into(),
-                items: vec![MenuItem::action("New Window", NewWindow), MenuItem::action("New Tab", NewTab)],
+                items: vec![
+                    MenuItem::action("New Window", NewWindow),
+                    MenuItem::action("New Tab", NewTab),
+                    MenuItem::action("New Folder", NewFolder),
+                ],
+                disabled: false,
+            },
+            Menu {
+                name: "Edit".into(),
+                items: vec![MenuItem::action("Undo", Undo), MenuItem::action("Redo", Redo)],
                 disabled: false,
             },
         ]);
