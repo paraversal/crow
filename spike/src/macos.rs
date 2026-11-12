@@ -9,10 +9,10 @@ use std::sync::Arc;
 use gpui::{Image, ImageFormat, Window};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSBitmapImageFileType, NSBitmapImageRep, NSDragOperation, NSDraggingContext,
-    NSDraggingItem, NSDraggingSession, NSDraggingSource, NSImage, NSView, NSWorkspace,
+    NSApplication, NSBitmapImageFileType, NSBitmapImageRep, NSDragOperation, NSDraggingContext, NSDraggingItem,
+    NSDraggingSession, NSDraggingSource, NSImage, NSView, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSFileManager, NSInteger, NSPoint, NSRect, NSSize, NSString, NSURL};
 use objc2_quick_look_ui::{QLPreviewItem, QLPreviewPanel, QLPreviewPanelDataSource};
@@ -45,7 +45,9 @@ fn icon_key(path: &Path, is_dir: bool) -> String {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     if is_dir {
         let home = std::env::var("HOME").unwrap_or_default();
-        let special = path.parent().is_some_and(|p| p == Path::new(&home)) || path == Path::new("/") || path.starts_with("/Volumes");
+        let special = path.parent().is_some_and(|p| p == Path::new(&home))
+            || path == Path::new("/")
+            || path.starts_with("/Volumes");
         if !ext.is_empty() || special { format!("path:{}", path.display()) } else { "dir".into() }
     } else {
         format!("ext:{ext}")
@@ -219,7 +221,8 @@ pub fn begin_drag(window: &Window, paths: &[PathBuf]) -> bool {
         .enumerate()
         .map(|(i, p)| {
             let url = ns_url(p);
-            let item = NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), ProtocolObject::from_ref(&*url));
+            let item =
+                NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), ProtocolObject::from_ref(&*url));
             let icon = NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(&p.to_string_lossy()));
             let frame = NSRect::new(NSPoint::new(at.x - 16.0 + 4.0 * i as f64, at.y - 16.0), NSSize::new(32.0, 32.0));
             // SAFETY: NSImage is a valid dragging image.

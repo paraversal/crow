@@ -85,11 +85,7 @@ impl Theme {
     /// The color for a role. Roles missing from an older index fall back to the
     /// embedded theme, so this never fails.
     pub fn role(&self, role: &str) -> Rgb {
-        self.roles
-            .get(role)
-            .copied()
-            .or_else(|| fallback().roles.get(role).copied())
-            .unwrap_or(Rgb(0xff00ff))
+        self.roles.get(role).copied().or_else(|| fallback().roles.get(role).copied()).unwrap_or(Rgb(0xff00ff))
     }
 
     /// A palette slot, for the many-hue cases (icons, syntax) the protocol allows.
@@ -164,23 +160,16 @@ pub fn list_themes(dir: &Path) -> Vec<String> {
 
 fn parse_theme(id: &str, scheme_json: &str, roles_json: &str) -> Result<Theme, String> {
     let scheme: SchemeFile = serde_json::from_str(scheme_json).map_err(|e| format!("{id}: {e}"))?;
-    let base: HashMap<String, String> =
-        serde_json::from_str(roles_json).map_err(|e| format!("roles.json: {e}"))?;
-    let palette: HashMap<String, Rgb> = scheme
-        .palette
-        .iter()
-        .filter_map(|(k, v)| Some((k.clone(), Rgb::parse(v)?)))
-        .collect();
+    let base: HashMap<String, String> = serde_json::from_str(roles_json).map_err(|e| format!("roles.json: {e}"))?;
+    let palette: HashMap<String, Rgb> =
+        scheme.palette.iter().filter_map(|(k, v)| Some((k.clone(), Rgb::parse(v)?))).collect();
     let mut mapping = base;
     mapping.extend(scheme.roles);
     let roles = mapping
         .into_iter()
         .filter_map(|(role, reference)| {
-            let color = if reference.starts_with('#') {
-                Rgb::parse(&reference)
-            } else {
-                palette.get(&reference).copied()
-            };
+            let color =
+                if reference.starts_with('#') { Rgb::parse(&reference) } else { palette.get(&reference).copied() };
             color.map(|c| (role, c))
         })
         .collect();
@@ -190,8 +179,8 @@ fn parse_theme(id: &str, scheme_json: &str, roles_json: &str) -> Result<Theme, S
 
 /// Load one theme: `roles.json` merged with the theme's own `roles` (theme wins).
 pub fn load_theme(dir: &Path, id: &str) -> Result<Theme, String> {
-    let scheme = fs::read_to_string(dir.join("schemes").join(format!("{id}.json")))
-        .map_err(|e| format!("{id}: {e}"))?;
+    let scheme =
+        fs::read_to_string(dir.join("schemes").join(format!("{id}.json"))).map_err(|e| format!("{id}: {e}"))?;
     let roles = fs::read_to_string(dir.join("roles.json")).unwrap_or_else(|_| FALLBACK_ROLES.into());
     parse_theme(id, &scheme, &roles)
 }
@@ -202,26 +191,24 @@ pub fn fallback() -> Theme {
 }
 
 fn read_selection(path: &Path) -> Selection {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 /// Which theme to show. `saved` is the app's stored choice: an id, `"system"` or `None`.
 /// Order: saved id → `current.json[appearance]` → `defaults.json[appearance]` → first theme.
 pub fn resolve_theme_id(saved: Option<&str>, appearance: Variant, dir: &Path, state: &Path) -> Option<String> {
     let ids = list_themes(dir);
-    if let Some(s) = saved {
-        if s != "system" && ids.iter().any(|i| i == s) {
-            return Some(s.to_owned());
-        }
+    if let Some(s) = saved
+        && s != "system"
+        && ids.iter().any(|i| i == s)
+    {
+        return Some(s.to_owned());
     }
     for sel in [read_selection(&state.join("current.json")), read_selection(&dir.join("defaults.json"))] {
-        if let Some(id) = sel.get(appearance) {
-            if ids.iter().any(|i| i == id) {
-                return Some(id.to_owned());
-            }
+        if let Some(id) = sel.get(appearance)
+            && ids.iter().any(|i| i == id)
+        {
+            return Some(id.to_owned());
         }
     }
     ids.into_iter().next()
@@ -230,9 +217,7 @@ pub fn resolve_theme_id(saved: Option<&str>, appearance: Variant, dir: &Path, st
 /// Resolve and load in one step, falling back to the embedded theme on any failure.
 pub fn current(saved: Option<&str>, appearance: Variant) -> Theme {
     let (dir, state) = (themes_dir(), state_dir());
-    resolve_theme_id(saved, appearance, &dir, &state)
-        .and_then(|id| load_theme(&dir, &id).ok())
-        .unwrap_or_else(fallback)
+    resolve_theme_id(saved, appearance, &dir, &state).and_then(|id| load_theme(&dir, &id).ok()).unwrap_or_else(fallback)
 }
 
 /// "Apply to all apps": merge `id` into `current.json` under its variant, atomically.
@@ -240,10 +225,8 @@ pub fn set_global(theme: &Theme) -> std::io::Result<()> {
     let state = state_dir();
     fs::create_dir_all(&state)?;
     let target = state.join("current.json");
-    let mut current: serde_json::Map<String, serde_json::Value> = fs::read_to_string(&target)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    let mut current: serde_json::Map<String, serde_json::Value> =
+        fs::read_to_string(&target).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     current.insert(theme.variant.key().into(), theme.id.clone().into());
     let tmp = state.join(format!("current.json.{}.tmp", std::process::id()));
     fs::write(&tmp, serde_json::to_string_pretty(&current)? + "\n")?;
@@ -256,16 +239,17 @@ pub fn set_global(theme: &Theme) -> std::io::Result<()> {
 /// show up at the real path.
 pub fn watch_dirs() -> BTreeSet<PathBuf> {
     let (dir, state) = (themes_dir(), state_dir());
-    let _ = fs::create_dir_all(&state);
+    // Created so a later first write of current.json is seen; failure just means no state dir to watch.
+    fs::create_dir_all(&state).ok();
     let mut dirs: BTreeSet<PathBuf> = [dir.clone(), dir.join("schemes"), state].into_iter().collect();
     let files = ["roles.json".to_owned(), "defaults.json".to_owned()]
         .into_iter()
         .chain(list_themes(&dir).into_iter().map(|id| format!("schemes/{id}.json")));
     for f in files {
-        if let Ok(real) = fs::canonicalize(dir.join(f)) {
-            if let Some(parent) = real.parent() {
-                dirs.insert(parent.to_path_buf());
-            }
+        if let Ok(real) = fs::canonicalize(dir.join(f))
+            && let Some(parent) = real.parent()
+        {
+            dirs.insert(parent.to_path_buf());
         }
     }
     dirs.retain(|d| d.is_dir());

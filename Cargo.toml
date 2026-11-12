@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/crow-theme", "spike"]
+members = ["crates/*", "spike"]
 # vendor/zed is its own workspace (fetched by scripts/fetch-gpui.sh).
 exclude = ["vendor"]
 
@@ -9,6 +9,23 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+crow-core = { path = "crates/crow-core" }
+crow-fs = { path = "crates/crow-fs" }
+crow-macos = { path = "crates/crow-macos" }
+crow-search = { path = "crates/crow-search" }
+crow-theme = { path = "crates/crow-theme" }
+
+# Zed's GPUI with AccessKit accessibility; crates.io's 0.2.2 has none.
+# runtime_shaders: compile Metal shaders at launch, so building needs no Metal Toolchain download.
+gpui = { path = "vendor/zed/crates/gpui", default-features = false, features = ["font-kit"] }
+gpui_platform = { path = "vendor/zed/crates/gpui_platform", default-features = false, features = ["font-kit", "runtime_shaders"] }
+
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+notify = "8"
+raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-notify = "8"
+toml = "1"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

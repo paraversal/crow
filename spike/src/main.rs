@@ -16,10 +16,10 @@ use std::time::{Duration, Instant};
 use crow_theme::{Rgb, Theme, Variant};
 use fsmodel::{Entry, Snapshot};
 use gpui::{
-    App, Bounds, ClickEvent, Context, FocusHandle, KeyBinding, Menu, MenuItem, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollStrategy, SharedString, Subscription,
-    Role, TitlebarOptions, UniformListScrollHandle, Window, WindowAppearance, WindowBounds, WindowOptions, actions, div,
-    img, point, prelude::*, px, rgb, rgba, size, uniform_list,
+    App, Bounds, ClickEvent, Context, FocusHandle, KeyBinding, Menu, MenuItem, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, Role, ScrollStrategy, SharedString, Subscription,
+    TitlebarOptions, UniformListScrollHandle, Window, WindowAppearance, WindowBounds, WindowOptions, actions, div, img,
+    point, prelude::*, px, rgb, rgba, size, uniform_list,
 };
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -425,7 +425,12 @@ impl Crow {
         }
     }
 
-    fn render_rows(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) -> Vec<impl IntoElement + use<>> {
+    fn render_rows(
+        &mut self,
+        range: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<impl IntoElement + use<>> {
         let t = &self.theme;
         let focused = self.list_focus.is_focused(window);
         let sel_bg = if focused { ca(t.role("accent"), 0x55) } else { c(t.role("selection")) };
@@ -648,13 +653,7 @@ impl Crow {
                     .when(i + 1 < n, |d| d.child(div().pl_1().child("›")))
             }))
             .child(div().flex_1())
-            .child(format!(
-                "{} items · {:.0} ms{} · {}",
-                self.entries.len(),
-                self.load_ms,
-                fps,
-                self.theme.name
-            ))
+            .child(format!("{} items · {:.0} ms{} · {}", self.entries.len(), self.load_ms, fps, self.theme.name))
     }
 }
 
@@ -822,7 +821,11 @@ fn main() {
             KeyBinding::new("cmd-q", Quit, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.set_menus(vec![Menu { name: "Crow Spike".into(), items: vec![MenuItem::action("Quit Crow Spike", Quit)], disabled: false }]);
+        cx.set_menus(vec![Menu {
+            name: "Crow Spike".into(),
+            items: vec![MenuItem::action("Quit Crow Spike", Quit)],
+            disabled: false,
+        }]);
         let bounds = Bounds::centered(None, size(px(1200.), px(760.)), cx);
         cx.open_window(
             WindowOptions {

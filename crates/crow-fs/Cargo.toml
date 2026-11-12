@@ -1,0 +1,10 @@
+[package]
+name = "crow-fs"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Folder snapshots, watching and (from M4) the file operation engine"
+
+[dependencies]
+notify.workspace = true
