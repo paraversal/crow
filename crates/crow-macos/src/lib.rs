@@ -24,6 +24,7 @@ pub use volumes::{MountWatcher, Volume, eject, reduce_motion, volumes, watch_mou
 
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
+use objc2_app_kit::{NSApplication, NSWorkspace};
 use objc2_foundation::{NSString, NSURL};
 use std::path::Path;
 
@@ -42,4 +43,16 @@ fn ns_string(path: &Path) -> Retained<NSString> {
 
 fn ns_url(path: &Path) -> Retained<NSURL> {
     NSURL::fileURLWithPath(&ns_string(path))
+}
+
+/// The standard About panel, filled from the app bundle's Info.plist.
+pub fn show_about_panel() {
+    let Some(mtm) = main_thread() else { return };
+    NSApplication::sharedApplication(mtm).orderFrontStandardAboutPanel(None);
+}
+
+/// Open `path` with the application the user has associated with it.
+/// False when nothing opened it (no app for its type, or not on the main thread).
+pub fn open_in_default_app(path: &Path) -> bool {
+    main_thread().is_some() && NSWorkspace::sharedWorkspace().openURL(&ns_url(path))
 }

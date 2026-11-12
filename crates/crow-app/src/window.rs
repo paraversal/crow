@@ -10,10 +10,10 @@ use gpui::{
 };
 
 use crate::actions::{
-    AddToSidebar, ApplyThemeEverywhere, CancelOperation, CloseTab, GoBack, GoForward, GoToFolder, MoveDown,
-    MoveToTrash, MoveUp, NewTab, NextTab, OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView,
-    ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, UseViewAsDefaults, ViewAsColumns,
-    ViewAsList, WhyThisView,
+    AddToSidebar, ApplyThemeEverywhere, CancelOperation, CloseTab, GoBack, GoForward, GoToFolder, KeyboardShortcuts,
+    Minimize, MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PreviousTab,
+    ResetFolderView, SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
+    UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
 };
 use crate::chrome::{self, SheetWidth, with_action_tooltip, with_tooltip};
 use crate::icons::{self, Glyph};
@@ -50,6 +50,13 @@ pub fn open(dir: PathBuf, bench: bool, cx: &mut App) {
     if let Err(e) = cx.open_window(options, |window, cx| cx.new(|cx| CrowWindow::new(dir, bench, window, cx))) {
         tracing::error!("open window: {e}");
     }
+}
+
+/// What `CrowWindow::open_search` starts from. U3 reuses it with a query.
+pub struct SearchStart {
+    pub folder: PathBuf,
+    pub query: String,
+    pub everything: bool,
 }
 
 pub struct CrowWindow {
@@ -164,6 +171,19 @@ impl CrowWindow {
     }
 
     // ----- window actions -----
+
+    fn new_window(&mut self, _: &NewWindow, _window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.pane().read(cx).current_dir(cx);
+        open(dir, false, cx);
+    }
+
+    fn minimize(&mut self, _: &Minimize, window: &mut Window, _: &mut Context<Self>) {
+        window.minimize_window();
+    }
+
+    fn zoom(&mut self, _: &Zoom, window: &mut Window, _: &mut Context<Self>) {
+        window.zoom_window();
+    }
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.pane().read(cx).current_dir(cx);
@@ -1297,12 +1317,37 @@ impl CrowWindow {
             search.update(cx, |search, cx| search.focus_input(window, cx));
             return;
         }
-        if self.picker.is_some() || self.go_to.is_some() || self.sheet.is_some() || self.palette.is_some() {
+        let folder = self.pane().read(cx).current_dir(cx);
+        self.open_search(SearchStart { folder, query: String::new(), everything: false }, window, cx);
+    }
+
+    fn search_everything(&mut self, _: &SearchEverything, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(search) = &self.search {
+            search.update(cx, |search, cx| {
+                let on = !search.everything();
+                search.set_everything(on, cx);
+                search.focus_input(window, cx);
+            });
             return;
         }
         let folder = self.pane().read(cx).current_dir(cx);
+        self.open_search(SearchStart { folder, query: String::new(), everything: true }, window, cx);
+    }
+
+    /// Opens the search panel (Scope Folder) on `folder`, with `query` in the field and
+    /// the rules set by `everything`. Does nothing while another overlay is open or
+    /// search is already open.
+    fn open_search(&mut self, start: SearchStart, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.search.is_some()
+            || self.picker.is_some()
+            || self.go_to.is_some()
+            || self.sheet.is_some()
+            || self.palette.is_some()
+        {
+            return false;
+        }
         let (home, show_hidden) = (cx.global::<Ui>().home.clone(), self.show_hidden);
-        let search = cx.new(|cx| SearchView::new(folder, home, show_hidden, cx));
+        let search = cx.new(|cx| SearchView::new(start.folder, home, show_hidden, start.query, start.everything, cx));
         self._subscriptions.push(cx.observe(&search, |_, _, cx| cx.notify()));
         self._subscriptions.push(cx.subscribe_in(&search, window, |this, search, event, window, cx| {
             this.on_search_event(search.clone(), event, window, cx)
@@ -1310,6 +1355,7 @@ impl CrowWindow {
         search.update(cx, |search, cx| search.focus_input(window, cx));
         self.search = Some(search);
         cx.notify();
+        true
     }
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1366,6 +1412,15 @@ impl CrowWindow {
     // ----- command palette -----
 
     fn show_palette(&mut self, _: &ShowCommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette("", window, cx);
+    }
+
+    /// Help ▸ Crow Keyboard Shortcuts starts the palette in command mode.
+    fn keyboard_shortcuts(&mut self, _: &KeyboardShortcuts, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette(">", window, cx);
+    }
+
+    fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some()
             || self.picker.is_some()
             || self.go_to.is_some()
@@ -1382,8 +1437,8 @@ impl CrowWindow {
         };
         let subfolders = self.pane().read(cx).subfolders(cx);
         let folders = palette::folder_candidates(favorites, recents, subfolders, &home);
-        let items = palette::items("", &folders);
-        let input = cx.new(|cx| TextInput::new("", "Go to Folder or > for Commands", cx));
+        let items = palette::items(query, &folders);
+        let input = cx.new(|cx| TextInput::new(query, "Go to Folder or > for Commands", cx));
         let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
             TextInputEvent::Changed => {
                 let query = input.read(cx).text().to_owned();
@@ -1474,6 +1529,10 @@ impl CrowWindow {
             CommandId::UseViewAsDefaults => self.use_view_as_defaults(&UseViewAsDefaults, window, cx),
             CommandId::ResetFolderView => self.reset_folder_view(&ResetFolderView, window, cx),
             CommandId::ShowThemePicker => self.show_theme_picker(&ShowThemePicker, window, cx),
+            CommandId::ShowSearch => self.show_search(&ShowSearch, window, cx),
+            CommandId::SearchEverything => self.search_everything(&SearchEverything, window, cx),
+            // Reached from the palette? No: ShowCommandPalette is menu-only and SearchReveal needs results.
+            CommandId::ShowCommandPalette | CommandId::SearchReveal => {}
             CommandId::ToggleActivity => {
                 self.show_activity = !self.show_activity;
                 cx.notify();
@@ -1774,6 +1833,10 @@ impl Render for CrowWindow {
             // keys::context_stack (KeyScope::Window) mirrors this; every overlay nests under it.
             .key_context("Crow")
             .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::new_window))
+            .on_action(cx.listener(Self::minimize))
+            .on_action(cx.listener(Self::zoom))
+            .on_action(cx.listener(Self::keyboard_shortcuts))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
@@ -1795,6 +1858,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::show_theme_picker))
             .on_action(cx.listener(Self::show_palette))
             .on_action(cx.listener(Self::show_search))
+            .on_action(cx.listener(Self::search_everything))
             .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, _, cx| {
                 this.show_activity = !this.show_activity;
                 cx.notify();
@@ -1889,6 +1953,12 @@ mod tests {
 
     fn dir(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> PathBuf {
         pane(view, cx).read_with(cx, |p, cx| p.current_dir(cx))
+    }
+
+    /// Whether the menu item for `action` would be enabled with the current focus.
+    fn action_available(action: &dyn gpui::Action, cx: &mut VisualTestContext) -> bool {
+        let window = cx.update(|_, cx| cx.windows()[0]);
+        cx.update_window(window, |_, window, cx| window.is_action_available(action, cx)).expect("check action")
     }
 
     /// The visible list rows as (name, indent depth).
@@ -2263,6 +2333,244 @@ mod tests {
         let paths = search.read_with(&cx, |search, _| search.result_paths());
         assert!(paths.contains(&root.join("node_modules/pkg/needle.txt")), "{paths:?}");
         assert_eq!(search.read_with(&cx, |search, _| search.skipped_count()), 0);
+    }
+
+    fn focus_search_input(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+        let focus = view.read_with(cx, |w, cx| w.search.as_ref().expect("search open").read(cx).input_focus_handle(cx));
+        assert!(cx.update(|window, _| focus.is_focused(window)), "focus is in the search field");
+    }
+
+    #[gpui::test]
+    fn find_everything_from_the_list_opens_search_with_rules_off(cx: &mut TestAppContext) {
+        let root = fixture("find-everything");
+        std::fs::create_dir_all(root.join("node_modules/pkg")).expect("create fixture");
+        std::fs::write(root.join("node_modules/pkg/needle.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+
+        cx.simulate_keystrokes("cmd-shift-a");
+        cx.run_until_parked();
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert!(search.read_with(&cx, |search, _| search.everything()), "every rule is off");
+        assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Folder);
+        focus_search_input(&view, &mut cx);
+
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.contains(&root.join("node_modules/pkg/needle.txt")), "{paths:?}");
+        assert_eq!(search.read_with(&cx, |search, _| search.skipped_count()), 0);
+    }
+
+    #[gpui::test]
+    fn find_everything_does_nothing_over_the_palette(cx: &mut TestAppContext) {
+        let root = fixture("find-everything-palette");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-shift-a");
+        cx.run_until_parked();
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "search stays closed");
+        assert!(view.read_with(&cx, |w, _| w.palette.is_some()), "the palette stays open");
+    }
+
+    #[gpui::test]
+    fn find_everything_from_the_sidebar_with_search_open(cx: &mut TestAppContext) {
+        let root = fixture("find-everything-sidebar");
+        std::fs::write(root.join("notes.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert!(!search.read_with(&cx, |search, _| search.everything()));
+
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        let focus = sidebar.read_with(&cx, |sidebar, cx| sidebar.focus_handle(cx));
+        cx.update(|window, cx| window.focus(&focus, cx));
+        cx.simulate_keystrokes("cmd-shift-a");
+        wait_for_search(&view, &mut cx);
+        assert!(search.read_with(&cx, |search, _| search.everything()), "the open search flips its rules");
+        focus_search_input(&view, &mut cx);
+    }
+
+    #[gpui::test]
+    fn open_search_with_a_query_runs_it(cx: &mut TestAppContext) {
+        let root = fixture("open-search-query");
+        std::fs::write(root.join("notes.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        let window = cx.update(|_, cx| cx.windows()[0]);
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.open_search(
+                    SearchStart { folder: root.clone(), query: "needle".to_owned(), everything: false },
+                    window,
+                    cx,
+                );
+            });
+        })
+        .expect("open search with a query");
+        wait_for_search(&view, &mut cx);
+
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "needle");
+        assert!(!search.read_with(&cx, |search, _| search.everything()));
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.contains(&root.join("notes.txt")), "{paths:?}");
+    }
+
+    fn menu_action(menu: &str, title: &str, cx: &VisualTestContext) -> Box<dyn gpui::Action> {
+        cx.read(|cx| {
+            let menus = cx.get_menus().expect("menus are installed");
+            menus
+                .iter()
+                .find(|candidate| candidate.name.as_ref() == menu)
+                .and_then(|menu| {
+                    menu.items.iter().find_map(|item| match item {
+                        gpui::OwnedMenuItem::Action { name, action, .. } if name == title => Some(action.boxed_clone()),
+                        _ => None,
+                    })
+                })
+                .unwrap_or_else(|| panic!("{menu} > {title} exists"))
+        })
+    }
+
+    fn dispatch_menu(menu: &str, title: &str, cx: &mut VisualTestContext) {
+        let action = menu_action(menu, title, cx);
+        let window = cx.update(|_, cx| cx.windows()[0]);
+        cx.update_window(window, |_, window, cx| window.dispatch_action(action, cx)).expect("dispatch menu item");
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn menu_keys_are_the_finder_keys(cx: &mut TestAppContext) {
+        let root = fixture("menu-keys");
+        let (_view, cx) = open(cx, &root);
+        let checks = [
+            (crate::palette::CommandId::ShowSearch, "cmd-f"),
+            (crate::palette::CommandId::SearchEverything, "cmd-shift-a"),
+            (crate::palette::CommandId::OpenParent, "cmd-up"),
+            (crate::palette::CommandId::Undo, "cmd-z"),
+            (crate::palette::CommandId::Copy, "cmd-c"),
+            (crate::palette::CommandId::ShowCommandPalette, "cmd-k"),
+            (crate::palette::CommandId::GoToFolder, "cmd-shift-g"),
+            (crate::palette::CommandId::ToggleActivity, "alt-cmd-l"),
+        ];
+        for (id, expected) in checks {
+            let actual = cx.read(|cx| {
+                let command = crate::palette::COMMANDS.iter().find(|command| command.id == id).expect("command");
+                let keymap = cx.key_bindings();
+                let keymap = keymap.borrow();
+                keymap.bindings_for_action(command.action).next().map(|binding| {
+                    binding
+                        .keystrokes()
+                        .iter()
+                        .map(|keystroke| keystroke.unparse(gpui::OperatingSystem::Mac))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+            });
+            assert_eq!(actual.as_deref(), Some(expected), "{id:?} shows its Finder key");
+        }
+    }
+
+    #[gpui::test]
+    fn menu_items_are_enabled_by_focus(cx: &mut TestAppContext) {
+        let root = fixture("menu-focus");
+        std::fs::write(root.join("notes.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+
+        assert!(action_available(&crate::actions::StartFilter, &mut cx), "list: Filter");
+        assert!(action_available(&crate::actions::Rename, &mut cx), "list: Rename");
+        assert!(action_available(&crate::actions::MoveToTrash, &mut cx), "list: Move to Trash");
+        assert!(action_available(&crate::actions::GoBack, &mut cx), "any: Back");
+
+        cx.simulate_keystrokes("tab");
+        assert!(!action_available(&crate::actions::StartFilter, &mut cx), "sidebar: no Filter");
+        assert!(!action_available(&crate::actions::Rename, &mut cx), "sidebar: no Rename");
+        assert!(!action_available(&crate::actions::CopyFiles, &mut cx), "sidebar: no Copy");
+        assert!(!action_available(&crate::actions::PasteFiles, &mut cx), "sidebar: no Paste");
+        assert!(!action_available(&crate::actions::NewFolder, &mut cx), "sidebar: no New Folder");
+        assert!(!action_available(&crate::actions::QuickLook, &mut cx), "sidebar: no Quick Look");
+        assert!(action_available(&crate::actions::GoBack, &mut cx), "sidebar: Back stays");
+        assert!(action_available(&crate::actions::ShowSearch, &mut cx), "sidebar: Find stays");
+        assert!(action_available(&crate::actions::SearchEverything, &mut cx), "sidebar: Find Everything stays");
+        assert!(action_available(&crate::actions::Undo, &mut cx), "sidebar: Undo stays");
+
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        cx.simulate_keystrokes("tab");
+        assert!(action_available(&crate::actions::CopyFiles, &mut cx), "results: Copy");
+        assert!(action_available(&crate::actions::SelectAll, &mut cx), "results: Select All");
+        assert!(action_available(&crate::actions::MoveToTrash, &mut cx), "results: Move to Trash");
+        assert!(action_available(&crate::actions::QuickLook, &mut cx), "results: Quick Look");
+        assert!(!action_available(&crate::actions::PasteFiles, &mut cx), "results: no Paste");
+        assert!(!action_available(&crate::actions::StartFilter, &mut cx), "results: no Filter");
+    }
+
+    #[gpui::test]
+    fn menu_items_dispatch(cx: &mut TestAppContext) {
+        let root = fixture("menu-dispatch");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| crate::menus::init_for_tests(cx));
+
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        dispatch_menu("Go", "Enclosing Folder", &mut cx);
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root);
+        dispatch_menu("Go", "Back", &mut cx);
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+
+        dispatch_menu("Edit", "Filter This Folder", &mut cx);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "Filter opens");
+        cx.simulate_keystrokes("escape");
+
+        dispatch_menu("Edit", "Find…", &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_some()), "Find opens search");
+        cx.simulate_keystrokes("escape");
+        dispatch_menu("Go", "Go to…", &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.palette.is_some()), "Go to opens the palette");
+        cx.simulate_keystrokes("escape");
+
+        let activity = view.read_with(&cx, |w, _| w.show_activity);
+        dispatch_menu("View", "Show Activity", &mut cx);
+        assert_ne!(view.read_with(&cx, |w, _| w.show_activity), activity, "Show Activity flips");
+
+        dispatch_menu("File", "New Tab", &mut cx);
+        assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2, "New Tab opens a tab");
+    }
+
+    #[gpui::test]
+    fn window_menu_tab_items_switch_tabs(cx: &mut TestAppContext) {
+        let root = fixture("menu-tabs");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| crate::menus::init_for_tests(cx));
+        cx.simulate_keystrokes("cmd-t");
+        settle(&view, &mut cx);
+        assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2);
+
+        dispatch_menu("Window", "Show Previous Tab", &mut cx);
+        assert_eq!(view.read_with(&cx, |w, _| w.tabs.active_index()), 0);
+        dispatch_menu("Window", "Show Next Tab", &mut cx);
+        assert_eq!(view.read_with(&cx, |w, _| w.tabs.active_index()), 1);
+    }
+
+    #[gpui::test]
+    fn help_opens_palette_in_command_mode(cx: &mut TestAppContext) {
+        let root = fixture("menu-help");
+        let (view, mut cx) = open(cx, &root);
+        let window = cx.update(|_, cx| cx.windows()[0]);
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_action(Box::new(crate::actions::KeyboardShortcuts), cx)
+        })
+        .expect("dispatch Help item");
+        cx.run_until_parked();
+        let text =
+            view.read_with(&cx, |w, cx| w.palette.as_ref().expect("palette opens").input.read(cx).text().to_owned());
+        assert_eq!(text, ">", "the palette starts in command mode");
     }
 
     #[gpui::test]
@@ -3014,6 +3322,149 @@ mod tests {
         assert!(root.join("Projects").is_dir(), "renamed on Return; folder now has {entries:?}");
         assert!(!root.join("untitled folder").exists());
         assert_eq!(selected(&view, &cx).as_deref(), Some("Projects"));
+    }
+
+    #[gpui::test]
+    fn palette_find_opens_search(cx: &mut TestAppContext) {
+        let root = fixture("palette-find");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.run_until_parked();
+        cx.simulate_input(">find");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "the palette closes");
+        let focus =
+            view.read_with(&cx, |w, cx| w.search.as_ref().expect("Find… opens search").read(cx).input_focus_handle(cx));
+        assert!(cx.update(|window, _| focus.is_focused(window)), "focus is in the search field");
+    }
+
+    #[gpui::test]
+    fn plain_keys_stay_in_every_text_field(cx: &mut TestAppContext) {
+        use crate::actions::{CopyFiles, CutFiles, MoveToTrash, PasteFiles, QuickLook, Rename, SelectAll, StartFilter};
+
+        let root = fixture("plain-keys");
+        let (view, mut cx) = open(cx, &root);
+        // simulate_input skips AppKit's menu equivalents, so the real guard is that no list
+        // action is on the focus path: a disabled menu item lets its plain key through.
+        fn list_actions_off(field: &str, cx: &mut VisualTestContext) {
+            for (action, name) in [
+                (&StartFilter as &dyn gpui::Action, "Filter This Folder"),
+                (&QuickLook, "Quick Look"),
+                (&Rename, "Rename"),
+                (&MoveToTrash, "Move to Trash"),
+            ] {
+                assert!(!action_available(action, cx), "{field}: {name} is off the path");
+            }
+        }
+
+        // Rename: the list's actions must be off the focus path so AppKit passes plain keys through.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "Return starts rename");
+        cx.simulate_input("a/b c");
+        let (name, filtering) = pane(&view, &cx).read_with(&cx, |p, cx| (p.rename_text(cx), p.is_filtering()));
+        assert_eq!(name.as_deref(), Some("a/b c"), "slash and space land in the name");
+        assert!(!filtering, "slash did not start the filter");
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "space did not open Quick Look");
+        list_actions_off("rename", &mut cx);
+        assert!(action_available(&CopyFiles, &mut cx), "the field handles Copy");
+        assert!(action_available(&CutFiles, &mut cx), "the field handles Cut");
+        assert!(action_available(&PasteFiles, &mut cx), "the field handles Paste");
+        assert!(action_available(&SelectAll, &mut cx), "the field handles Select All");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "Return ends the rename");
+        settle(&view, &mut cx);
+
+        // Filter field.
+        cx.simulate_keystrokes("/");
+        cx.run_until_parked();
+        cx.simulate_input("a/b c");
+        let text = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_text(cx));
+        assert_eq!(text.as_deref(), Some("a/b c"), "slash and space land in the filter");
+        list_actions_off("filter", &mut cx);
+        cx.simulate_keystrokes("escape");
+
+        // Go to Folder field.
+        cx.simulate_keystrokes("cmd-shift-g");
+        cx.run_until_parked();
+        cx.simulate_input("/ ");
+        let text = view
+            .read_with(&cx, |w, cx| w.go_to.as_ref().map(|(input, _)| input.read(cx).text().to_owned()))
+            .expect("Go to Folder stays open");
+        assert!(text.ends_with("/ "), "slash and space land in Go to Folder, got {text:?}");
+        list_actions_off("Go to Folder", &mut cx);
+        cx.simulate_keystrokes("escape");
+
+        // Search field.
+        cx.simulate_keystrokes("cmd-f");
+        cx.run_until_parked();
+        cx.simulate_input("/ ");
+        let text = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search open").read(cx).query_text(cx));
+        assert_eq!(text, "/ ", "slash and space land in the search field");
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "search did not start the filter");
+        list_actions_off("search", &mut cx);
+        cx.simulate_keystrokes("escape");
+
+        // Palette field.
+        cx.simulate_keystrokes("cmd-k");
+        cx.run_until_parked();
+        cx.simulate_input("/ ");
+        let text =
+            view.read_with(&cx, |w, cx| w.palette.as_ref().expect("palette open").input.read(cx).text().to_owned());
+        assert_eq!(text, "/ ", "slash and space land in the palette");
+        list_actions_off("palette", &mut cx);
+        cx.simulate_keystrokes("escape");
+    }
+
+    #[gpui::test]
+    fn cmd_z_in_a_text_field_undoes_typing_not_files(cx: &mut TestAppContext) {
+        let root = fixture("field-undo");
+        let (view, mut cx) = open(cx, &root);
+        // A file operation to (wrongly) undo: trash notes.txt.
+        cx.simulate_keystrokes("down down cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists());
+
+        // Rename beta: "beta" is selected; typing replaces it in one step, then a second run.
+        cx.simulate_keystrokes("home down");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_input("gamma");
+        cx.simulate_keystrokes("backspace backspace");
+        let name = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.rename_text(cx));
+        assert_eq!(name(&cx).as_deref(), Some("gam"));
+
+        cx.simulate_keystrokes("cmd-z");
+        assert_eq!(name(&cx).as_deref(), Some("gamma"), "undo takes back the deletions as one step");
+        cx.simulate_keystrokes("cmd-z");
+        assert_eq!(name(&cx).as_deref(), Some("beta"), "undo takes back the typing as one step");
+        cx.simulate_keystrokes("cmd-z");
+        assert_eq!(name(&cx).as_deref(), Some("beta"), "nothing left to undo in the field");
+        cx.simulate_keystrokes("cmd-shift-z");
+        assert_eq!(name(&cx).as_deref(), Some("gamma"), "redo brings the typing back");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists(), "the trash was never undone");
+        cx.simulate_keystrokes("escape");
+
+        // The same in the filter field, with the menu's Undo action.
+        cx.simulate_keystrokes("/");
+        cx.run_until_parked();
+        cx.simulate_input("al");
+        cx.dispatch_action(crate::actions::Undo);
+        let text = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_text(cx));
+        assert_eq!(text.as_deref(), Some(""), "Edit ▸ Undo undoes the filter text");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists(), "the trash was never undone");
+        cx.simulate_keystrokes("escape");
+
+        // Back in the list, ⌘Z undoes the file operation again.
+        cx.simulate_keystrokes("cmd-z");
+        settle(&view, &mut cx);
+        assert!(root.join("notes.txt").exists(), "list ⌘Z undoes the trash");
     }
 
     #[gpui::test]

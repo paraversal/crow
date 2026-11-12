@@ -59,8 +59,12 @@ In the sidebar, Cmd-Delete removes a favorite or forgets a recent folder, and Cm
 With `keymap = "vim"`: j/k, h/l (parent and open, or columns), gg/G, yy/dd/p (copy, cut, paste),
 u and Ctrl-R, cw renames, `-` goes up, `m x` marks the folder as favorite x and `'x` jumps there.
 
-Shortcuts shown in the command palette, tooltips and hints come from the live keymap, so they
-follow `keymap = "vim"` too. Hover a nav arrow, a view button, a path segment, a disk row,
+Menus list every command with its key and grey out what the focused view cannot do: File,
+Edit (including Filter This Folder, Find… and Find Everything…), View, Go (Back, Forward,
+Enclosing Folder, Go to…, Go to Folder…), Window and Help. Use as Defaults, Reset View for
+This Folder and Zoom have no shortcut. Cmd-Shift-A from anywhere opens search with every
+`exclude.toml` set off. Shortcuts shown in the command palette, tooltips and hints come from
+the live keymap, so they follow `keymap = "vim"` too. Hover a nav arrow, a view button, a path segment, a disk row,
 Search everything or Cancel during an operation to see its name and key. Sheets (Go to Folder,
 Why This View?, the theme picker, Cmd-K and the delete/conflict questions) dim the window;
 clicking outside one cancels it exactly like Esc.

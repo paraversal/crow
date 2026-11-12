@@ -14,8 +14,9 @@ selection, type-to-select, sorting, Go to Folder, the column view's focus rules,
 (new folder and rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete),
 drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent),
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
-(preview, revert, save), the `/` filter, the command palette, the search panel and the Vim layer
-(motions, marks). Shared chrome has its own tests: key text from the live keymap (including the
+(preview, revert, save), the `/` filter, the command palette, the search panel, the menu bar
+(every registry command listed, Finder keys, enabled by focus, dispatch matching the key) and the
+Vim layer (motions, marks). Shared chrome has its own tests: key text from the live keymap (including the
 Vim layer and the palette's old strings), keycap weights, tooltip text and a hover, the sheet scrim
 (closing outside, staying open inside), and the selection tint roles. Each test gets its own temp
 config folder.
@@ -91,3 +92,10 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Sheets | Open Go to Folder, Cmd-J, the theme picker, Cmd-K and a permanent delete: each sits on a darkened window (check a dark and a light theme); clicking outside closes it like Esc (picker reverts, delete does nothing), clicking inside doesn't. The window can still be dragged. |
 | Keys follow the layer | Cmd-K, `>`: rows show ⇧⌘G style keys; set `keymap = "vim"`: Copy shows `yy`. |
 | Icons | Title-bar back/forward and view buttons are drawn icons, crisp at 1× and 2×, in both themes. |
+| Menu bar | Open each of File, Edit, View, Go, Window and Help: every item shows the key it has in the list (⌘F, ⇧⌘A, ⌘K, ⇧⌘G, ⌘[ …). Rename shows ↩, Filter This Folder `/` and Quick Look Space. Items without a key are the ones the README names. |
+| Menus follow focus | With the list focused, Edit ▸ Filter This Folder, Cut, Copy, Paste and Select All and File ▸ Rename are enabled; Tab to the sidebar: they grey out, Go ▸ Back stays enabled. In search results, Copy, Move to Trash and Quick Look are enabled, Paste is not. With the rename field focused, the list's items (Rename, Quick Look, Filter This Folder, Move to Trash …) grey out; Cut, Copy, Paste, Select All, Undo and Redo act on the text. |
+| Undo in text fields | Trash a file, then rename another item, type, and press ⌘Z: the typing is undone (a run of typing or deleting is one step), ⇧⌘Z redoes it, and the trashed file stays in the Trash. Same in the filter, search and Go to Folder fields. Back in the list, ⌘Z restores the file. Settings… with no app for `.toml` files shows an error in the status line. |
+| Menus act | Choose Go ▸ Enclosing Folder, Back, Go to…, Go to Folder…; Edit ▸ Find…, Filter This Folder; View ▸ Show Activity: each does what its key does. File ▸ New Window opens the current folder; ⌘N with no window opens Home. |
+| Find Everything | From the list press ⇧⌘A (or Edit ▸ Find Everything…): search opens in the current folder with the rules off; typing finds files inside `node_modules`. With search open, ⇧⌘A from the sidebar flips the rules and returns focus to the query field. |
+| Typing is not stolen | Rename a file and type `/`, Space and Return: the characters stay in the field (Return commits) and no filter or Quick Look opens. Same in the filter, Go to Folder, search and palette fields. |
+| Help search | Help ▸ type "trash": macOS points at File ▸ Move to Trash. |
