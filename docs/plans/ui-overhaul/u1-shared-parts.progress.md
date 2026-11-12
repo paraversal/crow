@@ -1,15 +1,15 @@
 # u1-shared-parts progress
-Branch: `ui-u1-shared-parts` · PR: none · Last updated: 2026-11-12
+Branch: `ui-u1-shared-parts` · PR: https://github.com/paraversal/file-crow/pull/8 · Last updated: 2026-11-12 · State: PR open (not merged)
 
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| I1 Keys from the live keymap | done (this commit) | `keys.rs`; palette rows/footer, delete sheet, picker, search header read the live keymap; tests `keys::tests::*`, `command_palette_keys_follow_the_layer` pass; grep has only the sort arrow. |
-| I2 Keycap element | done (this commit) | three weights, three builders; unit + render smoke tests pass. Hand check FireBox/Paper pending. |
-| I3 Tooltip | done (this commit) | all Target-table elements have tooltips; `History`/`Pane` peeks added; `history_peeks_without_moving` and `back_button_tooltip_names_the_folder` (incl. hover after 600 ms) pass. |
-| I4 Sheet overlay | done (this commit) | five overlays use `chrome::sheet`; `clicking_the_scrim_closes_every_overlay` and `clicking_inside_a_sheet_keeps_it_open` pass. Light/dark scrim and window drag while a sheet is open need a hand check. |
-| I5 Icons | done (this commit) | Lucide 1.72.0: chevron-left, chevron-right, list (columns-3 for Columns), search, arrow-right, x, chevron-down; ISC notice at `crates/crow-app/assets/icons/LICENSE`, copied to `Crow.app/Contents/Resources/Lucide-LICENSE.txt` by `scripts/bundle.sh`; embedded via `include_bytes!`; title-bar glyphs 16 px in unchanged 26×26 / 28×22 buttons; `every_glyph_resolves` and `assets_list_icons` pass. Bundle hand check pending. |
-| I6 Selection tints | done (this commit) | named tint helpers in `style.rs`; unfocused search selection is now `selection`; `tints_follow_roles` passes; grep shows 0x55 only in `style.rs`; `cursor_ring` is an inset shadow (crisp-ring hand check pending). |
+| I1 Keys from the live keymap | done (78e03f1) | `keys.rs`; palette rows/footer, delete sheet, picker, search header read the live keymap; tests `keys::tests::*`, `command_palette_keys_follow_the_layer` pass; grep has only the sort arrow. |
+| I2 Keycap element | done (78e03f1) | three weights, three builders; unit + render smoke tests pass. Hand check FireBox/Paper pending. |
+| I3 Tooltip | done (78e03f1) | all Target-table elements have tooltips; `History`/`Pane` peeks added; `history_peeks_without_moving` and `back_button_tooltip_names_the_folder` (incl. hover after 600 ms) pass. |
+| I4 Sheet overlay | done (6ded2f7) | five overlays use `chrome::sheet`; `clicking_the_scrim_closes_every_overlay` and `clicking_inside_a_sheet_keeps_it_open` pass. Light/dark scrim and window drag while a sheet is open need a hand check. |
+| I5 Icons | done (6ded2f7) | Lucide 1.72.0: chevron-left, chevron-right, list (columns-3 for Columns), search, arrow-right, x, chevron-down; ISC notice at `crates/crow-app/assets/icons/LICENSE`, copied to `Crow.app/Contents/Resources/Lucide-LICENSE.txt` by `scripts/bundle.sh`; embedded via `include_bytes!`; title-bar glyphs 16 px in unchanged 26×26 / 28×22 buttons; `every_glyph_resolves` and `assets_list_icons` pass. Bundle hand check pending. |
+| I6 Selection tints | done (6ded2f7) | named tint helpers in `style.rs`; unfocused search selection is now `selection`; `tints_follow_roles` passes; grep shows 0x55 only in `style.rs`; `cursor_ring` is an inset shadow (crisp-ring hand check pending). |
 
 ## Questions
 - U1 Q1–Q8 (asked 2026-11-12) → all recommended answers accepted:
@@ -46,4 +46,4 @@ Within run-to-run noise; recorded in `docs/testing.md` next to M6.
 - Not hand-checked yet: dark/light scrim pair on a light theme, tooltips for every other Target-table element, the Vim palette keys in the bundle, `cursor_ring` crispness (U8 uses it).
 
 ## Next
-Commit README/docs/progress, push, open the PR.
+None: all six items done and verified; PR #8 is open for review and hand testing. Remaining items above are hand checks for the user. Do not merge.
