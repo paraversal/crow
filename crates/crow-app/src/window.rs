@@ -2457,10 +2457,10 @@ mod tests {
         ];
         for (id, expected) in checks {
             let actual = cx.read(|cx| {
-                let action = crate::menus::action(id);
+                let command = crate::palette::COMMANDS.iter().find(|command| command.id == id).expect("command");
                 let keymap = cx.key_bindings();
                 let keymap = keymap.borrow();
-                keymap.bindings_for_action(&*action).next().map(|binding| {
+                keymap.bindings_for_action(command.action).next().map(|binding| {
                     binding
                         .keystrokes()
                         .iter()
@@ -3346,6 +3346,18 @@ mod tests {
 
         let root = fixture("plain-keys");
         let (view, mut cx) = open(cx, &root);
+        // simulate_input skips AppKit's menu equivalents, so the real guard is that no list
+        // action is on the focus path: a disabled menu item lets its plain key through.
+        fn list_actions_off(field: &str, cx: &mut VisualTestContext) {
+            for (action, name) in [
+                (&StartFilter as &dyn gpui::Action, "Filter This Folder"),
+                (&QuickLook, "Quick Look"),
+                (&Rename, "Rename"),
+                (&MoveToTrash, "Move to Trash"),
+            ] {
+                assert!(!action_available(action, cx), "{field}: {name} is off the path");
+            }
+        }
 
         // Rename: the list's actions must be off the focus path so AppKit passes plain keys through.
         cx.simulate_keystrokes("enter");
@@ -3356,15 +3368,15 @@ mod tests {
         assert_eq!(name.as_deref(), Some("a/b c"), "slash and space land in the name");
         assert!(!filtering, "slash did not start the filter");
         assert!(view.read_with(&cx, |w, _| w.search.is_none()), "space did not open Quick Look");
-        assert!(!action_available(&StartFilter, &mut cx), "Filter This Folder is off the path");
-        assert!(!action_available(&QuickLook, &mut cx), "Quick Look is off the path");
-        assert!(!action_available(&Rename, &mut cx), "Rename is off the path");
-        assert!(!action_available(&MoveToTrash, &mut cx), "Move to Trash is off the path");
+        list_actions_off("rename", &mut cx);
         assert!(action_available(&CopyFiles, &mut cx), "the field handles Copy");
         assert!(action_available(&CutFiles, &mut cx), "the field handles Cut");
         assert!(action_available(&PasteFiles, &mut cx), "the field handles Paste");
         assert!(action_available(&SelectAll, &mut cx), "the field handles Select All");
-        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "Return ends the rename");
+        settle(&view, &mut cx);
 
         // Filter field.
         cx.simulate_keystrokes("/");
@@ -3372,7 +3384,7 @@ mod tests {
         cx.simulate_input("a/b c");
         let text = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_text(cx));
         assert_eq!(text.as_deref(), Some("a/b c"), "slash and space land in the filter");
-        assert!(!action_available(&QuickLook, &mut cx), "Quick Look stays off while filtering");
+        list_actions_off("filter", &mut cx);
         cx.simulate_keystrokes("escape");
 
         // Go to Folder field.
@@ -3383,6 +3395,7 @@ mod tests {
             .read_with(&cx, |w, cx| w.go_to.as_ref().map(|(input, _)| input.read(cx).text().to_owned()))
             .expect("Go to Folder stays open");
         assert!(text.ends_with("/ "), "slash and space land in Go to Folder, got {text:?}");
+        list_actions_off("Go to Folder", &mut cx);
         cx.simulate_keystrokes("escape");
 
         // Search field.
@@ -3392,6 +3405,7 @@ mod tests {
         let text = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search open").read(cx).query_text(cx));
         assert_eq!(text, "/ ", "slash and space land in the search field");
         assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "search did not start the filter");
+        list_actions_off("search", &mut cx);
         cx.simulate_keystrokes("escape");
 
         // Palette field.
@@ -3401,7 +3415,56 @@ mod tests {
         let text =
             view.read_with(&cx, |w, cx| w.palette.as_ref().expect("palette open").input.read(cx).text().to_owned());
         assert_eq!(text, "/ ", "slash and space land in the palette");
+        list_actions_off("palette", &mut cx);
         cx.simulate_keystrokes("escape");
+    }
+
+    #[gpui::test]
+    fn cmd_z_in_a_text_field_undoes_typing_not_files(cx: &mut TestAppContext) {
+        let root = fixture("field-undo");
+        let (view, mut cx) = open(cx, &root);
+        // A file operation to (wrongly) undo: trash notes.txt.
+        cx.simulate_keystrokes("down down cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists());
+
+        // Rename beta: "beta" is selected; typing replaces it in one step, then a second run.
+        cx.simulate_keystrokes("home down");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_input("gamma");
+        cx.simulate_keystrokes("backspace backspace");
+        let name = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.rename_text(cx));
+        assert_eq!(name(&cx).as_deref(), Some("gam"));
+
+        cx.simulate_keystrokes("cmd-z");
+        assert_eq!(name(&cx).as_deref(), Some("gamma"), "undo takes back the deletions as one step");
+        cx.simulate_keystrokes("cmd-z");
+        assert_eq!(name(&cx).as_deref(), Some("beta"), "undo takes back the typing as one step");
+        cx.simulate_keystrokes("cmd-z");
+        assert_eq!(name(&cx).as_deref(), Some("beta"), "nothing left to undo in the field");
+        cx.simulate_keystrokes("cmd-shift-z");
+        assert_eq!(name(&cx).as_deref(), Some("gamma"), "redo brings the typing back");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists(), "the trash was never undone");
+        cx.simulate_keystrokes("escape");
+
+        // The same in the filter field, with the menu's Undo action.
+        cx.simulate_keystrokes("/");
+        cx.run_until_parked();
+        cx.simulate_input("al");
+        cx.dispatch_action(crate::actions::Undo);
+        let text = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_text(cx));
+        assert_eq!(text.as_deref(), Some(""), "Edit ▸ Undo undoes the filter text");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists(), "the trash was never undone");
+        cx.simulate_keystrokes("escape");
+
+        // Back in the list, ⌘Z undoes the file operation again.
+        cx.simulate_keystrokes("cmd-z");
+        settle(&view, &mut cx);
+        assert!(root.join("notes.txt").exists(), "list ⌘Z undoes the trash");
     }
 
     #[gpui::test]

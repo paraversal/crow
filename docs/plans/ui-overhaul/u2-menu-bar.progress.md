@@ -32,6 +32,12 @@ Branch: `ui-u2-menu-bar` · PR: https://github.com/paraversal/file-crow/pull/9 �
 - Window tab items are `MenuName::Window`, section 0. I5's `app_menus` puts Minimize/Zoom and a separator before them, which is why the registry's Window items start at 0 and no leading separator is emitted.
 - `OpenSettings` calls `crow_macos::open_in_default_app` directly on the main thread. The plan said `background_spawn`, but `NSWorkspace` is AppKit and must run on the main thread; no disk read happens here. `show_about_panel` and `open_in_default_app` are new `crow-macos` helpers.
 - `NewWindow` has both a `Crow` root listener (current folder) and the global no-window fallback (Home), so the menu and ⌘N agree (Q9).
+- Review fixes (2026-11-13, after the orchestrator's review; ⌘Z choice from the user: "cmd z should undo text input while a text field is focused"):
+  - `TextInput` has its own undo history and handles `crow::Undo`/`crow::Redo`, so ⌘Z/⇧⌘Z and Edit ▸ Undo/Redo act on the text in every field and never reach the file Undo. A run of typing at the cursor or deleting next to it is one step; paste, cut and Tab completion are their own steps; an IME composition is one step. With nothing left, it beeps instead of passing through. Test: `cmd_z_in_a_text_field_undoes_typing_not_files`.
+  - Settings… reports a failed open in the status line (`crow_macos::open_in_default_app` now returns whether it opened).
+  - `menus::action` (a second id → action table) is gone; menus use `Command.action` directly.
+  - `plain_keys_stay_in_every_text_field` now checks that Filter, Quick Look, Rename and Move to Trash are off the focus path in all five fields, and that Return ends a rename.
+  - The earlier hand-check note "rename field → only Cut/Copy/Paste/Select All enabled" was wrong: the window root's actions (Undo, Redo, Back …) stayed enabled. Undo/Redo now belong to the field.
 - Help ▸ Crow Keyboard Shortcuts opens the palette with `>` prefilled via `open_palette(">")`; `ShowCommandPalette` is hidden from the palette itself.
 - I1 findings (seen by hand on 2026-11-12, macOS 27.0.1 build 26A434, temporary menus built with `scripts/bundle.sh`):
   1. **Keys shown.** Filter This Folder showed `/` (no Command modifier). Quick Look showed a blank space. Rename showed the literal string `ENTER`. Other keys came from the first Finder-layer binding (`⌘F`, `⇧⌘A`, `⌘K`, `⇧⌘G`, `⌘[` …). After the GPUI patch, Rename shows ↩ and the other keys are unchanged.
@@ -50,6 +56,8 @@ Branch: `ui-u2-menu-bar` · PR: https://github.com/paraversal/file-crow/pull/9 �
 - [x] Help search: Help, type `trash` → Menu Items: Move to Trash. (2026-11-13)
 - [x] App menu: About Crow opens the standard panel; Hide Crow hides the app and it un-hides. (2026-11-13)
 - [ ] Settings… and Hide Others/Show All: not exercised by hand (Settings opens `settings.toml` in the external default app); code path reviewed.
+- [ ] (user) Undo in text fields: trash a file, rename another, type, ⌘Z → typing undone, file stays trashed; ⇧⌘Z redoes; same in filter/search/Go to Folder; ⌘Z in the list restores the file.
+- [ ] (user) The checks above marked [x] were run by the agent through System Events; repeat the menu ones by hand before merging.
 
 ## Found along the way
 - The first hand-check attempt sent `keystroke "down" using command down` (the letters d-o-w-n), which fired Open, Close Tab and New Window in sequence and made the app look like it crashed. The app was fine; use `key code 125` for the arrow. No product change needed.
@@ -62,6 +70,8 @@ Branch: `ui-u2-menu-bar` · PR: https://github.com/paraversal/file-crow/pull/9 �
 - 2026-11-12: I1 spike. Built temporary menus and inspected them through System Events/AX. All temporary code reverted; findings above.
 - 2026-11-13: I3/I4/I5: added `menus.rs`, `SearchStart`/`open_search`/`set_everything`, the Crow ⇧⌘A binding/listener, app/Window/Help menus and their handlers; added menu, focus, dispatch, tab, Help and Find Everything tests. I6 docs updated.
 - 2026-11-13: Ran the bundle hand checks above. `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` all pass. No bench: menus are built once from a static table and no per-frame rendering changed.
+
+- 2026-11-13: Review fixes (see Decisions): text undo in `TextInput`, Settings error in the status line, `menus::action` removed, stronger text-field test. fmt, clippy and `cargo test --workspace` pass.
 
 ## Next
 PR #9 is open; the user hand-tests and merges. Do not merge.

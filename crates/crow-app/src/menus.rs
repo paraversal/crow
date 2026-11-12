@@ -3,61 +3,11 @@
 //! Run `init` after every `cx.bind_keys`: GPUI reads the keymap when `set_menus`
 //! is called, and the menus are static for the life of the app.
 
-use gpui::{Action, App, Menu, MenuItem, OsAction, SystemMenuType};
+use gpui::{App, Menu, MenuItem, OsAction, SystemMenuType};
 
 use crate::actions as act;
 use crate::palette::{COMMANDS, Command, CommandId, MenuName, MenuSlot};
 use crate::ui::Ui;
-
-/// The action behind a palette command. Exhaustive so a new `CommandId` cannot
-/// reach the menus without deciding what it runs.
-pub fn action(id: CommandId) -> Box<dyn Action> {
-    match id {
-        CommandId::NewTab => Box::new(act::NewTab),
-        CommandId::CloseTab => Box::new(act::CloseTab),
-        CommandId::NextTab => Box::new(act::NextTab),
-        CommandId::PreviousTab => Box::new(act::PreviousTab),
-        CommandId::NewWindow => Box::new(act::NewWindow),
-        CommandId::SwitchFocus => Box::new(act::SwitchFocus),
-        CommandId::ToggleHiddenFiles => Box::new(act::ToggleHiddenFiles),
-        CommandId::OpenParent => Box::new(act::OpenParent),
-        CommandId::GoBack => Box::new(act::GoBack),
-        CommandId::GoForward => Box::new(act::GoForward),
-        CommandId::GoToFolder => Box::new(act::GoToFolder),
-        CommandId::ViewAsList => Box::new(act::ViewAsList),
-        CommandId::ViewAsColumns => Box::new(act::ViewAsColumns),
-        CommandId::Open => Box::new(act::OpenSelection),
-        CommandId::QuickLook => Box::new(act::QuickLook),
-        CommandId::Rename => Box::new(act::Rename),
-        CommandId::NewFolder => Box::new(act::NewFolder),
-        CommandId::Duplicate => Box::new(act::Duplicate),
-        CommandId::MoveToTrash => Box::new(act::MoveToTrash),
-        CommandId::DeletePermanently => Box::new(act::DeletePermanently),
-        CommandId::Copy => Box::new(act::CopyFiles),
-        CommandId::Cut => Box::new(act::CutFiles),
-        CommandId::Paste => Box::new(act::PasteFiles),
-        CommandId::PasteMove => Box::new(act::PasteMoveFiles),
-        CommandId::SelectAll => Box::new(act::SelectAll),
-        CommandId::StartFilter => Box::new(act::StartFilter),
-        CommandId::Undo => Box::new(act::Undo),
-        CommandId::Redo => Box::new(act::Redo),
-        CommandId::AddToSidebar => Box::new(act::AddToSidebar),
-        CommandId::ShowSearch => Box::new(act::ShowSearch),
-        CommandId::SearchEverything => Box::new(act::SearchEverything),
-        CommandId::ShowCommandPalette => Box::new(act::ShowCommandPalette),
-        CommandId::SearchReveal => Box::new(act::SearchReveal),
-        CommandId::WhyThisView => Box::new(act::WhyThisView),
-        CommandId::UseViewAsDefaults => Box::new(act::UseViewAsDefaults),
-        CommandId::ResetFolderView => Box::new(act::ResetFolderView),
-        CommandId::ShowThemePicker => Box::new(act::ShowThemePicker),
-        CommandId::ToggleActivity => Box::new(act::ToggleActivity),
-        CommandId::RemoveFromSidebar => Box::new(act::RemoveFromSidebar),
-        CommandId::MoveFavoriteUp => Box::new(act::MoveFavoriteUp),
-        CommandId::MoveFavoriteDown => Box::new(act::MoveFavoriteDown),
-        CommandId::Eject => Box::new(act::Eject),
-        CommandId::Quit => Box::new(act::Quit),
-    }
-}
 
 fn command_item(command: &Command, slot: MenuSlot) -> MenuItem {
     let os_action = match command.id {
@@ -69,7 +19,13 @@ fn command_item(command: &Command, slot: MenuSlot) -> MenuItem {
         CommandId::SelectAll => Some(OsAction::SelectAll),
         _ => None,
     };
-    MenuItem::Action { name: slot.title.into(), action: action(command.id), os_action, checked: false, disabled: false }
+    MenuItem::Action {
+        name: slot.title.into(),
+        action: command.action.boxed_clone(),
+        os_action,
+        checked: false,
+        disabled: false,
+    }
 }
 
 /// The whole menu bar in macOS order: Crow, File, Edit, View, Go, Window, Help.
@@ -127,7 +83,11 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &act::About, _| crow_macos::show_about_panel());
     cx.on_action(|_: &act::OpenSettings, cx| {
         let path = cx.global::<Ui>().config_dir.join("settings.toml");
-        crow_macos::open_in_default_app(&path);
+        if !crow_macos::open_in_default_app(&path) {
+            let message = format!("Couldn't open {}: no app is set to open .toml files", path.display());
+            cx.global_mut::<crate::operations::Operations>().message = Some((message.into(), true));
+            cx.refresh_windows();
+        }
     });
     cx.on_action(|_: &act::HideApp, cx| cx.hide());
     cx.on_action(|_: &act::HideOthers, cx| cx.hide_other_apps());
@@ -141,7 +101,7 @@ pub fn init_for_tests(cx: &mut App) {
 }
 
 #[cfg(test)]
-pub fn is_app_action(action: &dyn Action) -> bool {
+pub fn is_app_action(action: &dyn gpui::Action) -> bool {
     action.partial_eq(&act::About)
         || action.partial_eq(&act::OpenSettings)
         || action.partial_eq(&act::HideApp)
@@ -183,7 +143,7 @@ mod tests {
                 })
                 .collect();
             assert_eq!(matches.len(), 1, "{:?} appears once in {:?}", slot.title, slot.menu);
-            assert!(matches[0].partial_eq(&*action(command.id)), "{} runs the registry action", slot.title);
+            assert!(matches[0].partial_eq(command.action), "{} runs the registry action", slot.title);
         }
 
         for menu in &menus {

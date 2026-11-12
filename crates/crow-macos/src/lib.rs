@@ -52,7 +52,7 @@ pub fn show_about_panel() {
 }
 
 /// Open `path` with the application the user has associated with it.
-pub fn open_in_default_app(path: &Path) {
-    let Some(_) = main_thread() else { return };
-    let _ = NSWorkspace::sharedWorkspace().openURL(&ns_url(path));
+/// False when nothing opened it (no app for its type, or not on the main thread).
+pub fn open_in_default_app(path: &Path) -> bool {
+    main_thread().is_some() && NSWorkspace::sharedWorkspace().openURL(&ns_url(path))
 }

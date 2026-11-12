@@ -13,7 +13,8 @@ use gpui::{
 use unicode_segmentation::*;
 
 use crate::actions::{
-    CopyFiles as CrowCopyFiles, CutFiles as CrowCutFiles, PasteFiles as CrowPasteFiles, SelectAll as CrowSelectAll,
+    CopyFiles as CrowCopyFiles, CutFiles as CrowCutFiles, PasteFiles as CrowPasteFiles, Redo as CrowRedo,
+    SelectAll as CrowSelectAll, Undo as CrowUndo,
 };
 use crate::style::{color, color_alpha};
 use crate::ui::Ui;
@@ -82,7 +83,32 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    history: History,
 }
+
+/// The field's own undo history. Inside a text field ⌘Z undoes typing, never a file operation.
+#[derive(Default)]
+struct History {
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    /// The last edit and where the cursor ended, so a run of typing or deleting undoes as one step.
+    last: Option<(EditKind, usize)>,
+}
+
+struct Snapshot {
+    content: SharedString,
+    selected_range: Range<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditKind {
+    Typing,
+    Deleting,
+    /// Paste, cut and completion: always their own step.
+    Other,
+}
+
+const HISTORY_LIMIT: usize = 100;
 
 impl EventEmitter<TextInputEvent> for TextInput {}
 
@@ -100,6 +126,7 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            history: History::default(),
         }
     }
 
@@ -109,6 +136,8 @@ impl TextInput {
 
     /// Replace the whole text and put the cursor at its end.
     pub fn set_text(&mut self, text: impl Into<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
+        self.record(EditKind::Other, &(0..self.content.len()));
+        self.history.last = None;
         self.content = text.into();
         self.selected_range = self.content.len()..self.content.len();
         self.selection_reversed = false;
@@ -227,7 +256,7 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace("\n", " "), window, cx);
+            self.edit(self.selected_range.clone(), &text.replace("\n", " "), EditKind::Other, window, cx);
         }
     }
 
@@ -239,7 +268,7 @@ impl TextInput {
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(self.content[self.selected_range.clone()].to_string()));
-            self.replace_text_in_range(None, "", window, cx)
+            self.edit(self.selected_range.clone(), "", EditKind::Other, window, cx)
         }
     }
 
@@ -259,6 +288,84 @@ impl TextInput {
 
     fn crow_select_all(&mut self, _: &CrowSelectAll, window: &mut Window, cx: &mut Context<Self>) {
         self.select_all(&SelectAll, window, cx);
+    }
+
+    /// Replace `range` with `new_text` as one user edit, recorded for undo.
+    fn edit(
+        &mut self,
+        range: Range<usize>,
+        new_text: &str,
+        kind: EditKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Committing a composition finishes the step its marked text started.
+        if self.marked_range.is_none() {
+            self.record(kind, &range);
+        }
+        self.content = (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+        let cursor = range.start + new_text.len();
+        self.selected_range = cursor..cursor;
+        self.selection_reversed = false;
+        self.marked_range.take();
+        self.history.last = Some((kind, cursor));
+        window.notify_text_input_changed(&self.focus_handle);
+        cx.emit(TextInputEvent::Changed);
+        cx.notify();
+    }
+
+    /// Save the state before an edit of `kind` over `range`, unless the edit continues the
+    /// current run: typing at the cursor after typing, or deleting next to it after deleting.
+    fn record(&mut self, kind: EditKind, range: &Range<usize>) {
+        let continues = match (self.history.last, kind) {
+            (Some((EditKind::Typing, cursor)), EditKind::Typing) => range.is_empty() && range.start == cursor,
+            (Some((EditKind::Deleting, cursor)), EditKind::Deleting) => range.end == cursor || range.start == cursor,
+            _ => false,
+        };
+        if !continues {
+            if self.history.undo.len() == HISTORY_LIMIT {
+                self.history.undo.remove(0);
+            }
+            self.history.undo.push(self.snapshot());
+        }
+        self.history.redo.clear();
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot { content: self.content.clone(), selected_range: self.selected_range.clone() }
+    }
+
+    fn restore(&mut self, snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
+        self.content = snapshot.content;
+        let end = self.content.len();
+        self.selected_range = snapshot.selected_range.start.min(end)..snapshot.selected_range.end.min(end);
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.history.last = None;
+        window.notify_text_input_changed(&self.focus_handle);
+        cx.emit(TextInputEvent::Changed);
+        cx.notify();
+    }
+
+    // Handled here even with nothing to undo, so ⌘Z in a field never reaches the file Undo.
+    fn undo(&mut self, _: &CrowUndo, window: &mut Window, cx: &mut Context<Self>) {
+        match self.history.undo.pop() {
+            Some(snapshot) => {
+                self.history.redo.push(self.snapshot());
+                self.restore(snapshot, window, cx);
+            }
+            None => window.play_system_bell(),
+        }
+    }
+
+    fn redo(&mut self, _: &CrowRedo, window: &mut Window, cx: &mut Context<Self>) {
+        match self.history.redo.pop() {
+            Some(snapshot) => {
+                self.history.undo.push(self.snapshot());
+                self.restore(snapshot, window, cx);
+            }
+            None => window.play_system_bell(),
+        }
     }
 
     fn move_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
@@ -408,14 +515,8 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-
-        self.content = (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
-        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
-        self.selection_reversed = false;
-        self.marked_range.take();
-        window.notify_text_input_changed(&self.focus_handle);
-        cx.emit(TextInputEvent::Changed);
-        cx.notify();
+        let kind = if new_text.is_empty() { EditKind::Deleting } else { EditKind::Typing };
+        self.edit(range, new_text, kind, window, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -432,6 +533,10 @@ impl EntityInputHandler for TextInput {
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
 
+        // A composition (IME, dead keys) is one undo step from its first marked text to its commit.
+        if self.marked_range.is_none() {
+            self.record(EditKind::Typing, &range);
+        }
         self.content = (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
@@ -677,6 +782,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::cut_files))
             .on_action(cx.listener(Self::paste_files))
             .on_action(cx.listener(Self::crow_select_all))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::complete))
