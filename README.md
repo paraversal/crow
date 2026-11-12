@@ -3,7 +3,7 @@
 A Finder-style file explorer for macOS, written in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 It keeps Finder's directness and aims to be faster, more predictable and keyboard-first.
 
-Status: Phase 1 (the "daily driver" MVP), milestone M3.
+Status: Phase 1 (the "daily driver" MVP), milestone M4.
 
 ## Build and run
 
@@ -40,5 +40,11 @@ Cmd-Shift-. and Space. Typing a name selects it. Tab moves focus between the sid
 Column headers sort (click again to reverse) and their dividers resize.
 Cmd-2 shows a list, Cmd-3 columns; in columns, Left and Right move between them.
 The default view is set by `view` in `settings.toml`.
+
+File operations use Finder's keys: Return renames, Cmd-Shift-N new folder, Cmd-D duplicate,
+Cmd-Delete moves to the Trash, Cmd-Option-Delete deletes permanently (after asking),
+Cmd-C / Cmd-X / Cmd-V copy, cut and paste (also to and from Finder), Cmd-Option-V moves,
+Cmd-Z / Cmd-Shift-Z undo and redo, Esc cancels a running operation, Cmd-Option-L shows activity.
+Nothing is ever overwritten: name clashes ask first, and Replace moves the old item to the Trash.
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).

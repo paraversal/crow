@@ -3,6 +3,7 @@
 //! No UI types here: everything is plain data so it can be tested without a window.
 
 mod listing;
+pub mod ops;
 mod snapshot;
 mod sort;
 mod watch;
@@ -38,3 +39,7 @@ mod tests {
         assert_eq!(human_size(4_200_000_000), "4.2 GB");
     }
 }
+
+#[cfg(test)]
+#[path = "ops_tests.rs"]
+mod ops_tests;

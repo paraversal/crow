@@ -46,6 +46,8 @@ pub struct Folder {
     cursor_ix: Option<usize>,
     /// After going up or back, Finder selects the folder you came from.
     select_after_load: Option<PathBuf>,
+    /// Items an operation produced: selected as soon as they appear in the listing.
+    select_when_present: Vec<PathBuf>,
     /// Select the first item once loaded. Off for column-view children, which show
     /// a folder's contents without selecting anything until you move into them.
     auto_select: bool,
@@ -86,6 +88,7 @@ impl Folder {
             selection: Selection::default(),
             cursor_ix: None,
             select_after_load: None,
+            select_when_present: Vec::new(),
             auto_select,
             type_select: TypeSelect::default(),
             show_hidden,
@@ -162,6 +165,17 @@ impl Folder {
         if self.cursor_ix.is_none() && !self.entries.is_empty() {
             self.select_only(0, cx);
         }
+    }
+
+    /// Select `paths` once they show up (an operation's results), then forget them.
+    pub fn select_when_present(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.select_when_present = paths;
+        self.reload(cx);
+    }
+
+    /// List the folder again now rather than waiting for the watcher.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.load(cx);
     }
 
     pub fn select_after_load(&mut self, path: PathBuf) {
@@ -253,6 +267,13 @@ impl Folder {
         {
             self.select_after_load = None;
             self.selection.select_only(target);
+        }
+        if !self.select_when_present.is_empty() && self.select_when_present.iter().all(|p| present.contains(p)) {
+            let wanted = std::mem::take(&mut self.select_when_present);
+            self.selection.clear();
+            for path in wanted {
+                self.selection.toggle(path);
+            }
         }
         if self.auto_select
             && self.selection.is_empty()

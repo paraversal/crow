@@ -15,20 +15,23 @@ use std::time::Instant;
 use crow_core::{Align, Column, ColumnContext, ColumnWidth, History, ResizeDrag, TableLayout, ViewMode};
 use crow_fs::{Entry, Sort, SortKey};
 use gpui::{
-    ClickEvent, Context, Entity, EntityId, FocusHandle, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Role, ScrollHandle, SharedString, Subscription, Window, div,
-    img, prelude::*, px, uniform_list,
+    ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, Focusable, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Role, ScrollHandle,
+    SharedString, Subscription, Window, div, img, prelude::*, px, uniform_list,
 };
 
 use crate::actions::{
-    ExtendDown, ExtendUp, MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveUp, OpenSelection, QuickLook,
+    CopyFiles, CutFiles, DeletePermanently, Duplicate, ExtendDown, ExtendUp, MoveDown, MoveLeft, MoveRight,
+    MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFolder, OpenSelection, PasteFiles, PasteMoveFiles, QuickLook,
     Rename, SelectAll,
 };
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
 use crate::preview::{self, Preview};
 use crate::style::{color, color_alpha, format_time, icon, kind, truncate_middle};
+use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
+use crow_fs::ops::Request;
 
 const ROW_HEIGHT: f32 = 24.0;
 /// Space before the name for a folder's disclosure triangle (inline expansion comes later).
@@ -38,6 +41,23 @@ const CELL_PADDING: f32 = 8.0;
 const COLUMN_WIDTH: f32 = 220.0;
 const COLUMN_WIDTH_CAP: f32 = 360.0;
 const PREVIEW_COLUMN_WIDTH: f32 = 300.0;
+
+/// Requests the pane can't carry out alone: operations may need a sheet (conflicts,
+/// confirmations) and the clipboard is app-wide, so the window handles these.
+pub enum PaneEvent {
+    Run(Request),
+    Copy { paths: Vec<PathBuf>, cut: bool },
+    Paste { into: PathBuf, move_items: bool },
+}
+
+impl EventEmitter<PaneEvent> for Pane {}
+
+/// An inline rename in progress.
+struct Renaming {
+    path: PathBuf,
+    input: Entity<TextInput>,
+    _subscription: Subscription,
+}
 
 pub struct Pane {
     history: History,
@@ -60,6 +80,9 @@ pub struct Pane {
     preview: Option<Preview>,
     strip_scroll: ScrollHandle,
     status: Option<SharedString>,
+    renaming: Option<Renaming>,
+    /// Start renaming this item once it appears (a new folder).
+    rename_when_present: Option<PathBuf>,
     bench: Option<Bench>,
 }
 
@@ -91,6 +114,8 @@ impl Pane {
             preview: None,
             strip_scroll: ScrollHandle::new(),
             status: None,
+            renaming: None,
+            rename_when_present: None,
             bench: bench.then(|| Bench { frame: 0, intervals: Vec::new(), last: None, scrolled: None }),
         };
         pane.enter(dir, cx);
@@ -191,6 +216,27 @@ impl Pane {
             self.navigate(parent, cx);
             self.folders[0].update(cx, |f, _| f.select_after_load(child));
         }
+    }
+
+    /// After an operation: list again now and select what it produced; a new folder
+    /// also starts its rename, like Finder.
+    pub fn show_results(&mut self, paths: Vec<PathBuf>, rename: bool, cx: &mut Context<Self>) {
+        self.rename_when_present = if rename { paths.first().cloned() } else { None };
+        let here = self.focused_folder().clone();
+        let dir = here.read(cx).dir().to_path_buf();
+        let mine: Vec<PathBuf> = paths.into_iter().filter(|p| p.parent() == Some(dir.as_path())).collect();
+        for folder in self.folders.clone() {
+            if folder == here && !mine.is_empty() {
+                folder.update(cx, |f, cx| f.select_when_present(mine.clone(), cx));
+            } else {
+                folder.update(cx, |f, cx| f.reload(cx));
+            }
+        }
+    }
+
+    /// The selected items of the focused folder, in display order.
+    fn selected_paths(&self, cx: &gpui::App) -> Vec<PathBuf> {
+        self.focused_folder().read(cx).selected_paths()
     }
 
     pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
@@ -389,10 +435,120 @@ impl Pane {
         self.open_selected(cx);
     }
 
-    fn rename(&mut self, _: &Rename, _: &mut Window, cx: &mut Context<Self>) {
-        // Inline rename arrives with the operation engine in M4.
-        self.status = Some("Rename arrives in milestone M4".into());
+    fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(entry) = self.cursor_entry(cx) {
+            self.begin_rename(entry.path, window, cx);
+        }
+    }
+
+    /// Replace the item's name with a text field; the name without its extension is selected.
+    fn begin_rename(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem_end = match name.rfind('.') {
+            Some(i) if i > 0 && !path.is_dir() => i,
+            _ => name.len(),
+        };
+        let input = cx.new(|cx| TextInput::new(name.clone(), "Name", cx));
+        input.update(cx, |input, cx| input.select_range(0..stem_end, window, cx));
+        let subscription =
+            cx.subscribe_in(&input, window, move |this, input, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::Confirmed => {
+                    let new_name = input.read(cx).text().trim().to_owned();
+                    let Some(renaming) = this.renaming.take() else { return };
+                    let old = renaming.path.file_name().map(|n| n.to_string_lossy().into_owned());
+                    if old.as_deref() != Some(new_name.as_str()) {
+                        cx.emit(PaneEvent::Run(Request::Rename { path: renaming.path, new_name }));
+                    }
+                    window.focus(&this.focus, cx);
+                    cx.notify();
+                }
+                TextInputEvent::Cancelled => {
+                    this.renaming = None;
+                    window.focus(&this.focus, cx);
+                    cx.notify();
+                }
+                TextInputEvent::CompletionRequested => {}
+            });
+        let focus = input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.renaming = Some(Renaming { path, input, _subscription: subscription });
         cx.notify();
+    }
+
+    fn new_folder(&mut self, _: &NewFolder, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(PaneEvent::Run(Request::NewFolder { parent: self.current_dir(cx) }));
+    }
+
+    fn duplicate(&mut self, _: &Duplicate, _: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.selected_paths(cx);
+        if !paths.is_empty() {
+            cx.emit(PaneEvent::Run(Request::Duplicate { paths }));
+        }
+    }
+
+    fn move_to_trash(&mut self, _: &MoveToTrash, _: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.selected_paths(cx);
+        if !paths.is_empty() {
+            cx.emit(PaneEvent::Run(Request::Trash { paths }));
+        }
+    }
+
+    fn delete_permanently(&mut self, _: &DeletePermanently, _: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.selected_paths(cx);
+        if !paths.is_empty() {
+            cx.emit(PaneEvent::Run(Request::DeletePermanently { paths }));
+        }
+    }
+
+    fn copy_files(&mut self, _: &CopyFiles, _: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.selected_paths(cx);
+        if !paths.is_empty() {
+            cx.emit(PaneEvent::Copy { paths, cut: false });
+        }
+    }
+
+    fn cut_files(&mut self, _: &CutFiles, _: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.selected_paths(cx);
+        if !paths.is_empty() {
+            cx.emit(PaneEvent::Copy { paths, cut: true });
+        }
+    }
+
+    fn paste_files(&mut self, _: &PasteFiles, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(PaneEvent::Paste { into: self.current_dir(cx), move_items: false });
+    }
+
+    fn paste_move_files(&mut self, _: &PasteMoveFiles, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(PaneEvent::Paste { into: self.current_dir(cx), move_items: true });
+    }
+
+    /// Files dropped onto folder `k`'s list (as opposed to onto one of its folders).
+    fn drop_files(&mut self, k: usize, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(into) = self.folders.get(k).map(|f| f.read(cx).dir().to_path_buf()) {
+            self.drop_into(into, paths, window, cx);
+        }
+    }
+
+    /// Files dropped from Crow, Finder or another app: moved within a volume, copied
+    /// across volumes, like Finder; Option forces a copy. Items already in `into`, and
+    /// folders dropped onto themselves or into their own contents, are left alone.
+    fn drop_into(&mut self, into: PathBuf, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        let paths: Vec<PathBuf> = paths
+            .paths()
+            .iter()
+            .filter(|p| p.parent() != Some(into.as_path()) && !into.starts_with(p))
+            .cloned()
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let same_volume = paths.iter().all(|p| same_volume(p, &into));
+        let request = if same_volume && !window.modifiers().alt {
+            Request::Move { paths, into }
+        } else {
+            Request::Copy { paths, into }
+        };
+        cx.emit(PaneEvent::Run(request));
     }
 
     fn quick_look(&mut self, _: &QuickLook, _: &mut Window, cx: &mut Context<Self>) {
@@ -407,6 +563,10 @@ impl Pane {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // While a name is being edited, letters belong to the text field, not type-to-select.
+        if self.renaming.is_some() {
+            return;
+        }
         let m = &event.keystroke.modifiers;
         if m.platform || m.control || m.alt {
             return;
@@ -422,6 +582,8 @@ impl Pane {
     /// A press on row `ix` of folder `k`: Finder's click, Cmd-click and Shift-click.
     fn press(&mut self, k: usize, ix: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        // A system drag can end without GPUI seeing the mouse go up; a new press starts fresh.
+        self.dragging = false;
         self.drag_origin = Some((k, ix, event.position));
         if k != self.focused {
             self.focused = k;
@@ -502,6 +664,7 @@ impl Pane {
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
         let selection_bg = selection_color(self.focus.is_focused(window), theme);
+        let drop_bg = color_alpha(theme.role("accent"), 0x40);
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
         let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
         let last = widths.len() - 1;
@@ -535,6 +698,16 @@ impl Pane {
                     .items_center()
                     .when(ix % 2 == 1, |row| row.bg(stripe))
                     .when(selected, |row| row.bg(selection_bg))
+                    .debug_selector(|| format!("row-{}", entry.name))
+                    .when(entry.is_dir && !entry.is_package(), |row| {
+                        let target = entry.path.clone();
+                        row.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg)).on_drop(cx.listener(
+                            move |this, paths: &ExternalPaths, window, cx| {
+                                this.drop_into(target.clone(), paths, window, cx);
+                                cx.stop_propagation();
+                            },
+                        ))
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -562,7 +735,10 @@ impl Pane {
                                     .flex_none()
                                     .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
                             )
-                            .child(div().whitespace_nowrap().child(name)),
+                            .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                                Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
+                                None => div().whitespace_nowrap().child(name).into_any_element(),
+                            }),
                     );
                 row.children(cells.into_iter().enumerate().map(|(i, (text, align))| {
                     let width = px(widths[i + 1]);
@@ -677,6 +853,7 @@ impl Pane {
         // Spec: only the focused column shows its selection in the accent color.
         let active = k == self.focused && self.focus.is_focused(window);
         let selection_bg = selection_color(active, theme);
+        let drop_bg = color_alpha(theme.role("accent"), 0x40);
         let subtle = color(theme.role("fg-subtle"));
         let Some(folder) = self.folders.get(k).map(|f| f.read(cx)) else { return Vec::new() };
         let width = column_width(folder.entries());
@@ -706,6 +883,16 @@ impl Pane {
                     .items_center()
                     .gap_2()
                     .when(selected, |row| row.bg(selection_bg))
+                    .debug_selector(|| format!("column-{k}-row-{}", entry.name))
+                    .when(navigable, |row| {
+                        let target = entry.path.clone();
+                        row.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg)).on_drop(cx.listener(
+                            move |this, paths: &ExternalPaths, window, cx| {
+                                this.drop_into(target.clone(), paths, window, cx);
+                                cx.stop_propagation();
+                            },
+                        ))
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -723,7 +910,10 @@ impl Pane {
                             .flex_none()
                             .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
                     )
-                    .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(name))
+                    .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                        Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
+                        None => div().flex_1().overflow_hidden().whitespace_nowrap().child(name).into_any_element(),
+                    })
                     .child(div().w(px(10.)).flex_none().text_color(subtle).child(if navigable { "›" } else { "" }))
             })
             .collect()
@@ -750,6 +940,11 @@ impl Pane {
                     .border_r_1()
                     .border_color(border)
                     .when(k == focused, |c| c.bg(color_alpha(theme.role("surface"), 0x40)))
+                    .on_drop(
+                        cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                            this.drop_files(k, paths, window, cx)
+                        }),
+                    )
                     .child(
                         uniform_list(
                             ("column-list", k),
@@ -807,6 +1002,13 @@ fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.bench_step(window, cx);
+        if let Some(path) = self.rename_when_present.clone()
+            && self.focused_folder().read(cx).entries().iter().any(|e| e.path == path)
+        {
+            self.rename_when_present = None;
+            // Focus can't move during a render; start the rename right after it.
+            cx.defer_in(window, move |this, window, cx| this.begin_rename(path, window, cx));
+        }
         let focused = self.focused_folder().read(cx);
         let title =
             focused.dir().file_name().map_or_else(|| "Macintosh HD".to_owned(), |n| n.to_string_lossy().into_owned());
@@ -831,6 +1033,10 @@ impl Render for Pane {
                             .track_scroll(&scroll)
                             .flex_1(),
                     )
+                    // Dropped on the list but not on a folder row: into the folder shown.
+                    .on_drop(
+                        cx.listener(|this, paths: &ExternalPaths, window, cx| this.drop_files(0, paths, window, cx)),
+                    )
                     .into_any_element()
             }
             ViewMode::Columns => self.render_columns(cx).into_any_element(),
@@ -853,6 +1059,14 @@ impl Render for Pane {
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::rename))
             .on_action(cx.listener(Self::quick_look))
+            .on_action(cx.listener(Self::new_folder))
+            .on_action(cx.listener(Self::duplicate))
+            .on_action(cx.listener(Self::move_to_trash))
+            .on_action(cx.listener(Self::delete_permanently))
+            .on_action(cx.listener(Self::copy_files))
+            .on_action(cx.listener(Self::cut_files))
+            .on_action(cx.listener(Self::paste_files))
+            .on_action(cx.listener(Self::paste_move_files))
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 if let Some(drag) = this.resize {
@@ -905,6 +1119,14 @@ impl Render for Pane {
 
 #[cfg(test)]
 impl Pane {
+    pub fn is_renaming(&self) -> bool {
+        self.renaming.is_some()
+    }
+
+    pub fn rename_text(&self, cx: &gpui::App) -> Option<String> {
+        self.renaming.as_ref().map(|r| r.input.read(cx).text().to_owned())
+    }
+
     pub fn folder_count(&self) -> usize {
         self.folders.len()
     }
@@ -927,5 +1149,13 @@ impl Pane {
 
     pub fn selected_names(&self, cx: &gpui::App) -> Vec<String> {
         self.focused_folder().read(cx).selected_names()
+    }
+}
+
+fn same_volume(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (a.symlink_metadata(), b.metadata()) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev(),
+        _ => false,
     }
 }

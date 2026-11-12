@@ -112,6 +112,15 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Select `range` (byte offsets, clamped to the text).
+    pub fn select_range(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let end = range.end.min(self.content.len());
+        self.selected_range = range.start.min(end)..end;
+        self.selection_reversed = false;
+        window.notify_text_selection_changed(&self.focus_handle);
+        cx.notify();
+    }
+
     fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(TextInputEvent::Confirmed);
     }
