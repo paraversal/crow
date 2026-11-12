@@ -45,6 +45,8 @@ pub fn open(dir: PathBuf, bench: bool, cx: &mut App) {
             appears_transparent: true,
             traffic_light_position: Some(point(px(14.), px(19.))),
         }),
+        // Sidebar 210 plus a usable center; below this the band's parts no longer fit.
+        window_min_size: Some(size(px(640.), px(400.))),
         ..Default::default()
     };
     if let Err(e) = cx.open_window(options, |window, cx| cx.new(|cx| CrowWindow::new(dir, bench, window, cx))) {
@@ -191,6 +193,9 @@ impl CrowWindow {
     }
 
     fn open_tab_at(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_some() {
+            self.close_search(window, cx);
+        }
         let show_hidden = self.show_hidden;
         let pane = cx.new(|cx| Pane::new(dir, show_hidden, false, cx));
         self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
@@ -202,6 +207,9 @@ impl CrowWindow {
     }
 
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_some() {
+            self.close_search(window, cx);
+        }
         if self.tabs.close_active().is_none() {
             window.remove_window();
             return;
@@ -211,6 +219,9 @@ impl CrowWindow {
     }
 
     fn cycle_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_some() {
+            self.close_search(window, cx);
+        }
         self.tabs.cycle(delta);
         self.focus_pane(window, cx);
         cx.notify();
@@ -363,6 +374,7 @@ impl CrowWindow {
             };
             let icon = icons::glyph(icon, 16., "fg-muted", &theme).id(icon_id);
             let icon = if enabled { icon.group_hover(group, move |s| s.text_color(hover_icon)) } else { icon };
+            let aria = if enabled { aria } else { format!("{aria}, unavailable") };
             let mut button = div()
                 .id(id)
                 .debug_selector(move || id.into())
@@ -580,6 +592,9 @@ impl CrowWindow {
                     .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
                     .when(selected, |tab| tab.bg(color(theme.role("bg"))))
                     .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.search.is_some() {
+                            this.close_search(window, cx);
+                        }
                         this.tabs.activate(i);
                         this.focus_pane(window, cx);
                         cx.notify();
@@ -2633,6 +2648,22 @@ mod tests {
         click_selector(&mut cx, "search-scope-This Folder");
         settle(&view, &mut cx);
         assert_eq!(search.read_with(&cx, |search, _| search.effective_match()), crate::search::Match::Contents);
+    }
+
+    #[gpui::test]
+    fn switching_tabs_closes_search(cx: &mut TestAppContext) {
+        let root = fixture("search-tabs");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-t");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-shift-]");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "switching tabs closes search");
+        cx.simulate_keystrokes("n");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "the new tab's pane has focus");
     }
 
     fn focus_search_input(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
