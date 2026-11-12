@@ -1061,6 +1061,7 @@ dependencies = [
  "crow-core",
  "crow-fs",
  "crow-macos",
+ "crow-search",
  "crow-theme",
  "futures",
  "gpui",

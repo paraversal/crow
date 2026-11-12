@@ -33,6 +33,7 @@ use crate::actions::{
 };
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
+use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{color, color_alpha, format_time, icon, kind, truncate_middle};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -400,6 +401,37 @@ impl Pane {
     /// The selected items of the focused folder, in display order.
     pub fn selected_paths(&self, cx: &gpui::App) -> Vec<PathBuf> {
         self.focused_folder().read(cx).selected_paths()
+    }
+
+    /// The current folder's subfolders, for the command palette's go-to list.
+    pub fn subfolders(&self, cx: &gpui::App) -> Vec<PathBuf> {
+        self.focused_folder()
+            .read(cx)
+            .entries()
+            .iter()
+            .filter(|entry| entry.is_dir && !entry.is_package())
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+
+    /// Run one of the palette's pane commands through the same path as its key.
+    pub fn run_command(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        match command {
+            CommandId::Open => self.open_selected(cx),
+            CommandId::QuickLook => self.quick_look(&QuickLook, window, cx),
+            CommandId::Rename => self.rename(&Rename, window, cx),
+            CommandId::NewFolder => self.new_folder(&NewFolder, window, cx),
+            CommandId::Duplicate => self.duplicate(&Duplicate, window, cx),
+            CommandId::MoveToTrash => self.move_to_trash(&MoveToTrash, window, cx),
+            CommandId::DeletePermanently => self.delete_permanently(&DeletePermanently, window, cx),
+            CommandId::Copy => self.copy_files(&CopyFiles, window, cx),
+            CommandId::Cut => self.cut_files(&CutFiles, window, cx),
+            CommandId::Paste => self.paste_files(&PasteFiles, window, cx),
+            CommandId::PasteMove => self.paste_move_files(&PasteMoveFiles, window, cx),
+            CommandId::SelectAll => self.select_all(&SelectAll, window, cx),
+            CommandId::StartFilter => self.start_filter(&StartFilter, window, cx),
+            _ => {}
+        }
     }
 
     pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {

@@ -38,6 +38,8 @@ pub struct Ui {
     zoxide: Vec<(f64, PathBuf)>,
     /// The folders Recent shows, best first (computed off the main thread).
     pub recent_list: Vec<PathBuf>,
+    /// More of the same ranking for the command palette (favorites included).
+    pub palette_recents: Vec<PathBuf>,
     pub volumes: Vec<crow_macos::Volume>,
     pub config_dir: PathBuf,
     pub state_dir: PathBuf,
@@ -71,6 +73,7 @@ impl Ui {
             recent,
             zoxide: Vec::new(),
             recent_list: Vec::new(),
+            palette_recents: Vec::new(),
             volumes: Vec::new(),
             config_dir,
             state_dir,
@@ -374,12 +377,12 @@ pub fn record_visit(dir: &Path, cx: &mut App) {
 /// and save the visit history.
 pub fn refresh_recent(cx: &mut App) {
     let ui = cx.global::<Ui>();
-    if !ui.sidebar.recent.show {
-        return;
-    }
     let recent = ui.recent.clone();
     let zoxide = ui.zoxide.clone();
-    let count = ui.sidebar.recent.count;
+    let sidebar_count = ui.sidebar.recent.count;
+    // The palette wants more folders than the sidebar shows; keep favorites in this
+    // list and filter them out only for the sidebar's rows.
+    let count = sidebar_count.max(50);
     let favorites: Vec<PathBuf> = ui.favorites().into_iter().flat_map(|(_, f)| f).map(|f| f.path).collect();
     let file = ui.state_dir.join("recent.json");
     let task = cx.background_spawn(async move {
@@ -387,14 +390,18 @@ pub fn refresh_recent(cx: &mut App) {
             tracing::warn!("{}: {e}", file.display());
         }
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        recent.top(count, now, &zoxide, |p| !favorites.iter().any(|f| f == p) && p != Path::new("/") && p.is_dir())
+        recent.top(count, now, &zoxide, |p| p != Path::new("/") && p.is_dir())
     });
     cx.spawn(async move |cx| {
         let list = task.await;
         cx.update(|cx| {
             let ui = cx.global_mut::<Ui>();
-            if ui.recent_list != list {
-                ui.recent_list = list;
+            let sidebar: Vec<PathBuf> =
+                list.iter().filter(|path| !favorites.contains(path)).take(sidebar_count).cloned().collect();
+            let changed = ui.recent_list != sidebar || ui.palette_recents != list;
+            ui.recent_list = sidebar;
+            ui.palette_recents = list;
+            if changed {
                 cx.refresh_windows();
             }
         });

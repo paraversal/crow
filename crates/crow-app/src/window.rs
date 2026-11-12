@@ -4,16 +4,18 @@ use std::path::{Path, PathBuf};
 
 use crow_core::{SidebarEdit, Tabs, ViewMode};
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role, SharedString,
-    Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, point, prelude::*, px, size,
+    App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role, ScrollStrategy,
+    SharedString, Subscription, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions, div,
+    img, point, prelude::*, px, size, uniform_list,
 };
 
 use crate::actions::{
     AddToSidebar, ApplyThemeEverywhere, CloseTab, GoBack, GoForward, GoToFolder, MoveDown, MoveUp, NewTab, NextTab,
-    OpenParent, PreviousTab, ResetFolderView, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, UseViewAsDefaults,
-    ViewAsColumns, ViewAsList, WhyThisView,
+    OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView, ShowCommandPalette, ShowThemePicker, SwitchFocus,
+    ToggleHiddenFiles, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
 };
 use crate::operations::{self, Clipboard, Operations};
+use crate::palette::{self, Item};
 use crate::pane::Pane;
 use crate::pane::PaneEvent;
 use crate::preview;
@@ -59,6 +61,8 @@ pub struct CrowWindow {
     /// "Why this view?", while open.
     why: Option<FocusHandle>,
     picker: Option<ThemePicker>,
+    /// Cmd-K, while open.
+    palette: Option<Palette>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -78,6 +82,16 @@ impl ThemePicker {
             _ => "system".into(),
         }
     }
+}
+
+/// Cmd-K: folders (favorites, Recent, subfolders) or, after `>`, commands.
+struct Palette {
+    input: Entity<TextInput>,
+    items: Vec<Item>,
+    cursor: usize,
+    folders: Vec<palette::FolderCandidate>,
+    scroll: UniformListScrollHandle,
+    _subscription: Subscription,
 }
 
 impl CrowWindow {
@@ -116,6 +130,7 @@ impl CrowWindow {
             show_activity: false,
             why: None,
             picker: None,
+            palette: None,
             _subscriptions: subscriptions,
         }
     }
@@ -133,6 +148,10 @@ impl CrowWindow {
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.pane().read(cx).current_dir(cx);
+        self.open_tab_at(dir, window, cx);
+    }
+
+    fn open_tab_at(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let show_hidden = self.show_hidden;
         let pane = cx.new(|cx| Pane::new(dir, show_hidden, false, cx));
         self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
@@ -1244,6 +1263,255 @@ impl CrowWindow {
         cx.notify();
     }
 
+    // ----- command palette -----
+
+    fn show_palette(&mut self, _: &ShowCommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() || self.picker.is_some() || self.go_to.is_some() || self.sheet.is_some() {
+            return;
+        }
+        let (home, favorites, recents) = {
+            let ui = cx.global::<Ui>();
+            let favorites: Vec<PathBuf> =
+                ui.favorites().into_iter().flat_map(|(_, group)| group).map(|f| f.path).collect();
+            (ui.home.clone(), favorites, ui.palette_recents.clone())
+        };
+        let subfolders = self.pane().read(cx).subfolders(cx);
+        let folders = palette::folder_candidates(favorites, recents, subfolders, &home);
+        let items = palette::items("", &folders);
+        let input = cx.new(|cx| TextInput::new("", "Go to Folder or > for Commands", cx));
+        let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
+            TextInputEvent::Changed => {
+                let query = input.read(cx).text().to_owned();
+                this.refresh_palette(&query, cx);
+            }
+            TextInputEvent::Confirmed => this.confirm_palette(false, window, cx),
+            TextInputEvent::Cancelled => this.close_palette(window, cx),
+            TextInputEvent::CompletionRequested => {}
+        });
+        let focus = input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.palette = Some(Palette {
+            input,
+            items,
+            cursor: 0,
+            folders,
+            scroll: UniformListScrollHandle::new(),
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn refresh_palette(&mut self, query: &str, cx: &mut Context<Self>) {
+        let Some(palette) = &mut self.palette else { return };
+        let items = palette::items(query, &palette.folders);
+        palette.items = items;
+        palette.cursor = 0;
+        palette.scroll.scroll_to_item(0, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    fn move_palette(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(palette) = &mut self.palette else { return };
+        let last = palette.items.len().saturating_sub(1);
+        palette.cursor = palette.cursor.saturating_add_signed(delta).min(last);
+        palette.scroll.scroll_to_item(palette.cursor, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.take().is_none() {
+            return;
+        }
+        self.focus_pane(window, cx);
+        cx.notify();
+    }
+
+    fn palette_open_in_tab(&mut self, _: &PaletteOpenInTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_palette(true, window, cx);
+    }
+
+    fn confirm_palette(&mut self, new_tab: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.take() else { return };
+        let item = palette.items.get(palette.cursor).cloned();
+        self.focus_pane(window, cx);
+        match item {
+            Some(Item::Command(command)) => self.run_command(command.id, window, cx),
+            Some(Item::Folder { path, .. }) if new_tab => self.open_tab_at(path, window, cx),
+            Some(Item::Folder { path, .. }) => self.pane().update(cx, |pane, cx| pane.navigate(path, cx)),
+            None => {}
+        }
+        cx.notify();
+    }
+
+    fn run_command(&mut self, command: palette::CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        use palette::CommandId;
+        match command {
+            CommandId::NewTab => self.new_tab(&NewTab, window, cx),
+            CommandId::CloseTab => self.close_tab(&CloseTab, window, cx),
+            CommandId::NextTab => self.next_tab(&NextTab, window, cx),
+            CommandId::PreviousTab => self.previous_tab(&PreviousTab, window, cx),
+            CommandId::NewWindow => {
+                let dir = self.pane().read(cx).current_dir(cx);
+                open(dir, false, cx);
+            }
+            CommandId::SwitchFocus => self.switch_focus(&SwitchFocus, window, cx),
+            CommandId::ToggleHiddenFiles => self.toggle_hidden(&ToggleHiddenFiles, window, cx),
+            CommandId::OpenParent => self.open_parent(&OpenParent, window, cx),
+            CommandId::GoBack => self.go_back(&GoBack, window, cx),
+            CommandId::GoForward => self.go_forward(&GoForward, window, cx),
+            CommandId::GoToFolder => self.go_to_folder(&GoToFolder, window, cx),
+            CommandId::ViewAsList => self.view_as_list(&ViewAsList, window, cx),
+            CommandId::ViewAsColumns => self.view_as_columns(&ViewAsColumns, window, cx),
+            CommandId::Undo => self.undo(None, cx),
+            CommandId::Redo => self.redo(cx),
+            CommandId::AddToSidebar => self.add_to_sidebar(&AddToSidebar, window, cx),
+            CommandId::WhyThisView => self.why_this_view(&WhyThisView, window, cx),
+            CommandId::UseViewAsDefaults => self.use_view_as_defaults(&UseViewAsDefaults, window, cx),
+            CommandId::ResetFolderView => self.reset_folder_view(&ResetFolderView, window, cx),
+            CommandId::ShowThemePicker => self.show_theme_picker(&ShowThemePicker, window, cx),
+            CommandId::ToggleActivity => {
+                self.show_activity = !self.show_activity;
+                cx.notify();
+            }
+            CommandId::RemoveFromSidebar
+            | CommandId::MoveFavoriteUp
+            | CommandId::MoveFavoriteDown
+            | CommandId::Eject => {
+                self.sidebar.update(cx, |sidebar, cx| sidebar.run_command(command, window, cx));
+            }
+            CommandId::Quit => cx.quit(),
+            other => self.pane().update(cx, |pane, cx| pane.run_command(other, window, cx)),
+        }
+    }
+
+    fn render_palette(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let (input, scroll, count) = {
+            let palette = self.palette.as_ref()?;
+            (palette.input.clone(), palette.scroll.clone(), palette.items.len())
+        };
+        let ui = cx.global::<Ui>();
+        let theme = ui.theme.clone();
+        let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
+        let muted = color(theme.role("fg-muted"));
+        let mut context = "Sheet Palette".to_owned();
+        if vim {
+            context.push_str(" vim");
+        }
+        let list: gpui::AnyElement = if count == 0 {
+            div()
+                .id("palette-empty")
+                .p_2()
+                .role(Role::Label)
+                .aria_label("No matches")
+                .child("No matches")
+                .into_any_element()
+        } else {
+            let height = (count.min(14) as f32) * 26.0;
+            div()
+                .id("palette-list")
+                .role(Role::ListBox)
+                .aria_label("Commands and folders")
+                .h(px(height))
+                .flex()
+                .flex_col()
+                .child(
+                    uniform_list("palette-items", count, cx.processor(Self::render_palette_rows))
+                        .track_scroll(&scroll)
+                        .flex_1(),
+                )
+                .into_any_element()
+        };
+        Some(
+            div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
+                div()
+                    .id("palette")
+                    .role(Role::Dialog)
+                    .aria_label("Command Palette")
+                    .key_context(context.as_str())
+                    .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_palette(-1, cx)))
+                    .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_palette(1, cx)))
+                    .on_action(cx.listener(Self::palette_open_in_tab))
+                    .w(px(560.))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(color(theme.role("surface")))
+                    .border_1()
+                    .border_color(color(theme.role("border")))
+                    .shadow_lg()
+                    .child(input)
+                    .child(list)
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(muted)
+                            .child("> commands · Return runs · ⌘Return opens a folder in a new tab"),
+                    ),
+            ),
+        )
+    }
+
+    fn render_palette_rows(
+        &mut self,
+        range: std::ops::Range<usize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<impl IntoElement + use<>> {
+        let Some(palette) = self.palette.as_ref() else { return Vec::new() };
+        let ui = cx.global::<Ui>();
+        let theme = &ui.theme;
+        let (fg, muted, accent) = (color(theme.role("fg")), color(theme.role("fg-muted")), theme.role("accent"));
+        let (cursor, count) = (palette.cursor, palette.items.len());
+        range
+            .filter_map(|i| {
+                let item = palette.items.get(i)?;
+                let selected = i == cursor;
+                let (icon_path, label, keys) = match item {
+                    Item::Command(command) => (None, command.label.to_owned(), command.keys),
+                    Item::Folder { path, label } => (Some(path.clone()), label.clone(), ""),
+                };
+                let row = div()
+                    .id(("palette-row", i))
+                    .role(Role::ListBoxOption)
+                    .aria_label(label.clone())
+                    .aria_position_in_set(i + 1)
+                    .aria_size_of_set(count)
+                    .aria_selected(selected)
+                    .when(selected, |row| row.aria_active_descendant())
+                    .h(px(26.))
+                    .px_2()
+                    .rounded_md()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(selected, |row| row.bg(color_alpha(accent, 0x55)))
+                    .debug_selector(|| format!("palette-row-{i}"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(palette) = &mut this.palette {
+                            palette.cursor = i;
+                        }
+                        this.confirm_palette(false, window, cx);
+                    }))
+                    .child(div().size(px(16.)).flex_none().children(
+                        icon_path.and_then(|path| icon(&path, true, 16)).map(|image| img(image).size(px(16.))),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_color(fg)
+                            .child(label),
+                    )
+                    .child(div().text_size(px(11.)).text_color(muted).child(keys));
+                Some(row.into_any_element())
+            })
+            .collect()
+    }
+
     fn render_picker(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let picker = self.picker.as_ref()?;
         let ui = cx.global::<Ui>();
@@ -1394,6 +1662,7 @@ impl Render for CrowWindow {
         let activity = self.show_activity.then(|| self.render_activity(cx));
         let why = self.render_why(cx);
         let picker = self.render_picker(cx);
+        let palette = self.render_palette(cx);
         div()
             .id("crow")
             .role(Role::Application)
@@ -1424,6 +1693,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::use_view_as_defaults))
             .on_action(cx.listener(Self::reset_folder_view))
             .on_action(cx.listener(Self::show_theme_picker))
+            .on_action(cx.listener(Self::show_palette))
             .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, _, cx| {
                 this.show_activity = !this.show_activity;
                 cx.notify();
@@ -1452,6 +1722,7 @@ impl Render for CrowWindow {
             .children(activity)
             .children(why)
             .children(picker)
+            .children(palette)
     }
 }
 
@@ -1818,6 +2089,81 @@ mod tests {
             }
             dir
         })
+    }
+
+    #[gpui::test]
+    fn command_palette_runs_a_command(cx: &mut TestAppContext) {
+        let root = fixture("palette-command");
+        std::fs::write(root.join(".secret"), "").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.item_count(cx));
+        assert_eq!(count(&cx), 3);
+
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.palette.is_some()));
+        cx.simulate_input(">toggle hidden");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "Return closes the palette");
+        assert_eq!(count(&cx), 4, "the command ran");
+    }
+
+    #[gpui::test]
+    fn command_palette_goes_to_a_recent_folder(cx: &mut TestAppContext) {
+        let root = fixture("palette-go");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        cx.simulate_keystrokes("cmd-up");
+        settle(&view, &mut cx);
+        assert!(
+            cx.read(|cx| cx.global::<Ui>().palette_recents.contains(&root.join("alpha"))),
+            "the visit is in the palette's recent list"
+        );
+
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input("alpha");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()));
+    }
+
+    #[gpui::test]
+    fn command_palette_cmd_return_opens_a_new_tab(cx: &mut TestAppContext) {
+        let root = fixture("palette-tab");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input("beta");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-enter");
+        settle(&view, &mut cx);
+
+        assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2);
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()));
+    }
+
+    #[gpui::test]
+    fn command_palette_vim_keys_move_the_cursor(cx: &mut TestAppContext) {
+        let root = fixture("palette-vim");
+        let (view, mut cx) = open(cx, &root);
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        let cursor = |cx: &VisualTestContext| view.read_with(cx, |w, _| w.palette.as_ref().map(|p| p.cursor));
+        assert_eq!(cursor(&cx), Some(0));
+        cx.simulate_keystrokes("j");
+        assert_eq!(cursor(&cx), Some(1), "j moves down");
+        cx.simulate_keystrokes("k");
+        assert_eq!(cursor(&cx), Some(0), "k moves up");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()));
     }
 
     #[gpui::test]

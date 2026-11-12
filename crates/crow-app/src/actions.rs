@@ -63,6 +63,9 @@ actions!(
         // List filter
         StartFilter,
         ClearFilter,
+        // Command palette
+        ShowCommandPalette,
+        PaletteOpenInTab,
         // Window
         NewTab,
         CloseTab,
@@ -140,6 +143,10 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("up", MoveUp, Some("ThemePicker")),
         KeyBinding::new("down", MoveDown, Some("ThemePicker")),
         KeyBinding::new("cmd-enter", ApplyThemeEverywhere, Some("ThemePicker")),
+        KeyBinding::new("cmd-k", ShowCommandPalette, Some("Crow")),
+        KeyBinding::new("up", MoveUp, Some("Palette")),
+        KeyBinding::new("down", MoveDown, Some("Palette")),
+        KeyBinding::new("cmd-enter", PaletteOpenInTab, Some("Palette")),
     ]
 }
 
@@ -174,5 +181,7 @@ pub fn vim_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("l", OpenSelection, Some("Sidebar && vim")),
         KeyBinding::new("j", MoveDown, Some("ThemePicker && vim")),
         KeyBinding::new("k", MoveUp, Some("ThemePicker && vim")),
+        KeyBinding::new("j", MoveDown, Some("Palette && vim")),
+        KeyBinding::new("k", MoveUp, Some("Palette && vim")),
     ]
 }

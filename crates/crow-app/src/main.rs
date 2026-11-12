@@ -11,6 +11,7 @@ mod extensions;
 mod folder;
 mod logging;
 mod operations;
+mod palette;
 mod pane;
 mod preview;
 mod sidebar;
