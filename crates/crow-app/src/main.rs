@@ -8,8 +8,10 @@
 
 mod actions;
 mod extensions;
+mod folder;
 mod logging;
 mod pane;
+mod preview;
 mod style;
 mod text_input;
 mod ui;

@@ -23,6 +23,9 @@ font_size = 13.0
 
 show_hidden_files = false
 
+# How new windows and tabs show folders: "list" or "columns". Cmd-2 and Cmd-3 switch.
+view = "list"
+
 [window]
 # Size of every new window, in points. Restored sessions keep their own sizes.
 width = 1200
@@ -35,6 +38,15 @@ pub enum KeymapLayer {
     #[default]
     Finder,
     Vim,
+}
+
+/// How a pane shows folders.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewMode {
+    #[default]
+    List,
+    Columns,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -58,6 +70,7 @@ pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
     pub show_hidden_files: bool,
+    pub view: ViewMode,
     pub window: WindowDefaults,
 }
 
@@ -69,6 +82,7 @@ impl Default for Settings {
             font_family: String::new(),
             font_size: 13.0,
             show_hidden_files: false,
+            view: ViewMode::List,
             window: WindowDefaults::default(),
         }
     }

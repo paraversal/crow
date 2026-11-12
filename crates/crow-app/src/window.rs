@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crow_core::{Favorite, PreviewContent, Tabs};
+use crow_core::{Favorite, Tabs, ViewMode};
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role, SharedString,
     Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, point, prelude::*, px, size,
@@ -10,10 +10,11 @@ use gpui::{
 
 use crate::actions::{
     CloseTab, GoBack, GoForward, GoToFolder, MoveDown, MoveUp, NewTab, NextTab, OpenParent, OpenSelection, PreviousTab,
-    SwitchFocus, ToggleHiddenFiles,
+    SwitchFocus, ToggleHiddenFiles, ViewAsColumns, ViewAsList,
 };
 use crate::pane::Pane;
-use crate::style::{color, color_alpha, format_time, icon, kind, ui_font};
+use crate::preview;
+use crate::style::{color, color_alpha, icon, ui_font};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::{Ui, reload_theme};
 
@@ -55,7 +56,8 @@ impl CrowWindow {
         let mut favorites = crow_core::default_favorites(&home);
         favorites.push(Favorite { name: "Macintosh HD".into(), path: PathBuf::from("/") });
         let show_hidden = cx.global::<Ui>().settings.show_hidden_files;
-        let pane = cx.new(|cx| Pane::new(dir, show_hidden, bench, cx));
+        let mode = cx.global::<Ui>().settings.view;
+        let pane = cx.new(|cx| Pane::new(dir, show_hidden, mode, bench, cx));
         let focus = pane.read(cx).focus_handle().clone();
         window.focus(&focus, cx);
         let subscriptions = vec![
@@ -85,9 +87,9 @@ impl CrowWindow {
     // ----- window actions -----
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        let dir = self.pane().read(cx).dir().to_path_buf();
+        let (dir, mode) = (self.pane().read(cx).current_dir(cx), self.pane().read(cx).mode());
         let show_hidden = self.show_hidden;
-        let pane = cx.new(|cx| Pane::new(dir, show_hidden, false, cx));
+        let pane = cx.new(|cx| Pane::new(dir, show_hidden, mode, false, cx));
         self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
         self.tabs.open(pane);
         self.focus_pane(window, cx);
@@ -135,11 +137,11 @@ impl CrowWindow {
     }
 
     fn go_to_folder(&mut self, _: &GoToFolder, window: &mut Window, cx: &mut Context<Self>) {
-        let current = home_relative(self.pane().read(cx).dir());
+        let current = home_relative(&self.pane().read(cx).current_dir(cx));
         let input = cx.new(|cx| TextInput::new(current, "Go to Folder", cx));
         let subscription = cx.subscribe_in(&input, window, |this, input, event: &TextInputEvent, window, cx| {
             let typed = input.read(cx).text().to_owned();
-            let cwd = this.pane().read(cx).dir().to_path_buf();
+            let cwd = this.pane().read(cx).current_dir(cx);
             let home = home_dir();
             match event {
                 TextInputEvent::CompletionRequested => {
@@ -199,6 +201,14 @@ impl CrowWindow {
         )
     }
 
+    fn view_as_list(&mut self, _: &ViewAsList, _: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| pane.set_mode(ViewMode::List, cx));
+    }
+
+    fn view_as_columns(&mut self, _: &ViewAsColumns, _: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+    }
+
     fn open_parent(&mut self, _: &OpenParent, _: &mut Window, cx: &mut Context<Self>) {
         self.pane().update(cx, |pane, cx| pane.open_parent(cx));
     }
@@ -236,7 +246,7 @@ impl CrowWindow {
     fn render_title_bar(&self, title: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = &cx.global::<Ui>().theme;
         let pane = self.pane().read(cx);
-        let (back, forward) = (pane.can_go_back(), pane.can_go_forward());
+        let (back, forward, mode) = (pane.can_go_back(), pane.can_go_forward(), pane.mode());
         let (fg, muted, subtle) = (theme.role("fg"), theme.role("fg-muted"), theme.role("fg-subtle"));
         let nav_button = |id: &'static str, label: &'static str, glyph: &'static str, enabled: bool| {
             div()
@@ -283,14 +293,36 @@ impl CrowWindow {
                     .text_color(color(fg))
                     .child(title.to_owned()),
             )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("view-switcher")
+                    .role(Role::RadioGroup)
+                    .aria_label("View")
+                    .flex()
+                    .gap(px(2.))
+                    .p(px(2.))
+                    .rounded_md()
+                    .bg(color(theme.role("surface")))
+                    .child(view_button("view-list", "as List", "☰", mode == ViewMode::List, theme).on_click(
+                        cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.set_mode(ViewMode::List, cx))),
+                    ))
+                    .child(view_button("view-columns", "as Columns", "▥", mode == ViewMode::Columns, theme).on_click(
+                        cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.set_mode(ViewMode::Columns, cx))),
+                    )),
+            )
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let active = self.tabs.active_index();
         let count = self.tabs.len();
-        let tabs: Vec<(usize, String)> =
-            self.tabs.iter().enumerate().map(|(i, (_, pane))| (i, folder_name(pane.read(cx).dir()))).collect();
+        let tabs: Vec<(usize, String)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, (_, pane))| (i, folder_name(&pane.read(cx).current_dir(cx))))
+            .collect();
         div()
             .id("tabs")
             .role(Role::TabList)
@@ -331,7 +363,7 @@ impl CrowWindow {
     fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let focused = self.sidebar_focus.is_focused(window);
-        let current = self.pane().read(cx).dir().to_path_buf();
+        let current = self.pane().read(cx).current_dir(cx);
         let count = self.favorites.len();
         let rows: Vec<(usize, Favorite)> = self.favorites.iter().cloned().enumerate().collect();
         div()
@@ -385,86 +417,24 @@ impl CrowWindow {
             }))
     }
 
+    /// List view's right-hand preview pane (column view shows it as its last column).
     fn render_preview(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
-        let muted = color(theme.role("fg-muted"));
-        let border = color(theme.role("border"));
         let pane = self.pane().read(cx);
-        let base = div()
+        let entry = pane.cursor_entry(cx);
+        let preview = pane.preview(cx);
+        div()
             .id("preview")
             .role(Role::Group)
+            .aria_label(entry.as_ref().map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview)))
             .w(px(300.))
             .flex_none()
             .h_full()
             .p_4()
             .border_l_1()
-            .border_color(border)
-            .flex()
-            .flex_col()
-            .gap_3()
-            .overflow_hidden();
-        let Some(entry) = pane.cursor_entry().cloned() else { return base.aria_label("Preview") };
-        let size = if entry.is_dir { "--".to_owned() } else { crow_fs::human_size(entry.size) };
-        let kind = kind(&entry);
-        let (created, modified, added) =
-            (format_time(entry.created), format_time(entry.modified), format_time(entry.added));
-        let preview = pane.preview();
-        let tags = preview.map(|p| p.tags.join(", ")).filter(|t| !t.is_empty());
-        let picture = match (preview.and_then(|p| p.image.clone()), preview.and_then(|p| p.content.clone())) {
-            (Some(image), _) => {
-                div().h(px(220.)).flex().items_center().justify_center().child(img(image).max_w_full().max_h(px(220.)))
-            }
-            (None, Some(PreviewContent::Text(text))) => div()
-                .h(px(220.))
-                .p_2()
-                .rounded_md()
-                .border_1()
-                .border_color(border)
-                .bg(color(theme.role("bg-inset")))
-                .overflow_hidden()
-                .font_family("Menlo")
-                .text_size(px(11.))
-                .child(text),
-            _ => div()
-                .h(px(220.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .children(icon(&entry.path, entry.is_dir, 128).map(|i| img(i).size(px(128.)))),
-        };
-        let info_row = |label: &str, value: String| {
-            div()
-                .flex()
-                .justify_between()
-                .gap_2()
-                .py_1()
-                .border_b_1()
-                .border_color(border)
-                .child(div().flex_none().text_color(muted).child(label.to_owned()))
-                .child(div().text_right().child(value))
-        };
-        base.aria_label(format!(
-            "Preview: {}, {kind}, {size}, created {created}, modified {modified}{}",
-            entry.name,
-            tags.as_ref().map(|t| format!(", tags {t}")).unwrap_or_default()
-        ))
-        .child(picture)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .child(div().text_size(px(15.)).child(entry.name.clone()))
-                .child(div().text_color(muted).child(format!("{kind} · {size}"))),
-        )
-        .child(div().pt_2().font_weight(FontWeight::SEMIBOLD).child("Information"))
-        .child(info_row("Created", created))
-        .child(info_row("Modified", modified))
-        .when(entry.added.is_some(), |pane| pane.child(info_row("Added", added)))
-        .child(div().pt_2().font_weight(FontWeight::SEMIBOLD).child("Tags"))
-        .child(match tags {
-            Some(tags) => div().child(tags),
-            None => div().text_color(muted).child("No tags"),
-        })
+            .border_color(color(theme.role("border")))
+            .overflow_hidden()
+            .children(entry.map(|e| preview::contents(&e, preview, &theme)))
     }
 
     fn render_path_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -472,17 +442,16 @@ impl CrowWindow {
         let theme = ui.theme.clone();
         let settings_error = ui.settings_error.clone();
         let pane = self.pane().read(cx);
-        let target = pane.cursor_entry().map_or_else(|| pane.dir().to_path_buf(), |e| e.path.clone());
+        let target = pane.cursor_entry(cx).map_or_else(|| pane.current_dir(cx), |e| e.path.clone());
         let parts = crow_macos::display_components(&target);
         let last = parts.len().saturating_sub(1);
         let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
-        let (status, is_error): (SharedString, bool) = match (pane.error().cloned(), settings_error) {
+        let (count, selected) = (pane.item_count(cx), pane.selected_count(cx));
+        let (status, is_error): (SharedString, bool) = match (pane.error(cx), settings_error) {
             (Some(e), _) | (None, Some(e)) => (e, true),
-            _ if pane.is_loading() && pane.item_count() == 0 => ("Loading…".into(), false),
-            _ if pane.selected_count() > 1 => {
-                (format!("{} of {} selected", pane.selected_count(), pane.item_count()).into(), false)
-            }
-            _ => (format!("{} items", pane.item_count()).into(), false),
+            _ if pane.is_loading(cx) && count == 0 => ("Loading…".into(), false),
+            _ if selected > 1 => (format!("{selected} of {count} selected").into(), false),
+            _ => (format!("{count} items").into(), false),
         };
         div()
             .id("path-bar")
@@ -530,6 +499,30 @@ impl CrowWindow {
     }
 }
 
+fn view_button(
+    id: &'static str,
+    label: &'static str,
+    glyph: &'static str,
+    selected: bool,
+    theme: &crow_theme::Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .role(Role::RadioButton)
+        .aria_label(label)
+        .aria_selected(selected)
+        .w(px(28.))
+        .h(px(22.))
+        .rounded_sm()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(13.))
+        .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
+        .when(selected, |b| b.bg(color(theme.role("surface-raised"))))
+        .child(glyph)
+}
+
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
 }
@@ -552,12 +545,13 @@ impl Render for CrowWindow {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let (font, font_size) = (ui_font(&ui.settings.font_family), ui.settings.font_size);
-        let title = folder_name(self.pane().read(cx).dir());
+        let title = folder_name(&self.pane().read(cx).current_dir(cx));
+        let list_view = self.pane().read(cx).mode() == ViewMode::List;
         window.set_window_title(&title);
         let title_bar = self.render_title_bar(&title, cx);
         let tab_bar = (self.tabs.len() > 1).then(|| self.render_tab_bar(cx));
         let sidebar = self.render_sidebar(window, cx);
-        let preview = self.render_preview(cx);
+        let preview = list_view.then(|| self.render_preview(cx));
         let path_bar = self.render_path_bar(cx);
         let go_to = self.render_go_to(cx);
         div()
@@ -575,6 +569,8 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::go_to_folder))
+            .on_action(cx.listener(Self::view_as_list))
+            .on_action(cx.listener(Self::view_as_columns))
             .size_full()
             .flex()
             .flex_col()
@@ -591,7 +587,7 @@ impl Render for CrowWindow {
                     .flex()
                     .child(sidebar)
                     .child(div().flex_1().min_w_0().h_full().child(self.pane().clone()))
-                    .child(preview),
+                    .children(preview),
             )
             .child(path_bar)
             .children(go_to)
@@ -638,7 +634,7 @@ mod tests {
     fn settle(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
         for _ in 0..400 {
             cx.run_until_parked();
-            let busy = view.read_with(cx, |w, cx| w.tabs.iter().any(|(_, pane)| pane.read(cx).is_loading()));
+            let busy = view.read_with(cx, |w, cx| w.tabs.iter().any(|(_, pane)| pane.read(cx).is_loading(cx)));
             if !busy {
                 cx.run_until_parked();
                 return;
@@ -653,11 +649,11 @@ mod tests {
     }
 
     fn selected(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Option<String> {
-        pane(view, cx).read_with(cx, |p, _| p.cursor_entry().map(|e| e.name.clone()))
+        pane(view, cx).read_with(cx, |p, cx| p.cursor_entry(cx).map(|e| e.name))
     }
 
     fn dir(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> PathBuf {
-        pane(view, cx).read_with(cx, |p, _| p.dir().to_path_buf())
+        pane(view, cx).read_with(cx, |p, cx| p.current_dir(cx))
     }
 
     #[gpui::test]
@@ -686,7 +682,7 @@ mod tests {
         assert!(cx.update(|window, _| list_focus.is_focused(window)), "…and moves focus to the list");
 
         cx.simulate_keystrokes("enter");
-        let error = pane(&view, &cx).read_with(&cx, |p, _| p.error().cloned());
+        let error = pane(&view, &cx).read_with(&cx, |p, cx| p.error(cx));
         assert!(error.is_some_and(|e| e.contains("Rename")), "Return in the list means rename");
     }
 
@@ -738,7 +734,7 @@ mod tests {
         let root = fixture("hidden");
         std::fs::write(root.join(".secret"), "").expect("create fixture");
         let (view, mut cx) = open(cx, &root);
-        let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.item_count());
+        let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.item_count(cx));
         assert_eq!(count(&cx), 3);
 
         cx.simulate_keystrokes("cmd-t cmd-shift-.");
@@ -749,11 +745,11 @@ mod tests {
     }
 
     fn selected_names(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Vec<String> {
-        pane(view, cx).read_with(cx, |p, _| p.selected_names())
+        pane(view, cx).read_with(cx, |p, cx| p.selected_names(cx))
     }
 
     fn names(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Vec<String> {
-        pane(view, cx).read_with(cx, |p, _| p.names())
+        pane(view, cx).read_with(cx, |p, cx| p.names(cx))
     }
 
     #[gpui::test]
@@ -824,5 +820,70 @@ mod tests {
         cx.simulate_keystrokes("cmd-shift-g escape");
         assert!(!sheet_open(&cx), "Escape closes the sheet");
         assert_eq!(dir(&view, &cx), root, "…without going anywhere");
+    }
+
+    /// (number of columns, focused column, folder shown in column `k`, cursor name in column `k`).
+    fn columns(
+        view: &Entity<CrowWindow>,
+        cx: &VisualTestContext,
+        k: usize,
+    ) -> (usize, usize, Option<PathBuf>, Option<String>) {
+        pane(view, cx)
+            .read_with(cx, |p, cx| (p.folder_count(), p.focused_index(), p.folder_dir(k, cx), p.cursor_name_in(k, cx)))
+    }
+
+    #[gpui::test]
+    fn column_view_follows_the_focus_rules(cx: &mut TestAppContext) {
+        let root = fixture("columns");
+        std::fs::write(root.join("alpha/zeta.txt"), "z").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        let (count, focused, child, child_cursor) = columns(&view, &cx, 1);
+        assert_eq!((count, focused), (2, 0), "the selected folder's contents show in a second column");
+        assert_eq!(child, Some(root.join("alpha")));
+        assert_eq!(child_cursor, None, "…which is not focused and has nothing selected");
+
+        cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
+        assert_eq!(columns(&view, &cx, 1).2, Some(root.join("beta")), "the child column follows the selection");
+        cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
+        assert_eq!(columns(&view, &cx, 0).0, 1, "a file ends the chain (its preview is the last column)");
+
+        cx.simulate_keystrokes("up up right");
+        settle(&view, &mut cx);
+        let (count, focused, _, cursor) = columns(&view, &cx, 1);
+        assert_eq!(focused, 1, "Right moves into the child column");
+        assert_eq!(cursor.as_deref(), Some("inner"), "…selecting its first item");
+        assert_eq!(count, 3, "…whose own contents open to the right");
+
+        cx.simulate_keystrokes("z");
+        assert_eq!(columns(&view, &cx, 1).3.as_deref(), Some("zeta.txt"), "typing selects in the focused column");
+        assert_eq!(columns(&view, &cx, 0).3.as_deref(), Some("alpha"), "…and leaves the parent alone");
+        assert_eq!(dir(&view, &cx), root.join("alpha"), "the window shows the focused column's folder");
+
+        cx.simulate_keystrokes("left");
+        let (count, focused, _, cursor) = columns(&view, &cx, 1);
+        assert_eq!((count, focused), (2, 0), "Left moves back; the child column stays");
+        assert_eq!(cursor, None, "…with its selection cleared");
+    }
+
+    #[gpui::test]
+    fn switching_to_list_view_keeps_the_folder_you_are_in(cx: &mut TestAppContext) {
+        let root = fixture("switch");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-2");
+        settle(&view, &mut cx);
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.mode()), ViewMode::List);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        assert_eq!(selected(&view, &cx).as_deref(), Some("inner"), "the selection comes along");
+        cx.simulate_keystrokes("cmd-[");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root, "and Back returns to where the columns started");
     }
 }
