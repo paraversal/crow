@@ -81,6 +81,7 @@ struct Row {
     name: String,
     folder: String,
     is_dir: bool,
+    is_package: bool,
     kind: SharedString,
     modified: Option<SystemTime>,
     score: u32,
@@ -442,7 +443,7 @@ impl SearchView {
 
     fn open_selected(&mut self, cx: &mut Context<Self>) {
         if let Some(row) = self.results.get(self.cursor) {
-            cx.emit(SearchEvent::Open { path: row.path.clone(), is_dir: row.is_dir });
+            cx.emit(SearchEvent::Open { path: row.path.clone(), is_dir: row.is_dir && !row.is_package });
         }
     }
 
@@ -1016,8 +1017,9 @@ impl Row {
         let name = path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
         let folder = path.parent().map_or_else(String::new, |parent| abbreviate_home(parent, home));
         let ext = Path::new(&name).extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        let is_package = is_dir && matches!(ext, "app" | "bundle" | "framework" | "photoslibrary");
         let kind: SharedString = crow_macos::kind_name(ext, is_dir).to_string().into();
-        Row { path, name, folder, is_dir, kind, modified, score, content }
+        Row { path, name, folder, is_dir, is_package, kind, modified, score, content }
     }
 }
 
