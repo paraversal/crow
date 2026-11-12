@@ -18,9 +18,10 @@ use gpui::{
 };
 
 use crate::actions::{Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, OpenSelection, RemoveFromSidebar};
+use crate::chrome::with_tooltip;
 use crate::palette::CommandId;
 use crate::pane::DraggedSelection;
-use crate::style::{color, color_alpha, icon};
+use crate::style::{active_selection, color, current_location, drop_target, icon};
 use crate::ui::{self, Ui};
 
 pub enum SidebarEvent {
@@ -385,7 +386,7 @@ impl Render for Sidebar {
         let selectable_count = rows.iter().filter(|r| !matches!(r, Row::Header(..))).count();
         self.cursor = self.cursor.min(selectable_count.saturating_sub(1));
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
-        let drop_bg = color_alpha(accent, 0x40);
+        let drop_bg = drop_target(&theme);
 
         // A drag's target comes from the pointer and the last layout, so the
         // highlight only changes when the pointer enters a different row.
@@ -458,6 +459,10 @@ impl Render for Sidebar {
                 Row::Volume(v) => (v.name.clone(), None, None),
                 _ => (display_name(&path), None, None),
             };
+            let volume_label = match &row {
+                Row::Volume(v) => Some(format!("{} free of {}", human_bytes(v.free_bytes), human_bytes(v.total_bytes))),
+                _ => None,
+            };
             let spoken = match &row {
                 Row::Volume(v) => format!(
                     "{label}, {} free of {}{}",
@@ -487,8 +492,8 @@ impl Render for Sidebar {
                 .flex()
                 .flex_col()
                 .relative()
-                .when(here, |row| row.bg(color(theme.role("selection"))))
-                .when(focused && cursor, |row| row.bg(color_alpha(accent, 0x55)))
+                .when(here, |row| row.bg(current_location(&theme)))
+                .when(focused && cursor, |row| row.bg(active_selection(&theme)))
                 .when(!self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Row(i)), |row| {
                     row.bg(drop_bg)
                 })
@@ -599,6 +604,9 @@ impl Render for Sidebar {
                         ),
                     );
             }
+            if let Some(label) = volume_label {
+                item = with_tooltip(item, label, None);
+            }
             children.push(item.into_any_element());
         }
 
@@ -619,6 +627,7 @@ impl Render for Sidebar {
             .id("sidebar")
             .role(Role::ListBox)
             .aria_label("Sidebar")
+            // keys::context_stack (KeyScope::Sidebar) mirrors this.
             .key_context(context.as_str())
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::move_up))

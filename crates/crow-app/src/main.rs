@@ -9,8 +9,11 @@
 //! ```
 
 mod actions;
+mod chrome;
 mod extensions;
 mod folder;
+mod icons;
+mod keys;
 mod logging;
 mod operations;
 mod palette;
@@ -165,7 +168,7 @@ fn main() -> ExitCode {
         }
     };
 
-    gpui_platform::application().run(move |cx: &mut App| {
+    gpui_platform::application().with_assets(icons::Assets).run(move |cx: &mut App| {
         ui::init(cx);
         extensions::init(cx);
         operations::init(cx, std::sync::Arc::new(crow_macos::SystemTrash));

@@ -7,6 +7,16 @@ use std::path::{Path, PathBuf};
 
 use crow_core::abbreviate_home;
 use crow_search::FuzzyMatcher;
+use gpui::Action;
+
+use crate::actions::{
+    AddToSidebar, CloseTab, CopyFiles, CutFiles, DeletePermanently, Duplicate, Eject, GoBack, GoForward, GoToFolder,
+    MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, PasteFiles,
+    PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView, SelectAll, ShowThemePicker,
+    StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList,
+    WhyThisView,
+};
+use crate::keys::KeyScope;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandId {
@@ -55,51 +65,93 @@ pub enum CommandId {
 pub struct Command {
     pub id: CommandId,
     pub label: &'static str,
-    /// The current Finder-layer shortcut, or empty when the command has none.
-    pub keys: &'static str,
+    /// The action the palette shows (and its future menus run).
+    pub action: &'static dyn Action,
+    /// The context its shortcut is looked up in.
+    pub scope: KeyScope,
 }
 
 /// User-facing commands, in the order an empty `>` query lists them.
 pub const COMMANDS: &[Command] = &[
-    Command { id: CommandId::NewTab, label: "New Tab", keys: "⌘T" },
-    Command { id: CommandId::CloseTab, label: "Close Tab", keys: "⌘W" },
-    Command { id: CommandId::NextTab, label: "Next Tab", keys: "⌃⇥" },
-    Command { id: CommandId::PreviousTab, label: "Previous Tab", keys: "⌃⇧⇥" },
-    Command { id: CommandId::NewWindow, label: "New Window", keys: "⌘N" },
-    Command { id: CommandId::SwitchFocus, label: "Switch Focus", keys: "⇥" },
-    Command { id: CommandId::ToggleHiddenFiles, label: "Toggle Hidden Files", keys: "⌘⇧." },
-    Command { id: CommandId::OpenParent, label: "Go to Parent Folder", keys: "⌘↑" },
-    Command { id: CommandId::GoBack, label: "Back", keys: "⌘[" },
-    Command { id: CommandId::GoForward, label: "Forward", keys: "⌘]" },
-    Command { id: CommandId::GoToFolder, label: "Go to Folder…", keys: "⌘⇧G" },
-    Command { id: CommandId::ViewAsList, label: "View as List", keys: "⌘2" },
-    Command { id: CommandId::ViewAsColumns, label: "View as Columns", keys: "⌘3" },
-    Command { id: CommandId::Open, label: "Open Selected", keys: "⌘↓" },
-    Command { id: CommandId::QuickLook, label: "Quick Look", keys: "Space" },
-    Command { id: CommandId::Rename, label: "Rename", keys: "↩" },
-    Command { id: CommandId::NewFolder, label: "New Folder", keys: "⌘⇧N" },
-    Command { id: CommandId::Duplicate, label: "Duplicate", keys: "⌘D" },
-    Command { id: CommandId::MoveToTrash, label: "Move to Trash", keys: "⌘⌫" },
-    Command { id: CommandId::DeletePermanently, label: "Delete Permanently", keys: "⌘⌥⌫" },
-    Command { id: CommandId::Copy, label: "Copy", keys: "⌘C" },
-    Command { id: CommandId::Cut, label: "Cut", keys: "⌘X" },
-    Command { id: CommandId::Paste, label: "Paste", keys: "⌘V" },
-    Command { id: CommandId::PasteMove, label: "Move Here", keys: "⌘⌥V" },
-    Command { id: CommandId::SelectAll, label: "Select All", keys: "⌘A" },
-    Command { id: CommandId::StartFilter, label: "Filter", keys: "/" },
-    Command { id: CommandId::Undo, label: "Undo", keys: "⌘Z" },
-    Command { id: CommandId::Redo, label: "Redo", keys: "⌘⇧Z" },
-    Command { id: CommandId::AddToSidebar, label: "Add to Sidebar", keys: "⌃⌘T" },
-    Command { id: CommandId::WhyThisView, label: "Why This View?", keys: "⌘J" },
-    Command { id: CommandId::UseViewAsDefaults, label: "Use View as Defaults", keys: "" },
-    Command { id: CommandId::ResetFolderView, label: "Reset This Folder's View", keys: "" },
-    Command { id: CommandId::ShowThemePicker, label: "Theme…", keys: "⌘⌥T" },
-    Command { id: CommandId::ToggleActivity, label: "Show Activity", keys: "⌘⌥L" },
-    Command { id: CommandId::RemoveFromSidebar, label: "Remove from Sidebar", keys: "⌘⌫" },
-    Command { id: CommandId::MoveFavoriteUp, label: "Move Favorite Up", keys: "⌘⌥↑" },
-    Command { id: CommandId::MoveFavoriteDown, label: "Move Favorite Down", keys: "⌘⌥↓" },
-    Command { id: CommandId::Eject, label: "Eject Volume", keys: "⌘E" },
-    Command { id: CommandId::Quit, label: "Quit Crow", keys: "⌘Q" },
+    Command { id: CommandId::NewTab, label: "New Tab", action: &NewTab, scope: KeyScope::Window },
+    Command { id: CommandId::CloseTab, label: "Close Tab", action: &CloseTab, scope: KeyScope::Window },
+    Command { id: CommandId::NextTab, label: "Next Tab", action: &crate::actions::NextTab, scope: KeyScope::Window },
+    Command {
+        id: CommandId::PreviousTab,
+        label: "Previous Tab",
+        action: &crate::actions::PreviousTab,
+        scope: KeyScope::Window,
+    },
+    Command { id: CommandId::NewWindow, label: "New Window", action: &NewWindow, scope: KeyScope::Window },
+    Command { id: CommandId::SwitchFocus, label: "Switch Focus", action: &SwitchFocus, scope: KeyScope::Window },
+    Command {
+        id: CommandId::ToggleHiddenFiles,
+        label: "Toggle Hidden Files",
+        action: &ToggleHiddenFiles,
+        scope: KeyScope::Window,
+    },
+    Command { id: CommandId::OpenParent, label: "Go to Parent Folder", action: &OpenParent, scope: KeyScope::Window },
+    Command { id: CommandId::GoBack, label: "Back", action: &GoBack, scope: KeyScope::Window },
+    Command { id: CommandId::GoForward, label: "Forward", action: &GoForward, scope: KeyScope::Window },
+    Command { id: CommandId::GoToFolder, label: "Go to Folder…", action: &GoToFolder, scope: KeyScope::Window },
+    Command { id: CommandId::ViewAsList, label: "View as List", action: &ViewAsList, scope: KeyScope::Window },
+    Command { id: CommandId::ViewAsColumns, label: "View as Columns", action: &ViewAsColumns, scope: KeyScope::Window },
+    Command { id: CommandId::Open, label: "Open Selected", action: &OpenSelection, scope: KeyScope::List },
+    Command { id: CommandId::QuickLook, label: "Quick Look", action: &QuickLook, scope: KeyScope::List },
+    Command { id: CommandId::Rename, label: "Rename", action: &Rename, scope: KeyScope::List },
+    Command { id: CommandId::NewFolder, label: "New Folder", action: &NewFolder, scope: KeyScope::List },
+    Command { id: CommandId::Duplicate, label: "Duplicate", action: &Duplicate, scope: KeyScope::List },
+    Command { id: CommandId::MoveToTrash, label: "Move to Trash", action: &MoveToTrash, scope: KeyScope::List },
+    Command {
+        id: CommandId::DeletePermanently,
+        label: "Delete Permanently",
+        action: &DeletePermanently,
+        scope: KeyScope::List,
+    },
+    Command { id: CommandId::Copy, label: "Copy", action: &CopyFiles, scope: KeyScope::List },
+    Command { id: CommandId::Cut, label: "Cut", action: &CutFiles, scope: KeyScope::List },
+    Command { id: CommandId::Paste, label: "Paste", action: &PasteFiles, scope: KeyScope::List },
+    Command { id: CommandId::PasteMove, label: "Move Here", action: &PasteMoveFiles, scope: KeyScope::List },
+    Command { id: CommandId::SelectAll, label: "Select All", action: &SelectAll, scope: KeyScope::List },
+    Command { id: CommandId::StartFilter, label: "Filter", action: &StartFilter, scope: KeyScope::List },
+    Command { id: CommandId::Undo, label: "Undo", action: &Undo, scope: KeyScope::Window },
+    Command { id: CommandId::Redo, label: "Redo", action: &Redo, scope: KeyScope::Window },
+    Command { id: CommandId::AddToSidebar, label: "Add to Sidebar", action: &AddToSidebar, scope: KeyScope::Window },
+    Command { id: CommandId::WhyThisView, label: "Why This View?", action: &WhyThisView, scope: KeyScope::Window },
+    Command {
+        id: CommandId::UseViewAsDefaults,
+        label: "Use View as Defaults",
+        action: &UseViewAsDefaults,
+        scope: KeyScope::Window,
+    },
+    Command {
+        id: CommandId::ResetFolderView,
+        label: "Reset This Folder's View",
+        action: &ResetFolderView,
+        scope: KeyScope::Window,
+    },
+    Command { id: CommandId::ShowThemePicker, label: "Theme…", action: &ShowThemePicker, scope: KeyScope::Window },
+    Command { id: CommandId::ToggleActivity, label: "Show Activity", action: &ToggleActivity, scope: KeyScope::Window },
+    Command {
+        id: CommandId::RemoveFromSidebar,
+        label: "Remove from Sidebar",
+        action: &RemoveFromSidebar,
+        scope: KeyScope::Sidebar,
+    },
+    Command {
+        id: CommandId::MoveFavoriteUp,
+        label: "Move Favorite Up",
+        action: &MoveFavoriteUp,
+        scope: KeyScope::Sidebar,
+    },
+    Command {
+        id: CommandId::MoveFavoriteDown,
+        label: "Move Favorite Down",
+        action: &MoveFavoriteDown,
+        scope: KeyScope::Sidebar,
+    },
+    Command { id: CommandId::Eject, label: "Eject Volume", action: &Eject, scope: KeyScope::Sidebar },
+    Command { id: CommandId::Quit, label: "Quit Crow", action: &Quit, scope: KeyScope::Window },
 ];
 
 #[derive(Clone, Debug)]

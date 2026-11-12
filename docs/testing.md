@@ -15,7 +15,10 @@ selection, type-to-select, sorting, Go to Folder, the column view's focus rules,
 drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent),
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
 (preview, revert, save), the `/` filter, the command palette, the search panel and the Vim layer
-(motions, marks). Each test gets its own temp config folder.
+(motions, marks). Shared chrome has its own tests: key text from the live keymap (including the
+Vim layer and the palette's old strings), keycap weights, tooltip text and a hover, the sheet scrim
+(closing outside, staying open inside), and the selection tint roles. Each test gets its own temp
+config folder.
 
 `crates/crow-core` tests the config models on their own: view layers and glob rules, `exclude.toml`
 defaults and validation, editing `views.toml` and `sidebar.toml` without losing comments, and
@@ -47,8 +50,8 @@ It needs a GPU, so it runs locally, not in CI.
 
 | Measure | Budget |
 | --- | --- |
-| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms) |
-| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms) |
+| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms; U1: 10 ms) |
+| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms) |
 | Search, 200k nested files, every file matches (names + contents) | first hit 4 ms; total 4.1 s (M6). `--bench-search` includes the walk, fuzzy names and content reads. |
 
 ## By hand (each milestone)
@@ -84,3 +87,7 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Spotlight | Search "Everywhere" for a name outside the home folder: results stream in and the summary says Spotlight only sees indexed volumes. |
 | VoiceOver | Cmd-F5, move through the list: each row reads name, details and "n of N". |
 | Privacy prompts | Open Desktop, Documents, Downloads: the prompt names Crow. |
+| Tooltips | Hover back, forward, both view buttons, a path segment, the disk row, Search everything and Cancel during a copy: each shows its name, and its key where it has one ("Back to Desktop ⌘["). VoiceOver still reads the old labels. |
+| Sheets | Open Go to Folder, Cmd-J, the theme picker, Cmd-K and a permanent delete: each sits on a darkened window (check a dark and a light theme); clicking outside closes it like Esc (picker reverts, delete does nothing), clicking inside doesn't. The window can still be dragged. |
+| Keys follow the layer | Cmd-K, `>`: rows show ⇧⌘G style keys; set `keymap = "vim"`: Copy shows `yy`. |
+| Icons | Title-bar back/forward and view buttons are drawn icons, crisp at 1× and 2×, in both themes. |

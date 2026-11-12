@@ -35,6 +35,16 @@ impl History {
         !self.forward.is_empty()
     }
 
+    /// The folder Back would show, without moving.
+    pub fn back_target(&self) -> Option<&Path> {
+        self.back.last().map(PathBuf::as_path)
+    }
+
+    /// The folder Forward would show, without moving.
+    pub fn forward_target(&self) -> Option<&Path> {
+        self.forward.last().map(PathBuf::as_path)
+    }
+
     pub fn back(&mut self) -> Option<&Path> {
         let prev = self.back.pop()?;
         self.forward.push(std::mem::replace(&mut self.current, prev));
@@ -64,6 +74,19 @@ mod tests {
         h.visit("/d".into());
         assert!(!h.can_go_forward(), "a new visit clears forward");
         assert_eq!(h.back(), Some(Path::new("/b")));
+    }
+
+    #[test]
+    fn history_peeks_without_moving() {
+        let mut h = History::new("/a".into());
+        assert_eq!(h.back_target(), None);
+        h.visit("/b".into());
+        h.visit("/c".into());
+        assert_eq!(h.back_target(), Some(Path::new("/b")));
+        assert_eq!(h.current(), Path::new("/c"), "peeking leaves the current folder alone");
+        assert_eq!(h.back(), Some(Path::new("/b")));
+        assert_eq!(h.forward_target(), Some(Path::new("/c")));
+        assert_eq!(h.current(), Path::new("/b"));
     }
 
     #[test]

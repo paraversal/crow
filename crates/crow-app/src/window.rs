@@ -10,10 +10,14 @@ use gpui::{
 };
 
 use crate::actions::{
-    AddToSidebar, ApplyThemeEverywhere, CloseTab, GoBack, GoForward, GoToFolder, MoveDown, MoveUp, NewTab, NextTab,
-    OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView, ShowCommandPalette, ShowSearch, ShowThemePicker,
-    SwitchFocus, ToggleHiddenFiles, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
+    AddToSidebar, ApplyThemeEverywhere, CancelOperation, CloseTab, GoBack, GoForward, GoToFolder, MoveDown,
+    MoveToTrash, MoveUp, NewTab, NextTab, OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView,
+    ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, UseViewAsDefaults, ViewAsColumns,
+    ViewAsList, WhyThisView,
 };
+use crate::chrome::{self, SheetWidth, with_action_tooltip, with_tooltip};
+use crate::icons::{self, Glyph};
+use crate::keys::{self, KeyScope};
 use crate::operations::{self, Clipboard, Operations};
 use crate::palette::{self, Item};
 use crate::pane::Pane;
@@ -21,7 +25,7 @@ use crate::pane::PaneEvent;
 use crate::preview;
 use crate::search::{SearchEvent, SearchView};
 use crate::sidebar::{Sidebar, SidebarEvent};
-use crate::style::{color, color_alpha, icon, ui_font};
+use crate::style::{active_selection, color, icon, ui_font};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::{self, Ui, reload_theme};
 use crow_fs::ops::{Plan, Request, Resolution};
@@ -95,6 +99,17 @@ struct Palette {
     folders: Vec<palette::FolderCandidate>,
     scroll: UniformListScrollHandle,
     _subscription: Subscription,
+}
+
+impl Palette {
+    /// The shortcut shown on row `i`, from the live keymap. Shared by
+    /// `render_palette_rows` and the layer test.
+    fn row_keys(&self, i: usize, cx: &App) -> Option<SharedString> {
+        match self.items.get(i)? {
+            Item::Command(command) => keys::text(command.action, command.scope, cx),
+            Item::Folder { .. } => None,
+        }
+    }
 }
 
 impl CrowWindow {
@@ -253,27 +268,19 @@ impl CrowWindow {
 
     fn render_go_to(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let (input, _) = self.go_to.as_ref()?;
-        let theme = &cx.global::<Ui>().theme;
-        Some(
-            div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
-                div()
-                    .id("go-to-folder")
-                    .role(Role::Dialog)
-                    .aria_label("Go to Folder")
-                    .w(px(520.))
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .rounded_lg()
-                    .bg(color(theme.role("surface")))
-                    .border_1()
-                    .border_color(color(theme.role("border")))
-                    .shadow_lg()
-                    .child(div().text_size(px(12.)).text_color(color(theme.role("fg-muted"))).child("Go to Folder"))
-                    .child(input.clone()),
-            ),
-        )
+        let theme = cx.global::<Ui>().theme.clone();
+        Some(chrome::sheet(
+            chrome::sheet_panel("go-to-folder", chrome::SheetWidth::Narrow, &theme)
+                .aria_label("Go to Folder")
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(div().text_size(px(12.)).text_color(color(theme.role("fg-muted"))).child("Go to Folder"))
+                .child(input.clone()),
+            &theme,
+            cx.listener(|this, _, window, cx| this.close_go_to(window, cx)),
+        ))
     }
 
     fn view_as_list(&mut self, _: &ViewAsList, _: &mut Window, cx: &mut Context<Self>) {
@@ -302,10 +309,16 @@ impl CrowWindow {
         let theme = &cx.global::<Ui>().theme;
         let pane = self.pane().read(cx);
         let (back, forward, mode) = (pane.can_go_back(), pane.can_go_forward(), pane.mode());
-        let (fg, muted, subtle) = (theme.role("fg"), theme.role("fg-muted"), theme.role("fg-subtle"));
-        let nav_button = |id: &'static str, label: &'static str, glyph: &'static str, enabled: bool| {
+        let back_label =
+            pane.back_target().map_or_else(|| "Back".to_owned(), |dir| format!("Back to {}", folder_name(dir)));
+        let forward_label = pane
+            .forward_target()
+            .map_or_else(|| "Forward".to_owned(), |dir| format!("Forward to {}", folder_name(dir)));
+        let fg = theme.role("fg");
+        let nav_button = |id: &'static str, label: &'static str, icon: Glyph, enabled: bool| {
             div()
                 .id(id)
+                .debug_selector(move || id.into())
                 .role(Role::Button)
                 .aria_label(label)
                 .w(px(26.))
@@ -314,9 +327,7 @@ impl CrowWindow {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(18.))
-                .text_color(color(if enabled { muted } else { subtle }))
-                .child(glyph)
+                .child(icons::glyph(icon, 16., if enabled { "fg-muted" } else { "fg-subtle" }, theme))
         };
         div()
             .h(px(44.))
@@ -329,12 +340,24 @@ impl CrowWindow {
             .border_b_1()
             .border_color(color(theme.role("border")))
             .child(
-                nav_button("back", "Back", "‹", back)
-                    .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_back(cx)))),
+                with_action_tooltip(
+                    nav_button("back", "Back", Glyph::Back, back),
+                    back_label,
+                    &GoBack,
+                    KeyScope::Window,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_back(cx)))),
             )
             .child(
-                nav_button("forward", "Forward", "›", forward)
-                    .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_forward(cx)))),
+                with_action_tooltip(
+                    nav_button("forward", "Forward", Glyph::Forward, forward),
+                    forward_label,
+                    &GoForward,
+                    KeyScope::Window,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_forward(cx)))),
             )
             .child(
                 div()
@@ -359,12 +382,30 @@ impl CrowWindow {
                     .p(px(2.))
                     .rounded_md()
                     .bg(color(theme.role("surface")))
-                    .child(view_button("view-list", "as List", "☰", mode == ViewMode::List, theme).on_click(
-                        cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.set_mode(ViewMode::List, cx))),
-                    ))
-                    .child(view_button("view-columns", "as Columns", "▥", mode == ViewMode::Columns, theme).on_click(
-                        cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.set_mode(ViewMode::Columns, cx))),
-                    )),
+                    .child(
+                        with_action_tooltip(
+                            view_button("view-list", "as List", Glyph::List, mode == ViewMode::List, theme),
+                            "View as List",
+                            &ViewAsList,
+                            KeyScope::Window,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.pane().update(cx, |p, cx| p.set_mode(ViewMode::List, cx));
+                        })),
+                    )
+                    .child(
+                        with_action_tooltip(
+                            view_button("view-columns", "as Columns", Glyph::Columns, mode == ViewMode::Columns, theme),
+                            "View as Columns",
+                            &ViewAsColumns,
+                            KeyScope::Window,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.pane().update(cx, |p, cx| p.set_mode(ViewMode::Columns, cx));
+                        })),
+                    ),
             )
     }
 
@@ -494,7 +535,7 @@ impl CrowWindow {
                                 .id(("path-segment", i))
                                 .debug_selector(move || format!("path-segment-{i}"))
                                 .role(Role::Button)
-                                .aria_label(spoke)
+                                .aria_label(spoke.clone())
                                 .flex()
                                 .items_center()
                                 .gap_1()
@@ -519,7 +560,7 @@ impl CrowWindow {
                                     }
                                 });
                             });
-                            part
+                            with_tooltip(part, spoke, None)
                         }
                     }),
                 ),
@@ -535,7 +576,7 @@ impl CrowWindow {
                     .child(status),
             )
             .when(running.is_some(), |bar| {
-                bar.child(
+                bar.child(with_action_tooltip(
                     div()
                         .id("cancel-operation")
                         .role(Role::Button)
@@ -547,7 +588,11 @@ impl CrowWindow {
                         .text_color(color(theme.role("fg")))
                         .on_click(|_, _, cx| operations::cancel_running(cx))
                         .child("Cancel"),
-                )
+                    "Cancel operation",
+                    &CancelOperation,
+                    KeyScope::Window,
+                    cx,
+                ))
             })
     }
 }
@@ -555,7 +600,7 @@ impl CrowWindow {
 fn view_button(
     id: &'static str,
     label: &'static str,
-    glyph: &'static str,
+    icon: Glyph,
     selected: bool,
     theme: &crow_theme::Theme,
 ) -> gpui::Stateful<gpui::Div> {
@@ -570,10 +615,8 @@ fn view_button(
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(13.))
-        .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
         .when(selected, |b| b.bg(color(theme.role("surface-raised"))))
-        .child(glyph)
+        .child(icons::glyph(icon, 16., if selected { "fg" } else { "fg-muted" }, theme))
 }
 
 fn home_dir() -> PathBuf {
@@ -744,9 +787,14 @@ impl CrowWindow {
         let sheet = self.sheet.as_ref()?;
         let theme = cx.global::<Ui>().theme.clone();
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
+        let trash_hint = match keys::text(&MoveToTrash, KeyScope::List, cx) {
+            Some(keys) => format!("This can't be undone. Move to Trash ({keys}) can."),
+            None => "This can't be undone. Move to Trash can.".to_owned(),
+        };
         let button = |id: &'static str, label: String, primary: bool| {
             div()
                 .id(id)
+                .debug_selector(move || id.into())
                 .role(Role::Button)
                 .aria_label(label.clone())
                 .px_3()
@@ -768,7 +816,7 @@ impl CrowWindow {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .child(div().text_color(color(muted)).child("This can't be undone. Move to Trash (⌘⌫) can."))
+                        .child(div().text_color(color(muted)).child(trash_hint))
                         .child(
                             div()
                                 .flex()
@@ -814,7 +862,7 @@ impl CrowWindow {
                         .px_2()
                         .rounded_sm()
                         .text_size(px(12.))
-                        .when(on, |o| o.bg(color_alpha(accent, 0x55)).text_color(color(fg)))
+                        .when(on, |o| o.bg(active_selection(&theme)).text_color(color(fg)))
                         .on_click(cx.listener(move |this, _, _, cx| this.set_choice(Some(row), value, cx)))
                         .child(label)
                 };
@@ -867,36 +915,27 @@ impl CrowWindow {
                 )
             }
         };
-        Some(
-            div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
-                div()
-                    .id("sheet")
-                    .role(Role::Dialog)
-                    .aria_label(title.clone())
-                    .key_context("Sheet")
-                    .track_focus(sheet.focus())
-                    .on_action(
-                        cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| {
-                            this.confirm_sheet(window, cx)
-                        }),
-                    )
-                    .on_action(
-                        cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_sheet(window, cx)),
-                    )
-                    .w(px(520.))
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .rounded_lg()
-                    .bg(color(theme.role("surface")))
-                    .border_1()
-                    .border_color(color(theme.role("border")))
-                    .shadow_lg()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-                    .child(body),
-            ),
-        )
+        Some(chrome::sheet(
+            chrome::sheet_panel("sheet", SheetWidth::Narrow, &theme)
+                .aria_label(title.clone())
+                // keys::context_stack (KeyScope::Sheet) mirrors this.
+                .key_context("Sheet")
+                .track_focus(sheet.focus())
+                .on_action(
+                    cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.confirm_sheet(window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_sheet(window, cx)),
+                )
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                .child(body),
+            &theme,
+            cx.listener(|this, _, window, cx| this.close_sheet(window, cx)),
+        ))
     }
 
     /// Recent operations, newest first, each with its own Undo.
@@ -1114,75 +1153,64 @@ impl CrowWindow {
                 .bg(color(theme.role("surface-raised")))
                 .child(label)
         };
-        Some(
-            div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
-                div()
-                    .id("why-this-view")
-                    .role(Role::Dialog)
-                    .aria_label(format!("Why this view: {folder}"))
-                    .key_context("Sheet")
-                    .track_focus(focus)
-                    .on_action(
-                        cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.close_why(window, cx)),
-                    )
-                    .on_action(
-                        cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_why(window, cx)),
-                    )
-                    .w(px(560.))
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .rounded_lg()
-                    .bg(color(theme.role("surface")))
-                    .border_1()
-                    .border_color(color(theme.role("border")))
-                    .shadow_lg()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Why this view? {folder}")))
-                    .children(lines.into_iter().enumerate().map(|(i, (what, value, source))| {
-                        div()
-                            .id(("why-line", i))
-                            .role(Role::ListItem)
-                            .aria_label(format!("{what}: {value}, from {source}"))
-                            .flex()
-                            .gap_3()
-                            .child(div().w(px(70.)).text_color(color(muted)).child(what))
-                            .child(div().w(px(190.)).text_color(color(fg)).child(value))
-                            .child(div().flex_1().text_size(px(12.)).text_color(color(muted)).child(source))
-                    }))
-                    .child(div().pt_1().text_size(px(12.)).text_color(color(muted)).child(rules))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .pt_2()
-                            .child(button("why-open-file", "Edit views.toml").on_click(move |_, _, _| {
-                                if let Err(e) = std::process::Command::new("open").arg("-t").arg(&views_file).spawn() {
-                                    tracing::warn!("open views.toml: {e}");
-                                }
-                            }))
-                            .child(div().flex_1())
-                            .when(has_override, |row| {
-                                row.child(button("why-reset", "Reset This Folder").on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.reset_folder_view(&ResetFolderView, window, cx);
-                                        this.close_why(window, cx);
-                                    },
-                                )))
-                            })
-                            .child(button("why-defaults", "Use as Defaults").on_click(cx.listener(
+        Some(chrome::sheet(
+            chrome::sheet_panel("why-this-view", SheetWidth::Wide, &theme)
+                .aria_label(format!("Why this view: {folder}"))
+                // keys::context_stack (KeyScope::Sheet) mirrors this.
+                .key_context("Sheet")
+                .track_focus(focus)
+                .on_action(cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.close_why(window, cx)))
+                .on_action(cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_why(window, cx)))
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Why this view? {folder}")))
+                .children(lines.into_iter().enumerate().map(|(i, (what, value, source))| {
+                    div()
+                        .id(("why-line", i))
+                        .role(Role::ListItem)
+                        .aria_label(format!("{what}: {value}, from {source}"))
+                        .flex()
+                        .gap_3()
+                        .child(div().w(px(70.)).text_color(color(muted)).child(what))
+                        .child(div().w(px(190.)).text_color(color(fg)).child(value))
+                        .child(div().flex_1().text_size(px(12.)).text_color(color(muted)).child(source))
+                }))
+                .child(div().pt_1().text_size(px(12.)).text_color(color(muted)).child(rules))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .pt_2()
+                        .child(button("why-open-file", "Edit views.toml").on_click(move |_, _, _| {
+                            if let Err(e) = std::process::Command::new("open").arg("-t").arg(&views_file).spawn() {
+                                tracing::warn!("open views.toml: {e}");
+                            }
+                        }))
+                        .child(div().flex_1())
+                        .when(has_override, |row| {
+                            row.child(button("why-reset", "Reset This Folder").on_click(cx.listener(
                                 |this, _, window, cx| {
-                                    this.use_view_as_defaults(&UseViewAsDefaults, window, cx);
+                                    this.reset_folder_view(&ResetFolderView, window, cx);
                                     this.close_why(window, cx);
                                 },
                             )))
-                            .child(
-                                button("why-close", "Close")
-                                    .on_click(cx.listener(|this, _, window, cx| this.close_why(window, cx))),
-                            ),
-                    ),
-            ),
-        )
+                        })
+                        .child(button("why-defaults", "Use as Defaults").on_click(cx.listener(
+                            |this, _, window, cx| {
+                                this.use_view_as_defaults(&UseViewAsDefaults, window, cx);
+                                this.close_why(window, cx);
+                            },
+                        )))
+                        .child(
+                            button("why-close", "Close")
+                                .on_click(cx.listener(|this, _, window, cx| this.close_why(window, cx))),
+                        ),
+                ),
+            &theme,
+            cx.listener(|this, _, window, cx| this.close_why(window, cx)),
+        ))
     }
 
     // ----- theme picker -----
@@ -1498,36 +1526,29 @@ impl CrowWindow {
                 )
                 .into_any_element()
         };
-        Some(
-            div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
-                div()
-                    .id("palette")
-                    .role(Role::Dialog)
-                    .aria_label("Command Palette")
-                    .key_context(context.as_str())
-                    .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_palette(-1, cx)))
-                    .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_palette(1, cx)))
-                    .on_action(cx.listener(Self::palette_open_in_tab))
-                    .w(px(560.))
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .rounded_lg()
-                    .bg(color(theme.role("surface")))
-                    .border_1()
-                    .border_color(color(theme.role("border")))
-                    .shadow_lg()
-                    .child(input)
-                    .child(list)
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(muted)
-                            .child("> commands · Return runs · ⌘Return opens a folder in a new tab"),
-                    ),
-            ),
-        )
+        let run = keys::text(&crate::text_input::Confirm, KeyScope::Palette, cx)
+            .map_or_else(|| "Return".to_owned(), |key| key.to_string());
+        let new_tab = keys::text(&PaletteOpenInTab, KeyScope::Palette, cx)
+            .map_or_else(|| "Return".to_owned(), |key| key.to_string());
+        let footer = format!("> commands · {run} runs · {new_tab} opens a folder in a new tab");
+        Some(chrome::sheet(
+            chrome::sheet_panel("palette", SheetWidth::Wide, &theme)
+                .aria_label("Command Palette")
+                // keys::context_stack (KeyScope::Palette/ThemePicker) mirrors this.
+                .key_context(context.as_str())
+                .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_palette(-1, cx)))
+                .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_palette(1, cx)))
+                .on_action(cx.listener(Self::palette_open_in_tab))
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(input)
+                .child(list)
+                .child(div().text_size(px(12.)).text_color(muted).child(footer)),
+            &theme,
+            cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
+        ))
     }
 
     fn render_palette_rows(
@@ -1539,15 +1560,16 @@ impl CrowWindow {
         let Some(palette) = self.palette.as_ref() else { return Vec::new() };
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
-        let (fg, muted, accent) = (color(theme.role("fg")), color(theme.role("fg-muted")), theme.role("accent"));
+        let (fg, muted) = (color(theme.role("fg")), color(theme.role("fg-muted")));
         let (cursor, count) = (palette.cursor, palette.items.len());
         range
             .filter_map(|i| {
                 let item = palette.items.get(i)?;
                 let selected = i == cursor;
-                let (icon_path, label, keys) = match item {
-                    Item::Command(command) => (None, command.label.to_owned(), command.keys),
-                    Item::Folder { path, label } => (Some(path.clone()), label.clone(), ""),
+                let keys = palette.row_keys(i, cx);
+                let (icon_path, label) = match item {
+                    Item::Command(command) => (None, command.label.to_owned()),
+                    Item::Folder { path, label } => (Some(path.clone()), label.clone()),
                 };
                 let row = div()
                     .id(("palette-row", i))
@@ -1563,7 +1585,7 @@ impl CrowWindow {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .when(selected, |row| row.bg(color_alpha(accent, 0x55)))
+                    .when(selected, |row| row.bg(active_selection(theme)))
                     .debug_selector(|| format!("palette-row-{i}"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(palette) = &mut this.palette {
@@ -1583,7 +1605,7 @@ impl CrowWindow {
                             .text_color(fg)
                             .child(label),
                     )
-                    .child(div().text_size(px(11.)).text_color(muted).child(keys));
+                    .child(div().text_size(px(11.)).text_color(muted).children(keys));
                 Some(row.into_any_element())
             })
             .collect()
@@ -1629,7 +1651,7 @@ impl CrowWindow {
                     .py(px(3.))
                     .rounded_md()
                     .text_color(color(fg))
-                    .when(selected, |r| r.bg(color_alpha(accent, 0x55)))
+                    .when(selected, |r| r.bg(active_selection(&theme)))
                     .on_click(cx.listener(move |this, _, _, cx| this.select_picker(i, cx)))
                     .child(label)
                     .into_any_element(),
@@ -1651,71 +1673,67 @@ impl CrowWindow {
                 .text_color(color(if primary { theme.role("on-accent") } else { fg }))
                 .child(label)
         };
-        Some(
-            div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
-                div()
-                    .id("theme-picker")
-                    .role(Role::Dialog)
-                    .aria_label("Theme")
-                    .key_context(context.as_str())
-                    .track_focus(&picker.focus)
-                    .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_picker(-1, cx)))
-                    .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_picker(1, cx)))
-                    .on_action(cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| {
-                        this.confirm_picker(window, cx)
-                    }))
-                    .on_action(
-                        cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.cancel_picker(window, cx)),
-                    )
-                    .on_action(cx.listener(Self::apply_everywhere))
-                    .w(px(360.))
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .rounded_lg()
-                    .bg(color(theme.role("surface")))
-                    .border_1()
-                    .border_color(color(theme.role("border")))
-                    .shadow_lg()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Theme"))
-                    .child(
-                        div()
-                            .id("theme-list")
-                            .role(Role::ListBox)
-                            .aria_label("Themes")
-                            .max_h(px(380.))
-                            .overflow_y_scroll()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            .children(rows),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(color(muted))
-                            .child("Return keeps it for Crow. Apply to All Apps (⌘↩) sets it for every app that reads the theme index."),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(button("theme-everywhere", "Apply to All Apps", false).on_click(cx.listener(
-                                |this, _, window, cx| this.apply_everywhere(&ApplyThemeEverywhere, window, cx),
-                            )))
-                            .child(div().flex_1())
-                            .child(
-                                button("theme-cancel", "Cancel", false)
-                                    .on_click(cx.listener(|this, _, window, cx| this.cancel_picker(window, cx))),
-                            )
-                            .child(
-                                button("theme-ok", "Choose", true)
-                                    .on_click(cx.listener(|this, _, window, cx| this.confirm_picker(window, cx))),
-                            ),
-                    ),
+        let keep = keys::text(&crate::actions::SheetConfirm, KeyScope::ThemePicker, cx);
+        let everywhere = keys::text(&ApplyThemeEverywhere, KeyScope::ThemePicker, cx);
+        let hint = match (keep, everywhere) {
+            (Some(keep), Some(everywhere)) => format!(
+                "{keep} keeps it for Crow. Apply to All Apps ({everywhere}) sets it for every app that reads the theme index."
             ),
-        )
+            _ => "Apply to All Apps sets it for every app that reads the theme index.".to_owned(),
+        };
+        Some(chrome::sheet(
+            chrome::sheet_panel("theme-picker", SheetWidth::Compact, &theme)
+                .aria_label("Theme")
+                // keys::context_stack (KeyScope::Palette/ThemePicker) mirrors this.
+                .key_context(context.as_str())
+                .track_focus(&picker.focus)
+                .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_picker(-1, cx)))
+                .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_picker(1, cx)))
+                .on_action(
+                    cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.confirm_picker(window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.cancel_picker(window, cx)),
+                )
+                .on_action(cx.listener(Self::apply_everywhere))
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("Theme"))
+                .child(
+                    div()
+                        .id("theme-list")
+                        .role(Role::ListBox)
+                        .aria_label("Themes")
+                        .max_h(px(380.))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .children(rows),
+                )
+                .child(div().text_size(px(12.)).text_color(color(muted)).child(hint))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(button("theme-everywhere", "Apply to All Apps", false).on_click(
+                            cx.listener(|this, _, window, cx| this.apply_everywhere(&ApplyThemeEverywhere, window, cx)),
+                        ))
+                        .child(div().flex_1())
+                        .child(
+                            button("theme-cancel", "Cancel", false)
+                                .on_click(cx.listener(|this, _, window, cx| this.cancel_picker(window, cx))),
+                        )
+                        .child(
+                            button("theme-ok", "Choose", true)
+                                .on_click(cx.listener(|this, _, window, cx| this.confirm_picker(window, cx))),
+                        ),
+                ),
+            &theme,
+            cx.listener(|this, _, window, cx| this.cancel_picker(window, cx)),
+        ))
     }
 }
 
@@ -1753,6 +1771,7 @@ impl Render for CrowWindow {
                     this.pane().update(cx, |pane, cx| pane.update_drag_target(event.position, cx));
                 }
             }))
+            // keys::context_stack (KeyScope::Window) mirrors this; every overlay nests under it.
             .key_context("Crow")
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_tab))
@@ -2040,6 +2059,24 @@ mod tests {
         cx.simulate_keystrokes("cmd-[");
         settle(&view, &mut cx);
         assert_eq!(mode(&cx), ViewMode::Columns);
+    }
+
+    #[gpui::test]
+    fn back_button_tooltip_names_the_folder(cx: &mut TestAppContext) {
+        let root = fixture("back-tooltip");
+        let executor = cx.executor();
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        let back = view.read_with(&cx, |w, cx| w.pane().read(cx).back_target().map(Path::to_path_buf));
+        assert_eq!(back.as_deref(), Some(root.as_path()), "Back points at the folder we came from");
+
+        let bounds = cx.debug_bounds("back").expect("the back button is laid out");
+        cx.simulate_mouse_move(bounds.center(), None, gpui::Modifiers::default());
+        executor.advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        cx.simulate_mouse_move(bounds.center(), None, gpui::Modifiers::default());
+        assert!(cx.debug_bounds("tooltip").is_some(), "the tooltip is drawn after the 500 ms delay");
     }
 
     #[gpui::test]
@@ -2351,6 +2388,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn command_palette_keys_follow_the_layer(cx: &mut TestAppContext) {
+        let root = fixture("palette-keys");
+        let (view, mut cx) = open(cx, &root);
+        let copy_keys = |cx: &VisualTestContext| {
+            view.read_with(cx, |w, cx| {
+                let palette = w.palette.as_ref().expect("palette is open");
+                let i = palette
+                    .items
+                    .iter()
+                    .position(
+                        |item| matches!(item, Item::Command(command) if command.id == crate::palette::CommandId::Copy),
+                    )
+                    .expect("the Copy row is listed");
+                palette.row_keys(i, cx).map(|keys| keys.to_string())
+            })
+        };
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">copy");
+        settle(&view, &mut cx);
+        assert_eq!(copy_keys(&cx).as_deref(), Some("⌘C"));
+        cx.simulate_keystrokes("escape");
+
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">copy");
+        settle(&view, &mut cx);
+        assert_eq!(copy_keys(&cx).as_deref(), Some("yy"), "the palette follows keymap = vim");
+    }
+
+    #[gpui::test]
     fn command_palette_vim_keys_move_the_cursor(cx: &mut TestAppContext) {
         let root = fixture("palette-vim");
         let (view, mut cx) = open(cx, &root);
@@ -2624,6 +2691,83 @@ mod tests {
         assert_eq!(names(&cx), vec!["only_this".to_owned()], "a broken file keeps the last good rules");
         let error = cx.read(|cx| cx.global::<Ui>().config_error().map(|e| e.to_string()).unwrap_or_default());
         assert!(error.contains("exclude.toml"), "{error}");
+    }
+
+    #[gpui::test]
+    fn clicking_the_scrim_closes_every_overlay(cx: &mut TestAppContext) {
+        theme_index();
+        let root = fixture("scrim");
+        let (view, mut cx) = open(cx, &root);
+        let start_theme = cx.read(|cx| cx.global::<Ui>().theme.name.clone());
+        let pane_focus = view.read_with(&cx, |w, cx| w.pane().read(cx).focus_handle().clone());
+        let click_scrim = |cx: &mut VisualTestContext| {
+            let bounds = cx.debug_bounds("sheet-scrim").expect("the scrim is laid out");
+            cx.simulate_click(gpui::point(bounds.origin.x + px(10.), bounds.bottom() - px(10.)), Default::default());
+            settle(&view, cx);
+        };
+        let focused = |cx: &mut VisualTestContext| cx.update(|window, _| pane_focus.is_focused(window));
+
+        cx.simulate_keystrokes("cmd-shift-g");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.go_to.is_some()), "Go to Folder is open");
+        click_scrim(&mut cx);
+        assert!(view.read_with(&cx, |w, _| w.go_to.is_none()), "a scrim click closes it like Escape");
+        assert!(focused(&mut cx), "focus goes back to the pane");
+        assert!(root.join("notes.txt").exists());
+
+        cx.simulate_keystrokes("down down cmd-alt-backspace");
+        settle(&view, &mut cx);
+        assert!(sheet_open(&view, &cx), "the delete sheet is open");
+        click_scrim(&mut cx);
+        assert!(!sheet_open(&view, &cx), "a scrim click cancels it");
+        assert!(root.join("notes.txt").exists(), "cancel runs nothing");
+        assert!(focused(&mut cx));
+
+        cx.simulate_keystrokes("cmd-j");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.why.is_some()), "Why This View? is open");
+        click_scrim(&mut cx);
+        assert!(view.read_with(&cx, |w, _| w.why.is_none()));
+        assert!(focused(&mut cx));
+
+        cx.simulate_keystrokes("cmd-alt-t");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("down");
+        assert!(view.read_with(&cx, |w, _| w.picker.is_some()), "the theme picker is open");
+        assert_ne!(cx.read(|cx| cx.global::<Ui>().theme.name.clone()), start_theme, "a theme is previewed");
+        click_scrim(&mut cx);
+        assert!(view.read_with(&cx, |w, _| w.picker.is_none()));
+        assert_eq!(cx.read(|cx| cx.global::<Ui>().theme.name.clone()), start_theme, "the preview is reverted");
+        assert!(focused(&mut cx));
+
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.palette.is_some()), "the palette is open");
+        click_scrim(&mut cx);
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()));
+        assert!(focused(&mut cx));
+    }
+
+    #[gpui::test]
+    fn clicking_inside_a_sheet_keeps_it_open(cx: &mut TestAppContext) {
+        let root = fixture("sheet-inside");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-j");
+        settle(&view, &mut cx);
+        let panel = cx.debug_bounds("sheet-panel").expect("the panel is laid out");
+        cx.simulate_click(panel.center(), Default::default());
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.why.is_some()), "a click inside does not dismiss");
+
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("down down cmd-alt-backspace");
+        settle(&view, &mut cx);
+        assert!(sheet_open(&view, &cx));
+        let cancel = cx.debug_bounds("sheet-cancel").expect("the Cancel button is laid out");
+        cx.simulate_click(cancel.center(), Default::default());
+        settle(&view, &mut cx);
+        assert!(!sheet_open(&view, &cx), "a button inside still runs its own click");
+        assert!(root.join("notes.txt").exists());
     }
 
     #[gpui::test]

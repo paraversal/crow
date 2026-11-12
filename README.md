@@ -58,6 +58,15 @@ In the sidebar, Cmd-Delete removes a favorite or forgets a recent folder, and Cm
 
 With `keymap = "vim"`: j/k, h/l (parent and open, or columns), gg/G, yy/dd/p (copy, cut, paste),
 u and Ctrl-R, cw renames, `-` goes up, `m x` marks the folder as favorite x and `'x` jumps there.
+
+Shortcuts shown in the command palette, tooltips and hints come from the live keymap, so they
+follow `keymap = "vim"` too. Hover a nav arrow, a view button, a path segment, a disk row,
+Search everything or Cancel during an operation to see its name and key. Sheets (Go to Folder,
+Why This View?, the theme picker, Cmd-K and the delete/conflict questions) dim the window;
+clicking outside one cancels it exactly like Esc.
+
+Toolbar icons are [Lucide](https://lucide.dev) 1.72.0, ISC-licensed; the notice is at
+`crates/crow-app/assets/icons/LICENSE` (also copied into `Crow.app/Contents/Resources/`).
 Letters no longer select by name in this layer.
 
 File operations use Finder's keys: Return renames, Cmd-Shift-N new folder, Cmd-D duplicate,

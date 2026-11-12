@@ -1,0 +1,367 @@
+//! Key text from the live keymap. The palette, tooltips and hints show the
+//! binding that will actually fire in a given context, including the Vim layer,
+//! so displayed keys can never drift from `actions.rs`.
+
+use crow_core::KeymapLayer;
+use gpui::{Action, App, KeyBinding, KeyContext, SharedString};
+
+use crate::ui::Ui;
+
+/// The context a shortcut is shown for. Each variant mirrors a `key_context`
+/// in the views; keep `context_stack` in step with those calls.
+// Scopes for U3–U7 as well as the palette and tooltips built here.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyScope {
+    Window,
+    List,
+    Columns,
+    Sidebar,
+    Filter,
+    Search,
+    SearchResults,
+    Palette,
+    ThemePicker,
+    Sheet,
+}
+
+fn context(source: &str) -> KeyContext {
+    KeyContext::parse(source).expect("key context literals parse")
+}
+
+/// The real nesting for `scope`, as the views build it: `Crow` is the window
+/// root, and the Vim layer adds `vim` to the views that append it.
+pub fn context_stack(scope: KeyScope, layer: KeymapLayer) -> Vec<KeyContext> {
+    let vim = layer == KeymapLayer::Vim;
+    match scope {
+        KeyScope::Window => vec![context("Crow")],
+        KeyScope::List => vec![context("Crow"), context(if vim { "FileList vim" } else { "FileList" })],
+        KeyScope::Columns => {
+            vec![context("Crow"), context(if vim { "FileList ColumnView vim" } else { "FileList ColumnView" })]
+        }
+        KeyScope::Sidebar => vec![context("Crow"), context(if vim { "Sidebar vim" } else { "Sidebar" })],
+        KeyScope::Filter => vec![context("Crow"), context("Filter"), context("TextInput")],
+        KeyScope::Search => vec![context("Crow"), context("Search"), context("TextInput")],
+        KeyScope::SearchResults => vec![context("Crow"), context("Search"), context("SearchResults")],
+        KeyScope::Palette => vec![
+            context("Crow"),
+            context(if vim { "Sheet Palette vim" } else { "Sheet Palette" }),
+            context("TextInput"),
+        ],
+        KeyScope::ThemePicker => {
+            vec![context("Crow"), context(if vim { "Sheet ThemePicker vim" } else { "Sheet ThemePicker" })]
+        }
+        KeyScope::Sheet => vec![context("Crow"), context("Sheet")],
+    }
+}
+
+/// The binding that wins for `action` in `scope`. Same rule as
+/// `DispatchTree::highest_precedence_binding_for_action`: the last binding
+/// added whose keystrokes resolve to this action in this context stack.
+pub fn binding_for(action: &dyn Action, scope: KeyScope, cx: &App) -> Option<KeyBinding> {
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    let stack = context_stack(scope, cx.global::<Ui>().settings.keymap);
+    keymap
+        .bindings_for_action(action)
+        .rev()
+        .find(|binding| {
+            let (resolved, _) = keymap.bindings_for_input(binding.keystrokes(), &stack);
+            resolved.first().is_some_and(|found| found.action().partial_eq(action))
+        })
+        .cloned()
+}
+
+/// Modifiers as symbols, in Apple's order: ⌃ ⌥ ⇧ ⌘.
+fn symbols(modifiers: &gpui::Modifiers) -> Vec<&'static str> {
+    let mut out = Vec::with_capacity(4);
+    if modifiers.control {
+        out.push("⌃");
+    }
+    if modifiers.alt {
+        out.push("⌥");
+    }
+    if modifiers.shift {
+        out.push("⇧");
+    }
+    if modifiers.platform {
+        out.push("⌘");
+    }
+    out
+}
+
+/// Modifier words, in the same order as the symbols: Control Option Shift Command.
+fn words(modifiers: &gpui::Modifiers) -> Vec<&'static str> {
+    let mut out = Vec::with_capacity(4);
+    if modifiers.control {
+        out.push("Control");
+    }
+    if modifiers.alt {
+        out.push("Option");
+    }
+    if modifiers.shift {
+        out.push("Shift");
+    }
+    if modifiers.platform {
+        out.push("Command");
+    }
+    out
+}
+
+fn is_letter(key: &str) -> bool {
+    key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic()
+}
+
+fn function_key(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "backspace" => "⌫",
+        "delete" => "⌦",
+        "enter" => "↩",
+        "escape" => "esc",
+        "tab" => "⇥",
+        "space" => "Space",
+        "up" => "↑",
+        "down" => "↓",
+        "left" => "←",
+        "right" => "→",
+        "home" => "↖",
+        "end" => "↘",
+        "pageup" => "⇞",
+        "pagedown" => "⇟",
+        _ => return None,
+    })
+}
+
+fn spoken_key(key: &str) -> &'static str {
+    match key {
+        "backspace" => "Delete",
+        "delete" => "Forward Delete",
+        "enter" => "Return",
+        "escape" => "Escape",
+        "tab" => "Tab",
+        "space" => "Space",
+        "up" => "Up Arrow",
+        "down" => "Down Arrow",
+        "left" => "Left Arrow",
+        "right" => "Right Arrow",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" => "Page Up",
+        "pagedown" => "Page Down",
+        _ => "",
+    }
+}
+
+/// One keystroke's caps, modifiers first.
+fn keystroke_caps(keystroke: &gpui::KeybindingKeystroke) -> Vec<SharedString> {
+    let key = keystroke.key();
+    let modifiers = keystroke.modifiers();
+    // Vim-style keys carry no ⌃⌥⌘: a bare letter stays lower-case and Shift
+    // turns it into the upper-case letter, without the ⇧ symbol.
+    if !modifiers.control && !modifiers.alt && !modifiers.platform && is_letter(key) {
+        let text = if modifiers.shift { key.to_ascii_uppercase() } else { key.to_owned() };
+        return vec![text.into()];
+    }
+    let mut caps: Vec<SharedString> = symbols(modifiers).into_iter().map(SharedString::from).collect();
+    let text = match function_key(key) {
+        Some(symbol) => symbol.to_owned(),
+        None if is_letter(key) => key.to_ascii_uppercase(),
+        None => key.to_owned(),
+    };
+    caps.push(text.into());
+    caps
+}
+
+fn keystroke_text(keystroke: &gpui::KeybindingKeystroke) -> String {
+    keystroke_caps(keystroke).concat()
+}
+
+fn keystroke_spoken(keystroke: &gpui::KeybindingKeystroke) -> String {
+    let key = keystroke.key();
+    let modifiers = keystroke.modifiers();
+    if !modifiers.control && !modifiers.alt && !modifiers.platform && is_letter(key) {
+        return if modifiers.shift { key.to_ascii_uppercase() } else { key.to_owned() };
+    }
+    let mut text = words(modifiers).join(" ");
+    let spoken = spoken_key(key);
+    let key_word = if !spoken.is_empty() {
+        spoken.to_owned()
+    } else if is_letter(key) {
+        key.to_ascii_uppercase()
+    } else {
+        key.to_owned()
+    };
+    if !text.is_empty() {
+        text.push(' ');
+    }
+    text.push_str(&key_word);
+    text
+}
+
+/// One cap per key, modifiers first. A multi-key sequence (Vim's `gg`) is one
+/// cap, glued, because it reads as a single shortcut.
+pub fn caps(binding: &KeyBinding) -> Vec<SharedString> {
+    let keystrokes = binding.keystrokes();
+    if keystrokes.len() > 1 {
+        let mut glued = String::new();
+        for keystroke in keystrokes {
+            glued.push_str(&keystroke_text(keystroke));
+        }
+        return vec![glued.into()];
+    }
+    let Some(keystroke) = keystrokes.first() else { return Vec::new() };
+    keystroke_caps(keystroke)
+}
+
+/// The whole shortcut as one string: `⇧⌘A`, `gg`, `esc`.
+pub fn chord_text(binding: &KeyBinding) -> SharedString {
+    caps(binding).concat().into()
+}
+
+/// The shortcut in words, for aria labels: "Shift Command A", "Escape".
+pub fn spoken(binding: &KeyBinding) -> String {
+    binding.keystrokes().iter().map(keystroke_spoken).collect::<Vec<_>>().join(" ")
+}
+
+/// The displayed shortcut for `action` in `scope`, when it has one there.
+pub fn text(action: &dyn Action, scope: KeyScope, cx: &App) -> Option<SharedString> {
+    binding_for(action, scope, cx).as_ref().map(chord_text)
+}
+
+/// `text` in words, for aria labels.
+pub fn spoken_for(action: &dyn Action, scope: KeyScope, cx: &App) -> Option<String> {
+    binding_for(action, scope, cx).as_ref().map(spoken)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actions::*;
+    use crate::palette::{COMMANDS, CommandId};
+    use gpui::{App, TestAppContext};
+
+    fn setup(cx: &mut TestAppContext) {
+        cx.update(|cx: &mut App| {
+            crate::ui::init_for_tests(cx);
+            cx.bind_keys(crate::actions::finder_keymap());
+            cx.bind_keys(crate::actions::vim_keymap());
+            cx.bind_keys(crate::text_input::keymap());
+        });
+    }
+
+    fn binding(keys: &'static str) -> KeyBinding {
+        KeyBinding::new(keys, MoveUp, None)
+    }
+
+    fn format(keys: &'static str) -> String {
+        chord_text(&binding(keys)).to_string()
+    }
+
+    #[gpui::test]
+    fn formats_mac_symbols_in_apple_order(_cx: &mut TestAppContext) {
+        assert_eq!(format("cmd-shift-a"), "⇧⌘A");
+        assert_eq!(format("ctrl-cmd-t"), "⌃⌘T");
+        assert_eq!(format("cmd-alt-backspace"), "⌥⌘⌫");
+        assert_eq!(format("ctrl-shift-tab"), "⌃⇧⇥");
+        assert_eq!(format("cmd-shift-."), "⇧⌘.");
+        assert_eq!(format("cmd-up"), "⌘↑");
+        assert_eq!(format("escape"), "esc");
+        assert_eq!(format("space"), "Space");
+        assert_eq!(format("enter"), "↩");
+        assert_eq!(format("/"), "/");
+        assert_eq!(format("shift-g"), "G");
+        assert_eq!(format("g g"), "gg");
+        let caps: Vec<String> = caps(&binding("cmd-shift-a")).iter().map(ToString::to_string).collect();
+        assert_eq!(caps, vec!["⇧", "⌘", "A"]);
+        assert_eq!(spoken(&binding("cmd-f")), "Command F");
+    }
+
+    #[gpui::test]
+    fn finds_bindings_by_scope(cx: &mut TestAppContext) {
+        setup(cx);
+        cx.update(|cx| {
+            assert_eq!(text(&ShowSearch, KeyScope::Window, cx).as_deref(), Some("⌘F"));
+            assert_eq!(text(&StartFilter, KeyScope::List, cx).as_deref(), Some("/"));
+            assert_eq!(text(&StartFilter, KeyScope::Window, cx), None);
+            assert_eq!(text(&MoveToTrash, KeyScope::List, cx).as_deref(), Some("⌘⌫"));
+            assert_eq!(text(&RemoveFromSidebar, KeyScope::Sidebar, cx).as_deref(), Some("⌘⌫"));
+            assert_eq!(text(&CancelOperation, KeyScope::List, cx).as_deref(), Some("esc"));
+            assert_eq!(text(&SheetCancel, KeyScope::Sheet, cx).as_deref(), Some("esc"));
+            assert_eq!(text(&OpenSelection, KeyScope::List, cx).as_deref(), Some("⌘↓"));
+        });
+    }
+
+    #[gpui::test]
+    fn vim_layer_shows_vim_keys(cx: &mut TestAppContext) {
+        setup(cx);
+        cx.update(|cx| cx.global_mut::<Ui>().settings.keymap = KeymapLayer::Vim);
+        cx.update(|cx| {
+            assert_eq!(text(&MoveToFirst, KeyScope::List, cx).as_deref(), Some("gg"));
+            assert_eq!(text(&CopyFiles, KeyScope::List, cx).as_deref(), Some("yy"));
+            assert_eq!(text(&MoveDown, KeyScope::Sidebar, cx).as_deref(), Some("j"));
+            assert_eq!(text(&Undo, KeyScope::Window, cx).as_deref(), Some("⌘Z"));
+        });
+    }
+
+    fn action(id: CommandId) -> &'static dyn Action {
+        COMMANDS.iter().find(|c| c.id == id).expect("command is registered").action
+    }
+
+    #[gpui::test]
+    fn palette_keys_match_the_old_strings(cx: &mut TestAppContext) {
+        setup(cx);
+        cx.update(|cx| {
+            let expected: &[(CommandId, &str)] = &[
+                (CommandId::NewTab, "⌘T"),
+                (CommandId::CloseTab, "⌘W"),
+                (CommandId::NextTab, "⌃⇥"),
+                (CommandId::PreviousTab, "⌃⇧⇥"),
+                (CommandId::NewWindow, "⌘N"),
+                (CommandId::SwitchFocus, "⇥"),
+                (CommandId::ToggleHiddenFiles, "⇧⌘."),
+                (CommandId::OpenParent, "⌘↑"),
+                (CommandId::GoBack, "⌘["),
+                (CommandId::GoForward, "⌘]"),
+                (CommandId::GoToFolder, "⇧⌘G"),
+                (CommandId::ViewAsList, "⌘2"),
+                (CommandId::ViewAsColumns, "⌘3"),
+                (CommandId::Open, "⌘↓"),
+                (CommandId::QuickLook, "Space"),
+                (CommandId::Rename, "↩"),
+                (CommandId::NewFolder, "⇧⌘N"),
+                (CommandId::Duplicate, "⌘D"),
+                (CommandId::MoveToTrash, "⌘⌫"),
+                (CommandId::DeletePermanently, "⌥⌘⌫"),
+                (CommandId::Copy, "⌘C"),
+                (CommandId::Cut, "⌘X"),
+                (CommandId::Paste, "⌘V"),
+                (CommandId::PasteMove, "⌥⌘V"),
+                (CommandId::SelectAll, "⌘A"),
+                (CommandId::StartFilter, "/"),
+                (CommandId::Undo, "⌘Z"),
+                (CommandId::Redo, "⇧⌘Z"),
+                (CommandId::AddToSidebar, "⌃⌘T"),
+                (CommandId::WhyThisView, "⌘J"),
+                (CommandId::ShowThemePicker, "⌥⌘T"),
+                (CommandId::ToggleActivity, "⌥⌘L"),
+                (CommandId::RemoveFromSidebar, "⌘⌫"),
+                (CommandId::MoveFavoriteUp, "⌥⌘↑"),
+                (CommandId::MoveFavoriteDown, "⌥⌘↓"),
+                (CommandId::Eject, "⌘E"),
+                (CommandId::Quit, "⌘Q"),
+            ];
+            for (id, keys) in expected {
+                assert_eq!(
+                    text(action(*id), COMMANDS.iter().find(|c| c.id == *id).unwrap().scope, cx).as_deref(),
+                    Some(*keys),
+                    "{id:?}"
+                );
+            }
+            for id in [CommandId::UseViewAsDefaults, CommandId::ResetFolderView] {
+                let command = COMMANDS.iter().find(|c| c.id == id).unwrap();
+                assert_eq!(text(command.action, command.scope, cx), None, "{id:?} has no binding");
+            }
+            assert_eq!(COMMANDS.len(), expected.len() + 2, "every command is in the table");
+        });
+    }
+}
