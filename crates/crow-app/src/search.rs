@@ -388,6 +388,11 @@ impl SearchView {
     }
 
     #[cfg(test)]
+    pub fn query_text(&self, cx: &App) -> String {
+        self.query(cx)
+    }
+
+    #[cfg(test)]
     pub fn scope(&self) -> Scope {
         self.scope
     }

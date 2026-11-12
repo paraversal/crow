@@ -1891,6 +1891,12 @@ mod tests {
         pane(view, cx).read_with(cx, |p, cx| p.current_dir(cx))
     }
 
+    /// Whether the menu item for `action` would be enabled with the current focus.
+    fn action_available(action: &dyn gpui::Action, cx: &mut VisualTestContext) -> bool {
+        let window = cx.update(|_, cx| cx.windows()[0]);
+        cx.update_window(window, |_, window, cx| window.is_action_available(action, cx)).expect("check action")
+    }
+
     /// The visible list rows as (name, indent depth).
     fn rows(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Vec<(String, usize)> {
         pane(view, cx).read_with(cx, |p, cx| p.rows(cx))
@@ -3014,6 +3020,70 @@ mod tests {
         assert!(root.join("Projects").is_dir(), "renamed on Return; folder now has {entries:?}");
         assert!(!root.join("untitled folder").exists());
         assert_eq!(selected(&view, &cx).as_deref(), Some("Projects"));
+    }
+
+    #[gpui::test]
+    fn plain_keys_stay_in_every_text_field(cx: &mut TestAppContext) {
+        use crate::actions::{CopyFiles, CutFiles, MoveToTrash, PasteFiles, QuickLook, Rename, SelectAll, StartFilter};
+
+        let root = fixture("plain-keys");
+        let (view, mut cx) = open(cx, &root);
+
+        // Rename: the list's actions must be off the focus path so AppKit passes plain keys through.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "Return starts rename");
+        cx.simulate_input("a/b c");
+        let (name, filtering) = pane(&view, &cx).read_with(&cx, |p, cx| (p.rename_text(cx), p.is_filtering()));
+        assert_eq!(name.as_deref(), Some("a/b c"), "slash and space land in the name");
+        assert!(!filtering, "slash did not start the filter");
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "space did not open Quick Look");
+        assert!(!action_available(&StartFilter, &mut cx), "Filter This Folder is off the path");
+        assert!(!action_available(&QuickLook, &mut cx), "Quick Look is off the path");
+        assert!(!action_available(&Rename, &mut cx), "Rename is off the path");
+        assert!(!action_available(&MoveToTrash, &mut cx), "Move to Trash is off the path");
+        assert!(action_available(&CopyFiles, &mut cx), "the field handles Copy");
+        assert!(action_available(&CutFiles, &mut cx), "the field handles Cut");
+        assert!(action_available(&PasteFiles, &mut cx), "the field handles Paste");
+        assert!(action_available(&SelectAll, &mut cx), "the field handles Select All");
+        cx.simulate_keystrokes("escape");
+
+        // Filter field.
+        cx.simulate_keystrokes("/");
+        cx.run_until_parked();
+        cx.simulate_input("a/b c");
+        let text = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_text(cx));
+        assert_eq!(text.as_deref(), Some("a/b c"), "slash and space land in the filter");
+        assert!(!action_available(&QuickLook, &mut cx), "Quick Look stays off while filtering");
+        cx.simulate_keystrokes("escape");
+
+        // Go to Folder field.
+        cx.simulate_keystrokes("cmd-shift-g");
+        cx.run_until_parked();
+        cx.simulate_input("/ ");
+        let text = view
+            .read_with(&cx, |w, cx| w.go_to.as_ref().map(|(input, _)| input.read(cx).text().to_owned()))
+            .expect("Go to Folder stays open");
+        assert!(text.ends_with("/ "), "slash and space land in Go to Folder, got {text:?}");
+        cx.simulate_keystrokes("escape");
+
+        // Search field.
+        cx.simulate_keystrokes("cmd-f");
+        cx.run_until_parked();
+        cx.simulate_input("/ ");
+        let text = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search open").read(cx).query_text(cx));
+        assert_eq!(text, "/ ", "slash and space land in the search field");
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "search did not start the filter");
+        cx.simulate_keystrokes("escape");
+
+        // Palette field.
+        cx.simulate_keystrokes("cmd-k");
+        cx.run_until_parked();
+        cx.simulate_input("/ ");
+        let text =
+            view.read_with(&cx, |w, cx| w.palette.as_ref().expect("palette open").input.read(cx).text().to_owned());
+        assert_eq!(text, "/ ", "slash and space land in the palette");
+        cx.simulate_keystrokes("escape");
     }
 
     #[gpui::test]

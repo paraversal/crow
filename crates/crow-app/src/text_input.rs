@@ -12,6 +12,9 @@ use gpui::{
 };
 use unicode_segmentation::*;
 
+use crate::actions::{
+    CopyFiles as CrowCopyFiles, CutFiles as CrowCutFiles, PasteFiles as CrowPasteFiles, SelectAll as CrowSelectAll,
+};
 use crate::style::{color, color_alpha};
 use crate::ui::Ui;
 
@@ -238,6 +241,24 @@ impl TextInput {
             cx.write_to_clipboard(ClipboardItem::new_string(self.content[self.selected_range.clone()].to_string()));
             self.replace_text_in_range(None, "", window, cx)
         }
+    }
+
+    // Crow's menu items dispatch the file actions. Inside a text field they mean the
+    // field's own text operations, as in Finder.
+    fn copy_files(&mut self, _: &CrowCopyFiles, window: &mut Window, cx: &mut Context<Self>) {
+        self.copy(&Copy, window, cx);
+    }
+
+    fn cut_files(&mut self, _: &CrowCutFiles, window: &mut Window, cx: &mut Context<Self>) {
+        self.cut(&Cut, window, cx);
+    }
+
+    fn paste_files(&mut self, _: &CrowPasteFiles, window: &mut Window, cx: &mut Context<Self>) {
+        self.paste(&Paste, window, cx);
+    }
+
+    fn crow_select_all(&mut self, _: &CrowSelectAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_all(&SelectAll, window, cx);
     }
 
     fn move_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
@@ -652,6 +673,10 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::copy_files))
+            .on_action(cx.listener(Self::cut_files))
+            .on_action(cx.listener(Self::paste_files))
+            .on_action(cx.listener(Self::crow_select_all))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::complete))

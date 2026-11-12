@@ -1836,30 +1836,35 @@ impl Render for Pane {
             // keys::context_stack (KeyScope::List/Columns) mirrors this.
             .key_context(context.as_str())
             .track_focus(&self.focus)
-            .on_action(cx.listener(Self::move_up))
-            .on_action(cx.listener(Self::move_down))
-            .on_action(cx.listener(Self::extend_up))
-            .on_action(cx.listener(Self::extend_down))
-            .on_action(cx.listener(Self::move_to_first))
-            .on_action(cx.listener(Self::move_to_last))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::move_left))
-            .on_action(cx.listener(Self::move_right))
-            .on_action(cx.listener(Self::open))
-            .on_action(cx.listener(Self::rename))
-            .on_action(cx.listener(Self::quick_look))
-            .on_action(cx.listener(Self::new_folder))
-            .on_action(cx.listener(Self::duplicate))
-            .on_action(cx.listener(Self::move_to_trash))
-            .on_action(cx.listener(Self::delete_permanently))
-            .on_action(cx.listener(Self::copy_files))
-            .on_action(cx.listener(Self::cut_files))
-            .on_action(cx.listener(Self::paste_files))
-            .on_action(cx.listener(Self::paste_move_files))
-            .on_action(cx.listener(Self::begin_mark))
-            .on_action(cx.listener(Self::begin_jump))
-            .on_action(cx.listener(Self::start_filter))
-            .on_action(cx.listener(Self::clear_filter))
+            // While a name is being edited, every list shortcut must be off the focus path so
+            // AppKit passes plain keys and its menu equivalents to the text field. The text
+            // field supplies its own Cut/Copy/Paste/Select All listeners.
+            .when(self.renaming.is_none(), |list| {
+                list.on_action(cx.listener(Self::move_up))
+                    .on_action(cx.listener(Self::move_down))
+                    .on_action(cx.listener(Self::extend_up))
+                    .on_action(cx.listener(Self::extend_down))
+                    .on_action(cx.listener(Self::move_to_first))
+                    .on_action(cx.listener(Self::move_to_last))
+                    .on_action(cx.listener(Self::select_all))
+                    .on_action(cx.listener(Self::move_left))
+                    .on_action(cx.listener(Self::move_right))
+                    .on_action(cx.listener(Self::open))
+                    .on_action(cx.listener(Self::rename))
+                    .on_action(cx.listener(Self::quick_look))
+                    .on_action(cx.listener(Self::new_folder))
+                    .on_action(cx.listener(Self::duplicate))
+                    .on_action(cx.listener(Self::move_to_trash))
+                    .on_action(cx.listener(Self::delete_permanently))
+                    .on_action(cx.listener(Self::copy_files))
+                    .on_action(cx.listener(Self::cut_files))
+                    .on_action(cx.listener(Self::paste_files))
+                    .on_action(cx.listener(Self::paste_move_files))
+                    .on_action(cx.listener(Self::begin_mark))
+                    .on_action(cx.listener(Self::begin_jump))
+                    .on_action(cx.listener(Self::start_filter))
+                    .on_action(cx.listener(Self::clear_filter))
+            })
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if cx.has_active_drag() {
@@ -1898,6 +1903,14 @@ impl Pane {
 
     pub fn rename_text(&self, cx: &gpui::App) -> Option<String> {
         self.renaming.as_ref().map(|r| r.input.read(cx).text().to_owned())
+    }
+
+    pub fn is_filtering(&self) -> bool {
+        self.filtering.is_some()
+    }
+
+    pub fn filter_text(&self, cx: &gpui::App) -> Option<String> {
+        self.filtering.as_ref().map(|f| f.input.read(cx).text().to_owned())
     }
 
     pub fn folder_count(&self) -> usize {

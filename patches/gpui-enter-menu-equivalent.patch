@@ -1,0 +1,19 @@
+diff --git a/crates/gpui_macos/src/events.rs b/crates/gpui_macos/src/events.rs
+index 89ae111..b21c68a 100644
+--- a/crates/gpui_macos/src/events.rs
++++ b/crates/gpui_macos/src/events.rs
+@@ -41,12 +41,14 @@ const SHIFT_TAB_KEY: u32 = 0x19;
+ //
+ // See https://developer.apple.com/documentation/appkit/nsmenuitem/keyequivalent#Discussion
+ const BACKSPACE_KEY_EQUIVALENT: u32 = 0x08;
++const RETURN_KEY_EQUIVALENT: u32 = 0x0d;
+ const DELETE_KEY_EQUIVALENT: u32 = 0x7f;
+ 
+ pub(crate) fn key_to_menu_equivalent(key: &str) -> Cow<'_, str> {
+     let code = match key {
+         "space" => SPACE_KEY,
+         "backspace" => BACKSPACE_KEY_EQUIVALENT,
++        "enter" => RETURN_KEY_EQUIVALENT,
+         "escape" => u32::from(ESCAPE_KEY),
+         "up" => NSUpArrowFunctionKey,
+         "down" => NSDownArrowFunctionKey,
