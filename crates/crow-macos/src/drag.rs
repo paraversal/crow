@@ -24,12 +24,10 @@ define_class!(
     unsafe impl NSDraggingSource for DragSource {
         #[unsafe(method(draggingSession:sourceOperationMaskForDraggingContext:))]
         fn operation_mask(&self, _session: &NSDraggingSession, context: NSDraggingContext) -> NSDragOperation {
-            if context == NSDraggingContext::OutsideApplication {
-                // Like Finder: the destination decides between copy and move.
-                NSDragOperation::Copy | NSDragOperation::Move | NSDragOperation::Link | NSDragOperation::Generic
-            } else {
-                NSDragOperation::None
-            }
+            // Like Finder: the destination decides between copy and move, in other
+            // apps and inside Crow alike (its own drop targets apply the same rules).
+            let allowed = NSDragOperation::Copy | NSDragOperation::Move | NSDragOperation::Generic;
+            if context == NSDraggingContext::OutsideApplication { allowed | NSDragOperation::Link } else { allowed }
         }
     }
 );

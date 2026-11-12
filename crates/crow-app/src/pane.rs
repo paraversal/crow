@@ -522,12 +522,23 @@ impl Pane {
         cx.emit(PaneEvent::Paste { into: self.current_dir(cx), move_items: true });
     }
 
-    /// Files dropped from Finder, another app or another Crow window: moved within
-    /// a volume, copied across volumes, like Finder; Option forces a copy.
+    /// Files dropped onto folder `k`'s list (as opposed to onto one of its folders).
     fn drop_files(&mut self, k: usize, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(into) = self.folders.get(k).map(|f| f.read(cx).dir().to_path_buf()) else { return };
-        let paths: Vec<PathBuf> =
-            paths.paths().iter().filter(|p| p.parent() != Some(into.as_path())).cloned().collect();
+        if let Some(into) = self.folders.get(k).map(|f| f.read(cx).dir().to_path_buf()) {
+            self.drop_into(into, paths, window, cx);
+        }
+    }
+
+    /// Files dropped from Crow, Finder or another app: moved within a volume, copied
+    /// across volumes, like Finder; Option forces a copy. Items already in `into`, and
+    /// folders dropped onto themselves or into their own contents, are left alone.
+    fn drop_into(&mut self, into: PathBuf, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        let paths: Vec<PathBuf> = paths
+            .paths()
+            .iter()
+            .filter(|p| p.parent() != Some(into.as_path()) && !into.starts_with(p))
+            .cloned()
+            .collect();
         if paths.is_empty() {
             return;
         }
@@ -571,6 +582,8 @@ impl Pane {
     /// A press on row `ix` of folder `k`: Finder's click, Cmd-click and Shift-click.
     fn press(&mut self, k: usize, ix: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        // A system drag can end without GPUI seeing the mouse go up; a new press starts fresh.
+        self.dragging = false;
         self.drag_origin = Some((k, ix, event.position));
         if k != self.focused {
             self.focused = k;
@@ -651,6 +664,7 @@ impl Pane {
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
         let selection_bg = selection_color(self.focus.is_focused(window), theme);
+        let drop_bg = color_alpha(theme.role("accent"), 0x40);
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
         let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
         let last = widths.len() - 1;
@@ -684,6 +698,16 @@ impl Pane {
                     .items_center()
                     .when(ix % 2 == 1, |row| row.bg(stripe))
                     .when(selected, |row| row.bg(selection_bg))
+                    .debug_selector(|| format!("row-{}", entry.name))
+                    .when(entry.is_dir && !entry.is_package(), |row| {
+                        let target = entry.path.clone();
+                        row.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg)).on_drop(cx.listener(
+                            move |this, paths: &ExternalPaths, window, cx| {
+                                this.drop_into(target.clone(), paths, window, cx);
+                                cx.stop_propagation();
+                            },
+                        ))
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -829,6 +853,7 @@ impl Pane {
         // Spec: only the focused column shows its selection in the accent color.
         let active = k == self.focused && self.focus.is_focused(window);
         let selection_bg = selection_color(active, theme);
+        let drop_bg = color_alpha(theme.role("accent"), 0x40);
         let subtle = color(theme.role("fg-subtle"));
         let Some(folder) = self.folders.get(k).map(|f| f.read(cx)) else { return Vec::new() };
         let width = column_width(folder.entries());
@@ -858,6 +883,16 @@ impl Pane {
                     .items_center()
                     .gap_2()
                     .when(selected, |row| row.bg(selection_bg))
+                    .debug_selector(|| format!("column-{k}-row-{}", entry.name))
+                    .when(navigable, |row| {
+                        let target = entry.path.clone();
+                        row.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_bg)).on_drop(cx.listener(
+                            move |this, paths: &ExternalPaths, window, cx| {
+                                this.drop_into(target.clone(), paths, window, cx);
+                                cx.stop_propagation();
+                            },
+                        ))
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -997,6 +1032,10 @@ impl Render for Pane {
                         uniform_list("entries", rows, cx.processor(Self::render_table_rows))
                             .track_scroll(&scroll)
                             .flex_1(),
+                    )
+                    // Dropped on the list but not on a folder row: into the folder shown.
+                    .on_drop(
+                        cx.listener(|this, paths: &ExternalPaths, window, cx| this.drop_files(0, paths, window, cx)),
                     )
                     .into_any_element()
             }

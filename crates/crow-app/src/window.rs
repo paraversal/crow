@@ -1423,4 +1423,64 @@ mod tests {
         settle(&view, &mut cx);
         assert!(!root.join("notes.txt").exists(), "Return confirms");
     }
+
+    /// Drag `paths` in from outside the window and drop them on the element `selector`.
+    ///
+    /// The test platform makes a newly drawn frame the one that is hit-tested only at
+    /// the next input event (the app presents frames continuously). So the pointer
+    /// first moves over the target, as it does in a real drag, before the drop events.
+    fn drop_on(cx: &mut VisualTestContext, selector: &'static str, paths: Vec<PathBuf>) {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("no element {selector}")).center();
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_event(gpui::FileDropEvent::Entered { position: at, paths: gpui::ExternalPaths(paths.into()) });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: at });
+        cx.simulate_event(gpui::FileDropEvent::Submit { position: at });
+    }
+
+    #[gpui::test]
+    fn dropping_on_a_folder_row_moves_into_that_folder(cx: &mut TestAppContext) {
+        let root = fixture("drop-row");
+        let (view, mut cx) = open(cx, &root);
+        drop_on(&mut cx, "row-alpha", vec![root.join("notes.txt")]);
+        settle(&view, &mut cx);
+        assert!(root.join("alpha/notes.txt").exists(), "dropped onto alpha: moved into it");
+        assert!(!root.join("notes.txt").exists(), "same volume: a move, like Finder");
+
+        drop_on(&mut cx, "row-alpha", vec![root.join("alpha")]);
+        settle(&view, &mut cx);
+        assert!(root.join("alpha").is_dir(), "a folder dropped onto itself stays put");
+        let message = cx.update(|_, cx| cx.global::<Operations>().message.clone());
+        assert!(message.is_none_or(|(_, error)| !error), "…without an error");
+    }
+
+    #[gpui::test]
+    fn dropping_on_the_list_moves_into_the_open_folder(cx: &mut TestAppContext) {
+        let root = fixture("drop-list");
+        let elsewhere = fixture("drop-elsewhere");
+        let (view, mut cx) = open(cx, &root);
+        drop_on(&mut cx, "row-notes.txt", vec![elsewhere.join("notes.txt")]);
+        settle(&view, &mut cx);
+        assert!(
+            sheet_open(&view, &cx),
+            "a file row is not a target: the drop lands in the folder, where the name clashes"
+        );
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert!(root.join("notes 2.txt").exists(), "kept both");
+        assert!(!elsewhere.join("notes.txt").exists(), "moved, not copied");
+    }
+
+    #[gpui::test]
+    fn dropping_in_column_view_targets_the_folder_under_the_pointer(cx: &mut TestAppContext) {
+        let root = fixture("drop-columns");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        drop_on(&mut cx, "column-0-row-beta", vec![root.join("notes.txt")]);
+        settle(&view, &mut cx);
+        assert!(root.join("beta/notes.txt").exists());
+    }
 }
