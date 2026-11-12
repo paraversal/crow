@@ -37,8 +37,8 @@ It needs a GPU, so it runs locally, not in CI.
 
 | Measure | Budget |
 | --- | --- |
-| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms) |
-| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms) |
+| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms) |
+| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms) |
 
 ## By hand (each milestone)
 
@@ -48,12 +48,13 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | --- | --- |
 | Drag out | Drag one row, then a multiple selection, onto a Finder window and into a Mail message. |
 | Quick Look | Select a file, press Space. Arrow keys while it is open move it along. |
-| Column view | Cmd-3: arrows move within a column, Right moves into the selected folder, Left moves back. Only the focused column's selection is in the accent color. Selecting a file shows its preview as the last column. Cmd-2 returns to the list in the folder you were in. |
+| Column view | Cmd-3: arrows move within a column, Right moves into the selected folder, Left moves back; Left in the leftmost column goes up a folder. Only the focused column's selection is in the accent color. Selecting a file shows its preview as the last column. Cmd-2 returns to the list in the folder you were in. |
 | Trash and Put Back | Cmd-Delete a file in Crow, then use Finder's Put Back on it in the Trash. |
 | Finder clipboard | Copy in Crow, paste in Finder; copy in Finder, paste in Crow. |
 | Drop in | Drag files from Finder onto a Crow list, onto a column, and onto sidebar rows and group titles: the row under the pointer keeps one steady highlight; same disk moves, other disk copies, Option copies. |
 | Progress and cancel | Copy a large folder to another disk: progress shows in the status line; Esc or Cancel stops it with nothing half-copied. |
 | Activity | Cmd-Option-L lists recent operations; Undo on an older one works or explains why not. |
+| Path bar | Click a folder segment to go there (Back returns); click the selected file's segment to open it. |
 | Table | Drag header dividers to resize; click headers to sort and reverse. |
 | Preview pane | Select an image, a PDF, a text file and a folder: thumbnail, text, icon. Tags show for tagged files. |
 | Live updates | With a folder open, create, rename and delete files from Terminal; the list follows without jumping. |
@@ -62,7 +63,8 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Favorites | Drag a favorite up and down: the line follows the pointer's half and no rows shift; drop below the last one to move it to the end. Drag a folder from the list onto a group title; drop a file onto a favorite. Check `sidebar.toml` keeps your comments. Add `icon = "🚀"` and `color = "blue"` to one. |
 | Recent | Visit a few folders (and `cd` around with zoxide): they appear under Recent, favorites excluded. |
 | Locations | Mount a disk image: it appears without a restart, with a free-space bar; ⏏ ejects it. |
-| View settings | Cmd-3 in one folder, then visit another: it keeps its own view. Add a `[[rule]]` to `views.toml` with the folder open: it applies at once. Cmd-J explains each value. |
+| View settings | Cmd-3 in one folder, then visit another: it keeps its own view; going up in column view stays in columns. Add a `[[rule]]` to `views.toml` with the folder open: it applies at once. Cmd-J explains each value. |
+| Inline folders | In the list, Right opens a folder indented under it (Right again goes in); Left steps to the containing row, Left again closes it. Option-click a triangle opens everything below. Select across levels (Cmd-click or Shift-click a nested row) and copy or trash: every selected row is included. Navigate away and back: expansions are gone. |
 | Vim layer | Set `keymap = "vim"`: hjkl, gg/G, `m a` then `'a` from elsewhere. |
 | VoiceOver | Cmd-F5, move through the list: each row reads name, details and "n of N". |
 | Privacy prompts | Open Desktop, Documents, Downloads: the prompt names Crow. |

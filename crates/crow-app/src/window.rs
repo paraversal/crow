@@ -1521,6 +1521,11 @@ mod tests {
         pane(view, cx).read_with(cx, |p, cx| p.current_dir(cx))
     }
 
+    /// The visible list rows as (name, indent depth).
+    fn rows(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Vec<(String, usize)> {
+        pane(view, cx).read_with(cx, |p, cx| p.rows(cx))
+    }
+
     fn config_dir(cx: &VisualTestContext) -> PathBuf {
         cx.read(|cx| cx.global::<Ui>().config_dir.clone())
     }
@@ -1739,7 +1744,10 @@ mod tests {
         assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "letters don't select by name");
         cx.simulate_keystrokes("l");
         settle(&view, &mut cx);
-        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        assert_eq!(dir(&view, &cx), root, "l expands the folder first");
+        cx.simulate_keystrokes("l");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"), "l again goes into it");
         cx.simulate_keystrokes("h");
         settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root);
@@ -2035,6 +2043,114 @@ mod tests {
         cx.simulate_keystrokes("left");
         settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), PathBuf::from("/"), "Left at / does nothing");
+    }
+
+    #[gpui::test]
+    fn list_view_expands_folders_inline(cx: &mut TestAppContext) {
+        let root = fixture("expand");
+        std::fs::write(root.join("alpha/a.txt"), "").expect("create fixture");
+        std::fs::write(root.join("alpha/b.txt"), "").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0), ("beta".to_owned(), 0), ("notes.txt".to_owned(), 0)]);
+
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        assert_eq!(
+            rows(&view, &cx),
+            [
+                ("alpha".to_owned(), 0),
+                ("inner".to_owned(), 1),
+                ("a.txt".to_owned(), 1),
+                ("b.txt".to_owned(), 1),
+                ("beta".to_owned(), 0),
+                ("notes.txt".to_owned(), 0),
+            ],
+            "Right opens the folder inline, indented under it"
+        );
+        assert_eq!(dir(&view, &cx), root, "…without going anywhere");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "the folder stays selected");
+
+        cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("inner"), "Right expands a nested folder");
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha/inner"), "Right again goes into the open folder");
+
+        cx.simulate_keystrokes("cmd-[");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root);
+        assert!(!rows(&view, &cx).iter().any(|(_, depth)| *depth > 0), "coming back starts collapsed");
+    }
+
+    #[gpui::test]
+    fn list_view_left_steps_to_the_parent_row_then_collapses(cx: &mut TestAppContext) {
+        let root = fixture("left-parent");
+        std::fs::write(root.join("alpha/a.txt"), "").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("inner"), "a nested row is selected");
+
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "Left selects the row that contains it");
+        assert!(rows(&view, &cx).iter().any(|(name, _)| name == "inner"), "…and leaves it open");
+
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert!(!rows(&view, &cx).iter().any(|(name, _)| name == "inner"), "Left again collapses it");
+
+        cx.simulate_keystrokes("down down");
+        settle(&view, &mut cx);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.parent().unwrap(), "Left on a top-level row goes up a folder");
+        assert_eq!(selected(&view, &cx).as_deref(), Some(root.file_name().unwrap().to_str().unwrap()));
+    }
+
+    #[gpui::test]
+    fn option_clicking_a_triangle_expands_everything_below(cx: &mut TestAppContext) {
+        let root = fixture("expand-all");
+        std::fs::create_dir_all(root.join("alpha/inner/leaf")).expect("create fixture");
+        std::fs::write(root.join("alpha/inner/leaf/deep.txt"), "").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let at = cx.debug_bounds("disclosure-alpha").expect("alpha's triangle").center();
+        cx.simulate_click(at, gpui::Modifiers { alt: true, ..Default::default() });
+        settle(&view, &mut cx);
+        let rows = rows(&view, &cx);
+        assert!(rows.contains(&("inner".to_owned(), 1)), "alpha opened: {rows:?}");
+        assert!(rows.contains(&("leaf".to_owned(), 2)), "its folders opened too: {rows:?}");
+        assert!(rows.contains(&("deep.txt".to_owned(), 3)), "down to the last file: {rows:?}");
+    }
+
+    #[gpui::test]
+    fn selection_and_trash_span_expanded_levels(cx: &mut TestAppContext) {
+        let root = fixture("expand-select");
+        let (a, b) = (root.join("alpha/a.txt"), root.join("alpha/b.txt"));
+        std::fs::write(&a, "").expect("create fixture");
+        std::fs::write(&b, "").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("down down");
+        settle(&view, &mut cx);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("a.txt"));
+        cx.simulate_keystrokes("shift-down");
+        let selected_paths = pane(&view, &cx).read_with(&cx, |p, cx| p.selected_paths(cx));
+        assert_eq!(selected_paths, [a.clone(), b.clone()], "a range over rows of the expanded folder");
+
+        cx.simulate_keystrokes("cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!a.exists() && !b.exists(), "both nested files went to the trash");
+        assert!(root.join("alpha").is_dir(), "their folder stays");
     }
 
     #[gpui::test]

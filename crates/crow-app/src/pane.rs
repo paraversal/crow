@@ -36,8 +36,10 @@ use crate::ui::Ui;
 use crow_fs::ops::Request;
 
 const ROW_HEIGHT: f32 = 24.0;
-/// Space before the name for a folder's disclosure triangle (inline expansion comes later).
-const NAME_INSET: f32 = 22.0;
+/// Left padding before a row's disclosure triangle, and the indent per tree level.
+const NAME_INSET: f32 = 4.0;
+const INDENT: f32 = 16.0;
+const TRIANGLE_WIDTH: f32 = 14.0;
 const CELL_PADDING: f32 = 8.0;
 /// Column view: every column starts this wide; one with long names widens up to the cap.
 const COLUMN_WIDTH: f32 = 220.0;
@@ -182,7 +184,14 @@ impl Pane {
     }
 
     pub fn is_loading(&self, cx: &gpui::App) -> bool {
-        self.folders.iter().any(|f| f.read(cx).is_loading())
+        self.folders.iter().any(|f| f.read(cx).is_loading_deep(cx))
+    }
+
+    /// The visible (name, depth) rows of the focused folder, for tests.
+    #[cfg(test)]
+    pub fn rows(&self, cx: &gpui::App) -> Vec<(String, usize)> {
+        let folder = self.focused_folder().read(cx);
+        (0..folder.row_count()).filter_map(|ix| folder.row(ix).map(|(e, d)| (e.name.clone(), d))).collect()
     }
 
     pub fn error(&self, cx: &gpui::App) -> Option<SharedString> {
@@ -507,6 +516,10 @@ impl Pane {
 
     /// Column view: move into the column showing the selected folder's contents.
     fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == ViewMode::List {
+            self.list_right(cx);
+            return;
+        }
         if self.focused + 1 >= self.folders.len() {
             return;
         }
@@ -517,10 +530,46 @@ impl Pane {
         cx.notify();
     }
 
+    /// List view: open the selected folder inline, or go into it when it is already open.
+    fn list_right(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.cursor_entry(cx) else { return };
+        if !entry.is_dir || entry.is_package() {
+            return;
+        }
+        let folder = self.focused_folder().clone();
+        let expanded = folder.read(cx).is_expanded(&entry.path, cx);
+        if expanded {
+            self.navigate(entry.path, cx);
+        } else {
+            folder.update(cx, |folder, cx| folder.expand(entry.path, false, cx));
+        }
+    }
+
+    /// List view: close an open folder, step to the row that contains a nested one, or
+    /// leave the folder from the top level, as Finder does.
+    fn list_left(&mut self, cx: &mut Context<Self>) {
+        let folder = self.focused_folder().clone();
+        let read = folder.read(cx);
+        let Some(ix) = read.cursor_ix() else { return };
+        let Some((entry, _)) = read.row(ix) else { return };
+        let (path, expanded, parent) = (entry.path.clone(), read.is_expanded(&entry.path, cx), read.parent_row(ix));
+        if expanded {
+            folder.update(cx, |folder, cx| folder.collapse(&path, cx));
+        } else if let Some(parent) = parent {
+            folder.update(cx, |folder, cx| folder.select_only(parent, cx));
+        } else {
+            self.open_parent(cx);
+        }
+    }
+
     /// Column view: back to the parent column. The column you leave stays, unselected.
     /// On the leftmost column there is no column to go back to, so the parent folder
     /// is pushed in from the left, with the folder we came from selected in it.
     fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == ViewMode::List {
+            self.list_left(cx);
+            return;
+        }
         if self.focused > 0 {
             let leaving = self.focused_folder().clone();
             self.focused -= 1;
@@ -810,20 +859,25 @@ impl Pane {
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
         let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
         let last = widths.len() - 1;
-        let name_room = px(widths[0] - NAME_INSET - 16.0 - 8.0 - CELL_PADDING);
         let folder = self.folders[0].read(cx);
-        let total = folder.entries().len();
+        let list_folder = self.folders[0].clone();
+        let total = folder.row_count();
         let cursor = folder.cursor_ix();
-        let rows: Vec<(usize, Entry, bool)> = range
-            .filter_map(|ix| folder.entries().get(ix).map(|e| (ix, e.clone(), folder.is_selected(&e.path))))
+        let rows: Vec<(usize, Entry, usize, bool)> = range
+            .filter_map(|ix| {
+                folder.row(ix).map(|(entry, depth)| (ix, entry.clone(), depth, folder.is_selected(&entry.path)))
+            })
             .collect();
         rows.into_iter()
-            .map(|(ix, entry, selected)| {
+            .map(|(ix, entry, depth, selected)| {
                 let cells: Vec<(String, Align)> =
                     self.columns.iter().map(|c| (c.text(&entry, &column_cx), c.align())).collect();
                 let spoken =
                     cells.iter().map(|(text, _)| text.as_str()).filter(|t| *t != "--").collect::<Vec<_>>().join(", ");
+                let indent = NAME_INSET + depth as f32 * INDENT;
+                let name_room = px(widths[0] - indent - TRIANGLE_WIDTH - 8.0 - 16.0 - 8.0 - CELL_PADDING);
                 let name = truncate_middle(&entry.name, name_room, font_size, window);
+                let expanded = folder.is_expanded(&entry.path, cx);
                 let row = div()
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
@@ -865,12 +919,43 @@ impl Pane {
                         div()
                             .w(px(widths[0]))
                             .flex_none()
-                            .pl(px(NAME_INSET))
+                            .pl(px(indent))
                             .pr(px(CELL_PADDING))
                             .flex()
                             .items_center()
                             .gap_2()
                             .overflow_hidden()
+                            .child(if entry.is_dir && !entry.is_package() {
+                                let path = entry.path.clone();
+                                let pane = list_folder.clone();
+                                div()
+                                    .id(("disclosure", ix))
+                                    .debug_selector({
+                                        let name = entry.name.clone();
+                                        move || format!("disclosure-{name}")
+                                    })
+                                    .role(Role::Button)
+                                    .aria_label(if expanded {
+                                        format!("Collapse {}", entry.name)
+                                    } else {
+                                        format!("Expand {}", entry.name)
+                                    })
+                                    .w(px(TRIANGLE_WIDTH))
+                                    .flex_none()
+                                    .flex()
+                                    .justify_center()
+                                    .text_size(px(10.))
+                                    .text_color(muted)
+                                    .on_click(cx.listener(move |_, _, window, cx| {
+                                        cx.stop_propagation();
+                                        let all = window.modifiers().alt;
+                                        pane.update(cx, |folder, cx| folder.toggle_expansion(path.clone(), all, cx));
+                                    }))
+                                    .child(if expanded { "▾" } else { "▸" })
+                                    .into_any_element()
+                            } else {
+                                div().w(px(TRIANGLE_WIDTH)).flex_none().into_any_element()
+                            })
                             .child(
                                 div()
                                     .size(px(16.))
@@ -935,7 +1020,7 @@ impl Pane {
                 .h_full()
                 .when(i == last, |cell| cell.flex_1().min_w(width))
                 .when(i != last, |cell| cell.w(width).flex_none())
-                .pl(px(if i == 0 { NAME_INSET } else { CELL_PADDING }))
+                .pl(px(if i == 0 { NAME_INSET + TRIANGLE_WIDTH + 8.0 } else { CELL_PADDING }))
                 .pr(px(CELL_PADDING))
                 .flex()
                 .items_center()
@@ -1167,7 +1252,7 @@ impl Render for Pane {
             ViewMode::List => {
                 let (rows, scroll) = {
                     let root = self.folders[0].read(cx);
-                    (root.entries().len(), root.scroll().clone())
+                    (root.row_count(), root.scroll().clone())
                 };
                 div()
                     .size_full()
