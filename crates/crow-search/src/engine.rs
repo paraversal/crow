@@ -7,6 +7,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::SystemTime;
 
 use grep_matcher::Matcher as _;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
@@ -36,6 +37,9 @@ pub struct Hit {
     /// Higher is a better fuzzy name match; content hits score 0.
     pub score: u32,
     pub kind: HitKind,
+    /// For the results table; read with the hit so the UI never stats on its thread.
+    pub modified: Option<SystemTime>,
+    pub size: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,18 +134,28 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                     }
                     scanned.fetch_add(1, Ordering::Relaxed);
                     let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+                    let metadata = entry.metadata().ok();
+                    let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
+                    let size = metadata.as_ref().map_or(0, |meta| meta.len());
                     let mut hits = Vec::new();
                     if let Some(fuzzy) = fuzzy.as_mut() {
                         let name = entry.file_name();
                         let name = name.to_string_lossy();
                         if let Some(score) = fuzzy.score(name.as_ref()) {
-                            hits.push(Hit { path: entry.path().to_path_buf(), is_dir, score, kind: HitKind::Name });
+                            hits.push(Hit {
+                                path: entry.path().to_path_buf(),
+                                is_dir,
+                                score,
+                                kind: HitKind::Name,
+                                modified,
+                                size,
+                            });
                         }
                     }
                     if let Some(content) = content.as_mut()
                         && !is_dir
                     {
-                        content.search(entry.path(), &mut hits, &cancel);
+                        content.search(entry.path(), modified, size, &mut hits, &cancel);
                     }
                     if !hits.is_empty() {
                         let _ = tx.send(hits);
@@ -249,8 +263,15 @@ impl ContentSearch {
         Ok(ContentSearch { matcher, searcher })
     }
 
-    fn search(&mut self, path: &Path, hits: &mut Vec<Hit>, cancel: &Arc<AtomicBool>) {
-        let mut sink = ContentSink { matcher: &self.matcher, path, hits, cancel };
+    fn search(
+        &mut self,
+        path: &Path,
+        modified: Option<SystemTime>,
+        size: u64,
+        hits: &mut Vec<Hit>,
+        cancel: &Arc<AtomicBool>,
+    ) {
+        let mut sink = ContentSink { matcher: &self.matcher, path, modified, size, hits, cancel };
         let _ = self.searcher.search_path(&self.matcher, path, &mut sink);
     }
 }
@@ -258,6 +279,8 @@ impl ContentSearch {
 struct ContentSink<'a> {
     matcher: &'a RegexMatcher,
     path: &'a Path,
+    modified: Option<SystemTime>,
+    size: u64,
     hits: &'a mut Vec<Hit>,
     cancel: &'a Arc<AtomicBool>,
 }
@@ -289,6 +312,8 @@ impl Sink for ContentSink<'_> {
             is_dir: false,
             score: 0,
             kind: HitKind::Content { line: mat.line_number().unwrap_or(0), text: text.to_owned(), ranges },
+            modified: self.modified,
+            size: self.size,
         });
         Ok(true)
     }

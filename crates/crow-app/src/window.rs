@@ -11,14 +11,15 @@ use gpui::{
 
 use crate::actions::{
     AddToSidebar, ApplyThemeEverywhere, CloseTab, GoBack, GoForward, GoToFolder, MoveDown, MoveUp, NewTab, NextTab,
-    OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView, ShowCommandPalette, ShowThemePicker, SwitchFocus,
-    ToggleHiddenFiles, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
+    OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView, ShowCommandPalette, ShowSearch, ShowThemePicker,
+    SwitchFocus, ToggleHiddenFiles, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
 };
 use crate::operations::{self, Clipboard, Operations};
 use crate::palette::{self, Item};
 use crate::pane::Pane;
 use crate::pane::PaneEvent;
 use crate::preview;
+use crate::search::{SearchEvent, SearchView};
 use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::style::{color, color_alpha, icon, ui_font};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -63,6 +64,8 @@ pub struct CrowWindow {
     picker: Option<ThemePicker>,
     /// Cmd-K, while open.
     palette: Option<Palette>,
+    /// Cmd-F, while its results replace the pane.
+    search: Option<Entity<SearchView>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -131,6 +134,7 @@ impl CrowWindow {
             why: None,
             picker: None,
             palette: None,
+            search: None,
             _subscriptions: subscriptions,
         }
     }
@@ -200,6 +204,9 @@ impl CrowWindow {
         let show = self.show_hidden;
         for (_, pane) in self.tabs.iter() {
             pane.update(cx, |pane, cx| pane.set_show_hidden(show, cx));
+        }
+        if let Some(search) = &self.search {
+            search.update(cx, |search, cx| search.set_show_hidden(show, cx));
         }
     }
 
@@ -604,19 +611,11 @@ impl CrowWindow {
     fn on_pane_event(&mut self, event: &PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PaneEvent::Run(request) => self.run_request(request.clone(), window, cx),
-            PaneEvent::Copy { paths, cut } => {
-                let change_count = crow_macos::write_file_urls(paths);
-                let n = paths.len();
-                let ops = cx.global_mut::<Operations>();
-                ops.clipboard = Some(Clipboard { paths: paths.clone(), cut: *cut, change_count });
-                let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
-                ops.message = Some((
-                    if *cut { format!("Cut {what}: paste to move") } else { format!("Copied {what}") }.into(),
-                    false,
-                ));
-                cx.notify();
-            }
+            PaneEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
             PaneEvent::Entered(dir) => {
+                if self.search.is_some() {
+                    self.close_search(window, cx);
+                }
                 if !self.bench {
                     ui::record_visit(dir, cx);
                 }
@@ -1263,6 +1262,79 @@ impl CrowWindow {
         cx.notify();
     }
 
+    // ----- search -----
+
+    fn show_search(&mut self, _: &ShowSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(search) = &self.search {
+            search.update(cx, |search, cx| search.focus_input(window, cx));
+            return;
+        }
+        if self.picker.is_some() || self.go_to.is_some() || self.sheet.is_some() {
+            return;
+        }
+        let folder = self.pane().read(cx).current_dir(cx);
+        let (home, show_hidden) = (cx.global::<Ui>().home.clone(), self.show_hidden);
+        let search = cx.new(|cx| SearchView::new(folder, home, show_hidden, cx));
+        self._subscriptions.push(cx.observe(&search, |_, _, cx| cx.notify()));
+        self._subscriptions.push(cx.subscribe_in(&search, window, |this, search, event, window, cx| {
+            this.on_search_event(search.clone(), event, window, cx)
+        }));
+        search.update(cx, |search, cx| search.focus_input(window, cx));
+        self.search = Some(search);
+        cx.notify();
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(search) = self.search.take() {
+            search.update(cx, |search, cx| search.cancel(cx));
+            self.focus_pane(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn on_search_event(
+        &mut self,
+        search: Entity<SearchView>,
+        event: &SearchEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SearchEvent::Close => self.close_search(window, cx),
+            SearchEvent::FocusResults => search.update(cx, |search, cx| search.focus_results(window, cx)),
+            SearchEvent::Reveal(path) => {
+                self.pane().update(cx, |pane, cx| pane.reveal(path.clone(), cx));
+                self.close_search(window, cx);
+                self.focus_pane(window, cx);
+            }
+            SearchEvent::Open { path, is_dir } => {
+                if *is_dir {
+                    self.pane().update(cx, |pane, cx| pane.navigate(path.clone(), cx));
+                    self.close_search(window, cx);
+                    self.focus_pane(window, cx);
+                } else {
+                    self.pane().update(cx, |pane, cx| pane.open_file(path.clone(), cx));
+                }
+            }
+            SearchEvent::Run(request) => {
+                self.close_search(window, cx);
+                self.run_request(request.clone(), window, cx);
+            }
+            SearchEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
+        }
+    }
+
+    fn copy_paths(&mut self, paths: Vec<PathBuf>, cut: bool, cx: &mut Context<Self>) {
+        let change_count = crow_macos::write_file_urls(&paths);
+        let n = paths.len();
+        let ops = cx.global_mut::<Operations>();
+        ops.clipboard = Some(Clipboard { paths, cut, change_count });
+        let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
+        ops.message =
+            Some((if cut { format!("Cut {what}: paste to move") } else { format!("Copied {what}") }.into(), false));
+        cx.notify();
+    }
+
     // ----- command palette -----
 
     fn show_palette(&mut self, _: &ShowCommandPalette, window: &mut Window, cx: &mut Context<Self>) {
@@ -1655,7 +1727,7 @@ impl Render for CrowWindow {
         let current = self.pane().read(cx).current_dir(cx);
         self.sidebar.update(cx, |s, cx| s.set_current(current, cx));
         let sidebar = self.sidebar.clone();
-        let preview = list_view.then(|| self.render_preview(cx));
+        let preview = (list_view && self.search.is_none()).then(|| self.render_preview(cx));
         let path_bar = self.render_path_bar(cx);
         let go_to = self.render_go_to(cx);
         let sheet = self.render_sheet(cx);
@@ -1663,6 +1735,10 @@ impl Render for CrowWindow {
         let why = self.render_why(cx);
         let picker = self.render_picker(cx);
         let palette = self.render_palette(cx);
+        let center: gpui::AnyElement = match &self.search {
+            Some(search) => div().flex_1().min_w_0().h_full().child(search.clone()).into_any_element(),
+            None => div().flex_1().min_w_0().h_full().child(self.pane().clone()).into_any_element(),
+        };
         div()
             .id("crow")
             .role(Role::Application)
@@ -1694,6 +1770,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::reset_folder_view))
             .on_action(cx.listener(Self::show_theme_picker))
             .on_action(cx.listener(Self::show_palette))
+            .on_action(cx.listener(Self::show_search))
             .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, _, cx| {
                 this.show_activity = !this.show_activity;
                 cx.notify();
@@ -1707,15 +1784,7 @@ impl Render for CrowWindow {
             .text_size(px(font_size))
             .child(title_bar)
             .children(tab_bar)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .child(sidebar)
-                    .child(div().flex_1().min_w_0().h_full().child(self.pane().clone()))
-                    .children(preview),
-            )
+            .child(div().flex_1().min_h_0().flex().child(sidebar).child(center).children(preview))
             .child(path_bar)
             .children(go_to)
             .children(sheet)
@@ -2089,6 +2158,133 @@ mod tests {
             }
             dir
         })
+    }
+
+    fn wait_for_search(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+        for _ in 0..400 {
+            cx.run_until_parked();
+            let busy =
+                view.read_with(cx, |w, cx| w.search.as_ref().is_some_and(|search| search.read(cx).is_searching()));
+            if !busy {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("search never finished");
+    }
+
+    #[gpui::test]
+    fn search_panel_streams_names_and_contents(cx: &mut TestAppContext) {
+        let root = fixture("search");
+        std::fs::write(root.join("notes.txt"), "needle here\n").expect("create fixture");
+        std::fs::write(root.join("alpha/needle.txt"), "nothing\n").expect("create fixture");
+        std::fs::write(root.join("beta/other.txt"), "needle in beta\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Folder);
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.contains(&root.join("notes.txt")), "{paths:?}");
+        assert!(paths.contains(&root.join("alpha/needle.txt")), "{paths:?}");
+        assert!(paths.contains(&root.join("beta/other.txt")), "contents are searched too: {paths:?}");
+        assert_eq!(
+            search.read_with(&cx, |search, _| search.result_content(&root.join("beta/other.txt"))),
+            Some((1, "needle in beta".to_owned()))
+        );
+    }
+
+    #[gpui::test]
+    fn search_everything_turns_the_rules_off(cx: &mut TestAppContext) {
+        let root = fixture("search-rules");
+        std::fs::create_dir_all(root.join("node_modules/pkg")).expect("create fixture");
+        std::fs::write(root.join("node_modules/pkg/needle.txt"), "needle\n").expect("create fixture");
+        std::fs::write(root.join("outside.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.contains(&root.join("outside.txt")));
+        assert!(!paths.iter().any(|path| path.ends_with("node_modules/pkg/needle.txt")), "{paths:?}");
+        assert!(search.read_with(&cx, |search, _| search.skipped_count()) > 0);
+
+        cx.simulate_keystrokes("cmd-shift-a");
+        wait_for_search(&view, &mut cx);
+        assert!(search.read_with(&cx, |search, _| search.everything()));
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.contains(&root.join("node_modules/pkg/needle.txt")), "{paths:?}");
+        assert_eq!(search.read_with(&cx, |search, _| search.skipped_count()), 0);
+    }
+
+    #[gpui::test]
+    fn search_results_copy_and_trash_the_selection(cx: &mut TestAppContext) {
+        let root = fixture("search-actions");
+        std::fs::write(root.join("notes.txt"), "needle\n").expect("create fixture");
+        std::fs::write(root.join("alpha/needle.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        cx.simulate_keystrokes("tab cmd-a cmd-c");
+
+        let copied = cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|clip| clip.paths.clone()));
+        let copied = copied.expect("copy filled the clipboard");
+        assert!(copied.contains(&root.join("notes.txt")), "{copied:?}");
+        assert!(copied.contains(&root.join("alpha/needle.txt")), "{copied:?}");
+
+        cx.simulate_keystrokes("cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists(), "trash acted on the results");
+        assert!(!root.join("alpha/needle.txt").exists());
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "an operation closes the search");
+    }
+
+    #[gpui::test]
+    fn search_result_return_navigates_and_closes(cx: &mut TestAppContext) {
+        let root = fixture("search-open");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("alpha");
+        wait_for_search(&view, &mut cx);
+
+        cx.simulate_keystrokes("tab");
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()));
+    }
+
+    #[gpui::test]
+    fn search_result_cmd_r_reveals_the_file(cx: &mut TestAppContext) {
+        let root = fixture("search-reveal");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+
+        cx.simulate_keystrokes("tab");
+        cx.simulate_keystrokes("cmd-r");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()));
+        assert_eq!(dir(&view, &cx), root);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+    }
+
+    #[gpui::test]
+    fn search_escape_closes_and_cancels(cx: &mut TestAppContext) {
+        let root = fixture("search-close");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()));
     }
 
     #[gpui::test]

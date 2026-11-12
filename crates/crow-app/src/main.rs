@@ -14,6 +14,7 @@ mod operations;
 mod palette;
 mod pane;
 mod preview;
+mod search;
 mod sidebar;
 mod style;
 mod text_input;
