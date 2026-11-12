@@ -58,6 +58,20 @@ This document lists **observed behavior and wanted behavior**. Causes below mark
 - **Plan:** delete the `expand_all` field and its cascade; Option-click then expands/collapses that one folder like a click (user's answer). Keep the existing manual expansion recursion limit (`MAX_DEPTH`) as a safety net. Update docs.
 - **Done when:** Option-click cannot open a subtree; the app stays responsive on a dev-directory fixture; tests updated.
 
+## D5 Drag image: Finder-like combo, one image at a time
+
+- **Observed:** the in-window drag image is anchored at the grab point inside the row, so it sits near the original item instead of the cursor (image 2). After dragging out of the window and back in, the native drag image and the GPUI image are both visible.
+- **Wanted:** the drag image is a small icon plus a pill with the item name (Finder’s “onhover combo”). It tracks the cursor with a fixed relative position, except when the cursor lies beyond the combo’s width: then the combo’s right side touches the cursor. Only one image is visible at a time.
+- **Plan:** `DraggedFiles` renders icon (22 px) + name pill; the `on_drag` offset anchors it. Measure the combo width at prepaint and, when `cursor.x > width`, shift it so its right edge sits at the cursor. A thread-local flag is set in `external_drag_payload` (native promotion) and cleared at the next drag’s constructor; the restored GPUI view renders empty while the platform owns the drag.
+- **Done when:** visual check of both grab positions (near the row’s icon and near the name) and a drag-out-and-back recording shows one image; drag-out still starts a native session.
+
+## D6 Chevron rotation, not glyph swap
+
+- **Observed:** the expanded chevron is a different glyph and sits lower.
+- **Wanted:** expanding rotates the same chevron in place; its box and position do not move.
+- **Plan:** paint the chevron as a stroked path (`canvas` + `PathBuilder`) in a fixed 14 px box; collapsed and expanded differ only in the vertex coordinates.
+- **Done when:** visual check shows the same box; expand/collapse tests still pass.
+
 ---
 
 ## Finish

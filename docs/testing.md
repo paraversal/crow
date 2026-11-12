@@ -46,7 +46,7 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 
 | Check | How |
 | --- | --- |
-| Drag out | Drag one row, then a multiple selection, onto a Finder window and into a Mail message. Inside Crow the image is Crow's and follows the pointer smoothly; macOS takes over the moment it leaves the window. |
+| Drag out | Drag one row, then a multiple selection, onto a Finder window and into a Mail message. Inside Crow the image is a small icon plus a name pill that follows the pointer (right edge at the cursor if the grab point is past it); macOS takes over the moment it leaves the window, and only one image is visible after coming back. |
 | Quick Look | Select a file, press Space. Arrow keys while it is open move it along. |
 | Column view | Cmd-3: arrows move within a column, Right moves into the selected folder, Left moves back; Left in the leftmost column goes up a folder. Only the focused column's selection is in the accent color. Selecting a file shows its preview as the last column. Cmd-2 returns to the list in the folder you were in. |
 | Trash and Put Back | Cmd-Delete a file in Crow, then use Finder's Put Back on it in the Trash. |

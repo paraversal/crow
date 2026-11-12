@@ -7,8 +7,10 @@
 //!   you move into it (Right arrow or a click);
 //! - typing and filtering always act on the focused column.
 
+use std::cell::Cell;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,8 +21,8 @@ use crow_fs::{Entry, Sort, SortKey};
 use gpui::{
     Action, ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalDragPayload, ExternalPaths, FileDragPaths,
     FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Render, Role, ScrollHandle, SharedString, Subscription, Window, div, img, prelude::*, px,
-    uniform_list,
+    MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle, SharedString, Subscription, Window, canvas,
+    div, img, point, prelude::*, px, uniform_list,
 };
 
 use crate::actions::{
@@ -91,39 +93,53 @@ impl DraggedSelection {
     }
 }
 
-/// The image that follows the pointer while dragging files with GPUI inside the window.
+thread_local! {
+    /// A native drag session owns the image after the pointer leaves the window; GPUI
+    /// restores its own drag view when the pointer comes back, which would show twice.
+    static PLATFORM_DRAG: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The Finder-like image that follows the pointer while dragging with GPUI inside the window:
+/// a small icon and a pill with the name. Its width is measured for the anchor rule.
 struct DraggedFiles {
     icon: Option<Arc<Image>>,
-    count: usize,
+    label: SharedString,
+    cursor: Point<Pixels>,
+    width: Rc<Cell<Option<f32>>>,
 }
 
 impl Render for DraggedFiles {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &cx.global::<Ui>().theme;
-        div()
-            .relative()
+        let width = self.width.clone();
+        let left = self.width.get().map_or(0.0, |width| drag_combo_left(f32::from(self.cursor.x), width));
+        let combo = div()
+            .ml(px(left))
             .flex()
             .items_center()
-            .justify_center()
-            .when_some(self.icon.clone(), |element, icon| element.child(img(icon).size(px(44.))))
-            .when(self.count > 1, |image| {
-                image.child(
-                    div()
-                        .absolute()
-                        .right(px(-6.))
-                        .bottom(px(-6.))
-                        .min_w(px(18.))
-                        .h(px(18.))
-                        .rounded_full()
-                        .bg(color(theme.role("accent")))
-                        .text_color(color(theme.role("bg")))
-                        .text_size(px(11.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(self.count.to_string()),
-                )
+            .gap_2()
+            .when_some(self.icon.clone(), |element, icon| element.child(img(icon).size(px(22.))))
+            .child(
+                div()
+                    .px_2()
+                    .py(px(1.))
+                    .rounded_full()
+                    .bg(color(theme.role("surface-raised")))
+                    .text_color(color(theme.role("fg")))
+                    .text_size(px(12.))
+                    .max_w(px(220.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(self.label.clone()),
+            );
+        div().when(!PLATFORM_DRAG.with(|flag| flag.get()), |root| {
+            root.on_children_prepainted(move |bounds, _, _| {
+                if let Some(bounds) = bounds.first() {
+                    width.set(Some(f32::from(bounds.size.width)));
+                }
             })
+            .child(combo)
+        })
     }
 }
 
@@ -899,7 +915,6 @@ impl Pane {
         let stripe = color_alpha(theme.role("surface"), 0x70);
         let selection_bg = selection_color(self.focus.is_focused(window), theme);
         let drop_bg = color_alpha(theme.role("accent"), 0x40);
-        let chevron_hover = color(theme.role("fg"));
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
         let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
         let last = widths.len() - 1;
@@ -930,6 +945,8 @@ impl Pane {
                 };
                 let drag_icon = icon(&entry.path, entry.is_dir, 44);
                 let drag_count = drag_entries.len();
+                let drag_label: SharedString =
+                    if drag_count > 1 { format!("{drag_count} items").into() } else { entry.name.clone().into() };
                 let row = div()
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
@@ -947,10 +964,17 @@ impl Pane {
                     .when(ix % 2 == 1, |row| row.bg(stripe))
                     .when(selected, |row| row.bg(selection_bg))
                     .debug_selector(|| format!("row-{}", entry.name))
-                    .on_drag(DraggedSelection { entries: drag_entries }, move |_value, _, _, cx| {
-                        cx.new(|_| DraggedFiles { icon: drag_icon.clone(), count: drag_count })
+                    .on_drag(DraggedSelection { entries: drag_entries }, move |_value, offset, _, cx| {
+                        PLATFORM_DRAG.with(|flag| flag.set(false));
+                        cx.new(|_| DraggedFiles {
+                            icon: drag_icon.clone(),
+                            label: drag_label.clone(),
+                            cursor: offset,
+                            width: Rc::new(Cell::new(None)),
+                        })
                     })
                     .external_drag_payload::<DraggedSelection>(move |selection, _, _| {
+                        PLATFORM_DRAG.with(|flag| flag.set(true));
                         Some(ExternalDragPayload::Files(FileDragPaths::new(selection.entries.iter().cloned())))
                     })
                     .when(entry.is_dir && !entry.is_package(), |row| {
@@ -1009,15 +1033,13 @@ impl Pane {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_size(px(16.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(muted)
-                                    .hover(move |s| s.text_color(chevron_hover))
+                                    .rounded_sm()
+                                    .hover(move |s| s.bg(color(theme.role("surface-raised"))))
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.stop_propagation();
                                         pane.update(cx, |folder, cx| folder.toggle_expansion(path.clone(), cx));
                                     }))
-                                    .child(if expanded { "⌄" } else { "›" })
+                                    .child(chevron_glyph(expanded, muted))
                                     .into_any_element()
                             } else {
                                 div().w(px(TRIANGLE_WIDTH)).flex_none().into_any_element()
@@ -1168,6 +1190,8 @@ impl Pane {
                 };
                 let drag_icon = icon(&entry.path, entry.is_dir, 44);
                 let drag_count = drag_entries.len();
+                let drag_label: SharedString =
+                    if drag_count > 1 { format!("{drag_count} items").into() } else { entry.name.clone().into() };
                 div()
                     .id(ix)
                     .role(Role::ListBoxOption)
@@ -1185,10 +1209,17 @@ impl Pane {
                     .gap_2()
                     .when(selected, |row| row.bg(selection_bg))
                     .debug_selector(|| format!("column-{k}-row-{}", entry.name))
-                    .on_drag(DraggedSelection { entries: drag_entries }, move |_value, _, _, cx| {
-                        cx.new(|_| DraggedFiles { icon: drag_icon.clone(), count: drag_count })
+                    .on_drag(DraggedSelection { entries: drag_entries }, move |_value, offset, _, cx| {
+                        PLATFORM_DRAG.with(|flag| flag.set(false));
+                        cx.new(|_| DraggedFiles {
+                            icon: drag_icon.clone(),
+                            label: drag_label.clone(),
+                            cursor: offset,
+                            width: Rc::new(Cell::new(None)),
+                        })
                     })
                     .external_drag_payload::<DraggedSelection>(move |selection, _, _| {
+                        PLATFORM_DRAG.with(|flag| flag.set(true));
                         Some(ExternalDragPayload::Files(FileDragPaths::new(selection.entries.iter().cloned())))
                     })
                     .when(navigable, |row| {
@@ -1290,6 +1321,40 @@ impl Pane {
         }
         strip
     }
+}
+
+/// Where the drag combo's left edge goes: the grab point stays under the cursor, but a
+/// combo narrower than that is shifted until its right side just touches the cursor.
+fn drag_combo_left(cursor_x: f32, width: f32) -> f32 {
+    if cursor_x > width { cursor_x - width } else { 0.0 }
+}
+
+/// A chevron drawn as a path: expanding rotates the same glyph instead of swapping in a
+/// different one that sits lower in its box.
+fn chevron_glyph(expanded: bool, chevron: gpui::Rgba) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let (width, height) = (bounds.size.width, bounds.size.height);
+            let origin = bounds.origin;
+            let p = |x: f32, y: f32| point(origin.x + width * x, origin.y + height * y);
+            let mut builder = PathBuilder::stroke(px(2.));
+            if expanded {
+                builder.move_to(p(0.2, 0.35));
+                builder.line_to(p(0.5, 0.65));
+                builder.line_to(p(0.8, 0.35));
+            } else {
+                builder.move_to(p(0.35, 0.2));
+                builder.line_to(p(0.65, 0.5));
+                builder.line_to(p(0.35, 0.8));
+            }
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, chevron);
+            }
+        },
+    )
+    .w(px(14.))
+    .h(px(14.))
 }
 
 fn selection_color(active: bool, theme: &crow_theme::Theme) -> gpui::Rgba {
@@ -1443,5 +1508,17 @@ impl Pane {
 
     pub fn selected_names(&self, cx: &gpui::App) -> Vec<String> {
         self.focused_folder().read(cx).selected_names()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drag_combo_left;
+
+    #[test]
+    fn drag_combo_touches_the_cursor_only_when_it_has_to() {
+        assert_eq!(drag_combo_left(200.0, 80.0), 120.0, "right edge lands on the cursor");
+        assert_eq!(drag_combo_left(80.0, 80.0), 0.0, "cursor at the right edge needs no shift");
+        assert_eq!(drag_combo_left(30.0, 80.0), 0.0, "inside the combo: the grab point tracks");
     }
 }
