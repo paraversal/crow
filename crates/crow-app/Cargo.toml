@@ -14,6 +14,7 @@ path = "src/main.rs"
 crow-core.workspace = true
 crow-fs.workspace = true
 crow-macos.workspace = true
+crow-search.workspace = true
 crow-theme.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true

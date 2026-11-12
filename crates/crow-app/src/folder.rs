@@ -82,6 +82,8 @@ pub struct Folder {
     auto_select: bool,
     type_select: TypeSelect,
     show_hidden: bool,
+    /// Name filter (list/column view): shown rows are this folder's matches, flat.
+    filter: Option<String>,
     /// List view: folders shown inline, by path.
     children: HashMap<PathBuf, ChildFolder>,
     expanded: HashSet<PathBuf>,
@@ -130,6 +132,7 @@ impl Folder {
             auto_select,
             type_select: TypeSelect::default(),
             show_hidden,
+            filter: None,
             children: HashMap::new(),
             expanded: HashSet::new(),
             rows: Arc::new(Vec::new()),
@@ -287,6 +290,26 @@ impl Folder {
 
     pub fn type_select_active(&self) -> bool {
         self.type_select.is_active(Instant::now())
+    }
+
+    /// The active name filter, if any.
+    pub fn filter(&self) -> Option<&str> {
+        self.filter.as_deref()
+    }
+
+    /// Filter this folder's own rows (case-insensitive substring). Open inline
+    /// folders are ignored while a filter is active; clearing it restores them.
+    pub fn set_filter(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
+        let filter = filter.filter(|query| !query.is_empty());
+        if self.filter == filter {
+            return;
+        }
+        self.filter = filter;
+        self.rebuild_rows(cx);
+        self.prune_selection();
+        self.settle_cursor(cx);
+        cx.emit(FolderEvent::Changed);
+        cx.notify();
     }
 
     // ----- changes -----
@@ -458,7 +481,20 @@ impl Folder {
     }
 
     /// Flatten this listing and every open child folder into the visible rows.
+    /// With a filter, the rows are this folder's matching entries only (flat).
     fn rebuild_rows(&mut self, cx: &gpui::App) {
+        if let Some(filter) = &self.filter {
+            let lower = filter.to_lowercase();
+            self.rows = Arc::new(
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| name_matches(&entry.name, filter, &lower))
+                    .map(|(i, _)| FlatRow::Own(i))
+                    .collect(),
+            );
+            return;
+        }
         let mut rows = Vec::with_capacity(self.entries.len());
         for i in 0..self.entries.len() {
             rows.push(FlatRow::Own(i));
@@ -735,6 +771,20 @@ impl Folder {
             .collect();
         names.sort();
         names
+    }
+}
+
+/// Case-insensitive substring, with an ASCII fast path so filtering 100k rows
+/// does not allocate a lowercase copy of every name.
+fn name_matches(name: &str, query: &str, lower_query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    if name.is_ascii() && query.is_ascii() {
+        let needle = query.as_bytes();
+        name.as_bytes().windows(needle.len()).any(|window| window.eq_ignore_ascii_case(needle))
+    } else {
+        name.to_lowercase().contains(lower_query)
     }
 }
 

@@ -60,6 +60,17 @@ actions!(
         GoToFolder,
         ViewAsList,
         ViewAsColumns,
+        // List filter
+        StartFilter,
+        ClearFilter,
+        // Command palette
+        ShowCommandPalette,
+        PaletteOpenInTab,
+        // Search
+        ShowSearch,
+        SearchEverything,
+        CloseSearch,
+        SearchReveal,
         // Window
         NewTab,
         CloseTab,
@@ -81,6 +92,10 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("shift-up", ExtendUp, Some("FileList")),
         KeyBinding::new("shift-down", ExtendDown, Some("FileList")),
         KeyBinding::new("cmd-a", SelectAll, Some("FileList")),
+        KeyBinding::new("/", StartFilter, Some("FileList")),
+        KeyBinding::new("escape", ClearFilter, Some("FileList && Filtered")),
+        KeyBinding::new("up", MoveUp, Some("Filter")),
+        KeyBinding::new("down", MoveDown, Some("Filter")),
         KeyBinding::new("cmd-down", OpenSelection, Some("FileList")),
         KeyBinding::new("cmd-o", OpenSelection, Some("FileList")),
         KeyBinding::new("enter", Rename, Some("FileList")),
@@ -133,6 +148,25 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("up", MoveUp, Some("ThemePicker")),
         KeyBinding::new("down", MoveDown, Some("ThemePicker")),
         KeyBinding::new("cmd-enter", ApplyThemeEverywhere, Some("ThemePicker")),
+        KeyBinding::new("cmd-k", ShowCommandPalette, Some("Crow")),
+        KeyBinding::new("cmd-f", ShowSearch, Some("Crow")),
+        KeyBinding::new("cmd-shift-a", SearchEverything, Some("Search")),
+        KeyBinding::new("escape", CloseSearch, Some("SearchResults")),
+        KeyBinding::new("up", MoveUp, Some("SearchResults")),
+        KeyBinding::new("down", MoveDown, Some("SearchResults")),
+        KeyBinding::new("alt-up", MoveToFirst, Some("SearchResults")),
+        KeyBinding::new("alt-down", MoveToLast, Some("SearchResults")),
+        KeyBinding::new("enter", OpenSelection, Some("SearchResults")),
+        KeyBinding::new("space", QuickLook, Some("SearchResults")),
+        KeyBinding::new("cmd-r", SearchReveal, Some("SearchResults")),
+        KeyBinding::new("cmd-a", SelectAll, Some("SearchResults")),
+        KeyBinding::new("cmd-c", CopyFiles, Some("SearchResults")),
+        KeyBinding::new("cmd-x", CutFiles, Some("SearchResults")),
+        KeyBinding::new("cmd-backspace", MoveToTrash, Some("SearchResults")),
+        KeyBinding::new("cmd-alt-backspace", DeletePermanently, Some("SearchResults")),
+        KeyBinding::new("up", MoveUp, Some("Palette")),
+        KeyBinding::new("down", MoveDown, Some("Palette")),
+        KeyBinding::new("cmd-enter", PaletteOpenInTab, Some("Palette")),
     ]
 }
 
@@ -167,5 +201,9 @@ pub fn vim_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("l", OpenSelection, Some("Sidebar && vim")),
         KeyBinding::new("j", MoveDown, Some("ThemePicker && vim")),
         KeyBinding::new("k", MoveUp, Some("ThemePicker && vim")),
+        KeyBinding::new("j", MoveDown, Some("Palette && vim")),
+        KeyBinding::new("k", MoveUp, Some("Palette && vim")),
+        KeyBinding::new("j", MoveDown, Some("SearchResults && vim")),
+        KeyBinding::new("k", MoveUp, Some("SearchResults && vim")),
     ]
 }

@@ -27,12 +27,13 @@ use gpui::{
 };
 
 use crate::actions::{
-    BeginJump, BeginMark, CopyFiles, CutFiles, DeletePermanently, Duplicate, ExtendDown, ExtendUp, MoveDown, MoveLeft,
-    MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFolder, OpenSelection, PasteFiles, PasteMoveFiles,
-    QuickLook, Rename, SelectAll,
+    BeginJump, BeginMark, ClearFilter, CopyFiles, CutFiles, DeletePermanently, Duplicate, ExtendDown, ExtendUp,
+    MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFolder, OpenSelection, PasteFiles,
+    PasteMoveFiles, QuickLook, Rename, SelectAll, StartFilter,
 };
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
+use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{color, color_alpha, format_time, icon, kind, truncate_middle};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -191,6 +192,12 @@ struct Renaming {
     _subscription: Subscription,
 }
 
+/// The `/` filter field, while open.
+struct Filtering {
+    input: Entity<TextInput>,
+    _subscription: Subscription,
+}
+
 pub struct Pane {
     history: History,
     mode: ViewMode,
@@ -224,6 +231,10 @@ pub struct Pane {
     /// The column and row a drag would drop on in column view.
     drop_column: Option<(usize, usize)>,
     mark_pending: Option<MarkPending>,
+    /// The `/` filter field, while open.
+    filtering: Option<Filtering>,
+    /// Focus the list after a render because a navigation closed the filter.
+    focus_list_after_filter: bool,
 }
 
 struct Bench {
@@ -261,6 +272,8 @@ impl Pane {
             column_bounds: Rc::new(RefCell::new(HashMap::new())),
             drop_column: None,
             mark_pending: None,
+            filtering: None,
+            focus_list_after_filter: false,
         };
         pane.enter(dir, cx);
         pane
@@ -390,6 +403,37 @@ impl Pane {
         self.focused_folder().read(cx).selected_paths()
     }
 
+    /// The current folder's subfolders, for the command palette's go-to list.
+    pub fn subfolders(&self, cx: &gpui::App) -> Vec<PathBuf> {
+        self.focused_folder()
+            .read(cx)
+            .entries()
+            .iter()
+            .filter(|entry| entry.is_dir && !entry.is_package())
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+
+    /// Run one of the palette's pane commands through the same path as its key.
+    pub fn run_command(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        match command {
+            CommandId::Open => self.open_selected(cx),
+            CommandId::QuickLook => self.quick_look(&QuickLook, window, cx),
+            CommandId::Rename => self.rename(&Rename, window, cx),
+            CommandId::NewFolder => self.new_folder(&NewFolder, window, cx),
+            CommandId::Duplicate => self.duplicate(&Duplicate, window, cx),
+            CommandId::MoveToTrash => self.move_to_trash(&MoveToTrash, window, cx),
+            CommandId::DeletePermanently => self.delete_permanently(&DeletePermanently, window, cx),
+            CommandId::Copy => self.copy_files(&CopyFiles, window, cx),
+            CommandId::Cut => self.cut_files(&CutFiles, window, cx),
+            CommandId::Paste => self.paste_files(&PasteFiles, window, cx),
+            CommandId::PasteMove => self.paste_move_files(&PasteMoveFiles, window, cx),
+            CommandId::SelectAll => self.select_all(&SelectAll, window, cx),
+            CommandId::StartFilter => self.start_filter(&StartFilter, window, cx),
+            _ => {}
+        }
+    }
+
     pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
         self.show_hidden = show;
         for folder in &self.folders {
@@ -466,6 +510,7 @@ impl Pane {
         if self.mode == mode {
             return false;
         }
+        self.drop_filter(cx);
         self.mode = mode;
         match mode {
             // The list shows the folder you were in: the focused column becomes the root.
@@ -485,6 +530,9 @@ impl Pane {
     }
 
     fn enter(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        if self.filtering.take().is_some() {
+            self.focus_list_after_filter = true;
+        }
         self.folders.clear();
         self.subscriptions.clear();
         self.focused = 0;
@@ -599,6 +647,67 @@ impl Pane {
         self.focused_folder().clone().update(cx, f);
     }
 
+    // ----- filter -----
+
+    fn start_filter(&mut self, _: &StartFilter, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(filtering) = &self.filtering {
+            let focus = filtering.input.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+            return;
+        }
+        let input = cx.new(|cx| TextInput::new("", "Filter", cx));
+        let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
+            TextInputEvent::Changed => {
+                let query = input.read(cx).text().to_owned();
+                let folder = this.focused_folder().clone();
+                folder.update(cx, |folder, cx| folder.set_filter(Some(query), cx));
+                cx.notify();
+            }
+            TextInputEvent::Confirmed => {
+                this.open_selected(cx);
+                if this.filtering.is_none() {
+                    this.focus_list_after_filter = false;
+                    window.focus(&this.focus, cx);
+                }
+            }
+            TextInputEvent::Cancelled => this.close_filter(window, cx),
+            TextInputEvent::CompletionRequested => {}
+        });
+        let focus = input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.filtering = Some(Filtering { input, _subscription: subscription });
+        cx.notify();
+    }
+
+    fn clear_filter(&mut self, _: &ClearFilter, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_filter(window, cx);
+    }
+
+    fn close_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filtering.take().is_none() {
+            return;
+        }
+        for folder in &self.folders {
+            folder.update(cx, |folder, cx| folder.set_filter(None, cx));
+        }
+        self.focus_list_after_filter = false;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Close the filter from a navigation path that has no window (the list
+    /// gets its focus back after the next render).
+    fn drop_filter(&mut self, cx: &mut Context<Self>) {
+        if self.filtering.take().is_none() {
+            return;
+        }
+        for folder in &self.folders {
+            folder.update(cx, |folder, cx| folder.set_filter(None, cx));
+        }
+        self.focus_list_after_filter = true;
+        cx.notify();
+    }
+
     // ----- actions -----
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -622,7 +731,7 @@ impl Pane {
     }
 
     fn move_to_last(&mut self, _: &MoveToLast, _: &mut Window, cx: &mut Context<Self>) {
-        self.with_focused(cx, |f, cx| f.select_only(f.entries().len().saturating_sub(1), cx));
+        self.with_focused(cx, |f, cx| f.select_only(f.row_count().saturating_sub(1), cx));
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -638,6 +747,7 @@ impl Pane {
         if self.focused + 1 >= self.folders.len() {
             return;
         }
+        self.drop_filter(cx);
         self.focused += 1;
         self.with_focused(cx, |f, cx| f.select_first(cx));
         self.strip_scroll.scroll_to_item(self.focused);
@@ -649,6 +759,10 @@ impl Pane {
     fn list_right(&mut self, cx: &mut Context<Self>) {
         let Some(entry) = self.cursor_entry(cx) else { return };
         if !entry.is_dir || entry.is_package() {
+            return;
+        }
+        if self.filtering.is_some() {
+            self.navigate(entry.path, cx);
             return;
         }
         let folder = self.focused_folder().clone();
@@ -686,12 +800,14 @@ impl Pane {
             return;
         }
         if self.focused > 0 {
+            self.drop_filter(cx);
             let leaving = self.focused_folder().clone();
             self.focused -= 1;
             leaving.update(cx, |f, cx| f.clear_selection(cx));
         } else {
             let child = self.folders[0].read(cx).dir().to_path_buf();
             let Some(parent) = child.parent().map(Path::to_path_buf) else { return };
+            self.drop_filter(cx);
             self.history.visit(parent.clone());
             self.push_folder(parent.clone(), false, cx);
             let folder = self.folders.pop().expect("pushed above");
@@ -728,6 +844,7 @@ impl Pane {
         input.update(cx, |input, cx| input.select_range(0..stem_end, window, cx));
         let subscription =
             cx.subscribe_in(&input, window, move |this, input, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::Changed => {}
                 TextInputEvent::Confirmed => {
                     let new_name = input.read(cx).text().trim().to_owned();
                     let Some(renaming) = this.renaming.take() else { return };
@@ -891,6 +1008,7 @@ impl Pane {
         crow_macos::remember_mouse_down();
         window.focus(&self.focus, cx);
         if k != self.focused {
+            self.drop_filter(cx);
             self.focused = k;
             self.strip_scroll.scroll_to_item(k);
         }
@@ -1032,7 +1150,7 @@ impl Pane {
         let font_size = px(ui.settings.font_size);
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
-        let selection_bg = selection_color(self.focus.is_focused(window), theme);
+        let selection_bg = selection_color(self.focus.is_focused(window) || self.filtering.is_some(), theme);
         let drop_bg = color_alpha(theme.role("accent"), 0x40);
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
         let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
@@ -1318,19 +1436,18 @@ impl Pane {
         let theme = &ui.theme;
         let font_size = px(ui.settings.font_size);
         // Spec: only the focused column shows its selection in the accent color.
-        let active = k == self.focused && self.focus.is_focused(window);
+        let active = k == self.focused && (self.focus.is_focused(window) || self.filtering.is_some());
         let selection_bg = selection_color(active, theme);
         let drop_bg = color_alpha(theme.role("accent"), 0x40);
         let subtle = color(theme.role("fg-subtle"));
         let Some(folder) = self.folders.get(k).map(|f| f.read(cx)) else { return Vec::new() };
         let width = column_width(folder.entries());
         let name_room = px(width - 16.0 - 8.0 - 16.0 - 2.0 * CELL_PADDING - 8.0);
-        let total = folder.entries().len();
+        let total = folder.row_count();
         let cursor = folder.cursor_ix();
         let selected_entries = folder.selected_entries();
-        let rows: Vec<(usize, Entry, bool)> = range
-            .filter_map(|ix| folder.entries().get(ix).map(|e| (ix, e.clone(), folder.is_selected(&e.path))))
-            .collect();
+        let rows: Vec<(usize, Entry, bool)> =
+            range.filter_map(|ix| folder.row(ix).map(|(e, _)| (ix, e.clone(), folder.is_selected(&e.path)))).collect();
         rows.into_iter()
             .map(|(ix, entry, selected)| {
                 let name = truncate_middle(&entry.name, name_room, font_size, window);
@@ -1514,6 +1631,50 @@ impl Pane {
         }
         strip
     }
+
+    fn render_filter(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let filtering = self.filtering.as_ref()?;
+        let ui = cx.global::<Ui>();
+        let theme = &ui.theme;
+        let (shown, total) = {
+            let folder = self.focused_folder().read(cx);
+            (folder.row_count(), folder.entries().len())
+        };
+        let input = filtering.input.clone();
+        Some(
+            div()
+                .id("filter-bar")
+                .role(Role::Group)
+                .aria_label("Filter")
+                .key_context("Filter")
+                .h(px(34.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .border_b_1()
+                .border_color(color(theme.role("border")))
+                .on_action(cx.listener(Self::move_up))
+                .on_action(cx.listener(Self::move_down))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Some(filtering) = &this.filtering {
+                        let focus = filtering.input.read(cx).focus_handle(cx);
+                        window.focus(&focus, cx);
+                    }
+                }))
+                .child(div().text_size(px(12.)).text_color(color(theme.role("fg-muted"))).child("Filter"))
+                .child(div().flex_1().child(input))
+                .child(
+                    div()
+                        .id("filter-count")
+                        .role(Role::Label)
+                        .aria_label(format!("{shown} of {total} shown"))
+                        .text_size(px(12.))
+                        .text_color(color(theme.role("fg-muted")))
+                        .child(format!("{shown} of {total}")),
+                ),
+        )
+    }
 }
 
 /// Where the drag combo's left edge goes: the grab point stays under the cursor, but a
@@ -1595,10 +1756,15 @@ impl Render for Pane {
             // Focus can't move during a render; start the rename right after it.
             cx.defer_in(window, move |this, window, cx| this.begin_rename(path, window, cx));
         }
-        let focused = self.focused_folder().read(cx);
-        let title =
-            focused.dir().file_name().map_or_else(|| "Macintosh HD".to_owned(), |n| n.to_string_lossy().into_owned());
-        let count = focused.entries().len();
+        let (title, total, shown, filtered) = {
+            let focused = self.focused_folder().read(cx);
+            let title = focused
+                .dir()
+                .file_name()
+                .map_or_else(|| "Macintosh HD".to_owned(), |n| n.to_string_lossy().into_owned());
+            (title, focused.entries().len(), focused.row_count(), focused.filter().is_some())
+        };
+        let filtering = self.filtering.is_some();
         let mut context = match self.mode {
             ViewMode::List => "FileList".to_owned(),
             ViewMode::Columns => "FileList ColumnView".to_owned(),
@@ -1606,6 +1772,9 @@ impl Render for Pane {
         if cx.global::<Ui>().settings.keymap == KeymapLayer::Vim {
             // While a mark waits for its letter, the Vim bindings step aside so the letter arrives as typed.
             context.push_str(if self.mark_pending.is_some() { " VimPending" } else { " vim" });
+        }
+        if filtering {
+            context.push_str(" Filtered");
         }
         let body = match self.mode {
             ViewMode::List => {
@@ -1644,10 +1813,14 @@ impl Render for Pane {
             }
             ViewMode::Columns => self.render_columns(cx).into_any_element(),
         };
-        div()
+        let list = div()
             .id("file-list")
             .role(Role::ListBox)
-            .aria_label(format!("{title}, {count} items"))
+            .aria_label(if filtered {
+                format!("{title}, {shown} of {total} items")
+            } else {
+                format!("{title}, {total} items")
+            })
             .key_context(context.as_str())
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::move_up))
@@ -1672,6 +1845,8 @@ impl Render for Pane {
             .on_action(cx.listener(Self::paste_move_files))
             .on_action(cx.listener(Self::begin_mark))
             .on_action(cx.listener(Self::begin_jump))
+            .on_action(cx.listener(Self::start_filter))
+            .on_action(cx.listener(Self::clear_filter))
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if cx.has_active_drag() {
@@ -1688,10 +1863,17 @@ impl Render for Pane {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.resize = None))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.resize = None))
-            .size_full()
+            .flex_1()
+            .min_h_0()
+            .w_full()
             // Wider-than-pane tables are clipped for now; horizontal scrolling comes with view settings.
             .overflow_hidden()
-            .child(body)
+            .child(body);
+        if self.focus_list_after_filter {
+            self.focus_list_after_filter = false;
+            cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));
+        }
+        div().size_full().flex().flex_col().children(self.render_filter(cx)).child(list)
     }
 }
 

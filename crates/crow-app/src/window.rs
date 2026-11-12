@@ -4,19 +4,22 @@ use std::path::{Path, PathBuf};
 
 use crow_core::{SidebarEdit, Tabs, ViewMode};
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role, SharedString,
-    Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, point, prelude::*, px, size,
+    App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role, ScrollStrategy,
+    SharedString, Subscription, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions, div,
+    img, point, prelude::*, px, size, uniform_list,
 };
 
 use crate::actions::{
     AddToSidebar, ApplyThemeEverywhere, CloseTab, GoBack, GoForward, GoToFolder, MoveDown, MoveUp, NewTab, NextTab,
-    OpenParent, PreviousTab, ResetFolderView, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, UseViewAsDefaults,
-    ViewAsColumns, ViewAsList, WhyThisView,
+    OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView, ShowCommandPalette, ShowSearch, ShowThemePicker,
+    SwitchFocus, ToggleHiddenFiles, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
 };
 use crate::operations::{self, Clipboard, Operations};
+use crate::palette::{self, Item};
 use crate::pane::Pane;
 use crate::pane::PaneEvent;
 use crate::preview;
+use crate::search::{SearchEvent, SearchView};
 use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::style::{color, color_alpha, icon, ui_font};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -59,6 +62,10 @@ pub struct CrowWindow {
     /// "Why this view?", while open.
     why: Option<FocusHandle>,
     picker: Option<ThemePicker>,
+    /// Cmd-K, while open.
+    palette: Option<Palette>,
+    /// Cmd-F, while its results replace the pane.
+    search: Option<Entity<SearchView>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -78,6 +85,16 @@ impl ThemePicker {
             _ => "system".into(),
         }
     }
+}
+
+/// Cmd-K: folders (favorites, Recent, subfolders) or, after `>`, commands.
+struct Palette {
+    input: Entity<TextInput>,
+    items: Vec<Item>,
+    cursor: usize,
+    folders: Vec<palette::FolderCandidate>,
+    scroll: UniformListScrollHandle,
+    _subscription: Subscription,
 }
 
 impl CrowWindow {
@@ -116,6 +133,8 @@ impl CrowWindow {
             show_activity: false,
             why: None,
             picker: None,
+            palette: None,
+            search: None,
             _subscriptions: subscriptions,
         }
     }
@@ -133,6 +152,10 @@ impl CrowWindow {
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.pane().read(cx).current_dir(cx);
+        self.open_tab_at(dir, window, cx);
+    }
+
+    fn open_tab_at(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let show_hidden = self.show_hidden;
         let pane = cx.new(|cx| Pane::new(dir, show_hidden, false, cx));
         self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
@@ -182,6 +205,9 @@ impl CrowWindow {
         for (_, pane) in self.tabs.iter() {
             pane.update(cx, |pane, cx| pane.set_show_hidden(show, cx));
         }
+        if let Some(search) = &self.search {
+            search.update(cx, |search, cx| search.set_show_hidden(show, cx));
+        }
     }
 
     fn go_to_folder(&mut self, _: &GoToFolder, window: &mut Window, cx: &mut Context<Self>) {
@@ -192,6 +218,7 @@ impl CrowWindow {
             let cwd = this.pane().read(cx).current_dir(cx);
             let home = home_dir();
             match event {
+                TextInputEvent::Changed => {}
                 TextInputEvent::CompletionRequested => {
                     if let Some(completed) = crow_core::complete_typed(&typed, &cwd, &home) {
                         input.update(cx, |input, cx| input.set_text(completed, window, cx));
@@ -584,19 +611,11 @@ impl CrowWindow {
     fn on_pane_event(&mut self, event: &PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PaneEvent::Run(request) => self.run_request(request.clone(), window, cx),
-            PaneEvent::Copy { paths, cut } => {
-                let change_count = crow_macos::write_file_urls(paths);
-                let n = paths.len();
-                let ops = cx.global_mut::<Operations>();
-                ops.clipboard = Some(Clipboard { paths: paths.clone(), cut: *cut, change_count });
-                let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
-                ops.message = Some((
-                    if *cut { format!("Cut {what}: paste to move") } else { format!("Copied {what}") }.into(),
-                    false,
-                ));
-                cx.notify();
-            }
+            PaneEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
             PaneEvent::Entered(dir) => {
+                if self.search.is_some() {
+                    self.close_search(window, cx);
+                }
                 if !self.bench {
                     ui::record_visit(dir, cx);
                 }
@@ -1243,6 +1262,333 @@ impl CrowWindow {
         cx.notify();
     }
 
+    // ----- search -----
+
+    fn show_search(&mut self, _: &ShowSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(search) = &self.search {
+            search.update(cx, |search, cx| search.focus_input(window, cx));
+            return;
+        }
+        if self.picker.is_some() || self.go_to.is_some() || self.sheet.is_some() || self.palette.is_some() {
+            return;
+        }
+        let folder = self.pane().read(cx).current_dir(cx);
+        let (home, show_hidden) = (cx.global::<Ui>().home.clone(), self.show_hidden);
+        let search = cx.new(|cx| SearchView::new(folder, home, show_hidden, cx));
+        self._subscriptions.push(cx.observe(&search, |_, _, cx| cx.notify()));
+        self._subscriptions.push(cx.subscribe_in(&search, window, |this, search, event, window, cx| {
+            this.on_search_event(search.clone(), event, window, cx)
+        }));
+        search.update(cx, |search, cx| search.focus_input(window, cx));
+        self.search = Some(search);
+        cx.notify();
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(search) = self.search.take() {
+            search.update(cx, |search, cx| search.cancel(cx));
+            self.focus_pane(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn on_search_event(
+        &mut self,
+        search: Entity<SearchView>,
+        event: &SearchEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SearchEvent::Close => self.close_search(window, cx),
+            SearchEvent::FocusResults => search.update(cx, |search, cx| search.focus_results(window, cx)),
+            SearchEvent::Reveal(path) => {
+                self.pane().update(cx, |pane, cx| pane.reveal(path.clone(), cx));
+                self.close_search(window, cx);
+                self.focus_pane(window, cx);
+            }
+            SearchEvent::Open { path, is_dir } => {
+                if *is_dir {
+                    self.pane().update(cx, |pane, cx| pane.navigate(path.clone(), cx));
+                    self.close_search(window, cx);
+                    self.focus_pane(window, cx);
+                } else {
+                    self.pane().update(cx, |pane, cx| pane.open_file(path.clone(), cx));
+                }
+            }
+            SearchEvent::Run(request) => {
+                self.close_search(window, cx);
+                self.run_request(request.clone(), window, cx);
+            }
+            SearchEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
+        }
+    }
+
+    fn copy_paths(&mut self, paths: Vec<PathBuf>, cut: bool, cx: &mut Context<Self>) {
+        let change_count = crow_macos::write_file_urls(&paths);
+        let n = paths.len();
+        let ops = cx.global_mut::<Operations>();
+        ops.clipboard = Some(Clipboard { paths, cut, change_count });
+        let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
+        ops.message =
+            Some((if cut { format!("Cut {what}: paste to move") } else { format!("Copied {what}") }.into(), false));
+        cx.notify();
+    }
+
+    // ----- command palette -----
+
+    fn show_palette(&mut self, _: &ShowCommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some()
+            || self.picker.is_some()
+            || self.go_to.is_some()
+            || self.sheet.is_some()
+            || self.search.is_some()
+        {
+            return;
+        }
+        let (home, favorites, recents) = {
+            let ui = cx.global::<Ui>();
+            let favorites: Vec<PathBuf> =
+                ui.favorites().into_iter().flat_map(|(_, group)| group).map(|f| f.path).collect();
+            (ui.home.clone(), favorites, ui.palette_recents.clone())
+        };
+        let subfolders = self.pane().read(cx).subfolders(cx);
+        let folders = palette::folder_candidates(favorites, recents, subfolders, &home);
+        let items = palette::items("", &folders);
+        let input = cx.new(|cx| TextInput::new("", "Go to Folder or > for Commands", cx));
+        let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
+            TextInputEvent::Changed => {
+                let query = input.read(cx).text().to_owned();
+                this.refresh_palette(&query, cx);
+            }
+            TextInputEvent::Confirmed => this.confirm_palette(false, window, cx),
+            TextInputEvent::Cancelled => this.close_palette(window, cx),
+            TextInputEvent::CompletionRequested => {}
+        });
+        let focus = input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.palette = Some(Palette {
+            input,
+            items,
+            cursor: 0,
+            folders,
+            scroll: UniformListScrollHandle::new(),
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn refresh_palette(&mut self, query: &str, cx: &mut Context<Self>) {
+        let Some(palette) = &mut self.palette else { return };
+        let items = palette::items(query, &palette.folders);
+        palette.items = items;
+        palette.cursor = 0;
+        palette.scroll.scroll_to_item(0, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    fn move_palette(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(palette) = &mut self.palette else { return };
+        let last = palette.items.len().saturating_sub(1);
+        palette.cursor = palette.cursor.saturating_add_signed(delta).min(last);
+        palette.scroll.scroll_to_item(palette.cursor, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.take().is_none() {
+            return;
+        }
+        self.focus_pane(window, cx);
+        cx.notify();
+    }
+
+    fn palette_open_in_tab(&mut self, _: &PaletteOpenInTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_palette(true, window, cx);
+    }
+
+    fn confirm_palette(&mut self, new_tab: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.take() else { return };
+        let item = palette.items.get(palette.cursor).cloned();
+        self.focus_pane(window, cx);
+        match item {
+            Some(Item::Command(command)) => self.run_command(command.id, window, cx),
+            Some(Item::Folder { path, .. }) if new_tab => self.open_tab_at(path, window, cx),
+            Some(Item::Folder { path, .. }) => self.pane().update(cx, |pane, cx| pane.navigate(path, cx)),
+            None => {}
+        }
+        cx.notify();
+    }
+
+    fn run_command(&mut self, command: palette::CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        use palette::CommandId;
+        match command {
+            CommandId::NewTab => self.new_tab(&NewTab, window, cx),
+            CommandId::CloseTab => self.close_tab(&CloseTab, window, cx),
+            CommandId::NextTab => self.next_tab(&NextTab, window, cx),
+            CommandId::PreviousTab => self.previous_tab(&PreviousTab, window, cx),
+            CommandId::NewWindow => {
+                let dir = self.pane().read(cx).current_dir(cx);
+                open(dir, false, cx);
+            }
+            CommandId::SwitchFocus => self.switch_focus(&SwitchFocus, window, cx),
+            CommandId::ToggleHiddenFiles => self.toggle_hidden(&ToggleHiddenFiles, window, cx),
+            CommandId::OpenParent => self.open_parent(&OpenParent, window, cx),
+            CommandId::GoBack => self.go_back(&GoBack, window, cx),
+            CommandId::GoForward => self.go_forward(&GoForward, window, cx),
+            CommandId::GoToFolder => self.go_to_folder(&GoToFolder, window, cx),
+            CommandId::ViewAsList => self.view_as_list(&ViewAsList, window, cx),
+            CommandId::ViewAsColumns => self.view_as_columns(&ViewAsColumns, window, cx),
+            CommandId::Undo => self.undo(None, cx),
+            CommandId::Redo => self.redo(cx),
+            CommandId::AddToSidebar => self.add_to_sidebar(&AddToSidebar, window, cx),
+            CommandId::WhyThisView => self.why_this_view(&WhyThisView, window, cx),
+            CommandId::UseViewAsDefaults => self.use_view_as_defaults(&UseViewAsDefaults, window, cx),
+            CommandId::ResetFolderView => self.reset_folder_view(&ResetFolderView, window, cx),
+            CommandId::ShowThemePicker => self.show_theme_picker(&ShowThemePicker, window, cx),
+            CommandId::ToggleActivity => {
+                self.show_activity = !self.show_activity;
+                cx.notify();
+            }
+            CommandId::RemoveFromSidebar
+            | CommandId::MoveFavoriteUp
+            | CommandId::MoveFavoriteDown
+            | CommandId::Eject => {
+                self.sidebar.update(cx, |sidebar, cx| sidebar.run_command(command, window, cx));
+            }
+            CommandId::Quit => cx.quit(),
+            other => self.pane().update(cx, |pane, cx| pane.run_command(other, window, cx)),
+        }
+    }
+
+    fn render_palette(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let (input, scroll, count) = {
+            let palette = self.palette.as_ref()?;
+            (palette.input.clone(), palette.scroll.clone(), palette.items.len())
+        };
+        let ui = cx.global::<Ui>();
+        let theme = ui.theme.clone();
+        let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
+        let muted = color(theme.role("fg-muted"));
+        let mut context = "Sheet Palette".to_owned();
+        if vim {
+            context.push_str(" vim");
+        }
+        let list: gpui::AnyElement = if count == 0 {
+            div()
+                .id("palette-empty")
+                .p_2()
+                .role(Role::Label)
+                .aria_label("No matches")
+                .child("No matches")
+                .into_any_element()
+        } else {
+            let height = (count.min(14) as f32) * 26.0;
+            div()
+                .id("palette-list")
+                .role(Role::ListBox)
+                .aria_label("Commands and folders")
+                .h(px(height))
+                .flex()
+                .flex_col()
+                .child(
+                    uniform_list("palette-items", count, cx.processor(Self::render_palette_rows))
+                        .track_scroll(&scroll)
+                        .flex_1(),
+                )
+                .into_any_element()
+        };
+        Some(
+            div().absolute().top(px(52.)).left_0().right_0().flex().justify_center().child(
+                div()
+                    .id("palette")
+                    .role(Role::Dialog)
+                    .aria_label("Command Palette")
+                    .key_context(context.as_str())
+                    .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_palette(-1, cx)))
+                    .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_palette(1, cx)))
+                    .on_action(cx.listener(Self::palette_open_in_tab))
+                    .w(px(560.))
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(color(theme.role("surface")))
+                    .border_1()
+                    .border_color(color(theme.role("border")))
+                    .shadow_lg()
+                    .child(input)
+                    .child(list)
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(muted)
+                            .child("> commands · Return runs · ⌘Return opens a folder in a new tab"),
+                    ),
+            ),
+        )
+    }
+
+    fn render_palette_rows(
+        &mut self,
+        range: std::ops::Range<usize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<impl IntoElement + use<>> {
+        let Some(palette) = self.palette.as_ref() else { return Vec::new() };
+        let ui = cx.global::<Ui>();
+        let theme = &ui.theme;
+        let (fg, muted, accent) = (color(theme.role("fg")), color(theme.role("fg-muted")), theme.role("accent"));
+        let (cursor, count) = (palette.cursor, palette.items.len());
+        range
+            .filter_map(|i| {
+                let item = palette.items.get(i)?;
+                let selected = i == cursor;
+                let (icon_path, label, keys) = match item {
+                    Item::Command(command) => (None, command.label.to_owned(), command.keys),
+                    Item::Folder { path, label } => (Some(path.clone()), label.clone(), ""),
+                };
+                let row = div()
+                    .id(("palette-row", i))
+                    .role(Role::ListBoxOption)
+                    .aria_label(label.clone())
+                    .aria_position_in_set(i + 1)
+                    .aria_size_of_set(count)
+                    .aria_selected(selected)
+                    .when(selected, |row| row.aria_active_descendant())
+                    .h(px(26.))
+                    .px_2()
+                    .rounded_md()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(selected, |row| row.bg(color_alpha(accent, 0x55)))
+                    .debug_selector(|| format!("palette-row-{i}"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(palette) = &mut this.palette {
+                            palette.cursor = i;
+                        }
+                        this.confirm_palette(false, window, cx);
+                    }))
+                    .child(div().size(px(16.)).flex_none().children(
+                        icon_path.and_then(|path| icon(&path, true, 16)).map(|image| img(image).size(px(16.))),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_color(fg)
+                            .child(label),
+                    )
+                    .child(div().text_size(px(11.)).text_color(muted).child(keys));
+                Some(row.into_any_element())
+            })
+            .collect()
+    }
+
     fn render_picker(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let picker = self.picker.as_ref()?;
         let ui = cx.global::<Ui>();
@@ -1386,13 +1732,18 @@ impl Render for CrowWindow {
         let current = self.pane().read(cx).current_dir(cx);
         self.sidebar.update(cx, |s, cx| s.set_current(current, cx));
         let sidebar = self.sidebar.clone();
-        let preview = list_view.then(|| self.render_preview(cx));
+        let preview = (list_view && self.search.is_none()).then(|| self.render_preview(cx));
         let path_bar = self.render_path_bar(cx);
         let go_to = self.render_go_to(cx);
         let sheet = self.render_sheet(cx);
         let activity = self.show_activity.then(|| self.render_activity(cx));
         let why = self.render_why(cx);
         let picker = self.render_picker(cx);
+        let palette = self.render_palette(cx);
+        let center: gpui::AnyElement = match &self.search {
+            Some(search) => div().flex_1().min_w_0().h_full().child(search.clone()).into_any_element(),
+            None => div().flex_1().min_w_0().h_full().child(self.pane().clone()).into_any_element(),
+        };
         div()
             .id("crow")
             .role(Role::Application)
@@ -1423,6 +1774,8 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::use_view_as_defaults))
             .on_action(cx.listener(Self::reset_folder_view))
             .on_action(cx.listener(Self::show_theme_picker))
+            .on_action(cx.listener(Self::show_palette))
+            .on_action(cx.listener(Self::show_search))
             .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, _, cx| {
                 this.show_activity = !this.show_activity;
                 cx.notify();
@@ -1436,21 +1789,14 @@ impl Render for CrowWindow {
             .text_size(px(font_size))
             .child(title_bar)
             .children(tab_bar)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .child(sidebar)
-                    .child(div().flex_1().min_w_0().h_full().child(self.pane().clone()))
-                    .children(preview),
-            )
+            .child(div().flex_1().min_h_0().flex().child(sidebar).child(center).children(preview))
             .child(path_bar)
             .children(go_to)
             .children(sheet)
             .children(activity)
             .children(why)
             .children(picker)
+            .children(palette)
     }
 }
 
@@ -1819,6 +2165,208 @@ mod tests {
         })
     }
 
+    fn wait_for_search(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+        for _ in 0..400 {
+            cx.run_until_parked();
+            let busy =
+                view.read_with(cx, |w, cx| w.search.as_ref().is_some_and(|search| search.read(cx).is_searching()));
+            if !busy {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("search never finished");
+    }
+
+    #[gpui::test]
+    fn search_panel_streams_names_and_contents(cx: &mut TestAppContext) {
+        let root = fixture("search");
+        std::fs::write(root.join("notes.txt"), "needle here\n").expect("create fixture");
+        std::fs::write(root.join("alpha/needle.txt"), "nothing\n").expect("create fixture");
+        std::fs::write(root.join("beta/other.txt"), "needle in beta\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Folder);
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.contains(&root.join("notes.txt")), "{paths:?}");
+        assert!(paths.contains(&root.join("alpha/needle.txt")), "{paths:?}");
+        assert!(paths.contains(&root.join("beta/other.txt")), "contents are searched too: {paths:?}");
+        assert_eq!(
+            search.read_with(&cx, |search, _| search.result_content(&root.join("beta/other.txt"))),
+            Some((1, "needle in beta".to_owned()))
+        );
+    }
+
+    #[gpui::test]
+    fn search_everything_turns_the_rules_off(cx: &mut TestAppContext) {
+        let root = fixture("search-rules");
+        std::fs::create_dir_all(root.join("node_modules/pkg")).expect("create fixture");
+        std::fs::write(root.join("node_modules/pkg/needle.txt"), "needle\n").expect("create fixture");
+        std::fs::write(root.join("outside.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.contains(&root.join("outside.txt")));
+        assert!(!paths.iter().any(|path| path.ends_with("node_modules/pkg/needle.txt")), "{paths:?}");
+        assert!(search.read_with(&cx, |search, _| search.skipped_count()) > 0);
+
+        cx.simulate_keystrokes("cmd-shift-a");
+        wait_for_search(&view, &mut cx);
+        assert!(search.read_with(&cx, |search, _| search.everything()));
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.contains(&root.join("node_modules/pkg/needle.txt")), "{paths:?}");
+        assert_eq!(search.read_with(&cx, |search, _| search.skipped_count()), 0);
+    }
+
+    #[gpui::test]
+    fn search_results_copy_and_trash_the_selection(cx: &mut TestAppContext) {
+        let root = fixture("search-actions");
+        std::fs::write(root.join("notes.txt"), "needle\n").expect("create fixture");
+        std::fs::write(root.join("alpha/needle.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        cx.simulate_keystrokes("tab cmd-a cmd-c");
+
+        let copied = cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|clip| clip.paths.clone()));
+        let copied = copied.expect("copy filled the clipboard");
+        assert!(copied.contains(&root.join("notes.txt")), "{copied:?}");
+        assert!(copied.contains(&root.join("alpha/needle.txt")), "{copied:?}");
+
+        cx.simulate_keystrokes("cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists(), "trash acted on the results");
+        assert!(!root.join("alpha/needle.txt").exists());
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "an operation closes the search");
+    }
+
+    #[gpui::test]
+    fn search_result_return_navigates_and_closes(cx: &mut TestAppContext) {
+        let root = fixture("search-open");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("alpha");
+        wait_for_search(&view, &mut cx);
+
+        cx.simulate_keystrokes("tab");
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()));
+    }
+
+    #[gpui::test]
+    fn search_result_cmd_r_reveals_the_file(cx: &mut TestAppContext) {
+        let root = fixture("search-reveal");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+
+        cx.simulate_keystrokes("tab");
+        cx.simulate_keystrokes("cmd-r");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()));
+        assert_eq!(dir(&view, &cx), root);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+    }
+
+    #[gpui::test]
+    fn search_escape_closes_and_cancels(cx: &mut TestAppContext) {
+        let root = fixture("search-close");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()));
+    }
+
+    #[gpui::test]
+    fn command_palette_runs_a_command(cx: &mut TestAppContext) {
+        let root = fixture("palette-command");
+        std::fs::write(root.join(".secret"), "").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.item_count(cx));
+        assert_eq!(count(&cx), 3);
+
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.palette.is_some()));
+        cx.simulate_input(">toggle hidden");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "Return closes the palette");
+        assert_eq!(count(&cx), 4, "the command ran");
+    }
+
+    #[gpui::test]
+    fn command_palette_goes_to_a_recent_folder(cx: &mut TestAppContext) {
+        let root = fixture("palette-go");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        cx.simulate_keystrokes("cmd-up");
+        settle(&view, &mut cx);
+        assert!(
+            cx.read(|cx| cx.global::<Ui>().palette_recents.contains(&root.join("alpha"))),
+            "the visit is in the palette's recent list"
+        );
+
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input("alpha");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()));
+    }
+
+    #[gpui::test]
+    fn command_palette_cmd_return_opens_a_new_tab(cx: &mut TestAppContext) {
+        let root = fixture("palette-tab");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input("beta");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-enter");
+        settle(&view, &mut cx);
+
+        assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2);
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()));
+    }
+
+    #[gpui::test]
+    fn command_palette_vim_keys_move_the_cursor(cx: &mut TestAppContext) {
+        let root = fixture("palette-vim");
+        let (view, mut cx) = open(cx, &root);
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        let cursor = |cx: &VisualTestContext| view.read_with(cx, |w, _| w.palette.as_ref().map(|p| p.cursor));
+        assert_eq!(cursor(&cx), Some(0));
+        cx.simulate_keystrokes("j");
+        assert_eq!(cursor(&cx), Some(1), "j moves down");
+        cx.simulate_keystrokes("k");
+        assert_eq!(cursor(&cx), Some(0), "k moves up");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()));
+    }
+
     #[gpui::test]
     fn theme_picker_previews_reverts_and_saves(cx: &mut TestAppContext) {
         theme_index();
@@ -1940,6 +2488,115 @@ mod tests {
     }
 
     #[gpui::test]
+    fn filter_narrows_rows_and_escape_restores_focus(cx: &mut TestAppContext) {
+        let root = fixture("filter");
+        let (view, mut cx) = open(cx, &root);
+
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("AL");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)], "matching is case-insensitive");
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.item_count(cx)), 3, "the total stays visible");
+
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx).len(), 3, "Escape clears the filter");
+        cx.simulate_keystrokes("n");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "focus is back on the list for type-to-select");
+    }
+
+    #[gpui::test]
+    fn filter_arrows_and_return_act_on_matching_rows(cx: &mut TestAppContext) {
+        let root = fixture("filter-enter");
+        let (view, mut cx) = open(cx, &root);
+
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("a");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx).iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["alpha", "beta"]);
+
+        cx.simulate_keystrokes("down");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "arrows move within the matches");
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("beta"), "Return opens the selected match");
+        assert!(rows(&view, &cx).is_empty(), "the filter does not follow the navigation");
+
+        cx.simulate_keystrokes("cmd-up");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx).len(), 3, "going back shows the whole folder again");
+    }
+
+    #[gpui::test]
+    fn filter_commands_and_escape_work_with_the_list_focused(cx: &mut TestAppContext) {
+        let root = fixture("filter-list-focus");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("a");
+        settle(&view, &mut cx);
+
+        let focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+        cx.update(|window, cx| window.focus(&focus, cx));
+        cx.simulate_keystrokes("cmd-a");
+        assert_eq!(selected_names(&view, &cx), ["alpha", "beta"], "Cmd-A selects matching rows only");
+
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx).len(), 3, "Escape on the list clears the filter too");
+    }
+
+    #[gpui::test]
+    fn filter_ignores_inline_children_until_cleared(cx: &mut TestAppContext) {
+        let root = fixture("filter-inline");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        assert!(rows(&view, &cx).contains(&("inner".to_owned(), 1)), "alpha is open inline");
+
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("inner");
+        settle(&view, &mut cx);
+        assert!(rows(&view, &cx).is_empty(), "a filter shows this folder's own matches, flat");
+
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert!(rows(&view, &cx).contains(&("inner".to_owned(), 1)), "clearing restores the open folder");
+    }
+
+    #[gpui::test]
+    fn filter_letters_stay_in_the_field_in_the_vim_layer(cx: &mut TestAppContext) {
+        let root = fixture("filter-vim");
+        let (view, mut cx) = open(cx, &root);
+        use_vim(&view, &mut cx);
+
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("al");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)], "l filters instead of moving right");
+
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("j");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "Vim keys work again after the filter");
+    }
+
+    #[gpui::test]
+    fn filter_narrows_the_focused_column(cx: &mut TestAppContext) {
+        let root = fixture("filter-columns");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("al");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)]);
+
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx).len(), 3);
+    }
+
+    #[gpui::test]
     fn sorting_keeps_folders_first_and_the_selection(cx: &mut TestAppContext) {
         let root = fixture("sort");
         std::fs::write(root.join("big.bin"), vec![0u8; 5000]).expect("create fixture");
@@ -1951,6 +2608,22 @@ mod tests {
         settle(&view, &mut cx);
         assert_eq!(names(&view, &cx), ["alpha", "beta", "big.bin", "notes.txt"], "largest file first, folders on top");
         assert_eq!(selected(&view, &cx), picked, "the selection follows the item, not the row");
+    }
+
+    #[gpui::test]
+    fn exclude_config_reloads_live_and_keeps_the_last_good_rules(cx: &mut TestAppContext) {
+        let root = fixture("exclude-reload");
+        let (view, mut cx) = open(cx, &root);
+        let names = |cx: &VisualTestContext| cx.read(|cx| cx.global::<Ui>().exclude.set(crow_core::SetName::Dev).names);
+        assert!(names(&cx).contains(&"node_modules".to_owned()));
+
+        write_config(&view, &mut cx, "exclude.toml", "[dev]\nnames = [\"only_this\"]\n");
+        assert_eq!(names(&cx), vec!["only_this".to_owned()]);
+
+        write_config(&view, &mut cx, "exclude.toml", "this is not toml");
+        assert_eq!(names(&cx), vec!["only_this".to_owned()], "a broken file keeps the last good rules");
+        let error = cx.read(|cx| cx.global::<Ui>().config_error().map(|e| e.to_string()).unwrap_or_default());
+        assert!(error.contains("exclude.toml"), "{error}");
     }
 
     #[gpui::test]

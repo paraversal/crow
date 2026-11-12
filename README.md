@@ -3,7 +3,7 @@
 A Finder-style file explorer for macOS, written in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 It keeps Finder's directness and aims to be faster, more predictable and keyboard-first.
 
-Status: Phase 1 (the "daily driver" MVP), milestone M5.
+Status: Phase 1 (the "daily driver" MVP), milestone M6.
 
 ## Build and run
 
@@ -28,7 +28,7 @@ Running as `Crow.app` makes macOS privacy prompts name Crow instead of your term
 
 ## Configuration
 
-Three files in `~/.config/crow/`, each created on first launch with every option documented.
+Four files in `~/.config/crow/`, each created on first launch with every option documented.
 Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
@@ -36,6 +36,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 | `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), font, hidden files, window size |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
+| `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search summary counts skipped folders and lists the rule for each. |
 
 Themes come from the global index in `~/.config/themes`. View ▸ Theme… (Cmd-Option-T)
 previews each theme as you move through the list; Apply to All Apps (Cmd-Return) sets it for every app that reads the index.
@@ -48,7 +49,8 @@ Finder's keys work as in Finder: arrows (Shift extends), Option-Up/Down, Cmd-Up/
 Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (Tab completes),
 Cmd-Shift-. and Space. Typing a name selects it. Tab moves focus between the sidebar and the list.
 Column headers sort (click again to reverse) and their dividers resize.
-Cmd-2 shows a list, Cmd-3 columns. In the list, Right opens the selected folder inline (Right again goes into it); Left steps to the row that contains a nested one, closes an open folder, or goes up from the top level. In columns, Left and Right move between them, and Left in the leftmost column goes up a folder. Vim `h`/`l` follow the same keys.
+Type `/` to filter the focused folder; the field shows the query and "n of N". Esc clears it,
+arrows move within the matches, and Return opens the selection. Cmd-2 shows a list, Cmd-3 columns. In the list, Right opens the selected folder inline (Right again goes into it); Left steps to the row that contains a nested one, closes an open folder, or goes up from the top level. In columns, Left and Right move between them, and Left in the leftmost column goes up a folder. Vim `h`/`l` follow the same keys.
 
 Sidebar: drag favorites to reorder them (or Cmd-Option-Up/Down), drop files on any row to move or
 copy them there, drop folders on a group's title to add them. Ctrl-Cmd-T adds the selected folder.
@@ -63,5 +65,11 @@ Cmd-Delete moves to the Trash, Cmd-Option-Delete deletes permanently (after aski
 Cmd-C / Cmd-X / Cmd-V copy, cut and paste (also to and from Finder), Cmd-Option-V moves,
 Cmd-Z / Cmd-Shift-Z undo and redo, Esc cancels a running operation, Cmd-Option-L shows activity.
 Nothing is ever overwritten: name clashes ask first, and Replace moves the old item to the Trash.
+
+Cmd-K opens the command palette: type to go to a favorite, recent or subfolder; start with `>`
+for commands (labels and their keys). Return goes there, Cmd-Return opens a folder in a new tab.
+Cmd-F searches names and contents in the current folder; its scope buttons switch to Home or
+Everywhere (Spotlight). Cmd-Shift-A searches with every `exclude.toml` set off. Results open with
+Return, reveal with Cmd-R, Quick Look with Space, and take the usual copy, cut and trash keys.
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).

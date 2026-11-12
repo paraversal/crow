@@ -18,6 +18,7 @@ use gpui::{
 };
 
 use crate::actions::{Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, OpenSelection, RemoveFromSidebar};
+use crate::palette::CommandId;
 use crate::pane::DraggedSelection;
 use crate::style::{color, color_alpha, icon};
 use crate::ui::{self, Ui};
@@ -322,6 +323,17 @@ impl Sidebar {
     fn eject_cursor(&mut self, _: &Eject, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(Row::Volume(v)) = self.cursor_row(cx) {
             self.eject(v, cx);
+        }
+    }
+
+    /// Run a palette command that acts on the sidebar's cursor row.
+    pub fn run_command(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        match command {
+            CommandId::RemoveFromSidebar => self.remove(&RemoveFromSidebar, window, cx),
+            CommandId::MoveFavoriteUp => self.favorite_up(&MoveFavoriteUp, window, cx),
+            CommandId::MoveFavoriteDown => self.favorite_down(&MoveFavoriteDown, window, cx),
+            CommandId::Eject => self.eject_cursor(&Eject, window, cx),
+            _ => {}
         }
     }
 

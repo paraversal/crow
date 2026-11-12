@@ -2,6 +2,7 @@
 //! `crow-app` renders it and feeds it events.
 
 mod config;
+mod exclude;
 mod extensions;
 mod history;
 mod paths;
@@ -14,6 +15,7 @@ mod tabs;
 mod views;
 
 pub use config::{abbreviate_home, edit_toml, expand_home, home, state_dir, write_atomic};
+pub use exclude::{DEFAULT_EXCLUDE, Exclude, ExcludeSet, SetName, SetRules, exclude_path, load_exclude};
 pub use extensions::{Align, Column, ColumnContext, Extensions, PreviewContent, Previewer, TextPreviewer};
 pub use history::History;
 pub use paths::{complete_typed, resolve_typed};
