@@ -11,6 +11,7 @@ Branch: m5-fix · PR: https://github.com/paraversal/file-crow/pull/6 · Last upd
 | D7 Native combo handoff | done (this commit) | Crow now starts its own `NSDraggingSession` from the external-payload hook, using the retained mouse-down event and GPUI's window as the dragging source. The native image is an AppKit-drawn copy of the combo (22 px icon, pill with the label/“N items”), anchored with the same grab-point rule. GPUI's drag is stopped, so re-entry shows one image; the GPUI view is hidden once the pointer is outside the window so it cannot clip at the edge. Verified with screenshots outside and after re-entry: icon+pill both places, one image. Hand checks: drag-out to Finder/Mail, drop back inside, re-entry tracking. |
 | D8 Combo start and attraction | done (this commit) | The pill is measured with text shaping at drag start (before the first frame), so the combo is anchored from frame one; no animation (user chose measure/no easing). Verified in the first-frame and 1.2 s screenshots. |
 | D5 Drag image: combo and duplicate after re-entry | done (this commit) | `DraggedFiles` is now a 22 px icon plus a name pill. The `on_drag` offset anchors it; its width is measured at prepaint and, when the cursor is beyond it, the combo shifts so its right edge touches the cursor. A thread-local set in `external_drag_payload` hides the GPUI view while the native drag owns the image; the next drag’s constructor clears it. Verified visually in both grab positions and with an out-and-back drag; one image at a time. |
+| D9 Target flicker after Crow→outside→Crow | done (this commit) | Cause: GPUI's macOS view replays the last in-window `MouseMove` every 16 ms while the button is held (`synthetic_drag` in `gpui_macos/src/window.rs`). GPUI's own `start_external_drag` bumps `synthetic_drag_counter` to stop that loop; Crow's `crow_macos::begin_drag` cannot, so the stale move (the point where the pointer left the window) keeps arriving after re-entry and alternates with the real `draggingUpdated` position. Finder drags never start the loop. Fix (user chose the GPUI change): the replay loop stops once a platform file drag has entered the window (`external_files_dragged`). Kept as `patches/gpui-stop-synthetic-drag-on-file-drag.patch`, applied idempotently by `scripts/fetch-gpui.sh`; the CI cache key now includes the patches. Not measured with a real drag; hand check: Crow→outside→Crow highlight in list and column view. |
 | D6 Chevron rotation | done (this commit) | The chevron is painted as a path in a fixed 14 px box; expanded changes the vertices, not the glyph or position. Visual check. |
 
 ## Questions
@@ -22,6 +23,7 @@ Branch: m5-fix · PR: https://github.com/paraversal/file-crow/pull/6 · Last upd
   - Keep dropping a favorite on a group title (moves it to that group’s start), with one line under the title.
   - Continue on `m5-fix`, update PR #6.
 - Q2 (asked 2026-11-12): explain the flicker and group-title questions. → answers as above.
+- Q3 (asked 2026-11-12): D9 fix — one-line vendored GPUI change (stop the synthetic replay once a platform file drag enters) or an app-side filter that ignores the replayed position? → the one-line GPUI fix (user).
 - Out of scope (future, user): dropping an item on the sidebar should choose between “add to favorites” and “move into that folder” by cursor position, with Finder-like “+” tooltip feedback.
 
 ## Decisions
@@ -29,6 +31,7 @@ Branch: m5-fix · PR: https://github.com/paraversal/file-crow/pull/6 · Last upd
 - Same branch and PR — user.
 - In-app drag image: use GPUI’s internal drag and promote to a native file drag when the pointer leaves the window — user approved if per-update work alone does not fix the lag.
 - No vendored code changes unless measured to be required; prefer app-side work.
+- Vendored GPUI fixes live in `patches/gpui-*.patch`, applied by `scripts/fetch-gpui.sh` (vendor/ is not tracked) — D9, user approved the GPUI change.
 
 ## Log
 - 2026-11-12: Plan `docs/plans/m5-fix-2.md` written and approved (lgtm), answers recorded. Progress file started.
@@ -38,6 +41,8 @@ Branch: m5-fix · PR: https://github.com/paraversal/file-crow/pull/6 · Last upd
 - 2026-11-12: Second hand-test follow-up (D7/D8): own native image with the pill, retained mouse-down + window dragging source, GPUI view hidden outside the window, pre-measured combo. Screenshots: combo at the cursor from the first frame; icon+pill outside the window; icon+pill after re-entry, one image. `sandbox_extension_consume failed: 1` is logged by the system when the native session starts, but the drag works. Hand checks still needed: drag-out to Finder and Mail, dropping back inside Crow, re-entry tracking, and the absence of a source-row flash.
 - 2026-11-12: Bug after the handoff work: the combo sometimes did not appear for in-window drags until the pointer travelled far or left the window. Cause: the “hide the GPUI view outside the window” check compared `window.bounds()` (screen coordinates) with `window.mouse_position()` (window-relative), so it hid the combo over much of the window. Now it compares the position with the bounds’ size only. Verified with folder and file drags inside the window: both show the combo at the cursor.
 - 2026-11-12: Drop-target flicker on Crow→native→Crow. Cause: list and column rows still used style-based `drag_over` highlights, which flicker on the platform drag updates. Both views now compute the target from state (the pointer against the list/column viewport bounds and scroll offset) on mouse moves; rows draw that state. Also, AppKit sends no destination callbacks and accepts no drop when the window itself is the drag source, so a dedicated `NSDraggingSource` object now starts the session. Verified: target stays on one row over repeated updates (tests `platform_drag_updates_keep_one_list_target` and `..._column_target`); dropping a file back into Crow moved it into the folder; the native combo tracks the cursor (cursor-included screenshot). Hand checks: list and column highlights, drag-out to Finder/Mail.
+- 2026-11-12: D9 investigated (re-entry flicker). Diagnosed from the code paths above; not yet measured with an automated out-and-back drag (that drives the real pointer).
+- 2026-11-12: D9 fixed in GPUI via a patch file; fresh fetch applies it, a re-run skips it. fmt, clippy, `cargo test --workspace` clean (40 app tests). The changed code is macOS platform code that tests do not reach.
 
 ## Session note (2026-11-12, hand-test follow-up)
 Changes since the D7/D8 handoff:
@@ -49,4 +54,4 @@ Changes since the D7/D8 handoff:
 Still for the user's hand check: drags to Finder/Mail, column highlight feel, and any source-row flash.
 
 ## Next
-PR #6 updated with the follow-up. The user hand-tests: drag-out to Finder/Mail, a Finder→Crow drag highlight, and the drag/chevron feel. Do not merge.
+D9 is waiting to be committed and pushed to PR #6. The user hand-tests: drag-out to Finder/Mail, a Finder→Crow drag highlight, and the drag/chevron feel. Do not merge.

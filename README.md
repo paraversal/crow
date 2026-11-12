@@ -8,7 +8,7 @@ Status: Phase 1 (the "daily driver" MVP), milestone M5.
 ## Build and run
 
 ```bash
-./scripts/fetch-gpui.sh          # once: Zed's GPUI at a pinned commit, into vendor/
+./scripts/fetch-gpui.sh          # once: Zed's GPUI at a pinned commit, into vendor/, with patches/gpui-*.patch applied
 cargo run --release -p crow-app  # opens your home folder
 ./scripts/bundle.sh --open       # builds and opens target/bundle/Crow.app
 ```
