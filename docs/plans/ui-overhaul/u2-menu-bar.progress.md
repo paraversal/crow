@@ -1,5 +1,5 @@
 # u2-menu-bar progress
-Branch: `ui-u2-menu-bar` · PR: pending · Last updated: 2026-11-13
+Branch: `ui-u2-menu-bar` · PR: https://github.com/paraversal/file-crow/pull/9 · Last updated: 2026-11-13
 
 ## Status
 | Item | State | Notes |
@@ -62,4 +62,4 @@ Branch: `ui-u2-menu-bar` · PR: pending · Last updated: 2026-11-13
 - 2026-11-13: Ran the bundle hand checks above. `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` all pass. No bench: menus are built once from a static table and no per-frame rendering changed.
 
 ## Next
-Commit the remaining code/docs, push `ui-u2-menu-bar`, open the PR and set this state to "PR open". Do not merge.
+PR #9 is open; the user hand-tests and merges. Do not merge.
