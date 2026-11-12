@@ -17,7 +17,7 @@ use crow_core::{
 };
 use crow_fs::{Entry, Sort, SortKey};
 use gpui::{
-    ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, Focusable, IntoElement,
+    Action, ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, Focusable, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Role, ScrollHandle,
     SharedString, Subscription, Window, div, img, prelude::*, px, uniform_list,
 };
@@ -328,7 +328,12 @@ impl Pane {
                 resolved.columns.0.iter().filter_map(|id| available.iter().find(|c| c.id() == id).cloned()).collect();
             self.table = default_table(&self.columns);
         }
-        self.apply_mode(resolved.view.0, cx);
+        // Columns are one browsing session: entering a folder may switch to column
+        // view, but a views.toml reload while its columns are open (the parent's
+        // setting, say) must not yank the mode out from under the chain.
+        if self.mode != ViewMode::Columns || self.folders.len() == 1 {
+            self.apply_mode(resolved.view.0, cx);
+        }
         cx.notify();
     }
 
@@ -451,8 +456,16 @@ impl Pane {
         let Some(entry) = self.cursor_entry(cx) else { return };
         if entry.is_dir && !entry.is_package() {
             self.navigate(entry.path, cx);
-        } else if let Err(e) = std::process::Command::new("open").arg(&entry.path).spawn() {
-            self.status = Some(format!("Can't open “{}”: {e}", entry.name).into());
+        } else {
+            self.open_file(entry.path, cx);
+        }
+    }
+
+    /// Open `path` in the app that owns it, as a double-click on that row would.
+    pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
+            self.status = Some(format!("Can't open “{name}”: {e}").into());
             cx.notify();
         }
     }
@@ -505,13 +518,26 @@ impl Pane {
     }
 
     /// Column view: back to the parent column. The column you leave stays, unselected.
+    /// On the leftmost column there is no column to go back to, so the parent folder
+    /// is pushed in from the left, with the folder we came from selected in it.
     fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
-        if self.focused == 0 {
-            return;
+        if self.focused > 0 {
+            let leaving = self.focused_folder().clone();
+            self.focused -= 1;
+            leaving.update(cx, |f, cx| f.clear_selection(cx));
+        } else {
+            let child = self.folders[0].read(cx).dir().to_path_buf();
+            let Some(parent) = child.parent().map(Path::to_path_buf) else { return };
+            self.history.visit(parent.clone());
+            self.push_folder(parent.clone(), false, cx);
+            let folder = self.folders.pop().expect("pushed above");
+            let subscription = self.subscriptions.pop().expect("pushed above");
+            self.folders.insert(0, folder.clone());
+            self.subscriptions.insert(0, subscription);
+            folder.update(cx, |f, _| f.select_after_load(child));
+            self.focused = 0;
+            cx.emit(PaneEvent::Entered(parent));
         }
-        let leaving = self.focused_folder().clone();
-        self.focused -= 1;
-        leaving.update(cx, |f, cx| f.clear_selection(cx));
         self.strip_scroll.scroll_to_item(self.focused);
         self.load_preview(cx);
         cx.notify();
@@ -622,15 +648,29 @@ impl Pane {
         }
     }
 
-    fn quick_look(&mut self, _: &QuickLook, _: &mut Window, cx: &mut Context<Self>) {
+    fn quick_look(&mut self, _: &QuickLook, window: &mut Window, cx: &mut Context<Self>) {
         // Mid-word, Space belongs to type-to-select ("my file"), not Quick Look.
         if self.focused_folder().read(cx).type_select_active() {
             self.with_focused(cx, |f, cx| f.type_char(' ', cx));
             return;
         }
-        if let Some(entry) = self.cursor_entry(cx) {
-            crow_macos::toggle_quick_look(&entry.path);
-        }
+        let Some(entry) = self.cursor_entry(cx) else { return };
+        // The panel is key while it is open, so the arrows come back through its
+        // delegate instead of the window. Run them as the arrows those keys are bound to.
+        let handle = window.window_handle();
+        let async_cx = cx.to_async();
+        crow_macos::set_quick_look_key_handler(move |key| {
+            async_cx.update(|cx| {
+                let action: Box<dyn Action> = match key {
+                    crow_macos::QuickLookKey::Up => Box::new(MoveUp),
+                    crow_macos::QuickLookKey::Down => Box::new(MoveDown),
+                    crow_macos::QuickLookKey::Left => Box::new(MoveLeft),
+                    crow_macos::QuickLookKey::Right => Box::new(MoveRight),
+                };
+                let _ = handle.update(cx, |_, window, cx| window.dispatch_action(action, cx));
+            });
+        });
+        crow_macos::toggle_quick_look(&entry.path);
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {

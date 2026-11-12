@@ -17,7 +17,7 @@ pub use files::{SystemTrash, pasteboard_change_count, read_file_urls, write_file
 pub use icons::icon_png;
 pub use metadata::{kind_name, tags, thumbnail_png};
 pub use names::display_components;
-pub use quick_look::{toggle_quick_look, update_quick_look};
+pub use quick_look::{QuickLookKey, set_quick_look_key_handler, toggle_quick_look, update_quick_look};
 pub use volumes::{MountWatcher, Volume, eject, reduce_motion, volumes, watch_mounts};
 
 use objc2::MainThreadMarker;

@@ -413,9 +413,13 @@ impl CrowWindow {
         let theme = ui.theme.clone();
         let settings_error = ui.config_error();
         let pane = self.pane().read(cx);
-        let target = pane.cursor_entry(cx).map_or_else(|| pane.current_dir(cx), |e| e.path.clone());
+        let selected_entry = pane.cursor_entry(cx);
+        let target = selected_entry.as_ref().map_or_else(|| pane.current_dir(cx), |e| e.path.clone());
         let parts = crow_macos::display_components(&target);
         let last = parts.len().saturating_sub(1);
+        // The last segment is a file when a file is selected; every other segment is a folder.
+        let last_is_dir = selected_entry.as_ref().is_none_or(|e| e.is_dir);
+        let path_pane = self.pane().clone();
         let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
         let (count, selected) = (pane.item_count(cx), pane.selected_count(cx));
         let ops = cx.global::<Operations>();
@@ -454,16 +458,41 @@ impl CrowWindow {
                 div().flex_1().min_w_0().overflow_hidden().flex().items_center().gap_1().children(
                     parts.into_iter().enumerate().map({
                         let fg = color(theme.role("fg"));
+                        let hover = color(theme.role("surface-raised"));
                         move |(i, (name, path))| {
-                            let is_dir = i < last || path.is_dir();
-                            div()
+                            let pane = path_pane.clone();
+                            let is_dir = i < last || last_is_dir;
+                            let spoke = if is_dir { format!("Go to {name}") } else { format!("Open {name}") };
+                            let mut part = div()
+                                .id(("path-segment", i))
+                                .debug_selector(move || format!("path-segment-{i}"))
+                                .role(Role::Button)
+                                .aria_label(spoke)
                                 .flex()
                                 .items_center()
                                 .gap_1()
+                                .px_1()
+                                .rounded_sm()
                                 .when(i == last, |part| part.text_color(fg))
+                                .hover(move |s| s.bg(hover))
                                 .children(icon(&path, is_dir, 14).map(|i| img(i).size(px(14.))))
                                 .child(name)
-                                .when(i < last, |part| part.child(div().pl_1().child("›")))
+                                .when(i < last, |part| part.child(div().pl_1().child("›")));
+                            let target = path.clone();
+                            part = part.on_click(move |_, _, cx| {
+                                let target = target.clone();
+                                pane.update(cx, |pane, cx| {
+                                    if is_dir {
+                                        // Clicking where you already are changes nothing.
+                                        if pane.current_dir(cx) != target {
+                                            pane.navigate(target.clone(), cx);
+                                        }
+                                    } else {
+                                        pane.open_file(target.clone(), cx);
+                                    }
+                                });
+                            });
+                            part
                         }
                     }),
                 ),
@@ -1625,6 +1654,24 @@ mod tests {
     }
 
     #[gpui::test]
+    fn path_bar_segments_navigate_as_history_steps(cx: &mut TestAppContext) {
+        let root = fixture("path-bar");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+
+        // The bar ends in the selected item, so its first segment is `/`'s own entry.
+        let bounds = cx.debug_bounds("path-segment-0").expect("path bar segment is laid out");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), PathBuf::from("/"), "clicking a segment opens that folder");
+        cx.simulate_keystrokes("cmd-[");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"), "and it left a history step to go back to");
+    }
+
+    #[gpui::test]
     fn rules_apply_live_and_why_explains(cx: &mut TestAppContext) {
         let root = fixture("rules");
         let (view, mut cx) = open(cx, &root);
@@ -1934,6 +1981,42 @@ mod tests {
         let (count, focused, _, cursor) = columns(&view, &cx, 1);
         assert_eq!((count, focused), (2, 0), "Left moves back; the child column stays");
         assert_eq!(cursor, None, "…with its selection cleared");
+    }
+
+    #[gpui::test]
+    fn column_view_left_on_the_leftmost_column_goes_up(cx: &mut TestAppContext) {
+        let root = fixture("columns-left");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        assert_eq!(columns(&view, &cx, 0).2, Some(root.clone()));
+
+        let parent = root.parent().expect("the fixture has a parent").to_path_buf();
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        let (_, focused, first, cursor) = columns(&view, &cx, 0);
+        assert_eq!(focused, 0);
+        assert_eq!(first, Some(parent.clone()), "the parent is pushed in from the left");
+        assert_eq!(
+            cursor.as_deref(),
+            Some(root.file_name().unwrap().to_str().unwrap()),
+            "…with the old folder selected"
+        );
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.mode()), ViewMode::Columns, "and column view stays on");
+        assert_eq!(dir(&view, &cx), parent);
+
+        cx.simulate_keystrokes("cmd-[");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root, "Back returns to where the columns started");
+
+        // At the root of the disk there is nowhere to go up to.
+        pane(&view, &cx).update(&mut cx, |p, cx| p.navigate(PathBuf::from("/"), cx));
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), PathBuf::from("/"), "Left at / does nothing");
     }
 
     #[gpui::test]
