@@ -91,7 +91,7 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 - Updates live: `m x` writes `sidebar.toml` → reload → the letter moves (a mark taken from another favorite disappears there).
 
 ### Keys, focus, VoiceOver
-- No new keys. Tab, arrows, Return, Cmd-Delete, Cmd-Option-Up/Down, Cmd-E, Vim j/k/l unchanged; the ring follows the cursor on every one of them.
+- No new keys. Tab, Cmd-Delete, Cmd-Option-Up/Down, Cmd-E unchanged; the ring follows the cursor on every key. What arrows, Return and → do changes with I8 (the center follows the cursor).
 - Roles unchanged: `ListBox` "Sidebar", `ListBoxOption` rows, `Heading` titles, eject `Button`. The hint and the right slot are part of the row's aria label, not separate nodes (mark them as plain text children; they are not interactive).
 - Multiple windows and tabs: each window has its own `Sidebar` and `current`; twins and marks come from the shared `Ui` global, so every window shows the same hints.
 - List and column views: no difference (the sidebar does not depend on the view mode).
@@ -169,6 +169,26 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 - *Tests*: `favorites_header_shows_the_add_key`: header text contains "⌃⌘T" with the Finder keymap.
 - *Done when*: tests green.
 
+### I8 The center follows the sidebar cursor (added 2026-11-13, user request)
+- *Why*: today Up/Down (Vim j/k) in the sidebar only move a cursor (`sidebar.rs:276`, `:281`); the folder shows only after Return/Cmd-Down/`l` (`OpenSelection` → `SidebarEvent::Open` → `window.rs` `on_sidebar_event`, which navigates **and** focuses the center). The user wants Finder's feel: moving the cursor shows that folder in the main window right away, while focus stays in the sidebar, so arrowing through favorites previews each one.
+- *Where*: `sidebar.rs` `move_up`/`move_down` (and the Vim `j`/`k` that map to them), new event; `window.rs` `on_sidebar_event`; `actions.rs` Sidebar bindings; `crow-core/src/history.rs` if Q12 picks "replace".
+- *Change*:
+  - New `SidebarEvent::Show(PathBuf)`, emitted after every cursor move that lands on a folder row (favorite, recent, volume). The window navigates the active pane there and **keeps focus in the sidebar** (no `focus_center`). Missing folders (a favorite whose path is gone) show the pane's usual error, focus stays.
+  - `SidebarEvent::Open` (Return, Cmd-Down, `l`, click) unchanged: navigate if needed, then focus the center. Per Q13, also bind `right` in `Sidebar` to `OpenSelection` (focus the center without navigating again when the pane already shows the cursor's folder).
+  - Tab from the sidebar (`SwitchFocus`) focuses the center as today; the center already shows the cursor's folder, so Tab and → land in the same place.
+  - While search is open: the first `Show` closes search (`close_search`) and then navigates, as Back/Forward do via `PaneEvent::Entered`. Tabbing into the sidebar alone never navigates. (Agreed in U3 review: Finder leaves search when a sidebar item is picked.)
+  - Clicking a row is unchanged (navigate + focus center).
+  - History per Q12.
+- *Edge cases*: the cursor moving onto a header (not selectable, skipped today) never emits; the cursor starting at 0 when the sidebar first gets focus does not navigate (only a move does); rapid Up/Down on a slow folder (network volume): each move starts a listing, the last one wins (pane listing is already generation-checked; verify); column view navigates the root column; the sidebar's own current-folder fill moves with the pane, so after a move the fill and the ring sit on the same row.
+- *Tests* (window.rs, keystroke):
+  - `sidebar_arrows_show_the_folder_and_keep_focus`: favorites alpha, beta; Tab to the sidebar; `down` → pane dir is beta, sidebar still focused; `up` → alpha; `tab` → pane focused, dir alpha.
+  - `sidebar_return_and_right_focus_the_center`: Tab, `down`, `enter` → pane focused on beta; again with `right` (if Q13 yes).
+  - `sidebar_arrow_closes_search`: cmd-f, type, `tab tab` (field → results → sidebar), `down` → `search.is_none()`, pane dir is the new row, sidebar focused.
+  - `sidebar_tab_in_does_not_navigate`: dir before Tab into the sidebar == dir after.
+  - Vim: `j`/`k` behave like `down`/`up` (`same_keys_mean_different_things_in_sidebar_and_list` must still pass).
+  - History per Q12: after `down down down`, Cmd-[ goes to the folder before the sidebar walk (replace) or one step back (push).
+- *Done when*: tests pass; hand check in list and column view, with and without search open.
+
 ## Seams with other U plans
 - **U1** (required): `current_location`, `cursor_ring`, and any drop tint helper in `style.rs`; U1 I3's tooltip on the disk row stays. If U1 I6 landed the helpers under other names, use those and record it. If `cursor_ring` is a 1.5 px border (layout-affecting), wrap it as an inset `BoxShadow` here and tell the user (Risks).
 - **U5** (bottom bar): owns the sidebar-focus hints ("⌘⌥↑↓ reorder · ⌘⌫ remove · ⇥ to list") and the `hints` setting. U8 adds no bottom-bar text. I7 reads `hints` only if U5 is merged.
@@ -195,11 +215,16 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 9. **Bench.** The index says U8 runs the bench, but U8 doesn't touch the pane's rows. *Recommended: run it once and record the numbers, no comparison needed unless they move.*
 10. **Current folder spoken.** Add an aria description "current folder" on the filled row? *Recommended: yes* (`aria_description`), so VoiceOver users get what the fill tells sighted users.
 
+11. **(I8) Scope.** Should arrows in the sidebar show the folder in the center, focus staying in the sidebar? *Answered 2026-11-13: yes, as in I8.*
+12. **(I8) History while arrowing.** Each sidebar move a separate Back step (Finder), or replace the history entry while the walk continues so Back returns to where you were before entering the sidebar? *Recommended: replace* — arrowing past five favorites shouldn't cost five Cmd-[ presses; needs `History::replace_current` (or "visit, but collapse consecutive sidebar visits").
+13. **(I8) → and Return.** Bind `right` in `Sidebar` to focus the center (same as Return)? *Recommended: yes*; it matches the column view's → into a folder and the user's "→ focuses that page".
+
 ## Hand checks
 Add to `docs/testing.md` (By hand), replacing nothing:
 | Check | How |
 | --- | --- |
 | Sidebar twins | Visit two folders with the same name (e.g. `~/a/git`, `~/b/git`): Recent shows "git a" and "git b" with the hint dimmer; a narrow window truncates the hint before the name. VoiceOver reads "git, in a". |
+| Sidebar follows the cursor (I8) | Tab into the sidebar: nothing navigates. Arrow down through favorites: each shows in the center, focus stays in the sidebar (ring moves, the list has no focus). Tab or → (or Return): the list has focus on that folder. With a search open, Tab to the sidebar and arrow: search closes, the folder shows. Back after an arrow walk follows Q12. List and column view. |
 | Sidebar fills | Open a favorite: only it is filled. Tab into the sidebar and arrow: an accent ring moves, no second fill; Tab out: the ring goes. Drag a file over the current row: the drop highlight shows. Check in a light and a dark theme. |
 | Disk row | Locations shows "<n> GB free" right-aligned and a grey bar; fill a disk image past 90 %: the bar turns to the warning color. VoiceOver still reads free and total. |
 | Mark letters | With `keymap = "vim"`, favorites with a `key` show the letter on the right; `m x` on another folder moves it; Finder layer shows none. |

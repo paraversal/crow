@@ -77,6 +77,9 @@ pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
+    /// Whether to draw the field box. Bare inputs sit inside a field the parent draws.
+    chrome: bool,
+    role: Role,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -120,6 +123,8 @@ impl TextInput {
             focus_handle: cx.focus_handle(),
             content,
             placeholder: placeholder.into(),
+            chrome: true,
+            role: Role::TextInput,
             selected_range: end..end,
             selection_reversed: false,
             marked_range: None,
@@ -132,6 +137,26 @@ impl TextInput {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// No fill, border or padding: the parent draws the field around it.
+    pub fn bare(mut self) -> Self {
+        self.chrome = false;
+        self
+    }
+
+    pub fn with_role(mut self, role: Role) -> Self {
+        self.role = role;
+        self
+    }
+
+    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let placeholder = placeholder.into();
+        if self.placeholder == placeholder {
+            return;
+        }
+        self.placeholder = placeholder;
+        cx.notify();
     }
 
     /// Replace the whole text and put the cursor at its end.
@@ -655,8 +680,9 @@ impl Element for TextElement {
         let cursor = input.cursor_offset();
         let style = window.text_style();
         let theme = &cx.global::<Ui>().theme;
+        let placeholder_role = if input.chrome { "fg-subtle" } else { "fg-muted" };
         let (placeholder_color, cursor_color, selection_color) =
-            (color(theme.role("fg-subtle")), color(theme.role("accent")), color_alpha(theme.role("accent"), 0x40));
+            (color(theme.role(placeholder_role)), color(theme.role("accent")), color_alpha(theme.role("accent"), 0x40));
 
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.clone(), gpui::Hsla::from(placeholder_color))
@@ -755,10 +781,12 @@ impl Element for TextElement {
 impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<Ui>().theme.clone();
+        let chrome = self.chrome;
         div()
             .id("text-input")
-            .role(Role::TextInput)
+            .role(self.role)
             .aria_label(self.placeholder.clone())
+            .aria_placeholder(self.placeholder.clone())
             .aria_value(self.content.clone())
             .flex()
             // keys::context_stack adds TextInput for Filter, Search and Palette.
@@ -792,12 +820,15 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(color(theme.role("bg")))
-            .border_1()
-            .border_color(color(theme.role("accent")))
+            .when(chrome, |field| {
+                field
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(color(theme.role("bg")))
+                    .border_1()
+                    .border_color(color(theme.role("accent")))
+            })
             .child(TextElement { input: cx.entity() })
     }
 }

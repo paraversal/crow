@@ -64,7 +64,7 @@ Edit (including Filter This Folder, Find… and Find Everything…), View, Go (B
 Enclosing Folder, Go to…, Go to Folder…), Window and Help. Use as Defaults, Reset View for
 This Folder and Zoom have no shortcut. Cmd-Shift-A from anywhere opens search with every
 `exclude.toml` set off. Shortcuts shown in the command palette, tooltips and hints come from
-the live keymap, so they follow `keymap = "vim"` too. Hover a nav arrow, a view button, a path segment, a disk row,
+the live keymap, so they follow `keymap = "vim"` too. Hover a nav arrow, a view button, the Go to button, the search field, a path segment, a disk row,
 Search everything or Cancel during an operation to see its name and key. Sheets (Go to Folder,
 Why This View?, the theme picker, Cmd-K and the delete/conflict questions) dim the window;
 clicking outside one cancels it exactly like Esc.
@@ -81,8 +81,12 @@ Nothing is ever overwritten: name clashes ask first, and Replace moves the old i
 
 Cmd-K opens the command palette: type to go to a favorite, recent or subfolder; start with `>`
 for commands (labels and their keys). Return goes there, Cmd-Return opens a folder in a new tab.
-Cmd-F searches names and contents in the current folder; its scope buttons switch to Home or
-Everywhere (Spotlight). Cmd-Shift-A searches with every `exclude.toml` set off. Results open with
-Return, reveal with Cmd-R, Quick Look with Space, and take the usual copy, cut and trash keys.
+Cmd-F, or the top band's Search field, searches names and contents in the current folder; the same
+field moves into the band while searching, where All / Names / Contents choose what to match (Names
+reads no file contents). Cmd-F again focuses the field and selects the query; Tab goes field →
+results → sidebar → field (no results: straight to the sidebar); Done or Esc (from anywhere) closes.
+The scope buttons switch to Home or Everywhere (Spotlight, names only). Cmd-Shift-A searches with
+every `exclude.toml` set off. Results open with Return, reveal with Cmd-R, Quick Look with Space,
+and take the usual copy, cut and trash keys. "Go to ⌘K" in the band opens the command palette.
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).

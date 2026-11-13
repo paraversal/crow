@@ -14,7 +14,9 @@ selection, type-to-select, sorting, Go to Folder, the column view's focus rules,
 (new folder and rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete),
 drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent),
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
-(preview, revert, save), the `/` filter, the command palette, the search panel, the menu bar
+(preview, revert, save), the `/` filter, the command palette, the search panel, the top band
+(search field click, Cmd-F refocus and select-all, Done/Esc, Go to, All/Names/Contents, switching
+tabs closing search, the Tab cycle while searching, focus never left on an element that is gone), the menu bar
 (every registry command listed, Finder keys, enabled by focus, dispatch matching the key) and the
 Vim layer (motions, marks). Shared chrome has its own tests: key text from the live keymap (including the
 Vim layer and the palette's old strings), keycap weights, tooltip text and a hover, the sheet scrim
@@ -78,6 +80,11 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Favorites | Drag a favorite up and down: one insertion line shows the exact target (under a group title for that group's start), the line never shifts rows, and the end of a group is reachable; dropping on a group title still moves the favorite to its start. Drag a folder from the list onto a group title; drop a file onto a favorite. Check `sidebar.toml` keeps your comments. Add `icon = "🚀"` and `color = "blue"` to one. |
 | Recent | Visit a few folders (and `cd` around with zoxide): they appear under Recent, favorites excluded. |
 | Locations | Mount a disk image: it appears without a restart, with a free-space bar; ⏏ ejects it. |
+| Top band | Hover Back, Forward, both view buttons, Go to and the search field: each shows a tooltip with its key ("Back to <folder> ⌘["). At the start of history Back is the same icon, faded. Traffic lights sit centred on the band. Light and dark themes. |
+| Search field | Click the field: search opens with the cursor in the field; the field spans the band with an accent ring; Done esc on the right. Tab to the results: the ring goes; Tab again to the sidebar, again back to the field (with nothing typed, Tab goes straight to the sidebar). From any of them Cmd-F brings the field back with the query selected, and Esc closes. Esc or Done returns to the folder with keys going to the list. |
+| All / Names / Contents | Search a word that's in file names and inside files: Names drops the content lines, Contents drops the name-only rows. Names in Home is fast (no file reads). Switch to Everywhere: the control shows Names, faded. |
+| Narrow window | Shrink the window: the title truncates, then the field shrinks, then Go to loses its label. In search mode the field shrinks but the match control and Done stay whole. |
+| VoiceOver | Cmd-F5: the band reads as a toolbar; the field announces "Search <folder>, Command F"; in search mode the field is a search field and Done reads "Done, close search, Escape". |
 | View settings | Cmd-3 in one folder, then visit another: it keeps its own view; going up in column view stays in columns. Add a `[[rule]]` to `views.toml` with the folder open: it applies at once. Cmd-J explains each value. |
 | Inline folders | In the list, the chevron (›/⌄) opens and closes a folder inline; Right opens a folder indented under it (Right again goes in), Left steps to the containing row, Left again closes it. Option-click is a normal click. Select across levels (Cmd-click or Shift-click a nested row) and copy or trash: every selected row is included. Navigate away and back: expansions are gone. |
 | Vim layer | Set `keymap = "vim"`: hjkl, gg/G, `m a` then `'a` from elsewhere. |

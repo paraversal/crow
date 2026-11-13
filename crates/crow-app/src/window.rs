@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use crow_core::{SidebarEdit, Tabs, ViewMode};
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role, ScrollStrategy,
-    SharedString, Subscription, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions, div,
-    img, point, prelude::*, px, size, uniform_list,
+    App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role,
+    ScrollStrategy, SharedString, Subscription, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
+    WindowOptions, div, img, point, prelude::*, px, size, transparent_black, uniform_list,
 };
 
 use crate::actions::{
@@ -15,7 +15,7 @@ use crate::actions::{
     ResetFolderView, SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
     UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
 };
-use crate::chrome::{self, SheetWidth, with_action_tooltip, with_tooltip};
+use crate::chrome::{self, Keycap, KeycapWeight, SheetWidth, with_action_tooltip, with_tooltip};
 use crate::icons::{self, Glyph};
 use crate::keys::{self, KeyScope};
 use crate::operations::{self, Clipboard, Operations};
@@ -43,8 +43,10 @@ pub fn open(dir: PathBuf, bench: bool, cx: &mut App) {
         titlebar: Some(TitlebarOptions {
             title: Some("Crow".into()),
             appears_transparent: true,
-            traffic_light_position: Some(point(px(14.), px(16.))),
+            traffic_light_position: Some(point(px(14.), px(19.))),
         }),
+        // Sidebar 210 plus a usable center; below this the band's parts no longer fit.
+        window_min_size: Some(size(px(640.), px(400.))),
         ..Default::default()
     };
     if let Err(e) = cx.open_window(options, |window, cx| cx.new(|cx| CrowWindow::new(dir, bench, window, cx))) {
@@ -138,6 +140,9 @@ impl CrowWindow {
             cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)),
             cx.subscribe_in(&sidebar, window, |this, _, event, window, cx| this.on_sidebar_event(event, window, cx)),
             cx.observe_window_appearance(window, |_, _, cx| reload_theme(cx)),
+            // Focus on an element that left the tree (an emptied results list, a hidden pane)
+            // dispatches keys from the bare root, above the Crow context, so every key goes dead.
+            cx.on_focus_lost(window, |this, window, cx| this.focus_center(window, cx)),
             // A reloaded views.toml applies to every tab's folder at once.
             cx.observe_global::<Ui>(|this, cx| {
                 for (_, pane) in this.tabs.iter() {
@@ -165,7 +170,13 @@ impl CrowWindow {
         self.tabs.active()
     }
 
-    fn focus_pane(&self, window: &mut Window, cx: &mut App) {
+    /// Focus whatever fills the center: the search field while search covers the pane,
+    /// else the active pane. Never the pane under an open search, which isn't rendered.
+    fn focus_center(&self, window: &mut Window, cx: &mut App) {
+        if let Some(search) = &self.search {
+            search.update(cx, |search, cx| search.focus_input(window, cx));
+            return;
+        }
         let handle = self.pane().read(cx).focus_handle().clone();
         window.focus(&handle, cx);
     }
@@ -191,28 +202,37 @@ impl CrowWindow {
     }
 
     fn open_tab_at(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_some() {
+            self.close_search(window, cx);
+        }
         let show_hidden = self.show_hidden;
         let pane = cx.new(|cx| Pane::new(dir, show_hidden, false, cx));
         self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
         self._subscriptions
             .push(cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)));
         self.tabs.open(pane);
-        self.focus_pane(window, cx);
+        self.focus_center(window, cx);
         cx.notify();
     }
 
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_some() {
+            self.close_search(window, cx);
+        }
         if self.tabs.close_active().is_none() {
             window.remove_window();
             return;
         }
-        self.focus_pane(window, cx);
+        self.focus_center(window, cx);
         cx.notify();
     }
 
     fn cycle_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_some() {
+            self.close_search(window, cx);
+        }
         self.tabs.cycle(delta);
-        self.focus_pane(window, cx);
+        self.focus_center(window, cx);
         cx.notify();
     }
 
@@ -227,7 +247,7 @@ impl CrowWindow {
     fn switch_focus(&mut self, _: &SwitchFocus, window: &mut Window, cx: &mut Context<Self>) {
         let sidebar = self.sidebar.read(cx).focus_handle(cx);
         if sidebar.is_focused(window) {
-            self.focus_pane(window, cx);
+            self.focus_center(window, cx);
         } else {
             window.focus(&sidebar, cx);
         }
@@ -282,7 +302,7 @@ impl CrowWindow {
 
     fn close_go_to(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.go_to = None;
-        self.focus_pane(window, cx);
+        self.focus_center(window, cx);
         cx.notify();
     }
 
@@ -325,108 +345,212 @@ impl CrowWindow {
 
     // ----- rendering -----
 
-    fn render_title_bar(&self, title: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = &cx.global::<Ui>().theme;
-        let pane = self.pane().read(cx);
-        let (back, forward, mode) = (pane.can_go_back(), pane.can_go_forward(), pane.mode());
-        let back_label =
-            pane.back_target().map_or_else(|| "Back".to_owned(), |dir| format!("Back to {}", folder_name(dir)));
-        let forward_label = pane
-            .forward_target()
-            .map_or_else(|| "Forward".to_owned(), |dir| format!("Forward to {}", folder_name(dir)));
-        let fg = theme.role("fg");
-        let nav_button = |id: &'static str, label: &'static str, icon: Glyph, enabled: bool| {
-            div()
+    fn render_title_bar(&self, title: &str, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.global::<Ui>().theme.clone();
+        let viewport = window.viewport_size().width;
+        let narrow = viewport < px(760.);
+        let (back, forward, mode, back_label, forward_label) = {
+            let pane = self.pane().read(cx);
+            let back_label =
+                pane.back_target().map_or_else(|| "Back".to_owned(), |dir| format!("Back to {}", folder_name(dir)));
+            let forward_label = pane
+                .forward_target()
+                .map_or_else(|| "Forward".to_owned(), |dir| format!("Forward to {}", folder_name(dir)));
+            (pane.can_go_back(), pane.can_go_forward(), pane.mode(), back_label, forward_label)
+        };
+        let fg = color(theme.role("fg"));
+        let muted = color(theme.role("fg-muted"));
+        let surface = color(theme.role("surface"));
+        let hover_icon = fg;
+        let hover_surface = surface;
+        let pressed_surface = color(theme.role("surface-raised"));
+        let nav_button = |id: &'static str,
+                          aria: String,
+                          tooltip: String,
+                          icon: Glyph,
+                          enabled: bool,
+                          action: &dyn gpui::Action,
+                          cx: &App|
+         -> gpui::Stateful<gpui::Div> {
+            let icon = icons::glyph(icon, 16., "fg-muted", &theme).id("icon");
+            let icon = if enabled { icon.group_hover(id, move |s| s.text_color(hover_icon)) } else { icon };
+            let aria = if enabled { aria } else { format!("{aria}, unavailable") };
+            let mut button = div()
                 .id(id)
                 .debug_selector(move || id.into())
                 .role(Role::Button)
-                .aria_label(label)
-                .w(px(26.))
-                .h(px(26.))
-                .rounded_md()
+                .aria_label(aria)
+                .w(px(28.))
+                .h(px(28.))
+                .rounded(px(6.))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icons::glyph(icon, 16., if enabled { "fg-muted" } else { "fg-subtle" }, theme))
+                .child(icon);
+            if enabled {
+                button = button.group(id).hover(move |s| s.bg(hover_surface)).active(move |s| s.bg(pressed_surface));
+            } else {
+                button = button.opacity(0.4);
+            }
+            if enabled {
+                with_action_tooltip(button, tooltip, action, KeyScope::Window, cx)
+            } else {
+                with_tooltip(button, tooltip, None)
+            }
         };
+        let nav = div()
+            .flex()
+            .gap(px(2.))
+            .child(
+                nav_button("back", "Back".to_owned(), back_label, Glyph::Back, back, &GoBack, cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_back(cx)))),
+            )
+            .child(
+                nav_button("forward", "Forward".to_owned(), forward_label, Glyph::Forward, forward, &GoForward, cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_forward(cx)))),
+            );
+
+        let title_label = div()
+            .id("title")
+            .role(Role::Heading)
+            .aria_level(1)
+            .aria_label(title.to_owned())
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_size(px(15.))
+            .text_color(fg)
+            .child(title.to_owned());
+        let views = div()
+            .id("view-switcher")
+            .role(Role::RadioGroup)
+            .aria_label("View")
+            .flex()
+            .flex_none()
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded(px(8.))
+            .bg(surface)
+            .child(
+                with_action_tooltip(
+                    view_button("view-list", "as List", Glyph::List, mode == ViewMode::List, &theme),
+                    "View as List",
+                    &ViewAsList,
+                    KeyScope::Window,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.pane().update(cx, |p, cx| p.set_mode(ViewMode::List, cx));
+                })),
+            )
+            .child(
+                with_action_tooltip(
+                    view_button("view-columns", "as Columns", Glyph::Columns, mode == ViewMode::Columns, &theme),
+                    "View as Columns",
+                    &ViewAsColumns,
+                    KeyScope::Window,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.pane().update(cx, |p, cx| p.set_mode(ViewMode::Columns, cx));
+                })),
+            );
+
+        let go_to_keys = Keycap::for_action(&ShowCommandPalette, KeyScope::Window, KeycapWeight::Outline, cx);
+        let go_to = div()
+            .id("toolbar-go-to")
+            .debug_selector(|| "toolbar-go-to".into())
+            .role(Role::Button)
+            .aria_label("Go to, Command K")
+            .aria_keyshortcuts("Command+K")
+            .flex_none()
+            .h(px(30.))
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .text_size(px(13.))
+            .text_color(muted)
+            .group("go-to")
+            .hover(move |style| style.bg(surface))
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(ShowCommandPalette), cx))
+            .when(narrow, |button| button.w(px(30.)).justify_center())
+            .when(!narrow, |button| button.pl(px(10.)).pr(px(8.)).gap(px(6.)))
+            .child(
+                icons::glyph(Glyph::GoTo, 15., "fg-muted", &theme)
+                    .id("go-to-icon")
+                    .group_hover("go-to", move |style| style.text_color(fg)),
+            )
+            .when(!narrow, |button| {
+                button.child(
+                    div().id("go-to-label").group_hover("go-to", move |style| style.text_color(fg)).child("Go to"),
+                )
+            })
+            .when(!narrow, |button| button.children(go_to_keys));
+        let go_to = with_action_tooltip(go_to, "Go to folder or command", &ShowCommandPalette, KeyScope::Window, cx);
+
+        let search_keys = Keycap::for_action(&ShowSearch, KeyScope::Window, KeycapWeight::Outline, cx);
+        let search_field = div()
+            .id("toolbar-search")
+            .debug_selector(|| "toolbar-search".into())
+            .role(Role::Button)
+            .aria_label(format!("Search {title}, Command F"))
+            .aria_keyshortcuts("Command+F")
+            .w(px(240.))
+            .min_w(px(160.))
+            .h(px(30.))
+            .flex_shrink(1.)
+            .rounded(px(8.))
+            .bg(surface)
+            .pl(px(10.))
+            .pr(px(6.))
+            .gap(px(8.))
+            .flex()
+            .items_center()
+            .border_1()
+            .border_color(transparent_black())
+            .hover(|style| style.border_color(color(theme.role("border"))))
+            .cursor(CursorStyle::IBeam)
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(ShowSearch), cx))
+            .child(icons::glyph(Glyph::Search, 14., "fg-muted", &theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(13.))
+                    .text_color(muted)
+                    .child(format!("Search {title}")),
+            )
+            .children(search_keys);
+        let search_field =
+            with_action_tooltip(search_field, "Search names and contents", &ShowSearch, KeyScope::Window, cx);
+
+        let band = self
+            .search
+            .as_ref()
+            .map(|search| search.update(cx, |search, cx| search.render_band(window, cx).into_any_element()));
+
         div()
-            .h(px(44.))
+            .id("toolbar")
+            .role(Role::Toolbar)
+            .aria_label("Toolbar")
+            .h(px(52.))
             .flex_none()
             .pl(px(86.))
             .pr_3()
             .flex()
             .items_center()
-            .gap_1()
+            .gap(px(10.))
             .border_b_1()
             .border_color(color(theme.role("border")))
-            .child(
-                with_action_tooltip(
-                    nav_button("back", "Back", Glyph::Back, back),
-                    back_label,
-                    &GoBack,
-                    KeyScope::Window,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_back(cx)))),
-            )
-            .child(
-                with_action_tooltip(
-                    nav_button("forward", "Forward", Glyph::Forward, forward),
-                    forward_label,
-                    &GoForward,
-                    KeyScope::Window,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_forward(cx)))),
-            )
-            .child(
-                div()
-                    .id("title")
-                    .role(Role::Heading)
-                    .aria_level(1)
-                    .aria_label(title.to_owned())
-                    .pl_2()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(14.))
-                    .text_color(color(fg))
-                    .child(title.to_owned()),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .id("view-switcher")
-                    .role(Role::RadioGroup)
-                    .aria_label("View")
-                    .flex()
-                    .gap(px(2.))
-                    .p(px(2.))
-                    .rounded_md()
-                    .bg(color(theme.role("surface")))
-                    .child(
-                        with_action_tooltip(
-                            view_button("view-list", "as List", Glyph::List, mode == ViewMode::List, theme),
-                            "View as List",
-                            &ViewAsList,
-                            KeyScope::Window,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.pane().update(cx, |p, cx| p.set_mode(ViewMode::List, cx));
-                        })),
-                    )
-                    .child(
-                        with_action_tooltip(
-                            view_button("view-columns", "as Columns", Glyph::Columns, mode == ViewMode::Columns, theme),
-                            "View as Columns",
-                            &ViewAsColumns,
-                            KeyScope::Window,
-                            cx,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.pane().update(cx, |p, cx| p.set_mode(ViewMode::Columns, cx));
-                        })),
-                    ),
-            )
+            .child(nav)
+            .when(self.search.is_some(), |bar| bar.when_some(band, |bar, band| bar.child(band)))
+            .when(self.search.is_none(), |bar| bar.child(title_label).child(views).child(go_to).child(search_field))
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -453,6 +577,7 @@ impl CrowWindow {
                 let selected = i == active;
                 div()
                     .id(("tab", i))
+                    .debug_selector(move || format!("tab-{i}"))
                     .role(Role::Tab)
                     .aria_label(name.clone())
                     .aria_selected(selected)
@@ -468,8 +593,14 @@ impl CrowWindow {
                     .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
                     .when(selected, |tab| tab.bg(color(theme.role("bg"))))
                     .on_click(cx.listener(move |this, _, window, cx| {
+                        if i == this.tabs.active_index() {
+                            return;
+                        }
+                        if this.search.is_some() {
+                            this.close_search(window, cx);
+                        }
                         this.tabs.activate(i);
-                        this.focus_pane(window, cx);
+                        this.focus_center(window, cx);
                         cx.notify();
                     }))
                     .child(name)
@@ -624,19 +755,26 @@ fn view_button(
     selected: bool,
     theme: &crow_theme::Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    let hover_icon = color(theme.role("fg"));
     div()
         .id(id)
+        .debug_selector(move || id.into())
         .role(Role::RadioButton)
         .aria_label(label)
         .aria_selected(selected)
-        .w(px(28.))
-        .h(px(22.))
-        .rounded_sm()
+        .w(px(32.))
+        .h(px(26.))
+        .rounded(px(6.))
         .flex()
         .items_center()
         .justify_center()
+        .group(id)
         .when(selected, |b| b.bg(color(theme.role("surface-raised"))))
-        .child(icons::glyph(icon, 16., if selected { "fg" } else { "fg-muted" }, theme))
+        .child(
+            icons::glyph(icon, 16., if selected { "fg" } else { "fg-muted" }, theme)
+                .id("icon")
+                .group_hover(id, move |s| s.text_color(hover_icon)),
+        )
 }
 
 fn home_dir() -> PathBuf {
@@ -652,7 +790,7 @@ fn home_relative(path: &Path) -> String {
     }
 }
 
-fn folder_name(dir: &Path) -> String {
+pub(crate) fn folder_name(dir: &Path) -> String {
     crow_macos::display_components(dir).pop().map_or_else(|| dir.display().to_string(), |(name, _)| name)
 }
 
@@ -766,7 +904,7 @@ impl CrowWindow {
 
     fn close_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sheet = None;
-        self.focus_pane(window, cx);
+        self.focus_center(window, cx);
         cx.notify();
     }
 
@@ -785,7 +923,7 @@ impl CrowWindow {
             }
             None => {}
         }
-        self.focus_pane(window, cx);
+        self.focus_center(window, cx);
         cx.notify();
     }
 
@@ -1045,7 +1183,7 @@ impl CrowWindow {
             SidebarEvent::Open(dir) => {
                 let dir = dir.clone();
                 self.pane().update(cx, |pane, cx| pane.navigate(dir, cx));
-                self.focus_pane(window, cx);
+                self.focus_center(window, cx);
             }
             SidebarEvent::Run(request) => self.run_request(request.clone(), window, cx),
             SidebarEvent::Message(text, error) => {
@@ -1090,7 +1228,7 @@ impl CrowWindow {
 
     fn why_this_view(&mut self, _: &WhyThisView, window: &mut Window, cx: &mut Context<Self>) {
         if self.why.take().is_some() {
-            self.focus_pane(window, cx);
+            self.focus_center(window, cx);
         } else {
             let focus = cx.focus_handle();
             window.focus(&focus, cx);
@@ -1101,7 +1239,7 @@ impl CrowWindow {
 
     fn close_why(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.why = None;
-        self.focus_pane(window, cx);
+        self.focus_center(window, cx);
         cx.notify();
     }
 
@@ -1283,7 +1421,7 @@ impl CrowWindow {
     fn confirm_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(picker) = self.picker.take() else { return };
         ui::choose_theme(&picker.id(picker.cursor), cx);
-        self.focus_pane(window, cx);
+        self.focus_center(window, cx);
         cx.notify();
     }
 
@@ -1291,7 +1429,7 @@ impl CrowWindow {
         self.picker = None;
         cx.global_mut::<Ui>().preview_theme = None;
         reload_theme(cx);
-        self.focus_pane(window, cx);
+        self.focus_center(window, cx);
         cx.notify();
     }
 
@@ -1306,7 +1444,7 @@ impl CrowWindow {
             },
             _ => ui::choose_theme("system", cx),
         }
-        self.focus_pane(window, cx);
+        self.focus_center(window, cx);
         cx.notify();
     }
 
@@ -1314,7 +1452,9 @@ impl CrowWindow {
 
     fn show_search(&mut self, _: &ShowSearch, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(search) = &self.search {
-            search.update(cx, |search, cx| search.focus_input(window, cx));
+            search.update(cx, |search, cx| search.select_all_input(window, cx));
+            // The band's focus ring is drawn from the input's focus state.
+            cx.notify();
             return;
         }
         let folder = self.pane().read(cx).current_dir(cx);
@@ -1347,7 +1487,8 @@ impl CrowWindow {
             return false;
         }
         let (home, show_hidden) = (cx.global::<Ui>().home.clone(), self.show_hidden);
-        let search = cx.new(|cx| SearchView::new(start.folder, home, show_hidden, start.query, start.everything, cx));
+        let search =
+            cx.new(|cx| SearchView::new(start.folder, home, show_hidden, start.query, start.everything, window, cx));
         self._subscriptions.push(cx.observe(&search, |_, _, cx| cx.notify()));
         self._subscriptions.push(cx.subscribe_in(&search, window, |this, search, event, window, cx| {
             this.on_search_event(search.clone(), event, window, cx)
@@ -1361,7 +1502,7 @@ impl CrowWindow {
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(search) = self.search.take() {
             search.update(cx, |search, cx| search.cancel(cx));
-            self.focus_pane(window, cx);
+            self.focus_center(window, cx);
             cx.notify();
         }
     }
@@ -1375,17 +1516,24 @@ impl CrowWindow {
     ) {
         match event {
             SearchEvent::Close => self.close_search(window, cx),
-            SearchEvent::FocusResults => search.update(cx, |search, cx| search.focus_results(window, cx)),
+            SearchEvent::FocusResults => {
+                // With no results there is no list to focus; the Tab cycle goes on to the sidebar.
+                if !search.update(cx, |search, cx| search.focus_results(window, cx)) {
+                    let sidebar = self.sidebar.read(cx).focus_handle(cx);
+                    window.focus(&sidebar, cx);
+                    cx.notify();
+                }
+            }
             SearchEvent::Reveal(path) => {
                 self.pane().update(cx, |pane, cx| pane.reveal(path.clone(), cx));
                 self.close_search(window, cx);
-                self.focus_pane(window, cx);
+                self.focus_center(window, cx);
             }
             SearchEvent::Open { path, is_dir } => {
                 if *is_dir {
                     self.pane().update(cx, |pane, cx| pane.navigate(path.clone(), cx));
                     self.close_search(window, cx);
-                    self.focus_pane(window, cx);
+                    self.focus_center(window, cx);
                 } else {
                     self.pane().update(cx, |pane, cx| pane.open_file(path.clone(), cx));
                 }
@@ -1482,7 +1630,7 @@ impl CrowWindow {
         if self.palette.take().is_none() {
             return;
         }
-        self.focus_pane(window, cx);
+        self.focus_center(window, cx);
         cx.notify();
     }
 
@@ -1493,7 +1641,7 @@ impl CrowWindow {
     fn confirm_palette(&mut self, new_tab: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(palette) = self.palette.take() else { return };
         let item = palette.items.get(palette.cursor).cloned();
-        self.focus_pane(window, cx);
+        self.focus_center(window, cx);
         match item {
             Some(Item::Command(command)) => self.run_command(command.id, window, cx),
             Some(Item::Folder { path, .. }) if new_tab => self.open_tab_at(path, window, cx),
@@ -1804,7 +1952,7 @@ impl Render for CrowWindow {
         let title = folder_name(&self.pane().read(cx).current_dir(cx));
         let list_view = self.pane().read(cx).mode() == ViewMode::List;
         window.set_window_title(&title);
-        let title_bar = self.render_title_bar(&title, cx);
+        let title_bar = self.render_title_bar(&title, window, cx);
         let tab_bar = (self.tabs.len() > 1).then(|| self.render_tab_bar(cx));
         let current = self.pane().read(cx).current_dir(cx);
         self.sidebar.update(cx, |s, cx| s.set_current(current, cx));
@@ -1850,7 +1998,15 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::view_as_columns))
             .on_action(cx.listener(|this, _: &crate::actions::Undo, _, cx| this.undo(None, cx)))
             .on_action(cx.listener(|this, _: &crate::actions::Redo, _, cx| this.redo(cx)))
-            .on_action(cx.listener(|_, _: &crate::actions::CancelOperation, _, cx| operations::cancel_running(cx)))
+            .on_action(cx.listener(|this, _: &crate::actions::CancelOperation, window, cx| {
+                // Esc stops a running operation first; with none, it closes an open search
+                // from wherever focus is (the sidebar, say).
+                if cx.global::<Operations>().running.is_some() {
+                    operations::cancel_running(cx);
+                } else {
+                    this.close_search(window, cx);
+                }
+            }))
             .on_action(cx.listener(Self::add_to_sidebar))
             .on_action(cx.listener(Self::why_this_view))
             .on_action(cx.listener(Self::use_view_as_defaults))
@@ -2132,6 +2288,22 @@ mod tests {
     }
 
     #[gpui::test]
+    fn toolbar_view_buttons_switch_views(cx: &mut TestAppContext) {
+        let root = fixture("toolbar-views");
+        let (view, mut cx) = open(cx, &root);
+        let mode = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.mode());
+        assert_eq!(mode(&cx), ViewMode::List);
+        let columns = cx.debug_bounds("view-columns").expect("columns button");
+        cx.simulate_click(columns.center(), gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(mode(&cx), ViewMode::Columns);
+        let list = cx.debug_bounds("view-list").expect("list button");
+        cx.simulate_click(list.center(), gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(mode(&cx), ViewMode::List);
+    }
+
+    #[gpui::test]
     fn back_button_tooltip_names_the_folder(cx: &mut TestAppContext) {
         let root = fixture("back-tooltip");
         let executor = cx.executor();
@@ -2285,6 +2457,12 @@ mod tests {
         panic!("search never finished");
     }
 
+    /// Click the element with this debug selector, failing if it is not on screen.
+    fn click_selector(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is on screen"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    }
+
     #[gpui::test]
     fn search_panel_streams_names_and_contents(cx: &mut TestAppContext) {
         let root = fixture("search");
@@ -2333,6 +2511,278 @@ mod tests {
         let paths = search.read_with(&cx, |search, _| search.result_paths());
         assert!(paths.contains(&root.join("node_modules/pkg/needle.txt")), "{paths:?}");
         assert_eq!(search.read_with(&cx, |search, _| search.skipped_count()), 0);
+    }
+
+    #[gpui::test]
+    fn search_field_click_opens_search_with_focus_in_the_field(cx: &mut TestAppContext) {
+        let root = fixture("toolbar-search-click");
+        std::fs::write(root.join("notes.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        click_selector(&mut cx, "toolbar-search");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_some()), "the field opens search");
+        focus_search_input(&view, &mut cx);
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        let paths = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search").read(cx).result_paths());
+        assert!(paths.contains(&root.join("notes.txt")), "{paths:?}");
+    }
+
+    #[gpui::test]
+    fn cmd_f_focuses_the_field_when_search_is_open(cx: &mut TestAppContext) {
+        let root = fixture("toolbar-cmd-f");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        cx.simulate_keystrokes("tab");
+        let focus = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search").read(cx).input_focus_handle(cx));
+        assert!(!cx.update(|window, _| focus.is_focused(window)), "tab moved focus to the results");
+        cx.simulate_keystrokes("cmd-f");
+        focus_search_input(&view, &mut cx);
+        cx.simulate_input("x");
+        let query = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search").read(cx).query_text(cx));
+        assert_eq!(query, "x", "the whole query was selected");
+    }
+
+    #[gpui::test]
+    fn escape_in_the_field_closes_search_and_restores_pane_focus(cx: &mut TestAppContext) {
+        let root = fixture("search-close");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()));
+        cx.simulate_keystrokes("n");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "type-to-select proves the pane has focus");
+    }
+
+    #[gpui::test]
+    fn done_button_closes_search(cx: &mut TestAppContext) {
+        let root = fixture("search-done");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        click_selector(&mut cx, "search-done");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()));
+        cx.simulate_keystrokes("n");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+    }
+
+    #[gpui::test]
+    fn vim_letters_type_into_the_band_field(cx: &mut TestAppContext) {
+        let root = fixture("search-vim");
+        let (view, mut cx) = open(cx, &root);
+        let before = (dir(&view, &cx), selected(&view, &cx));
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_keystrokes("j k / -");
+        let query = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search").read(cx).query_text(cx));
+        assert_eq!(query, "jk/-");
+        assert_eq!((dir(&view, &cx), selected(&view, &cx)), before, "no Vim motion reached the pane");
+    }
+
+    #[gpui::test]
+    fn go_to_button_opens_the_palette(cx: &mut TestAppContext) {
+        let root = fixture("toolbar-go-to");
+        let (view, mut cx) = open(cx, &root);
+        click_selector(&mut cx, "toolbar-go-to");
+        settle(&view, &mut cx);
+        let focus =
+            view.read_with(&cx, |w, cx| w.palette.as_ref().expect("palette opens").input.read(cx).focus_handle(cx));
+        assert!(cx.update(|window, _| focus.is_focused(window)), "focus is in the palette field");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()));
+        cx.simulate_keystrokes("n");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "the pane has focus again");
+    }
+
+    #[gpui::test]
+    fn go_to_button_is_hidden_while_searching(cx: &mut TestAppContext) {
+        let root = fixture("toolbar-search-band");
+        let (_view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        assert!(cx.debug_bounds("toolbar-go-to").is_none());
+        assert!(cx.debug_bounds("toolbar-search").is_none());
+        assert!(cx.debug_bounds("search-field").is_some(), "the band's own field is there instead");
+    }
+
+    #[gpui::test]
+    fn match_names_and_contents_change_the_results(cx: &mut TestAppContext) {
+        let root = fixture("search-match");
+        std::fs::write(root.join("alpha/needle.txt"), "nothing\n").expect("create fixture");
+        std::fs::write(root.join("beta/other.txt"), "needle in beta\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        let has = |cx: &VisualTestContext, path: &Path| {
+            search.read_with(cx, |search, _| search.result_paths().iter().any(|p| p == path))
+        };
+        let (name_hit, content_hit) = (root.join("alpha/needle.txt"), root.join("beta/other.txt"));
+        assert!(has(&cx, &name_hit) && has(&cx, &content_hit), "All searches names and contents");
+
+        click_selector(&mut cx, "search-match-names");
+        wait_for_search(&view, &mut cx);
+        assert!(has(&cx, &name_hit), "the name hit stays");
+        assert!(!has(&cx, &content_hit), "no file is read, so the content hit is gone");
+        focus_search_input(&view, &mut cx);
+
+        click_selector(&mut cx, "search-match-contents");
+        wait_for_search(&view, &mut cx);
+        assert!(!has(&cx, &name_hit), "name-only hits are dropped");
+        assert!(has(&cx, &content_hit));
+        focus_search_input(&view, &mut cx);
+
+        click_selector(&mut cx, "search-match-all");
+        wait_for_search(&view, &mut cx);
+        assert!(has(&cx, &name_hit) && has(&cx, &content_hit));
+        focus_search_input(&view, &mut cx);
+    }
+
+    #[gpui::test]
+    fn spotlight_scope_disables_the_match_control(cx: &mut TestAppContext) {
+        let root = fixture("search-match-spotlight");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        click_selector(&mut cx, "search-match-contents");
+        assert_eq!(search.read_with(&cx, |search, _| search.effective_match()), crate::search::Match::Contents);
+
+        click_selector(&mut cx, "search-scope-Everywhere");
+        settle(&view, &mut cx);
+        assert_eq!(
+            search.read_with(&cx, |search, _| search.effective_match()),
+            crate::search::Match::Names,
+            "Spotlight searches names only"
+        );
+        click_selector(&mut cx, "search-match-all");
+        assert_eq!(
+            search.read_with(&cx, |search, _| search.matching()),
+            crate::search::Match::Contents,
+            "the stored choice survives, and clicks on Spotlight change nothing"
+        );
+        click_selector(&mut cx, "search-scope-This Folder");
+        settle(&view, &mut cx);
+        assert_eq!(search.read_with(&cx, |search, _| search.effective_match()), crate::search::Match::Contents);
+    }
+
+    #[gpui::test]
+    fn switching_tabs_closes_search(cx: &mut TestAppContext) {
+        let root = fixture("search-tabs");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-t");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-shift-]");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "switching tabs closes search");
+        cx.simulate_keystrokes("n");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "the new tab's pane has focus");
+    }
+
+    #[gpui::test]
+    fn clicking_the_active_tab_keeps_search_open(cx: &mut TestAppContext) {
+        let root = fixture("search-tab-click");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-t");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        let bounds = cx.debug_bounds("tab-1").expect("active tab on screen");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_some()), "the active tab is not a switch");
+        let bounds = cx.debug_bounds("tab-0").expect("other tab on screen");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "switching tabs closes search");
+    }
+
+    fn sidebar_focused(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> bool {
+        let focus = view.read_with(cx, |w, cx| w.sidebar.read(cx).focus_handle(cx));
+        cx.update(|window, _| focus.is_focused(window))
+    }
+
+    fn search_input_focused(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> bool {
+        let focus = view.read_with(cx, |w, cx| w.search.as_ref().expect("search open").read(cx).input_focus_handle(cx));
+        cx.update(|window, _| focus.is_focused(window))
+    }
+
+    #[gpui::test]
+    fn tab_on_an_empty_search_goes_to_the_sidebar_and_esc_still_closes(cx: &mut TestAppContext) {
+        let root = fixture("search-empty-tab");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_keystrokes("tab");
+        assert!(sidebar_focused(&view, &mut cx), "no results to visit, so Tab goes to the sidebar");
+        cx.simulate_keystrokes("tab");
+        assert!(search_input_focused(&view, &mut cx), "Tab from the sidebar comes back to the field");
+        cx.simulate_keystrokes("tab");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "Esc in the sidebar closes search");
+        cx.simulate_keystrokes("n");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "the pane has focus");
+    }
+
+    #[gpui::test]
+    fn tab_cycles_field_results_sidebar_while_searching(cx: &mut TestAppContext) {
+        let root = fixture("search-tab-cycle");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        cx.simulate_keystrokes("tab");
+        assert!(!search_input_focused(&view, &mut cx) && !sidebar_focused(&view, &mut cx), "results");
+        cx.simulate_keystrokes("tab");
+        assert!(sidebar_focused(&view, &mut cx), "results, then the sidebar");
+        cx.simulate_keystrokes("tab");
+        assert!(search_input_focused(&view, &mut cx), "the hidden pane is skipped: back to the field");
+        cx.simulate_keystrokes("tab tab");
+        assert!(sidebar_focused(&view, &mut cx));
+        cx.simulate_keystrokes("cmd-f");
+        assert!(search_input_focused(&view, &mut cx), "Cmd-F from the sidebar refocuses the field");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()));
+    }
+
+    #[gpui::test]
+    fn closing_an_overlay_over_search_returns_to_the_field(cx: &mut TestAppContext) {
+        let root = fixture("search-overlays");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-shift-g");
+        assert!(view.read_with(&cx, |w, _| w.go_to.is_some()), "Go to Folder opens over search");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.go_to.is_none() && w.search.is_some()));
+        assert!(search_input_focused(&view, &mut cx), "focus goes back to the field, not the hidden pane");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "Esc in the field still closes search");
+    }
+
+    #[gpui::test]
+    fn results_emptied_under_focus_fall_back_to_the_field(cx: &mut TestAppContext) {
+        let root = fixture("search-results-vanish");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        cx.simulate_keystrokes("tab");
+        // Rerunning clears the list, so the focused results element leaves the tree.
+        click_selector(&mut cx, "search-match-contents");
+        settle(&view, &mut cx);
+        wait_for_search(&view, &mut cx);
+        assert!(search_input_focused(&view, &mut cx), "focus never dies with the list");
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()));
     }
 
     fn focus_search_input(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
@@ -2500,6 +2950,8 @@ mod tests {
         cx.simulate_input("needle");
         wait_for_search(&view, &mut cx);
         cx.simulate_keystrokes("tab");
+        assert!(action_available(&crate::actions::ShowSearch, &mut cx), "results: Find stays available");
+        assert!(action_available(&crate::actions::SearchEverything, &mut cx), "results: Find Everything stays");
         assert!(action_available(&crate::actions::CopyFiles, &mut cx), "results: Copy");
         assert!(action_available(&crate::actions::SelectAll, &mut cx), "results: Select All");
         assert!(action_available(&crate::actions::MoveToTrash, &mut cx), "results: Move to Trash");
@@ -2625,16 +3077,6 @@ mod tests {
         assert!(view.read_with(&cx, |w, _| w.search.is_none()));
         assert_eq!(dir(&view, &cx), root);
         assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
-    }
-
-    #[gpui::test]
-    fn search_escape_closes_and_cancels(cx: &mut TestAppContext) {
-        let root = fixture("search-close");
-        let (view, mut cx) = open(cx, &root);
-        cx.simulate_keystrokes("cmd-f");
-        cx.simulate_input("notes");
-        cx.simulate_keystrokes("escape");
-        assert!(view.read_with(&cx, |w, _| w.search.is_none()));
     }
 
     #[gpui::test]
