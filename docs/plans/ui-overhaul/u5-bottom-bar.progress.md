@@ -1,10 +1,10 @@
 # u5-bottom-bar progress
-Branch: `ui-u5-bottom-bar` · PR: none · Last updated: 2026-11-13 · State: started
+Branch: `ui-u5-bottom-bar` · PR: none · Last updated: 2026-11-13 · State: in progress
 
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| I1 `hints` setting and usage model | todo | |
+| I1 `hints` setting and usage model | done | `HintsMode`, `Settings.hints`, `DEFAULT_SETTINGS` block, `crow-core/src/usage.rs` (`Usage`, `RETIRE_AFTER`, `USAGE_CAP`, `idle_hint_visible`); 5 unit tests; `cargo test -p crow-core` 53 green. |
 | I2 Key-use recorder | todo | depends on Q13 |
 | I3 Three slots and counts | todo | depends on Q2, Q3, Q4, Q8 |
 | I4 Hints by focus and retiring | todo | depends on Q5, Q6, Q7 |
@@ -13,22 +13,24 @@ Branch: `ui-u5-bottom-bar` · PR: none · Last updated: 2026-11-13 · State: sta
 | I7 Narrow window drops hints first | todo | |
 
 ## Questions
-- Q1 (asked 2026-11-13): board E shows "/ filter" next to the error; the plan scope says hints drop while an error shows. Recommended: follow the scope.
-- Q2 (asked 2026-11-13): op message lifetime. Recommended: info messages clear after 5 s; op error messages become the error token and clear when the next operation starts or on the next navigation.
-- Q3 (asked 2026-11-13): counts grammar as tabled (single selected file's size; "1 of 44 selected" in search). Recommended: yes as tabled.
-- Q4 (asked 2026-11-13): folder sizes in a selection. Recommended: files only, no marker; folders-only selection shows no size.
-- Q5 (asked 2026-11-13): search-field hints. Recommended: "↵ open · ⇥ results · esc done".
-- Q6 (asked 2026-11-13): sidebar hints by row. Recommended: drop hints that do nothing on the cursor row; "⌘E eject" on a disk.
-- Q7 (asked 2026-11-13): overlay open. Recommended: no hints.
-- Q8 (asked 2026-11-13): path in search mode. Recommended: show the selected result's path.
-- Q9 (asked 2026-11-13): error text. Recommended: file name plus "line N" where the TOML parser gives a span.
-- Q10 (asked 2026-11-13): Open button app. Recommended: default app for `.toml`, falling back to `open -t`.
-- Q11 (asked 2026-11-13): "Apply to All Apps" failures stored as a settings error. Recommended: show them as an operation error message instead.
-- Q12 (asked 2026-11-13): bar height. Recommended: 30 px.
-- Q13 (asked 2026-11-13): should menu/palette uses count for hint retirement? Recommended: yes, count every use of the action.
+All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
+- Q1 → scope: no hints while an error token shows.
+- Q2 → timed: info messages clear after 5 s; op errors become the error token and clear when the next operation starts or on the next navigation.
+- Q3 → counts table as tabled.
+- Q4 → selected folders add nothing; a folders-only selection shows no size.
+- Q5 → search field hints "↵ open · ⇥ results · esc done".
+- Q6 → drop sidebar hints that do nothing on the cursor row; "⌘E eject" on a disk.
+- Q7 → no hints while an overlay is open.
+- Q8 → search mode shows the selected result's path.
+- Q9 → file name plus "line N" where the TOML parser gives a span.
+- Q10 → default app for `.toml`, falling back to `open -t`.
+- Q11 → "Apply to All Apps" failures show as an operation error message, not a settings error.
+- Q12 → bar height 30 px.
+- Q13 → every use of the action counts (key, menu, palette).
 
 ## Decisions
-- (none yet)
+- Version 30 px bar (Q12), message lifetime 5 s (Q2), search-result path (Q8), error Open fallback (Q10) — user, 2026-11-13.
+- `crow_core::idle_hint_visible(mode, uses)` kept as the plan names it; no extra settings wrapper.
 
 ## Hand checks
 - [ ] Bottom bar hints: fresh state dir (`CROW_STATE_DIR=$(mktemp -d)`): idle hints `/ filter · ⌘F search · ⌘K go to`. Press `/` and Esc three times: "filter" disappears, the others stay; relaunch: still gone. Focus the sidebar, a filter, search results: the hint set changes each time. `hints = "always"` brings them back; `"off"` hides all. Vim layer: same, and `m` shows "Mark this folder…".
@@ -39,10 +41,13 @@ Branch: `ui-u5-bottom-bar` · PR: none · Last updated: 2026-11-13 · State: sta
 - [ ] VoiceOver: Cmd-F5: the count reads "18 items in jules"; an error reads "Error: …" once; Open and Cancel read as buttons.
 
 ## Found along the way
-- (none yet)
+- Version 30 px bar (Q12), message lifetime 5 s (Q2), search-result path (Q8), error Open fallback (Q10) — user, 2026-11-13.
+- `crow_core::idle_hint_visible(mode, uses)` kept as the plan names it; no extra settings wrapper.
 
 ## Log
+- 2026-11-13: I1 done. `usage.json` is pretty JSON (`{ "counts": { … } }`); a corrupt file loads empty. `cargo test -p crow-core` 53 passed.
+- 2026-11-13: asked Q1–Q13; all recommended answers accepted.
 - 2026-11-13: read `AGENTS.md`, the index README, the plan, U1/U4 progress. Confirmed U1 (#8) and U4 (#12) are merged on `main`. Created the branch and this file. Preparing the 13 plan questions.
 
 ## Next
-Ask Q1–Q13 in one batch, then start I1 (crow-core `HintsMode` + `usage.rs`) while the answers are applied.
+I2: `crates/crow-app/src/usage.rs` global, `usage::record`/`uses`/`record_key`/`count_key`, handler calls; then the keystroke/palette counting tests.
