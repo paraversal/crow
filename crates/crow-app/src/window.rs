@@ -3520,6 +3520,26 @@ mod tests {
     }
 
     #[gpui::test]
+    fn click_in_a_scrolled_filter_field_lands_on_the_visible_text(cx: &mut TestAppContext) {
+        let root = fixture("filter-scrolled-click");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("/");
+        // Far wider than the column, so the field scrolls to keep the caret at the end.
+        let long = "abcdefghij".repeat(12);
+        cx.simulate_input(&long);
+        cx.run_until_parked();
+        let field = cx.debug_bounds("filter-field").expect("field on screen");
+        // Just right of the accent `/`: the start of the visible text, not of the query.
+        cx.simulate_click(gpui::point(field.left() + px(30.), field.center().y), gpui::Modifiers::default());
+        cx.simulate_input("X");
+        let query = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_query(cx)).expect("filtering");
+        let at = query.find('X').expect("typed");
+        assert!(at > 20, "the click landed on the scrolled-away start (X at {at}): {query}");
+    }
+
+    #[gpui::test]
     fn filter_closes_when_the_focused_column_changes(cx: &mut TestAppContext) {
         let root = fixture("filter-column-change");
         let (view, mut cx) = open(cx, &root);

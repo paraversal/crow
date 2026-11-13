@@ -40,10 +40,13 @@ Branch: `ui-u4-filter` · PR: https://github.com/paraversal/file-crow/pull/12 ·
 - [ ] IME (Japanese) still works in a text field (I2 touches every TextInput).
 
 ## Found along the way
-- (none yet)
+- 2026-11-13 (review): I2 left two bugs, fixed in the follow-up commit. Clicks in a scrolled field hit-tested the unscrolled line (`index_for_mouse_position` ignored `scroll_x`), and `scroll_for_caret` never capped the offset at the text's width, so deleting from the end of a long query left the field mostly empty. New test `click_in_a_scrolled_filter_field_lands_on_the_visible_text` (fails without the fix); `scroll_for_caret_keeps_the_caret_visible` gains the delete-from-end cases.
+- Not fixed, pre-existing: Cmd-Z in any text field (filter, rename) runs the file-operation Undo (`cmd-z` → `Undo` in `Crow`; `TextInput` has no undo binding). Accented names stored with combining marks (NFD) don't match NFC queries (M6 matching).
 
 ## Log
 - 2026-11-13: read AGENTS.md, execute-plan, index README, U4 plan, U3 progress; confirmed U1/U2/U3 are merged on `main` (U3's PR #10 was squash-merged as `a539089`) and U6 is not started. Created branch and this file. Measured Q7 with a throwaway test, then removed it. Asked Q1–Q6, Q8–Q9.
+
+- 2026-11-13: Review fixes for I2 (click mapping, scroll cap). Hand-checked in the bundle by computer use (column view, 46-character query): the caret stays at the end, deleting 12 characters keeps the field full, and a click near the field's left edge puts the caret on the visible character there.
 
 ## Next
 None: PR #12 is open for review and hand testing. Do not merge. Remaining hand checks: light-theme D, VoiceOver, IME.

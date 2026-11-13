@@ -422,7 +422,8 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        // The line is painted shifted left by `scroll_x`; undo that before hit-testing.
+        line.closest_index_for_x(position.x - bounds.left() + self.scroll_x)
     }
 
     fn select_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
@@ -724,7 +725,7 @@ impl Element for TextElement {
         let line = window.text_system().shape_line(display_text, font_size, &runs, None);
 
         let cursor_pos = line.x_for_index(cursor);
-        let scroll_x = scroll_for_caret(cursor_pos, bounds.size.width, input.scroll_x);
+        let scroll_x = scroll_for_caret(cursor_pos, line.width, bounds.size.width, input.scroll_x);
         let x = |index| bounds.left() + line.x_for_index(index) - scroll_x;
         let (selection, cursor) = if selected_range.is_empty() {
             (
@@ -846,23 +847,24 @@ impl Focusable for TextInput {
     }
 }
 
-/// How far a single-line field scrolls so the caret stays inside it. `width` is the
-/// text area; a 2 px margin keeps the caret's own 2 px quad visible. Scrolling never
-/// goes left of the text or past the caret, so short text always sits at offset 0.
-fn scroll_for_caret(caret: Pixels, width: Pixels, current: Pixels) -> Pixels {
-    if width <= px(0.) {
+/// How far a single-line field scrolls so the caret stays inside it. `text` is the
+/// shaped line's width and `width` the text area; a 2 px margin keeps the caret's own
+/// 2 px quad visible. The offset moves only as far as the caret needs, and never past
+/// the text's end, so deleting from the end of a long text keeps the field full and a
+/// text that fits always sits at offset 0.
+fn scroll_for_caret(caret: Pixels, text: Pixels, width: Pixels, current: Pixels) -> Pixels {
+    let room = width - px(2.);
+    if room <= px(0.) {
         return px(0.);
     }
-    let margin = px(2.);
-    let visible_right = current + width - margin;
-    if caret < current {
-        // Back at the start of a text that now fits: drop the offset entirely.
-        if caret <= width - margin { px(0.) } else { caret }
-    } else if caret > visible_right {
-        caret - (width - margin)
-    } else {
-        current
+    let mut scroll = current;
+    if caret < scroll {
+        scroll = caret;
+    } else if caret > scroll + room {
+        scroll = caret - room;
     }
+    let max = (text - room).max(px(0.));
+    scroll.clamp(px(0.), max)
 }
 
 #[cfg(test)]
@@ -871,15 +873,21 @@ mod tests {
 
     #[test]
     fn scroll_for_caret_keeps_the_caret_visible() {
-        // Caret beyond the right edge: scroll just enough.
-        assert_eq!(scroll_for_caret(px(100.), px(50.), px(0.)), px(52.));
+        // Caret at the end of a long text, beyond the right edge: scroll just enough.
+        assert_eq!(scroll_for_caret(px(100.), px(100.), px(50.), px(0.)), px(52.));
         // Caret back at the start of a long text: scroll to it.
-        assert_eq!(scroll_for_caret(px(0.), px(50.), px(52.)), px(0.));
+        assert_eq!(scroll_for_caret(px(0.), px(100.), px(50.), px(52.)), px(0.));
         // Short text never scrolls, even after a long one.
-        assert_eq!(scroll_for_caret(px(10.), px(50.), px(52.)), px(0.));
+        assert_eq!(scroll_for_caret(px(10.), px(10.), px(50.), px(52.)), px(0.));
         // Caret already visible: keep the offset.
-        assert_eq!(scroll_for_caret(px(60.), px(50.), px(20.)), px(20.));
-        // Zero width (before layout): no divide-like surprises.
-        assert_eq!(scroll_for_caret(px(100.), px(0.), px(20.)), px(0.));
+        assert_eq!(scroll_for_caret(px(60.), px(100.), px(50.), px(20.)), px(20.));
+        // Caret left of the view in a long text: it lands at the left edge.
+        assert_eq!(scroll_for_caret(px(30.), px(200.), px(50.), px(100.)), px(30.));
+        // Deleting from the end of a long text: the view follows the end, so the field
+        // stays full instead of showing empty space after the last character.
+        assert_eq!(scroll_for_caret(px(190.), px(190.), px(50.), px(152.)), px(142.));
+        assert_eq!(scroll_for_caret(px(60.), px(60.), px(50.), px(152.)), px(12.));
+        // Zero width (before layout): no offset.
+        assert_eq!(scroll_for_caret(px(100.), px(100.), px(0.), px(20.)), px(0.));
     }
 }
