@@ -1459,8 +1459,24 @@ impl CrowWindow {
             cx.notify();
             return;
         }
-        let folder = self.pane().read(cx).current_dir(cx);
-        self.open_search(SearchStart { folder, query: String::new(), everything: false }, window, cx);
+        // Another overlay owns the keys; don't move the filter's text into a search
+        // that cannot open.
+        if self.search_blocked() {
+            return;
+        }
+        let pane = self.pane().clone();
+        let folder = pane.read(cx).current_dir(cx);
+        let query = pane.update(cx, |pane, cx| pane.take_filter(cx)).unwrap_or_default();
+        self.open_search(SearchStart { folder, query, everything: false }, window, cx);
+    }
+
+    /// Whether an overlay other than search is open (search itself is checked by `open_search`).
+    fn search_blocked(&self) -> bool {
+        self.search.is_some()
+            || self.picker.is_some()
+            || self.go_to.is_some()
+            || self.sheet.is_some()
+            || self.palette.is_some()
     }
 
     fn search_everything(&mut self, _: &SearchEverything, window: &mut Window, cx: &mut Context<Self>) {
@@ -1480,12 +1496,7 @@ impl CrowWindow {
     /// the rules set by `everything`. Does nothing while another overlay is open or
     /// search is already open.
     fn open_search(&mut self, start: SearchStart, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.search.is_some()
-            || self.picker.is_some()
-            || self.go_to.is_some()
-            || self.sheet.is_some()
-            || self.palette.is_some()
-        {
+        if self.search_blocked() {
             return false;
         }
         let (home, show_hidden) = (cx.global::<Ui>().home.clone(), self.show_hidden);
@@ -3539,6 +3550,75 @@ mod tests {
         assert_eq!(rows(&view, &cx).iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["alpha", "alpine.txt"]);
         let matches = pane(&view, &cx).read_with(&cx, |p, cx| p.row_matches(cx));
         assert_eq!(matches, [Some(0..2), Some(0..2)], "both rows carry the live match range");
+    }
+
+    #[gpui::test]
+    fn cmd_f_while_filtering_searches_the_focused_folder_with_the_query(cx: &mut TestAppContext) {
+        let root = fixture("filter-to-search");
+        std::fs::write(root.join("alpha/needle.txt"), "nothing\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("nee");
+        settle(&view, &mut cx);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()));
+
+        cx.simulate_keystrokes("cmd-f");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "nee");
+        assert_eq!(search.read_with(&cx, |search, _| search.folder().to_path_buf()), root.join("alpha"));
+        assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Folder);
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.contains(&root.join("alpha/needle.txt")), "{paths:?}");
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "the filter was handed over, not left open");
+
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx).len(), 2, "the focused column shows all of its rows again");
+        cx.simulate_keystrokes("n");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("needle.txt"), "type-to-select proves the list has focus");
+    }
+
+    #[gpui::test]
+    fn cmd_f_from_the_list_while_filtering_also_escalates(cx: &mut TestAppContext) {
+        let root = fixture("filter-list-to-search");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("a");
+        settle(&view, &mut cx);
+        let focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+        cx.update(|window, cx| window.focus(&focus, cx));
+
+        cx.simulate_keystrokes("cmd-f");
+        wait_for_search(&view, &mut cx);
+        let query = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search").read(cx).query_text(cx));
+        assert_eq!(query, "a");
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()));
+    }
+
+    #[gpui::test]
+    fn filter_footer_click_opens_search(cx: &mut TestAppContext) {
+        let root = fixture("filter-footer-click");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("al");
+        settle(&view, &mut cx);
+        click_selector(&mut cx, "filter-search-footer");
+        wait_for_search(&view, &mut cx);
+        let query = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search").read(cx).query_text(cx));
+        assert_eq!(query, "al");
+    }
+
+    #[gpui::test]
+    fn filter_footer_hides_for_an_empty_query(cx: &mut TestAppContext) {
+        let root = fixture("filter-footer-empty");
+        let (_view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        settle(&_view, &mut cx);
+        assert!(cx.debug_bounds("filter-field").is_some(), "the field is open");
+        assert!(cx.debug_bounds("filter-search-footer").is_none(), "nothing to carry deeper");
     }
 
     #[gpui::test]

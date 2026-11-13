@@ -477,6 +477,11 @@ impl SearchView {
         self.scope
     }
 
+    #[cfg(test)]
+    pub fn folder(&self) -> &Path {
+        &self.folder
+    }
+
     fn set_scope(&mut self, scope: Scope, cx: &mut Context<Self>) {
         if self.scope == scope {
             return;

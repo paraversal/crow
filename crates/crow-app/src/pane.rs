@@ -703,6 +703,19 @@ impl Pane {
         self.filtering.as_ref().map(|filtering| filtering.input.read(cx).text().to_owned())
     }
 
+    /// Close the filter without taking focus, returning its query. ⌘F uses this to hand
+    /// the text to search; the search field gets focus instead.
+    pub fn take_filter(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let filtering = self.filtering.take()?;
+        let query = filtering.input.read(cx).text().to_owned();
+        for folder in &self.folders {
+            folder.update(cx, |folder, cx| folder.set_filter(None, cx));
+        }
+        self.focus_list_after_filter = false;
+        cx.notify();
+        Some(query)
+    }
+
     fn clear_filter(&mut self, _: &ClearFilter, window: &mut Window, cx: &mut Context<Self>) {
         self.close_filter(window, cx);
     }
