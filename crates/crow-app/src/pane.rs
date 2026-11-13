@@ -36,11 +36,15 @@ use crate::folder::{Folder, FolderEvent};
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, drop_target, format_time, icon, inactive_selection, kind, truncate_middle,
+    active_selection, color, color_alpha, drop_target, format_time, highlight_text, icon, inactive_selection, kind,
+    map_range, truncate_middle, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
 use crow_fs::ops::Request;
+
+mod pane_filter;
+use pane_filter::FilterPlace;
 
 const ROW_HEIGHT: f32 = 24.0;
 /// Space between the list header's line and the first row, so a highlighted first row's
@@ -669,7 +673,8 @@ impl Pane {
             window.focus(&focus, cx);
             return;
         }
-        let input = cx.new(|cx| TextInput::new("", "Filter", cx));
+        let folder = crate::style::display_name(self.focused_folder().read(cx).dir());
+        let input = cx.new(|cx| TextInput::new("", format!("Filter {folder}"), cx).bare());
         let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
             TextInputEvent::Changed => {
                 let query = input.read(cx).text().to_owned();
@@ -691,6 +696,11 @@ impl Pane {
         window.focus(&focus, cx);
         self.filtering = Some(Filtering { input, _subscription: subscription });
         cx.notify();
+    }
+
+    /// The query in the open filter field, if any (U5 and search escalation read it).
+    pub fn filter_query(&self, cx: &gpui::App) -> Option<String> {
+        self.filtering.as_ref().map(|filtering| filtering.input.read(cx).text().to_owned())
     }
 
     fn clear_filter(&mut self, _: &ClearFilter, window: &mut Window, cx: &mut Context<Self>) {
@@ -1085,7 +1095,7 @@ impl Pane {
             return None;
         }
         let row = row as usize;
-        (row < folder.entries().len()).then_some((k, row))
+        (row < folder.row_count()).then_some((k, row))
     }
 
     pub fn update_drag_target(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -1170,11 +1180,8 @@ impl Pane {
         let font_size = px(ui.settings.font_size);
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
-        let selection_bg = if self.focus.is_focused(window) || self.filtering.is_some() {
-            active_selection(theme)
-        } else {
-            inactive_selection(theme)
-        };
+        let active = self.focus.is_focused(window) || self.filtering.is_some();
+        let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let drop_bg = drop_target(theme);
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
         let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
@@ -1197,7 +1204,8 @@ impl Pane {
                     cells.iter().map(|(text, _)| text.as_str()).filter(|t| *t != "--").collect::<Vec<_>>().join(", ");
                 let indent = NAME_INSET + depth as f32 * INDENT;
                 let name_room = px(widths[0] - indent - TRIANGLE_WIDTH - 8.0 - 16.0 - 8.0 - CELL_PADDING);
-                let name = truncate_middle(&entry.name, name_room, font_size, window);
+                let name = truncate_middle_parts(&entry.name, name_room, font_size, window);
+                let ranges = folder.row_match(ix).map(|range| map_range(&name, range));
                 let expanded = folder.is_expanded(&entry.path, cx);
                 let drag_entries = if selected {
                     selected_entries.clone()
@@ -1346,7 +1354,13 @@ impl Pane {
                             )
                             .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
                                 Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
-                                None => div().whitespace_nowrap().child(name).into_any_element(),
+                                None => match ranges {
+                                    Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
+                                        .whitespace_nowrap()
+                                        .child(highlight_text(name.text.clone(), &ranges, theme, selected && active))
+                                        .into_any_element(),
+                                    _ => div().whitespace_nowrap().child(name.text.clone()).into_any_element(),
+                                },
                             }),
                     );
                 row.children(cells.into_iter().enumerate().map(|(i, (text, align))| {
@@ -1475,7 +1489,8 @@ impl Pane {
             range.filter_map(|ix| folder.row(ix).map(|(e, _)| (ix, e.clone(), folder.is_selected(&e.path)))).collect();
         rows.into_iter()
             .map(|(ix, entry, selected)| {
-                let name = truncate_middle(&entry.name, name_room, font_size, window);
+                let name = truncate_middle_parts(&entry.name, name_room, font_size, window);
+                let ranges = folder.row_match(ix).map(|range| map_range(&name, range));
                 let navigable = entry.is_dir && !entry.is_package();
                 let drag_entries = if selected {
                     selected_entries.clone()
@@ -1582,61 +1597,106 @@ impl Pane {
                     )
                     .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
                         Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
-                        None => div().flex_1().overflow_hidden().whitespace_nowrap().child(name).into_any_element(),
+                        None => match ranges {
+                            Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(highlight_text(name.text.clone(), &ranges, theme, selected && active))
+                                .into_any_element(),
+                            _ => div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(name.text.clone())
+                                .into_any_element(),
+                        },
                     })
                     .child(div().w(px(10.)).flex_none().text_color(subtle).child(if navigable { "›" } else { "" }))
             })
             .collect()
     }
 
-    fn render_columns(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_columns(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let border = color(theme.role("border"));
         let focused = self.focused;
         let mut strip = div().id("columns").size_full().flex().overflow_x_scroll().track_scroll(&self.strip_scroll);
         for (k, folder) in self.folders.iter().enumerate() {
-            let f = folder.read(cx);
-            let (count, width, scroll) = (f.entries().len(), column_width(f.entries()), f.scroll().clone());
-            let title = f.dir().file_name().map_or_else(|| "/".to_owned(), |n| n.to_string_lossy().into_owned());
-            strip = strip.child(
-                div()
-                    .on_children_prepainted({
-                        let bounds = self.column_bounds.clone();
-                        move |children, _, _| {
-                            if let Some(child) = children.first() {
-                                bounds.borrow_mut().insert(k, *child);
+            let (count, shown, width, scroll, title, filtered) = {
+                let f = folder.read(cx);
+                (
+                    f.entries().len(),
+                    f.row_count(),
+                    column_width(f.entries()),
+                    f.scroll().clone(),
+                    f.dir().file_name().map_or_else(|| "/".to_owned(), |n| n.to_string_lossy().into_owned()),
+                    f.filter().is_some(),
+                )
+            };
+            // Only the focused column holds the field; the others render as always.
+            let (field, no_matches, footer) = if k == focused {
+                (
+                    self.render_filter_field(FilterPlace::Column, window, cx),
+                    self.render_no_matches(cx),
+                    self.render_filter_footer(FilterPlace::Column, cx),
+                )
+            } else {
+                (None, None, None)
+            };
+            let has_field = field.is_some();
+            let body = match no_matches {
+                Some(block) => block,
+                None => uniform_list(
+                    ("column-list", k),
+                    shown,
+                    cx.processor(move |this, range, window, cx| this.render_column_rows(k, range, window, cx)),
+                )
+                .track_scroll(&scroll)
+                .flex_1()
+                .min_h_0()
+                .px_1()
+                .into_any_element(),
+            };
+            strip =
+                strip.child(
+                    div()
+                        .on_children_prepainted({
+                            let bounds = self.column_bounds.clone();
+                            move |children, _, _| {
+                                // The field (when present) is the first child, then the list.
+                                if let Some(child) = children.get(usize::from(has_field)) {
+                                    bounds.borrow_mut().insert(k, *child);
+                                }
                             }
-                        }
-                    })
-                    .id(("column-view", k))
-                    .role(Role::ListBox)
-                    .aria_label(format!("{title}, {count} items"))
-                    .w(px(width))
-                    .flex_none()
-                    .h_full()
-                    .py_1()
-                    .border_r_1()
-                    .border_color(border)
-                    .when(k == focused, |c| c.bg(color_alpha(theme.role("surface"), 0x40)))
-                    .on_drop(
-                        cx.listener(move |this, paths: &ExternalPaths, window, cx| {
-                            this.drop_files(k, paths, window, cx)
-                        }),
-                    )
-                    .on_drop(cx.listener(move |this, selection: &DraggedSelection, window, cx| {
-                        this.drop_files(k, &selection.external(), window, cx)
-                    }))
-                    .child(
-                        uniform_list(
-                            ("column-list", k),
-                            count,
-                            cx.processor(move |this, range, window, cx| this.render_column_rows(k, range, window, cx)),
-                        )
-                        .track_scroll(&scroll)
+                        })
+                        .id(("column-view", k))
+                        .debug_selector(|| format!("column-{k}"))
+                        .role(Role::ListBox)
+                        .aria_label(if filtered {
+                            format!("{title}, {shown} of {count} items")
+                        } else {
+                            format!("{title}, {count} items")
+                        })
+                        .w(px(width))
+                        .flex_none()
                         .h_full()
-                        .px_1(),
-                    ),
-            );
+                        .flex()
+                        .flex_col()
+                        .py_1()
+                        .border_r_1()
+                        .border_color(border)
+                        .when(k == focused, |c| c.bg(color_alpha(theme.role("surface"), 0x40)))
+                        .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                            this.drop_files(k, paths, window, cx)
+                        }))
+                        .on_drop(cx.listener(move |this, selection: &DraggedSelection, window, cx| {
+                            this.drop_files(k, &selection.external(), window, cx)
+                        }))
+                        .children(field)
+                        .child(body)
+                        .children(footer),
+                );
         }
         // The preview is the last column when the focused column's cursor is a file.
         if let Some(entry) = self.cursor_entry(cx).filter(|e| !e.is_dir || e.is_package()) {
@@ -1655,51 +1715,6 @@ impl Pane {
             );
         }
         strip
-    }
-
-    fn render_filter(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let filtering = self.filtering.as_ref()?;
-        let ui = cx.global::<Ui>();
-        let theme = &ui.theme;
-        let (shown, total) = {
-            let folder = self.focused_folder().read(cx);
-            (folder.row_count(), folder.entries().len())
-        };
-        let input = filtering.input.clone();
-        Some(
-            div()
-                .id("filter-bar")
-                .role(Role::Group)
-                .aria_label("Filter")
-                // keys::context_stack (KeyScope::Filter) mirrors this.
-                .key_context("Filter")
-                .h(px(34.))
-                .px_2()
-                .flex()
-                .items_center()
-                .gap_2()
-                .border_b_1()
-                .border_color(color(theme.role("border")))
-                .on_action(cx.listener(Self::move_up))
-                .on_action(cx.listener(Self::move_down))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if let Some(filtering) = &this.filtering {
-                        let focus = filtering.input.read(cx).focus_handle(cx);
-                        window.focus(&focus, cx);
-                    }
-                }))
-                .child(div().text_size(px(12.)).text_color(color(theme.role("fg-muted"))).child("Filter"))
-                .child(div().flex_1().child(input))
-                .child(
-                    div()
-                        .id("filter-count")
-                        .role(Role::Label)
-                        .aria_label(format!("{shown} of {total} shown"))
-                        .text_size(px(12.))
-                        .text_color(color(theme.role("fg-muted")))
-                        .child(format!("{shown} of {total}")),
-                ),
-        )
     }
 }
 
@@ -1787,6 +1802,12 @@ impl Render for Pane {
             (title, focused.entries().len(), focused.row_count(), focused.filter().is_some())
         };
         let filtering = self.filtering.is_some();
+        // The field is inside the list now: while it has focus, the list's actions must be
+        // off the focus path so AppKit's menu equivalents let those keys through.
+        let filter_focused = self
+            .filtering
+            .as_ref()
+            .is_some_and(|filtering| filtering.input.read(cx).focus_handle(cx).is_focused(window));
         let mut context = match self.mode {
             ViewMode::List => "FileList".to_owned(),
             ViewMode::Columns => "FileList ColumnView".to_owned(),
@@ -1804,13 +1825,25 @@ impl Render for Pane {
                     let root = self.folders[0].read(cx);
                     (root.row_count(), root.scroll().clone())
                 };
+                let field = self.render_filter_field(FilterPlace::List, window, cx);
+                let no_matches = self.render_no_matches(cx);
+                let footer = self.render_filter_footer(FilterPlace::List, cx);
                 div()
                     .size_full()
                     .flex()
                     .flex_col()
                     .child(self.render_table_header(cx))
+                    .children(field)
                     .child({
                         let bounds = self.list_bounds.clone();
+                        let body = match no_matches {
+                            Some(block) => block,
+                            None => uniform_list("entries", rows, cx.processor(Self::render_table_rows))
+                                .track_scroll(&scroll)
+                                .pt(px(LIST_TOP_INSET))
+                                .flex_1()
+                                .into_any_element(),
+                        };
                         div()
                             .flex_1()
                             .flex()
@@ -1818,12 +1851,7 @@ impl Render for Pane {
                             .on_children_prepainted(move |children, _, _| {
                                 bounds.set(children.first().copied());
                             })
-                            .child(
-                                uniform_list("entries", rows, cx.processor(Self::render_table_rows))
-                                    .track_scroll(&scroll)
-                                    .pt(px(LIST_TOP_INSET))
-                                    .flex_1(),
-                            )
+                            .child(body)
                     })
                     // Dropped on the list but not on a folder row: into the folder shown.
                     .on_drop(
@@ -1832,9 +1860,10 @@ impl Render for Pane {
                     .on_drop(cx.listener(|this, selection: &DraggedSelection, window, cx| {
                         this.drop_files(0, &selection.external(), window, cx)
                     }))
+                    .children(footer)
                     .into_any_element()
             }
-            ViewMode::Columns => self.render_columns(cx).into_any_element(),
+            ViewMode::Columns => self.render_columns(window, cx).into_any_element(),
         };
         let list = div()
             .id("file-list")
@@ -1850,7 +1879,7 @@ impl Render for Pane {
             // While a name is being edited, every list shortcut must be off the focus path so
             // AppKit passes plain keys and its menu equivalents to the text field. The text
             // field supplies its own Cut/Copy/Paste/Select All listeners.
-            .when(self.renaming.is_none(), |list| {
+            .when(self.renaming.is_none() && !filter_focused, |list| {
                 list.on_action(cx.listener(Self::move_up))
                     .on_action(cx.listener(Self::move_down))
                     .on_action(cx.listener(Self::extend_up))
@@ -1902,7 +1931,7 @@ impl Render for Pane {
             self.focus_list_after_filter = false;
             cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));
         }
-        div().size_full().flex().flex_col().children(self.render_filter(cx)).child(list)
+        div().size_full().flex().flex_col().child(list)
     }
 }
 
@@ -1921,7 +1950,7 @@ impl Pane {
     }
 
     pub fn filter_text(&self, cx: &gpui::App) -> Option<String> {
-        self.filtering.as_ref().map(|f| f.input.read(cx).text().to_owned())
+        self.filter_query(cx)
     }
 
     pub fn row_matches(&self, cx: &gpui::App) -> Vec<Option<Range<usize>>> {

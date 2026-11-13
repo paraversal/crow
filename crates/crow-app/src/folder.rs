@@ -853,6 +853,28 @@ fn name_match(name: &str, query: &str, lower_query: &str) -> Option<Range<usize>
     (start < end && name.is_char_boundary(start) && name.is_char_boundary(end)).then_some(start..end)
 }
 
+/// Runs on a background thread: list `dir`, sending sorted partial listings at most every
+/// 50 ms, then the full sorted listing.
+fn list_in_stages(dir: &Path, hidden: bool, sort: Sort, started: Instant, tx: &UnboundedSender<Load>) {
+    let mut all: Vec<Entry> = Vec::new();
+    let mut last_partial = started;
+    let result = crow_fs::list_dir(dir, hidden, |batch| {
+        all.extend(batch);
+        if last_partial.elapsed() >= PARTIAL_EVERY || (last_partial == started && !all.is_empty()) {
+            last_partial = Instant::now();
+            let mut partial = all.clone();
+            crow_fs::sort_entries(&mut partial, &sort, &kind);
+            // The folder may have been closed; nobody listening is fine.
+            tx.unbounded_send(Load::Partial(partial)).ok();
+        }
+    });
+    let done = result.map(|()| {
+        crow_fs::sort_entries(&mut all, &sort, &kind);
+        (all, started.elapsed().as_secs_f64() * 1000.0)
+    });
+    tx.unbounded_send(Load::Done(done)).ok();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -901,26 +923,4 @@ mod tests {
             }
         }
     }
-}
-
-/// Runs on a background thread: list `dir`, sending sorted partial listings at most every
-/// 50 ms, then the full sorted listing.
-fn list_in_stages(dir: &Path, hidden: bool, sort: Sort, started: Instant, tx: &UnboundedSender<Load>) {
-    let mut all: Vec<Entry> = Vec::new();
-    let mut last_partial = started;
-    let result = crow_fs::list_dir(dir, hidden, |batch| {
-        all.extend(batch);
-        if last_partial.elapsed() >= PARTIAL_EVERY || (last_partial == started && !all.is_empty()) {
-            last_partial = Instant::now();
-            let mut partial = all.clone();
-            crow_fs::sort_entries(&mut partial, &sort, &kind);
-            // The folder may have been closed; nobody listening is fine.
-            tx.unbounded_send(Load::Partial(partial)).ok();
-        }
-    });
-    let done = result.map(|()| {
-        crow_fs::sort_entries(&mut all, &sort, &kind);
-        (all, started.elapsed().as_secs_f64() * 1000.0)
-    });
-    tx.unbounded_send(Load::Done(done)).ok();
 }

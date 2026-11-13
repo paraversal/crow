@@ -351,11 +351,12 @@ impl CrowWindow {
         let narrow = viewport < px(760.);
         let (back, forward, mode, back_label, forward_label) = {
             let pane = self.pane().read(cx);
-            let back_label =
-                pane.back_target().map_or_else(|| "Back".to_owned(), |dir| format!("Back to {}", folder_name(dir)));
+            let back_label = pane
+                .back_target()
+                .map_or_else(|| "Back".to_owned(), |dir| format!("Back to {}", crate::style::display_name(dir)));
             let forward_label = pane
                 .forward_target()
-                .map_or_else(|| "Forward".to_owned(), |dir| format!("Forward to {}", folder_name(dir)));
+                .map_or_else(|| "Forward".to_owned(), |dir| format!("Forward to {}", crate::style::display_name(dir)));
             (pane.can_go_back(), pane.can_go_forward(), pane.mode(), back_label, forward_label)
         };
         let fg = color(theme.role("fg"));
@@ -561,7 +562,7 @@ impl CrowWindow {
             .tabs
             .iter()
             .enumerate()
-            .map(|(i, (_, pane))| (i, folder_name(&pane.read(cx).current_dir(cx))))
+            .map(|(i, (_, pane))| (i, crate::style::display_name(&pane.read(cx).current_dir(cx))))
             .collect();
         div()
             .id("tabs")
@@ -790,10 +791,6 @@ fn home_relative(path: &Path) -> String {
     }
 }
 
-pub(crate) fn folder_name(dir: &Path) -> String {
-    crow_macos::display_components(dir).pop().map_or_else(|| dir.display().to_string(), |(name, _)| name)
-}
-
 /// A question to answer before an operation runs.
 enum Sheet {
     Conflicts { plan: Plan, choices: Vec<Resolution>, focus: FocusHandle },
@@ -993,7 +990,12 @@ impl CrowWindow {
                 )
             }
             Sheet::Conflicts { plan, choices, .. } => {
-                let into = plan.items.first().and_then(|i| i.target.parent()).map(folder_name).unwrap_or_default();
+                let into = plan
+                    .items
+                    .first()
+                    .and_then(|i| i.target.parent())
+                    .map(crate::style::display_name)
+                    .unwrap_or_default();
                 let rows: Vec<(usize, String, Resolution)> = plan
                     .conflicts()
                     .zip(choices.iter().copied())
@@ -1949,7 +1951,7 @@ impl Render for CrowWindow {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let (font, font_size) = (ui_font(&ui.settings.font_family), ui.settings.font_size);
-        let title = folder_name(&self.pane().read(cx).current_dir(cx));
+        let title = crate::style::display_name(&self.pane().read(cx).current_dir(cx));
         let list_view = self.pane().read(cx).mode() == ViewMode::List;
         window.set_window_title(&title);
         let title_bar = self.render_title_bar(&title, window, cx);
@@ -3431,6 +3433,112 @@ mod tests {
         cx.simulate_keystrokes("escape");
         settle(&view, &mut cx);
         assert_eq!(rows(&view, &cx).len(), 3);
+    }
+
+    #[gpui::test]
+    fn filter_field_opens_in_the_focused_column(cx: &mut TestAppContext) {
+        let root = fixture("filter-field-column");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        let before0 = cx.debug_bounds("column-0").expect("first column");
+        let before1 = cx.debug_bounds("column-1").expect("second column");
+        let count_before = pane(&view, &cx).read_with(&cx, |p, _| p.folder_count());
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.focused_index()), 1, "moved into the second column");
+
+        cx.simulate_keystrokes("/");
+        settle(&view, &mut cx);
+        let field = cx.debug_bounds("filter-field").expect("the field is in the column");
+        let after0 = cx.debug_bounds("column-0").expect("first column");
+        let after1 = cx.debug_bounds("column-1").expect("second column");
+        assert!(field.left() >= after1.left() && field.right() <= after1.right(), "{field:?} inside {after1:?}");
+        assert_eq!(after0, before0, "the column to the left did not move");
+        assert_eq!(after0.size.width, before0.size.width, "widths do not change while filtering");
+        assert_eq!(after1, before1, "the filtered column does not move or grow");
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.folder_count()), count_before, "no column opened");
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.focused_index()), 1);
+    }
+
+    #[gpui::test]
+    fn filter_field_opens_above_the_list_rows(cx: &mut TestAppContext) {
+        let root = fixture("filter-field-list");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        settle(&view, &mut cx);
+        let header = cx.debug_bounds("table-header").expect("header");
+        let field = cx.debug_bounds("filter-field").expect("field");
+        let row = cx.debug_bounds("row-alpha").expect("first row");
+        assert!(field.top() >= header.bottom(), "{field:?} is below the {header:?}");
+        assert!(field.bottom() <= row.top(), "{field:?} is above the {row:?}");
+    }
+
+    #[gpui::test]
+    fn filter_vim_letters_stay_in_the_column_field(cx: &mut TestAppContext) {
+        let root = fixture("filter-vim-column-field");
+        let (view, mut cx) = open(cx, &root);
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        let before = (dir(&view, &cx), pane(&view, &cx).read_with(&cx, |p, _| p.focused_index()));
+        cx.simulate_keystrokes("/");
+        cx.simulate_keystrokes("h l -");
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.filter_query(cx)).as_deref(), Some("hl-"));
+        assert_eq!((dir(&view, &cx), pane(&view, &cx).read_with(&cx, |p, _| p.focused_index())), before);
+        assert!(rows(&view, &cx).is_empty(), "no Vim motion or filter match ran");
+    }
+
+    #[gpui::test]
+    fn filter_field_takes_space_slash_and_list_keys_as_text(cx: &mut TestAppContext) {
+        let root = fixture("filter-field-keys");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_keystrokes("a space /");
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.filter_query(cx)).as_deref(), Some("a /"));
+        cx.simulate_keystrokes("cmd-backspace");
+        assert!(root.join("notes.txt").exists(), "Cmd-Backspace did not trash a row from the field");
+    }
+
+    #[gpui::test]
+    fn filter_closes_when_the_focused_column_changes(cx: &mut TestAppContext) {
+        let root = fixture("filter-column-change");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("x");
+        settle(&view, &mut cx);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()));
+
+        // The field owns Left while it has focus; click the column's list first.
+        let focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+        cx.update(|window, cx| window.focus(&focus, cx));
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()));
+        assert!(cx.debug_bounds("filter-field").is_none(), "the field closed");
+        assert_eq!(rows(&view, &cx).len(), 3, "the left column shows all of its rows");
+    }
+
+    #[gpui::test]
+    fn filter_follows_live_changes(cx: &mut TestAppContext) {
+        let root = fixture("filter-live");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("al");
+        settle(&view, &mut cx);
+        std::fs::write(root.join("alpine.txt"), "").expect("create fixture");
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // The folder's watcher polls every 100 ms on the test clock.
+            cx.executor().advance_clock(std::time::Duration::from_millis(150));
+            cx.run_until_parked();
+            if rows(&view, &cx).iter().any(|(name, _)| name == "alpine.txt") {
+                break;
+            }
+        }
+        assert_eq!(rows(&view, &cx).iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["alpha", "alpine.txt"]);
+        let matches = pane(&view, &cx).read_with(&cx, |p, cx| p.row_matches(cx));
+        assert_eq!(matches, [Some(0..2), Some(0..2)], "both rows carry the live match range");
     }
 
     #[gpui::test]

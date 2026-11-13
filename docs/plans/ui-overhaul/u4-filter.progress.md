@@ -7,8 +7,8 @@ Branch: `ui-u4-filter` · PR: none · Last updated: 2026-11-13
 | I1 Match ranges from `Folder` | done (this commit) | `name_match` + `match_ranges`; 3 folder tests and `filter_exposes_match_ranges_per_row`; 111 app tests green. |
 | I2 Chromeless `TextInput` that scrolls to the caret | done (this commit) | Existing `bare()` used instead of adding `chromeless()`. Added `scroll_x`, clipping and shifted click/IME mapping; applies to every field. Test `scroll_for_caret_keeps_the_caret_visible`; 112 app tests green. |
 | I3 Keep list keys out of the field | done (this commit) | `LIST`, `LIST_FILTERED`, `COLUMNS`, `LIST_NOT_COLUMNS` plus `!Filter` in the Vim layer; `Pane::key_down` returns while the field has focus; `KeyScope::Filter` now includes the list contexts. Unit test `filter_field_context_disables_list_keys`; 113 app tests green. |
-| I4 Field inside the focused column and the list frame | todo | |
-| I5 Highlighted names | todo | U6 is not merged; U4 adds `style::highlight_text`. |
+| I4 Field inside the focused column and the list frame | done (this commit) | New `pane_filter.rs` (submodule of `pane`); old bar and `render_filter` deleted; field in the focused column/list; `column_row_at` uses `row_count`; column list count now `row_count`. Tests `filter_field_opens_in_the_focused_column`, `filter_field_opens_above_the_list_rows`, `filter_vim_letters_stay_in_the_column_field`, `filter_field_takes_space_slash_and_list_keys_as_text`, `filter_closes_when_the_focused_column_changes`, `filter_follows_live_changes`; list actions also leave the focus path while the field is focused. 121 app tests green. |
+| I5 Highlighted names | done (this commit) | `Truncated`, `truncate_middle_parts`, `map_range`; `style::highlight_text` (U6 reuses it). Both row renderers highlight the first match, through the middle truncation. Tests `map_range_through_truncation`, `highlight_text_clamps_ranges`. |
 | I6 Footer and ⌘F escalation | todo | U3 is merged; `CrowWindow::open_search(SearchStart)` exists. |
 | I7 No-matches state (D) | todo | |
 
@@ -44,7 +44,7 @@ Branch: `ui-u4-filter` · PR: none · Last updated: 2026-11-13
 - 2026-11-13: read AGENTS.md, execute-plan, index README, U4 plan, U3 progress; confirmed U1/U2/U3 are merged on `main` (U3's PR #10 was squash-merged as `a539089`) and U6 is not started. Created branch and this file. Measured Q7 with a throwaway test, then removed it. Asked Q1–Q6, Q8–Q9.
 
 ## Next
-I4: move the field into the focused column and the list frame (`pane_filter.rs`), then I5–I7.
+I6: footer click/⌘F escalation through `take_filter` + `open_search`; then I7.
 
 ### Answers applied (2026-11-13)
 - Q1 focused folder name; Q2 below the header; Q3 "Esc clears" alone; Q4 transparent ring; Q5 `--bench-filter`; Q6 no U9 hook; Q8 follow U6 highlight; Q9 `Keycap::border(role)` override.
@@ -52,3 +52,5 @@ I4: move the field into the focused column and the list frame (`pane_filter.rs`)
 - 2026-11-13: I2 done. `scroll_x` is computed in `TextElement::prepaint` and stored in `paint`; the line, caret and selection are clipped to the field, and `bounds_for_range`/`character_index_for_point` account for the shift. Applies to Go to Folder, rename, search, palette and the filter.
 
 - 2026-11-13: I3 done. All `FileList`/`ColumnView` bindings now carry `!Filter`; `Filter` up/down and `TextInput` keys are unchanged. `KeyScope::Filter`'s stack mirrors the field inside a filtered list. Decision: the field's `esc` keycap will use `text_input::Cancel`, not `ClearFilter`: `ClearFilter` is gated by `!Filter`, and in the field `Cancel` is the action that actually fires (`ClearFilter` remains what the key does from the list).
+
+- 2026-11-13: I4+I5 done in one commit (they share the row renderers). New module is `pane::pane_filter` (a child module) rather than `main.rs`: it accesses `Pane`'s private state without widening ~10 fields to `pub(crate)`. Field press propagation stops at the field; while the field has focus the list's action listeners are off the focus path (otherwise AppKit's menu equivalent keeps "Filter This Folder" enabled and steals `/`). The field's Esc keycap uses `text_input::Cancel` (the action that fires there; `ClearFilter` is gated by `!Filter`). Column list counts use `row_count`, fixing the old count mismatch while filtering.

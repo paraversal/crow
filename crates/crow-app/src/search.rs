@@ -159,7 +159,7 @@ impl SearchView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let folder_label = crate::window::folder_name(&folder);
+        let folder_label = crate::style::display_name(&folder);
         let placeholder = Scope::Folder.label(&folder_label);
         let input = cx.new(|cx| TextInput::new(query.clone(), placeholder, cx).bare().with_role(Role::SearchInput));
         let focus = cx.focus_handle();

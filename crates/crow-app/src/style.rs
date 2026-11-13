@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use crow_theme::{Rgb, Theme, Variant};
 use gpui::{
-    BoxShadow, Image, ImageFormat, Pixels, Rgba, SharedString, TextRun, Window, WindowAppearance, px, rgb, rgba,
+    BoxShadow, FontWeight, HighlightStyle, Image, ImageFormat, Pixels, Rgba, SharedString, StyledText, TextRun, Window,
+    WindowAppearance, px, rgb, rgba,
 };
 
 pub fn color(c: Rgb) -> Rgba {
@@ -93,15 +94,28 @@ pub fn format_time(t: Option<std::time::SystemTime>) -> String {
     }
 }
 
+/// A folder's own name for labels: the volume name at the root, else the last
+/// component as Finder writes it.
+pub fn display_name(dir: &Path) -> String {
+    crow_macos::display_components(dir).pop().map_or_else(|| dir.display().to_string(), |(name, _)| name)
+}
+
 /// Finder's kind for an entry, from the system's type descriptions (cached per extension).
 pub fn kind(entry: &crow_fs::Entry) -> Arc<str> {
     let ext = if entry.is_dir && !entry.is_package() { "" } else { entry.ext() };
     crow_macos::kind_name(ext, entry.is_dir && !entry.is_package())
 }
 
+/// Middle-truncated text, with the byte offsets needed to map highlight ranges back.
+pub struct Truncated {
+    pub text: SharedString,
+    /// `Some((head bytes, tail start))`: the original is `original[..head] + "…" + original[tail..]`.
+    pub cut: Option<(usize, usize)>,
+}
+
 /// Shorten `text` in the middle to fit `max` (Finder keeps both the start and the
 /// extension visible: `8b184f2a-90…app_icon.png`). Only long names are measured twice or more.
-pub fn truncate_middle(text: &str, max: Pixels, font_size: Pixels, window: &Window) -> SharedString {
+pub fn truncate_middle_parts(text: &str, max: Pixels, font_size: Pixels, window: &Window) -> Truncated {
     let font = window.text_style().font();
     let measure = |s: &str| {
         let run = TextRun {
@@ -115,26 +129,118 @@ pub fn truncate_middle(text: &str, max: Pixels, font_size: Pixels, window: &Wind
         window.text_system().shape_line(SharedString::from(s.to_owned()), font_size, &[run], None).width
     };
     if measure(text) <= max {
-        return SharedString::from(text.to_owned());
+        return Truncated { text: SharedString::from(text.to_owned()), cut: None };
     }
-    let chars: Vec<char> = text.chars().collect();
-    let shortened = |keep: usize| -> String {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let shortened = |keep: usize| -> (String, (usize, usize)) {
         let head = keep.div_ceil(2);
         let tail = keep - head;
-        chars[..head].iter().chain(['…'].iter()).chain(chars[chars.len() - tail..].iter()).collect()
+        let head_end = if head == 0 { 0 } else { chars[head - 1].0 + chars[head - 1].1.len_utf8() };
+        let tail_start = if tail == 0 { text.len() } else { chars[chars.len() - tail].0 };
+        (format!("{}\u{2026}{}", &text[..head_end], &text[tail_start..]), (head_end, tail_start))
     };
     // The longest shortening that still fits.
     let (mut lo, mut hi) = (0, chars.len().saturating_sub(1));
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
-        if measure(&shortened(mid)) <= max { lo = mid } else { hi = mid - 1 }
+        if measure(&shortened(mid).0) <= max { lo = mid } else { hi = mid - 1 }
     }
-    shortened(lo).into()
+    let (text, cut) = shortened(lo);
+    Truncated { text: text.into(), cut: Some(cut) }
+}
+
+/// `truncate_middle` without the range mapping, for callers that only draw text.
+pub fn truncate_middle(text: &str, max: Pixels, font_size: Pixels, window: &Window) -> SharedString {
+    truncate_middle_parts(text, max, font_size, window).text
+}
+
+/// Map a byte range in the original text to the truncated display text, dropping the
+/// part under the ellipsis. Unused slots are `0..0`.
+pub fn map_range(t: &Truncated, range: std::ops::Range<usize>) -> [std::ops::Range<usize>; 2] {
+    let mut out = [0..0, 0..0];
+    let intersect = |lo: usize, hi: usize| {
+        let start = range.start.max(lo);
+        let end = range.end.min(hi);
+        (start < end).then_some(start..end)
+    };
+    match t.cut {
+        None => {
+            if let Some(part) = intersect(0, t.text.len()) {
+                out[0] = part;
+            }
+        }
+        Some((head_end, tail_start)) => {
+            if let Some(part) = intersect(0, head_end) {
+                out[0] = part;
+            }
+            if let Some(part) = intersect(tail_start, range.end.max(tail_start))
+                && part.end > tail_start
+            {
+                let offset = head_end + '\u{2026}'.len_utf8();
+                out[1] = (offset + part.start - tail_start)..(offset + part.end - tail_start);
+            }
+        }
+    }
+    out
+}
+
+/// Accent + semibold matches; `fg` on an accent-tinted selection so it stays legible.
+pub fn highlight_text(
+    text: impl Into<SharedString>,
+    ranges: &[std::ops::Range<usize>],
+    theme: &Theme,
+    on_selection: bool,
+) -> StyledText {
+    let text = text.into();
+    let color: gpui::Hsla = color(if on_selection { theme.role("fg") } else { theme.role("accent") }).into();
+    let style = HighlightStyle { color: Some(color), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
+    StyledText::new(text.clone()).with_highlights(
+        ranges
+            .iter()
+            .filter(|range| !range.is_empty())
+            .map(|range| (clamped(&text, range.clone()), style))
+            .filter(|(range, _)| !range.is_empty()),
+    )
+}
+
+/// Pull both ends of `range` back to char boundaries inside `text`.
+fn clamped(text: &str, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+    let mut start = range.start.min(text.len());
+    let mut end = range.end.min(text.len());
+    while !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    start..end.max(start)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_range_through_truncation() {
+        let t = Truncated { text: "abc\u{2026}xyz".into(), cut: Some((3, 6)) };
+        assert_eq!(map_range(&t, 1..2), [1..2, 0..0], "range in the head");
+        assert_eq!(map_range(&t, 7..8), [0..0, 7..8], "range in the tail");
+        assert_eq!(map_range(&t, 2..7), [2..3, 6..7], "range across the ellipsis keeps both parts");
+        assert_eq!(map_range(&t, 3..6), [0..0, 0..0], "range entirely under the ellipsis");
+        let whole = Truncated { text: "alpha".into(), cut: None };
+        assert_eq!(map_range(&whole, 2..4), [2..4, 0..0], "uncut text maps directly");
+        assert_eq!(map_range(&whole, 2..99), [2..5, 0..0], "clamped to the text");
+    }
+
+    #[test]
+    fn highlight_text_clamps_ranges() {
+        let theme = crow_theme::fallback();
+        // Mid-char and past-the-end ranges must not trip StyledText's boundary asserts.
+        let mid_char = 1..2;
+        let past_end = 0..99;
+        let _ = highlight_text("\u{e9}", std::slice::from_ref(&mid_char), &theme, false);
+        let _ = highlight_text("alpha", std::slice::from_ref(&past_end), &theme, true);
+    }
 
     #[test]
     fn tints_follow_roles() {
