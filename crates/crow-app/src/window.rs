@@ -3332,6 +3332,17 @@ mod tests {
     }
 
     #[gpui::test]
+    fn filter_exposes_match_ranges_per_row(cx: &mut TestAppContext) {
+        let root = fixture("filter-ranges");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("PH");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)]);
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.row_matches(cx)), [Some(2..4)]);
+    }
+
+    #[gpui::test]
     fn filter_arrows_and_return_act_on_matching_rows(cx: &mut TestAppContext) {
         let root = fixture("filter-enter");
         let (view, mut cx) = open(cx, &root);

@@ -1918,6 +1918,11 @@ impl Pane {
         self.filtering.as_ref().map(|f| f.input.read(cx).text().to_owned())
     }
 
+    pub fn row_matches(&self, cx: &gpui::App) -> Vec<Option<Range<usize>>> {
+        let folder = self.focused_folder().read(cx);
+        (0..folder.row_count()).map(|ix| folder.row_match(ix)).collect()
+    }
+
     pub fn folder_count(&self) -> usize {
         self.folders.len()
     }

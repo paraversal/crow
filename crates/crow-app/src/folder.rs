@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
@@ -84,6 +85,9 @@ pub struct Folder {
     show_hidden: bool,
     /// Name filter (list/column view): shown rows are this folder's matches, flat.
     filter: Option<String>,
+    /// First match in each shown row's name, as byte offsets. Aligned with `rows`
+    /// while a filter is set; `(u32::MAX, u32::MAX)` where the row has no range.
+    match_ranges: Arc<Vec<(u32, u32)>>,
     /// List view: folders shown inline, by path.
     children: HashMap<PathBuf, ChildFolder>,
     expanded: HashSet<PathBuf>,
@@ -133,6 +137,7 @@ impl Folder {
             type_select: TypeSelect::default(),
             show_hidden,
             filter: None,
+            match_ranges: Arc::new(Vec::new()),
             children: HashMap::new(),
             expanded: HashSet::new(),
             rows: Arc::new(Vec::new()),
@@ -295,6 +300,12 @@ impl Folder {
     /// The active name filter, if any.
     pub fn filter(&self) -> Option<&str> {
         self.filter.as_deref()
+    }
+
+    /// The first filter match in shown row `ix`'s name, as byte offsets into it.
+    pub fn row_match(&self, ix: usize) -> Option<Range<usize>> {
+        let (start, end) = *self.match_ranges.get(ix)?;
+        (start != u32::MAX).then_some(start as usize..end as usize)
     }
 
     /// Filter this folder's own rows (case-insensitive substring). Open inline
@@ -485,16 +496,28 @@ impl Folder {
     fn rebuild_rows(&mut self, cx: &gpui::App) {
         if let Some(filter) = &self.filter {
             let lower = filter.to_lowercase();
-            self.rows = Arc::new(
-                self.entries
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, entry)| name_matches(&entry.name, filter, &lower))
-                    .map(|(i, _)| FlatRow::Own(i))
-                    .collect(),
-            );
+            let mut rows = Vec::new();
+            let mut ranges = Vec::new();
+            for (i, entry) in self.entries.iter().enumerate() {
+                let range = name_match(&entry.name, filter, &lower);
+                // The predicate keeps today's shown set. `name_match` only adds the
+                // highlight, and can fail where full-string lowercasing differs.
+                let shown = if entry.name.is_ascii() && filter.is_ascii() {
+                    range.is_some()
+                } else {
+                    name_matches(&entry.name, filter, &lower)
+                };
+                if !shown {
+                    continue;
+                }
+                rows.push(FlatRow::Own(i));
+                ranges.push(range.map_or((u32::MAX, u32::MAX), |r| (r.start as u32, r.end as u32)));
+            }
+            self.rows = Arc::new(rows);
+            self.match_ranges = Arc::new(ranges);
             return;
         }
+        self.match_ranges = Arc::new(Vec::new());
         let mut rows = Vec::with_capacity(self.entries.len());
         for i in 0..self.entries.len() {
             rows.push(FlatRow::Own(i));
@@ -785,6 +808,98 @@ fn name_matches(name: &str, query: &str, lower_query: &str) -> bool {
         name.as_bytes().windows(needle.len()).any(|window| window.eq_ignore_ascii_case(needle))
     } else {
         name.to_lowercase().contains(lower_query)
+    }
+}
+
+/// Where `query` first matches `name`, as byte offsets into `name`. `None` means no
+/// match, or (for the rare non-ASCII cases where char-wise lowercasing differs from
+/// `str::to_lowercase`, e.g. the Greek final sigma) a match the predicate found but
+/// that cannot be mapped back; the row then shows without a highlight.
+fn name_match(name: &str, query: &str, lower_query: &str) -> Option<Range<usize>> {
+    if query.is_empty() {
+        return Some(0..0);
+    }
+    if name.is_ascii() && query.is_ascii() {
+        let needle = query.as_bytes();
+        return name
+            .as_bytes()
+            .windows(needle.len())
+            .position(|window| window.eq_ignore_ascii_case(needle))
+            .map(|start| start..start + needle.len());
+    }
+    // Lowercase char by char, remembering where each lowered char came from, so the
+    // found range maps back to the original name's byte offsets.
+    let mut lowered = String::with_capacity(name.len());
+    // (lowered start, original start, original end) for each lowered char. One
+    // original char can lower to several, e.g. İ -> i + combining dot.
+    let mut starts: Vec<(usize, usize, usize)> = Vec::with_capacity(name.len());
+    for (byte, ch) in name.char_indices() {
+        let end = byte + ch.len_utf8();
+        for lower in ch.to_lowercase() {
+            starts.push((lowered.len(), byte, end));
+            lowered.push(lower);
+        }
+    }
+    let start_lowered = lowered.find(lower_query)?;
+    let end_lowered = start_lowered + lower_query.len();
+    // A range inside one original char's expansion (or spanning one) widens to
+    // whole chars, which keeps both ends on char boundaries.
+    let start = starts.iter().rev().find(|(at, _, _)| *at <= start_lowered).map(|(_, byte, _)| *byte)?;
+    let end = if end_lowered == lowered.len() {
+        name.len()
+    } else {
+        starts.iter().rev().find(|(at, _, _)| *at < end_lowered).map(|(_, _, byte)| *byte)?
+    };
+    (start < end && name.is_char_boundary(start) && name.is_char_boundary(end)).then_some(start..end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_match_finds_the_first_ascii_occurrence() {
+        assert_eq!(name_match("View_vi", "VI", "vi"), Some(0..2));
+        assert_eq!(name_match("alphabet", "ph", "ph"), Some(2..4));
+        assert_eq!(name_match("alpha", "zz", "zz"), None);
+        assert_eq!(name_match("alpha", "ALPHA", "alpha"), Some(0..5));
+        assert_eq!(name_match("alpha", "alpha beta", "alpha beta"), None);
+    }
+
+    #[test]
+    fn name_match_maps_non_ascii_to_original_bytes() {
+        assert_eq!(name_match("Ärger.txt", "rg", "rg"), Some(2..4));
+        assert_eq!(name_match("Ärger.txt", "ÄR", "är"), Some(0..3));
+        // A query that full-string lowercasing also misses.
+        assert_eq!(name_match("Grüße", "ÜSS", "üss"), None);
+        assert!(!name_matches("Grüße", "ÜSS", "üss"));
+        // The char-wise map can't express the final sigma; the row still shows.
+        assert!(name_matches("ΣΊΣΥΦΟΣ", "ς", "ς"));
+        assert_eq!(name_match("ΣΊΣΥΦΟΣ", "ς", "ς"), None);
+        // Combining marks and expansions: the range stays on char boundaries.
+        assert_eq!(name_match("e\u{301}clair", "e", "e"), Some(0..1));
+        assert_eq!(name_match("İstanbul", "i", "i"), Some(0..2));
+    }
+
+    #[test]
+    fn name_match_agrees_with_name_matches() {
+        let corpus = ["alpha", "Ärger.txt", "Grüße", "ΣΊΣΥΦΟΣ", "İstanbul", "e\u{301}clair", "café", "STRASSE"];
+        let queries = ["a", "ä", "rg", "ss", "σ", "ς", "i", "e", "café", "ÜSS", "zzz"];
+        for name in corpus {
+            for query in queries {
+                let lower = query.to_lowercase();
+                if name_matches(name, query, &lower) {
+                    // The known gap: final sigma (and other context-sensitive lowercasing).
+                    let known = name == "ΣΊΣΥΦΟΣ" && query == "ς";
+                    assert!(
+                        name_match(name, query, &lower).is_some() || known,
+                        "{name:?} shown for {query:?} without a range"
+                    );
+                } else {
+                    assert_eq!(name_match(name, query, &lower), None, "{name:?} highlighted for {query:?}");
+                }
+            }
+        }
     }
 }
 
