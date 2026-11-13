@@ -729,7 +729,10 @@ impl Element for TextElement {
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
-                Some(fill(Bounds::new(point(x(cursor), bounds.top()), size(px(2.), bounds.bottom() - bounds.top())), cursor_color)),
+                Some(fill(
+                    Bounds::new(point(x(cursor), bounds.top()), size(px(2.), bounds.bottom() - bounds.top())),
+                    cursor_color,
+                )),
             )
         } else {
             (

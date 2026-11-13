@@ -968,9 +968,15 @@ impl Pane {
         crow_macos::toggle_quick_look(&entry.path);
     }
 
-    fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // While a name is being edited, letters belong to the text field, not type-to-select.
         if self.renaming.is_some() {
+            return;
+        }
+        // The filter field is inside this list; its unhandled keys must not type-to-select.
+        if let Some(filtering) = &self.filtering
+            && filtering.input.read(cx).focus_handle(cx).is_focused(window)
+        {
             return;
         }
         let m = &event.keystroke.modifiers;

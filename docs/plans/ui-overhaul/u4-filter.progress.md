@@ -6,7 +6,7 @@ Branch: `ui-u4-filter` · PR: none · Last updated: 2026-11-13
 | --- | --- | --- |
 | I1 Match ranges from `Folder` | done (this commit) | `name_match` + `match_ranges`; 3 folder tests and `filter_exposes_match_ranges_per_row`; 111 app tests green. |
 | I2 Chromeless `TextInput` that scrolls to the caret | done (this commit) | Existing `bare()` used instead of adding `chromeless()`. Added `scroll_x`, clipping and shifted click/IME mapping; applies to every field. Test `scroll_for_caret_keeps_the_caret_visible`; 112 app tests green. |
-| I3 Keep list keys out of the field | todo | Spike (2026-11-13): rename does not leak keys today, so `!Filter` only (Q7 answered by measurement). |
+| I3 Keep list keys out of the field | done (this commit) | `LIST`, `LIST_FILTERED`, `COLUMNS`, `LIST_NOT_COLUMNS` plus `!Filter` in the Vim layer; `Pane::key_down` returns while the field has focus; `KeyScope::Filter` now includes the list contexts. Unit test `filter_field_context_disables_list_keys`; 113 app tests green. |
 | I4 Field inside the focused column and the list frame | todo | |
 | I5 Highlighted names | todo | U6 is not merged; U4 adds `style::highlight_text`. |
 | I6 Footer and ⌘F escalation | todo | U3 is merged; `CrowWindow::open_search(SearchStart)` exists. |
@@ -44,9 +44,11 @@ Branch: `ui-u4-filter` · PR: none · Last updated: 2026-11-13
 - 2026-11-13: read AGENTS.md, execute-plan, index README, U4 plan, U3 progress; confirmed U1/U2/U3 are merged on `main` (U3's PR #10 was squash-merged as `a539089`) and U6 is not started. Created branch and this file. Measured Q7 with a throwaway test, then removed it. Asked Q1–Q6, Q8–Q9.
 
 ## Next
-I3: add `!Filter` to the list/column contexts and the `Pane::key_down` early return; land the keymap unit test before moving UI.
+I4: move the field into the focused column and the list frame (`pane_filter.rs`), then I5–I7.
 
 ### Answers applied (2026-11-13)
 - Q1 focused folder name; Q2 below the header; Q3 "Esc clears" alone; Q4 transparent ring; Q5 `--bench-filter`; Q6 no U9 hook; Q8 follow U6 highlight; Q9 `Keycap::border(role)` override.
 
 - 2026-11-13: I2 done. `scroll_x` is computed in `TextElement::prepaint` and stored in `paint`; the line, caret and selection are clipped to the field, and `bounds_for_range`/`character_index_for_point` account for the shift. Applies to Go to Folder, rename, search, palette and the filter.
+
+- 2026-11-13: I3 done. All `FileList`/`ColumnView` bindings now carry `!Filter`; `Filter` up/down and `TextInput` keys are unchanged. `KeyScope::Filter`'s stack mirrors the field inside a filtered list. Decision: the field's `esc` keycap will use `text_input::Cancel`, not `ClearFilter`: `ClearFilter` is gated by `!Filter`, and in the field `Cancel` is the action that actually fires (`ClearFilter` remains what the key does from the list).

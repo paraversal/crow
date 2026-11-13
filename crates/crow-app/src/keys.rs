@@ -40,7 +40,13 @@ pub fn context_stack(scope: KeyScope, layer: KeymapLayer) -> Vec<KeyContext> {
             vec![context("Crow"), context(if vim { "FileList ColumnView vim" } else { "FileList ColumnView" })]
         }
         KeyScope::Sidebar => vec![context("Crow"), context(if vim { "Sidebar vim" } else { "Sidebar" })],
-        KeyScope::Filter => vec![context("Crow"), context("Filter"), context("TextInput")],
+        KeyScope::Filter => vec![
+            context("Crow"),
+            // The field lives inside the list/column, so the list's contexts are on its path.
+            context(if vim { "FileList vim Filtered" } else { "FileList Filtered" }),
+            context("Filter"),
+            context("TextInput"),
+        ],
         KeyScope::Search => vec![context("Crow"), context("Search"), context("TextInput")],
         KeyScope::SearchResults => vec![context("Crow"), context("Search"), context("SearchResults")],
         KeyScope::Palette => vec![

@@ -92,42 +92,49 @@ actions!(
     ]
 );
 
+/// List bindings, except while the filter field has focus: the field is inside the
+/// list, so a plain character (`/`, letters, Space) must reach the text input.
+const LIST: &str = "FileList && !Filter";
+const LIST_FILTERED: &str = "FileList && Filtered && !Filter";
+const COLUMNS: &str = "ColumnView && !Filter";
+const LIST_NOT_COLUMNS: &str = "FileList && !ColumnView && !Filter";
+
 pub fn finder_keymap() -> Vec<KeyBinding> {
     vec![
-        KeyBinding::new("up", MoveUp, Some("FileList")),
-        KeyBinding::new("down", MoveDown, Some("FileList")),
-        KeyBinding::new("alt-up", MoveToFirst, Some("FileList")),
-        KeyBinding::new("alt-down", MoveToLast, Some("FileList")),
-        KeyBinding::new("shift-up", ExtendUp, Some("FileList")),
-        KeyBinding::new("shift-down", ExtendDown, Some("FileList")),
-        KeyBinding::new("cmd-a", SelectAll, Some("FileList")),
-        KeyBinding::new("/", StartFilter, Some("FileList")),
-        KeyBinding::new("escape", ClearFilter, Some("FileList && Filtered")),
+        KeyBinding::new("up", MoveUp, Some(LIST)),
+        KeyBinding::new("down", MoveDown, Some(LIST)),
+        KeyBinding::new("alt-up", MoveToFirst, Some(LIST)),
+        KeyBinding::new("alt-down", MoveToLast, Some(LIST)),
+        KeyBinding::new("shift-up", ExtendUp, Some(LIST)),
+        KeyBinding::new("shift-down", ExtendDown, Some(LIST)),
+        KeyBinding::new("cmd-a", SelectAll, Some(LIST)),
+        KeyBinding::new("/", StartFilter, Some(LIST)),
+        KeyBinding::new("escape", ClearFilter, Some(LIST_FILTERED)),
         KeyBinding::new("up", MoveUp, Some("Filter")),
         KeyBinding::new("down", MoveDown, Some("Filter")),
         // cmd-o is added first so cmd-down stays the shown key (the last binding wins).
-        KeyBinding::new("cmd-o", OpenSelection, Some("FileList")),
-        KeyBinding::new("cmd-down", OpenSelection, Some("FileList")),
-        KeyBinding::new("enter", Rename, Some("FileList")),
-        KeyBinding::new("space", QuickLook, Some("FileList")),
-        KeyBinding::new("cmd-shift-n", NewFolder, Some("FileList")),
-        KeyBinding::new("cmd-d", Duplicate, Some("FileList")),
-        KeyBinding::new("cmd-backspace", MoveToTrash, Some("FileList")),
-        KeyBinding::new("cmd-alt-backspace", DeletePermanently, Some("FileList")),
-        KeyBinding::new("cmd-c", CopyFiles, Some("FileList")),
-        KeyBinding::new("cmd-x", CutFiles, Some("FileList")),
-        KeyBinding::new("cmd-v", PasteFiles, Some("FileList")),
-        KeyBinding::new("cmd-alt-v", PasteMoveFiles, Some("FileList")),
+        KeyBinding::new("cmd-o", OpenSelection, Some(LIST)),
+        KeyBinding::new("cmd-down", OpenSelection, Some(LIST)),
+        KeyBinding::new("enter", Rename, Some(LIST)),
+        KeyBinding::new("space", QuickLook, Some(LIST)),
+        KeyBinding::new("cmd-shift-n", NewFolder, Some(LIST)),
+        KeyBinding::new("cmd-d", Duplicate, Some(LIST)),
+        KeyBinding::new("cmd-backspace", MoveToTrash, Some(LIST)),
+        KeyBinding::new("cmd-alt-backspace", DeletePermanently, Some(LIST)),
+        KeyBinding::new("cmd-c", CopyFiles, Some(LIST)),
+        KeyBinding::new("cmd-x", CutFiles, Some(LIST)),
+        KeyBinding::new("cmd-v", PasteFiles, Some(LIST)),
+        KeyBinding::new("cmd-alt-v", PasteMoveFiles, Some(LIST)),
         KeyBinding::new("cmd-z", Undo, Some("Crow")),
         KeyBinding::new("cmd-shift-z", Redo, Some("Crow")),
         KeyBinding::new("escape", CancelOperation, Some("Crow")),
         KeyBinding::new("cmd-alt-l", ToggleActivity, Some("Crow")),
         KeyBinding::new("enter", SheetConfirm, Some("Sheet")),
         KeyBinding::new("escape", SheetCancel, Some("Sheet")),
-        KeyBinding::new("left", MoveLeft, Some("ColumnView")),
-        KeyBinding::new("right", MoveRight, Some("ColumnView")),
-        KeyBinding::new("left", MoveLeft, Some("FileList && !ColumnView")),
-        KeyBinding::new("right", MoveRight, Some("FileList && !ColumnView")),
+        KeyBinding::new("left", MoveLeft, Some(COLUMNS)),
+        KeyBinding::new("right", MoveRight, Some(COLUMNS)),
+        KeyBinding::new("left", MoveLeft, Some(LIST_NOT_COLUMNS)),
+        KeyBinding::new("right", MoveRight, Some(LIST_NOT_COLUMNS)),
         KeyBinding::new("cmd-2", ViewAsList, Some("Crow")),
         KeyBinding::new("cmd-3", ViewAsColumns, Some("Crow")),
         KeyBinding::new("up", MoveUp, Some("Sidebar")),
@@ -187,9 +194,9 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
 
 /// The optional Vim layer, on top of the Finder keys.
 pub fn vim_keymap() -> Vec<KeyBinding> {
-    const LIST: &str = "FileList && vim && !ColumnView";
-    const COLUMNS: &str = "ColumnView && vim";
-    const ANY: &str = "FileList && vim";
+    const LIST: &str = "FileList && vim && !ColumnView && !Filter";
+    const COLUMNS: &str = "ColumnView && vim && !Filter";
+    const ANY: &str = "FileList && vim && !Filter";
     vec![
         KeyBinding::new("j", MoveDown, Some(ANY)),
         KeyBinding::new("k", MoveUp, Some(ANY)),
@@ -221,4 +228,59 @@ pub fn vim_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("j", MoveDown, Some("SearchResults && vim")),
         KeyBinding::new("k", MoveUp, Some("SearchResults && vim")),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Action, KeyContext, Keymap, Keystroke};
+
+    use super::*;
+
+    fn keymap() -> Keymap {
+        let mut keymap = Keymap::default();
+        keymap.add_bindings(finder_keymap());
+        keymap.add_bindings(vim_keymap());
+        keymap.add_bindings(crate::text_input::keymap());
+        keymap
+    }
+
+    fn resolved(keymap: &Keymap, input: &'static str, stack: &[&'static str]) -> Vec<Box<dyn Action>> {
+        let stack: Vec<KeyContext> = stack.iter().map(|source| KeyContext::parse(source).expect("context")).collect();
+        let (bindings, _) = keymap.bindings_for_input(&[Keystroke::parse(input).expect("keystroke")], &stack);
+        bindings.iter().map(|binding| binding.action().boxed_clone()).collect()
+    }
+
+    fn wins(keymap: &Keymap, input: &'static str, stack: &[&'static str], action: &dyn Action) -> bool {
+        resolved(keymap, input, stack).first().is_some_and(|found| found.partial_eq(action))
+    }
+
+    #[test]
+    fn filter_field_context_disables_list_keys() {
+        let keymap = keymap();
+        let field = ["Crow", "FileList ColumnView vim Filtered", "Filter", "TextInput"];
+        // The filter field is inside the list. Plain characters must reach it, not
+        // trigger list actions.
+        for input in ["j", "l", "/", "space", "cmd-backspace", "cmd-d"] {
+            assert!(!wins(&keymap, input, &field, &MoveDown), "{input} must not move down");
+            assert!(!wins(&keymap, input, &field, &MoveRight), "{input} must not move right");
+            assert!(!wins(&keymap, input, &field, &StartFilter), "{input} must not reopen the filter");
+            assert!(!wins(&keymap, input, &field, &QuickLook), "{input} must not quick look");
+            assert!(!wins(&keymap, input, &field, &MoveToTrash), "{input} must not trash");
+            assert!(!wins(&keymap, input, &field, &Duplicate), "{input} must not duplicate");
+        }
+        assert!(wins(&keymap, "up", &field, &MoveUp));
+        assert!(wins(&keymap, "cmd-f", &field, &ShowSearch));
+        assert!(wins(&keymap, "escape", &field, &crate::text_input::Cancel));
+
+        // List focused while filtering: the M6 keys still work.
+        let list = ["Crow", "FileList vim Filtered"];
+        assert!(wins(&keymap, "/", &list, &StartFilter));
+        assert!(wins(&keymap, "j", &list, &MoveDown));
+        assert!(wins(&keymap, "escape", &list, &ClearFilter));
+
+        // `!Filter` must not match `Filtered`.
+        let unfiltered = ["Crow", "FileList vim"];
+        assert!(wins(&keymap, "/", &unfiltered, &StartFilter));
+        assert!(wins(&keymap, "j", &unfiltered, &MoveDown));
+    }
 }
