@@ -33,7 +33,7 @@ use std::collections::HashMap;
 
 /// Open a window on `dir`. New windows share one size from settings and step
 /// 24 pt down and right from the previous one, so they never land at random sizes.
-pub fn open(dir: PathBuf, bench: bool, cx: &mut App) {
+pub fn open(dir: PathBuf, bench: bool, bench_filter: Option<String>, cx: &mut App) {
     let defaults = cx.global::<Ui>().settings.window.clone();
     let step = px(24.0 * cx.windows().len() as f32);
     let mut bounds = Bounds::centered(None, size(px(defaults.width as f32), px(defaults.height as f32)), cx);
@@ -49,7 +49,9 @@ pub fn open(dir: PathBuf, bench: bool, cx: &mut App) {
         window_min_size: Some(size(px(640.), px(400.))),
         ..Default::default()
     };
-    if let Err(e) = cx.open_window(options, |window, cx| cx.new(|cx| CrowWindow::new(dir, bench, window, cx))) {
+    if let Err(e) =
+        cx.open_window(options, |window, cx| cx.new(|cx| CrowWindow::new(dir, bench, bench_filter, window, cx)))
+    {
         tracing::error!("open window: {e}");
     }
 }
@@ -122,12 +124,18 @@ impl Palette {
 }
 
 impl CrowWindow {
-    fn new(dir: PathBuf, bench: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        dir: PathBuf,
+        bench: bool,
+        bench_filter: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let show_hidden = cx.global::<Ui>().settings.show_hidden_files;
         if !bench {
             ui::record_visit(&dir, cx);
         }
-        let pane = cx.new(|cx| Pane::new(dir.clone(), show_hidden, bench, cx));
+        let pane = cx.new(|cx| Pane::new(dir.clone(), show_hidden, bench, bench_filter, cx));
         let sidebar = cx.new(|cx| {
             let mut sidebar = Sidebar::new(cx);
             sidebar.set_current(dir, cx);
@@ -185,7 +193,7 @@ impl CrowWindow {
 
     fn new_window(&mut self, _: &NewWindow, _window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.pane().read(cx).current_dir(cx);
-        open(dir, false, cx);
+        open(dir, false, None, cx);
     }
 
     fn minimize(&mut self, _: &Minimize, window: &mut Window, _: &mut Context<Self>) {
@@ -206,7 +214,7 @@ impl CrowWindow {
             self.close_search(window, cx);
         }
         let show_hidden = self.show_hidden;
-        let pane = cx.new(|cx| Pane::new(dir, show_hidden, false, cx));
+        let pane = cx.new(|cx| Pane::new(dir, show_hidden, false, None, cx));
         self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
         self._subscriptions
             .push(cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)));
@@ -1673,7 +1681,7 @@ impl CrowWindow {
             CommandId::PreviousTab => self.previous_tab(&PreviousTab, window, cx),
             CommandId::NewWindow => {
                 let dir = self.pane().read(cx).current_dir(cx);
-                open(dir, false, cx);
+                open(dir, false, None, cx);
             }
             CommandId::SwitchFocus => self.switch_focus(&SwitchFocus, window, cx),
             CommandId::ToggleHiddenFiles => self.toggle_hidden(&ToggleHiddenFiles, window, cx),
@@ -2095,7 +2103,9 @@ mod tests {
         let dir = dir.to_path_buf();
         let window: WindowHandle<CrowWindow> = cx
             .update(|cx| {
-                cx.open_window(Default::default(), |window, cx| cx.new(|cx| CrowWindow::new(dir, false, window, cx)))
+                cx.open_window(Default::default(), |window, cx| {
+                    cx.new(|cx| CrowWindow::new(dir, false, None, window, cx))
+                })
             })
             .expect("open window");
         let mut cx = VisualTestContext::from_window(window.into(), cx);

@@ -3,6 +3,7 @@
 //! ```text
 //! crow [DIR]                       open a window on DIR (default: home)
 //! crow --bench DIR                 auto-scroll DIR for 600 frames, print frame times, quit
+//! crow --bench-filter QUERY DIR    the same, with the name filter applied first
 //! crow --make-fixture DIR [N]      create N (default 100,000) empty files in DIR
 //! crow --make-search-fixture DIR [N]  create N (default 200,000) nested text files
 //! crow --bench-search DIR [QUERY]  time a name+contents walk, print first hit and total
@@ -149,11 +150,14 @@ fn main() -> ExitCode {
         };
     }
 
-    let bench = args.iter().any(|a| a == "--bench");
+    let bench_filter_at = args.iter().position(|a| a == "--bench-filter");
+    let bench_filter = bench_filter_at.and_then(|i| args.get(i + 1).cloned());
+    let bench = args.iter().any(|a| a == "--bench") || bench_filter.is_some();
     let start = args
         .iter()
-        .find(|a| !a.starts_with("--"))
-        .map(PathBuf::from)
+        .enumerate()
+        .find(|(i, arg)| !arg.starts_with("--") && Some(*i) != bench_filter_at.map(|at| at + 1))
+        .map(|(_, arg)| PathBuf::from(arg))
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/"));
     let start = match start.canonicalize() {
@@ -178,7 +182,7 @@ fn main() -> ExitCode {
             }
         })
         .detach();
-        window::open(start.clone(), bench, cx);
+        window::open(start.clone(), bench, bench_filter.clone(), cx);
         cx.activate(true);
     });
     ExitCode::SUCCESS

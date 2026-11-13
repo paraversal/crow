@@ -252,10 +252,18 @@ struct Bench {
     last: Option<Instant>,
     /// Scroll results, kept while the folder is reopened to time first paint in a warm app.
     scrolled: Option<String>,
+    /// The name filter applied before scrolling, so highlighted rows are what is timed.
+    filter: Option<String>,
 }
 
 impl Pane {
-    pub fn new(dir: PathBuf, show_hidden: bool, bench: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        dir: PathBuf,
+        show_hidden: bool,
+        bench: bool,
+        bench_filter: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let columns = cx.global::<Ext>().0.default_columns();
         let mut pane = Self {
             history: History::new(dir.clone()),
@@ -274,7 +282,13 @@ impl Pane {
             status: None,
             renaming: None,
             rename_when_present: None,
-            bench: bench.then(|| Bench { frame: 0, intervals: Vec::new(), last: None, scrolled: None }),
+            bench: bench.then(|| Bench {
+                frame: 0,
+                intervals: Vec::new(),
+                last: None,
+                scrolled: None,
+                filter: bench_filter,
+            }),
             applied_view: None,
             list_bounds: Rc::new(Cell::new(None)),
             drop_row: None,
@@ -285,6 +299,10 @@ impl Pane {
             focus_list_after_filter: false,
         };
         pane.enter(dir, cx);
+        if let Some(filter) = pane.bench.as_ref().and_then(|bench| bench.filter.clone()) {
+            let folder = pane.folders[0].clone();
+            folder.update(cx, |folder, cx| folder.set_filter(Some(filter), cx));
+        }
         pane
     }
 
@@ -1139,8 +1157,8 @@ impl Pane {
         let Some(bench) = self.bench.as_mut() else { return };
         window.request_animation_frame();
         let folder = self.folders[0].read(cx);
-        let (count, loading) = (folder.entries().len(), folder.is_loading());
-        if loading || count == 0 {
+        let (count, shown, loading) = (folder.entries().len(), folder.row_count(), folder.is_loading());
+        if loading || count == 0 || shown == 0 {
             return;
         }
         let now = Instant::now();
@@ -1149,7 +1167,7 @@ impl Pane {
         }
         bench.frame += 1;
         // About 3 rows per frame: a fast, continuous trackpad scroll.
-        folder.scroll_strict((bench.frame * 3) % count);
+        folder.scroll_strict((bench.frame * 3) % shown);
         if bench.frame == 600 {
             let mut v = std::mem::take(&mut bench.intervals);
             v.sort_by(f64::total_cmp);
@@ -1167,8 +1185,12 @@ impl Pane {
                 at(1.0),
             ));
             // Reopen the folder: the first paint of a warm app is what navigating feels like.
-            let dir = self.dir().to_path_buf();
+            let (dir, filter) = (folder.dir().to_path_buf(), bench.filter.clone());
             self.enter(dir, cx);
+            if let Some(filter) = filter {
+                let folder = self.folders[0].clone();
+                folder.update(cx, |folder, cx| folder.set_filter(Some(filter), cx));
+            }
         } else if bench.frame > 600 {
             println!(
                 "BENCH {} warm_first_paint={:.0}ms warm_load={:.0}ms",

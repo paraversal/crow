@@ -78,7 +78,7 @@ pub fn init(cx: &mut App) {
     // this fires only when there is no window (or none is listening).
     cx.on_action(|_: &act::NewWindow, cx| {
         let home = std::env::var_os("HOME").map_or_else(|| std::path::PathBuf::from("/"), std::path::PathBuf::from);
-        crate::window::open(home, false, cx);
+        crate::window::open(home, false, None, cx);
     });
     cx.on_action(|_: &act::About, _| crow_macos::show_about_panel());
     cx.on_action(|_: &act::OpenSettings, cx| {

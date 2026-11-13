@@ -24,17 +24,19 @@ Branch: `ui-u4-filter` · PR: none · Last updated: 2026-11-13
 - Q9 (asked 2026-11-13): `Keycap::Outline`'s border is `surface-raised`, the same colour as D's button fill, so it would be invisible on that button → answered: add a `Keycap::border(role)` override; the button passes `fg-subtle`.
 
 ## Decisions
+- Benchmark: `--bench-filter <query>` applies the folder filter before scrolling but does not render the field (no window is available in `Pane::new` to focus a text field); this times the filtered/highlighted row path, which is what changed. Warm reopen re-applies the filter.
 - Merged names used: `TextInput::bare()` replaces the plan's `chromeless()`; U3's `CrowWindow::open_search`/`SearchStart` and `SearchView::query_text`/`scope`/`input_focus_handle` exist and are reused. U1's `keys`, `chrome`, `icons`, `style` helpers are on `main`.
 - Plan line references are stale (U3 moved code); line numbers in this file refer to the tree at branch start.
 
 ## Hand checks
-- [ ] Field in the focused column; other columns don't move.
-- [ ] List view field below the header.
-- [ ] Highlighted match on selected/unselected rows in a light and a dark theme.
-- [ ] 60-character query stays inside a 220 px field with the caret visible.
-- [ ] ⌘F from field and footer, and the no-match button, open search with the same text in the focused folder.
-- [ ] D state in both themes; hidden-files note.
-- [ ] VoiceOver: "Filter <folder>", count, no-match line; check whether AXStatus changes are announced.
+- [x] Field in the focused column; other columns don't move. Verified in the bundle at `/tmp/u4-hand` (Cmd-3, Right, `/`, "vi"): field, "0 of 1", `esc` and D in the middle column; columns 0/1 kept their bounds.
+- [x] List view field below the header. Verified (Cmd-2, `/`, "ne"): field between header and `needle.txt`, footer at the list frame's bottom.
+- [x] Highlighted match on selected/unselected rows in a light and a dark theme. Unselected `needle.txt` (accent + semibold) and the selected row (fg + semibold, Q8) in FireBox; selected row in a Solarized Light preview (dark semibold on the light selection).
+- [x] 60-character query stays inside a 220 px field with the caret visible. Verified in the bundle: the field showed the tail and the caret, nothing overflowed.
+- [x] ⌘F from the field opens search with "nee", This Folder = alpha, 1 result (hand). Footer click and the D button's click are covered by `filter_footer_click_opens_search` / `filter_with_no_matches_offers_search` (not hand-clicked).
+- [x] D state in dark (FireBox, "Nothing in alpha matches “vi”", raised `⌘F` button, note). Hidden-files note checked both ways: "Hidden files are off · Esc clears", then "Esc clears" after Cmd-Shift-. (toggled back off).
+- [ ] D state in a light theme (light theme was previewed with a match, not with D).
+- [ ] VoiceOver: "Filter <folder>", count, no-match line; whether AXStatus changes are announced.
 - [ ] IME (Japanese) still works in a text field (I2 touches every TextInput).
 
 ## Found along the way
@@ -44,7 +46,7 @@ Branch: `ui-u4-filter` · PR: none · Last updated: 2026-11-13
 - 2026-11-13: read AGENTS.md, execute-plan, index README, U4 plan, U3 progress; confirmed U1/U2/U3 are merged on `main` (U3's PR #10 was squash-merged as `a539089`) and U6 is not started. Created branch and this file. Measured Q7 with a throwaway test, then removed it. Asked Q1–Q6, Q8–Q9.
 
 ## Next
-Finish: README + `docs/testing.md`, `--bench-filter`, bench vs `main`, `./scripts/bundle.sh` hand checks, push and open the PR.
+Push and open the PR; set this file to "PR open". Remaining hand checks: light-theme D, VoiceOver, IME.
 
 ### Answers applied (2026-11-13)
 - Q1 focused folder name; Q2 below the header; Q3 "Esc clears" alone; Q4 transparent ring; Q5 `--bench-filter`; Q6 no U9 hook; Q8 follow U6 highlight; Q9 `Keycap::border(role)` override.
@@ -58,3 +60,7 @@ Finish: README + `docs/testing.md`, `--bench-filter`, bench vs `main`, `./script
 - 2026-11-13: I6 done. ⌘F from the field or the list, and a click on the footer or the D button, all dispatch `ShowSearch`; `show_search` guards overlays before taking the filter, so no text is lost when search cannot open.
 
 - 2026-11-13: I7 done. The loading window could not be held with a small fixture (it settles before the first draw), so that half of the condition is a unit test and the window test covers D appearing after the listing settles.
+
+- 2026-11-13: Finish. Bench (`target/fixture-100k`, three runs): main warm first paint 10/10/10 ms, p99 8.86/8.85/8.84 ms; branch warm 10/11/10 ms, p99 8.85/8.88/8.95 ms. `--bench-filter e`: p99 8.82/9.03/8.97 ms, warm first paint 10/17/10 ms. No regression beyond run-to-run noise. `set_filter` on 100k with "e" (temporary timing, removed): 3.0–4.1 ms per rebuild, 100,000 rows — under one 120 Hz frame.
+- 2026-11-13: Hand-checked the bundle with screenshots: filtered column B (middle column only), list-view field/footer, highlights on unselected and selected rows in FireBox and a Solarized Light preview, a 60-character query scrolled in the field, ⌘F escalation to This Folder/alpha/"nee", D in dark, and the hidden-files note both ways. Rebuilt the bundle afterwards.
+- 2026-11-13: README Keys and `docs/testing.md` (Automated paragraph, bench command/line, budget numbers for U4, four hand rows replacing the old Filter row) updated.
