@@ -181,6 +181,7 @@ pub fn init(cx: &mut App) {
     ui.target = theme.clone();
     ui.theme = theme;
     cx.set_global(ui);
+    crate::usage::init(cx);
 
     let (theme_tx, theme_rx) = mpsc::channel();
     let theme_watcher = crow_theme::watch(theme_tx).inspect_err(|e| tracing::warn!("theme watch: {e}")).ok();
@@ -242,6 +243,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     let ui = Ui::new(root.join("config"), root.join("state"), crow_core::home(), crow_theme::fallback(), false);
     cx.set_global(ui);
     crate::extensions::init(cx);
+    crate::usage::init(cx);
     root.join("config")
 }
 

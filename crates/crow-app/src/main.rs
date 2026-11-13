@@ -26,6 +26,7 @@ mod sidebar;
 mod style;
 mod text_input;
 mod ui;
+mod usage;
 mod window;
 
 use std::path::PathBuf;

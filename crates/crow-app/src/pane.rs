@@ -691,6 +691,7 @@ impl Pane {
             window.focus(&focus, cx);
             return;
         }
+        crate::usage::record(&StartFilter, cx);
         let folder = crate::style::display_name(self.focused_folder().read(cx).dir());
         let input = cx.new(|cx| TextInput::new("", format!("Filter {folder}"), cx).bare());
         let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {

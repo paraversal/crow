@@ -1461,6 +1461,7 @@ impl CrowWindow {
     // ----- search -----
 
     fn show_search(&mut self, _: &ShowSearch, window: &mut Window, cx: &mut Context<Self>) {
+        crate::usage::record(&ShowSearch, cx);
         if let Some(search) = &self.search {
             search.update(cx, |search, cx| search.select_all_input(window, cx));
             // The band's focus ring is drawn from the input's focus state.
@@ -1581,6 +1582,7 @@ impl CrowWindow {
     // ----- command palette -----
 
     fn show_palette(&mut self, _: &ShowCommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+        crate::usage::record(&ShowCommandPalette, cx);
         self.open_palette("", window, cx);
     }
 
@@ -2064,7 +2066,9 @@ impl Render for CrowWindow {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use gpui::{Entity, TestAppContext, VisualTestContext, WindowHandle};
+    use gpui::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle};
+
+    use crate::actions::StartFilter;
 
     use super::*;
 
@@ -2369,6 +2373,74 @@ mod tests {
         cx.simulate_keystrokes("cmd-[");
         settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root.join("alpha"), "and it left a history step to go back to");
+    }
+
+    /// The in-memory count for an action name.
+    fn key_uses(cx: &VisualTestContext, key: &str) -> u32 {
+        cx.read(|cx| crate::usage::count_key(key, cx))
+    }
+
+    /// Wait for the background save and the count it wrote to `usage.json`.
+    fn saved_uses(cx: &mut VisualTestContext, key: &str, expected: u32) -> u32 {
+        let path = cx.read(|cx| cx.global::<Ui>().state_dir.join(crow_core::USAGE_FILE));
+        let mut saved = 0;
+        for _ in 0..200 {
+            cx.run_until_parked();
+            saved = crow_core::Usage::load(&path).count(key);
+            if saved == expected {
+                return saved;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        saved
+    }
+
+    #[gpui::test]
+    fn pressing_slash_counts_filter_uses(cx: &mut TestAppContext) {
+        let root = fixture("usage-filter");
+        let (view, mut cx) = open(cx, &root);
+        for _ in 0..3 {
+            cx.simulate_keystrokes("/");
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        let key = StartFilter.name();
+        assert_eq!(key_uses(&cx, key), 3, "each / counted once");
+        assert_eq!(saved_uses(&mut cx, key, 3), 3, "and survived to disk");
+    }
+
+    #[gpui::test]
+    fn palette_and_dispatch_count_too(cx: &mut TestAppContext) {
+        let root = fixture("usage-palette");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">filter");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "the palette opened the filter");
+        cx.simulate_keystrokes("escape");
+
+        cx.dispatch_action(ShowSearch);
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("escape");
+
+        assert_eq!(key_uses(&cx, ShowCommandPalette.name()), 1, "Cmd-K counted");
+        assert_eq!(key_uses(&cx, StartFilter.name()), 1, "the palette run counted");
+        assert_eq!(key_uses(&cx, ShowSearch.name()), 1, "a dispatched action counted");
+    }
+
+    #[gpui::test]
+    fn refocusing_an_open_filter_does_not_count(cx: &mut TestAppContext) {
+        let root = fixture("usage-refocus");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        settle(&view, &mut cx);
+        let before = key_uses(&cx, StartFilter.name());
+        assert_eq!(before, 1);
+        cx.dispatch_action(StartFilter);
+        settle(&view, &mut cx);
+        assert_eq!(key_uses(&cx, StartFilter.name()), before, "focusing the open field is not a new use");
     }
 
     #[gpui::test]

@@ -5,7 +5,7 @@ Branch: `ui-u5-bottom-bar` · PR: none · Last updated: 2026-11-13 · State: in 
 | Item | State | Notes |
 | --- | --- | --- |
 | I1 `hints` setting and usage model | done | `HintsMode`, `Settings.hints`, `DEFAULT_SETTINGS` block, `crow-core/src/usage.rs` (`Usage`, `RETIRE_AFTER`, `USAGE_CAP`, `idle_hint_visible`); 5 unit tests; `cargo test -p crow-core` 53 green. |
-| I2 Key-use recorder | todo | depends on Q13 |
+| I2 Key-use recorder | done | `crates/crow-app/src/usage.rs`: `UsageState` global (`usage.json` in the state dir), `record`/`record_key`/`uses`/`count_key`; called from `Pane::start_filter` (only when it opens the field), `show_search`, `show_palette`. Saves are chained so the file never goes backwards. Tests `pressing_slash_counts_filter_uses` (3 keys, file persisted), `palette_and_dispatch_count_too`, `refocusing_an_open_filter_does_not_count`; 133 app tests green. |
 | I3 Three slots and counts | todo | depends on Q2, Q3, Q4, Q8 |
 | I4 Hints by focus and retiring | todo | depends on Q5, Q6, Q7 |
 | I5 Progress and Cancel | todo | |
@@ -26,7 +26,7 @@ All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
 - Q10 → default app for `.toml`, falling back to `open -t`.
 - Q11 → "Apply to All Apps" failures show as an operation error message, not a settings error.
 - Q12 → bar height 30 px.
-- Q13 → every use of the action counts (key, menu, palette).
+- Q13 → every use of the action counts (key, menu, palette). Implemented as handler calls in the three actions; save tasks are chained in `UsageState.save` so two quick uses cannot write out of order.
 
 ## Decisions
 - Version 30 px bar (Q12), message lifetime 5 s (Q2), search-result path (Q8), error Open fallback (Q10) — user, 2026-11-13.
@@ -45,9 +45,10 @@ All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
 - `crow_core::idle_hint_visible(mode, uses)` kept as the plan names it; no extra settings wrapper.
 
 ## Log
+- 2026-11-13: I2 done. `Usage::record` returns false at the cap, so a capped count writes nothing. `cargo test --workspace` green (133 app tests), clippy clean.
 - 2026-11-13: I1 done. `usage.json` is pretty JSON (`{ "counts": { … } }`); a corrupt file loads empty. `cargo test -p crow-core` 53 passed.
 - 2026-11-13: asked Q1–Q13; all recommended answers accepted.
 - 2026-11-13: read `AGENTS.md`, the index README, the plan, U1/U4 progress. Confirmed U1 (#8) and U4 (#12) are merged on `main`. Created the branch and this file. Preparing the 13 plan questions.
 
 ## Next
-I2: `crates/crow-app/src/usage.rs` global, `usage::record`/`uses`/`record_key`/`count_key`, handler calls; then the keystroke/palette counting tests.
+I3: three slots (`bottom_bar.rs` `BarState`) and the counts; then I4 hints.
