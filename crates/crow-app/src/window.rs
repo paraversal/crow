@@ -4,16 +4,19 @@ use std::path::{Path, PathBuf};
 
 use crow_core::{SidebarEdit, Tabs, ViewMode};
 use gpui::{
-    App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role,
-    ScrollStrategy, SharedString, Subscription, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
-    WindowOptions, div, img, point, prelude::*, px, size, transparent_black, uniform_list,
+    AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
+    Render, Role, ScrollStrategy, SharedString, Subscription, TitlebarOptions, UniformListScrollHandle, Window,
+    WindowBounds, WindowOptions, div, img, point, prelude::*, px, size, transparent_black, uniform_list,
 };
 
 use crate::actions::{
-    AddToSidebar, ApplyThemeEverywhere, CancelOperation, CloseTab, GoBack, GoForward, GoToFolder, KeyboardShortcuts,
-    Minimize, MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PreviousTab,
-    ResetFolderView, SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
+    AddToSidebar, ApplyThemeEverywhere, CloseTab, GoBack, GoForward, GoToFolder, KeyboardShortcuts, Minimize, MoveDown,
+    MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView,
+    SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
     UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
+};
+use crate::bottom_bar::{
+    self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
 };
 use crate::chrome::{self, Keycap, KeycapWeight, SheetWidth, with_action_tooltip, with_tooltip};
 use crate::icons::{self, Glyph};
@@ -143,6 +146,11 @@ impl CrowWindow {
         });
         let focus = pane.read(cx).focus_handle().clone();
         window.focus(&focus, cx);
+        // The red close button: the last window asks before cutting an operation off.
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |this, cx| this.may_close(window, cx)).unwrap_or(true)
+        });
         let subscriptions = vec![
             cx.observe(&pane, |_, _, cx| cx.notify()),
             cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)),
@@ -228,10 +236,35 @@ impl CrowWindow {
             self.close_search(window, cx);
         }
         if self.tabs.close_active().is_none() {
-            window.remove_window();
+            // The last tab closes the window, which may have to ask first.
+            if self.may_close(window, cx) {
+                window.remove_window();
+            }
             return;
         }
         self.focus_center(window, cx);
+        cx.notify();
+    }
+
+    /// Whether this window may close now. The last window takes Crow with it, so while
+    /// an operation runs it asks first (and says no for now).
+    fn may_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let last = cx.windows().len() <= 1;
+        if !last || cx.global::<Operations>().running.is_none() {
+            return true;
+        }
+        self.ask_to_stop(AfterStop::CloseWindow, window, cx);
+        false
+    }
+
+    fn ask_to_stop(&mut self, then: AfterStop, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.sheet, Some(Sheet::StopOperation { .. })) {
+            return;
+        }
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.sheet = Some(Sheet::StopOperation { then, focus });
+        window.activate_window();
         cx.notify();
     }
 
@@ -636,125 +669,134 @@ impl CrowWindow {
             .children(entry.map(|e| preview::contents(&e, preview, &theme)))
     }
 
-    fn render_path_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let ui = cx.global::<Ui>();
-        let theme = ui.theme.clone();
-        let settings_error = ui.config_error();
-        let pane = self.pane().read(cx);
-        let selected_entry = pane.cursor_entry(cx);
-        let target = selected_entry.as_ref().map_or_else(|| pane.current_dir(cx), |e| e.path.clone());
-        let parts = crow_macos::display_components(&target);
-        let last = parts.len().saturating_sub(1);
-        // The last segment is a file when a file is selected; every other segment is a folder.
-        let last_is_dir = selected_entry.as_ref().is_none_or(|e| e.is_dir);
-        let path_pane = self.pane().clone();
-        let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
-        let (count, selected) = (pane.item_count(cx), pane.selected_count(cx));
-        let ops = cx.global::<Operations>();
-        let running = ops.running.as_ref().map(|r| {
-            let p = &r.progress;
-            let percent = (p.done_bytes * 100).checked_div(p.total_bytes).unwrap_or(0);
-            format!("{} — {} of {} · {percent}%", r.label, p.done_items, p.total_items)
-        });
-        let op_message = ops.message.clone();
-        let hint = pane.pending_hint();
-        let (status, is_error): (SharedString, bool) = match (pane.error(cx), settings_error) {
-            _ if hint.is_some() => (hint.unwrap_or_default().into(), false),
-            _ if running.is_some() => (running.clone().unwrap_or_default().into(), false),
-            _ if op_message.is_some() => op_message.clone().unwrap_or_default(),
-            (Some(e), _) | (None, Some(e)) => (e, true),
-            _ if pane.is_loading(cx) && count == 0 => ("Loading…".into(), false),
-            _ if selected > 1 => (format!("{selected} of {count} selected").into(), false),
-            _ => (format!("{count} items").into(), false),
-        };
-        div()
-            .id("path-bar")
-            .role(Role::Navigation)
-            .aria_label(format!("Path: {spoken}"))
-            .h(px(28.))
-            .flex_none()
-            .px_3()
-            .flex()
-            .items_center()
-            .gap_1()
-            .border_t_1()
-            .border_color(color(theme.role("border")))
-            .text_size(px(12.))
-            .text_color(color(theme.role("fg-muted")))
-            .child(
-                // Long paths give way to the status line instead of pushing it out.
-                div().flex_1().min_w_0().overflow_hidden().flex().items_center().gap_1().children(
-                    parts.into_iter().enumerate().map({
-                        let fg = color(theme.role("fg"));
-                        let hover = color(theme.role("surface-raised"));
-                        move |(i, (name, path))| {
-                            let pane = path_pane.clone();
-                            let is_dir = i < last || last_is_dir;
-                            let spoke = if is_dir { format!("Go to {name}") } else { format!("Open {name}") };
-                            let mut part = div()
-                                .id(("path-segment", i))
-                                .debug_selector(move || format!("path-segment-{i}"))
-                                .role(Role::Button)
-                                .aria_label(spoke.clone())
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .px_1()
-                                .rounded_sm()
-                                .when(i == last, |part| part.text_color(fg))
-                                .hover(move |s| s.bg(hover))
-                                .children(icon(&path, is_dir, 14).map(|i| img(i).size(px(14.))))
-                                .child(name)
-                                .when(i < last, |part| part.child(div().pl_1().child("›")));
-                            let target = path.clone();
-                            part = part.on_click(move |_, _, cx| {
-                                let target = target.clone();
-                                pane.update(cx, |pane, cx| {
-                                    if is_dir {
-                                        // Clicking where you already are changes nothing.
-                                        if pane.current_dir(cx) != target {
-                                            pane.navigate(target.clone(), cx);
-                                        }
-                                    } else {
-                                        pane.open_file(target.clone(), cx);
-                                    }
-                                });
-                            });
-                            with_tooltip(part, spoke, None)
-                        }
-                    }),
-                ),
-            )
-            .child(
-                div()
-                    .id("status")
-                    .flex_none()
-                    .pl_3()
-                    .role(Role::Status)
-                    .aria_label(status.clone())
-                    .when(is_error, |s| s.text_color(color(theme.role("error"))))
-                    .child(status),
-            )
-            .when(running.is_some(), |bar| {
-                bar.child(with_action_tooltip(
-                    div()
-                        .id("cancel-operation")
-                        .role(Role::Button)
-                        .aria_label("Cancel operation")
-                        .ml_2()
-                        .px_2()
-                        .rounded_sm()
-                        .bg(color(theme.role("surface-raised")))
-                        .text_color(color(theme.role("fg")))
-                        .on_click(|_, _, cx| operations::cancel_running(cx))
-                        .child("Cancel"),
-                    "Cancel operation",
-                    &CancelOperation,
-                    KeyScope::Window,
-                    cx,
-                ))
-            })
+    /// Which element owns the keys, for the bar's hints.
+    fn bar_focus(&self, window: &Window, pane: &Pane, cx: &App) -> BarFocus {
+        let overlay = self.go_to.is_some()
+            || self.sheet.is_some()
+            || self.why.is_some()
+            || self.picker.is_some()
+            || self.palette.is_some();
+        if overlay || pane.is_renaming() {
+            return BarFocus::Overlay;
+        }
+        if let Some(search) = &self.search {
+            return if search.read(cx).input_focused(window, cx) {
+                BarFocus::SearchField
+            } else {
+                BarFocus::SearchResults
+            };
+        }
+        if self.sidebar.read(cx).focus_handle(cx).is_focused(window) {
+            return BarFocus::Sidebar;
+        }
+        if pane.is_filtering() {
+            return match pane.filter_focus(cx) {
+                Some(focus) if focus.is_focused(window) => BarFocus::FilterField,
+                _ => BarFocus::ListFiltered,
+            };
+        }
+        BarFocus::List
     }
+
+    /// Everything the bottom bar shows this frame. Rendering reads only this.
+    fn bar_state(&self, window: &Window, cx: &App) -> BarState {
+        let ui = cx.global::<Ui>();
+        let pane = self.pane().read(cx);
+        let ops = cx.global::<Operations>();
+
+        // Errors never lose to hints: the token shows beside whatever else is primary.
+        let error = if let Some((text, file)) = ui.config_error_file() {
+            Some(BarError { text, file: Some(file) })
+        } else if let Some(text) = pane.error(cx) {
+            Some(BarError { text, file: None })
+        } else {
+            ops.message
+                .as_ref()
+                .filter(|(_, is_error)| *is_error)
+                .map(|(message, _)| BarError { text: message.clone(), file: None })
+        };
+        let focus = self.bar_focus(window, pane, cx);
+
+        let sidebar_focused = focus == BarFocus::Sidebar;
+        let count = if let Some(search) = &self.search {
+            let search = search.read(cx);
+            search_count(search.result_count(), search.selected_count(), search.is_searching())
+        } else if sidebar_focused {
+            self.sidebar
+                .read(cx)
+                .cursor_group(cx)
+                .map_or_else(|| bar_pane_count(pane, cx), |(group, rows)| sidebar_count(&group, rows))
+        } else {
+            bar_pane_count(pane, cx)
+        };
+
+        // Q8: search mode shows the selected result's path.
+        let search_entry = self.search.as_ref().and_then(|search| search.read(cx).selected_entry());
+        let (target, last_is_dir) = match search_entry {
+            Some((path, is_dir)) => (path, is_dir),
+            None => pane
+                .cursor_entry(cx)
+                .map_or_else(|| (pane.current_dir(cx), true), |entry| (entry.path.clone(), entry.is_dir)),
+        };
+        let parts = crow_macos::display_components(&target);
+        let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
+        let path = BarPath { parts, last_is_dir, spoken, hidden: None };
+
+        let primary = if let Some(hint) = pane.pending_hint() {
+            Primary::Pending(hint)
+        } else if let Some(running) = &ops.running {
+            Primary::Running(RunningView::new(running))
+        } else if let Some((message, false)) = &ops.message {
+            Primary::Message(message.clone())
+        } else {
+            let scope = match focus {
+                BarFocus::List => {
+                    if pane.mode() == ViewMode::Columns {
+                        KeyScope::Columns
+                    } else {
+                        KeyScope::List
+                    }
+                }
+                BarFocus::ListFiltered => {
+                    if pane.mode() == ViewMode::Columns {
+                        KeyScope::ColumnsFiltered
+                    } else {
+                        KeyScope::ListFiltered
+                    }
+                }
+                BarFocus::FilterField => KeyScope::Filter,
+                BarFocus::Sidebar => KeyScope::Sidebar,
+                BarFocus::SearchResults => KeyScope::SearchResults,
+                BarFocus::SearchField => KeyScope::Search,
+                BarFocus::Overlay => KeyScope::Window,
+            };
+            let sidebar_kind = if sidebar_focused { self.sidebar.read(cx).cursor_kind(cx) } else { None };
+            // Hints never show beside an error token; pending, progress and messages outrank them.
+            let hints = if error.is_none() { bottom_bar::hints(focus, scope, sidebar_kind, cx) } else { Vec::new() };
+            Primary::Hints(hints)
+        };
+
+        let mut state = BarState { primary, error, count, path, transient_max: None };
+        // Narrow windows lose hints from the right and fold the path's middle (I7).
+        bottom_bar::fit_to_window(&mut state, window);
+        state
+    }
+
+    fn render_bottom_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let state = self.bar_state(window, cx);
+        bottom_bar::render(state, self.pane().clone(), cx)
+    }
+}
+
+fn bar_pane_count(pane: &Pane, cx: &App) -> Count {
+    let (bytes, _folders) = pane.selected_bytes(cx);
+    bottom_bar::pane_count(bottom_bar::PaneCounts {
+        loading: pane.is_loading(cx),
+        total: pane.item_count(cx),
+        selected: pane.selected_count(cx),
+        bytes,
+        folder: crate::style::display_name(&pane.current_dir(cx)),
+    })
 }
 
 fn view_button(
@@ -799,18 +841,78 @@ fn home_relative(path: &Path) -> String {
     }
 }
 
-/// A question to answer before an operation runs.
+/// A question to answer before an operation runs, or before one is cut off.
 enum Sheet {
-    Conflicts { plan: Plan, choices: Vec<Resolution>, focus: FocusHandle },
-    ConfirmDelete { paths: Vec<PathBuf>, focus: FocusHandle },
+    Conflicts {
+        plan: Plan,
+        choices: Vec<Resolution>,
+        focus: FocusHandle,
+    },
+    ConfirmDelete {
+        paths: Vec<PathBuf>,
+        focus: FocusHandle,
+    },
+    /// Closing the last window or quitting would stop the running operation partway.
+    StopOperation {
+        then: AfterStop,
+        focus: FocusHandle,
+    },
+}
+
+/// What happens once the running operation has stopped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AfterStop {
+    CloseWindow,
+    Quit,
 }
 
 impl Sheet {
     fn focus(&self) -> &FocusHandle {
         match self {
-            Sheet::Conflicts { focus, .. } | Sheet::ConfirmDelete { focus, .. } => focus,
+            Sheet::Conflicts { focus, .. }
+            | Sheet::ConfirmDelete { focus, .. }
+            | Sheet::StopOperation { focus, .. } => focus,
         }
     }
+}
+
+/// Quit, unless an operation is running: then the active Crow window asks first.
+pub fn quit(cx: &mut App) {
+    if cx.global::<Operations>().running.is_none() {
+        cx.quit();
+        return;
+    }
+    let target = cx
+        .active_window()
+        .and_then(|w| w.downcast::<CrowWindow>())
+        .or_else(|| cx.windows().into_iter().find_map(|w| w.downcast::<CrowWindow>()));
+    match target {
+        // Deferred: ⌘Q and the palette dispatch from inside that window's own update.
+        Some(handle) => cx.defer(move |cx| {
+            if handle.update(cx, |this, window, cx| this.ask_to_stop(AfterStop::Quit, window, cx)).is_err() {
+                cx.quit();
+            }
+        }),
+        None => cx.quit(),
+    }
+}
+
+/// Cancel the running operation, wait for it to wind down (its undo record lands in
+/// the log), then close `window` or quit.
+fn stop_then(then: AfterStop, window: AnyWindowHandle, cx: &mut App) {
+    operations::cancel_running(cx);
+    cx.spawn(async move |cx| {
+        while cx.update(|cx| cx.global::<Operations>().running.is_some()) {
+            cx.background_executor().timer(std::time::Duration::from_millis(30)).await;
+        }
+        cx.update(|cx| match then {
+            AfterStop::Quit => cx.quit(),
+            AfterStop::CloseWindow => {
+                window.update(cx, |_, window, _| window.remove_window()).ok();
+            }
+        });
+    })
+    .detach();
 }
 
 impl CrowWindow {
@@ -819,6 +921,8 @@ impl CrowWindow {
             PaneEvent::Run(request) => self.run_request(request.clone(), window, cx),
             PaneEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
             PaneEvent::Entered(dir) => {
+                // A stale message would otherwise outlive the place it described (Q2).
+                operations::clear_message(cx);
                 if self.search.is_some() {
                     self.close_search(window, cx);
                 }
@@ -866,7 +970,7 @@ impl CrowWindow {
             let planned = cx.background_spawn(async move { crow_fs::ops::plan(request) }).await;
             this.update_in(cx, |this, window, cx| match planned {
                 Err(e) => {
-                    cx.global_mut::<Operations>().message = Some((e.to_string().into(), true));
+                    operations::message(e.to_string(), true, cx);
                     cx.notify();
                 }
                 Ok(plan) if plan.items.is_empty() => {}
@@ -923,8 +1027,12 @@ impl CrowWindow {
             Some(Sheet::ConfirmDelete { paths, .. }) => {
                 match crow_fs::ops::plan(Request::DeletePermanently { paths }) {
                     Ok(plan) => self.start(plan, HashMap::new(), cx),
-                    Err(e) => cx.global_mut::<Operations>().message = Some((e.to_string().into(), true)),
+                    Err(e) => operations::message(e.to_string(), true, cx),
                 }
+            }
+            Some(Sheet::StopOperation { then, .. }) => {
+                stop_then(then, window.window_handle(), cx);
+                return;
             }
             None => {}
         }
@@ -991,6 +1099,42 @@ impl CrowWindow {
                                 )
                                 .child(
                                     button("sheet-confirm", "Delete".into(), true)
+                                        .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
+                                ),
+                        )
+                        .into_any_element(),
+                )
+            }
+            Sheet::StopOperation { then, .. } => {
+                let label = cx
+                    .global::<Operations>()
+                    .running
+                    .as_ref()
+                    .map_or_else(|| "The operation".to_owned(), |r| operations::running_label(&r.label));
+                let (verb, confirm) = match then {
+                    AfterStop::CloseWindow => ("Closing the last window quits Crow", "Stop and Close"),
+                    AfterStop::Quit => ("Quitting", "Stop and Quit"),
+                };
+                (
+                    format!("{label} is still running"),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(div().text_color(color(muted)).child(format!(
+                            "{verb} would cut it off. Stop it cleanly first? Items already finished stay (Undo can reverse them); the one in progress is left out, never half done."
+                        )))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    button("sheet-cancel", "Keep Running".into(), false)
+                                        .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
+                                )
+                                .child(
+                                    button("sheet-confirm", confirm.into(), true)
                                         .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
                                 ),
                         )
@@ -1197,7 +1341,7 @@ impl CrowWindow {
             }
             SidebarEvent::Run(request) => self.run_request(request.clone(), window, cx),
             SidebarEvent::Message(text, error) => {
-                cx.global_mut::<Operations>().message = Some((text.clone(), *error));
+                operations::message(text.clone(), *error, cx);
                 cx.notify();
             }
         }
@@ -1208,7 +1352,7 @@ impl CrowWindow {
         let dir = self.pane().read(cx).current_dir(cx);
         if set {
             ui::edit_sidebar(SidebarEdit::SetKey { path: dir, key }, cx);
-            cx.global_mut::<Operations>().message = Some((format!("Marked as {key}").into(), false));
+            operations::message(format!("Marked as {key}"), false, cx);
             cx.notify();
             return;
         }
@@ -1217,7 +1361,8 @@ impl CrowWindow {
             Some(target) => self.pane().update(cx, |pane, cx| pane.navigate(target, cx)),
             None => {
                 window.play_system_bell();
-                cx.global_mut::<Operations>().message = Some((format!("No mark {key}").into(), true));
+                // A typo, not a lasting problem: an info message that retires.
+                operations::message(format!("No mark {key}"), false, cx);
                 cx.notify();
             }
         }
@@ -1256,7 +1401,7 @@ impl CrowWindow {
     fn use_view_as_defaults(&mut self, _: &UseViewAsDefaults, _: &mut Window, cx: &mut Context<Self>) {
         let dir = self.pane().read(cx).dir().to_path_buf();
         ui::use_view_as_defaults(dir, cx);
-        cx.global_mut::<Operations>().message = Some(("This view is now the default for all folders".into(), false));
+        operations::message("This view is now the default for all folders", false, cx);
     }
 
     fn reset_folder_view(&mut self, _: &ResetFolderView, _: &mut Window, cx: &mut Context<Self>) {
@@ -1450,7 +1595,7 @@ impl CrowWindow {
         match picker.entries.get(picker.cursor) {
             Some(Some(info)) => match crow_theme::load_theme(&crow_theme::themes_dir(), &info.id) {
                 Ok(theme) => ui::apply_theme_everywhere(&theme, cx),
-                Err(e) => cx.global_mut::<Operations>().message = Some((e.into(), true)),
+                Err(e) => operations::message(e, true, cx),
             },
             _ => ui::choose_theme("system", cx),
         }
@@ -1461,6 +1606,7 @@ impl CrowWindow {
     // ----- search -----
 
     fn show_search(&mut self, _: &ShowSearch, window: &mut Window, cx: &mut Context<Self>) {
+        crate::usage::record(&ShowSearch, cx);
         if let Some(search) = &self.search {
             search.update(cx, |search, cx| search.select_all_input(window, cx));
             // The band's focus ring is drawn from the input's focus state.
@@ -1570,17 +1716,20 @@ impl CrowWindow {
     fn copy_paths(&mut self, paths: Vec<PathBuf>, cut: bool, cx: &mut Context<Self>) {
         let change_count = crow_macos::write_file_urls(&paths);
         let n = paths.len();
-        let ops = cx.global_mut::<Operations>();
-        ops.clipboard = Some(Clipboard { paths, cut, change_count });
+        cx.global_mut::<Operations>().clipboard = Some(Clipboard { paths, cut, change_count });
         let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
-        ops.message =
-            Some((if cut { format!("Cut {what}: paste to move") } else { format!("Copied {what}") }.into(), false));
+        operations::message(
+            if cut { format!("Cut {what}: paste to move") } else { format!("Copied {what}") },
+            false,
+            cx,
+        );
         cx.notify();
     }
 
     // ----- command palette -----
 
     fn show_palette(&mut self, _: &ShowCommandPalette, window: &mut Window, cx: &mut Context<Self>) {
+        crate::usage::record(&ShowCommandPalette, cx);
         self.open_palette("", window, cx);
     }
 
@@ -1712,7 +1861,7 @@ impl CrowWindow {
             | CommandId::Eject => {
                 self.sidebar.update(cx, |sidebar, cx| sidebar.run_command(command, window, cx));
             }
-            CommandId::Quit => cx.quit(),
+            CommandId::Quit => quit(cx),
             other => self.pane().update(cx, |pane, cx| pane.run_command(other, window, cx)),
         }
     }
@@ -1979,7 +2128,7 @@ impl Render for CrowWindow {
         self.sidebar.update(cx, |s, cx| s.set_current(current, cx));
         let sidebar = self.sidebar.clone();
         let preview = (list_view && self.search.is_none()).then(|| self.render_preview(cx));
-        let path_bar = self.render_path_bar(cx);
+        let path_bar = self.render_bottom_bar(window, cx);
         let go_to = self.render_go_to(cx);
         let sheet = self.render_sheet(cx);
         let activity = self.show_activity.then(|| self.render_activity(cx));
@@ -2064,7 +2213,9 @@ impl Render for CrowWindow {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use gpui::{Entity, TestAppContext, VisualTestContext, WindowHandle};
+    use gpui::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle};
+
+    use crate::actions::StartFilter;
 
     use super::*;
 
@@ -2369,6 +2520,556 @@ mod tests {
         cx.simulate_keystrokes("cmd-[");
         settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root.join("alpha"), "and it left a history step to go back to");
+    }
+
+    /// The bar's data for the current frame.
+    fn bar_state(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> BarState {
+        let window = cx.update(|_, cx| cx.windows()[0]);
+        cx.update_window(window, |_, window, cx| view.read(cx).bar_state(window, cx)).expect("read the bar")
+    }
+
+    fn primary_text(state: &BarState) -> String {
+        match &state.primary {
+            Primary::Pending(text) => (*text).to_owned(),
+            Primary::Message(text) => text.to_string(),
+            Primary::Running(running) => format!("{} — {}", running.label, running.detail),
+            Primary::Hints(_) => String::new(),
+        }
+    }
+
+    fn hint_labels(state: &BarState) -> Vec<String> {
+        match &state.primary {
+            Primary::Hints(hints) => hints.iter().map(|hint| hint.label.to_owned()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn hint_keys(state: &BarState) -> Vec<String> {
+        match &state.primary {
+            Primary::Hints(hints) => hints.iter().map(|hint| hint.keys.to_string()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[gpui::test]
+    fn hints_follow_focus(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-focus");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["filter"], "⌘F and ⌘K live on the toolbar");
+        assert_eq!(hint_keys(&state), ["/"]);
+
+        cx.simulate_keystrokes("/");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["open", "clear", "search deeper"]);
+        assert_eq!(hint_keys(&state), ["↩", "esc", "⌘F"]);
+
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["reorder", "remove", "to list"]);
+        assert_eq!(hint_keys(&state), ["⌥⌘↑↓", "⌘⌫", "⇥"]);
+
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("a");
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["open", "reveal", "Quick Look"]);
+        assert_eq!(hint_keys(&state), ["↩", "⌘R", "Space"]);
+    }
+
+    #[gpui::test]
+    fn vim_layer_hints_use_the_vim_context(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-vim");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        use_vim(&view, &mut cx);
+
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["filter"]);
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["reorder", "remove", "to list"]);
+
+        cx.simulate_keystrokes("tab m");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert!(matches!(state.primary, Primary::Pending(_)), "the mark prompt replaces hints");
+        assert!(hint_labels(&state).is_empty());
+    }
+
+    #[gpui::test]
+    fn idle_hints_retire_after_three_uses(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-retire");
+        let (view, mut cx) = open(cx, &root);
+        for _ in 0..3 {
+            cx.simulate_keystrokes("/");
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        let state = bar_state(&view, &mut cx);
+        assert!(hint_labels(&state).is_empty(), "the used hint retired");
+
+        cx.simulate_keystrokes("/");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["open", "clear", "search deeper"], "focus hints never retire");
+    }
+
+    #[gpui::test]
+    fn retired_hints_stay_retired_after_reload(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-reload");
+        let (view, mut cx) = open(cx, &root);
+        for _ in 0..3 {
+            cx.simulate_keystrokes("/");
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        cx.update(|_, cx| crate::usage::reload_from_disk(cx));
+        write_config(&view, &mut cx, "settings.toml", "theme = \"system\"\n");
+        let state = bar_state(&view, &mut cx);
+        assert!(hint_labels(&state).is_empty(), "the count came back from usage.json");
+    }
+
+    #[gpui::test]
+    fn hints_always_never_retire(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-always");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "settings.toml", "hints = \"always\"\n");
+        for _ in 0..3 {
+            cx.simulate_keystrokes("/");
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["filter"]);
+    }
+
+    #[gpui::test]
+    fn hints_off_hides_every_hint(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-off");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "settings.toml", "keymap = \"vim\"\nhints = \"off\"\n");
+        let state = bar_state(&view, &mut cx);
+        assert!(hint_labels(&state).is_empty());
+
+        cx.simulate_keystrokes("m");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert!(matches!(state.primary, Primary::Pending(_)), "the mark prompt is not a hint");
+    }
+
+    #[gpui::test]
+    fn error_drops_hints(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-error");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "views.toml", "[defaults]\nsort = \"colour\"\n");
+        let state = bar_state(&view, &mut cx);
+        assert!(hint_labels(&state).is_empty(), "no hints beside the error token");
+        assert!(state.error.is_some());
+    }
+
+    #[gpui::test]
+    fn overlay_hides_hints(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-overlay");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        assert!(hint_labels(&bar_state(&view, &mut cx)).is_empty());
+    }
+
+    /// Install a running operation and hand back its cancel flag.
+    fn inject_running(cx: &mut VisualTestContext) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = cancel.clone();
+        cx.update(|_, cx| {
+            cx.global_mut::<Operations>().running = Some(crate::operations::Running {
+                label: "Move 2 items to Trash".into(),
+                progress: crow_fs::ops::Progress {
+                    done_items: 1,
+                    total_items: 2,
+                    total_bytes: 0,
+                    ..Default::default()
+                },
+                cancel: handle,
+            });
+            cx.refresh_windows();
+        });
+        cx.run_until_parked();
+        cancel
+    }
+
+    #[gpui::test]
+    fn cancel_button_sets_the_cancel_flag(cx: &mut TestAppContext) {
+        let root = fixture("bar-cancel-click");
+        let (_view, mut cx) = open(cx, &root);
+        let cancel = inject_running(&mut cx);
+        let bounds = cx.debug_bounds("bar-cancel").expect("the Cancel button is laid out");
+        let progress = cx.debug_bounds("bar-progress").expect("the progress line is laid out");
+        assert!(progress.size.width > gpui::px(0.), "some progress is drawn");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed), "the click asked the operation to stop");
+
+        cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+    }
+
+    #[gpui::test]
+    fn escape_cancels_from_the_list(cx: &mut TestAppContext) {
+        let root = fixture("bar-cancel-escape");
+        let (_view, mut cx) = open(cx, &root);
+        let cancel = inject_running(&mut cx);
+        cx.simulate_keystrokes("escape");
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+
+        cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+    }
+
+    #[gpui::test]
+    fn config_error_token_opens_the_broken_file(cx: &mut TestAppContext) {
+        let root = fixture("bar-error-open");
+        let (view, mut cx) = open(cx, &root);
+        crate::bottom_bar::take_opened();
+        write_config(&view, &mut cx, "sidebar.toml", "[[group]\n");
+
+        let state = bar_state(&view, &mut cx);
+        let error = state.error.expect("the broken sidebar shows a token");
+        assert!(error.text.starts_with("sidebar.toml"), "{}", error.text);
+        assert!(error.text.contains("line "), "the parser's line is shown: {}", error.text);
+        let file = error.file.expect("a config token can be opened");
+        assert!(file.ends_with("sidebar.toml"), "{}", file.display());
+
+        let bounds = cx.debug_bounds("bar-error-open").expect("the Open button is laid out");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        assert_eq!(crate::bottom_bar::take_opened(), [file]);
+    }
+
+    #[gpui::test]
+    fn fixing_the_file_clears_the_token(cx: &mut TestAppContext) {
+        let root = fixture("bar-error-fixed");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", "[[group]\n");
+        assert!(bar_state(&view, &mut cx).error.is_some());
+
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]));
+        let state = bar_state(&view, &mut cx);
+        assert!(state.error.is_none(), "fixing the file removes the token");
+        assert_eq!(hint_labels(&state), ["filter"], "hints come back");
+    }
+
+    #[gpui::test]
+    fn pane_error_has_no_open_button(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fixture("bar-error-pane");
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).expect("create folder");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("lock folder");
+        let (view, mut cx) = open(cx, &root);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(locked.clone(), cx));
+        settle(&view, &mut cx);
+
+        let state = bar_state(&view, &mut cx);
+        let error = state.error.expect("the pane's error shows");
+        assert!(error.file.is_none(), "a folder error has nothing to open");
+        assert!(cx.debug_bounds("bar-error-open").is_none());
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("unlock folder");
+    }
+
+    #[gpui::test]
+    fn narrow_window_drops_hints_before_the_path(cx: &mut TestAppContext) {
+        let root = fixture("bar-narrow");
+        let (view, mut cx) = open(cx, &root);
+        let last_segment =
+            |state: &BarState| -> &'static str { format!("path-segment-{}", state.path.parts.len() - 1).leak() };
+
+        // Shrink step by step: the middle folds first, then the hint goes; the first and
+        // last segments stay on screen throughout.
+        let (mut folded_with_hint, mut hint_gone) = (false, false);
+        for width in (380..=1200).rev().step_by(20) {
+            cx.simulate_resize(gpui::size(px(width as f32), px(500.)));
+            cx.run_until_parked();
+            let state = bar_state(&view, &mut cx);
+            let hints = hint_labels(&state);
+            folded_with_hint |= state.path.hidden.is_some() && !hints.is_empty();
+            if hints.is_empty() {
+                hint_gone = true;
+                assert!(state.path.hidden.is_some(), "at {width}: the hint only goes once the path has folded");
+            } else {
+                assert!(!hint_gone, "at {width}: a dropped hint stays dropped while narrowing");
+            }
+            assert!(cx.debug_bounds("path-segment-0").is_some(), "at {width}: the first segment stays");
+            let tail = cx.debug_bounds(last_segment(&state)).expect("the last segment is drawn");
+            assert!(tail.right() <= px(width as f32), "at {width}: the last segment is on screen: {tail:?}");
+        }
+        assert!(folded_with_hint, "the path folds before the hint is dropped");
+        assert!(hint_gone, "a narrow window drops the hint");
+        assert!(cx.debug_bounds("path-folded").is_some(), "the fold is drawn as …");
+
+        cx.simulate_resize(gpui::size(px(3000.), px(800.)));
+        cx.run_until_parked();
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["filter"], "wide again shows the hint");
+        assert_eq!(state.path.hidden, None, "and the whole path");
+    }
+
+    #[gpui::test]
+    fn error_and_progress_leave_the_path_its_ends(cx: &mut TestAppContext) {
+        let root = fixture("bar-squeeze");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_resize(gpui::size(px(700.), px(500.)));
+        cx.update(|_, cx| {
+            cx.global_mut::<Operations>().running = Some(crate::operations::Running {
+                label: "Copy 12 items to a folder with a rather long name indeed".into(),
+                progress: crow_fs::ops::Progress { done_bytes: 1, total_bytes: 4, ..Default::default() },
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            });
+        });
+        let dir = config_dir(&cx);
+        std::fs::write(dir.join("views.toml"), "[defaults]\nsort = \"a colour that does not exist at all\"\n")
+            .expect("break views.toml");
+        cx.update(|_, cx| crate::ui::reload_config(cx));
+        cx.run_until_parked();
+        let state = bar_state(&view, &mut cx);
+        let max = state.transient_max.expect("the transient slot is capped");
+        assert!(max < px(700.), "{max:?}");
+        let last: &'static str = format!("path-segment-{}", state.path.parts.len() - 1).leak();
+        let first = cx.debug_bounds("path-segment-0").expect("the first segment is drawn");
+        let tail = cx.debug_bounds(last).expect("the last segment is drawn");
+        assert!(first.size.width > px(20.), "the first segment keeps its room: {first:?}");
+        assert!(tail.size.width > px(20.), "the last segment keeps its room: {tail:?}");
+        let counts = cx.debug_bounds("bar-cancel").expect("Cancel is drawn");
+        assert!(counts.right() <= px(700.), "the transient stays inside the window: {counts:?}");
+        cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+    }
+
+    #[gpui::test]
+    fn counts_name_the_focused_folder(cx: &mut TestAppContext) {
+        let root = fixture("bar-counts-columns");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(state.count.text.as_ref(), "1 item");
+        assert_eq!(state.count.spoken.as_ref(), "1 item in alpha", "the focused column's folder");
+    }
+
+    #[gpui::test]
+    fn counts_show_filter_and_selection(cx: &mut TestAppContext) {
+        let root = fixture("bar-counts-filter");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("no");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(state.count.text.as_ref(), "3 items", "the field says \"1 of 3\"; the bar keeps the folder's count");
+
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("cmd-a");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(state.count.text.as_ref(), "3 selected · 6 bytes", "folders add no bytes");
+        let folder = crate::style::display_name(&root);
+        assert_eq!(state.count.spoken.as_ref(), format!("3 of 3 selected in {folder}, 6 bytes"));
+    }
+
+    #[gpui::test]
+    fn one_item_is_singular(cx: &mut TestAppContext) {
+        let root = fixture("bar-singular");
+        std::fs::create_dir_all(root.join("solo")).expect("create folder");
+        std::fs::write(root.join("solo/only.txt"), "").expect("create file");
+        let (view, mut cx) = open(cx, &root.join("solo"));
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(state.count.text.as_ref(), "1 item");
+        assert_eq!(state.count.spoken.as_ref(), "1 item in solo");
+    }
+
+    #[gpui::test]
+    fn message_does_not_hide_the_count(cx: &mut TestAppContext) {
+        let root = fixture("bar-message");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| {
+            operations::message("Copied 1 item", false, cx);
+        });
+        cx.simulate_keystrokes("down");
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(primary_text(&state), "Copied 1 item");
+        assert_eq!(state.count.text.as_ref(), "3 items");
+    }
+
+    #[gpui::test]
+    fn info_messages_expire_but_errors_stay(cx: &mut TestAppContext) {
+        let root = fixture("bar-message-expire");
+        let (_view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| operations::message("Copied 1 item", false, cx));
+        let executor = cx.executor();
+        executor.advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.global::<Operations>().message.is_none()), "an info message retires");
+
+        cx.update(|_, cx| operations::message("Can't open x", true, cx));
+        executor.advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.global::<Operations>().message.is_some()), "an error waits for something else");
+    }
+
+    #[gpui::test]
+    fn copy_and_missing_mark_messages_retire(cx: &mut TestAppContext) {
+        let root = fixture("bar-message-copy");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-c");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert!(primary_text(&state).starts_with("Copied"), "{}", primary_text(&state));
+        let executor = cx.executor();
+        executor.advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.global::<Operations>().message.is_none()), "the copy message retires");
+
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("' q");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(primary_text(&state), "No mark q");
+        assert!(state.error.is_none(), "a missing mark is not an error token");
+        executor.advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.global::<Operations>().message.is_none()), "and it retires too");
+    }
+
+    #[gpui::test]
+    fn option_arrows_move_by_word_in_text_fields(cx: &mut TestAppContext) {
+        let root = fixture("text-word-moves");
+        let (view, mut cx) = open(cx, &root);
+        let filter =
+            |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.filter_text(cx)).unwrap_or_default();
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("m5-fix.md");
+        cx.simulate_keystrokes("alt-left alt-left");
+        cx.simulate_input("X");
+        assert_eq!(filter(&cx), "m5-Xfix.md", "⌥← twice lands before \"fix\"");
+
+        cx.simulate_keystrokes("alt-right");
+        cx.simulate_input("Y");
+        assert_eq!(filter(&cx), "m5-XfixY.md", "⌥→ goes to the end of the word");
+
+        cx.simulate_keystrokes("alt-backspace");
+        assert_eq!(filter(&cx), "m5-.md", "⌥⌫ deletes back to the word start");
+
+        cx.simulate_keystrokes("cmd-left alt-shift-right");
+        cx.simulate_input("z");
+        assert_eq!(filter(&cx), "z-.md", "⌥⇧→ selects the word");
+    }
+
+    #[gpui::test]
+    fn navigating_clears_an_operation_error(cx: &mut TestAppContext) {
+        let root = fixture("bar-message-nav");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| operations::message("Can't open x", true, cx));
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        assert!(cx.read(|cx| cx.global::<Operations>().message.is_none()), "navigation drops the old message");
+    }
+
+    #[gpui::test]
+    fn error_and_running_operation_show_together(cx: &mut TestAppContext) {
+        let root = fixture("bar-error-running");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| {
+            cx.global_mut::<Operations>().running = Some(crate::operations::Running {
+                label: "Copy 1 item to x".into(),
+                progress: crow_fs::ops::Progress { total_items: 1, total_bytes: 1, ..Default::default() },
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            });
+        });
+        let dir = config_dir(&cx);
+        std::fs::write(dir.join("views.toml"), "[defaults]\nsort = \"colour\"\n").expect("break views.toml");
+        cx.update(|_, cx| crate::ui::reload_config(cx));
+        cx.run_until_parked();
+
+        let state = bar_state(&view, &mut cx);
+        assert!(matches!(state.primary, Primary::Running(_)), "progress stays primary");
+        let error = state.error.expect("the config error is its own token");
+        assert!(error.file.as_ref().is_some_and(|f| f.ends_with("views.toml")));
+        assert!(error.text.starts_with("views.toml"), "{}", error.text);
+
+        cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+        settle(&view, &mut cx);
+    }
+
+    /// The in-memory count for an action name.
+    fn key_uses(cx: &VisualTestContext, key: &str) -> u32 {
+        cx.read(|cx| crate::usage::count_key(key, cx))
+    }
+
+    /// Wait for the background save and the count it wrote to `usage.json`.
+    fn saved_uses(cx: &mut VisualTestContext, key: &str, expected: u32) -> u32 {
+        let path = cx.read(|cx| cx.global::<Ui>().state_dir.join(crow_core::USAGE_FILE));
+        let mut saved = 0;
+        for _ in 0..200 {
+            cx.run_until_parked();
+            saved = crow_core::Usage::load(&path).count(key);
+            if saved == expected {
+                return saved;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        saved
+    }
+
+    #[gpui::test]
+    fn pressing_slash_counts_filter_uses(cx: &mut TestAppContext) {
+        let root = fixture("usage-filter");
+        let (view, mut cx) = open(cx, &root);
+        for _ in 0..3 {
+            cx.simulate_keystrokes("/");
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        let key = StartFilter.name();
+        assert_eq!(key_uses(&cx, key), 3, "each / counted once");
+        assert_eq!(saved_uses(&mut cx, key, 3), 3, "and survived to disk");
+    }
+
+    #[gpui::test]
+    fn palette_and_dispatch_count_too(cx: &mut TestAppContext) {
+        let root = fixture("usage-palette");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">filter");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "the palette opened the filter");
+        cx.simulate_keystrokes("escape");
+
+        cx.dispatch_action(ShowSearch);
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("escape");
+
+        assert_eq!(key_uses(&cx, ShowCommandPalette.name()), 1, "Cmd-K counted");
+        assert_eq!(key_uses(&cx, StartFilter.name()), 1, "the palette run counted");
+        assert_eq!(key_uses(&cx, ShowSearch.name()), 1, "a dispatched action counted");
+    }
+
+    #[gpui::test]
+    fn refocusing_an_open_filter_does_not_count(cx: &mut TestAppContext) {
+        let root = fixture("usage-refocus");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        settle(&view, &mut cx);
+        let before = key_uses(&cx, StartFilter.name());
+        assert_eq!(before, 1);
+        cx.dispatch_action(StartFilter);
+        settle(&view, &mut cx);
+        assert_eq!(key_uses(&cx, StartFilter.name()), before, "focusing the open field is not a new use");
     }
 
     #[gpui::test]
@@ -3284,6 +3985,109 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-w");
         assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 1);
+    }
+
+    #[gpui::test]
+    fn closing_the_last_window_mid_operation_asks_first(app: &mut TestAppContext) {
+        let root = fixture("close-guard");
+        let (view, mut cx) = open(app, &root);
+        let cancel = inject_running(&mut cx);
+        let windows = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.windows().len());
+        let asking = |view: &Entity<CrowWindow>, cx: &VisualTestContext| {
+            view.read_with(cx, |w, _| {
+                matches!(w.sheet, Some(Sheet::StopOperation { then: AfterStop::CloseWindow, .. }))
+            })
+        };
+
+        cx.simulate_keystrokes("cmd-w");
+        assert!(asking(&view, &cx), "the last window asks before cutting the move off");
+        assert_eq!(windows(&mut cx), 1);
+
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.sheet.is_none()), "Esc keeps it running");
+        assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "and does not cancel");
+
+        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("enter");
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed), "Stop and Close cancels the operation");
+        assert_eq!(windows(&mut cx), 1, "the window waits for the operation to wind down");
+
+        // The operation finishes cancelling: then the window closes.
+        app.update(|cx| cx.global_mut::<Operations>().running = None);
+        app.executor().advance_clock(std::time::Duration::from_millis(100));
+        app.run_until_parked();
+        assert_eq!(app.update(|cx| cx.windows().len()), 0, "closed once the operation stopped");
+    }
+
+    #[gpui::test]
+    fn closing_with_other_windows_open_just_closes(app: &mut TestAppContext) {
+        let root = fixture("close-free");
+        let (_view, mut cx) = open(app, &root);
+        cx.simulate_keystrokes("cmd-n");
+        cx.run_until_parked();
+        assert_eq!(app.update(|cx| cx.windows().len()), 2);
+        let _cancel = inject_running(&mut cx);
+        // Another window stays open, so the operation keeps going without asking.
+        cx.simulate_keystrokes("cmd-w");
+        app.run_until_parked();
+        assert_eq!(app.update(|cx| cx.windows().len()), 1, "closed without a sheet");
+        app.update(|cx| cx.global_mut::<Operations>().running = None);
+    }
+
+    #[gpui::test]
+    fn quitting_mid_operation_asks_first(cx: &mut TestAppContext) {
+        let root = fixture("quit-guard");
+        let (view, mut cx) = open(cx, &root);
+        let cancel = inject_running(&mut cx);
+        // Menu, palette and ⌘Q all go through `quit`.
+        cx.update(|_, cx| quit(cx));
+        cx.run_until_parked();
+        assert!(
+            view.read_with(&cx, |w, _| matches!(w.sheet, Some(Sheet::StopOperation { then: AfterStop::Quit, .. }))),
+            "⌘Q asks while the move runs"
+        );
+        cx.simulate_keystrokes("escape");
+        assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+        cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+    }
+
+    #[gpui::test]
+    fn list_name_column_follows_the_window_width(cx: &mut TestAppContext) {
+        let root = fixture("list-width");
+        let (_view, mut cx) = open(cx, &root);
+        let widths = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            // The pane asks for one more frame once it sees the new width; the test
+            // platform does not run scheduled frames, so draw it here.
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            let name = cx.debug_bounds("column-header-0").expect("Name header").size.width;
+            let next = cx.debug_bounds("column-header-1").expect("second header").size.width;
+            let table = cx.debug_bounds("table-header").expect("header").size.width;
+            (name, next, table)
+        };
+        cx.simulate_resize(gpui::size(px(1400.), px(700.)));
+        let (wide_name, wide_next, wide_table) = widths(&mut cx);
+        cx.simulate_resize(gpui::size(px(1100.), px(700.)));
+        let (narrow_name, narrow_next, narrow_table) = widths(&mut cx);
+        assert!(wide_table > narrow_table, "the list got narrower");
+        assert_eq!(wide_next, narrow_next, "the other columns keep their widths");
+        assert_eq!(wide_name - narrow_name, wide_table - narrow_table, "Name absorbs the whole change");
+
+        // Narrower than every column's minimum: whole columns hide from the right, so no
+        // cell runs past the list's edge.
+        for width in [900., 760., 640.] {
+            cx.simulate_resize(gpui::size(px(width), px(700.)));
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            let table = cx.debug_bounds("table-header").expect("header");
+            let shown: Vec<_> = (0..6).filter_map(|i| cx.debug_bounds(format!("column-header-{i}").leak())).collect();
+            assert!(!shown.is_empty(), "Name always shows");
+            for cell in &shown {
+                assert!(cell.right() <= table.right() + px(0.5), "at {width}: {cell:?} past {table:?}");
+            }
+        }
     }
 
     #[gpui::test]

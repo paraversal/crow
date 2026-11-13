@@ -14,7 +14,7 @@ mod spotlight;
 mod volumes;
 
 pub use drag::{ComboDrag, begin_drag, remember_mouse_down};
-pub use files::{SystemTrash, pasteboard_change_count, read_file_urls, write_file_urls};
+pub use files::{SystemTrash, open_path, pasteboard_change_count, read_file_urls, write_file_urls};
 pub use icons::icon_png;
 pub use metadata::{kind_name, tags, thumbnail_png};
 pub use names::display_components;

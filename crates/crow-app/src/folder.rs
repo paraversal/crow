@@ -43,6 +43,9 @@ type SelectionEntries = Arc<Vec<(PathBuf, bool)>>;
 /// The cached selection: the generation it was built for, and the entries.
 type SelectionCache = RefCell<Option<(u64, SelectionEntries)>>;
 
+/// The cached selection's file bytes and folder count, by generation.
+type SelectionBytes = RefCell<Option<(u64, (u64, usize))>>;
+
 /// One visible row: an entry of this folder, or one of an expanded folder under it.
 enum FlatRow {
     /// Index into `entries`.
@@ -97,6 +100,8 @@ pub struct Folder {
     selection_generation: u64,
     /// The selected rows for dragging, rebuilt only after one of those changes.
     selection_entries: SelectionCache,
+    /// The selected files' bytes and folders among them, cached the same way.
+    selection_bytes: SelectionBytes,
     scroll: UniformListScrollHandle,
     changes_rx: Receiver<FolderChange>,
     _watcher: Option<FolderWatcher>,
@@ -143,6 +148,7 @@ impl Folder {
             rows: Arc::new(Vec::new()),
             selection_generation: 0,
             selection_entries: RefCell::new(None),
+            selection_bytes: RefCell::new(None),
             scroll: UniformListScrollHandle::new(),
             changes_rx,
             _watcher: watcher,
@@ -274,6 +280,31 @@ impl Folder {
         );
         *self.selection_entries.borrow_mut() = Some((self.selection_generation, entries.clone()));
         entries
+    }
+
+    /// The selected files' bytes and how many selected items are folders.
+    /// Folders add no bytes: their size needs a disk walk. Cached per generation.
+    pub fn selected_bytes(&self) -> (u64, usize) {
+        if let Some((generation, bytes)) = *self.selection_bytes.borrow()
+            && generation == self.selection_generation
+        {
+            return bytes;
+        }
+        let (mut bytes, mut folders) = (0u64, 0usize);
+        for row in self.rows.iter() {
+            let entry = match row {
+                FlatRow::Own(i) => self.entries.get(*i),
+                FlatRow::Child(entry, _) => Some(entry),
+            };
+            let Some(entry) = entry.filter(|entry| self.selection.contains(&entry.path)) else { continue };
+            if entry.is_dir {
+                folders += 1;
+            } else {
+                bytes += entry.size;
+            }
+        }
+        *self.selection_bytes.borrow_mut() = Some((self.selection_generation, (bytes, folders)));
+        (bytes, folders)
     }
 
     /// Whatever changed, the drag snapshot is stale.

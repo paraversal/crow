@@ -30,6 +30,8 @@ Each plan is self-contained: its own branch, progress file and PR, carried out w
 | [U9](u9-tips.md)         | One-time contextual tips                                                                    | U5     | `ui-u9-tips`         |
 | [U10](u10-finish.md)     | Whole-window check against the assembled boards, docs pass, bench                           | all    | `ui-u10-finish`      |
 
+Later, after U10 (not a U plan yet): a **motion pass**. Moving and trashing give feedback: an inline animation (for example a small trash in the row that swallows the entry) and an optional sound. User request, 2026-11-13.
+
 Suggested order: U1 → U2 → U3 → U6 → U4 → U5 → U7 → U8 → U9 → U10. U1 and U2 need only PR #7 and can run side by side; U3, U4, U5 and U8 only need U1 and can go in any order.
 
 ## Shared names and who builds them

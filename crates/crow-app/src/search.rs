@@ -448,9 +448,30 @@ impl SearchView {
             .and_then(|row| row.content.as_ref().map(|(line, text, _)| (*line, text.clone())))
     }
 
-    #[cfg(test)]
     pub fn is_searching(&self) -> bool {
         self.searching
+    }
+
+    /// How many results the list holds so far.
+    pub fn result_count(&self) -> usize {
+        self.results.len()
+    }
+
+    pub fn selected_count(&self) -> usize {
+        self.selection.len()
+    }
+
+    /// The selected result's path and whether it is a folder.
+    pub fn selected_entry(&self) -> Option<(PathBuf, bool)> {
+        let path = self.selection.cursor()?;
+        let row = self.results.iter().find(|row| &row.path == path)?;
+        Some((row.path.clone(), row.is_dir))
+    }
+
+    /// Whether the query field has focus.
+    #[allow(dead_code)] // U5's hints read it.
+    pub fn input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.input.read(cx).focus_handle(cx).is_focused(window)
     }
 
     #[cfg(test)]

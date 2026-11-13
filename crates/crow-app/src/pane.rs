@@ -338,6 +338,35 @@ impl Pane {
         self.focused_folder().read(cx).selected_count()
     }
 
+    /// The selected files' bytes and how many selected items are folders.
+    pub fn selected_bytes(&self, cx: &gpui::App) -> (u64, usize) {
+        self.focused_folder().read(cx).selected_bytes()
+    }
+
+    /// Whether the `/` filter field is open.
+    pub fn is_filtering(&self) -> bool {
+        self.filtering.is_some()
+    }
+
+    /// The filter field's focus handle while it is open.
+    pub fn filter_focus(&self, cx: &gpui::App) -> Option<FocusHandle> {
+        self.filtering.as_ref().map(|filtering| filtering.input.read(cx).focus_handle(cx))
+    }
+
+    /// The list table's column widths, fitted to the list's width from the last frame.
+    fn table_widths(&self) -> Vec<f32> {
+        match self.list_bounds.get() {
+            // Rows and header sit 8 px in from each side (`mx_2`).
+            Some(bounds) => self.table.fitted(f32::from(bounds.size.width) - 16.0),
+            None => self.table.columns().iter().map(|c| c.width).collect(),
+        }
+    }
+
+    /// Whether a row is being renamed.
+    pub fn is_renaming(&self) -> bool {
+        self.renaming.is_some()
+    }
+
     pub fn is_loading(&self, cx: &gpui::App) -> bool {
         self.folders.iter().any(|f| f.read(cx).is_loading_deep(cx))
     }
@@ -691,6 +720,7 @@ impl Pane {
             window.focus(&focus, cx);
             return;
         }
+        crate::usage::record(&StartFilter, cx);
         let folder = crate::style::display_name(self.focused_folder().read(cx).dir());
         let input = cx.new(|cx| TextInput::new("", format!("Filter {folder}"), cx).bare());
         let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
@@ -1219,8 +1249,9 @@ impl Pane {
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let drop_bg = drop_target(theme);
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
-        let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
-        let last = widths.len() - 1;
+        let widths = self.table_widths();
+        // Columns hidden for a narrow pane have width 0; the last shown one stretches.
+        let last = widths.iter().rposition(|w| *w > 0.0).unwrap_or(0);
         let folder = self.folders[0].read(cx);
         let list_folder = self.folders[0].clone();
         let selected_entries = folder.selected_entries();
@@ -1398,19 +1429,21 @@ impl Pane {
                                 },
                             }),
                     );
-                row.children(cells.into_iter().enumerate().map(|(i, (text, align))| {
-                    let width = px(widths[i + 1]);
-                    div()
-                        .when(i + 1 == last, |cell| cell.flex_1().min_w(width))
-                        .when(i + 1 != last, |cell| cell.w(width).flex_none())
-                        .px(px(CELL_PADDING))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_color(muted)
-                        .when(align == Align::Right, |cell| cell.text_right())
-                        .child(text)
-                }))
+                row.children(cells.into_iter().enumerate().filter(|(i, _)| widths[i + 1] > 0.0).map(
+                    |(i, (text, align))| {
+                        let width = px(widths[i + 1]);
+                        div()
+                            .when(i + 1 == last, |cell| cell.flex_1().min_w(width))
+                            .when(i + 1 != last, |cell| cell.w(width).flex_none())
+                            .px(px(CELL_PADDING))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_color(muted)
+                            .when(align == Align::Right, |cell| cell.text_right())
+                            .child(text)
+                    },
+                ))
             })
             .collect()
     }
@@ -1418,8 +1451,9 @@ impl Pane {
     fn render_table_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let sort = self.sort;
-        let widths: Vec<f32> = self.table.columns().iter().map(|c| c.width).collect();
-        let last = widths.len() - 1;
+        let widths = self.table_widths();
+        // Columns hidden for a narrow pane have width 0; the last shown one stretches.
+        let last = widths.iter().rposition(|w| *w > 0.0).unwrap_or(0);
         let border = color(theme.role("border"));
         // (title, sort key, alignment) for the name column and each shown column.
         let mut specs = vec![("Name".to_owned(), Some(SortKey::Name), Align::Left)];
@@ -1436,7 +1470,7 @@ impl Pane {
             .text_color(color(theme.role("fg-muted")))
             .border_b_1()
             .border_color(border);
-        for (i, (title, key, align)) in specs.into_iter().enumerate() {
+        for (i, (title, key, align)) in specs.into_iter().enumerate().filter(|(i, _)| widths[*i] > 0.0) {
             let sorted = key.is_some_and(|k| k == sort.key);
             let chevron = match (sorted, sort.ascending) {
                 (false, _) => "",
@@ -1446,6 +1480,7 @@ impl Pane {
             let width = px(widths[i]);
             let cell = div()
                 .id(("column", i))
+                .debug_selector(move || format!("column-header-{i}"))
                 .role(Role::ColumnHeader)
                 .aria_label(format!("{title}{}", if sorted { ", sorted" } else { "" }))
                 .relative()
@@ -1883,8 +1918,15 @@ impl Render for Pane {
                             .flex_1()
                             .flex()
                             .flex_col()
-                            .on_children_prepainted(move |children, _, _| {
-                                bounds.set(children.first().copied());
+                            .on_children_prepainted(move |children, window, _| {
+                                let new = children.first().copied();
+                                // The table fits its columns to this width; a new width
+                                // needs one more frame to draw them fitted.
+                                // (A refresh during the draw itself is ignored, hence next frame.)
+                                if new.map(|b| b.size.width) != bounds.get().map(|b| b.size.width) {
+                                    window.on_next_frame(|window, _| window.refresh());
+                                }
+                                bounds.set(new);
                             })
                             .child(body)
                     })
@@ -1972,16 +2014,8 @@ impl Render for Pane {
 
 #[cfg(test)]
 impl Pane {
-    pub fn is_renaming(&self) -> bool {
-        self.renaming.is_some()
-    }
-
     pub fn rename_text(&self, cx: &gpui::App) -> Option<String> {
         self.renaming.as_ref().map(|r| r.input.read(cx).text().to_owned())
-    }
-
-    pub fn is_filtering(&self) -> bool {
-        self.filtering.is_some()
     }
 
     pub fn filter_text(&self, cx: &gpui::App) -> Option<String> {

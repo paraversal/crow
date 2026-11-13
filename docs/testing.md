@@ -16,7 +16,10 @@ drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
 (preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette, the search panel, the top band
 (search field click, Cmd-F refocus and select-all, Done/Esc, Go to, All/Names/Contents, switching
-tabs closing search, the Tab cycle while searching, focus never left on an element that is gone), the menu bar
+tabs closing search, the Tab cycle while searching, focus never left on an element that is gone), the bottom bar
+(hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
+path folding and hint dropping, messages that retire), closing or quitting during an operation, ⌥ word moves in
+text fields, the list's Name column following the window width, the menu bar
 (every registry command listed, Finder keys, enabled by focus, dispatch matching the key) and the
 Vim layer (motions, marks). Shared chrome has its own tests: key text from the live keymap (including the
 Vim layer and the palette's old strings), keycap weights, tooltip text and a hover, the sheet scrim
@@ -55,8 +58,8 @@ highlighted rows. It needs a GPU, so it runs locally, not in CI.
 
 | Measure | Budget |
 | --- | --- |
-| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms; U1: 10 ms; U4: 10–11 ms, filtered 10–17 ms) |
-| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms; U4: 8.85–8.95 ms, main on the same machine 8.84–8.86 ms, filtered 8.82–9.03 ms) |
+| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms; U1: 10 ms; U4: 10–11 ms, filtered 10–17 ms; U5: 10–11 ms) |
+| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms; U4: 8.85–8.95 ms, main on the same machine 8.84–8.86 ms, filtered 8.82–9.03 ms; U5: 8.87–9.06 ms, main on the same machine 8.86–8.95 ms) |
 | Search, 200k nested files, every file matches (names + contents) | first hit 4 ms; total 4.1 s (M6). `--bench-search` includes the walk, fuzzy names and content reads. |
 
 ## By hand (each milestone)
@@ -71,9 +74,17 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Trash and Put Back | Cmd-Delete a file in Crow, then use Finder's Put Back on it in the Trash. |
 | Finder clipboard | Copy in Crow, paste in Finder; copy in Finder, paste in Crow. |
 | Drop in | Drag files from Finder onto a Crow list, onto a column, and onto sidebar rows and group titles: the target keeps one steady highlight while the pointer moves within it; same disk moves, other disk copies, Option copies. Drag a row from Crow's own list the same way. |
-| Progress and cancel | Copy a large folder to another disk: progress shows in the status line; Esc or Cancel stops it with nothing half-copied. |
+| Progress and cancel | Copy a large folder to another disk: a 2 px accent line along the bottom bar's top edge and "Copying … · n %" with Cancel esc replace the hints; the path and count stay. Esc or Cancel stops it with nothing half-copied. |
 | Activity | Cmd-Option-L lists recent operations; Undo on an older one works or explains why not. |
 | Path bar | Click a folder segment to go there (Back returns); click the selected file's segment to open it. |
+| Bottom bar hints | Fresh state dir (`CROW_STATE_DIR=$(mktemp -d)`): idle hint `/ filter` only. Press `/` and Esc three times (or Edit ▸ Filter This Folder): it disappears; relaunch: still gone. Focus the sidebar, a filter, search results: the hint set changes each time. `hints = "always"` brings them back; `"off"` hides all. Vim layer: same, and `m` shows "Mark this folder…". |
+| Bottom bar counts | Column view: hover the count, the tooltip names the focused column's folder. Filter: the bar keeps "N items" (the field says "n of N"). Select several files: "n selected · size". |
+| Bottom bar error | Break `views.toml` while an operation runs: progress and the red token show together, hints are gone; Open opens `views.toml`; fixing it removes the token. |
+| Bottom bar, narrow | In a deep folder, shrink the window: the path's middle folds into "…" first (its tooltip names the hidden folders, a click goes to the deepest), then the hint goes; the first segment and the current folder or selection stay visible. With an error and a running copy at minimum width, the path still shows its ends and nothing runs off the right edge. |
+| Close during an operation | Copy a large folder to another disk, then ⌘W the only window (or click its red button, or ⌘Q): a sheet asks. Esc keeps the copy running; Return stops it and closes (or quits) once it has wound down. With a second window open, closing one does not ask. |
+| Word moves | In the filter, search and Go to Folder fields: ⌥←/⌥→ jump by word (`m5-fix.md` is three words), ⌥⇧←/→ select, ⌥⌫ deletes a word. |
+| List width | List view: widen and narrow the window: Name grows and shrinks, Date/Size/Kind keep their widths; past Name's minimum, Kind and then Size shrink; at the 640 px minimum whole columns hide from the right, so no cell is cut at the edge (names end in “…”). Drag Name's divider: Date gives up or takes the width. |
+| Bottom bar, VoiceOver | Cmd-F5: the count reads "18 items in <folder>"; an error reads "Error: …" once; Open and Cancel read as buttons. |
 | Table | Drag header dividers to resize; click headers to sort and reverse. |
 | Preview pane | Select an image, a PDF, a text file and a folder: thumbnail, text, icon. Tags show for tagged files. |
 | Live updates | With a folder open, create, rename and delete files from Terminal; the list follows without jumping. |
@@ -106,7 +117,7 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Icons | Title-bar back/forward and view buttons are drawn icons, crisp at 1× and 2×, in both themes. |
 | Menu bar | Open each of File, Edit, View, Go, Window and Help: every item shows the key it has in the list (⌘F, ⇧⌘A, ⌘K, ⇧⌘G, ⌘[ …). Rename shows ↩, Filter This Folder `/` and Quick Look Space. Items without a key are the ones the README names. |
 | Menus follow focus | With the list focused, Edit ▸ Filter This Folder, Cut, Copy, Paste and Select All and File ▸ Rename are enabled; Tab to the sidebar: they grey out, Go ▸ Back stays enabled. In search results, Copy, Move to Trash and Quick Look are enabled, Paste is not. With the rename field focused, the list's items (Rename, Quick Look, Filter This Folder, Move to Trash …) grey out; Cut, Copy, Paste, Select All, Undo and Redo act on the text. |
-| Undo in text fields | Trash a file, then rename another item, type, and press ⌘Z: the typing is undone (a run of typing or deleting is one step), ⇧⌘Z redoes it, and the trashed file stays in the Trash. Same in the filter, search and Go to Folder fields. Back in the list, ⌘Z restores the file. Settings… with no app for `.toml` files shows an error in the status line. |
+| Undo in text fields | Trash a file, then rename another item, type, and press ⌘Z: the typing is undone (a run of typing or deleting is one step), ⇧⌘Z redoes it, and the trashed file stays in the Trash. Same in the filter, search and Go to Folder fields. Back in the list, ⌘Z restores the file. Settings… with no app for `.toml` files shows an error in the bottom bar. |
 | Menus act | Choose Go ▸ Enclosing Folder, Back, Go to…, Go to Folder…; Edit ▸ Find…, Filter This Folder; View ▸ Show Activity: each does what its key does. File ▸ New Window opens the current folder; ⌘N with no window opens Home. |
 | Find Everything | From the list press ⇧⌘A (or Edit ▸ Find Everything…): search opens in the current folder with the rules off; typing finds files inside `node_modules`. With search open, ⇧⌘A from the sidebar flips the rules and returns focus to the query field. |
 | Typing is not stolen | Rename a file and type `/`, Space and Return: the characters stay in the field (Return commits) and no filter or Quick Look opens. Same in the filter, Go to Folder, search and palette fields. |

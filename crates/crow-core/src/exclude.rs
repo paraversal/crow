@@ -292,7 +292,8 @@ pub fn load_exclude(config_dir: &Path) -> Result<Exclude, String> {
         write_atomic(&path, DEFAULT_EXCLUDE).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let exclude: Exclude = toml::from_str(&text).map_err(|e| format!("{}: {}", path.display(), e.message()))?;
+    let exclude: Exclude =
+        toml::from_str(&text).map_err(|e| crate::config::file_message(&path, crate::config::parse_error(&e, &text)))?;
     exclude.validate().map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(exclude)
 }

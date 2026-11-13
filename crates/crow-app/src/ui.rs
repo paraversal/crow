@@ -87,9 +87,20 @@ impl Ui {
         ui
     }
 
-    /// The first config file problem, if any.
+    /// The first config file problem, if any. Tests read it; the bar uses the file form.
+    #[cfg(test)]
     pub fn config_error(&self) -> Option<SharedString> {
         self.errors.iter().flatten().next().cloned()
+    }
+
+    /// The first config file problem and the file it names, with the config dir
+    /// stripped so the bar can say "views.toml: …".
+    pub fn config_error_file(&self) -> Option<(SharedString, PathBuf)> {
+        const FILES: [&str; 4] = ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml"];
+        let (index, message) = self.errors.iter().enumerate().find_map(|(i, e)| e.as_ref().map(|m| (i, m)))?;
+        let dir = self.config_dir.display().to_string();
+        let text = message.strip_prefix(&dir).map_or(message.as_str(), |rest| rest.trim_start_matches('/'));
+        Some((text.to_owned().into(), self.config_dir.join(FILES[index])))
     }
 
     fn set_error(&mut self, which: usize, result: Result<(), String>) -> bool {
@@ -181,6 +192,7 @@ pub fn init(cx: &mut App) {
     ui.target = theme.clone();
     ui.theme = theme;
     cx.set_global(ui);
+    crate::usage::init(cx);
 
     let (theme_tx, theme_rx) = mpsc::channel();
     let theme_watcher = crow_theme::watch(theme_tx).inspect_err(|e| tracing::warn!("theme watch: {e}")).ok();
@@ -242,6 +254,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     let ui = Ui::new(root.join("config"), root.join("state"), crow_core::home(), crow_theme::fallback(), false);
     cx.set_global(ui);
     crate::extensions::init(cx);
+    crate::usage::init(cx);
     root.join("config")
 }
 
@@ -360,7 +373,8 @@ pub fn choose_theme(id: &str, cx: &mut App) {
 /// "Apply to all apps": make `theme` the global choice for its variant and follow it here.
 pub fn apply_theme_everywhere(theme: &Theme, cx: &mut App) {
     if let Err(e) = crow_theme::set_global(theme) {
-        cx.global_mut::<Ui>().set_error(SETTINGS, Err(format!("Can't apply the theme to all apps: {e}")));
+        // Not a file problem, so it belongs with the operation messages (no Open button).
+        crate::operations::message(format!("Can't apply the theme to all apps: {e}"), true, cx);
         return;
     }
     choose_theme("system", cx);

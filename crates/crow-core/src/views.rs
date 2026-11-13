@@ -186,7 +186,7 @@ impl Default for Views {
 
 impl Views {
     pub fn parse(text: &str, home: &Path) -> Result<Views, String> {
-        let file: ViewsFile = toml::from_str(text).map_err(|e| e.message().to_owned())?;
+        let file: ViewsFile = toml::from_str(text).map_err(|e| crate::config::parse_error(&e, text))?;
         let rules = file
             .rule
             .into_iter()
@@ -349,7 +349,7 @@ pub fn load_views(config_dir: &Path, home: &Path) -> Result<Views, String> {
         crate::config::write_atomic(&path, DEFAULT_VIEWS).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Views::parse(&text, home).map_err(|e| format!("{}: {e}", path.display()))
+    Views::parse(&text, home).map_err(|e| crate::config::file_message(&path, e))
 }
 
 #[cfg(test)]
@@ -423,6 +423,7 @@ view = "list"
     fn mistakes_are_errors_with_the_reason() {
         let err = Views::parse("[defaults]\nsort = \"colour\"\n", Path::new(HOME)).err().unwrap();
         assert!(err.contains("colour"), "{err}");
+        assert!(err.contains("line 2"), "the parser's span is a line: {err}");
         let err = Views::parse("[defaults]\nsortt = \"name\"\n", Path::new(HOME)).err().unwrap();
         assert!(err.contains("sortt"), "{err}");
     }

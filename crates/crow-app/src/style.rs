@@ -50,6 +50,11 @@ pub fn current_location(theme: &Theme) -> Rgba {
     color(theme.role("selection"))
 }
 
+/// An error token's fill: the error role, faint.
+pub fn error_soft(theme: &Theme) -> Rgba {
+    color_alpha(theme.role("error"), 0x24)
+}
+
 /// A drag's target.
 pub fn drop_target(theme: &Theme) -> Rgba {
     color_alpha(theme.role("accent"), 0x40)

@@ -104,7 +104,7 @@ pub struct Favorite {
 
 impl SidebarConfig {
     pub fn parse(text: &str) -> Result<SidebarConfig, String> {
-        toml::from_str(text).map_err(|e| e.message().to_owned())
+        toml::from_str(text).map_err(|e| crate::config::parse_error(&e, text))
     }
 
     /// Each group's favorites with `~` expanded.
@@ -279,7 +279,7 @@ pub fn load_sidebar(config_dir: &Path) -> Result<SidebarConfig, String> {
         crate::config::write_atomic(&path, DEFAULT_SIDEBAR).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    SidebarConfig::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    SidebarConfig::parse(&text).map_err(|e| crate::config::file_message(&path, e))
 }
 
 #[cfg(test)]

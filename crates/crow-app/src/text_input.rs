@@ -28,6 +28,12 @@ actions!(
         Right,
         SelectLeft,
         SelectRight,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        DeleteWordLeft,
+        DeleteWordRight,
         SelectAll,
         Home,
         End,
@@ -58,6 +64,12 @@ pub fn keymap() -> Vec<KeyBinding> {
         KeyBinding::new("right", Right, c),
         KeyBinding::new("shift-left", SelectLeft, c),
         KeyBinding::new("shift-right", SelectRight, c),
+        KeyBinding::new("alt-left", WordLeft, c),
+        KeyBinding::new("alt-right", WordRight, c),
+        KeyBinding::new("alt-shift-left", SelectWordLeft, c),
+        KeyBinding::new("alt-shift-right", SelectWordRight, c),
+        KeyBinding::new("alt-backspace", DeleteWordLeft, c),
+        KeyBinding::new("alt-delete", DeleteWordRight, c),
         KeyBinding::new("cmd-a", SelectAll, c),
         KeyBinding::new("home", Home, c),
         KeyBinding::new("cmd-left", Home, c),
@@ -219,6 +231,52 @@ impl TextInput {
 
     fn select_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor_offset()), window, cx);
+    }
+
+    /// ⌥← as in every Mac text field: to the start of the word before the caret.
+    fn word_left(&mut self, _: &WordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        let from = if self.selected_range.is_empty() { self.cursor_offset() } else { self.selected_range.start };
+        self.move_to(previous_word_start(&self.content, from), window, cx);
+    }
+
+    /// ⌥→: to the end of the word after the caret.
+    fn word_right(&mut self, _: &WordRight, window: &mut Window, cx: &mut Context<Self>) {
+        let from = if self.selected_range.is_empty() { self.cursor_offset() } else { self.selected_range.end };
+        self.move_to(next_word_end(&self.content, from), window, cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(previous_word_start(&self.content, self.cursor_offset()), window, cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(next_word_end(&self.content, self.cursor_offset()), window, cx);
+    }
+
+    /// ⌥⌫: delete back to the start of the word (or the selection).
+    fn delete_word_left(&mut self, _: &DeleteWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let start = previous_word_start(&self.content, self.cursor_offset());
+            if start == self.cursor_offset() {
+                window.play_system_bell();
+                return;
+            }
+            self.select_to(start, window, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    /// ⌥⌦: delete forward to the end of the word (or the selection).
+    fn delete_word_right(&mut self, _: &DeleteWordRight, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let end = next_word_end(&self.content, self.cursor_offset());
+            if end == self.cursor_offset() {
+                window.play_system_bell();
+                return;
+            }
+            self.select_to(end, window, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
     }
 
     fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
@@ -807,6 +865,12 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
@@ -867,9 +931,52 @@ fn scroll_for_caret(caret: Pixels, text: Pixels, width: Pixels, current: Pixels)
     scroll.clamp(px(0.), max)
 }
 
+/// Letters, digits and `_` make words; `m5-fix.md` is three of them, as in TextEdit.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The start of the word before `offset`, skipping any separators first.
+fn previous_word_start(text: &str, offset: usize) -> usize {
+    let mut chars = text[..offset].char_indices().rev().peekable();
+    while chars.next_if(|(_, c)| !is_word_char(*c)).is_some() {}
+    let mut start = chars.peek().map_or(0, |(i, c)| i + c.len_utf8());
+    while let Some((i, _)) = chars.next_if(|(_, c)| is_word_char(*c)) {
+        start = i;
+    }
+    start
+}
+
+/// The end of the word after `offset`, skipping any separators first.
+fn next_word_end(text: &str, offset: usize) -> usize {
+    let mut chars = text[offset..].char_indices().map(|(i, c)| (i + offset, c)).peekable();
+    while chars.next_if(|(_, c)| !is_word_char(*c)).is_some() {}
+    let mut end = chars.peek().map_or(text.len(), |(i, _)| *i);
+    while let Some((i, c)) = chars.next_if(|(_, c)| is_word_char(*c)) {
+        end = i + c.len_utf8();
+    }
+    end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn word_boundaries_follow_mac_fields() {
+        let text = "m5-fix.md  notes";
+        assert_eq!(previous_word_start(text, text.len()), 11, "back over \"notes\"");
+        assert_eq!(previous_word_start(text, 11), 7, "spaces and the dot are skipped");
+        assert_eq!(previous_word_start(text, 7), 3);
+        assert_eq!(previous_word_start(text, 3), 0);
+        assert_eq!(previous_word_start(text, 0), 0);
+        assert_eq!(next_word_end(text, 0), 2);
+        assert_eq!(next_word_end(text, 2), 6);
+        assert_eq!(next_word_end(text, 9), text.len());
+        assert_eq!(next_word_end(text, text.len()), text.len());
+        assert_eq!(next_word_end("über straße", 0), "über".len(), "non-ASCII letters are word characters");
+        assert_eq!(previous_word_start("   ", 3), 0, "only separators: to the start");
+    }
 
     #[test]
     fn scroll_for_caret_keeps_the_caret_visible() {
