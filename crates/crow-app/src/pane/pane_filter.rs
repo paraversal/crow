@@ -148,7 +148,8 @@ impl Pane {
         }
         let name = {
             let folder = self.focused_folder().read(cx);
-            if folder.row_count() > 0 || folder.is_loading() || folder.error().is_some() {
+            let shown = folder.row_count();
+            if !shows_no_matches(Some(&query), shown, folder.is_loading(), folder.error().is_some()) {
                 return None;
             }
             display_name(folder.dir())
@@ -160,7 +161,7 @@ impl Pane {
         let spoken = keys::spoken_for(&ShowSearch, KeyScope::Filter, cx).unwrap_or_else(|| "Command F".into());
         let keycap = Keycap::for_action(&ShowSearch, KeyScope::Filter, KeycapWeight::Outline, cx)
             .map(|keycap| keycap.border("fg-subtle"));
-        let note = if self.show_hidden { "Esc clears" } else { "Hidden files are off \u{00b7} Esc clears" };
+        let note = hidden_note(self.show_hidden);
         let block = div()
             .id("filter-no-matches")
             .debug_selector(|| "filter-no-matches".into())
@@ -215,5 +216,36 @@ impl Pane {
                     .child(note),
             );
         Some(block.into_any_element())
+    }
+}
+
+/// The D state replaces the list only when a non-empty filter has settled on a folder.
+fn shows_no_matches(query: Option<&str>, shown: usize, loading: bool, error: bool) -> bool {
+    query.is_some_and(|query| !query.is_empty()) && shown == 0 && !loading && !error
+}
+
+/// Why the folder looks empty, and the way out that always works.
+fn hidden_note(show_hidden: bool) -> &'static str {
+    if show_hidden { "Esc clears" } else { "Hidden files are off \u{00b7} Esc clears" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_matches_waits_for_a_settled_listing() {
+        assert!(shows_no_matches(Some("vfs"), 0, false, false));
+        assert!(!shows_no_matches(Some("vfs"), 0, true, false), "still loading: keep the area quiet");
+        assert!(!shows_no_matches(Some("vfs"), 0, false, true), "the folder's own error is shown instead");
+        assert!(!shows_no_matches(Some("vfs"), 1, false, false), "there is a match");
+        assert!(!shows_no_matches(Some(""), 0, false, false), "an empty query never shows D");
+        assert!(!shows_no_matches(None, 0, false, false));
+    }
+
+    #[test]
+    fn hidden_note_names_the_blocker_when_hidden_files_are_off() {
+        assert_eq!(hidden_note(false), "Hidden files are off \u{00b7} Esc clears");
+        assert_eq!(hidden_note(true), "Esc clears");
     }
 }

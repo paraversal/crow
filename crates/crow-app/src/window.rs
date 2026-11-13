@@ -3612,6 +3612,37 @@ mod tests {
     }
 
     #[gpui::test]
+    fn filter_with_no_matches_offers_search(cx: &mut TestAppContext) {
+        let root = fixture("filter-no-matches");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("zzz");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("filter-no-matches").is_some(), "D replaces the list");
+        assert!(cx.debug_bounds("filter-search-footer").is_none(), "there is no footer in D");
+
+        click_selector(&mut cx, "filter-search-subfolders");
+        wait_for_search(&view, &mut cx);
+        let query = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search").read(cx).query_text(cx));
+        assert_eq!(query, "zzz");
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()));
+    }
+
+    #[gpui::test]
+    fn filter_no_match_note_follows_hidden_files(cx: &mut TestAppContext) {
+        let root = fixture("filter-no-matches-hidden");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("zzz");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("filter-hidden-note").is_some(), "hidden files are off");
+        cx.simulate_keystrokes("cmd-shift-.");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("filter-hidden-note").is_some(), "the way out is still named");
+        assert!(cx.debug_bounds("filter-no-matches").is_some());
+    }
+
+    #[gpui::test]
     fn filter_footer_hides_for_an_empty_query(cx: &mut TestAppContext) {
         let root = fixture("filter-footer-empty");
         let (_view, mut cx) = open(cx, &root);
