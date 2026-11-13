@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use crow_core::{SidebarEdit, Tabs, ViewMode};
 use gpui::{
-    App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role,
-    ScrollStrategy, SharedString, Subscription, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
-    WindowOptions, div, img, point, prelude::*, px, size, transparent_black, uniform_list,
+    AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
+    Render, Role, ScrollStrategy, SharedString, Subscription, TitlebarOptions, UniformListScrollHandle, Window,
+    WindowBounds, WindowOptions, div, img, point, prelude::*, px, size, transparent_black, uniform_list,
 };
 
 use crate::actions::{
@@ -146,6 +146,11 @@ impl CrowWindow {
         });
         let focus = pane.read(cx).focus_handle().clone();
         window.focus(&focus, cx);
+        // The red close button: the last window asks before cutting an operation off.
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |this, cx| this.may_close(window, cx)).unwrap_or(true)
+        });
         let subscriptions = vec![
             cx.observe(&pane, |_, _, cx| cx.notify()),
             cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)),
@@ -231,10 +236,35 @@ impl CrowWindow {
             self.close_search(window, cx);
         }
         if self.tabs.close_active().is_none() {
-            window.remove_window();
+            // The last tab closes the window, which may have to ask first.
+            if self.may_close(window, cx) {
+                window.remove_window();
+            }
             return;
         }
         self.focus_center(window, cx);
+        cx.notify();
+    }
+
+    /// Whether this window may close now. The last window takes Crow with it, so while
+    /// an operation runs it asks first (and says no for now).
+    fn may_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let last = cx.windows().len() <= 1;
+        if !last || cx.global::<Operations>().running.is_none() {
+            return true;
+        }
+        self.ask_to_stop(AfterStop::CloseWindow, window, cx);
+        false
+    }
+
+    fn ask_to_stop(&mut self, then: AfterStop, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.sheet, Some(Sheet::StopOperation { .. })) {
+            return;
+        }
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.sheet = Some(Sheet::StopOperation { then, focus });
+        window.activate_window();
         cx.notify();
     }
 
@@ -710,7 +740,7 @@ impl CrowWindow {
         };
         let parts = crow_macos::display_components(&target);
         let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
-        let path = BarPath { parts, last_is_dir, spoken };
+        let path = BarPath { parts, last_is_dir, spoken, hidden: None };
 
         let primary = if let Some(hint) = pane.pending_hint() {
             Primary::Pending(hint)
@@ -742,14 +772,14 @@ impl CrowWindow {
             };
             let sidebar_kind = if sidebar_focused { self.sidebar.read(cx).cursor_kind(cx) } else { None };
             // Hints never show beside an error token; pending, progress and messages outrank them.
-            let mut hints =
-                if error.is_none() { bottom_bar::hints(focus, scope, sidebar_kind, cx) } else { Vec::new() };
-            // Narrow windows lose hints from the right before the path is cut (I7).
-            bottom_bar::fit_hints_to_window(&mut hints, &count, &path, window);
+            let hints = if error.is_none() { bottom_bar::hints(focus, scope, sidebar_kind, cx) } else { Vec::new() };
             Primary::Hints(hints)
         };
 
-        BarState { primary, error, count, path }
+        let mut state = BarState { primary, error, count, path, transient_max: None };
+        // Narrow windows lose hints from the right and fold the path's middle (I7).
+        bottom_bar::fit_to_window(&mut state, window);
+        state
     }
 
     fn render_bottom_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -762,8 +792,6 @@ fn bar_pane_count(pane: &Pane, cx: &App) -> Count {
     let (bytes, _folders) = pane.selected_bytes(cx);
     bottom_bar::pane_count(bottom_bar::PaneCounts {
         loading: pane.is_loading(cx),
-        filtering: pane.is_filtering(),
-        shown: pane.shown_count(cx),
         total: pane.item_count(cx),
         selected: pane.selected_count(cx),
         bytes,
@@ -813,18 +841,78 @@ fn home_relative(path: &Path) -> String {
     }
 }
 
-/// A question to answer before an operation runs.
+/// A question to answer before an operation runs, or before one is cut off.
 enum Sheet {
-    Conflicts { plan: Plan, choices: Vec<Resolution>, focus: FocusHandle },
-    ConfirmDelete { paths: Vec<PathBuf>, focus: FocusHandle },
+    Conflicts {
+        plan: Plan,
+        choices: Vec<Resolution>,
+        focus: FocusHandle,
+    },
+    ConfirmDelete {
+        paths: Vec<PathBuf>,
+        focus: FocusHandle,
+    },
+    /// Closing the last window or quitting would stop the running operation partway.
+    StopOperation {
+        then: AfterStop,
+        focus: FocusHandle,
+    },
+}
+
+/// What happens once the running operation has stopped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AfterStop {
+    CloseWindow,
+    Quit,
 }
 
 impl Sheet {
     fn focus(&self) -> &FocusHandle {
         match self {
-            Sheet::Conflicts { focus, .. } | Sheet::ConfirmDelete { focus, .. } => focus,
+            Sheet::Conflicts { focus, .. }
+            | Sheet::ConfirmDelete { focus, .. }
+            | Sheet::StopOperation { focus, .. } => focus,
         }
     }
+}
+
+/// Quit, unless an operation is running: then the active Crow window asks first.
+pub fn quit(cx: &mut App) {
+    if cx.global::<Operations>().running.is_none() {
+        cx.quit();
+        return;
+    }
+    let target = cx
+        .active_window()
+        .and_then(|w| w.downcast::<CrowWindow>())
+        .or_else(|| cx.windows().into_iter().find_map(|w| w.downcast::<CrowWindow>()));
+    match target {
+        // Deferred: ⌘Q and the palette dispatch from inside that window's own update.
+        Some(handle) => cx.defer(move |cx| {
+            if handle.update(cx, |this, window, cx| this.ask_to_stop(AfterStop::Quit, window, cx)).is_err() {
+                cx.quit();
+            }
+        }),
+        None => cx.quit(),
+    }
+}
+
+/// Cancel the running operation, wait for it to wind down (its undo record lands in
+/// the log), then close `window` or quit.
+fn stop_then(then: AfterStop, window: AnyWindowHandle, cx: &mut App) {
+    operations::cancel_running(cx);
+    cx.spawn(async move |cx| {
+        while cx.update(|cx| cx.global::<Operations>().running.is_some()) {
+            cx.background_executor().timer(std::time::Duration::from_millis(30)).await;
+        }
+        cx.update(|cx| match then {
+            AfterStop::Quit => cx.quit(),
+            AfterStop::CloseWindow => {
+                window.update(cx, |_, window, _| window.remove_window()).ok();
+            }
+        });
+    })
+    .detach();
 }
 
 impl CrowWindow {
@@ -942,6 +1030,10 @@ impl CrowWindow {
                     Err(e) => operations::message(e.to_string(), true, cx),
                 }
             }
+            Some(Sheet::StopOperation { then, .. }) => {
+                stop_then(then, window.window_handle(), cx);
+                return;
+            }
             None => {}
         }
         self.focus_center(window, cx);
@@ -1007,6 +1099,42 @@ impl CrowWindow {
                                 )
                                 .child(
                                     button("sheet-confirm", "Delete".into(), true)
+                                        .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
+                                ),
+                        )
+                        .into_any_element(),
+                )
+            }
+            Sheet::StopOperation { then, .. } => {
+                let label = cx
+                    .global::<Operations>()
+                    .running
+                    .as_ref()
+                    .map_or_else(|| "The operation".to_owned(), |r| operations::running_label(&r.label));
+                let (verb, confirm) = match then {
+                    AfterStop::CloseWindow => ("Closing the last window quits Crow", "Stop and Close"),
+                    AfterStop::Quit => ("Quitting", "Stop and Quit"),
+                };
+                (
+                    format!("{label} is still running"),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(div().text_color(color(muted)).child(format!(
+                            "{verb} would cut it off. Stop it cleanly first? Items already finished stay (Undo can reverse them); the one in progress is left out, never half done."
+                        )))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    button("sheet-cancel", "Keep Running".into(), false)
+                                        .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
+                                )
+                                .child(
+                                    button("sheet-confirm", confirm.into(), true)
                                         .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
                                 ),
                         )
@@ -1233,7 +1361,8 @@ impl CrowWindow {
             Some(target) => self.pane().update(cx, |pane, cx| pane.navigate(target, cx)),
             None => {
                 window.play_system_bell();
-                operations::message(format!("No mark {key}"), true, cx);
+                // A typo, not a lasting problem: an info message that retires.
+                operations::message(format!("No mark {key}"), false, cx);
                 cx.notify();
             }
         }
@@ -1587,11 +1716,13 @@ impl CrowWindow {
     fn copy_paths(&mut self, paths: Vec<PathBuf>, cut: bool, cx: &mut Context<Self>) {
         let change_count = crow_macos::write_file_urls(&paths);
         let n = paths.len();
-        let ops = cx.global_mut::<Operations>();
-        ops.clipboard = Some(Clipboard { paths, cut, change_count });
+        cx.global_mut::<Operations>().clipboard = Some(Clipboard { paths, cut, change_count });
         let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
-        ops.message =
-            Some((if cut { format!("Cut {what}: paste to move") } else { format!("Copied {what}") }.into(), false));
+        operations::message(
+            if cut { format!("Cut {what}: paste to move") } else { format!("Copied {what}") },
+            false,
+            cx,
+        );
         cx.notify();
     }
 
@@ -1730,7 +1861,7 @@ impl CrowWindow {
             | CommandId::Eject => {
                 self.sidebar.update(cx, |sidebar, cx| sidebar.run_command(command, window, cx));
             }
-            CommandId::Quit => cx.quit(),
+            CommandId::Quit => quit(cx),
             other => self.pane().update(cx, |pane, cx| pane.run_command(other, window, cx)),
         }
     }
@@ -2402,7 +2533,7 @@ mod tests {
             Primary::Pending(text) => (*text).to_owned(),
             Primary::Message(text) => text.to_string(),
             Primary::Running(running) => format!("{} — {}", running.label, running.detail),
-            Primary::Hints(_) | Primary::None => String::new(),
+            Primary::Hints(_) => String::new(),
         }
     }
 
@@ -2427,8 +2558,8 @@ mod tests {
         write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
 
         let state = bar_state(&view, &mut cx);
-        assert_eq!(hint_labels(&state), ["filter", "search", "go to"]);
-        assert_eq!(hint_keys(&state), ["/", "⌘F", "⌘K"]);
+        assert_eq!(hint_labels(&state), ["filter"], "⌘F and ⌘K live on the toolbar");
+        assert_eq!(hint_keys(&state), ["/"]);
 
         cx.simulate_keystrokes("/");
         settle(&view, &mut cx);
@@ -2462,7 +2593,7 @@ mod tests {
         use_vim(&view, &mut cx);
 
         let state = bar_state(&view, &mut cx);
-        assert_eq!(hint_labels(&state), ["filter", "search", "go to"]);
+        assert_eq!(hint_labels(&state), ["filter"]);
         cx.simulate_keystrokes("tab");
         settle(&view, &mut cx);
         let state = bar_state(&view, &mut cx);
@@ -2485,7 +2616,7 @@ mod tests {
             settle(&view, &mut cx);
         }
         let state = bar_state(&view, &mut cx);
-        assert_eq!(hint_labels(&state), ["search", "go to"], "only the used hint retired");
+        assert!(hint_labels(&state).is_empty(), "the used hint retired");
 
         cx.simulate_keystrokes("/");
         settle(&view, &mut cx);
@@ -2505,7 +2636,7 @@ mod tests {
         cx.update(|_, cx| crate::usage::reload_from_disk(cx));
         write_config(&view, &mut cx, "settings.toml", "theme = \"system\"\n");
         let state = bar_state(&view, &mut cx);
-        assert_eq!(hint_labels(&state), ["search", "go to"], "the count came back from usage.json");
+        assert!(hint_labels(&state).is_empty(), "the count came back from usage.json");
     }
 
     #[gpui::test]
@@ -2519,7 +2650,7 @@ mod tests {
             settle(&view, &mut cx);
         }
         let state = bar_state(&view, &mut cx);
-        assert_eq!(hint_labels(&state), ["filter", "search", "go to"]);
+        assert_eq!(hint_labels(&state), ["filter"]);
     }
 
     #[gpui::test]
@@ -2630,7 +2761,7 @@ mod tests {
         write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]));
         let state = bar_state(&view, &mut cx);
         assert!(state.error.is_none(), "fixing the file removes the token");
-        assert_eq!(hint_labels(&state), ["filter", "search", "go to"], "hints come back");
+        assert_eq!(hint_labels(&state), ["filter"], "hints come back");
     }
 
     #[gpui::test]
@@ -2656,18 +2787,67 @@ mod tests {
     fn narrow_window_drops_hints_before_the_path(cx: &mut TestAppContext) {
         let root = fixture("bar-narrow");
         let (view, mut cx) = open(cx, &root);
-        assert_eq!(hint_labels(&bar_state(&view, &mut cx)).len(), 3);
+        let last_segment =
+            |state: &BarState| -> &'static str { format!("path-segment-{}", state.path.parts.len() - 1).leak() };
 
-        cx.simulate_resize(gpui::size(px(560.), px(500.)));
+        // Shrink step by step: the middle folds first, then the hint goes; the first and
+        // last segments stay on screen throughout.
+        let (mut folded_with_hint, mut hint_gone) = (false, false);
+        for width in (380..=1200).rev().step_by(20) {
+            cx.simulate_resize(gpui::size(px(width as f32), px(500.)));
+            cx.run_until_parked();
+            let state = bar_state(&view, &mut cx);
+            let hints = hint_labels(&state);
+            folded_with_hint |= state.path.hidden.is_some() && !hints.is_empty();
+            if hints.is_empty() {
+                hint_gone = true;
+                assert!(state.path.hidden.is_some(), "at {width}: the hint only goes once the path has folded");
+            } else {
+                assert!(!hint_gone, "at {width}: a dropped hint stays dropped while narrowing");
+            }
+            assert!(cx.debug_bounds("path-segment-0").is_some(), "at {width}: the first segment stays");
+            let tail = cx.debug_bounds(last_segment(&state)).expect("the last segment is drawn");
+            assert!(tail.right() <= px(width as f32), "at {width}: the last segment is on screen: {tail:?}");
+        }
+        assert!(folded_with_hint, "the path folds before the hint is dropped");
+        assert!(hint_gone, "a narrow window drops the hint");
+        assert!(cx.debug_bounds("path-folded").is_some(), "the fold is drawn as …");
+
+        cx.simulate_resize(gpui::size(px(3000.), px(800.)));
         cx.run_until_parked();
         let state = bar_state(&view, &mut cx);
-        assert!(hint_labels(&state).is_empty(), "narrow windows drop every hint first");
-        assert!(cx.debug_bounds("path-segment-0").is_some(), "the path is still drawn");
+        assert_eq!(hint_labels(&state), ["filter"], "wide again shows the hint");
+        assert_eq!(state.path.hidden, None, "and the whole path");
+    }
 
-        // The fixture's temp path is long, so it needs more than 1200 points to fit all three.
-        cx.simulate_resize(gpui::size(px(1900.), px(800.)));
+    #[gpui::test]
+    fn error_and_progress_leave_the_path_its_ends(cx: &mut TestAppContext) {
+        let root = fixture("bar-squeeze");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_resize(gpui::size(px(700.), px(500.)));
+        cx.update(|_, cx| {
+            cx.global_mut::<Operations>().running = Some(crate::operations::Running {
+                label: "Copy 12 items to a folder with a rather long name indeed".into(),
+                progress: crow_fs::ops::Progress { done_bytes: 1, total_bytes: 4, ..Default::default() },
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            });
+        });
+        let dir = config_dir(&cx);
+        std::fs::write(dir.join("views.toml"), "[defaults]\nsort = \"a colour that does not exist at all\"\n")
+            .expect("break views.toml");
+        cx.update(|_, cx| crate::ui::reload_config(cx));
         cx.run_until_parked();
-        assert_eq!(hint_labels(&bar_state(&view, &mut cx)).len(), 3, "wide again shows every hint");
+        let state = bar_state(&view, &mut cx);
+        let max = state.transient_max.expect("the transient slot is capped");
+        assert!(max < px(700.), "{max:?}");
+        let last: &'static str = format!("path-segment-{}", state.path.parts.len() - 1).leak();
+        let first = cx.debug_bounds("path-segment-0").expect("the first segment is drawn");
+        let tail = cx.debug_bounds(last).expect("the last segment is drawn");
+        assert!(first.size.width > px(20.), "the first segment keeps its room: {first:?}");
+        assert!(tail.size.width > px(20.), "the last segment keeps its room: {tail:?}");
+        let counts = cx.debug_bounds("bar-cancel").expect("Cancel is drawn");
+        assert!(counts.right() <= px(700.), "the transient stays inside the window: {counts:?}");
+        cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
     }
 
     #[gpui::test]
@@ -2689,7 +2869,7 @@ mod tests {
         cx.simulate_input("no");
         settle(&view, &mut cx);
         let state = bar_state(&view, &mut cx);
-        assert_eq!(state.count.text.as_ref(), "1 of 3 shown");
+        assert_eq!(state.count.text.as_ref(), "3 items", "the field says \"1 of 3\"; the bar keeps the folder's count");
 
         cx.simulate_keystrokes("escape");
         cx.simulate_keystrokes("cmd-a");
@@ -2738,6 +2918,54 @@ mod tests {
         executor.advance_clock(std::time::Duration::from_secs(6));
         cx.run_until_parked();
         assert!(cx.read(|cx| cx.global::<Operations>().message.is_some()), "an error waits for something else");
+    }
+
+    #[gpui::test]
+    fn copy_and_missing_mark_messages_retire(cx: &mut TestAppContext) {
+        let root = fixture("bar-message-copy");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-c");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert!(primary_text(&state).starts_with("Copied"), "{}", primary_text(&state));
+        let executor = cx.executor();
+        executor.advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.global::<Operations>().message.is_none()), "the copy message retires");
+
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("' q");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(primary_text(&state), "No mark q");
+        assert!(state.error.is_none(), "a missing mark is not an error token");
+        executor.advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.global::<Operations>().message.is_none()), "and it retires too");
+    }
+
+    #[gpui::test]
+    fn option_arrows_move_by_word_in_text_fields(cx: &mut TestAppContext) {
+        let root = fixture("text-word-moves");
+        let (view, mut cx) = open(cx, &root);
+        let filter =
+            |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.filter_text(cx)).unwrap_or_default();
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("m5-fix.md");
+        cx.simulate_keystrokes("alt-left alt-left");
+        cx.simulate_input("X");
+        assert_eq!(filter(&cx), "m5-Xfix.md", "⌥← twice lands before \"fix\"");
+
+        cx.simulate_keystrokes("alt-right");
+        cx.simulate_input("Y");
+        assert_eq!(filter(&cx), "m5-XfixY.md", "⌥→ goes to the end of the word");
+
+        cx.simulate_keystrokes("alt-backspace");
+        assert_eq!(filter(&cx), "m5-.md", "⌥⌫ deletes back to the word start");
+
+        cx.simulate_keystrokes("cmd-left alt-shift-right");
+        cx.simulate_input("z");
+        assert_eq!(filter(&cx), "z-.md", "⌥⇧→ selects the word");
     }
 
     #[gpui::test]
@@ -3757,6 +3985,109 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-w");
         assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 1);
+    }
+
+    #[gpui::test]
+    fn closing_the_last_window_mid_operation_asks_first(app: &mut TestAppContext) {
+        let root = fixture("close-guard");
+        let (view, mut cx) = open(app, &root);
+        let cancel = inject_running(&mut cx);
+        let windows = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.windows().len());
+        let asking = |view: &Entity<CrowWindow>, cx: &VisualTestContext| {
+            view.read_with(cx, |w, _| {
+                matches!(w.sheet, Some(Sheet::StopOperation { then: AfterStop::CloseWindow, .. }))
+            })
+        };
+
+        cx.simulate_keystrokes("cmd-w");
+        assert!(asking(&view, &cx), "the last window asks before cutting the move off");
+        assert_eq!(windows(&mut cx), 1);
+
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.sheet.is_none()), "Esc keeps it running");
+        assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "and does not cancel");
+
+        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("enter");
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed), "Stop and Close cancels the operation");
+        assert_eq!(windows(&mut cx), 1, "the window waits for the operation to wind down");
+
+        // The operation finishes cancelling: then the window closes.
+        app.update(|cx| cx.global_mut::<Operations>().running = None);
+        app.executor().advance_clock(std::time::Duration::from_millis(100));
+        app.run_until_parked();
+        assert_eq!(app.update(|cx| cx.windows().len()), 0, "closed once the operation stopped");
+    }
+
+    #[gpui::test]
+    fn closing_with_other_windows_open_just_closes(app: &mut TestAppContext) {
+        let root = fixture("close-free");
+        let (_view, mut cx) = open(app, &root);
+        cx.simulate_keystrokes("cmd-n");
+        cx.run_until_parked();
+        assert_eq!(app.update(|cx| cx.windows().len()), 2);
+        let _cancel = inject_running(&mut cx);
+        // Another window stays open, so the operation keeps going without asking.
+        cx.simulate_keystrokes("cmd-w");
+        app.run_until_parked();
+        assert_eq!(app.update(|cx| cx.windows().len()), 1, "closed without a sheet");
+        app.update(|cx| cx.global_mut::<Operations>().running = None);
+    }
+
+    #[gpui::test]
+    fn quitting_mid_operation_asks_first(cx: &mut TestAppContext) {
+        let root = fixture("quit-guard");
+        let (view, mut cx) = open(cx, &root);
+        let cancel = inject_running(&mut cx);
+        // Menu, palette and ⌘Q all go through `quit`.
+        cx.update(|_, cx| quit(cx));
+        cx.run_until_parked();
+        assert!(
+            view.read_with(&cx, |w, _| matches!(w.sheet, Some(Sheet::StopOperation { then: AfterStop::Quit, .. }))),
+            "⌘Q asks while the move runs"
+        );
+        cx.simulate_keystrokes("escape");
+        assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+        cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+    }
+
+    #[gpui::test]
+    fn list_name_column_follows_the_window_width(cx: &mut TestAppContext) {
+        let root = fixture("list-width");
+        let (_view, mut cx) = open(cx, &root);
+        let widths = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            // The pane asks for one more frame once it sees the new width; the test
+            // platform does not run scheduled frames, so draw it here.
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            let name = cx.debug_bounds("column-header-0").expect("Name header").size.width;
+            let next = cx.debug_bounds("column-header-1").expect("second header").size.width;
+            let table = cx.debug_bounds("table-header").expect("header").size.width;
+            (name, next, table)
+        };
+        cx.simulate_resize(gpui::size(px(1400.), px(700.)));
+        let (wide_name, wide_next, wide_table) = widths(&mut cx);
+        cx.simulate_resize(gpui::size(px(1100.), px(700.)));
+        let (narrow_name, narrow_next, narrow_table) = widths(&mut cx);
+        assert!(wide_table > narrow_table, "the list got narrower");
+        assert_eq!(wide_next, narrow_next, "the other columns keep their widths");
+        assert_eq!(wide_name - narrow_name, wide_table - narrow_table, "Name absorbs the whole change");
+
+        // Narrower than every column's minimum: whole columns hide from the right, so no
+        // cell runs past the list's edge.
+        for width in [900., 760., 640.] {
+            cx.simulate_resize(gpui::size(px(width), px(700.)));
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            let table = cx.debug_bounds("table-header").expect("header");
+            let shown: Vec<_> = (0..6).filter_map(|i| cx.debug_bounds(format!("column-header-{i}").leak())).collect();
+            assert!(!shown.is_empty(), "Name always shows");
+            for cell in &shown {
+                assert!(cell.right() <= table.right() + px(0.5), "at {width}: {cell:?} past {table:?}");
+            }
+        }
     }
 
     #[gpui::test]

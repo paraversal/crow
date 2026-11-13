@@ -88,7 +88,7 @@ impl Ui {
     }
 
     /// The first config file problem, if any. Tests read it; the bar uses the file form.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn config_error(&self) -> Option<SharedString> {
         self.errors.iter().flatten().next().cloned()
     }

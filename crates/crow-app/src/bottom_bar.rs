@@ -2,16 +2,17 @@
 //! progress, messages, errors) and the counts. `CrowWindow::bar_state` builds
 //! the state; rendering here reads only that.
 
+use std::ops::Range;
 use std::path::PathBuf;
 
 use gpui::{
-    Action, AnyElement, App, Entity, FontWeight, IntoElement, KeyBinding, Role, SharedString, TextRun, Window, div,
-    img, prelude::*, px, relative,
+    Action, AnyElement, App, Entity, FontWeight, IntoElement, KeyBinding, Pixels, Role, SharedString, TextRun, Window,
+    div, img, prelude::*, px, relative,
 };
 
 use crate::actions::{
     CancelOperation, ClearFilter, Eject, MoveFavoriteDown, MoveFavoriteUp, OpenSelection, QuickLook, RemoveFromSidebar,
-    SearchReveal, ShowCommandPalette, ShowSearch, StartFilter, SwitchFocus,
+    SearchReveal, ShowSearch, StartFilter, SwitchFocus,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_tooltip};
 use crate::icons::{self, Glyph};
@@ -32,19 +33,19 @@ pub struct BarState {
     pub error: Option<BarError>,
     pub count: Count,
     pub path: Path,
+    /// The most the transient slot may take, so the path keeps its first and last
+    /// segments (set by `fit_to_window`).
+    pub transient_max: Option<Pixels>,
 }
 
 /// The transient slot's one primary item.
-// `None` and the hint/progress fields arrive with the next items.
-#[allow(dead_code)]
 pub enum Primary {
-    None,
     /// Vim's mark pending: "Mark this folder: type a letter".
     Pending(&'static str),
     Running(RunningView),
     /// An operation or clipboard message.
     Message(SharedString),
-    /// Keys for the focused element (U4 fills these).
+    /// Keys for the focused element.
     Hints(Vec<Hint>),
 }
 
@@ -97,6 +98,8 @@ pub struct Path {
     pub parts: Vec<(String, PathBuf)>,
     pub last_is_dir: bool,
     pub spoken: String,
+    /// Segments folded into one "…" when the bar is short of room (never the first or last).
+    pub hidden: Option<Range<usize>>,
 }
 
 fn items(n: usize) -> String {
@@ -114,9 +117,6 @@ fn spoken_size(bytes: u64) -> String {
 /// Counts for the list or a column.
 pub struct PaneCounts {
     pub loading: bool,
-    pub filtering: bool,
-    /// Visible rows while filtering.
-    pub shown: usize,
     pub total: usize,
     pub selected: usize,
     pub bytes: u64,
@@ -127,21 +127,7 @@ pub fn pane_count(c: PaneCounts) -> Count {
     if c.loading && c.total == 0 {
         return Count { text: "Loading…".into(), spoken: format!("Loading {}", c.folder).into() };
     }
-    if c.filtering {
-        let selected = if c.selected >= 2 { format!(" · {} selected", c.selected) } else { String::new() };
-        let selected_spoken = if c.selected >= 2 { format!(", {} selected", c.selected) } else { String::new() };
-        return Count {
-            text: format!("{} of {} shown{selected}{}", c.shown, c.total, size_suffix(c.bytes)).into(),
-            spoken: format!(
-                "{} of {} shown in {}{selected_spoken}{}",
-                c.shown,
-                c.total,
-                c.folder,
-                spoken_size(c.bytes)
-            )
-            .into(),
-        };
-    }
+    // While filtering the field already says "n of N"; the bar keeps the folder's count.
     if c.selected >= 2 {
         return Count {
             text: format!("{} selected{}", c.selected, size_suffix(c.bytes)).into(),
@@ -205,9 +191,9 @@ struct Spec {
 }
 
 const FILTER: Spec = Spec { kind: HintKind::Action(&StartFilter), label: "filter", idle: true };
-const SEARCH: Spec = Spec { kind: HintKind::Action(&ShowSearch), label: "search", idle: true };
-const GO_TO: Spec = Spec { kind: HintKind::Action(&ShowCommandPalette), label: "go to", idle: true };
-const LIST_HINTS: &[Spec] = &[FILTER, SEARCH, GO_TO];
+// ⌘F and ⌘K already sit on the toolbar's Search and Go to buttons; only the filter
+// has no other place on screen.
+const LIST_HINTS: &[Spec] = &[FILTER];
 
 const CONFIRM: Spec = Spec { kind: HintKind::Action(&Confirm), label: "open", idle: false };
 const CANCEL: Spec = Spec { kind: HintKind::Action(&text_input::Cancel), label: "clear", idle: false };
@@ -272,49 +258,70 @@ fn merged_keys(up: &KeyBinding, down: &KeyBinding) -> (SharedString, String) {
     (keys.into(), spoken)
 }
 
-/// How many hints fit, dropping from the right: the path keeps its natural width
-/// and only truncates once no hints remain.
-pub fn fit_hints(bar: gpui::Pixels, path: gpui::Pixels, fixed: gpui::Pixels, hints: &[gpui::Pixels]) -> usize {
-    let available = bar - path - fixed;
-    if available <= px(0.) {
-        return 0;
+/// Gap between the bar's slots and between hints.
+const GAP: f32 = 14.;
+
+/// How the bar shares its room this frame.
+#[derive(Debug, PartialEq)]
+pub struct Fit {
+    /// Hints kept, from the left.
+    pub hints: usize,
+    /// Path segments folded into "…".
+    pub hidden: Option<Range<usize>>,
+    /// The most the transient slot may take.
+    pub transient_max: Pixels,
+}
+
+/// Width of the path showing `segments[..1]`, "…" and `segments[from..]` (`from == 1`: everything).
+fn path_width(segments: &[Pixels], ellipsis: Pixels, from: usize) -> Pixels {
+    let first = segments.first().copied().unwrap_or_default();
+    let rest: Pixels = segments[from.min(segments.len())..].iter().copied().sum();
+    if from <= 1 { first + rest } else { first + ellipsis + rest }
+}
+
+/// Share the bar. The path always keeps its first segment and its last; then the
+/// transient's own content (progress, messages, errors) gets room; hints come next
+/// while the path still shows the parent of its last segment; the path takes the
+/// rest, folding middle segments into "…" from the left.
+///
+/// `segments` are each path segment's width including its separator, `fixed` the
+/// counts slot and the gaps around the transient, `other` the transient's content
+/// besides hints, `hints` each hint's width.
+pub fn fit(bar: Pixels, fixed: Pixels, segments: &[Pixels], ellipsis: Pixels, other: Pixels, hints: &[Pixels]) -> Fit {
+    let n = segments.len();
+    let full = path_width(segments, ellipsis, 1);
+    // First and last; with the parent too for the hint reserve.
+    let min_path = if n <= 2 { full } else { full.min(path_width(segments, ellipsis, n - 1)) };
+    let reserve = if n <= 3 { full } else { full.min(path_width(segments, ellipsis, n - 2)) };
+
+    let transient_max = (bar - fixed - min_path).max(px(0.));
+    let other = other.min(transient_max);
+
+    let mut room = bar - fixed - other - reserve;
+    if other > px(0.) {
+        room -= px(GAP);
     }
-    let mut used = px(0.);
     let mut kept = 0;
+    let mut used = px(0.);
     for (i, width) in hints.iter().enumerate() {
-        let needed = if i == 0 { *width } else { *width + px(14.) };
-        if used + needed <= available {
-            used += needed;
-            kept += 1;
-        } else {
+        let needed = if i == 0 { *width } else { *width + px(GAP) };
+        if used + needed > room {
             break;
         }
+        used += needed;
+        kept += 1;
     }
-    kept
+
+    let path_room = bar - fixed - other - used;
+    let from = (1..n.max(2)).find(|&from| path_width(segments, ellipsis, from) <= path_room).unwrap_or(n.max(2) - 1);
+    let hidden = (from > 1).then_some(1..from);
+    Fit { hints: kept, hidden, transient_max }
 }
 
-/// Measure the path's natural width with the bar's 12 px text.
-fn path_width(path: &Path, measure: &impl Fn(&str) -> gpui::Pixels) -> gpui::Pixels {
-    let last = path.parts.len().saturating_sub(1);
-    let mut width = px(0.);
-    for (i, (name, _)) in path.parts.iter().enumerate() {
-        // px_1 both sides, the 14 px icon, the segment's 4 px gap and the name.
-        width += px(8. + 14. + 4.) + measure(name);
-        if i < last {
-            // pl_1 + "›" + the parent's gap between segments.
-            width += px(4.) + measure("›") + px(4.);
-        }
-    }
-    width
-}
-
-/// Drop hints from the right until the path's natural width plus the counts fit.
-pub fn fit_hints_to_window(hints: &mut Vec<Hint>, count: &Count, path: &Path, window: &Window) {
-    if hints.is_empty() {
-        return;
-    }
+/// Fit the bar to the window: measure with the bar's 12 px text, then drop hints,
+/// fold the path and cap the transient slot.
+pub fn fit_to_window(state: &mut BarState, window: &Window) {
     let font = window.text_style().font();
-    let font_size = px(12.);
     let measure = |text: &str| {
         let run = TextRun {
             len: text.len(),
@@ -324,20 +331,56 @@ pub fn fit_hints_to_window(hints: &mut Vec<Hint>, count: &Count, path: &Path, wi
             underline: None,
             strikethrough: None,
         };
-        window.text_system().shape_line(SharedString::from(text.to_owned()), font_size, &[run], None).width
+        window.text_system().shape_line(SharedString::from(text.to_owned()), px(12.), &[run], None).width
     };
-    let bar = window.viewport_size().width - px(24.);
-    let fixed = measure(&count.text) + px(12. + 1. + 28.);
-    let widths: Vec<gpui::Pixels> = hints
+    let cap = |keys: &str| (measure(keys) + px(12.)).max(px(18.));
+    // The segment's gap before the separator, its pl_1, "›", and the path's gap to the next.
+    let separator = px(4. + 4.) + measure("›") + px(4.);
+    let last = state.path.parts.len().saturating_sub(1);
+    // px_1 both sides, the 14 px icon, the segment's 4 px gap, the name, the separator.
+    let segments: Vec<Pixels> = state
+        .path
+        .parts
         .iter()
-        .map(|hint| {
-            let cap = measure(&hint.keys);
-            let keycap = (cap + px(12.)).max(px(18.));
-            keycap + px(5.) + measure(hint.label)
-        })
+        .enumerate()
+        .map(|(i, (name, _))| px(8. + 14. + 4.) + measure(name) + if i < last { separator } else { px(0.) })
         .collect();
-    let keep = fit_hints(bar, path_width(path, &measure), fixed, &widths);
-    hints.truncate(keep);
+    // px_1 both sides, "…", pl_1 + "›" (no gap inside), the path's gap to the next.
+    let ellipsis = px(8.) + measure("…") + px(4.) + measure("›") + px(4.);
+
+    let bar = window.viewport_size().width - px(24.);
+    let fixed = measure(&state.count.text) + px(12. + 1.) + px(2. * GAP);
+    let mut other = match &state.primary {
+        Primary::Pending(text) => measure(text),
+        Primary::Message(text) => measure(text),
+        Primary::Running(running) => {
+            measure(&running.label)
+                + px(10.)
+                + if running.detail.is_empty() { px(0.) } else { measure(&running.detail) + px(10.) }
+                + px(12. + 6.)
+                + measure("Cancel")
+                + cap("esc")
+        }
+        Primary::Hints(_) => px(0.),
+    };
+    if let Some(error) = &state.error {
+        if other > px(0.) {
+            other += px(GAP);
+        }
+        let open = if error.file.is_some() { measure("Open") + px(12. + 8.) } else { px(0.) };
+        other += px(8. + 13. + 8. + 4.) + measure(&error.text).min(px(420.)) + open;
+    }
+    let hint_widths: Vec<Pixels> = match &state.primary {
+        Primary::Hints(hints) => hints.iter().map(|hint| cap(&hint.keys) + px(5.) + measure(hint.label)).collect(),
+        _ => Vec::new(),
+    };
+
+    let fit = fit(bar, fixed, &segments, ellipsis, other, &hint_widths);
+    if let Primary::Hints(hints) = &mut state.primary {
+        hints.truncate(fit.hints);
+    }
+    state.path.hidden = fit.hidden;
+    state.transient_max = Some(fit.transient_max);
 }
 
 /// The bar's hints in `scope`, with idle ones filtered by the setting and use counts.
@@ -482,6 +525,37 @@ fn cancel_button(cx: &App) -> gpui::Stateful<gpui::Div> {
     with_tooltip(button, "Cancel operation", keys)
 }
 
+/// Text that gives way with an ellipsis when the transient slot is squeezed.
+fn shrinking_text(text: impl Into<SharedString>) -> gpui::Div {
+    div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(text.into())
+}
+
+/// The "…" standing for folded path segments: goes to the deepest of them; the
+/// tooltip names them all.
+fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui::Rgba) -> impl IntoElement {
+    let names = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(" › ");
+    let (deepest, target) = parts.last().cloned().unwrap_or_default();
+    let pane = pane.clone();
+    let part = div()
+        .id("path-folded")
+        .debug_selector(|| "path-folded".into())
+        .role(Role::Button)
+        .aria_label(format!("Go to {deepest}, hidden: {names}"))
+        .flex()
+        .flex_none()
+        .items_center()
+        .px_1()
+        .rounded_sm()
+        .hover(move |s| s.bg(hover))
+        .child("…")
+        .child(div().pl_1().child("›"))
+        .on_click(move |_, _, cx| {
+            let target = target.clone();
+            pane.update(cx, |pane, cx| pane.navigate(target, cx));
+        });
+    with_tooltip(part, names, None)
+}
+
 /// One bar: path · transient · counts.
 pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoElement + use<> {
     let ui = cx.global::<Ui>();
@@ -495,6 +569,51 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
     let fg_path = fg;
     let last_is_dir = state.path.last_is_dir;
 
+    let hidden = state.path.hidden.clone().unwrap_or(0..0);
+    let separator = || div().pl_1().flex_none().child("›");
+    let mut children: Vec<AnyElement> = Vec::new();
+    for (i, (name, target)) in parts.iter().enumerate() {
+        if hidden.contains(&i) {
+            if i == hidden.start {
+                children.push(folded_segment(&parts[hidden.clone()], &pane, hover).into_any_element());
+            }
+            continue;
+        }
+        let pane = pane.clone();
+        let is_dir = i < last || last_is_dir;
+        let spoke = if is_dir { format!("Go to {name}") } else { format!("Open {name}") };
+        let part = div()
+            .id(("path-segment", i))
+            .debug_selector(move || format!("path-segment-{i}"))
+            .role(Role::Button)
+            .aria_label(spoke.clone())
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_1()
+            .rounded_sm()
+            // Only the last segment gives way (with an ellipsis) once nothing else can fold.
+            .map(|part| if i == last { part.min_w_0().text_color(fg_path) } else { part.flex_none() })
+            .hover(move |s| s.bg(hover))
+            .children(icon(target, is_dir, 14).map(|i| img(i).flex_none().size(px(14.))))
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name.clone()))
+            .when(i < last, |part| part.child(separator()));
+        let target = target.clone();
+        let part = part.on_click(move |_, _, cx| {
+            let target = target.clone();
+            pane.update(cx, |pane, cx| {
+                if is_dir {
+                    // Clicking where you already are changes nothing.
+                    if pane.current_dir(cx) != target {
+                        pane.navigate(target.clone(), cx);
+                    }
+                } else {
+                    pane.open_file(target.clone(), cx);
+                }
+            });
+        });
+        children.push(with_tooltip(part, spoke, None).into_any_element());
+    }
     let path = div()
         .id("bar-path")
         .role(Role::Navigation)
@@ -505,45 +624,10 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         .flex()
         .items_center()
         .gap_1()
-        .children(parts.into_iter().enumerate().map(move |(i, (name, target))| {
-            let pane = pane.clone();
-            let is_dir = i < last || last_is_dir;
-            let spoke = if is_dir { format!("Go to {name}") } else { format!("Open {name}") };
-            let mut part = div()
-                .id(("path-segment", i))
-                .debug_selector(move || format!("path-segment-{i}"))
-                .role(Role::Button)
-                .aria_label(spoke.clone())
-                .flex()
-                .items_center()
-                .gap_1()
-                .px_1()
-                .rounded_sm()
-                .when(i == last, |part| part.text_color(fg_path))
-                .hover(move |s| s.bg(hover))
-                .children(icon(&target, is_dir, 14).map(|i| img(i).size(px(14.))))
-                .child(name)
-                .when(i < last, |part| part.child(div().pl_1().child("›")));
-            let target = target.clone();
-            part = part.on_click(move |_, _, cx| {
-                let target = target.clone();
-                pane.update(cx, |pane, cx| {
-                    if is_dir {
-                        // Clicking where you already are changes nothing.
-                        if pane.current_dir(cx) != target {
-                            pane.navigate(target.clone(), cx);
-                        }
-                    } else {
-                        pane.open_file(target.clone(), cx);
-                    }
-                });
-            });
-            with_tooltip(part, spoke, None)
-        }));
+        .children(children);
 
     let idle_text = color(theme.role("fg-subtle"));
     let (primary_aria, primary_el) = match &state.primary {
-        Primary::None => (None, None),
         Primary::Hints(hints) if hints.is_empty() => (None, None),
         Primary::Hints(hints) => {
             let aria = format!(
@@ -570,10 +654,10 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
             (Some(SharedString::from(aria)), Some(el))
         }
         Primary::Pending(text) => {
-            (Some(SharedString::from(*text)), Some(div().text_color(fg).child(*text).into_any_element()))
+            (Some(SharedString::from(*text)), Some(shrinking_text(*text).text_color(fg).into_any_element()))
         }
         Primary::Message(text) => {
-            (Some(text.clone()), Some(div().text_color(muted).child(text.clone()).into_any_element()))
+            (Some(text.clone()), Some(shrinking_text(text.clone()).text_color(muted).into_any_element()))
         }
         Primary::Running(running) => {
             let label = running.label.clone();
@@ -581,6 +665,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
             let percent = running.percent;
             let mut group = div()
                 .id("bar-progress-text")
+                .min_w_0()
                 .flex()
                 .items_center()
                 .gap(px(10.))
@@ -589,19 +674,25 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
                 .aria_numeric_value(f64::from(percent))
                 .aria_min_numeric_value(0.)
                 .aria_max_numeric_value(100.)
-                .child(div().text_color(fg).child(label.clone()))
-                .children((!detail.is_empty()).then(|| div().text_color(muted).child(detail)));
-            group = group.child(cancel_button(cx));
+                .child(shrinking_text(label.clone()).text_color(fg))
+                .children((!detail.is_empty()).then(|| div().flex_none().text_color(muted).child(detail)));
+            group = group.child(cancel_button(cx).flex_none());
             (Some(label), Some(group.into_any_element()))
         }
     };
     let error_el = state.error.as_ref().map(|error| error_token(error, &theme));
+    // Hints change with every focus move, so they are a plain group; only progress,
+    // messages and errors live in the status region VoiceOver announces.
+    let role = if matches!(state.primary, Primary::Hints(_)) { Role::Group } else { Role::Status };
     let transient = div()
         .id("bar-transient")
         .debug_selector(|| "bar-transient".into())
-        .role(Role::Status)
+        .role(role)
         .aria_label(primary_aria.unwrap_or_default())
         .flex_none()
+        .min_w_0()
+        .when_some(state.transient_max, |el, max| el.flex_shrink_1().max_w(max))
+        .overflow_hidden()
         .flex()
         .items_center()
         .gap(px(14.))
@@ -672,14 +763,24 @@ mod tests {
     }
 
     #[test]
-    fn fit_hints_drops_from_the_end() {
-        let hints = [px(60.), px(60.), px(60.)];
-        assert_eq!(fit_hints(px(400.), px(100.), px(50.), &hints), 3);
-        assert_eq!(fit_hints(px(300.), px(100.), px(50.), &hints), 2);
-        assert_eq!(fit_hints(px(220.), px(100.), px(50.), &hints), 1);
-        assert_eq!(fit_hints(px(140.), px(100.), px(50.), &hints), 0, "no room at all");
-        assert_eq!(fit_hints(px(400.), px(400.), px(50.), &hints), 0, "the path wins first");
-        assert_eq!(fit_hints(px(400.), px(100.), px(50.), &[]), 0);
+    fn fit_shares_the_bar() {
+        let segments = [px(100.); 5];
+        let fit5 =
+            |bar: f32, other: f32, hints: &[Pixels]| fit(px(bar), px(100.), &segments, px(30.), px(other), hints);
+
+        // Room for everything: nothing folds.
+        assert_eq!(fit5(1000., 0., &[px(80.)]), Fit { hints: 1, hidden: None, transient_max: px(670.) });
+        // Hints stay while the path still shows first … parent › last; the middle folds.
+        assert_eq!(fit5(600., 0., &[px(80.)]).hints, 1);
+        assert_eq!(fit5(600., 0., &[px(80.)]).hidden, Some(1..3));
+        // Narrower: hints go before the parent does.
+        assert_eq!(fit5(450., 0., &[px(80.)]), Fit { hints: 0, hidden: Some(1..3), transient_max: px(120.) });
+        // A long error or progress line is capped so first and last stay.
+        assert_eq!(fit5(600., 500., &[]), Fit { hints: 0, hidden: Some(1..4), transient_max: px(270.) });
+        // Hints drop from the right.
+        assert_eq!(fit5(1000., 0., &[px(300.), px(300.)]).hints, 1);
+        // Two segments never fold.
+        assert_eq!(fit(px(100.), px(50.), &[px(100.), px(100.)], px(30.), px(0.), &[]).hidden, None);
     }
 
     #[test]

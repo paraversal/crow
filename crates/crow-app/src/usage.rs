@@ -50,7 +50,6 @@ pub fn record_key(key: &str, cx: &mut App) {
 }
 
 /// How many times `action` has been used. U9's tips read this too.
-#[allow(dead_code)] // U4's hint filter is the first caller.
 pub fn uses(action: &dyn Action, cx: &App) -> u32 {
     count_key(action.name(), cx)
 }
@@ -61,7 +60,6 @@ pub fn count_key(key: &str, cx: &App) -> u32 {
 
 /// Re-read the file, for the persistence test.
 #[cfg(test)]
-#[allow(dead_code)] // The reload test arrives with the hint tests.
 pub fn reload_from_disk(cx: &mut App) {
     let state = cx.global_mut::<UsageState>();
     let path = state.path.clone();

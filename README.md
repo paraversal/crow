@@ -73,15 +73,23 @@ Why This View?, the theme picker, Cmd-K and the delete/conflict questions) dim t
 clicking outside one cancels it exactly like Esc.
 
 The bottom bar has three slots: the path, a transient one (hints, operation progress, messages,
-errors) and counts. Idle hints show `/` filter, `⌘F` search and `⌘K` go to; after you have used a
-key three times its hint retires (`hints = "always"` keeps every hint, `"off"` hides hints and the
+errors) and counts. The idle hint shows `/` filter (Search and Go to carry their keys on the
+toolbar); after you have used it three times it retires (`hints = "always"` keeps every hint, `"off"` hides hints and the
 one-time tips). Hints follow focus: the filter field (Return open, Esc clear, `⌘F` search deeper),
 the sidebar (`⌘⌥↑↓` reorder, `⌘⌫` remove, `⌘E` eject a disk), search results and the search field.
 While an operation runs, a 2 px accent line along the bar's top edge and "Copying … · n %" with
 Cancel esc replace the hints; the path and count stay. A broken config file shows an error pill with
 its file name, line and an Open button, beside progress rather than instead of it. Counts name the
-focused folder ("18 items in Documents"), show "n of N shown" while filtering, the selected size,
-or the cursor's sidebar group. Narrow windows drop hints from the right before the path is cut.
+focused folder ("18 items in Documents"), the selection and its size, or the cursor's sidebar
+group (while filtering, the field itself says "n of N"). When room runs short the path keeps its
+first and last segments: its middle folds into a "…" (click it for the deepest hidden folder),
+then hints drop from the right, then a long progress line or error is cut with an ellipsis.
+
+Closing the last window or quitting while an operation runs asks first: Esc keeps it running,
+Return stops it cleanly (finished items stay and Undo can reverse them; the item in progress is never left half done) and then closes or quits. In every text field
+⌥←/⌥→ move by word, ⌥⇧←/→ select by word and ⌥⌫ deletes a word. In list view the Name column
+takes whatever width the window gives; the other columns keep the widths you drag them to, and
+dragging Name's own divider trades width with the column after it.
 
 Toolbar icons are [Lucide](https://lucide.dev) 1.72.0, ISC-licensed; the notice is at
 `crates/crow-app/assets/icons/LICENSE` (also copied into `Crow.app/Contents/Resources/`).

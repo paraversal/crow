@@ -18,7 +18,8 @@ view settings (per-folder memory, live rules, Why This View?, broken files), the
 (search field click, Cmd-F refocus and select-all, Done/Esc, Go to, All/Names/Contents, switching
 tabs closing search, the Tab cycle while searching, focus never left on an element that is gone), the bottom bar
 (hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
-hint dropping), the menu bar
+path folding and hint dropping, messages that retire), closing or quitting during an operation, ⌥ word moves in
+text fields, the list's Name column following the window width, the menu bar
 (every registry command listed, Finder keys, enabled by focus, dispatch matching the key) and the
 Vim layer (motions, marks). Shared chrome has its own tests: key text from the live keymap (including the
 Vim layer and the palette's old strings), keycap weights, tooltip text and a hover, the sheet scrim
@@ -76,10 +77,13 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Progress and cancel | Copy a large folder to another disk: a 2 px accent line along the bottom bar's top edge and "Copying … · n %" with Cancel esc replace the hints; the path and count stay. Esc or Cancel stops it with nothing half-copied. |
 | Activity | Cmd-Option-L lists recent operations; Undo on an older one works or explains why not. |
 | Path bar | Click a folder segment to go there (Back returns); click the selected file's segment to open it. |
-| Bottom bar hints | Fresh state dir (`CROW_STATE_DIR=$(mktemp -d)`): idle hints `/ filter · ⌘F search · ⌘K go to`. Press `/` and Esc three times: "filter" disappears, the others stay; relaunch: still gone. Focus the sidebar, a filter, search results: the hint set changes each time. `hints = "always"` brings them back; `"off"` hides all. Vim layer: same, and `m` shows "Mark this folder…". |
-| Bottom bar counts | Column view: hover the count, the tooltip names the focused column's folder. Filter: "n of N shown". Select several files: "n selected · size". |
+| Bottom bar hints | Fresh state dir (`CROW_STATE_DIR=$(mktemp -d)`): idle hint `/ filter` only. Press `/` and Esc three times (or Edit ▸ Filter This Folder): it disappears; relaunch: still gone. Focus the sidebar, a filter, search results: the hint set changes each time. `hints = "always"` brings them back; `"off"` hides all. Vim layer: same, and `m` shows "Mark this folder…". |
+| Bottom bar counts | Column view: hover the count, the tooltip names the focused column's folder. Filter: the bar keeps "N items" (the field says "n of N"). Select several files: "n selected · size". |
 | Bottom bar error | Break `views.toml` while an operation runs: progress and the red token show together, hints are gone; Open opens `views.toml`; fixing it removes the token. |
-| Bottom bar, narrow | Shrink the window: hints disappear right to left before the path is cut. |
+| Bottom bar, narrow | In a deep folder, shrink the window: the path's middle folds into "…" first (its tooltip names the hidden folders, a click goes to the deepest), then the hint goes; the first segment and the current folder or selection stay visible. With an error and a running copy at minimum width, the path still shows its ends and nothing runs off the right edge. |
+| Close during an operation | Copy a large folder to another disk, then ⌘W the only window (or click its red button, or ⌘Q): a sheet asks. Esc keeps the copy running; Return stops it and closes (or quits) once it has wound down. With a second window open, closing one does not ask. |
+| Word moves | In the filter, search and Go to Folder fields: ⌥←/⌥→ jump by word (`m5-fix.md` is three words), ⌥⇧←/→ select, ⌥⌫ deletes a word. |
+| List width | List view: widen and narrow the window: Name grows and shrinks, Date/Size/Kind keep their widths; past Name's minimum, Kind and then Size shrink; at the 640 px minimum whole columns hide from the right, so no cell is cut at the edge (names end in “…”). Drag Name's divider: Date gives up or takes the width. |
 | Bottom bar, VoiceOver | Cmd-F5: the count reads "18 items in <folder>"; an error reads "Error: …" once; Open and Cancel read as buttons. |
 | Table | Drag header dividers to resize; click headers to sort and reverse. |
 | Preview pane | Select an image, a PDF, a text file and a folder: thumbnail, text, icon. Tags show for tagged files. |

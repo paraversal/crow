@@ -203,6 +203,9 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 - **Text measurement in 210 px.** `text_ellipsis()` on a `flex_basis(0)` child: verify GPUI truncates rather than wrapping or overflowing (pane.rs:1336 uses `text_ellipsis` in a sized column).
 - **Bench.** The pane's rows don't change, so the 100k bench can't move; run it once anyway as the index asks (Q9) and record the numbers.
 
+## User requests from the U5 review (2026-11-13)
+- **⌥↑ / ⌥↓ jump between sidebar groups** (Favorites, Recent, Locations): to the first row of the previous / next group. Add the actions to the live keymap (both layers) so U5's sidebar hints can show them, plus a keystroke test.
+
 ## Questions to ASK
 1. **Twin rules.** Twins compared across all favorites groups and Recent together (not volumes), by the shown label (custom `name` included), case-insensitively; the same path twice is not a twin. *Recommended: yes as written* — the user sees one column and compares what is shown.
 2. **Hint placement and only-on-twins.** Discovery B puts the hint right after the name and only on twins; the assembled search board shows "crow-core" right-aligned on a lone "src". *Recommended: Discovery B* (after the name, twins only); the right edge is for marks and free space.

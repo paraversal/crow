@@ -239,6 +239,13 @@ Heading, four example buttons, key line.
 - Clicking a scope segment while the first search of a big Home walk runs: `start_search` cancels; no new risk.
 - `display_components` in `folder_name` may touch the file system; it's already called on the main thread for the title each frame (`window.rs:1727`), so computing it once in `SearchView::new` adds nothing.
 
+## User requests from the U5 review (2026-11-13)
+Added by the user after hand-testing; fold them into this plan's items (ask where they clash with Decided):
+- **Names outrank contents.** Crow is a Finder replacement first; content search is a bonus. A name match always ranks above a content-only match (searching "m5" in `file-crow` must list `m5….md` first; today content matches come first). Name matches also stand out more in the result rows than content matches.
+- **Highlight name matches** in result names, as content matches are highlighted today (reuse `style::highlight_text` / `map_range`).
+- **A key to switch scope** All / Names / Contents from the field and the results (U3's scope band shows the state; the key goes in the live keymap, so the band and bar hints pick it up).
+- ⌥←/→ word moves in the search field were fixed in U5 (`text_input` `WordLeft`/`WordRight`).
+
 ## Questions to ASK
 1. **Preview at the hit line.** The text previewer only reads the first 8 KB / 40 lines and can't scroll (`extensions.rs:182–214`, `preview.rs:57–67`), so the decided scope falls back to the head. Add a bounded `text_excerpt` (I9: up to 1 MiB, ~5 lines before the hit, line numbers, hit line tinted)? Recommended: yes; a content hit on line 300 otherwise previews unrelated text, and the assembled board shows numbered lines.
 2. **"n results in m files" wording.** n counts every hit (name hit + each matching line), m counts rows (one per path, folders included). Recommended: show "n results in m files" only when n > m, "n results" when equal; keep the word "files" even if a few rows are folders.
