@@ -49,8 +49,10 @@ Finder's keys work as in Finder: arrows (Shift extends), Option-Up/Down, Cmd-Up/
 Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (Tab completes),
 Cmd-Shift-. and Space. Typing a name selects it. Tab moves focus between the sidebar and the list.
 Column headers sort (click again to reverse) and their dividers resize.
-Type `/` to filter the focused folder; the field shows the query and "n of N". Esc clears it,
-arrows move within the matches, and Return opens the selection. Cmd-2 shows a list, Cmd-3 columns. In the list, Right opens the selected folder inline (Right again goes into it); Left steps to the row that contains a nested one, closes an open folder, or goes up from the top level. In columns, Left and Right move between them, and Left in the leftmost column goes up a folder. Vim `h`/`l` follow the same keys.
+Type `/` to filter the focused folder: the field opens as the first row of the focused column
+(or under the list header), showing the query and "n of N", and matching letters are highlighted.
+Esc clears it, arrows move within the matches, and Return opens the selection. Cmd-F carries the
+filter text into a search of that folder. Cmd-2 shows a list, Cmd-3 columns. In the list, Right opens the selected folder inline (Right again goes into it); Left steps to the row that contains a nested one, closes an open folder, or goes up from the top level. In columns, Left and Right move between them, and Left in the leftmost column goes up a folder. Vim `h`/`l` follow the same keys.
 
 Sidebar: drag favorites to reorder them (or Cmd-Option-Up/Down), drop files on any row to move or
 copy them there, drop folders on a group's title to add them. Ctrl-Cmd-T adds the selected folder.

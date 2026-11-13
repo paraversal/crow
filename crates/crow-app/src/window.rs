@@ -33,7 +33,7 @@ use std::collections::HashMap;
 
 /// Open a window on `dir`. New windows share one size from settings and step
 /// 24 pt down and right from the previous one, so they never land at random sizes.
-pub fn open(dir: PathBuf, bench: bool, cx: &mut App) {
+pub fn open(dir: PathBuf, bench: bool, bench_filter: Option<String>, cx: &mut App) {
     let defaults = cx.global::<Ui>().settings.window.clone();
     let step = px(24.0 * cx.windows().len() as f32);
     let mut bounds = Bounds::centered(None, size(px(defaults.width as f32), px(defaults.height as f32)), cx);
@@ -49,7 +49,9 @@ pub fn open(dir: PathBuf, bench: bool, cx: &mut App) {
         window_min_size: Some(size(px(640.), px(400.))),
         ..Default::default()
     };
-    if let Err(e) = cx.open_window(options, |window, cx| cx.new(|cx| CrowWindow::new(dir, bench, window, cx))) {
+    if let Err(e) =
+        cx.open_window(options, |window, cx| cx.new(|cx| CrowWindow::new(dir, bench, bench_filter, window, cx)))
+    {
         tracing::error!("open window: {e}");
     }
 }
@@ -122,12 +124,18 @@ impl Palette {
 }
 
 impl CrowWindow {
-    fn new(dir: PathBuf, bench: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        dir: PathBuf,
+        bench: bool,
+        bench_filter: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let show_hidden = cx.global::<Ui>().settings.show_hidden_files;
         if !bench {
             ui::record_visit(&dir, cx);
         }
-        let pane = cx.new(|cx| Pane::new(dir.clone(), show_hidden, bench, cx));
+        let pane = cx.new(|cx| Pane::new(dir.clone(), show_hidden, bench, bench_filter, cx));
         let sidebar = cx.new(|cx| {
             let mut sidebar = Sidebar::new(cx);
             sidebar.set_current(dir, cx);
@@ -185,7 +193,7 @@ impl CrowWindow {
 
     fn new_window(&mut self, _: &NewWindow, _window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.pane().read(cx).current_dir(cx);
-        open(dir, false, cx);
+        open(dir, false, None, cx);
     }
 
     fn minimize(&mut self, _: &Minimize, window: &mut Window, _: &mut Context<Self>) {
@@ -206,7 +214,7 @@ impl CrowWindow {
             self.close_search(window, cx);
         }
         let show_hidden = self.show_hidden;
-        let pane = cx.new(|cx| Pane::new(dir, show_hidden, false, cx));
+        let pane = cx.new(|cx| Pane::new(dir, show_hidden, false, None, cx));
         self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
         self._subscriptions
             .push(cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)));
@@ -351,11 +359,12 @@ impl CrowWindow {
         let narrow = viewport < px(760.);
         let (back, forward, mode, back_label, forward_label) = {
             let pane = self.pane().read(cx);
-            let back_label =
-                pane.back_target().map_or_else(|| "Back".to_owned(), |dir| format!("Back to {}", folder_name(dir)));
+            let back_label = pane
+                .back_target()
+                .map_or_else(|| "Back".to_owned(), |dir| format!("Back to {}", crate::style::display_name(dir)));
             let forward_label = pane
                 .forward_target()
-                .map_or_else(|| "Forward".to_owned(), |dir| format!("Forward to {}", folder_name(dir)));
+                .map_or_else(|| "Forward".to_owned(), |dir| format!("Forward to {}", crate::style::display_name(dir)));
             (pane.can_go_back(), pane.can_go_forward(), pane.mode(), back_label, forward_label)
         };
         let fg = color(theme.role("fg"));
@@ -561,7 +570,7 @@ impl CrowWindow {
             .tabs
             .iter()
             .enumerate()
-            .map(|(i, (_, pane))| (i, folder_name(&pane.read(cx).current_dir(cx))))
+            .map(|(i, (_, pane))| (i, crate::style::display_name(&pane.read(cx).current_dir(cx))))
             .collect();
         div()
             .id("tabs")
@@ -790,10 +799,6 @@ fn home_relative(path: &Path) -> String {
     }
 }
 
-pub(crate) fn folder_name(dir: &Path) -> String {
-    crow_macos::display_components(dir).pop().map_or_else(|| dir.display().to_string(), |(name, _)| name)
-}
-
 /// A question to answer before an operation runs.
 enum Sheet {
     Conflicts { plan: Plan, choices: Vec<Resolution>, focus: FocusHandle },
@@ -993,7 +998,12 @@ impl CrowWindow {
                 )
             }
             Sheet::Conflicts { plan, choices, .. } => {
-                let into = plan.items.first().and_then(|i| i.target.parent()).map(folder_name).unwrap_or_default();
+                let into = plan
+                    .items
+                    .first()
+                    .and_then(|i| i.target.parent())
+                    .map(crate::style::display_name)
+                    .unwrap_or_default();
                 let rows: Vec<(usize, String, Resolution)> = plan
                     .conflicts()
                     .zip(choices.iter().copied())
@@ -1457,8 +1467,24 @@ impl CrowWindow {
             cx.notify();
             return;
         }
-        let folder = self.pane().read(cx).current_dir(cx);
-        self.open_search(SearchStart { folder, query: String::new(), everything: false }, window, cx);
+        // Another overlay owns the keys; don't move the filter's text into a search
+        // that cannot open.
+        if self.search_blocked() {
+            return;
+        }
+        let pane = self.pane().clone();
+        let folder = pane.read(cx).current_dir(cx);
+        let query = pane.update(cx, |pane, cx| pane.take_filter(cx)).unwrap_or_default();
+        self.open_search(SearchStart { folder, query, everything: false }, window, cx);
+    }
+
+    /// Whether an overlay other than search is open (search itself is checked by `open_search`).
+    fn search_blocked(&self) -> bool {
+        self.search.is_some()
+            || self.picker.is_some()
+            || self.go_to.is_some()
+            || self.sheet.is_some()
+            || self.palette.is_some()
     }
 
     fn search_everything(&mut self, _: &SearchEverything, window: &mut Window, cx: &mut Context<Self>) {
@@ -1478,12 +1504,7 @@ impl CrowWindow {
     /// the rules set by `everything`. Does nothing while another overlay is open or
     /// search is already open.
     fn open_search(&mut self, start: SearchStart, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.search.is_some()
-            || self.picker.is_some()
-            || self.go_to.is_some()
-            || self.sheet.is_some()
-            || self.palette.is_some()
-        {
+        if self.search_blocked() {
             return false;
         }
         let (home, show_hidden) = (cx.global::<Ui>().home.clone(), self.show_hidden);
@@ -1660,7 +1681,7 @@ impl CrowWindow {
             CommandId::PreviousTab => self.previous_tab(&PreviousTab, window, cx),
             CommandId::NewWindow => {
                 let dir = self.pane().read(cx).current_dir(cx);
-                open(dir, false, cx);
+                open(dir, false, None, cx);
             }
             CommandId::SwitchFocus => self.switch_focus(&SwitchFocus, window, cx),
             CommandId::ToggleHiddenFiles => self.toggle_hidden(&ToggleHiddenFiles, window, cx),
@@ -1949,7 +1970,7 @@ impl Render for CrowWindow {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let (font, font_size) = (ui_font(&ui.settings.font_family), ui.settings.font_size);
-        let title = folder_name(&self.pane().read(cx).current_dir(cx));
+        let title = crate::style::display_name(&self.pane().read(cx).current_dir(cx));
         let list_view = self.pane().read(cx).mode() == ViewMode::List;
         window.set_window_title(&title);
         let title_bar = self.render_title_bar(&title, window, cx);
@@ -2082,7 +2103,9 @@ mod tests {
         let dir = dir.to_path_buf();
         let window: WindowHandle<CrowWindow> = cx
             .update(|cx| {
-                cx.open_window(Default::default(), |window, cx| cx.new(|cx| CrowWindow::new(dir, false, window, cx)))
+                cx.open_window(Default::default(), |window, cx| {
+                    cx.new(|cx| CrowWindow::new(dir, false, None, window, cx))
+                })
             })
             .expect("open window");
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -3332,6 +3355,17 @@ mod tests {
     }
 
     #[gpui::test]
+    fn filter_exposes_match_ranges_per_row(cx: &mut TestAppContext) {
+        let root = fixture("filter-ranges");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("PH");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)]);
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.row_matches(cx)), [Some(2..4)]);
+    }
+
+    #[gpui::test]
     fn filter_arrows_and_return_act_on_matching_rows(cx: &mut TestAppContext) {
         let root = fixture("filter-enter");
         let (view, mut cx) = open(cx, &root);
@@ -3420,6 +3454,232 @@ mod tests {
         cx.simulate_keystrokes("escape");
         settle(&view, &mut cx);
         assert_eq!(rows(&view, &cx).len(), 3);
+    }
+
+    #[gpui::test]
+    fn filter_field_opens_in_the_focused_column(cx: &mut TestAppContext) {
+        let root = fixture("filter-field-column");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        let before0 = cx.debug_bounds("column-0").expect("first column");
+        let before1 = cx.debug_bounds("column-1").expect("second column");
+        let count_before = pane(&view, &cx).read_with(&cx, |p, _| p.folder_count());
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.focused_index()), 1, "moved into the second column");
+
+        cx.simulate_keystrokes("/");
+        settle(&view, &mut cx);
+        let field = cx.debug_bounds("filter-field").expect("the field is in the column");
+        let after0 = cx.debug_bounds("column-0").expect("first column");
+        let after1 = cx.debug_bounds("column-1").expect("second column");
+        assert!(field.left() >= after1.left() && field.right() <= after1.right(), "{field:?} inside {after1:?}");
+        assert_eq!(after0, before0, "the column to the left did not move");
+        assert_eq!(after0.size.width, before0.size.width, "widths do not change while filtering");
+        assert_eq!(after1, before1, "the filtered column does not move or grow");
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.folder_count()), count_before, "no column opened");
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.focused_index()), 1);
+    }
+
+    #[gpui::test]
+    fn filter_field_opens_above_the_list_rows(cx: &mut TestAppContext) {
+        let root = fixture("filter-field-list");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        settle(&view, &mut cx);
+        let header = cx.debug_bounds("table-header").expect("header");
+        let field = cx.debug_bounds("filter-field").expect("field");
+        let row = cx.debug_bounds("row-alpha").expect("first row");
+        assert!(field.top() >= header.bottom(), "{field:?} is below the {header:?}");
+        assert!(field.bottom() <= row.top(), "{field:?} is above the {row:?}");
+    }
+
+    #[gpui::test]
+    fn filter_vim_letters_stay_in_the_column_field(cx: &mut TestAppContext) {
+        let root = fixture("filter-vim-column-field");
+        let (view, mut cx) = open(cx, &root);
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        let before = (dir(&view, &cx), pane(&view, &cx).read_with(&cx, |p, _| p.focused_index()));
+        cx.simulate_keystrokes("/");
+        cx.simulate_keystrokes("h l -");
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.filter_query(cx)).as_deref(), Some("hl-"));
+        assert_eq!((dir(&view, &cx), pane(&view, &cx).read_with(&cx, |p, _| p.focused_index())), before);
+        assert!(rows(&view, &cx).is_empty(), "no Vim motion or filter match ran");
+    }
+
+    #[gpui::test]
+    fn filter_field_takes_space_slash_and_list_keys_as_text(cx: &mut TestAppContext) {
+        let root = fixture("filter-field-keys");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_keystrokes("a space /");
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.filter_query(cx)).as_deref(), Some("a /"));
+        cx.simulate_keystrokes("cmd-backspace");
+        assert!(root.join("notes.txt").exists(), "Cmd-Backspace did not trash a row from the field");
+    }
+
+    #[gpui::test]
+    fn click_in_a_scrolled_filter_field_lands_on_the_visible_text(cx: &mut TestAppContext) {
+        let root = fixture("filter-scrolled-click");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("/");
+        // Far wider than the column, so the field scrolls to keep the caret at the end.
+        let long = "abcdefghij".repeat(12);
+        cx.simulate_input(&long);
+        cx.run_until_parked();
+        let field = cx.debug_bounds("filter-field").expect("field on screen");
+        // Just right of the accent `/`: the start of the visible text, not of the query.
+        cx.simulate_click(gpui::point(field.left() + px(30.), field.center().y), gpui::Modifiers::default());
+        cx.simulate_input("X");
+        let query = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_query(cx)).expect("filtering");
+        let at = query.find('X').expect("typed");
+        assert!(at > 20, "the click landed on the scrolled-away start (X at {at}): {query}");
+    }
+
+    #[gpui::test]
+    fn filter_closes_when_the_focused_column_changes(cx: &mut TestAppContext) {
+        let root = fixture("filter-column-change");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("x");
+        settle(&view, &mut cx);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()));
+
+        // The field owns Left while it has focus; click the column's list first.
+        let focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+        cx.update(|window, cx| window.focus(&focus, cx));
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()));
+        assert!(cx.debug_bounds("filter-field").is_none(), "the field closed");
+        assert_eq!(rows(&view, &cx).len(), 3, "the left column shows all of its rows");
+    }
+
+    #[gpui::test]
+    fn filter_follows_live_changes(cx: &mut TestAppContext) {
+        let root = fixture("filter-live");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("al");
+        settle(&view, &mut cx);
+        std::fs::write(root.join("alpine.txt"), "").expect("create fixture");
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // The folder's watcher polls every 100 ms on the test clock.
+            cx.executor().advance_clock(std::time::Duration::from_millis(150));
+            cx.run_until_parked();
+            if rows(&view, &cx).iter().any(|(name, _)| name == "alpine.txt") {
+                break;
+            }
+        }
+        assert_eq!(rows(&view, &cx).iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["alpha", "alpine.txt"]);
+        let matches = pane(&view, &cx).read_with(&cx, |p, cx| p.row_matches(cx));
+        assert_eq!(matches, [Some(0..2), Some(0..2)], "both rows carry the live match range");
+    }
+
+    #[gpui::test]
+    fn cmd_f_while_filtering_searches_the_focused_folder_with_the_query(cx: &mut TestAppContext) {
+        let root = fixture("filter-to-search");
+        std::fs::write(root.join("alpha/needle.txt"), "nothing\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("nee");
+        settle(&view, &mut cx);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()));
+
+        cx.simulate_keystrokes("cmd-f");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "nee");
+        assert_eq!(search.read_with(&cx, |search, _| search.folder().to_path_buf()), root.join("alpha"));
+        assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Folder);
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.contains(&root.join("alpha/needle.txt")), "{paths:?}");
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "the filter was handed over, not left open");
+
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert_eq!(rows(&view, &cx).len(), 2, "the focused column shows all of its rows again");
+        cx.simulate_keystrokes("n");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("needle.txt"), "type-to-select proves the list has focus");
+    }
+
+    #[gpui::test]
+    fn cmd_f_from_the_list_while_filtering_also_escalates(cx: &mut TestAppContext) {
+        let root = fixture("filter-list-to-search");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("a");
+        settle(&view, &mut cx);
+        let focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+        cx.update(|window, cx| window.focus(&focus, cx));
+
+        cx.simulate_keystrokes("cmd-f");
+        wait_for_search(&view, &mut cx);
+        let query = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search").read(cx).query_text(cx));
+        assert_eq!(query, "a");
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()));
+    }
+
+    #[gpui::test]
+    fn filter_footer_click_opens_search(cx: &mut TestAppContext) {
+        let root = fixture("filter-footer-click");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("al");
+        settle(&view, &mut cx);
+        click_selector(&mut cx, "filter-search-footer");
+        wait_for_search(&view, &mut cx);
+        let query = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search").read(cx).query_text(cx));
+        assert_eq!(query, "al");
+    }
+
+    #[gpui::test]
+    fn filter_with_no_matches_offers_search(cx: &mut TestAppContext) {
+        let root = fixture("filter-no-matches");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("zzz");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("filter-no-matches").is_some(), "D replaces the list");
+        assert!(cx.debug_bounds("filter-search-footer").is_none(), "there is no footer in D");
+
+        click_selector(&mut cx, "filter-search-subfolders");
+        wait_for_search(&view, &mut cx);
+        let query = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search").read(cx).query_text(cx));
+        assert_eq!(query, "zzz");
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()));
+    }
+
+    #[gpui::test]
+    fn filter_no_match_note_follows_hidden_files(cx: &mut TestAppContext) {
+        let root = fixture("filter-no-matches-hidden");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("zzz");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("filter-hidden-note").is_some(), "hidden files are off");
+        cx.simulate_keystrokes("cmd-shift-.");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("filter-hidden-note").is_some(), "the way out is still named");
+        assert!(cx.debug_bounds("filter-no-matches").is_some());
+    }
+
+    #[gpui::test]
+    fn filter_footer_hides_for_an_empty_query(cx: &mut TestAppContext) {
+        let root = fixture("filter-footer-empty");
+        let (_view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        settle(&_view, &mut cx);
+        assert!(cx.debug_bounds("filter-field").is_some(), "the field is open");
+        assert!(cx.debug_bounds("filter-search-footer").is_none(), "nothing to carry deeper");
     }
 
     #[gpui::test]

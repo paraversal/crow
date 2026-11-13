@@ -14,7 +14,7 @@ selection, type-to-select, sorting, Go to Folder, the column view's focus rules,
 (new folder and rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete),
 drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent),
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
-(preview, revert, save), the `/` filter, the command palette, the search panel, the top band
+(preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette, the search panel, the top band
 (search field click, Cmd-F refocus and select-all, Done/Esc, Go to, All/Names/Contents, switching
 tabs closing search, the Tab cycle while searching, focus never left on an element that is gone), the menu bar
 (every registry command listed, Finder keys, enabled by focus, dispatch matching the key) and the
@@ -43,18 +43,20 @@ and 40 randomized rounds of "do, undo, compare the tree".
 ```bash
 cargo run --release -p crow-app -- --make-fixture target/fixture-100k 100000
 cargo run --release -p crow-app -- --bench target/fixture-100k
+cargo run --release -p crow-app -- --bench-filter e target/fixture-100k
 cargo run --release -p crow-fs --example list_bench -- target/fixture-100k
 cargo run --release -p crow-app -- --make-search-fixture target/fixture-search-200k 200000
 cargo run --release -p crow-app -- --bench-search target/fixture-search-200k
 ```
 
 `--bench` scrolls 600 frames and prints first paint, load time and frame times.
-It needs a GPU, so it runs locally, not in CI.
+`--bench-filter <query>` applies the name filter first, so the scroll times are for
+highlighted rows. It needs a GPU, so it runs locally, not in CI.
 
 | Measure | Budget |
 | --- | --- |
-| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms; U1: 10 ms) |
-| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms) |
+| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms; U1: 10 ms; U4: 10–11 ms, filtered 10–17 ms) |
+| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms; U4: 8.85–8.95 ms, main on the same machine 8.84–8.86 ms, filtered 8.82–9.03 ms) |
 | Search, 200k nested files, every file matches (names + contents) | first hit 4 ms; total 4.1 s (M6). `--bench-search` includes the walk, fuzzy names and content reads. |
 
 ## By hand (each milestone)
@@ -88,7 +90,10 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | View settings | Cmd-3 in one folder, then visit another: it keeps its own view; going up in column view stays in columns. Add a `[[rule]]` to `views.toml` with the folder open: it applies at once. Cmd-J explains each value. |
 | Inline folders | In the list, the chevron (›/⌄) opens and closes a folder inline; Right opens a folder indented under it (Right again goes in), Left steps to the containing row, Left again closes it. Option-click is a normal click. Select across levels (Cmd-click or Shift-click a nested row) and copy or trash: every selected row is included. Navigate away and back: expansions are gone. |
 | Vim layer | Set `keymap = "vim"`: hjkl, gg/G, `m a` then `'a` from elsewhere. |
-| Filter | Press `/` in a folder: the field and "n of N" show; typing narrows the rows; arrows move within matches; Return opens; Esc restores focus and rows. Try it in column view, and open a folder inline first (the filter is flat until cleared). |
+| Filter | Press `/` in a folder: an accent-ringed field with `/`, the query, "n of N" and `esc` opens as the list's first row (below the header). Typing narrows the rows and the matching letters turn accent and semibold. Arrows move within matches, Return opens, Esc restores focus and rows. |
+| Filter in columns | Cmd-3, move into a middle column, `/`: only that column gets the field and footer; no other column moves or changes width. Left or Right closes the filter. Type a 60-character query: the caret stays visible inside the field. |
+| Filter to search | Filter a column, then press Cmd-F (or click the footer): search opens with the same text in that folder, and Esc returns to the unfiltered column. Filter something with no matches: "Nothing in … matches", the button opens search, and the hidden-files note shows when hidden files are off. |
+| Filter look | In a light and a dark theme, accent text on the selected row is readable; in the Vim layer, letters typed in the field stay there. VoiceOver reads "Filter <folder>", the count, and the no-match line. |
 | Command palette | Cmd-K: type a recent folder and Return; try Cmd-Return for a new tab and `>` for commands; Vim j/k moves the cursor. |
 | Search | Cmd-F, search a word in file names and in contents: rows show the matching line with highlights; switch This Folder / Home / Everywhere; Return, Cmd-R, Space, drag-out, Cmd-C and Cmd-Delete act on results. |
 | Skipped folders | Search a folder with `node_modules`: the summary counts skipped folders; click it and check each folder is listed with the rule that skipped it. Cmd-Shift-A (Search everything) includes them. |
