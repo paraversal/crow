@@ -4,18 +4,18 @@
 
 use std::path::PathBuf;
 
-use gpui::{Action, App, Entity, IntoElement, KeyBinding, Role, SharedString, div, img, prelude::*, px};
+use gpui::{Action, App, Entity, IntoElement, KeyBinding, Role, SharedString, div, img, prelude::*, px, relative};
 
 use crate::actions::{
-    ClearFilter, Eject, MoveFavoriteDown, MoveFavoriteUp, OpenSelection, QuickLook, RemoveFromSidebar, SearchReveal,
-    ShowCommandPalette, ShowSearch, StartFilter, SwitchFocus,
+    CancelOperation, ClearFilter, Eject, MoveFavoriteDown, MoveFavoriteUp, OpenSelection, QuickLook, RemoveFromSidebar,
+    SearchReveal, ShowCommandPalette, ShowSearch, StartFilter, SwitchFocus,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_tooltip};
 use crate::keys::{self, KeyScope};
 use crate::operations::{self, Running};
 use crate::pane::Pane;
 use crate::sidebar::CursorKind;
-use crate::style::{color, icon};
+use crate::style::{color, color_alpha, icon};
 use crate::text_input::{self, Complete, Confirm};
 use crate::ui::Ui;
 use crate::usage;
@@ -44,7 +44,6 @@ pub enum Primary {
     Hints(Vec<Hint>),
 }
 
-#[allow(dead_code)] // `fraction` and `percent` draw the line and the aria value in U5's next step.
 pub struct RunningView {
     pub label: SharedString,
     pub detail: SharedString,
@@ -305,6 +304,34 @@ pub fn hints(focus: BarFocus, scope: KeyScope, sidebar: Option<CursorKind>, cx: 
     out
 }
 
+/// Cancel for the running operation: "Cancel esc", mouse target only (Esc works anywhere).
+fn cancel_button(cx: &App) -> gpui::Stateful<gpui::Div> {
+    let theme = cx.global::<Ui>().theme.clone();
+    let keys = keys::text(&CancelOperation, KeyScope::Window, cx);
+    let spoken = keys::spoken_for(&CancelOperation, KeyScope::Window, cx).unwrap_or_else(|| "Escape".into());
+    let hover = color_alpha(theme.role("fg"), 0x14);
+    let mut button = div()
+        .id("bar-cancel")
+        .debug_selector(|| "bar-cancel".into())
+        .role(Role::Button)
+        .aria_label(format!("Cancel operation, {spoken}"))
+        .h(px(20.))
+        .px(px(6.))
+        .rounded(px(5.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .bg(color(theme.role("surface-raised")))
+        .text_color(color(theme.role("fg")))
+        .hover(move |style| style.bg(hover))
+        .on_click(|_, _, cx| operations::cancel_running(cx))
+        .child("Cancel");
+    if let Some(keys) = keys.clone() {
+        button = button.child(Keycap::text(keys, KeycapWeight::Text));
+    }
+    with_tooltip(button, "Cancel operation", keys)
+}
+
 /// One bar: path · transient · counts.
 pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoElement + use<> {
     let ui = cx.global::<Ui>();
@@ -400,12 +427,23 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
             (Some(text.clone()), Some(div().text_color(muted).child(text.clone()).into_any_element()))
         }
         Primary::Running(running) => {
-            let text: SharedString = if running.detail.is_empty() {
-                running.label.clone()
-            } else {
-                format!("{} — {}", running.label, running.detail).into()
-            };
-            (Some(text.clone()), Some(div().text_color(fg).child(text).into_any_element()))
+            let label = running.label.clone();
+            let detail = running.detail.clone();
+            let percent = running.percent;
+            let mut group = div()
+                .id("bar-progress-text")
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .role(Role::ProgressIndicator)
+                .aria_label(label.clone())
+                .aria_numeric_value(f64::from(percent))
+                .aria_min_numeric_value(0.)
+                .aria_max_numeric_value(100.)
+                .child(div().text_color(fg).child(label.clone()))
+                .children((!detail.is_empty()).then(|| div().text_color(muted).child(detail)));
+            group = group.child(cancel_button(cx));
+            (Some(label), Some(group.into_any_element()))
         }
     };
     let error_text = state.error.as_ref().map(|e| e.text.clone());
@@ -437,10 +475,26 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         None,
     );
 
+    let progress = match &state.primary {
+        Primary::Running(running) => Some(
+            div()
+                .id("bar-progress")
+                .debug_selector(|| "bar-progress".into())
+                .absolute()
+                .top_0()
+                .left_0()
+                .h(px(2.))
+                .w(relative(running.fraction))
+                .bg(color(theme.role("accent"))),
+        ),
+        _ => None,
+    };
+
     div()
         .id("path-bar")
         .role(Role::Group)
         .aria_label("Status bar")
+        .relative()
         .h(px(30.))
         .flex_none()
         .px_3()
@@ -454,4 +508,52 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         .child(path)
         .child(transient)
         .child(counts)
+        .children(progress)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crow_fs::ops::Progress;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    fn running(label: &str, progress: Progress) -> Running {
+        Running { label: label.to_owned(), progress, cancel: Arc::new(AtomicBool::new(false)) }
+    }
+
+    #[test]
+    fn trash_progress_counts_items() {
+        let view = RunningView::new(&running(
+            "Move 2 items to Trash",
+            Progress { done_items: 1, total_items: 2, total_bytes: 0, ..Default::default() },
+        ));
+        assert_eq!(view.label.as_ref(), "Moving 2 items to Trash");
+        assert_eq!(view.detail.as_ref(), "1 of 2 items · 50 %");
+        assert_eq!(view.percent, 50);
+        assert_eq!(view.fraction, 0.5);
+    }
+
+    #[test]
+    fn bytes_progress_uses_one_unit() {
+        let view = RunningView::new(&running(
+            "Copy 3 items to Backup",
+            Progress {
+                done_items: 1,
+                total_items: 3,
+                done_bytes: 1_200_000_000,
+                total_bytes: 4_800_000_000,
+                ..Default::default()
+            },
+        ));
+        assert_eq!(view.detail.as_ref(), "1.2 of 4.8 GB · 25 %");
+    }
+
+    #[test]
+    fn zero_total_shows_no_detail() {
+        let view = RunningView::new(&running("Copy 0 items", Progress::default()));
+        assert_eq!(view.detail.as_ref(), "");
+        assert_eq!(view.fraction, 0.0);
+        assert_eq!(view.percent, 0);
+    }
 }

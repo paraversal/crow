@@ -8,7 +8,7 @@ Branch: `ui-u5-bottom-bar` · PR: none · Last updated: 2026-11-13 · State: in 
 | I2 Key-use recorder | done | `crates/crow-app/src/usage.rs`: `UsageState` global (`usage.json` in the state dir), `record`/`record_key`/`uses`/`count_key`; called from `Pane::start_filter` (only when it opens the field), `show_search`, `show_palette`. Saves are chained so the file never goes backwards. Tests `pressing_slash_counts_filter_uses` (3 keys, file persisted), `palette_and_dispatch_count_too`, `refocusing_an_open_filter_does_not_count`; 133 app tests green. |
 | I3 Three slots and counts | done | New `bottom_bar.rs` (`BarState`, `Primary`, `BarError`, `Count`, `Path`, count helpers, render); `CrowWindow::bar_state`/`render_bottom_bar`. Accessors: `Folder::selected_bytes` (cached by generation), `Pane::{shown_count, selected_bytes, is_filtering, filter_focus, is_renaming}`, `SearchView::{result_count, selected_count, selected_entry, input_focused}`, `Sidebar::cursor_group`, `Ui::config_error_file`. 30 px bar, `path-bar` is `Role::Group` "Status bar"; path keeps its ids/selectors. Tests `counts_name_the_focused_folder`, `counts_show_filter_and_selection`, `one_item_is_singular`, `message_does_not_hide_the_count`, `error_and_running_operation_show_together`; existing path-bar test unchanged and green. 139 app tests. |
 | I4 Hints by focus and retiring | done | `bottom_bar::{BarFocus, Hint, Spec, hint_set, hints, merged_keys}`; `CrowWindow::bar_focus` classifies List / FilterField / ListFiltered / Sidebar / SearchResults / SearchField / Overlay (overlay or a rename). Keys from `keys::binding_for` with new `KeyScope::{ListFiltered, ColumnsFiltered}`. Idle hints use `idle_hint_visible` + `usage::uses`; focus hints never retire; `off` hides all; an error token drops every hint. Sidebar hints follow the cursor row (Q6): favorite reorder/remove, recent remove, disk ⌘E, always ⇥ to list. `Keycap::text_role` added for focus/idle colors. 8 tests (`hints_follow_focus`, vim context, retiring, reload, always, off, error, overlay). 147 app tests. |
-| I5 Progress and Cancel | todo | |
+| I5 Progress and Cancel | done | `RunningView` (label, detail, fraction, percent) + `crow_fs::human_size_pair`; 2 px accent line id `bar-progress`; `Role::ProgressIndicator` group id `bar-progress-text` with aria value 0–100; Cancel button id `bar-cancel` ("Cancel" + live Esc cap, tooltip, aria `Cancel operation, Escape`). `operations::running_label` maps Copy/Move/Duplicate/Delete to -ing. Undo/redo still only message. Tests: `trash_progress_counts_items`, `bytes_progress_uses_one_unit`, `zero_total_shows_no_detail`, `human_size_pair` in crow-fs, `cancel_button_sets_the_cancel_flag`, `escape_cancels_from_the_list`. 152 app tests. |
 | I6 Error token with Open | todo | depends on Q9, Q10, Q11 |
 | I7 Narrow window drops hints first | todo | |
 
@@ -38,6 +38,7 @@ All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
 - Hints resolve keys through U1's `KeyScope` lookup, not the live dispatch tree: two new scopes (`ListFiltered`, `ColumnsFiltered`) mirror U4's `FileList [ColumnView] Filtered` contexts. This avoids the plan's "first frame after a focus change shows the old context" risk.
 - Reorder's merged cap comes out as `⌥⌘↑↓` (the live formatter's Apple order), not the board text `⌘⌥↑↓`; every other cap uses the same order.
 - Return shows as `↩` (U1's `keys::function_key`), not `↵` in the plan's test sketch.
+- Cancel's hover sets `color_alpha(fg, 0x14)` as the background instead of layering it over `surface-raised`; GPUI hover styles replace the fill, so the exact composite differs by one layer.
 - `Keycap::text_role` is a small addition to U1's keycap (the plan's focus `fg` / idle `fg-subtle` text needs it).
 
 ## Hand checks
@@ -58,9 +59,11 @@ All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
 - Hints resolve keys through U1's `KeyScope` lookup, not the live dispatch tree: two new scopes (`ListFiltered`, `ColumnsFiltered`) mirror U4's `FileList [ColumnView] Filtered` contexts. This avoids the plan's "first frame after a focus change shows the old context" risk.
 - Reorder's merged cap comes out as `⌥⌘↑↓` (the live formatter's Apple order), not the board text `⌘⌥↑↓`; every other cap uses the same order.
 - Return shows as `↩` (U1's `keys::function_key`), not `↵` in the plan's test sketch.
+- Cancel's hover sets `color_alpha(fg, 0x14)` as the background instead of layering it over `surface-raised`; GPUI hover styles replace the fill, so the exact composite differs by one layer.
 - `Keycap::text_role` is a small addition to U1's keycap (the plan's focus `fg` / idle `fg-subtle` text needs it).
 
 ## Log
+- 2026-11-13: I5 done. Progress detail is bytes-based when the plan has bytes, items-based for trash/delete; cancel keeps Esc's existing path. `cargo test --workspace` green, clippy clean.
 - 2026-11-13: I4 done. Hint labels/keys read from `BarState`; `KeyScope` gains filtered variants. `cargo test --workspace` green, clippy clean.
 - 2026-11-13: I3 done. The error token is plain `error`-colored text until I6 gives it the pill and Open; progress is text until I5. `cargo test --workspace` green, clippy clean.
 - 2026-11-13: I2 done. `Usage::record` returns false at the cap, so a capped count writes nothing. `cargo test --workspace` green (133 app tests), clippy clean.
@@ -69,4 +72,4 @@ All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
 - 2026-11-13: read `AGENTS.md`, the index README, the plan, U1/U4 progress. Confirmed U1 (#8) and U4 (#12) are merged on `main`. Created the branch and this file. Preparing the 13 plan questions.
 
 ## Next
-I5: progress line, detail, Cancel button and the escape/cancel tests.
+I6: the error pill with icon, `error_soft`, Open (crow-macos `open_path`), config-file line numbers and the token tests.

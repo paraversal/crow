@@ -2547,6 +2547,52 @@ mod tests {
         assert!(hint_labels(&bar_state(&view, &mut cx)).is_empty());
     }
 
+    /// Install a running operation and hand back its cancel flag.
+    fn inject_running(cx: &mut VisualTestContext) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = cancel.clone();
+        cx.update(|_, cx| {
+            cx.global_mut::<Operations>().running = Some(crate::operations::Running {
+                label: "Move 2 items to Trash".into(),
+                progress: crow_fs::ops::Progress {
+                    done_items: 1,
+                    total_items: 2,
+                    total_bytes: 0,
+                    ..Default::default()
+                },
+                cancel: handle,
+            });
+            cx.refresh_windows();
+        });
+        cx.run_until_parked();
+        cancel
+    }
+
+    #[gpui::test]
+    fn cancel_button_sets_the_cancel_flag(cx: &mut TestAppContext) {
+        let root = fixture("bar-cancel-click");
+        let (_view, mut cx) = open(cx, &root);
+        let cancel = inject_running(&mut cx);
+        let bounds = cx.debug_bounds("bar-cancel").expect("the Cancel button is laid out");
+        let progress = cx.debug_bounds("bar-progress").expect("the progress line is laid out");
+        assert!(progress.size.width > gpui::px(0.), "some progress is drawn");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed), "the click asked the operation to stop");
+
+        cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+    }
+
+    #[gpui::test]
+    fn escape_cancels_from_the_list(cx: &mut TestAppContext) {
+        let root = fixture("bar-cancel-escape");
+        let (_view, mut cx) = open(cx, &root);
+        let cancel = inject_running(&mut cx);
+        cx.simulate_keystrokes("escape");
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+
+        cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+    }
+
     #[gpui::test]
     fn counts_name_the_focused_folder(cx: &mut TestAppContext) {
         let root = fixture("bar-counts-columns");
