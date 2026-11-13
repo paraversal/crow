@@ -2057,6 +2057,15 @@ mod tests {
         root.canonicalize().expect("canonical fixture path")
     }
 
+    #[gpui::test]
+    fn first_row_sits_below_the_header_line(cx: &mut TestAppContext) {
+        let root = fixture("list-inset");
+        let (_view, mut cx) = open(cx, &root);
+        let header = cx.debug_bounds("table-header").expect("header");
+        let row = cx.debug_bounds("row-alpha").expect("first row");
+        assert_eq!(row.top() - header.bottom(), px(crate::pane::LIST_TOP_INSET));
+    }
+
     fn open(cx: &mut TestAppContext, dir: &Path) -> (Entity<CrowWindow>, VisualTestContext) {
         let trash = dir
             .parent()
