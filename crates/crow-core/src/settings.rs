@@ -115,14 +115,15 @@ impl Settings {
 #[derive(Debug)]
 pub enum SettingsError {
     Io(PathBuf, std::io::Error),
-    Parse(PathBuf, toml::de::Error),
+    /// Already names the file and, when TOML points at one, the line.
+    Parse(String),
 }
 
 impl fmt::Display for SettingsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SettingsError::Io(path, e) => write!(f, "{}: {e}", path.display()),
-            SettingsError::Parse(path, e) => write!(f, "{}: {}", path.display(), e.message()),
+            SettingsError::Parse(message) => f.write_str(message),
         }
     }
 }
@@ -163,7 +164,8 @@ pub fn load_settings(dir: &Path) -> Result<Settings, SettingsError> {
         fs::write(&path, DEFAULT_SETTINGS).map_err(|e| SettingsError::Io(path.clone(), e))?;
     }
     let text = fs::read_to_string(&path).map_err(|e| SettingsError::Io(path.clone(), e))?;
-    toml::from_str(&text).map_err(|e| SettingsError::Parse(path, e))
+    toml::from_str(&text)
+        .map_err(|e| SettingsError::Parse(crate::config::file_message(&path, crate::config::parse_error(&e, &text))))
 }
 
 #[cfg(test)]
@@ -227,6 +229,7 @@ mod tests {
         fs::write(dir.join("settings.toml"), "hints = \"sometimes\"\n").unwrap();
         let err = load_settings(&dir).expect_err("rejects an unknown mode").to_string();
         assert!(err.contains("settings.toml"), "{err}");
+        assert!(err.contains("line 1"), "{err}");
         fs::remove_dir_all(&dir).ok();
     }
 

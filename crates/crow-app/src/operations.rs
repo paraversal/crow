@@ -79,9 +79,46 @@ pub struct Operations {
     pub clipboard: Option<Clipboard>,
     /// The latest result or error, for the status line.
     pub message: Option<(SharedString, bool)>,
+    /// Bumped by every message, so an old timer cannot clear a newer one.
+    message_generation: u64,
 }
 
+/// Info messages clear after this long; errors stay until something replaces them.
+const MESSAGE_LIFETIME: Duration = Duration::from_secs(5);
+
 impl Global for Operations {}
+
+/// Show a message in the bar. Info messages retire after five seconds (Q2); errors
+/// stay until the next operation, navigation or a fixed config file.
+pub fn message(text: impl Into<SharedString>, is_error: bool, cx: &mut App) {
+    let generation = {
+        let ops = cx.global_mut::<Operations>();
+        ops.message_generation += 1;
+        ops.message = Some((text.into(), is_error));
+        ops.message_generation
+    };
+    if is_error {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(MESSAGE_LIFETIME).await;
+        cx.update(|cx| {
+            let ops = cx.global_mut::<Operations>();
+            if ops.message_generation == generation {
+                ops.message = None;
+                cx.refresh_windows();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Drop the message now; a pending info timer becomes a no-op.
+pub fn clear_message(cx: &mut App) {
+    let ops = cx.global_mut::<Operations>();
+    ops.message_generation += 1;
+    ops.message = None;
+}
 
 pub fn init(cx: &mut App, trash: Arc<dyn Trash>) {
     cx.set_global(Operations {
@@ -92,6 +129,7 @@ pub fn init(cx: &mut App, trash: Arc<dyn Trash>) {
         running: None,
         clipboard: None,
         message: None,
+        message_generation: 0,
     });
 }
 
@@ -103,14 +141,15 @@ pub fn execute(
     cx: &mut App,
     on_done: impl FnOnce(&Outcome, &mut App) + 'static,
 ) {
-    let ops = cx.global_mut::<Operations>();
-    if ops.running.is_some() {
-        ops.message = Some(("Another operation is still running".into(), true));
+    if cx.global::<Operations>().running.is_some() {
+        message("Another operation is still running", true, cx);
         cx.refresh_windows();
         return;
     }
+    let ops = cx.global_mut::<Operations>();
     let cancel = Arc::new(AtomicBool::new(false));
     ops.running = Some(Running { label: plan.label.clone(), progress: Progress::default(), cancel: cancel.clone() });
+    ops.message_generation += 1;
     ops.message = None;
     let trash = ops.trash.clone();
     let (tx, mut rx) = unbounded::<Progress>();
@@ -146,29 +185,30 @@ pub fn execute(
 }
 
 fn finish(outcome: &Outcome, cx: &mut App) {
-    let ops = cx.global_mut::<Operations>();
-    ops.running = None;
     let label = outcome.record.label.clone();
-    ops.message = match (&outcome.error, outcome.cancelled) {
-        (Some(e), _) => Some((e.to_string().into(), true)),
-        (None, true) => Some((format!("{label}: cancelled").into(), false)),
-        (None, false) => None,
-    };
-    if outcome.record.steps.is_empty() {
-        return;
+    {
+        let ops = cx.global_mut::<Operations>();
+        ops.running = None;
+        if !outcome.record.steps.is_empty() {
+            tracing::info!(label = %label, steps = outcome.record.steps.len(), "operation done");
+            ops.log.push(LogEntry {
+                record: outcome.record.clone(),
+                at: SystemTime::now(),
+                error: outcome.error.as_ref().map(|e| e.to_string()),
+                cancelled: outcome.cancelled,
+                undone: false,
+            });
+            if outcome.record.is_undoable() {
+                ops.undo_stack.push(ops.log.len() - 1);
+            }
+            ops.redo_stack.clear();
+        }
     }
-    tracing::info!(label = %label, steps = outcome.record.steps.len(), "operation done");
-    ops.log.push(LogEntry {
-        record: outcome.record.clone(),
-        at: SystemTime::now(),
-        error: outcome.error.as_ref().map(|e| e.to_string()),
-        cancelled: outcome.cancelled,
-        undone: false,
-    });
-    if outcome.record.is_undoable() {
-        ops.undo_stack.push(ops.log.len() - 1);
+    match (&outcome.error, outcome.cancelled) {
+        (Some(e), _) => message(e.to_string(), true, cx),
+        (None, true) => message(format!("{label}: cancelled"), false, cx),
+        (None, false) => clear_message(cx),
     }
-    ops.redo_stack.clear();
 }
 
 /// Undo log entry `index` (the newest by default). Undo checks the disk first and
@@ -184,16 +224,17 @@ pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf
             let ops = cx.global_mut::<Operations>();
             match result {
                 Ok(reversed) => {
+                    let label = reversed.label.clone();
                     ops.undo_stack.retain(|&i| i != index);
                     if let Some(entry) = ops.log.get_mut(index) {
                         entry.undone = true;
                     }
-                    ops.message = Some((reversed.label.clone().into(), false));
                     let restored = reversed.results();
                     ops.redo_stack.push(reversed);
+                    message(label, false, cx);
                     on_done(restored, cx);
                 }
-                Err(e) => ops.message = Some((e.to_string().into(), true)),
+                Err(e) => message(e.to_string(), true, cx),
             }
             cx.refresh_windows();
         });
@@ -222,10 +263,10 @@ pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static
                         undone: false,
                     });
                     ops.undo_stack.push(ops.log.len() - 1);
-                    ops.message = Some((format!("Redo {label}").into(), false));
+                    message(format!("Redo {label}"), false, cx);
                     on_done(results, cx);
                 }
-                Err(e) => ops.message = Some((e.to_string().into(), true)),
+                Err(e) => message(e.to_string(), true, cx),
             }
             cx.refresh_windows();
         });

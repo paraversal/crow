@@ -53,6 +53,27 @@ pub fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     fs::rename(tmp, path)
 }
 
+/// A TOML error with the line it points at: "line 12: unknown field `sortt`".
+/// Error strings keep this prefix so `file_message` can put the path before it.
+pub fn parse_error(error: &toml::de::Error, text: &str) -> String {
+    match error.span() {
+        Some(span) => {
+            let head = text.get(..span.start.min(text.len())).unwrap_or(text);
+            let line = head.matches('\n').count() + 1;
+            format!("line {line}: {}", error.message())
+        }
+        None => error.message().to_owned(),
+    }
+}
+
+/// Join an error with its file: "views.toml line 12: …", "sidebar.toml: …".
+pub fn file_message(path: &Path, message: String) -> String {
+    match message.strip_prefix("line ") {
+        Some(rest) => format!("{} line {rest}", path.display()),
+        None => format!("{}: {message}", path.display()),
+    }
+}
+
 /// Read `path` as an editable document (`default` if it doesn't exist), let `edit`
 /// change it, and write it back with every comment the user wrote still in place.
 pub fn edit_toml(

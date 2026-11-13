@@ -827,6 +827,8 @@ impl CrowWindow {
             PaneEvent::Run(request) => self.run_request(request.clone(), window, cx),
             PaneEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
             PaneEvent::Entered(dir) => {
+                // A stale message would otherwise outlive the place it described (Q2).
+                operations::clear_message(cx);
                 if self.search.is_some() {
                     self.close_search(window, cx);
                 }
@@ -874,7 +876,7 @@ impl CrowWindow {
             let planned = cx.background_spawn(async move { crow_fs::ops::plan(request) }).await;
             this.update_in(cx, |this, window, cx| match planned {
                 Err(e) => {
-                    cx.global_mut::<Operations>().message = Some((e.to_string().into(), true));
+                    operations::message(e.to_string(), true, cx);
                     cx.notify();
                 }
                 Ok(plan) if plan.items.is_empty() => {}
@@ -931,7 +933,7 @@ impl CrowWindow {
             Some(Sheet::ConfirmDelete { paths, .. }) => {
                 match crow_fs::ops::plan(Request::DeletePermanently { paths }) {
                     Ok(plan) => self.start(plan, HashMap::new(), cx),
-                    Err(e) => cx.global_mut::<Operations>().message = Some((e.to_string().into(), true)),
+                    Err(e) => operations::message(e.to_string(), true, cx),
                 }
             }
             None => {}
@@ -1205,7 +1207,7 @@ impl CrowWindow {
             }
             SidebarEvent::Run(request) => self.run_request(request.clone(), window, cx),
             SidebarEvent::Message(text, error) => {
-                cx.global_mut::<Operations>().message = Some((text.clone(), *error));
+                operations::message(text.clone(), *error, cx);
                 cx.notify();
             }
         }
@@ -1216,7 +1218,7 @@ impl CrowWindow {
         let dir = self.pane().read(cx).current_dir(cx);
         if set {
             ui::edit_sidebar(SidebarEdit::SetKey { path: dir, key }, cx);
-            cx.global_mut::<Operations>().message = Some((format!("Marked as {key}").into(), false));
+            operations::message(format!("Marked as {key}"), false, cx);
             cx.notify();
             return;
         }
@@ -1225,7 +1227,7 @@ impl CrowWindow {
             Some(target) => self.pane().update(cx, |pane, cx| pane.navigate(target, cx)),
             None => {
                 window.play_system_bell();
-                cx.global_mut::<Operations>().message = Some((format!("No mark {key}").into(), true));
+                operations::message(format!("No mark {key}"), true, cx);
                 cx.notify();
             }
         }
@@ -1264,7 +1266,7 @@ impl CrowWindow {
     fn use_view_as_defaults(&mut self, _: &UseViewAsDefaults, _: &mut Window, cx: &mut Context<Self>) {
         let dir = self.pane().read(cx).dir().to_path_buf();
         ui::use_view_as_defaults(dir, cx);
-        cx.global_mut::<Operations>().message = Some(("This view is now the default for all folders".into(), false));
+        operations::message("This view is now the default for all folders", false, cx);
     }
 
     fn reset_folder_view(&mut self, _: &ResetFolderView, _: &mut Window, cx: &mut Context<Self>) {
@@ -1458,7 +1460,7 @@ impl CrowWindow {
         match picker.entries.get(picker.cursor) {
             Some(Some(info)) => match crow_theme::load_theme(&crow_theme::themes_dir(), &info.id) {
                 Ok(theme) => ui::apply_theme_everywhere(&theme, cx),
-                Err(e) => cx.global_mut::<Operations>().message = Some((e.into(), true)),
+                Err(e) => operations::message(e, true, cx),
             },
             _ => ui::choose_theme("system", cx),
         }
@@ -2594,6 +2596,57 @@ mod tests {
     }
 
     #[gpui::test]
+    fn config_error_token_opens_the_broken_file(cx: &mut TestAppContext) {
+        let root = fixture("bar-error-open");
+        let (view, mut cx) = open(cx, &root);
+        crate::bottom_bar::take_opened();
+        write_config(&view, &mut cx, "sidebar.toml", "[[group]\n");
+
+        let state = bar_state(&view, &mut cx);
+        let error = state.error.expect("the broken sidebar shows a token");
+        assert!(error.text.starts_with("sidebar.toml"), "{}", error.text);
+        assert!(error.text.contains("line "), "the parser's line is shown: {}", error.text);
+        let file = error.file.expect("a config token can be opened");
+        assert!(file.ends_with("sidebar.toml"), "{}", file.display());
+
+        let bounds = cx.debug_bounds("bar-error-open").expect("the Open button is laid out");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        assert_eq!(crate::bottom_bar::take_opened(), [file]);
+    }
+
+    #[gpui::test]
+    fn fixing_the_file_clears_the_token(cx: &mut TestAppContext) {
+        let root = fixture("bar-error-fixed");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", "[[group]\n");
+        assert!(bar_state(&view, &mut cx).error.is_some());
+
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]));
+        let state = bar_state(&view, &mut cx);
+        assert!(state.error.is_none(), "fixing the file removes the token");
+        assert_eq!(hint_labels(&state), ["filter", "search", "go to"], "hints come back");
+    }
+
+    #[gpui::test]
+    fn pane_error_has_no_open_button(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fixture("bar-error-pane");
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).expect("create folder");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("lock folder");
+        let (view, mut cx) = open(cx, &root);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(locked.clone(), cx));
+        settle(&view, &mut cx);
+
+        let state = bar_state(&view, &mut cx);
+        let error = state.error.expect("the pane's error shows");
+        assert!(error.file.is_none(), "a folder error has nothing to open");
+        assert!(cx.debug_bounds("bar-error-open").is_none());
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("unlock folder");
+    }
+
+    #[gpui::test]
     fn counts_name_the_focused_folder(cx: &mut TestAppContext) {
         let root = fixture("bar-counts-columns");
         let (view, mut cx) = open(cx, &root);
@@ -2639,12 +2692,38 @@ mod tests {
         let root = fixture("bar-message");
         let (view, mut cx) = open(cx, &root);
         cx.update(|_, cx| {
-            cx.global_mut::<Operations>().message = Some(("Copied 1 item".into(), false));
+            operations::message("Copied 1 item", false, cx);
         });
         cx.simulate_keystrokes("down");
         let state = bar_state(&view, &mut cx);
         assert_eq!(primary_text(&state), "Copied 1 item");
         assert_eq!(state.count.text.as_ref(), "3 items");
+    }
+
+    #[gpui::test]
+    fn info_messages_expire_but_errors_stay(cx: &mut TestAppContext) {
+        let root = fixture("bar-message-expire");
+        let (_view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| operations::message("Copied 1 item", false, cx));
+        let executor = cx.executor();
+        executor.advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.global::<Operations>().message.is_none()), "an info message retires");
+
+        cx.update(|_, cx| operations::message("Can't open x", true, cx));
+        executor.advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.global::<Operations>().message.is_some()), "an error waits for something else");
+    }
+
+    #[gpui::test]
+    fn navigating_clears_an_operation_error(cx: &mut TestAppContext) {
+        let root = fixture("bar-message-nav");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| operations::message("Can't open x", true, cx));
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        assert!(cx.read(|cx| cx.global::<Operations>().message.is_none()), "navigation drops the old message");
     }
 
     #[gpui::test]
@@ -2667,7 +2746,7 @@ mod tests {
         assert!(matches!(state.primary, Primary::Running(_)), "progress stays primary");
         let error = state.error.expect("the config error is its own token");
         assert!(error.file.as_ref().is_some_and(|f| f.ends_with("views.toml")));
-        assert!(error.text.starts_with("views.toml:"), "{}", error.text);
+        assert!(error.text.starts_with("views.toml"), "{}", error.text);
 
         cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
         settle(&view, &mut cx);

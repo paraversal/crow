@@ -9,7 +9,7 @@ Branch: `ui-u5-bottom-bar` · PR: none · Last updated: 2026-11-13 · State: in 
 | I3 Three slots and counts | done | New `bottom_bar.rs` (`BarState`, `Primary`, `BarError`, `Count`, `Path`, count helpers, render); `CrowWindow::bar_state`/`render_bottom_bar`. Accessors: `Folder::selected_bytes` (cached by generation), `Pane::{shown_count, selected_bytes, is_filtering, filter_focus, is_renaming}`, `SearchView::{result_count, selected_count, selected_entry, input_focused}`, `Sidebar::cursor_group`, `Ui::config_error_file`. 30 px bar, `path-bar` is `Role::Group` "Status bar"; path keeps its ids/selectors. Tests `counts_name_the_focused_folder`, `counts_show_filter_and_selection`, `one_item_is_singular`, `message_does_not_hide_the_count`, `error_and_running_operation_show_together`; existing path-bar test unchanged and green. 139 app tests. |
 | I4 Hints by focus and retiring | done | `bottom_bar::{BarFocus, Hint, Spec, hint_set, hints, merged_keys}`; `CrowWindow::bar_focus` classifies List / FilterField / ListFiltered / Sidebar / SearchResults / SearchField / Overlay (overlay or a rename). Keys from `keys::binding_for` with new `KeyScope::{ListFiltered, ColumnsFiltered}`. Idle hints use `idle_hint_visible` + `usage::uses`; focus hints never retire; `off` hides all; an error token drops every hint. Sidebar hints follow the cursor row (Q6): favorite reorder/remove, recent remove, disk ⌘E, always ⇥ to list. `Keycap::text_role` added for focus/idle colors. 8 tests (`hints_follow_focus`, vim context, retiring, reload, always, off, error, overlay). 147 app tests. |
 | I5 Progress and Cancel | done | `RunningView` (label, detail, fraction, percent) + `crow_fs::human_size_pair`; 2 px accent line id `bar-progress`; `Role::ProgressIndicator` group id `bar-progress-text` with aria value 0–100; Cancel button id `bar-cancel` ("Cancel" + live Esc cap, tooltip, aria `Cancel operation, Escape`). `operations::running_label` maps Copy/Move/Duplicate/Delete to -ing. Undo/redo still only message. Tests: `trash_progress_counts_items`, `bytes_progress_uses_one_unit`, `zero_total_shows_no_detail`, `human_size_pair` in crow-fs, `cancel_button_sets_the_cancel_flag`, `escape_cancels_from_the_list`. 152 app tests. |
-| I6 Error token with Open | todo | depends on Q9, Q10, Q11 |
+| I6 Error token with Open | done | `error_token` pill (20 px, radius 10, `style::error_soft`, `alert-circle` Lucide SVG, text ellipsis at 420 px, Group aria "Error: …", tooltip = full text); Open button id `bar-error-open` (16 px, error fill, bg text, semibold) only for config errors. `crow_macos::open_path` (default app, then `open -t`), `bottom_bar::open_config` in a background task with failure as an operation message; tests record the path instead. Q9 line numbers: `crow_core::config::{parse_error, file_message}` used by settings, views, sidebar and exclude loaders. Q2: `operations::message` (info clears after 5 s via a generation-guarded timer), `operations::clear_message` on navigation; errors stay. Q11 applied (Apply to All Apps is an operation error). Tests: `config_error_token_opens_the_broken_file`, `fixing_the_file_clears_the_token`, `pane_error_has_no_open_button`, `info_messages_expire_but_errors_stay`, `navigating_clears_an_operation_error`; core line-number assertions. 157 app tests. |
 | I7 Narrow window drops hints first | todo | |
 
 ## Questions
@@ -38,6 +38,9 @@ All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
 - Hints resolve keys through U1's `KeyScope` lookup, not the live dispatch tree: two new scopes (`ListFiltered`, `ColumnsFiltered`) mirror U4's `FileList [ColumnView] Filtered` contexts. This avoids the plan's "first frame after a focus change shows the old context" risk.
 - Reorder's merged cap comes out as `⌥⌘↑↓` (the live formatter's Apple order), not the board text `⌘⌥↑↓`; every other cap uses the same order.
 - Return shows as `↩` (U1's `keys::function_key`), not `↵` in the plan's test sketch.
+- Q9 changed core error strings to "<path> line N: <message>"; the bar strips the config dir, so tests assert "views.toml line 2" rather than "views.toml:".
+- Q2 implemented with one timer per info message and a generation counter, so a newer message is never cleared by an older timer; `PaneEvent::Entered` clears any message.
+- `crow_macos::open_path` is only exercised by hand (the binary would launch an app); the window test checks the recorded path.
 - Cancel's hover sets `color_alpha(fg, 0x14)` as the background instead of layering it over `surface-raised`; GPUI hover styles replace the fill, so the exact composite differs by one layer.
 - `Keycap::text_role` is a small addition to U1's keycap (the plan's focus `fg` / idle `fg-subtle` text needs it).
 
@@ -59,10 +62,14 @@ All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
 - Hints resolve keys through U1's `KeyScope` lookup, not the live dispatch tree: two new scopes (`ListFiltered`, `ColumnsFiltered`) mirror U4's `FileList [ColumnView] Filtered` contexts. This avoids the plan's "first frame after a focus change shows the old context" risk.
 - Reorder's merged cap comes out as `⌥⌘↑↓` (the live formatter's Apple order), not the board text `⌘⌥↑↓`; every other cap uses the same order.
 - Return shows as `↩` (U1's `keys::function_key`), not `↵` in the plan's test sketch.
+- Q9 changed core error strings to "<path> line N: <message>"; the bar strips the config dir, so tests assert "views.toml line 2" rather than "views.toml:".
+- Q2 implemented with one timer per info message and a generation counter, so a newer message is never cleared by an older timer; `PaneEvent::Entered` clears any message.
+- `crow_macos::open_path` is only exercised by hand (the binary would launch an app); the window test checks the recorded path.
 - Cancel's hover sets `color_alpha(fg, 0x14)` as the background instead of layering it over `surface-raised`; GPUI hover styles replace the fill, so the exact composite differs by one layer.
 - `Keycap::text_role` is a small addition to U1's keycap (the plan's focus `fg` / idle `fg-subtle` text needs it).
 
 ## Log
+- 2026-11-13: I6 done. Added the Lucide `alert-circle` icon (24 px grid, existing ISC notice covers it). Message writes now go through `operations::message`; direct `Operations.message` writes remain only inside `Operations` itself. `cargo test --workspace` green, clippy clean.
 - 2026-11-13: I5 done. Progress detail is bytes-based when the plan has bytes, items-based for trash/delete; cancel keeps Esc's existing path. `cargo test --workspace` green, clippy clean.
 - 2026-11-13: I4 done. Hint labels/keys read from `BarState`; `KeyScope` gains filtered variants. `cargo test --workspace` green, clippy clean.
 - 2026-11-13: I3 done. The error token is plain `error`-colored text until I6 gives it the pill and Open; progress is text until I5. `cargo test --workspace` green, clippy clean.
@@ -72,4 +79,4 @@ All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
 - 2026-11-13: read `AGENTS.md`, the index README, the plan, U1/U4 progress. Confirmed U1 (#8) and U4 (#12) are merged on `main`. Created the branch and this file. Preparing the 13 plan questions.
 
 ## Next
-I6: the error pill with icon, `error_soft`, Open (crow-macos `open_path`), config-file line numbers and the token tests.
+I7: `fit_hints` and the narrow-window test, then Finish (README, docs/testing.md, bench, bundle).

@@ -4,18 +4,22 @@
 
 use std::path::PathBuf;
 
-use gpui::{Action, App, Entity, IntoElement, KeyBinding, Role, SharedString, div, img, prelude::*, px, relative};
+use gpui::{
+    Action, AnyElement, App, Entity, FontWeight, IntoElement, KeyBinding, Role, SharedString, div, img, prelude::*, px,
+    relative,
+};
 
 use crate::actions::{
     CancelOperation, ClearFilter, Eject, MoveFavoriteDown, MoveFavoriteUp, OpenSelection, QuickLook, RemoveFromSidebar,
     SearchReveal, ShowCommandPalette, ShowSearch, StartFilter, SwitchFocus,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_tooltip};
+use crate::icons::{self, Glyph};
 use crate::keys::{self, KeyScope};
 use crate::operations::{self, Running};
 use crate::pane::Pane;
 use crate::sidebar::CursorKind;
-use crate::style::{color, color_alpha, icon};
+use crate::style::{color, color_alpha, error_soft, icon};
 use crate::text_input::{self, Complete, Confirm};
 use crate::ui::Ui;
 use crate::usage;
@@ -80,7 +84,6 @@ pub struct BarError {
     /// Short message, file name first and the config dir stripped.
     pub text: SharedString,
     /// The config file at fault, when Open can help.
-    #[allow(dead_code)] // U5's error token draws the Open button from this.
     pub file: Option<PathBuf>,
 }
 
@@ -304,6 +307,85 @@ pub fn hints(focus: BarFocus, scope: KeyScope, sidebar: Option<CursorKind>, cx: 
     out
 }
 
+/// The error pill: icon, short message, and Open for a config file.
+fn error_token(error: &BarError, theme: &crow_theme::Theme) -> AnyElement {
+    let text = error.text.clone();
+    let mut pill = div()
+        .id("bar-error")
+        .debug_selector(|| "bar-error".into())
+        .role(Role::Group)
+        .aria_label(format!("Error: {text}"))
+        .h(px(20.))
+        .rounded(px(10.))
+        .pl(px(8.))
+        .pr(px(4.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .bg(error_soft(theme))
+        .text_color(color(theme.role("error")))
+        .child(icons::glyph(Glyph::AlertCircle, 13., "error", theme))
+        .child(div().max_w(px(420.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(text.clone()));
+    if let Some(path) = &error.file {
+        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let path = path.clone();
+        pill = pill.child(
+            div()
+                .id("bar-error-open")
+                .debug_selector(|| "bar-error-open".into())
+                .role(Role::Button)
+                .aria_label(format!("Open {name}"))
+                .h(px(16.))
+                .rounded(px(8.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .bg(color(theme.role("error")))
+                .text_color(color(theme.role("bg")))
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .on_click(move |_, _, cx| open_config(path.clone(), cx))
+                .child("Open"),
+        );
+    }
+    with_tooltip(pill, text, None).into_any_element()
+}
+
+/// Open a config file at fault: its default app, then the text editor (Q10).
+/// Tests record the path instead of starting an app.
+pub fn open_config(path: PathBuf, cx: &mut App) {
+    #[cfg(test)]
+    {
+        let _ = cx;
+        OPENED.lock().expect("the test recorder is not poisoned").push(path);
+    }
+    #[cfg(not(test))]
+    {
+        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let task = cx.background_spawn(async move {
+            crow_macos::open_path(&path, false).or_else(|_| crow_macos::open_path(&path, true))
+        });
+        cx.spawn(async move |cx| {
+            if let Err(e) = task.await {
+                cx.update(|cx| {
+                    operations::message(format!("Can't open {name}: {e}"), true, cx);
+                    cx.refresh_windows();
+                });
+            }
+        })
+        .detach();
+    }
+}
+
+#[cfg(test)]
+static OPENED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// The config files Open was clicked for, and clears the list.
+#[cfg(test)]
+pub fn take_opened() -> Vec<PathBuf> {
+    std::mem::take(&mut *OPENED.lock().expect("the test recorder is not poisoned"))
+}
+
 /// Cancel for the running operation: "Cancel esc", mouse target only (Esc works anywhere).
 fn cancel_button(cx: &App) -> gpui::Stateful<gpui::Div> {
     let theme = cx.global::<Ui>().theme.clone();
@@ -339,7 +421,6 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
     let border = color(theme.role("border"));
     let fg = color(theme.role("fg"));
     let muted = color(theme.role("fg-muted"));
-    let error = color(theme.role("error"));
     let hover = color(theme.role("surface-raised"));
     let last = state.path.parts.len().saturating_sub(1);
     let parts = state.path.parts;
@@ -446,18 +527,18 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
             (Some(label), Some(group.into_any_element()))
         }
     };
-    let error_text = state.error.as_ref().map(|e| e.text.clone());
+    let error_el = state.error.as_ref().map(|error| error_token(error, &theme));
     let transient = div()
         .id("bar-transient")
         .debug_selector(|| "bar-transient".into())
         .role(Role::Status)
-        .aria_label(primary_aria.or_else(|| error_text.clone()).unwrap_or_default())
+        .aria_label(primary_aria.unwrap_or_default())
         .flex_none()
         .flex()
         .items_center()
         .gap(px(14.))
         .children(primary_el)
-        .children(error_text.map(|text| div().text_color(error).child(text)));
+        .children(error_el);
 
     let counts_spoken = state.count.spoken.clone();
     let counts = with_tooltip(

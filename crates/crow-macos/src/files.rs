@@ -29,6 +29,17 @@ impl crow_fs::ops::Trash for SystemTrash {
     }
 }
 
+/// Open `path` with its default app, or with the default text editor (`open -t`).
+/// Waits for `open` to say whether it worked.
+pub fn open_path(path: &Path, as_text: bool) -> io::Result<()> {
+    let mut command = std::process::Command::new("/usr/bin/open");
+    if as_text {
+        command.arg("-t");
+    }
+    let status = command.arg(path).status()?;
+    if status.success() { Ok(()) } else { Err(io::Error::other(format!("open exited with {status}"))) }
+}
+
 /// Put `paths` on the general pasteboard as file URLs (what Finder's Copy does).
 /// Returns the pasteboard's change count afterwards, to recognize our own contents later.
 pub fn write_file_urls(paths: &[PathBuf]) -> Option<isize> {

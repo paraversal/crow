@@ -85,7 +85,7 @@ pub fn init(cx: &mut App) {
         let path = cx.global::<Ui>().config_dir.join("settings.toml");
         if !crow_macos::open_in_default_app(&path) {
             let message = format!("Couldn't open {}: no app is set to open .toml files", path.display());
-            cx.global_mut::<crate::operations::Operations>().message = Some((message.into(), true));
+            crate::operations::message(message, true, cx);
             cx.refresh_windows();
         }
     });

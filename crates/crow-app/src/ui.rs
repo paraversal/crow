@@ -10,7 +10,6 @@ use crow_theme::Theme;
 use gpui::{App, AppContext, Global, SharedString};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::operations::Operations;
 use crate::style::variant_of;
 
 const FADE: Duration = Duration::from_millis(500);
@@ -375,7 +374,7 @@ pub fn choose_theme(id: &str, cx: &mut App) {
 pub fn apply_theme_everywhere(theme: &Theme, cx: &mut App) {
     if let Err(e) = crow_theme::set_global(theme) {
         // Not a file problem, so it belongs with the operation messages (no Open button).
-        cx.global_mut::<Operations>().message = Some((format!("Can't apply the theme to all apps: {e}").into(), true));
+        crate::operations::message(format!("Can't apply the theme to all apps: {e}"), true, cx);
         return;
     }
     choose_theme("system", cx);
