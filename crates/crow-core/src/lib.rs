@@ -17,7 +17,9 @@ mod views;
 
 pub use config::{abbreviate_home, edit_toml, expand_home, home, state_dir, write_atomic};
 pub use exclude::{DEFAULT_EXCLUDE, Exclude, ExcludeSet, SetName, SetRules, exclude_path, load_exclude};
-pub use extensions::{Align, Column, ColumnContext, Extensions, PreviewContent, Previewer, TextPreviewer};
+pub use extensions::{
+    Align, Column, ColumnContext, Excerpt, Extensions, PreviewContent, Previewer, TextPreviewer, text_excerpt,
+};
 pub use history::History;
 pub use paths::{complete_typed, resolve_typed};
 pub use recent::{Recent, parse_zoxide, query_zoxide};

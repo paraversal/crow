@@ -44,14 +44,12 @@ pub struct Hit {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HitKind {
-    Name,
+    /// The file name matched; `ranges` are the matched graphemes as byte ranges
+    /// in the name.
+    Name { ranges: Vec<Range<usize>> },
     /// One matching line: its 1-based number, the line without its terminator,
     /// and the byte ranges of the matches within `text`.
-    Content {
-        line: u64,
-        text: String,
-        ranges: Vec<Range<usize>>,
-    },
+    Content { line: u64, text: String, ranges: Vec<Range<usize>> },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -88,6 +86,26 @@ impl FuzzyMatcher {
         let needle = Utf32Str::new(&self.needle, &mut self.needle_buf);
         let haystack = Utf32Str::new(haystack, &mut self.haystack_buf);
         self.matcher.fuzzy_match(haystack, needle).map(u32::from)
+    }
+
+    /// The score and the matched characters as byte ranges in `haystack`.
+    /// Nucleo reports codepoint indices; adjacent matches merge into one range.
+    pub fn indices(&mut self, haystack: &str) -> Option<(u32, Vec<Range<usize>>)> {
+        let needle = Utf32Str::new(&self.needle, &mut self.needle_buf);
+        let haystack_utf32 = Utf32Str::new(haystack, &mut self.haystack_buf);
+        let mut indices = Vec::new();
+        let score = self.matcher.fuzzy_indices(haystack_utf32, needle, &mut indices)?;
+        let offsets: Vec<usize> = haystack.char_indices().map(|(offset, _)| offset).collect();
+        let mut ranges: Vec<Range<usize>> = Vec::new();
+        for index in indices {
+            let Some(&start) = offsets.get(index as usize) else { continue };
+            let end = offsets.get(index as usize + 1).copied().unwrap_or(haystack.len());
+            match ranges.last_mut() {
+                Some(last) if last.end == start => last.end = end,
+                _ => ranges.push(start..end),
+            }
+        }
+        Some((u32::from(score), ranges))
     }
 }
 
@@ -141,12 +159,12 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                     if let Some(fuzzy) = fuzzy.as_mut() {
                         let name = entry.file_name();
                         let name = name.to_string_lossy();
-                        if let Some(score) = fuzzy.score(name.as_ref()) {
+                        if let Some((score, ranges)) = fuzzy.indices(name.as_ref()) {
                             hits.push(Hit {
                                 path: entry.path().to_path_buf(),
                                 is_dir,
                                 score,
-                                kind: HitKind::Name,
+                                kind: HitKind::Name { ranges },
                                 modified,
                                 size,
                             });
@@ -383,7 +401,7 @@ mod tests {
         hits.iter()
             .filter_map(|hit| match &hit.kind {
                 HitKind::Content { line, text, ranges } => Some((*line, text.clone(), ranges.clone())),
-                HitKind::Name => None,
+                HitKind::Name { .. } => None,
             })
             .collect()
     }
@@ -466,6 +484,28 @@ mod tests {
         let main = hits.iter().find(|hit| hit.path == root.join("src/main.rs")).expect("fuzzy match");
         assert!(main.score > 0);
         assert!(!main.is_dir);
+    }
+
+    #[test]
+    fn name_hits_carry_match_ranges() {
+        let root = root("name-ranges");
+        write(&root, "config.rs", b"");
+        write(&root, "r\u{e9}sum\u{e9}.txt", b"");
+        let (hits, _) = run(&root, Some("cfg"), None, false, true);
+        let hit = hits.iter().find(|hit| hit.path == root.join("config.rs")).expect("fuzzy name match");
+        let HitKind::Name { ranges } = &hit.kind else { panic!("a name hit") };
+        let matched: String = ranges.iter().map(|range| &"config.rs"[range.clone()]).collect();
+        assert_eq!(matched, "cfg");
+
+        let (hits, _) = run(&root, Some("sum"), None, false, true);
+        let hit = hits.iter().find(|hit| hit.path == root.join("r\u{e9}sum\u{e9}.txt")).expect("multibyte match");
+        let HitKind::Name { ranges } = &hit.kind else { panic!("a name hit") };
+        let expected: Vec<Range<usize>> = std::iter::once(3..6).collect();
+        assert_eq!(ranges, &expected);
+        assert!(ranges.iter().all(|range| {
+            let name = "r\u{e9}sum\u{e9}.txt";
+            name.is_char_boundary(range.start) && name.is_char_boundary(range.end)
+        }));
     }
 
     #[test]

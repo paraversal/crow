@@ -2,6 +2,7 @@
 //! API plugins will use, so it is exercised from the start.
 
 use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -213,6 +214,43 @@ impl Previewer for TextPreviewer {
     }
 }
 
+/// A window of a text file around a content match, for the search preview.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Excerpt {
+    /// 1-based number of the first line in `text`.
+    pub first_line: u64,
+    pub text: String,
+    /// 1-based number of the matched line.
+    pub hit: u64,
+}
+
+/// Read at most 1 MiB around `line`: `before` lines above it, `total` lines in
+/// all. Refuses binary files and lines past the cap.
+pub fn text_excerpt(path: &Path, line: u64, before: usize, total: usize) -> Option<Excerpt> {
+    const MAX_BYTES: usize = 1 << 20;
+    if line == 0 || total == 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(8192);
+    std::fs::File::open(path).ok()?.take(MAX_BYTES as u64).read_to_end(&mut bytes).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    let end = if bytes.len() == MAX_BYTES {
+        bytes.iter().rposition(|byte| *byte == b'\n').map_or(bytes.len(), |index| index + 1)
+    } else {
+        bytes.len()
+    };
+    let text = std::str::from_utf8(&bytes[..end]).ok()?;
+    let lines: Vec<&str> = text.lines().collect();
+    if line as usize > lines.len() {
+        return None;
+    }
+    let first = (line as usize - 1).saturating_sub(before);
+    let last = (first + total).min(lines.len());
+    Some(Excerpt { first_line: (first + 1) as u64, text: lines[first..last].join("\n"), hit: line })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +277,40 @@ mod tests {
             Some(PreviewContent::Text(t)) => assert_eq!(t.lines().count(), TextPreviewer::MAX_LINES),
             other => panic!("long UTF-8 file should preview, got {other:?}"),
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn text_excerpt_centers_on_the_line() {
+        let dir = std::env::temp_dir().join(format!("crow-core-excerpt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lines.txt");
+        let body: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(&path, body).unwrap();
+
+        let excerpt = text_excerpt(&path, 60, 5, 12).expect("an excerpt");
+        assert_eq!(excerpt.first_line, 55);
+        assert_eq!(excerpt.hit, 60);
+        assert!(excerpt.text.lines().any(|line| line == "line 60"), "{}", excerpt.text);
+        assert_eq!(text_excerpt(&path, 60, 0, 3).expect("from the hit").first_line, 60);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn text_excerpt_refuses_binary_and_lines_past_the_cap() {
+        let dir = std::env::temp_dir().join(format!("crow-core-excerpt-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("blob.bin");
+        std::fs::write(&binary, b"text\0more\n").unwrap();
+        assert_eq!(text_excerpt(&binary, 1, 2, 5), None);
+
+        let big = dir.join("big.txt");
+        let mut body = String::new();
+        for n in 0..120_000 {
+            body.push_str(&format!("line {n} ........................................\n"));
+        }
+        std::fs::write(&big, body).unwrap();
+        assert_eq!(text_excerpt(&big, 120_000, 2, 5), None, "the line sits past 1 MiB");
         std::fs::remove_dir_all(&dir).ok();
     }
 

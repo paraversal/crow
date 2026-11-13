@@ -36,7 +36,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 | `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), font, hidden files, window size |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
-| `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search summary counts skipped folders and lists the rule for each. |
+| `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
 
 Themes come from the global index in `~/.config/themes`. View ▸ Theme… (Cmd-Option-T)
 previews each theme as you move through the list; Apply to All Apps (Cmd-Return) sets it for every app that reads the index.
@@ -105,10 +105,15 @@ Cmd-K opens the command palette: type to go to a favorite, recent or subfolder; 
 for commands (labels and their keys). Return goes there, Cmd-Return opens a folder in a new tab.
 Cmd-F, or the top band's Search field, searches names and contents in the current folder; the same
 field moves into the band while searching, where All / Names / Contents choose what to match (Names
-reads no file contents). Cmd-F again focuses the field and selects the query; Tab goes field →
-results → sidebar → field (no results: straight to the sidebar); Done or Esc (from anywhere) closes.
-The scope buttons switch to Home or Everywhere (Spotlight, names only). Cmd-Shift-A searches with
-every `exclude.toml` set off. Results open with Return, reveal with Cmd-R, Quick Look with Space,
-and take the usual copy, cut and trash keys. "Go to ⌘K" in the band opens the command palette.
+reads no file contents) and Cmd-Shift-M cycles the three. Cmd-F again focuses the field and selects
+the query; Tab goes field → results → sidebar → field (no results: straight to the sidebar); Done or
+Esc (from anywhere) closes, and with the skipped list open Esc closes that first. The scope bar
+switches the folder, Home or This Mac (Spotlight, names only); its switch skips the folders named in
+`exclude.toml` sets, as Cmd-Shift-A does for every set. Name matches come first with their letters
+highlighted; content hits show the line number and the line under the name, and the footer counts
+results and files and lists what was skipped. With nothing typed, four examples fill the field. The
+right preview follows the selected result in list and column view, at the hit line for content hits.
+Results open with Return, reveal with Cmd-R, Quick Look with Space, and take the usual copy, cut and
+trash keys. "Go to ⌘K" in the band opens the command palette.
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).

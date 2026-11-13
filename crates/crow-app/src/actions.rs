@@ -69,6 +69,7 @@ actions!(
         // Search
         ShowSearch,
         SearchEverything,
+        CycleMatch,
         CloseSearch,
         SearchReveal,
         // Window
@@ -172,6 +173,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-k", ShowCommandPalette, Some("Crow")),
         KeyBinding::new("cmd-f", ShowSearch, Some("Crow")),
         KeyBinding::new("cmd-shift-a", SearchEverything, Some("Search")),
+        KeyBinding::new("cmd-shift-m", CycleMatch, Some("Search")),
         KeyBinding::new("cmd-shift-a", SearchEverything, Some("Crow")),
         KeyBinding::new("escape", CloseSearch, Some("SearchResults")),
         KeyBinding::new("up", MoveUp, Some("SearchResults")),

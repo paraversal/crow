@@ -57,7 +57,9 @@ pub fn context_stack(scope: KeyScope, layer: KeymapLayer) -> Vec<KeyContext> {
             context("TextInput"),
         ],
         KeyScope::Search => vec![context("Crow"), context("Search"), context("TextInput")],
-        KeyScope::SearchResults => vec![context("Crow"), context("Search"), context("SearchResults")],
+        KeyScope::SearchResults => {
+            vec![context("Crow"), context("Search"), context(if vim { "SearchResults vim" } else { "SearchResults" })]
+        }
         KeyScope::Palette => vec![
             context("Crow"),
             context(if vim { "Sheet Palette vim" } else { "Sheet Palette" }),
