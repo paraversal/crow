@@ -1,5 +1,5 @@
 # u5-bottom-bar progress
-Branch: `ui-u5-bottom-bar` · PR: none · Last updated: 2026-11-13 · State: in progress
+Branch: `ui-u5-bottom-bar` · PR: none · Last updated: 2026-11-13 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -45,6 +45,18 @@ All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
 - Cancel's hover sets `color_alpha(fg, 0x14)` as the background instead of layering it over `surface-raised`; GPUI hover styles replace the fill, so the exact composite differs by one layer.
 - `Keycap::text_role` is a small addition to U1's keycap (the plan's focus `fg` / idle `fg-subtle` text needs it).
 
+## Bench (100k fixture, same machine, release)
+| Run | warm first paint | p50 | p95 | p99 |
+| --- | --- | --- | --- | --- |
+| U5 branch 1 | 10 ms | 8.33 ms | 8.74 ms | 8.87 ms |
+| U5 branch 2 | 11 ms | 8.33 ms | 8.72 ms | 9.06 ms |
+| U5 branch 3 | 10 ms | 8.33 ms | 8.71 ms | 8.97 ms |
+| `main` 1 | 10 ms | 8.33 ms | 8.68 ms | 8.89 ms |
+| `main` 2 | 10 ms | 8.34 ms | 8.71 ms | 8.95 ms |
+| `main` 3 | 11 ms | 8.34 ms | 8.67 ms | 8.86 ms |
+
+Within run-to-run noise. `./scripts/bundle.sh` builds `target/bundle/Crow.app` (Lucide license present).
+
 ## Hand checks
 - [ ] Bottom bar hints: fresh state dir (`CROW_STATE_DIR=$(mktemp -d)`): idle hints `/ filter · ⌘F search · ⌘K go to`. Press `/` and Esc three times: "filter" disappears, the others stay; relaunch: still gone. Focus the sidebar, a filter, search results: the hint set changes each time. `hints = "always"` brings them back; `"off"` hides all. Vim layer: same, and `m` shows "Mark this folder…".
 - [ ] Bottom bar progress: copy a large folder to another disk: accent line on the bar's top edge, "Copying … · n %", Cancel esc; the path and count stay. Esc or Cancel stops it.
@@ -82,4 +94,6 @@ All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
 - 2026-11-13: read `AGENTS.md`, the index README, the plan, U1/U4 progress. Confirmed U1 (#8) and U4 (#12) are merged on `main`. Created the branch and this file. Preparing the 13 plan questions.
 
 ## Next
-Finish: README, `docs/testing.md` hand rows, bench vs `main`, bundle, PR.
+None: PR open for review and hand testing. Do not merge.
+
+- 2026-11-13: Finish. README (settings row, usage.json, a bottom-bar paragraph in Keys) and `docs/testing.md` (automated list, U5 bench numbers, new hand rows, "Progress and cancel" now describes the bar) updated. Bench vs `main` within noise. `cargo fmt --check`, clippy and `cargo test --workspace` green; bundle built. PR opened.

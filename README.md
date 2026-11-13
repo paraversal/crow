@@ -33,7 +33,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), font, hidden files, window size |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), font, hidden files, window size |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search summary counts skipped folders and lists the rule for each. |
@@ -41,6 +41,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 Themes come from the global index in `~/.config/themes`. View ▸ Theme… (Cmd-Option-T)
 previews each theme as you move through the list; Apply to All Apps (Cmd-Return) sets it for every app that reads the index.
 Recent folders are kept in `~/.local/state/crow/recent.json`, merged with zoxide's list when it's installed.
+Key-use counts, which retire idle bottom-bar hints, live next to it in `~/.local/state/crow/usage.json`.
 Logs go to `~/Library/Logs/Crow/crow.log`.
 
 ## Keys
@@ -70,6 +71,17 @@ the live keymap, so they follow `keymap = "vim"` too. Hover a nav arrow, a view 
 Search everything or Cancel during an operation to see its name and key. Sheets (Go to Folder,
 Why This View?, the theme picker, Cmd-K and the delete/conflict questions) dim the window;
 clicking outside one cancels it exactly like Esc.
+
+The bottom bar has three slots: the path, a transient one (hints, operation progress, messages,
+errors) and counts. Idle hints show `/` filter, `⌘F` search and `⌘K` go to; after you have used a
+key three times its hint retires (`hints = "always"` keeps every hint, `"off"` hides hints and the
+one-time tips). Hints follow focus: the filter field (Return open, Esc clear, `⌘F` search deeper),
+the sidebar (`⌘⌥↑↓` reorder, `⌘⌫` remove, `⌘E` eject a disk), search results and the search field.
+While an operation runs, a 2 px accent line along the bar's top edge and "Copying … · n %" with
+Cancel esc replace the hints; the path and count stay. A broken config file shows an error pill with
+its file name, line and an Open button, beside progress rather than instead of it. Counts name the
+focused folder ("18 items in Documents"), show "n of N shown" while filtering, the selected size,
+or the cursor's sidebar group. Narrow windows drop hints from the right before the path is cut.
 
 Toolbar icons are [Lucide](https://lucide.dev) 1.72.0, ISC-licensed; the notice is at
 `crates/crow-app/assets/icons/LICENSE` (also copied into `Crow.app/Contents/Resources/`).
