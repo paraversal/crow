@@ -5,7 +5,7 @@ Branch: `ui-u4-filter` · PR: none · Last updated: 2026-11-13
 | Item | State | Notes |
 | --- | --- | --- |
 | I1 Match ranges from `Folder` | done (this commit) | `name_match` + `match_ranges`; 3 folder tests and `filter_exposes_match_ranges_per_row`; 111 app tests green. |
-| I2 Chromeless `TextInput` that scrolls to the caret | todo | Merged name is `TextInput::bare()`, not `chromeless()`. |
+| I2 Chromeless `TextInput` that scrolls to the caret | done (this commit) | Existing `bare()` used instead of adding `chromeless()`. Added `scroll_x`, clipping and shifted click/IME mapping; applies to every field. Test `scroll_for_caret_keeps_the_caret_visible`; 112 app tests green. |
 | I3 Keep list keys out of the field | todo | Spike (2026-11-13): rename does not leak keys today, so `!Filter` only (Q7 answered by measurement). |
 | I4 Field inside the focused column and the list frame | todo | |
 | I5 Highlighted names | todo | U6 is not merged; U4 adds `style::highlight_text`. |
@@ -44,7 +44,9 @@ Branch: `ui-u4-filter` · PR: none · Last updated: 2026-11-13
 - 2026-11-13: read AGENTS.md, execute-plan, index README, U4 plan, U3 progress; confirmed U1/U2/U3 are merged on `main` (U3's PR #10 was squash-merged as `a539089`) and U6 is not started. Created branch and this file. Measured Q7 with a throwaway test, then removed it. Asked Q1–Q6, Q8–Q9.
 
 ## Next
-I2: `TextInput` horizontal scroll to the caret. I1 is in. Answers applied; I3 next after I2.
+I3: add `!Filter` to the list/column contexts and the `Pane::key_down` early return; land the keymap unit test before moving UI.
 
 ### Answers applied (2026-11-13)
 - Q1 focused folder name; Q2 below the header; Q3 "Esc clears" alone; Q4 transparent ring; Q5 `--bench-filter`; Q6 no U9 hook; Q8 follow U6 highlight; Q9 `Keycap::border(role)` override.
+
+- 2026-11-13: I2 done. `scroll_x` is computed in `TextElement::prepaint` and stored in `paint`; the line, caret and selection are clipped to the field, and `bounds_for_range`/`character_index_for_point` account for the shift. Applies to Go to Folder, rename, search, palette and the filter.

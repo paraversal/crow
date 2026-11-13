@@ -5,10 +5,10 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Role, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Role, ShapedLine, SharedString, Style,
+    TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::*;
 
@@ -85,6 +85,9 @@ pub struct TextInput {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    /// Horizontal scroll that keeps the caret inside the field. Every field scrolls;
+    /// only fields too narrow to show their whole text ever have a non-zero value.
+    scroll_x: Pixels,
     is_selecting: bool,
     history: History,
 }
@@ -130,6 +133,7 @@ impl TextInput {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            scroll_x: px(0.),
             is_selecting: false,
             history: History::default(),
         }
@@ -598,8 +602,8 @@ impl EntityInputHandler for TextInput {
         }
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
-            point(bounds.left() + last_layout.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + last_layout.x_for_index(range.end), bounds.bottom()),
+            point(bounds.left() + last_layout.x_for_index(range.start) - self.scroll_x, bounds.top()),
+            point(bounds.left() + last_layout.x_for_index(range.end) - self.scroll_x, bounds.bottom()),
         ))
     }
 
@@ -625,7 +629,7 @@ impl EntityInputHandler for TextInput {
         if last_layout.text != self.content {
             return None;
         }
-        let utf8_index = last_layout.closest_index_for_x(line_point.x);
+        let utf8_index = last_layout.closest_index_for_x(line_point.x + self.scroll_x);
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -638,6 +642,7 @@ struct PrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
+    scroll_x: Pixels,
 }
 
 impl Element for TextElement {
@@ -719,30 +724,26 @@ impl Element for TextElement {
         let line = window.text_system().shape_line(display_text, font_size, &runs, None);
 
         let cursor_pos = line.x_for_index(cursor);
+        let scroll_x = scroll_for_caret(cursor_pos, bounds.size.width, input.scroll_x);
+        let x = |index| bounds.left() + line.x_for_index(index) - scroll_x;
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
-                Some(fill(
-                    Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
-                        size(px(2.), bounds.bottom() - bounds.top()),
-                    ),
-                    cursor_color,
-                )),
+                Some(fill(Bounds::new(point(x(cursor), bounds.top()), size(px(2.), bounds.bottom() - bounds.top())), cursor_color)),
             )
         } else {
             (
                 Some(fill(
                     Bounds::from_corners(
-                        point(bounds.left() + line.x_for_index(selected_range.start), bounds.top()),
-                        point(bounds.left() + line.x_for_index(selected_range.end), bounds.bottom()),
+                        point(x(selected_range.start), bounds.top()),
+                        point(x(selected_range.end), bounds.bottom()),
                     ),
                     selection_color,
                 )),
                 None,
             )
         };
-        PrepaintState { line: Some(line), cursor, selection }
+        PrepaintState { line: Some(line), cursor, selection, scroll_x }
     }
 
     fn paint(
@@ -757,23 +758,26 @@ impl Element for TextElement {
     ) {
         let focus_handle = self.input.read(cx).focus_handle.clone();
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection)
-        }
-        let Some(line) = prepaint.line.take() else { return };
-        if let Err(e) = line.paint(bounds.origin, window.line_height(), gpui::TextAlign::Left, None, window, cx) {
-            tracing::warn!("text input paint: {e}");
-        }
-
-        if focus_handle.is_focused(window)
-            && let Some(cursor) = prepaint.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
-
-        self.input.update(cx, |input, _cx| {
-            input.last_layout = Some(line);
-            input.last_bounds = Some(bounds);
+        let scroll_x = prepaint.scroll_x;
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection)
+            }
+            let Some(line) = prepaint.line.take() else { return };
+            let origin = point(bounds.left() - scroll_x, bounds.top());
+            if let Err(e) = line.paint(origin, window.line_height(), gpui::TextAlign::Left, None, window, cx) {
+                tracing::warn!("text input paint: {e}");
+            }
+            if focus_handle.is_focused(window)
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
+            self.input.update(cx, |input, _cx| {
+                input.last_layout = Some(line);
+                input.last_bounds = Some(bounds);
+                input.scroll_x = scroll_x;
+            });
         });
     }
 }
@@ -836,5 +840,43 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+/// How far a single-line field scrolls so the caret stays inside it. `width` is the
+/// text area; a 2 px margin keeps the caret's own 2 px quad visible. Scrolling never
+/// goes left of the text or past the caret, so short text always sits at offset 0.
+fn scroll_for_caret(caret: Pixels, width: Pixels, current: Pixels) -> Pixels {
+    if width <= px(0.) {
+        return px(0.);
+    }
+    let margin = px(2.);
+    let visible_right = current + width - margin;
+    if caret < current {
+        // Back at the start of a text that now fits: drop the offset entirely.
+        if caret <= width - margin { px(0.) } else { caret }
+    } else if caret > visible_right {
+        caret - (width - margin)
+    } else {
+        current
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scroll_for_caret_keeps_the_caret_visible() {
+        // Caret beyond the right edge: scroll just enough.
+        assert_eq!(scroll_for_caret(px(100.), px(50.), px(0.)), px(52.));
+        // Caret back at the start of a long text: scroll to it.
+        assert_eq!(scroll_for_caret(px(0.), px(50.), px(52.)), px(0.));
+        // Short text never scrolls, even after a long one.
+        assert_eq!(scroll_for_caret(px(10.), px(50.), px(52.)), px(0.));
+        // Caret already visible: keep the offset.
+        assert_eq!(scroll_for_caret(px(60.), px(50.), px(20.)), px(20.));
+        // Zero width (before layout): no divide-like surprises.
+        assert_eq!(scroll_for_caret(px(100.), px(0.), px(20.)), px(0.));
     }
 }
