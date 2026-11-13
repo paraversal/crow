@@ -1,5 +1,5 @@
 # u4-filter progress
-Branch: `ui-u4-filter` · PR: none · Last updated: 2026-11-13
+Branch: `ui-u4-filter` · PR: https://github.com/paraversal/file-crow/pull/12 · Last updated: 2026-11-13 · State: PR open (not merged)
 
 ## Status
 | Item | State | Notes |
@@ -46,7 +46,7 @@ Branch: `ui-u4-filter` · PR: none · Last updated: 2026-11-13
 - 2026-11-13: read AGENTS.md, execute-plan, index README, U4 plan, U3 progress; confirmed U1/U2/U3 are merged on `main` (U3's PR #10 was squash-merged as `a539089`) and U6 is not started. Created branch and this file. Measured Q7 with a throwaway test, then removed it. Asked Q1–Q6, Q8–Q9.
 
 ## Next
-Push and open the PR; set this file to "PR open". Remaining hand checks: light-theme D, VoiceOver, IME.
+None: PR #12 is open for review and hand testing. Do not merge. Remaining hand checks: light-theme D, VoiceOver, IME.
 
 ### Answers applied (2026-11-13)
 - Q1 focused folder name; Q2 below the header; Q3 "Esc clears" alone; Q4 transparent ring; Q5 `--bench-filter`; Q6 no U9 hook; Q8 follow U6 highlight; Q9 `Keycap::border(role)` override.
