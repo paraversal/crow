@@ -43,6 +43,9 @@ use crate::ui::Ui;
 use crow_fs::ops::Request;
 
 const ROW_HEIGHT: f32 = 24.0;
+/// Space between the list header's line and the first row, so a highlighted first row's
+/// rounded corners don't meet the straight line and leave dark wedges at its ends.
+pub(crate) const LIST_TOP_INSET: f32 = 4.0;
 /// Left padding before a row's disclosure chevron, and the indent per tree level.
 const NAME_INSET: f32 = 4.0;
 const INDENT: f32 = 18.0;
@@ -1051,7 +1054,7 @@ impl Pane {
         }
         let folder = self.folders[0].read(cx);
         let row_height = px(ROW_HEIGHT);
-        let y = pointer.y - bounds.top() + folder.scroll().0.borrow().base_handle.offset().y;
+        let y = pointer.y - bounds.top() - px(LIST_TOP_INSET) + folder.scroll().0.borrow().base_handle.offset().y;
         let row = (f32::from(y) / f32::from(row_height)).floor();
         if row < 0.0 {
             return None;
@@ -1368,6 +1371,7 @@ impl Pane {
         specs.extend(self.columns.iter().map(|c| (c.title().to_owned(), c.sort_key(), c.align())));
         let mut header = div()
             .id("table-header")
+            .debug_selector(|| "table-header".into())
             .h(px(28.))
             .flex_none()
             .mx_2()
@@ -1811,6 +1815,7 @@ impl Render for Pane {
                             .child(
                                 uniform_list("entries", rows, cx.processor(Self::render_table_rows))
                                     .track_scroll(&scroll)
+                                    .pt(px(LIST_TOP_INSET))
                                     .flex_1(),
                             )
                     })
