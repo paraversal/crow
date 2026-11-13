@@ -68,7 +68,8 @@ pub enum Match {
 }
 
 fn query_parts(text: &str, matching: Match) -> (Option<String>, Option<String>) {
-    let text = text.trim().to_owned();
+    // start_search has already trimmed it.
+    let text = text.to_owned();
     match matching {
         Match::All => (Some(text.clone()), Some(text)),
         Match::Names => (Some(text), None),
@@ -158,9 +159,7 @@ impl SearchView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let folder_label = crow_macos::display_components(&folder)
-            .pop()
-            .map_or_else(|| folder.display().to_string(), |(name, _)| name);
+        let folder_label = crate::window::folder_name(&folder);
         let placeholder = Scope::Folder.label(&folder_label);
         let input = cx.new(|cx| TextInput::new(query.clone(), placeholder, cx).bare().with_role(Role::SearchInput));
         let focus = cx.focus_handle();
@@ -235,8 +234,14 @@ impl SearchView {
         input.update(cx, |input, cx| input.select_range(0..len, window, cx));
     }
 
-    pub fn focus_results(&self, window: &mut Window, cx: &mut App) {
+    /// Focus the results list. Returns false, focusing nothing, when there are no results:
+    /// the list isn't rendered then, and focus on it would leave the window without keys.
+    pub fn focus_results(&self, window: &mut Window, cx: &mut App) -> bool {
+        if self.results.is_empty() {
+            return false;
+        }
         window.focus(&self.focus, cx);
+        true
     }
 
     pub fn cancel(&mut self, _: &mut App) {
@@ -668,7 +673,6 @@ impl SearchView {
     pub fn render_band(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
-        let narrow = window.viewport_size().width < px(640.);
         let ring = if focused { color_alpha(theme.role("accent"), 0x8c) } else { color(theme.role("surface")) };
         let field = div()
             .id("search-field")
@@ -712,7 +716,7 @@ impl SearchView {
             .hover(move |style| style.bg(color(theme.role("surface"))))
             .on_click(cx.listener(|_, _, _, cx| cx.emit(SearchEvent::Close)))
             .child("Done")
-            .when(!narrow, |button| button.child(Keycap::text("esc", KeycapWeight::Outline)));
+            .child(Keycap::text("esc", KeycapWeight::Outline));
         div().flex_1().min_w_0().flex().items_center().gap(px(10.)).child(field).child(done)
     }
 

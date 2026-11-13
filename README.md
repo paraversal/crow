@@ -83,7 +83,8 @@ Cmd-K opens the command palette: type to go to a favorite, recent or subfolder; 
 for commands (labels and their keys). Return goes there, Cmd-Return opens a folder in a new tab.
 Cmd-F, or the top band's Search field, searches names and contents in the current folder; the same
 field moves into the band while searching, where All / Names / Contents choose what to match (Names
-reads no file contents). Cmd-F again focuses the field and selects the query; Done or Esc closes.
+reads no file contents). Cmd-F again focuses the field and selects the query; Tab goes field →
+results → sidebar → field (no results: straight to the sidebar); Done or Esc (from anywhere) closes.
 The scope buttons switch to Home or Everywhere (Spotlight, names only). Cmd-Shift-A searches with
 every `exclude.toml` set off. Results open with Return, reveal with Cmd-R, Quick Look with Space,
 and take the usual copy, cut and trash keys. "Go to ⌘K" in the band opens the command palette.

@@ -16,7 +16,7 @@ drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
 (preview, revert, save), the `/` filter, the command palette, the search panel, the top band
 (search field click, Cmd-F refocus and select-all, Done/Esc, Go to, All/Names/Contents, switching
-tabs closing search), the menu bar
+tabs closing search, the Tab cycle while searching, focus never left on an element that is gone), the menu bar
 (every registry command listed, Finder keys, enabled by focus, dispatch matching the key) and the
 Vim layer (motions, marks). Shared chrome has its own tests: key text from the live keymap (including the
 Vim layer and the palette's old strings), keycap weights, tooltip text and a hover, the sheet scrim
@@ -81,7 +81,7 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Recent | Visit a few folders (and `cd` around with zoxide): they appear under Recent, favorites excluded. |
 | Locations | Mount a disk image: it appears without a restart, with a free-space bar; ⏏ ejects it. |
 | Top band | Hover Back, Forward, both view buttons, Go to and the search field: each shows a tooltip with its key ("Back to <folder> ⌘["). At the start of history Back is the same icon, faded. Traffic lights sit centred on the band. Light and dark themes. |
-| Search field | Click the field: search opens with the cursor in the field; the field spans the band with an accent ring; Done esc on the right. Tab to the results: the ring goes; Cmd-F brings it back with the query selected. Esc or Done returns to the folder with keys going to the list. |
+| Search field | Click the field: search opens with the cursor in the field; the field spans the band with an accent ring; Done esc on the right. Tab to the results: the ring goes; Tab again to the sidebar, again back to the field (with nothing typed, Tab goes straight to the sidebar). From any of them Cmd-F brings the field back with the query selected, and Esc closes. Esc or Done returns to the folder with keys going to the list. |
 | All / Names / Contents | Search a word that's in file names and inside files: Names drops the content lines, Contents drops the name-only rows. Names in Home is fast (no file reads). Switch to Everywhere: the control shows Names, faded. |
 | Narrow window | Shrink the window: the title truncates, then the field shrinks, then Go to loses its label. In search mode the field shrinks but the match control and Done stay whole. |
 | VoiceOver | Cmd-F5: the band reads as a toolbar; the field announces "Search <folder>, Command F"; in search mode the field is a search field and Done reads "Done, close search, Escape". |
