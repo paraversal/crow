@@ -5,8 +5,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Action, AnyElement, App, Entity, FontWeight, IntoElement, KeyBinding, Role, SharedString, div, img, prelude::*, px,
-    relative,
+    Action, AnyElement, App, Entity, FontWeight, IntoElement, KeyBinding, Role, SharedString, TextRun, Window, div,
+    img, prelude::*, px, relative,
 };
 
 use crate::actions::{
@@ -270,6 +270,74 @@ fn merged_keys(up: &KeyBinding, down: &KeyBinding) -> (SharedString, String) {
     let shared = up_words.iter().zip(&down_words).take_while(|(a, b)| a == b).count();
     let spoken = format!("{} {}", up_words.join(" "), down_words[shared..].join(" "));
     (keys.into(), spoken)
+}
+
+/// How many hints fit, dropping from the right: the path keeps its natural width
+/// and only truncates once no hints remain.
+pub fn fit_hints(bar: gpui::Pixels, path: gpui::Pixels, fixed: gpui::Pixels, hints: &[gpui::Pixels]) -> usize {
+    let available = bar - path - fixed;
+    if available <= px(0.) {
+        return 0;
+    }
+    let mut used = px(0.);
+    let mut kept = 0;
+    for (i, width) in hints.iter().enumerate() {
+        let needed = if i == 0 { *width } else { *width + px(14.) };
+        if used + needed <= available {
+            used += needed;
+            kept += 1;
+        } else {
+            break;
+        }
+    }
+    kept
+}
+
+/// Measure the path's natural width with the bar's 12 px text.
+fn path_width(path: &Path, measure: &impl Fn(&str) -> gpui::Pixels) -> gpui::Pixels {
+    let last = path.parts.len().saturating_sub(1);
+    let mut width = px(0.);
+    for (i, (name, _)) in path.parts.iter().enumerate() {
+        // px_1 both sides, the 14 px icon, the segment's 4 px gap and the name.
+        width += px(8. + 14. + 4.) + measure(name);
+        if i < last {
+            // pl_1 + "›" + the parent's gap between segments.
+            width += px(4.) + measure("›") + px(4.);
+        }
+    }
+    width
+}
+
+/// Drop hints from the right until the path's natural width plus the counts fit.
+pub fn fit_hints_to_window(hints: &mut Vec<Hint>, count: &Count, path: &Path, window: &Window) {
+    if hints.is_empty() {
+        return;
+    }
+    let font = window.text_style().font();
+    let font_size = px(12.);
+    let measure = |text: &str| {
+        let run = TextRun {
+            len: text.len(),
+            font: font.clone(),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window.text_system().shape_line(SharedString::from(text.to_owned()), font_size, &[run], None).width
+    };
+    let bar = window.viewport_size().width - px(24.);
+    let fixed = measure(&count.text) + px(12. + 1. + 28.);
+    let widths: Vec<gpui::Pixels> = hints
+        .iter()
+        .map(|hint| {
+            let cap = measure(&hint.keys);
+            let keycap = (cap + px(12.)).max(px(18.));
+            keycap + px(5.) + measure(hint.label)
+        })
+        .collect();
+    let keep = fit_hints(bar, path_width(path, &measure), fixed, &widths);
+    hints.truncate(keep);
 }
 
 /// The bar's hints in `scope`, with idle ones filtered by the setting and use counts.
@@ -601,6 +669,17 @@ mod tests {
 
     fn running(label: &str, progress: Progress) -> Running {
         Running { label: label.to_owned(), progress, cancel: Arc::new(AtomicBool::new(false)) }
+    }
+
+    #[test]
+    fn fit_hints_drops_from_the_end() {
+        let hints = [px(60.), px(60.), px(60.)];
+        assert_eq!(fit_hints(px(400.), px(100.), px(50.), &hints), 3);
+        assert_eq!(fit_hints(px(300.), px(100.), px(50.), &hints), 2);
+        assert_eq!(fit_hints(px(220.), px(100.), px(50.), &hints), 1);
+        assert_eq!(fit_hints(px(140.), px(100.), px(50.), &hints), 0, "no room at all");
+        assert_eq!(fit_hints(px(400.), px(400.), px(50.), &hints), 0, "the path wins first");
+        assert_eq!(fit_hints(px(400.), px(100.), px(50.), &[]), 0);
     }
 
     #[test]

@@ -686,6 +686,32 @@ impl CrowWindow {
                 .map(|(message, _)| BarError { text: message.clone(), file: None })
         };
         let focus = self.bar_focus(window, pane, cx);
+
+        let sidebar_focused = focus == BarFocus::Sidebar;
+        let count = if let Some(search) = &self.search {
+            let search = search.read(cx);
+            search_count(search.result_count(), search.selected_count(), search.is_searching())
+        } else if sidebar_focused {
+            self.sidebar
+                .read(cx)
+                .cursor_group(cx)
+                .map_or_else(|| bar_pane_count(pane, cx), |(group, rows)| sidebar_count(&group, rows))
+        } else {
+            bar_pane_count(pane, cx)
+        };
+
+        // Q8: search mode shows the selected result's path.
+        let search_entry = self.search.as_ref().and_then(|search| search.read(cx).selected_entry());
+        let (target, last_is_dir) = match search_entry {
+            Some((path, is_dir)) => (path, is_dir),
+            None => pane
+                .cursor_entry(cx)
+                .map_or_else(|| (pane.current_dir(cx), true), |entry| (entry.path.clone(), entry.is_dir)),
+        };
+        let parts = crow_macos::display_components(&target);
+        let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
+        let path = BarPath { parts, last_is_dir, spoken };
+
         let primary = if let Some(hint) = pane.pending_hint() {
             Primary::Pending(hint)
         } else if let Some(running) = &ops.running {
@@ -714,36 +740,16 @@ impl CrowWindow {
                 BarFocus::SearchField => KeyScope::Search,
                 BarFocus::Overlay => KeyScope::Window,
             };
-            let sidebar_kind = if focus == BarFocus::Sidebar { self.sidebar.read(cx).cursor_kind(cx) } else { None };
+            let sidebar_kind = if sidebar_focused { self.sidebar.read(cx).cursor_kind(cx) } else { None };
             // Hints never show beside an error token; pending, progress and messages outrank them.
-            let hints = if error.is_none() { bottom_bar::hints(focus, scope, sidebar_kind, cx) } else { Vec::new() };
+            let mut hints =
+                if error.is_none() { bottom_bar::hints(focus, scope, sidebar_kind, cx) } else { Vec::new() };
+            // Narrow windows lose hints from the right before the path is cut (I7).
+            bottom_bar::fit_hints_to_window(&mut hints, &count, &path, window);
             Primary::Hints(hints)
         };
 
-        let sidebar_focused = focus == BarFocus::Sidebar;
-        let count = if let Some(search) = &self.search {
-            let search = search.read(cx);
-            search_count(search.result_count(), search.selected_count(), search.is_searching())
-        } else if sidebar_focused {
-            self.sidebar
-                .read(cx)
-                .cursor_group(cx)
-                .map_or_else(|| bar_pane_count(pane, cx), |(group, rows)| sidebar_count(&group, rows))
-        } else {
-            bar_pane_count(pane, cx)
-        };
-
-        // Q8: search mode shows the selected result's path.
-        let search_entry = self.search.as_ref().and_then(|search| search.read(cx).selected_entry());
-        let (target, last_is_dir) = match search_entry {
-            Some((path, is_dir)) => (path, is_dir),
-            None => pane
-                .cursor_entry(cx)
-                .map_or_else(|| (pane.current_dir(cx), true), |entry| (entry.path.clone(), entry.is_dir)),
-        };
-        let parts = crow_macos::display_components(&target);
-        let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
-        BarState { primary, error, count, path: BarPath { parts, last_is_dir, spoken } }
+        BarState { primary, error, count, path }
     }
 
     fn render_bottom_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -2644,6 +2650,24 @@ mod tests {
         assert!(cx.debug_bounds("bar-error-open").is_none());
 
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("unlock folder");
+    }
+
+    #[gpui::test]
+    fn narrow_window_drops_hints_before_the_path(cx: &mut TestAppContext) {
+        let root = fixture("bar-narrow");
+        let (view, mut cx) = open(cx, &root);
+        assert_eq!(hint_labels(&bar_state(&view, &mut cx)).len(), 3);
+
+        cx.simulate_resize(gpui::size(px(560.), px(500.)));
+        cx.run_until_parked();
+        let state = bar_state(&view, &mut cx);
+        assert!(hint_labels(&state).is_empty(), "narrow windows drop every hint first");
+        assert!(cx.debug_bounds("path-segment-0").is_some(), "the path is still drawn");
+
+        // The fixture's temp path is long, so it needs more than 1200 points to fit all three.
+        cx.simulate_resize(gpui::size(px(1900.), px(800.)));
+        cx.run_until_parked();
+        assert_eq!(hint_labels(&bar_state(&view, &mut cx)).len(), 3, "wide again shows every hint");
     }
 
     #[gpui::test]
