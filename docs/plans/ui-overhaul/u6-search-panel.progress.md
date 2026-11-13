@@ -1,5 +1,5 @@
 # U6 search panel progress
-Branch: `ui-u6-search-panel` · PR: none · Last updated: 2026-11-13
+Branch: `ui-u6-search-panel` · PR: https://github.com/paraversal/file-crow/pull/14 · Last updated: 2026-11-13
 
 ## Status
 | Item | State | Notes |
@@ -66,4 +66,4 @@ All asked 2026-11-13; answers from the user.
 - 2026-11-13: ran the app (`target/release/crow target/u6-ui`) and checked the real surface: idle examples and live key line, name-first results with the name match highlighted, content lines under names, footer counts, 300 px preview with the hit line tinted, folder column `"."` at the root, and preview hidden at an 850 px window. Rows needed `.w_full()` so columns line up with the header; fixed and re-checked.
 
 ## Next
-Commit, run `./scripts/bundle.sh`, then hand-check (light/dark, VoiceOver switch, narrow window) and open the PR.
+PR #14 is open and CI is running. A human needs the unchecked hand checks (light theme, VoiceOver switch/footer, the switch click, footer hint with rules off) before the squash merge.
