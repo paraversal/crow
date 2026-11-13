@@ -1,5 +1,5 @@
 # u5-bottom-bar progress
-Branch: `ui-u5-bottom-bar` · PR: none · Last updated: 2026-11-13 · State: PR open
+Branch: `ui-u5-bottom-bar` · PR: https://github.com/paraversal/file-crow/pull/13 · Last updated: 2026-11-13 · State: PR open (not merged)
 
 ## Status
 | Item | State | Notes |
