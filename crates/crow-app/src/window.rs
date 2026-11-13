@@ -16,7 +16,7 @@ use crate::actions::{
     UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
-    self, BarError, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
+    self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
 };
 use crate::chrome::{self, Keycap, KeycapWeight, SheetWidth, with_action_tooltip, with_tooltip};
 use crate::icons::{self, Glyph};
@@ -639,6 +639,35 @@ impl CrowWindow {
             .children(entry.map(|e| preview::contents(&e, preview, &theme)))
     }
 
+    /// Which element owns the keys, for the bar's hints.
+    fn bar_focus(&self, window: &Window, pane: &Pane, cx: &App) -> BarFocus {
+        let overlay = self.go_to.is_some()
+            || self.sheet.is_some()
+            || self.why.is_some()
+            || self.picker.is_some()
+            || self.palette.is_some();
+        if overlay || pane.is_renaming() {
+            return BarFocus::Overlay;
+        }
+        if let Some(search) = &self.search {
+            return if search.read(cx).input_focused(window, cx) {
+                BarFocus::SearchField
+            } else {
+                BarFocus::SearchResults
+            };
+        }
+        if self.sidebar.read(cx).focus_handle(cx).is_focused(window) {
+            return BarFocus::Sidebar;
+        }
+        if pane.is_filtering() {
+            return match pane.filter_focus(cx) {
+                Some(focus) if focus.is_focused(window) => BarFocus::FilterField,
+                _ => BarFocus::ListFiltered,
+            };
+        }
+        BarFocus::List
+    }
+
     /// Everything the bottom bar shows this frame. Rendering reads only this.
     fn bar_state(&self, window: &Window, cx: &App) -> BarState {
         let ui = cx.global::<Ui>();
@@ -656,6 +685,7 @@ impl CrowWindow {
                 .filter(|(_, is_error)| *is_error)
                 .map(|(message, _)| BarError { text: message.clone(), file: None })
         };
+        let focus = self.bar_focus(window, pane, cx);
         let primary = if let Some(hint) = pane.pending_hint() {
             Primary::Pending(hint)
         } else if let Some(running) = &ops.running {
@@ -663,11 +693,34 @@ impl CrowWindow {
         } else if let Some((message, false)) = &ops.message {
             Primary::Message(message.clone())
         } else {
-            // U4 fills the hints; nothing else is primary while a token shows.
-            Primary::Hints(Vec::new())
+            let scope = match focus {
+                BarFocus::List => {
+                    if pane.mode() == ViewMode::Columns {
+                        KeyScope::Columns
+                    } else {
+                        KeyScope::List
+                    }
+                }
+                BarFocus::ListFiltered => {
+                    if pane.mode() == ViewMode::Columns {
+                        KeyScope::ColumnsFiltered
+                    } else {
+                        KeyScope::ListFiltered
+                    }
+                }
+                BarFocus::FilterField => KeyScope::Filter,
+                BarFocus::Sidebar => KeyScope::Sidebar,
+                BarFocus::SearchResults => KeyScope::SearchResults,
+                BarFocus::SearchField => KeyScope::Search,
+                BarFocus::Overlay => KeyScope::Window,
+            };
+            let sidebar_kind = if focus == BarFocus::Sidebar { self.sidebar.read(cx).cursor_kind(cx) } else { None };
+            // Hints never show beside an error token; pending, progress and messages outrank them.
+            let hints = if error.is_none() { bottom_bar::hints(focus, scope, sidebar_kind, cx) } else { Vec::new() };
+            Primary::Hints(hints)
         };
 
-        let sidebar_focused = self.sidebar.read(cx).focus_handle(cx).is_focused(window);
+        let sidebar_focused = focus == BarFocus::Sidebar;
         let count = if let Some(search) = &self.search {
             let search = search.read(cx);
             search_count(search.result_count(), search.selected_count(), search.is_searching())
@@ -2343,6 +2396,155 @@ mod tests {
             Primary::Running(running) => format!("{} — {}", running.label, running.detail),
             Primary::Hints(_) | Primary::None => String::new(),
         }
+    }
+
+    fn hint_labels(state: &BarState) -> Vec<String> {
+        match &state.primary {
+            Primary::Hints(hints) => hints.iter().map(|hint| hint.label.to_owned()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn hint_keys(state: &BarState) -> Vec<String> {
+        match &state.primary {
+            Primary::Hints(hints) => hints.iter().map(|hint| hint.keys.to_string()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[gpui::test]
+    fn hints_follow_focus(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-focus");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["filter", "search", "go to"]);
+        assert_eq!(hint_keys(&state), ["/", "⌘F", "⌘K"]);
+
+        cx.simulate_keystrokes("/");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["open", "clear", "search deeper"]);
+        assert_eq!(hint_keys(&state), ["↩", "esc", "⌘F"]);
+
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["reorder", "remove", "to list"]);
+        assert_eq!(hint_keys(&state), ["⌥⌘↑↓", "⌘⌫", "⇥"]);
+
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("a");
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["open", "reveal", "Quick Look"]);
+        assert_eq!(hint_keys(&state), ["↩", "⌘R", "Space"]);
+    }
+
+    #[gpui::test]
+    fn vim_layer_hints_use_the_vim_context(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-vim");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        use_vim(&view, &mut cx);
+
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["filter", "search", "go to"]);
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["reorder", "remove", "to list"]);
+
+        cx.simulate_keystrokes("tab m");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert!(matches!(state.primary, Primary::Pending(_)), "the mark prompt replaces hints");
+        assert!(hint_labels(&state).is_empty());
+    }
+
+    #[gpui::test]
+    fn idle_hints_retire_after_three_uses(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-retire");
+        let (view, mut cx) = open(cx, &root);
+        for _ in 0..3 {
+            cx.simulate_keystrokes("/");
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["search", "go to"], "only the used hint retired");
+
+        cx.simulate_keystrokes("/");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["open", "clear", "search deeper"], "focus hints never retire");
+    }
+
+    #[gpui::test]
+    fn retired_hints_stay_retired_after_reload(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-reload");
+        let (view, mut cx) = open(cx, &root);
+        for _ in 0..3 {
+            cx.simulate_keystrokes("/");
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        cx.update(|_, cx| crate::usage::reload_from_disk(cx));
+        write_config(&view, &mut cx, "settings.toml", "theme = \"system\"\n");
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["search", "go to"], "the count came back from usage.json");
+    }
+
+    #[gpui::test]
+    fn hints_always_never_retire(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-always");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "settings.toml", "hints = \"always\"\n");
+        for _ in 0..3 {
+            cx.simulate_keystrokes("/");
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(hint_labels(&state), ["filter", "search", "go to"]);
+    }
+
+    #[gpui::test]
+    fn hints_off_hides_every_hint(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-off");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "settings.toml", "keymap = \"vim\"\nhints = \"off\"\n");
+        let state = bar_state(&view, &mut cx);
+        assert!(hint_labels(&state).is_empty());
+
+        cx.simulate_keystrokes("m");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert!(matches!(state.primary, Primary::Pending(_)), "the mark prompt is not a hint");
+    }
+
+    #[gpui::test]
+    fn error_drops_hints(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-error");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "views.toml", "[defaults]\nsort = \"colour\"\n");
+        let state = bar_state(&view, &mut cx);
+        assert!(hint_labels(&state).is_empty(), "no hints beside the error token");
+        assert!(state.error.is_some());
+    }
+
+    #[gpui::test]
+    fn overlay_hides_hints(cx: &mut TestAppContext) {
+        let root = fixture("bar-hints-overlay");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        assert!(hint_labels(&bar_state(&view, &mut cx)).is_empty());
     }
 
     #[gpui::test]

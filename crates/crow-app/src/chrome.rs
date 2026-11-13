@@ -30,6 +30,8 @@ pub struct Keycap {
     /// Outline border role. Defaults to `surface-raised`; a control whose fill is
     /// also `surface-raised` passes a contrasting role so the cap stays visible.
     border: Option<&'static str>,
+    /// Text role override, for a cap whose surface needs dimmer or brighter text.
+    text_role: Option<&'static str>,
 }
 
 // `from_binding` and `for_action` are the builders U3–U7 use.
@@ -38,7 +40,7 @@ impl Keycap {
     /// A literal shortcut, e.g. `"esc"` (`Key` splits it on nothing: use
     /// `from_binding` for a chord).
     pub fn text(text: impl Into<SharedString>, weight: KeycapWeight) -> Self {
-        Self { caps: vec![text.into()], weight, border: None }
+        Self { caps: vec![text.into()], weight, border: None, text_role: None }
     }
 
     pub fn from_binding(binding: &KeyBinding, weight: KeycapWeight) -> Self {
@@ -46,7 +48,7 @@ impl Keycap {
             KeycapWeight::Key => keys::caps(binding),
             KeycapWeight::Outline | KeycapWeight::Text => vec![keys::chord_text(binding)],
         };
-        Self { caps, weight, border: None }
+        Self { caps, weight, border: None, text_role: None }
     }
 
     pub fn for_action(action: &dyn gpui::Action, scope: KeyScope, weight: KeycapWeight, cx: &App) -> Option<Self> {
@@ -58,9 +60,15 @@ impl Keycap {
         self.border = Some(role);
         self
     }
+
+    /// The key text's theme role. Focus hints read `fg`; idle ones `fg-subtle`.
+    pub fn text_role(mut self, role: &'static str) -> Self {
+        self.text_role = Some(role);
+        self
+    }
 }
 
-fn cap(text: SharedString, theme: &crow_theme::Theme, key: bool, border: Option<&str>) -> Div {
+fn cap(text: SharedString, theme: &crow_theme::Theme, key: bool, border: Option<&str>, text_role: Option<&str>) -> Div {
     let border_role = border.unwrap_or("surface-raised");
     div()
         .h(px(if key { 20. } else { 18. }))
@@ -74,7 +82,7 @@ fn cap(text: SharedString, theme: &crow_theme::Theme, key: bool, border: Option<
         .border_color(color(theme.role(border_role)))
         .when(key, |cap| cap.border_b_2().bg(color(theme.role("bg"))))
         .text_size(px(if key { 11.5 } else { 11. }))
-        .text_color(color(if key { theme.role("fg") } else { theme.role("fg-muted") }))
+        .text_color(color(theme.role(text_role.unwrap_or(if key { "fg" } else { "fg-muted" }))))
         .flex_none()
         .whitespace_nowrap()
         .child(text)
@@ -87,15 +95,20 @@ impl RenderOnce for Keycap {
             return div().into_any_element();
         }
         match self.weight {
-            KeycapWeight::Text => {
-                div().text_color(color(theme.role("fg-muted"))).child(self.caps.concat()).into_any_element()
+            KeycapWeight::Text => div()
+                .text_color(color(theme.role(self.text_role.unwrap_or("fg-muted"))))
+                .child(self.caps.concat())
+                .into_any_element(),
+            KeycapWeight::Outline => {
+                cap(self.caps.concat().into(), &theme, false, self.border, self.text_role).into_any_element()
             }
-            KeycapWeight::Outline => cap(self.caps.concat().into(), &theme, false, self.border).into_any_element(),
             KeycapWeight::Key => div()
                 .flex()
                 .items_center()
                 .gap(px(3.))
-                .children(self.caps.into_iter().map(|cap_text| cap(cap_text, &theme, true, self.border)))
+                .children(
+                    self.caps.into_iter().map(|cap_text| cap(cap_text, &theme, true, self.border, self.text_role)),
+                )
                 .into_any_element(),
         }
     }

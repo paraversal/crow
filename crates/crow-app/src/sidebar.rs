@@ -65,6 +65,14 @@ impl Render for DraggedFavorite {
     }
 }
 
+/// What the cursor row is, for the bar's hints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorKind {
+    Favorite,
+    Recent,
+    Volume,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Row {
     /// A section title; `Some(group)` for favorites groups, which accept folders.
@@ -194,6 +202,16 @@ impl Sidebar {
     #[cfg(test)]
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// What the cursor row is, for which hints apply.
+    pub fn cursor_kind(&self, cx: &gpui::App) -> Option<CursorKind> {
+        match self.cursor_row(cx)? {
+            Row::Favorite(..) => Some(CursorKind::Favorite),
+            Row::Recent(_) => Some(CursorKind::Recent),
+            Row::Volume(_) => Some(CursorKind::Volume),
+            Row::Header(..) => None,
+        }
     }
 
     /// The sidebar group the cursor row belongs to, and how many rows it has.

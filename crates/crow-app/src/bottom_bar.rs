@@ -4,13 +4,22 @@
 
 use std::path::PathBuf;
 
-use gpui::{App, Entity, IntoElement, Role, SharedString, div, img, prelude::*, px};
+use gpui::{Action, App, Entity, IntoElement, KeyBinding, Role, SharedString, div, img, prelude::*, px};
 
-use crate::chrome::with_tooltip;
+use crate::actions::{
+    ClearFilter, Eject, MoveFavoriteDown, MoveFavoriteUp, OpenSelection, QuickLook, RemoveFromSidebar, SearchReveal,
+    ShowCommandPalette, ShowSearch, StartFilter, SwitchFocus,
+};
+use crate::chrome::{Keycap, KeycapWeight, with_tooltip};
+use crate::keys::{self, KeyScope};
 use crate::operations::{self, Running};
 use crate::pane::Pane;
+use crate::sidebar::CursorKind;
 use crate::style::{color, icon};
+use crate::text_input::{self, Complete, Confirm};
 use crate::ui::Ui;
+use crate::usage;
+use crow_core::{HintsMode, idle_hint_visible};
 use crow_fs::human_size;
 
 /// Everything the bar draws this frame, computed on the main thread.
@@ -61,7 +70,6 @@ impl RunningView {
     }
 }
 
-#[allow(dead_code)] // U5's hint step fills and reads these.
 pub struct Hint {
     pub keys: SharedString,
     pub spoken: SharedString,
@@ -167,6 +175,136 @@ pub fn sidebar_count(group: &str, rows: usize) -> Count {
     Count { text: format!("{group} · {rows}").into(), spoken: format!("{group}, {}", items(rows)).into() }
 }
 
+/// Which element owns the keys, for choosing the hint set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarFocus {
+    List,
+    FilterField,
+    ListFiltered,
+    Sidebar,
+    SearchResults,
+    SearchField,
+    Overlay,
+}
+
+#[derive(Clone, Copy)]
+enum HintKind {
+    Action(&'static dyn Action),
+    /// ⌥⌘↑↓ as one cap: the shared modifiers once, then both keys.
+    Reorder,
+}
+
+#[derive(Clone, Copy)]
+struct Spec {
+    kind: HintKind,
+    label: &'static str,
+    /// Idle hints retire after their key has been used.
+    idle: bool,
+}
+
+const FILTER: Spec = Spec { kind: HintKind::Action(&StartFilter), label: "filter", idle: true };
+const SEARCH: Spec = Spec { kind: HintKind::Action(&ShowSearch), label: "search", idle: true };
+const GO_TO: Spec = Spec { kind: HintKind::Action(&ShowCommandPalette), label: "go to", idle: true };
+const LIST_HINTS: &[Spec] = &[FILTER, SEARCH, GO_TO];
+
+const CONFIRM: Spec = Spec { kind: HintKind::Action(&Confirm), label: "open", idle: false };
+const CANCEL: Spec = Spec { kind: HintKind::Action(&text_input::Cancel), label: "clear", idle: false };
+const SEARCH_DEEPER: Spec = Spec { kind: HintKind::Action(&ShowSearch), label: "search deeper", idle: false };
+const FILTER_FIELD_HINTS: &[Spec] = &[CONFIRM, CANCEL, SEARCH_DEEPER];
+
+const OPEN: Spec = Spec { kind: HintKind::Action(&OpenSelection), label: "open", idle: false };
+const CLEAR: Spec = Spec { kind: HintKind::Action(&ClearFilter), label: "clear", idle: false };
+const FILTERED_HINTS: &[Spec] = &[OPEN, CLEAR, SEARCH_DEEPER];
+
+const REORDER: Spec = Spec { kind: HintKind::Reorder, label: "reorder", idle: false };
+const REMOVE: Spec = Spec { kind: HintKind::Action(&RemoveFromSidebar), label: "remove", idle: false };
+const EJECT: Spec = Spec { kind: HintKind::Action(&Eject), label: "eject", idle: false };
+const TO_LIST: Spec = Spec { kind: HintKind::Action(&SwitchFocus), label: "to list", idle: false };
+
+const REVEAL: Spec = Spec { kind: HintKind::Action(&SearchReveal), label: "reveal", idle: false };
+const QUICK_LOOK: Spec = Spec { kind: HintKind::Action(&QuickLook), label: "Quick Look", idle: false };
+const RESULT_HINTS: &[Spec] = &[OPEN, REVEAL, QUICK_LOOK];
+
+const COMPLETE: Spec = Spec { kind: HintKind::Action(&Complete), label: "results", idle: false };
+const DONE: Spec = Spec { kind: HintKind::Action(&text_input::Cancel), label: "done", idle: false };
+const FIELD_HINTS: &[Spec] = &[CONFIRM, COMPLETE, DONE];
+
+/// The hint set for a focus. Sidebar hints follow the cursor row (Q6).
+fn hint_set(focus: BarFocus, sidebar: Option<CursorKind>) -> Vec<Spec> {
+    match focus {
+        BarFocus::List => LIST_HINTS.to_vec(),
+        BarFocus::FilterField => FILTER_FIELD_HINTS.to_vec(),
+        BarFocus::ListFiltered => FILTERED_HINTS.to_vec(),
+        BarFocus::Sidebar => {
+            let mut specs = Vec::new();
+            match sidebar {
+                Some(CursorKind::Favorite) => specs.extend([REORDER, REMOVE]),
+                Some(CursorKind::Recent) => specs.push(REMOVE),
+                Some(CursorKind::Volume) => specs.push(EJECT),
+                None => {}
+            }
+            specs.push(TO_LIST);
+            specs
+        }
+        BarFocus::SearchResults => RESULT_HINTS.to_vec(),
+        BarFocus::SearchField => FIELD_HINTS.to_vec(),
+        BarFocus::Overlay => Vec::new(),
+    }
+}
+
+/// The keys for two bindings in one cap: the shared modifier prefix once.
+fn merged_keys(up: &KeyBinding, down: &KeyBinding) -> (SharedString, String) {
+    let up_caps = keys::caps(up);
+    let down_caps = keys::caps(down);
+    let shared = up_caps.iter().zip(&down_caps).take_while(|(a, b)| a == b).count();
+    let mut keys = up_caps[..shared].concat();
+    keys.push_str(&up_caps[shared..].concat());
+    keys.push_str(&down_caps[shared..].concat());
+
+    let up_spoken = keys::spoken(up);
+    let down_spoken = keys::spoken(down);
+    let up_words: Vec<&str> = up_spoken.split(' ').collect();
+    let down_words: Vec<&str> = down_spoken.split(' ').collect();
+    let shared = up_words.iter().zip(&down_words).take_while(|(a, b)| a == b).count();
+    let spoken = format!("{} {}", up_words.join(" "), down_words[shared..].join(" "));
+    (keys.into(), spoken)
+}
+
+/// The bar's hints in `scope`, with idle ones filtered by the setting and use counts.
+pub fn hints(focus: BarFocus, scope: KeyScope, sidebar: Option<CursorKind>, cx: &App) -> Vec<Hint> {
+    let mode = cx.global::<Ui>().settings.hints;
+    if mode == HintsMode::Off {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for spec in hint_set(focus, sidebar) {
+        match spec.kind {
+            HintKind::Action(action) => {
+                if spec.idle && !idle_hint_visible(mode, usage::uses(action, cx)) {
+                    continue;
+                }
+                let Some(binding) = keys::binding_for(action, scope, cx) else { continue };
+                out.push(Hint {
+                    keys: keys::chord_text(&binding),
+                    spoken: keys::spoken(&binding).into(),
+                    label: spec.label,
+                    idle: spec.idle,
+                });
+            }
+            HintKind::Reorder => {
+                let (Some(up), Some(down)) =
+                    (keys::binding_for(&MoveFavoriteUp, scope, cx), keys::binding_for(&MoveFavoriteDown, scope, cx))
+                else {
+                    continue;
+                };
+                let (keys, spoken) = merged_keys(&up, &down);
+                out.push(Hint { keys, spoken: spoken.into(), label: spec.label, idle: spec.idle });
+            }
+        }
+    }
+    out
+}
+
 /// One bar: path · transient · counts.
 pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoElement + use<> {
     let ui = cx.global::<Ui>();
@@ -227,17 +365,47 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
             with_tooltip(part, spoke, None)
         }));
 
-    let (primary, primary_color) = match &state.primary {
-        Primary::None | Primary::Hints(_) => (None, muted),
-        Primary::Pending(text) => (Some(SharedString::from(*text)), fg),
-        Primary::Message(text) => (Some(text.clone()), muted),
+    let idle_text = color(theme.role("fg-subtle"));
+    let (primary_aria, primary_el) = match &state.primary {
+        Primary::None => (None, None),
+        Primary::Hints(hints) if hints.is_empty() => (None, None),
+        Primary::Hints(hints) => {
+            let aria = format!(
+                "Keys: {}",
+                hints.iter().map(|hint| format!("{} {}", hint.spoken, hint.label)).collect::<Vec<_>>().join(", ")
+            );
+            let el = div()
+                .flex()
+                .items_center()
+                .gap(px(14.))
+                .children(hints.iter().enumerate().map(|(i, hint)| {
+                    let key_role = if hint.idle { "fg-subtle" } else { "fg" };
+                    div()
+                        .id(("bar-hint", i))
+                        .debug_selector(move || format!("bar-hint-{i}"))
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .text_color(if hint.idle { idle_text } else { muted })
+                        .child(Keycap::text(hint.keys.clone(), KeycapWeight::Outline).text_role(key_role))
+                        .child(hint.label)
+                }))
+                .into_any_element();
+            (Some(SharedString::from(aria)), Some(el))
+        }
+        Primary::Pending(text) => {
+            (Some(SharedString::from(*text)), Some(div().text_color(fg).child(*text).into_any_element()))
+        }
+        Primary::Message(text) => {
+            (Some(text.clone()), Some(div().text_color(muted).child(text.clone()).into_any_element()))
+        }
         Primary::Running(running) => {
-            let text = if running.detail.is_empty() {
+            let text: SharedString = if running.detail.is_empty() {
                 running.label.clone()
             } else {
                 format!("{} — {}", running.label, running.detail).into()
             };
-            (Some(text), fg)
+            (Some(text.clone()), Some(div().text_color(fg).child(text).into_any_element()))
         }
     };
     let error_text = state.error.as_ref().map(|e| e.text.clone());
@@ -245,12 +413,12 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         .id("bar-transient")
         .debug_selector(|| "bar-transient".into())
         .role(Role::Status)
-        .aria_label(primary.clone().or_else(|| error_text.clone()).unwrap_or_default())
+        .aria_label(primary_aria.or_else(|| error_text.clone()).unwrap_or_default())
         .flex_none()
         .flex()
         .items_center()
         .gap(px(14.))
-        .children(primary.map(|text| div().text_color(primary_color).child(text)))
+        .children(primary_el)
         .children(error_text.map(|text| div().text_color(error).child(text)));
 
     let counts_spoken = state.count.spoken.clone();

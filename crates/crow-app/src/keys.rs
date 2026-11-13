@@ -16,6 +16,8 @@ pub enum KeyScope {
     Window,
     List,
     Columns,
+    ListFiltered,
+    ColumnsFiltered,
     Sidebar,
     Filter,
     Search,
@@ -39,6 +41,13 @@ pub fn context_stack(scope: KeyScope, layer: KeymapLayer) -> Vec<KeyContext> {
         KeyScope::Columns => {
             vec![context("Crow"), context(if vim { "FileList ColumnView vim" } else { "FileList ColumnView" })]
         }
+        KeyScope::ListFiltered => {
+            vec![context("Crow"), context(if vim { "FileList Filtered vim" } else { "FileList Filtered" })]
+        }
+        KeyScope::ColumnsFiltered => vec![
+            context("Crow"),
+            context(if vim { "FileList ColumnView Filtered vim" } else { "FileList ColumnView Filtered" }),
+        ],
         KeyScope::Sidebar => vec![context("Crow"), context(if vim { "Sidebar vim" } else { "Sidebar" })],
         KeyScope::Filter => vec![
             context("Crow"),
