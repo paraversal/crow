@@ -338,6 +338,33 @@ impl Pane {
         self.focused_folder().read(cx).selected_count()
     }
 
+    /// The focused folder's visible rows (what a filter leaves).
+    pub fn shown_count(&self, cx: &gpui::App) -> usize {
+        self.focused_folder().read(cx).row_count()
+    }
+
+    /// The selected files' bytes and how many selected items are folders.
+    pub fn selected_bytes(&self, cx: &gpui::App) -> (u64, usize) {
+        self.focused_folder().read(cx).selected_bytes()
+    }
+
+    /// Whether the `/` filter field is open.
+    pub fn is_filtering(&self) -> bool {
+        self.filtering.is_some()
+    }
+
+    /// The filter field's focus handle while it is open.
+    #[allow(dead_code)] // U5's hints read it.
+    pub fn filter_focus(&self, cx: &gpui::App) -> Option<FocusHandle> {
+        self.filtering.as_ref().map(|filtering| filtering.input.read(cx).focus_handle(cx))
+    }
+
+    /// Whether a row is being renamed.
+    #[allow(dead_code)] // U5's hints read it.
+    pub fn is_renaming(&self) -> bool {
+        self.renaming.is_some()
+    }
+
     pub fn is_loading(&self, cx: &gpui::App) -> bool {
         self.folders.iter().any(|f| f.read(cx).is_loading_deep(cx))
     }
@@ -1973,16 +2000,8 @@ impl Render for Pane {
 
 #[cfg(test)]
 impl Pane {
-    pub fn is_renaming(&self) -> bool {
-        self.renaming.is_some()
-    }
-
     pub fn rename_text(&self, cx: &gpui::App) -> Option<String> {
         self.renaming.as_ref().map(|r| r.input.read(cx).text().to_owned())
-    }
-
-    pub fn is_filtering(&self) -> bool {
-        self.filtering.is_some()
     }
 
     pub fn filter_text(&self, cx: &gpui::App) -> Option<String> {

@@ -196,6 +196,20 @@ impl Sidebar {
         self.cursor
     }
 
+    /// The sidebar group the cursor row belongs to, and how many rows it has.
+    pub fn cursor_group(&self, cx: &gpui::App) -> Option<(String, usize)> {
+        match self.cursor_row(cx)? {
+            Row::Favorite(slot, _) => {
+                let groups = cx.global::<Ui>().favorites();
+                let (name, rows) = groups.get(slot.0)?;
+                Some((name.clone(), rows.len()))
+            }
+            Row::Recent(_) => Some(("Recent".into(), cx.global::<Ui>().recent_list.len())),
+            Row::Volume(_) => Some(("Locations".into(), cx.global::<Ui>().volumes.len())),
+            Row::Header(..) => None,
+        }
+    }
+
     /// Paths of the selectable rows, in order.
     #[cfg(test)]
     pub fn paths(cx: &gpui::App) -> Vec<PathBuf> {

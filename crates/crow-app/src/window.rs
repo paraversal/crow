@@ -10,10 +10,13 @@ use gpui::{
 };
 
 use crate::actions::{
-    AddToSidebar, ApplyThemeEverywhere, CancelOperation, CloseTab, GoBack, GoForward, GoToFolder, KeyboardShortcuts,
-    Minimize, MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PreviousTab,
-    ResetFolderView, SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
+    AddToSidebar, ApplyThemeEverywhere, CloseTab, GoBack, GoForward, GoToFolder, KeyboardShortcuts, Minimize, MoveDown,
+    MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView,
+    SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
     UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
+};
+use crate::bottom_bar::{
+    self, BarError, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
 };
 use crate::chrome::{self, Keycap, KeycapWeight, SheetWidth, with_action_tooltip, with_tooltip};
 use crate::icons::{self, Glyph};
@@ -636,125 +639,77 @@ impl CrowWindow {
             .children(entry.map(|e| preview::contents(&e, preview, &theme)))
     }
 
-    fn render_path_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// Everything the bottom bar shows this frame. Rendering reads only this.
+    fn bar_state(&self, window: &Window, cx: &App) -> BarState {
         let ui = cx.global::<Ui>();
-        let theme = ui.theme.clone();
-        let settings_error = ui.config_error();
         let pane = self.pane().read(cx);
-        let selected_entry = pane.cursor_entry(cx);
-        let target = selected_entry.as_ref().map_or_else(|| pane.current_dir(cx), |e| e.path.clone());
-        let parts = crow_macos::display_components(&target);
-        let last = parts.len().saturating_sub(1);
-        // The last segment is a file when a file is selected; every other segment is a folder.
-        let last_is_dir = selected_entry.as_ref().is_none_or(|e| e.is_dir);
-        let path_pane = self.pane().clone();
-        let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
-        let (count, selected) = (pane.item_count(cx), pane.selected_count(cx));
         let ops = cx.global::<Operations>();
-        let running = ops.running.as_ref().map(|r| {
-            let p = &r.progress;
-            let percent = (p.done_bytes * 100).checked_div(p.total_bytes).unwrap_or(0);
-            format!("{} — {} of {} · {percent}%", r.label, p.done_items, p.total_items)
-        });
-        let op_message = ops.message.clone();
-        let hint = pane.pending_hint();
-        let (status, is_error): (SharedString, bool) = match (pane.error(cx), settings_error) {
-            _ if hint.is_some() => (hint.unwrap_or_default().into(), false),
-            _ if running.is_some() => (running.clone().unwrap_or_default().into(), false),
-            _ if op_message.is_some() => op_message.clone().unwrap_or_default(),
-            (Some(e), _) | (None, Some(e)) => (e, true),
-            _ if pane.is_loading(cx) && count == 0 => ("Loading…".into(), false),
-            _ if selected > 1 => (format!("{selected} of {count} selected").into(), false),
-            _ => (format!("{count} items").into(), false),
+
+        // Errors never lose to hints: the token shows beside whatever else is primary.
+        let error = if let Some((text, file)) = ui.config_error_file() {
+            Some(BarError { text, file: Some(file) })
+        } else if let Some(text) = pane.error(cx) {
+            Some(BarError { text, file: None })
+        } else {
+            ops.message
+                .as_ref()
+                .filter(|(_, is_error)| *is_error)
+                .map(|(message, _)| BarError { text: message.clone(), file: None })
         };
-        div()
-            .id("path-bar")
-            .role(Role::Navigation)
-            .aria_label(format!("Path: {spoken}"))
-            .h(px(28.))
-            .flex_none()
-            .px_3()
-            .flex()
-            .items_center()
-            .gap_1()
-            .border_t_1()
-            .border_color(color(theme.role("border")))
-            .text_size(px(12.))
-            .text_color(color(theme.role("fg-muted")))
-            .child(
-                // Long paths give way to the status line instead of pushing it out.
-                div().flex_1().min_w_0().overflow_hidden().flex().items_center().gap_1().children(
-                    parts.into_iter().enumerate().map({
-                        let fg = color(theme.role("fg"));
-                        let hover = color(theme.role("surface-raised"));
-                        move |(i, (name, path))| {
-                            let pane = path_pane.clone();
-                            let is_dir = i < last || last_is_dir;
-                            let spoke = if is_dir { format!("Go to {name}") } else { format!("Open {name}") };
-                            let mut part = div()
-                                .id(("path-segment", i))
-                                .debug_selector(move || format!("path-segment-{i}"))
-                                .role(Role::Button)
-                                .aria_label(spoke.clone())
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .px_1()
-                                .rounded_sm()
-                                .when(i == last, |part| part.text_color(fg))
-                                .hover(move |s| s.bg(hover))
-                                .children(icon(&path, is_dir, 14).map(|i| img(i).size(px(14.))))
-                                .child(name)
-                                .when(i < last, |part| part.child(div().pl_1().child("›")));
-                            let target = path.clone();
-                            part = part.on_click(move |_, _, cx| {
-                                let target = target.clone();
-                                pane.update(cx, |pane, cx| {
-                                    if is_dir {
-                                        // Clicking where you already are changes nothing.
-                                        if pane.current_dir(cx) != target {
-                                            pane.navigate(target.clone(), cx);
-                                        }
-                                    } else {
-                                        pane.open_file(target.clone(), cx);
-                                    }
-                                });
-                            });
-                            with_tooltip(part, spoke, None)
-                        }
-                    }),
-                ),
-            )
-            .child(
-                div()
-                    .id("status")
-                    .flex_none()
-                    .pl_3()
-                    .role(Role::Status)
-                    .aria_label(status.clone())
-                    .when(is_error, |s| s.text_color(color(theme.role("error"))))
-                    .child(status),
-            )
-            .when(running.is_some(), |bar| {
-                bar.child(with_action_tooltip(
-                    div()
-                        .id("cancel-operation")
-                        .role(Role::Button)
-                        .aria_label("Cancel operation")
-                        .ml_2()
-                        .px_2()
-                        .rounded_sm()
-                        .bg(color(theme.role("surface-raised")))
-                        .text_color(color(theme.role("fg")))
-                        .on_click(|_, _, cx| operations::cancel_running(cx))
-                        .child("Cancel"),
-                    "Cancel operation",
-                    &CancelOperation,
-                    KeyScope::Window,
-                    cx,
-                ))
-            })
+        let primary = if let Some(hint) = pane.pending_hint() {
+            Primary::Pending(hint)
+        } else if let Some(running) = &ops.running {
+            Primary::Running(RunningView::new(running))
+        } else if let Some((message, false)) = &ops.message {
+            Primary::Message(message.clone())
+        } else {
+            // U4 fills the hints; nothing else is primary while a token shows.
+            Primary::Hints(Vec::new())
+        };
+
+        let sidebar_focused = self.sidebar.read(cx).focus_handle(cx).is_focused(window);
+        let count = if let Some(search) = &self.search {
+            let search = search.read(cx);
+            search_count(search.result_count(), search.selected_count(), search.is_searching())
+        } else if sidebar_focused {
+            self.sidebar
+                .read(cx)
+                .cursor_group(cx)
+                .map_or_else(|| bar_pane_count(pane, cx), |(group, rows)| sidebar_count(&group, rows))
+        } else {
+            bar_pane_count(pane, cx)
+        };
+
+        // Q8: search mode shows the selected result's path.
+        let search_entry = self.search.as_ref().and_then(|search| search.read(cx).selected_entry());
+        let (target, last_is_dir) = match search_entry {
+            Some((path, is_dir)) => (path, is_dir),
+            None => pane
+                .cursor_entry(cx)
+                .map_or_else(|| (pane.current_dir(cx), true), |entry| (entry.path.clone(), entry.is_dir)),
+        };
+        let parts = crow_macos::display_components(&target);
+        let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
+        BarState { primary, error, count, path: BarPath { parts, last_is_dir, spoken } }
     }
+
+    fn render_bottom_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let state = self.bar_state(window, cx);
+        bottom_bar::render(state, self.pane().clone(), cx)
+    }
+}
+
+fn bar_pane_count(pane: &Pane, cx: &App) -> Count {
+    let (bytes, _folders) = pane.selected_bytes(cx);
+    bottom_bar::pane_count(bottom_bar::PaneCounts {
+        loading: pane.is_loading(cx),
+        filtering: pane.is_filtering(),
+        shown: pane.shown_count(cx),
+        total: pane.item_count(cx),
+        selected: pane.selected_count(cx),
+        bytes,
+        folder: crate::style::display_name(&pane.current_dir(cx)),
+    })
 }
 
 fn view_button(
@@ -1981,7 +1936,7 @@ impl Render for CrowWindow {
         self.sidebar.update(cx, |s, cx| s.set_current(current, cx));
         let sidebar = self.sidebar.clone();
         let preview = (list_view && self.search.is_none()).then(|| self.render_preview(cx));
-        let path_bar = self.render_path_bar(cx);
+        let path_bar = self.render_bottom_bar(window, cx);
         let go_to = self.render_go_to(cx);
         let sheet = self.render_sheet(cx);
         let activity = self.show_activity.then(|| self.render_activity(cx));
@@ -2373,6 +2328,101 @@ mod tests {
         cx.simulate_keystrokes("cmd-[");
         settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root.join("alpha"), "and it left a history step to go back to");
+    }
+
+    /// The bar's data for the current frame.
+    fn bar_state(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> BarState {
+        let window = cx.update(|_, cx| cx.windows()[0]);
+        cx.update_window(window, |_, window, cx| view.read(cx).bar_state(window, cx)).expect("read the bar")
+    }
+
+    fn primary_text(state: &BarState) -> String {
+        match &state.primary {
+            Primary::Pending(text) => (*text).to_owned(),
+            Primary::Message(text) => text.to_string(),
+            Primary::Running(running) => format!("{} — {}", running.label, running.detail),
+            Primary::Hints(_) | Primary::None => String::new(),
+        }
+    }
+
+    #[gpui::test]
+    fn counts_name_the_focused_folder(cx: &mut TestAppContext) {
+        let root = fixture("bar-counts-columns");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(state.count.text.as_ref(), "1 item");
+        assert_eq!(state.count.spoken.as_ref(), "1 item in alpha", "the focused column's folder");
+    }
+
+    #[gpui::test]
+    fn counts_show_filter_and_selection(cx: &mut TestAppContext) {
+        let root = fixture("bar-counts-filter");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("no");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(state.count.text.as_ref(), "1 of 3 shown");
+
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("cmd-a");
+        settle(&view, &mut cx);
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(state.count.text.as_ref(), "3 selected · 6 bytes", "folders add no bytes");
+        let folder = crate::style::display_name(&root);
+        assert_eq!(state.count.spoken.as_ref(), format!("3 of 3 selected in {folder}, 6 bytes"));
+    }
+
+    #[gpui::test]
+    fn one_item_is_singular(cx: &mut TestAppContext) {
+        let root = fixture("bar-singular");
+        std::fs::create_dir_all(root.join("solo")).expect("create folder");
+        std::fs::write(root.join("solo/only.txt"), "").expect("create file");
+        let (view, mut cx) = open(cx, &root.join("solo"));
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(state.count.text.as_ref(), "1 item");
+        assert_eq!(state.count.spoken.as_ref(), "1 item in solo");
+    }
+
+    #[gpui::test]
+    fn message_does_not_hide_the_count(cx: &mut TestAppContext) {
+        let root = fixture("bar-message");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| {
+            cx.global_mut::<Operations>().message = Some(("Copied 1 item".into(), false));
+        });
+        cx.simulate_keystrokes("down");
+        let state = bar_state(&view, &mut cx);
+        assert_eq!(primary_text(&state), "Copied 1 item");
+        assert_eq!(state.count.text.as_ref(), "3 items");
+    }
+
+    #[gpui::test]
+    fn error_and_running_operation_show_together(cx: &mut TestAppContext) {
+        let root = fixture("bar-error-running");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| {
+            cx.global_mut::<Operations>().running = Some(crate::operations::Running {
+                label: "Copy 1 item to x".into(),
+                progress: crow_fs::ops::Progress { total_items: 1, total_bytes: 1, ..Default::default() },
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            });
+        });
+        let dir = config_dir(&cx);
+        std::fs::write(dir.join("views.toml"), "[defaults]\nsort = \"colour\"\n").expect("break views.toml");
+        cx.update(|_, cx| crate::ui::reload_config(cx));
+        cx.run_until_parked();
+
+        let state = bar_state(&view, &mut cx);
+        assert!(matches!(state.primary, Primary::Running(_)), "progress stays primary");
+        let error = state.error.expect("the config error is its own token");
+        assert!(error.file.as_ref().is_some_and(|f| f.ends_with("views.toml")));
+        assert!(error.text.starts_with("views.toml:"), "{}", error.text);
+
+        cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+        settle(&view, &mut cx);
     }
 
     /// The in-memory count for an action name.

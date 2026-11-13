@@ -10,6 +10,7 @@ use crow_theme::Theme;
 use gpui::{App, AppContext, Global, SharedString};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::operations::Operations;
 use crate::style::variant_of;
 
 const FADE: Duration = Duration::from_millis(500);
@@ -87,9 +88,20 @@ impl Ui {
         ui
     }
 
-    /// The first config file problem, if any.
+    /// The first config file problem, if any. Tests read it; the bar uses the file form.
+    #[allow(dead_code)]
     pub fn config_error(&self) -> Option<SharedString> {
         self.errors.iter().flatten().next().cloned()
+    }
+
+    /// The first config file problem and the file it names, with the config dir
+    /// stripped so the bar can say "views.toml: …".
+    pub fn config_error_file(&self) -> Option<(SharedString, PathBuf)> {
+        const FILES: [&str; 4] = ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml"];
+        let (index, message) = self.errors.iter().enumerate().find_map(|(i, e)| e.as_ref().map(|m| (i, m)))?;
+        let dir = self.config_dir.display().to_string();
+        let text = message.strip_prefix(&dir).map_or(message.as_str(), |rest| rest.trim_start_matches('/'));
+        Some((text.to_owned().into(), self.config_dir.join(FILES[index])))
     }
 
     fn set_error(&mut self, which: usize, result: Result<(), String>) -> bool {
@@ -362,7 +374,8 @@ pub fn choose_theme(id: &str, cx: &mut App) {
 /// "Apply to all apps": make `theme` the global choice for its variant and follow it here.
 pub fn apply_theme_everywhere(theme: &Theme, cx: &mut App) {
     if let Err(e) = crow_theme::set_global(theme) {
-        cx.global_mut::<Ui>().set_error(SETTINGS, Err(format!("Can't apply the theme to all apps: {e}")));
+        // Not a file problem, so it belongs with the operation messages (no Open button).
+        cx.global_mut::<Operations>().message = Some((format!("Can't apply the theme to all apps: {e}").into(), true));
         return;
     }
     choose_theme("system", cx);

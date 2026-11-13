@@ -49,6 +49,19 @@ pub struct Running {
     pub cancel: Arc<AtomicBool>,
 }
 
+/// The plan's label in the progressive form the bar shows: "Copy 3 items" → "Copying 3 items".
+pub fn running_label(label: &str) -> String {
+    let (verb, rest) = label.split_once(' ').unwrap_or((label, ""));
+    let ing = match verb {
+        "Copy" => "Copying",
+        "Move" => "Moving",
+        "Duplicate" => "Duplicating",
+        "Delete" => "Deleting",
+        _ => verb,
+    };
+    if rest.is_empty() { ing.to_owned() } else { format!("{ing} {rest}") }
+}
+
 /// What Cmd-C / Cmd-X put on the clipboard. The paths also go on the system
 /// pasteboard; `change_count` tells whether it still holds them (or someone copied since).
 pub struct Clipboard {
@@ -238,5 +251,26 @@ impl Trash for FolderTrash {
         let dest = self.0.join(format!("{}-{}", N.fetch_add(1, Ordering::Relaxed), name.to_string_lossy()));
         std::fs::rename(path, &dest)?;
         Ok(dest)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn running_label_uses_the_ing_form() {
+        // The labels `crow_fs::ops::plan` makes.
+        let cases = [
+            ("Copy 3 items to Backup", "Copying 3 items to Backup"),
+            ("Move 1 item to Trash", "Moving 1 item to Trash"),
+            ("Duplicate 2 items", "Duplicating 2 items"),
+            ("Delete 2 items permanently", "Deleting 2 items permanently"),
+            ("New Folder", "New Folder"),
+            ("Rename “a” to “b”", "Rename “a” to “b”"),
+        ];
+        for (label, expected) in cases {
+            assert_eq!(running_label(label), expected, "{label}");
+        }
     }
 }

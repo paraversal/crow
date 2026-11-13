@@ -6,7 +6,7 @@ Branch: `ui-u5-bottom-bar` · PR: none · Last updated: 2026-11-13 · State: in 
 | --- | --- | --- |
 | I1 `hints` setting and usage model | done | `HintsMode`, `Settings.hints`, `DEFAULT_SETTINGS` block, `crow-core/src/usage.rs` (`Usage`, `RETIRE_AFTER`, `USAGE_CAP`, `idle_hint_visible`); 5 unit tests; `cargo test -p crow-core` 53 green. |
 | I2 Key-use recorder | done | `crates/crow-app/src/usage.rs`: `UsageState` global (`usage.json` in the state dir), `record`/`record_key`/`uses`/`count_key`; called from `Pane::start_filter` (only when it opens the field), `show_search`, `show_palette`. Saves are chained so the file never goes backwards. Tests `pressing_slash_counts_filter_uses` (3 keys, file persisted), `palette_and_dispatch_count_too`, `refocusing_an_open_filter_does_not_count`; 133 app tests green. |
-| I3 Three slots and counts | todo | depends on Q2, Q3, Q4, Q8 |
+| I3 Three slots and counts | done | New `bottom_bar.rs` (`BarState`, `Primary`, `BarError`, `Count`, `Path`, count helpers, render); `CrowWindow::bar_state`/`render_bottom_bar`. Accessors: `Folder::selected_bytes` (cached by generation), `Pane::{shown_count, selected_bytes, is_filtering, filter_focus, is_renaming}`, `SearchView::{result_count, selected_count, selected_entry, input_focused}`, `Sidebar::cursor_group`, `Ui::config_error_file`. 30 px bar, `path-bar` is `Role::Group` "Status bar"; path keeps its ids/selectors. Tests `counts_name_the_focused_folder`, `counts_show_filter_and_selection`, `one_item_is_singular`, `message_does_not_hide_the_count`, `error_and_running_operation_show_together`; existing path-bar test unchanged and green. 139 app tests. |
 | I4 Hints by focus and retiring | todo | depends on Q5, Q6, Q7 |
 | I5 Progress and Cancel | todo | |
 | I6 Error token with Open | todo | depends on Q9, Q10, Q11 |
@@ -31,6 +31,10 @@ All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
 ## Decisions
 - Version 30 px bar (Q12), message lifetime 5 s (Q2), search-result path (Q8), error Open fallback (Q10) — user, 2026-11-13.
 - `crow_core::idle_hint_visible(mode, uses)` kept as the plan names it; no extra settings wrapper.
+- Q11 applied early: "Apply to All Apps" now sets an `Operations.message` error instead of `Ui.errors[SETTINGS]`, so the token has no file and no Open.
+- Q8 applied in `bar_state`: search mode shows the selected result's path.
+- `Path` data lives in `BarState` so `bottom_bar::render` needs no access to `CrowWindow`'s private fields.
+- Counts helpers are pure (`pane_count`, `search_count`, `sidebar_count`) so the grammar is testable without a window.
 
 ## Hand checks
 - [ ] Bottom bar hints: fresh state dir (`CROW_STATE_DIR=$(mktemp -d)`): idle hints `/ filter · ⌘F search · ⌘K go to`. Press `/` and Esc three times: "filter" disappears, the others stay; relaunch: still gone. Focus the sidebar, a filter, search results: the hint set changes each time. `hints = "always"` brings them back; `"off"` hides all. Vim layer: same, and `m` shows "Mark this folder…".
@@ -43,12 +47,17 @@ All 13 answered by the user on 2026-11-13; every recommended answer was chosen.
 ## Found along the way
 - Version 30 px bar (Q12), message lifetime 5 s (Q2), search-result path (Q8), error Open fallback (Q10) — user, 2026-11-13.
 - `crow_core::idle_hint_visible(mode, uses)` kept as the plan names it; no extra settings wrapper.
+- Q11 applied early: "Apply to All Apps" now sets an `Operations.message` error instead of `Ui.errors[SETTINGS]`, so the token has no file and no Open.
+- Q8 applied in `bar_state`: search mode shows the selected result's path.
+- `Path` data lives in `BarState` so `bottom_bar::render` needs no access to `CrowWindow`'s private fields.
+- Counts helpers are pure (`pane_count`, `search_count`, `sidebar_count`) so the grammar is testable without a window.
 
 ## Log
+- 2026-11-13: I3 done. The error token is plain `error`-colored text until I6 gives it the pill and Open; progress is text until I5. `cargo test --workspace` green, clippy clean.
 - 2026-11-13: I2 done. `Usage::record` returns false at the cap, so a capped count writes nothing. `cargo test --workspace` green (133 app tests), clippy clean.
 - 2026-11-13: I1 done. `usage.json` is pretty JSON (`{ "counts": { … } }`); a corrupt file loads empty. `cargo test -p crow-core` 53 passed.
 - 2026-11-13: asked Q1–Q13; all recommended answers accepted.
 - 2026-11-13: read `AGENTS.md`, the index README, the plan, U1/U4 progress. Confirmed U1 (#8) and U4 (#12) are merged on `main`. Created the branch and this file. Preparing the 13 plan questions.
 
 ## Next
-I3: three slots (`bottom_bar.rs` `BarState`) and the counts; then I4 hints.
+I4: `BarFocus`, `hint_set`, hint rendering with keycaps, the `hints` setting filter, and the focus/retire tests.

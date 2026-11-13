@@ -10,6 +10,7 @@
 //! ```
 
 mod actions;
+mod bottom_bar;
 mod chrome;
 mod extensions;
 mod folder;
