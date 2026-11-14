@@ -27,6 +27,9 @@ use crate::usage;
 use crow_core::{HintsMode, idle_hint_visible};
 use crow_fs::human_size;
 
+/// The bar's height; tips sit above it.
+pub const HEIGHT: f32 = 30.;
+
 /// Everything the bar draws this frame, computed on the main thread.
 pub struct BarState {
     pub primary: Primary,
@@ -740,7 +743,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         .role(Role::Group)
         .aria_label("Status bar")
         .relative()
-        .h(px(30.))
+        .h(px(HEIGHT))
         .flex_none()
         .px_3()
         .flex()

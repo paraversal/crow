@@ -97,6 +97,14 @@ group (while filtering, the field itself says "n of N"). When room runs short th
 first and last segments: its middle folds into a "…" (click it for the deepest hidden folder),
 then hints drop from the right, then a long progress line or error is cut with an ellipsis.
 
+A contextual tip appears once, bottom right above the bar, when you visibly do something the
+slow way: scrolling a folder of 200+ items ("Type / to filter this folder by name."), two filters
+in a row that matched nothing ("⌘F searches subfolders and file contents too."), or typing a whole
+path in the palette for a folder it already lists ("⌘K finds recent and favorite folders by a few
+letters."). It retires the moment it shows; Got it, using its key, changing folder or opening an
+overlay closes it. The retired ids live in `~/.local/state/crow/tips.json`; `hints = "off"` hides
+tips as well.
+
 Closing the last window or quitting while an operation runs asks first: Esc keeps it running,
 Return stops it cleanly (finished items stay and Undo can reverse them; the item in progress is never left half done) and then closes or quits. In every text field
 ⌥←/⌥→ move by word, ⌥⇧←/→ select by word and ⌥⌫ deletes a word. In list view the Name column

@@ -13,6 +13,7 @@ mod settings;
 mod sidebar;
 mod table;
 mod tabs;
+mod tips;
 mod usage;
 mod views;
 
@@ -36,6 +37,9 @@ pub use sidebar::{
 };
 pub use table::{ColumnWidth, ResizeDrag, TableLayout};
 pub use tabs::{TabId, Tabs};
+pub use tips::{
+    TIP_COOLDOWN, TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS, TIPS_FILE, TipBook, TipId, TipState, ZeroMatchStreak,
+};
 pub use usage::{RETIRE_AFTER, USAGE_CAP, USAGE_FILE, Usage, idle_hint_visible};
 pub use views::{
     DEFAULT_VIEWS, ResolvedView, Source, ViewChange, ViewLayer, Views, load_views, natural_ascending, reset_folder,

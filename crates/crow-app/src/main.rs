@@ -26,6 +26,7 @@ mod search;
 mod sidebar;
 mod style;
 mod text_input;
+mod tips;
 mod ui;
 mod usage;
 mod window;

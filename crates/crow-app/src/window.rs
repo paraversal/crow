@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crow_core::{SidebarEdit, Tabs, ViewMode};
+use crow_core::{HintsMode, SidebarEdit, Tabs, TipId, ViewMode, ZeroMatchStreak};
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
     Render, Role, ScrollHandle, SharedString, Subscription, TitlebarOptions, Toggled, Window, WindowBounds,
@@ -83,6 +83,10 @@ pub struct CrowWindow {
     palette: Option<Palette>,
     /// Cmd-F, while its results replace the pane.
     search: Option<Entity<SearchView>>,
+    /// The contextual tip on screen, if any.
+    tip: Option<TipId>,
+    /// Consecutive filter sessions that ended with no matches (U9's ⌘F tip).
+    zero_streak: ZeroMatchStreak,
     /// The folder a sidebar arrow walk is showing. Walking records no Recent visits
     /// (they would re-rank Recent under the cursor); leaving the sidebar records this one.
     walk_visit: Option<PathBuf>,
@@ -275,6 +279,7 @@ impl CrowWindow {
         window.on_window_should_close(cx, move |window, cx| {
             this.update(cx, |this, cx| this.may_close(window, cx)).unwrap_or(true)
         });
+        let owner = cx.entity_id();
         let subscriptions = vec![
             cx.observe(&pane, |_, _, cx| cx.notify()),
             cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)),
@@ -289,6 +294,8 @@ impl CrowWindow {
                     pane.update(cx, |pane, cx| pane.apply_view(cx));
                 }
             }),
+            // A closed window must not keep the app-wide tip on screen.
+            cx.on_release(move |_, cx| crate::tips::closed(owner, cx)),
         ];
         Self {
             tabs: Tabs::new(pane),
@@ -301,6 +308,8 @@ impl CrowWindow {
             picker: None,
             palette: None,
             search: None,
+            tip: None,
+            zero_streak: ZeroMatchStreak::new(),
             walk_visit: None,
             _subscriptions: subscriptions,
         }
@@ -345,6 +354,7 @@ impl CrowWindow {
         if self.search.is_some() {
             self.close_search(window, cx);
         }
+        self.close_tip(cx);
         let show_hidden = self.show_hidden;
         // A new tab keeps the window's view when views don't follow folders.
         let start_mode = Some(self.pane().read(cx).mode());
@@ -361,6 +371,7 @@ impl CrowWindow {
         if self.search.is_some() {
             self.close_search(window, cx);
         }
+        self.close_tip(cx);
         if self.tabs.close_active().is_none() {
             // The last tab closes the window, which may have to ask first.
             if self.may_close(window, cx) {
@@ -398,6 +409,7 @@ impl CrowWindow {
         if self.search.is_some() {
             self.close_search(window, cx);
         }
+        self.close_tip(cx);
         self.tabs.cycle(delta);
         self.focus_center(window, cx);
         cx.notify();
@@ -724,6 +736,7 @@ impl CrowWindow {
                         if this.search.is_some() {
                             this.close_search(window, cx);
                         }
+                        this.close_tip(cx);
                         this.tabs.activate(i);
                         this.focus_center(window, cx);
                         cx.notify();
@@ -876,6 +889,42 @@ impl CrowWindow {
         let state = self.bar_state(window, cx);
         bottom_bar::render(state, self.pane().clone(), cx)
     }
+
+    // ----- contextual tips -----
+
+    /// Show `id` when nothing else owns the screen and its key is still unknown.
+    /// Retirement, key uses, one-on-screen and the cooldown live in `tips::request`.
+    fn offer_tip(&mut self, id: TipId, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.tip_blocked(cx) || (id == TipId::Filter && self.pane().read(cx).is_filtering()) {
+            return;
+        }
+        if crate::tips::key_text(id, cx).is_none() {
+            return;
+        }
+        if crate::tips::request(id, cx.entity_id(), cx) {
+            self.tip = Some(id);
+            cx.notify();
+        }
+    }
+
+    fn close_tip(&mut self, cx: &mut Context<Self>) {
+        if self.tip.take().is_some() {
+            crate::tips::closed(cx.entity_id(), cx);
+            cx.notify();
+        }
+    }
+
+    /// States a tip must not appear over, and that close one already up.
+    fn tip_blocked(&self, cx: &App) -> bool {
+        self.sheet.is_some()
+            || self.why.is_some()
+            || self.picker.is_some()
+            || self.palette.is_some()
+            || self.search.is_some()
+            || self.show_activity
+            || cx.has_active_drag()
+            || self.pane().read(cx).is_renaming()
+    }
 }
 
 fn bar_pane_count(pane: &Pane, cx: &App) -> Count {
@@ -1013,6 +1062,7 @@ impl CrowWindow {
             PaneEvent::Entered(dir) => {
                 // A stale message would otherwise outlive the place it described (Q2).
                 operations::clear_message(cx);
+                self.close_tip(cx);
                 if self.search.is_some() {
                     self.close_search(window, cx);
                 }
@@ -1026,6 +1076,13 @@ impl CrowWindow {
                 self.sidebar.update(cx, |s, cx| s.set_current(dir, cx));
             }
             PaneEvent::Mark { key, set } => self.mark(*key, *set, window, cx),
+            PaneEvent::FilterEnded { empty, matches } => {
+                if self.zero_streak.end_session(*empty, *matches) {
+                    // A navigation's Entered event closes tips; offer after it.
+                    cx.defer_in(window, |this, window, cx| this.offer_tip(TipId::Search, window, cx));
+                }
+            }
+            PaneEvent::LongFolderScrolled => self.offer_tip(TipId::Filter, window, cx),
             PaneEvent::Paste { into, move_items } => {
                 // Our clipboard if the pasteboard still holds what we put there; otherwise
                 // whatever another app (Finder) copied.
@@ -1733,6 +1790,7 @@ impl CrowWindow {
         crate::usage::record(&ShowSearch, cx);
         if let Some(search) = &self.search {
             search.update(cx, |search, cx| search.select_all_input(window, cx));
+            crate::tips::key_used(TipId::Search, cx);
             // The band's focus ring is drawn from the input's focus state.
             cx.notify();
             return;
@@ -1742,6 +1800,7 @@ impl CrowWindow {
         if self.search_blocked() {
             return;
         }
+        crate::tips::key_used(TipId::Search, cx);
         let pane = self.pane().clone();
         let folder = pane.read(cx).current_dir(cx);
         let query = pane.update(cx, |pane, cx| pane.take_filter(cx)).unwrap_or_default();
@@ -1850,6 +1909,11 @@ impl CrowWindow {
 
     fn show_palette(&mut self, _: &ShowCommandPalette, window: &mut Window, cx: &mut Context<Self>) {
         crate::usage::record(&ShowCommandPalette, cx);
+        // Another overlay owns the keys; open_palette would refuse below.
+        if self.search_blocked() {
+            return;
+        }
+        crate::tips::key_used(TipId::GoTo, cx);
         self.open_palette("", window, cx);
     }
 
@@ -2167,6 +2231,8 @@ impl CrowWindow {
             self.reveal_typed_path(window, cx);
             return;
         }
+        // Typing a whole path for a folder the palette already offers is the slow way.
+        let path_mode = palette.path.is_some();
         self.palette = None;
         self.focus_center(window, cx);
         match item {
@@ -2175,10 +2241,23 @@ impl CrowWindow {
                 ui::record_command(command.id, cx);
             }
             Some(Item::Folder { path, .. }) if new_tab => self.open_tab_at(path, window, cx),
-            Some(Item::Folder { path, .. }) => self.pane().update(cx, |pane, cx| pane.navigate(path, cx)),
+            Some(Item::Folder { path, .. }) => {
+                let known = path_mode && self.known_folder(&path, cx);
+                self.pane().update(cx, |pane, cx| pane.navigate(path, cx));
+                if known {
+                    // Navigating closes tips; offer this one after its Entered event.
+                    cx.defer_in(window, |this, window, cx| this.offer_tip(TipId::GoTo, window, cx));
+                }
+            }
             None => {}
         }
         cx.notify();
+    }
+
+    /// Whether `path` is somewhere ⌘K already offers: a recent or favorite folder,
+    /// other than the one on screen.
+    fn known_folder(&self, path: &Path, cx: &App) -> bool {
+        path != self.pane().read(cx).current_dir(cx) && cx.global::<Ui>().palette_recents.iter().any(|p| p == path)
     }
 
     /// Return on a path that lists no folder: off the main thread, check whether it
@@ -2201,7 +2280,11 @@ impl CrowWindow {
                         this.palette = None;
                         this.focus_center(window, cx);
                         if is_dir {
+                            let known = this.known_folder(&target, cx);
                             this.pane().update(cx, |pane, cx| pane.navigate(target, cx));
+                            if known {
+                                cx.defer_in(window, |this, window, cx| this.offer_tip(TipId::GoTo, window, cx));
+                            }
                         } else {
                             this.pane().update(cx, |pane, cx| pane.reveal(target, cx));
                         }
@@ -2830,6 +2913,28 @@ impl Render for CrowWindow {
             None
         };
         let path_bar = self.render_bottom_bar(window, cx);
+        // Close a tip whose reason is gone: hints off, another window owns it, or a
+        // blocking state started (rename, drag, overlay, activity).
+        if self.tip.is_some()
+            && (self.tip_blocked(cx)
+                || cx.global::<Ui>().settings.hints == HintsMode::Off
+                || crate::tips::owner(cx) != Some(cx.entity_id()))
+        {
+            self.tip = None;
+            crate::tips::closed(cx.entity_id(), cx);
+        }
+        let tip = match self.tip {
+            Some(id) => crate::tips::key_text(id, cx).map(|key| {
+                crate::tips::render_tip(
+                    id,
+                    key,
+                    &theme,
+                    f32::from(window.viewport_size().width),
+                    cx.listener(|this, _, _, cx| this.close_tip(cx)),
+                )
+            }),
+            None => None,
+        };
         let sheet = self.render_sheet(cx);
         let activity = self.show_activity.then(|| self.render_activity(cx));
         let why = self.render_why(cx);
@@ -2911,6 +3016,7 @@ impl Render for CrowWindow {
             .children(tab_bar)
             .child(div().flex_1().min_h_0().flex().child(sidebar).child(center).children(preview))
             .child(path_bar)
+            .children(tip)
             .children(sheet)
             .children(activity)
             .children(why)
@@ -7525,5 +7631,410 @@ mod tests {
         drop_on(&mut cx, "column-0-row-beta", vec![root.join("notes.txt")]);
         settle(&view, &mut cx);
         assert!(root.join("beta/notes.txt").exists());
+    }
+
+    // ----- U9: contextual tips -----
+
+    /// `root/` with `n` files, for the scroll trigger.
+    fn long_fixture(name: &str, n: usize) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("crow-app-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create fixture");
+        for i in 0..n {
+            std::fs::write(root.join(format!("f{i:03}.txt")), "").expect("create fixture");
+        }
+        root.canonicalize().expect("canonical fixture path")
+    }
+
+    fn tip(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Option<TipId> {
+        view.read_with(cx, |w, _| w.tip)
+    }
+
+    fn tips_json(cx: &VisualTestContext) -> String {
+        let file = cx.read(|cx| cx.global::<Ui>().state_dir.join(crow_core::TIPS_FILE));
+        std::fs::read_to_string(file).unwrap_or_default()
+    }
+
+    /// A pointer scroll of `lines` up (negative delta) over `selector`.
+    fn scroll(cx: &mut VisualTestContext, selector: &'static str, lines: f32) {
+        let bounds = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is laid out"));
+        cx.simulate_event(gpui::ScrollEvent {
+            position: bounds.center(),
+            delta: gpui::ScrollDelta::Lines(gpui::point(0., -lines)),
+            ..Default::default()
+        });
+    }
+
+    /// Call `offer_tip` as a trigger would, with the test window.
+    fn offer(view: &Entity<CrowWindow>, id: TipId, cx: &mut VisualTestContext) {
+        let window = cx.update(|_, cx| cx.windows()[0]);
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |view, cx| view.offer_tip(id, window, cx));
+        })
+        .expect("offer the tip");
+    }
+
+    #[gpui::test]
+    fn tip_got_it_retires_it(cx: &mut TestAppContext) {
+        let root = long_fixture("tip-got-it", 250);
+        let (view, mut cx) = open(cx, &root);
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::Filter), "a long folder scroll suggests /");
+
+        let button = cx.debug_bounds("tip-got-it").expect("the tip's button is laid out");
+        cx.simulate_click(button.center(), Default::default());
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "Got it closes the tip");
+        assert!(tips_json(&cx).contains("\"filter\""), "retired in the state file: {}", tips_json(&cx));
+
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "shown once, never again");
+    }
+
+    #[gpui::test]
+    fn tip_closes_when_the_folder_changes(cx: &mut TestAppContext) {
+        let root = long_fixture("tip-folder-change", 250);
+        let (view, mut cx) = open(cx, &root);
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::Filter));
+
+        cx.simulate_keystrokes("cmd-up");
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "leaving the folder closes it");
+
+        cx.simulate_keystrokes("cmd-[");
+        settle(&view, &mut cx);
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "and it was already spent");
+    }
+
+    #[gpui::test]
+    fn tip_hints_off_suppresses_and_hides(cx: &mut TestAppContext) {
+        let root = long_fixture("tip-hints-off", 250);
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "settings.toml", "hints = \"off\"\n");
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "hints = off shows no tips");
+
+        write_config(&view, &mut cx, "settings.toml", "hints = \"auto\"\n");
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::Filter), "auto allows tips");
+
+        write_config(&view, &mut cx, "settings.toml", "hints = \"off\"\n");
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "turning hints off hides a tip on screen");
+    }
+
+    #[gpui::test]
+    fn tip_never_shows_while_busy(cx: &mut TestAppContext) {
+        let root = long_fixture("tip-busy", 250);
+        let (view, mut cx) = open(cx, &root);
+
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert!(pane(&view, &cx).read_with(&cx, |pane, _| pane.is_renaming()), "a rename is open");
+        offer(&view, TipId::Filter, &mut cx);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "no tip during a rename");
+        assert!(!tips_json(&cx).contains("\"filter\""), "and it is not retired");
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+
+        for (open_keys, close_keys, open) in
+            [("cmd-f", "escape", "search"), ("cmd-k", "escape", "palette"), ("cmd-alt-l", "cmd-alt-l", "activity")]
+        {
+            cx.simulate_keystrokes(open_keys);
+            settle(&view, &mut cx);
+            offer(&view, TipId::Filter, &mut cx);
+            settle(&view, &mut cx);
+            assert_eq!(tip(&view, &cx), None, "no tip while {open} is open");
+            assert!(!tips_json(&cx).contains("\"filter\""), "{open} does not retire it");
+            cx.simulate_keystrokes(close_keys);
+            settle(&view, &mut cx);
+        }
+
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::Filter), "the trigger still works after the overlays");
+
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "opening search closes a shown tip");
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+    }
+
+    #[gpui::test]
+    fn tip_only_one_on_screen(cx: &mut TestAppContext) {
+        let root = long_fixture("tip-one", 250);
+        let (view, mut cx) = open(cx, &root);
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::Filter));
+
+        offer(&view, TipId::Search, &mut cx);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::Filter), "the first tip stays; the second is refused");
+    }
+
+    #[gpui::test]
+    fn tip_scrolling_a_long_folder_suggests_the_filter_once(cx: &mut TestAppContext) {
+        let root = long_fixture("tip-scroll", 250);
+        let (view, mut cx) = open(cx, &root);
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::Filter));
+
+        let button = cx.debug_bounds("tip-got-it").expect("the tip's button");
+        cx.simulate_click(button.center(), Default::default());
+        settle(&view, &mut cx);
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None);
+    }
+
+    #[gpui::test]
+    fn tip_short_folder_scroll_does_nothing(cx: &mut TestAppContext) {
+        let root = fixture("tip-short");
+        let (view, mut cx) = open(cx, &root);
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "three entries are not a long folder");
+    }
+
+    #[gpui::test]
+    fn tip_using_the_key_retires_it(cx: &mut TestAppContext) {
+        let root = long_fixture("tip-key", 250);
+        let (view, mut cx) = open(cx, &root);
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::Filter));
+
+        cx.simulate_keystrokes("/");
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "using / closes the tip");
+        assert!(tips_json(&cx).contains("\"filter\""), "and retires it");
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+    }
+
+    #[gpui::test]
+    fn tip_scroll_in_column_view(cx: &mut TestAppContext) {
+        let root = long_fixture("tip-columns", 250);
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        scroll(&mut cx, "column-0", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::Filter), "any column's scroll counts");
+    }
+
+    #[gpui::test]
+    fn tip_two_zero_match_filters_suggest_search(cx: &mut TestAppContext) {
+        let root = fixture("tip-two-filters");
+        let (view, mut cx) = open(cx, &root);
+        for query in ["zzz", "qqq"] {
+            cx.simulate_keystrokes("/");
+            settle(&view, &mut cx);
+            cx.simulate_input(query);
+            settle(&view, &mut cx);
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        assert_eq!(tip(&view, &cx), Some(TipId::Search), "two zero-match filters suggest search");
+        assert_eq!(
+            view.read_with(&cx, |_, cx| crate::tips::key_text(TipId::Search, cx)),
+            Some("⌘F".into()),
+            "the tip shows the live key"
+        );
+    }
+
+    #[gpui::test]
+    fn tip_zero_match_streak_resets_on_a_match(cx: &mut TestAppContext) {
+        let root = fixture("tip-streak");
+        let (view, mut cx) = open(cx, &root);
+        for query in ["zzz", "al", "qqq"] {
+            cx.simulate_keystrokes("/");
+            settle(&view, &mut cx);
+            cx.simulate_input(query);
+            settle(&view, &mut cx);
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        assert_eq!(tip(&view, &cx), None, "a filter with matches resets the streak");
+    }
+
+    #[gpui::test]
+    fn tip_search_key_retires_it(cx: &mut TestAppContext) {
+        let root = fixture("tip-search-key");
+        let (view, mut cx) = open(cx, &root);
+        for query in ["zzz", "qqq"] {
+            cx.simulate_keystrokes("/");
+            settle(&view, &mut cx);
+            cx.simulate_input(query);
+            settle(&view, &mut cx);
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        assert_eq!(tip(&view, &cx), Some(TipId::Search));
+
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "using ⌘F closes the tip");
+        assert!(tips_json(&cx).contains("\"search\""), "and retires it");
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+
+        for query in ["zzz", "qqq"] {
+            cx.simulate_keystrokes("/");
+            settle(&view, &mut cx);
+            cx.simulate_input(query);
+            settle(&view, &mut cx);
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        assert_eq!(tip(&view, &cx), None, "no second suggestion");
+    }
+
+    #[gpui::test]
+    fn tip_go_to_folder_for_a_recent_folder_suggests_the_palette(cx: &mut TestAppContext) {
+        let root = fixture("tip-goto");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"), "visited alpha");
+        cx.simulate_keystrokes("cmd-up");
+        settle(&view, &mut cx);
+
+        let recents = cx.read(|cx| cx.global::<Ui>().palette_recents.clone());
+        assert!(recents.iter().any(|p| *p == root.join("alpha")), "alpha is recent: {recents:?}");
+        cx.simulate_keystrokes("cmd-shift-g cmd-a");
+        cx.simulate_input(&root.join("alpha").display().to_string());
+        settle(&view, &mut cx);
+        assert!(
+            view.read_with(&cx, |w, _| w.palette.as_ref().is_some_and(|p| p.path.is_some())),
+            "the typed path lists its parent"
+        );
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        assert_eq!(tip(&view, &cx), Some(TipId::GoTo), "a typed path for a recent folder suggests ⌘K");
+        assert_eq!(view.read_with(&cx, |_, cx| crate::tips::key_text(TipId::GoTo, cx)), Some("⌘K".into()));
+    }
+
+    #[gpui::test]
+    fn tip_go_to_folder_for_a_new_folder_does_nothing(cx: &mut TestAppContext) {
+        let root = fixture("tip-goto-new");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-shift-g cmd-a");
+        cx.simulate_input(&root.join("beta").display().to_string());
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+        assert_eq!(tip(&view, &cx), None, "a folder the palette did not know teaches nothing");
+    }
+
+    #[gpui::test]
+    fn tip_palette_key_retires_it(cx: &mut TestAppContext) {
+        let root = fixture("tip-goto-key");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-up");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-shift-g cmd-a");
+        cx.simulate_input(&root.join("alpha").display().to_string());
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::GoTo));
+
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "using ⌘K closes the tip");
+        assert!(tips_json(&cx).contains("\"go-to\""), "and retires it");
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+    }
+
+    #[gpui::test]
+    fn tip_state_survives_reload(cx: &mut TestAppContext) {
+        let root = long_fixture("tip-reload", 250);
+        let (view, mut cx) = open(cx, &root);
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::Filter));
+        let button = cx.debug_bounds("tip-got-it").expect("the tip's button");
+        cx.simulate_click(button.center(), Default::default());
+        settle(&view, &mut cx);
+        assert!(tips_json(&cx).contains("\"filter\""));
+
+        cx.update(|_, cx| crate::tips::reload_for_tests(cx));
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "the retired set survives a relaunch");
+
+        // The relaunch cleared the cooldown, so a never-shown tip can still appear.
+        for query in ["zzz", "qqq"] {
+            cx.simulate_keystrokes("/");
+            settle(&view, &mut cx);
+            cx.simulate_input(query);
+            settle(&view, &mut cx);
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+        assert_eq!(tip(&view, &cx), Some(TipId::Search));
+    }
+
+    #[gpui::test]
+    fn tip_filter_dropped_by_navigation_counts(cx: &mut TestAppContext) {
+        let root = fixture("tip-filter-nav");
+        let (view, mut cx) = open(cx, &root);
+        for _ in 0..2 {
+            cx.simulate_keystrokes("/");
+            settle(&view, &mut cx);
+            cx.simulate_input("zzz");
+            settle(&view, &mut cx);
+            cx.simulate_keystrokes("cmd-up");
+            settle(&view, &mut cx);
+        }
+        assert_eq!(tip(&view, &cx), Some(TipId::Search), "a filter dropped by navigation ends the session too");
+    }
+
+    #[gpui::test]
+    fn tip_closes_when_a_tab_is_clicked(cx: &mut TestAppContext) {
+        let root = long_fixture("tip-tab-click", 250);
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-t");
+        settle(&view, &mut cx);
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::Filter));
+
+        let bounds = cx.debug_bounds("tab-0").expect("other tab on screen");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "switching tabs by click closes the tip");
+        assert_eq!(view.read_with(&cx, |_, cx| crate::tips::owner(cx)), None, "and frees it app-wide");
+    }
+
+    #[gpui::test]
+    fn tip_sits_above_the_bar_at_the_right_edge(cx: &mut TestAppContext) {
+        let root = long_fixture("tip-layout", 250);
+        let (view, mut cx) = open(cx, &root);
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        let tip = cx.debug_bounds("tip").expect("the tip is laid out");
+        let viewport = cx.update(|window, _| window.viewport_size());
+        assert_eq!(tip.right(), viewport.width - px(12.), "12 px from the right edge");
+        assert_eq!(tip.bottom(), viewport.height - px(crate::bottom_bar::HEIGHT + 8.), "8 px above the bottom bar");
+        assert!(tip.size.width >= px(280.) && tip.size.width <= px(440.), "{:?}", tip.size);
     }
 }
