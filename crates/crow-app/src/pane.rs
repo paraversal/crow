@@ -41,7 +41,7 @@ use crate::icons::{Glyph, glyph};
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, drop_target, effect_tint, format_time, highlight_text, icon,
+    active_selection, color, color_alpha, content_opacity, drop_target, effect_tint, format_time, highlight_text, icon,
     inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
@@ -1422,6 +1422,10 @@ impl Pane {
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
                 let tint = effect_tint(look, theme);
+                let dim = content_opacity(
+                    entry.hidden,
+                    self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
+                );
                 let reveal = folder.disclosure_opacity(ix, now);
                 let turn = folder.chevron_turn(&entry.path, now).unwrap_or(if expanded { 1.0 } else { 0.0 });
                 let row = div()
@@ -1559,7 +1563,7 @@ impl Pane {
                             })
                             .child(row_icon(&entry, look, theme))
                             .child(
-                                div().relative().left(px(look.dx)).child(
+                                div().relative().left(px(look.dx)).opacity(dim).child(
                                     match self.renaming.as_ref().filter(|r| r.path == entry.path) {
                                         Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
                                         None => match ranges {
@@ -1589,6 +1593,7 @@ impl Pane {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .text_color(muted)
+                            .opacity(dim)
                             .when(align == Align::Right, |cell| cell.text_right())
                             .child(text)
                     },
@@ -1727,6 +1732,10 @@ impl Pane {
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
                 let tint = effect_tint(look, theme);
+                let dim = content_opacity(
+                    entry.hidden,
+                    self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
+                );
                 div()
                     .id(ix)
                     .role(Role::ListBoxOption)
@@ -1820,7 +1829,7 @@ impl Pane {
                     }))
                     .child(row_icon(&entry, look, theme))
                     .child(
-                        div().relative().left(px(look.dx)).flex_1().child(
+                        div().relative().left(px(look.dx)).flex_1().opacity(dim).child(
                             match self.renaming.as_ref().filter(|r| r.path == entry.path) {
                                 Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
                                 None => match ranges {
@@ -2067,7 +2076,9 @@ fn row_icon(entry: &Entry, look: Look, theme: &Theme) -> Div {
         .size(px(16.))
         .flex_none()
         .child(
-            div().opacity(1.0 - look.trash).children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
+            div()
+                .opacity((1.0 - look.trash) * content_opacity(entry.hidden, false))
+                .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
         )
         .when(look.trash > 0.0, |slot| {
             slot.child(
@@ -2092,7 +2103,15 @@ fn ghost_row(entry: &Entry, look: Look, theme: &Theme, font_size: Pixels) -> Div
         .px(px(CELL_PADDING))
         .opacity(look.opacity)
         .child(row_icon(entry, look, theme))
-        .child(div().relative().left(px(look.dx)).text_size(font_size).whitespace_nowrap().child(entry.name.clone()))
+        .child(
+            div()
+                .relative()
+                .left(px(look.dx))
+                .opacity(content_opacity(entry.hidden, false))
+                .text_size(font_size)
+                .whitespace_nowrap()
+                .child(entry.name.clone()),
+        )
 }
 
 /// Ghost rows for effects whose entry left the listing before the swallow ended.

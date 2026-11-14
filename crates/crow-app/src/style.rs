@@ -60,6 +60,16 @@ pub fn drop_target(theme: &Theme) -> Rgba {
     color_alpha(theme.role("accent"), 0x40)
 }
 
+/// How much of its contrast a hidden item's icon and text keep (Finder dims them;
+/// the selection fill behind them stays full).
+pub const HIDDEN_DIM: f32 = 0.5;
+
+/// The opacity of a row's icon and text: hidden items are dimmed, except while
+/// being renamed, so the field reads at full contrast.
+pub fn content_opacity(hidden: bool, renaming: bool) -> f32 {
+    if hidden && !renaming { HIDDEN_DIM } else { 1.0 }
+}
+
 /// The fill a feedback effect puts over a row: accent for a receive, error for a
 /// refuse. `None` when the effect has no tint at this moment.
 pub fn effect_tint(look: crow_core::motion::Look, theme: &Theme) -> Option<Rgba> {
@@ -284,6 +294,13 @@ fn clamped(text: &str, range: std::ops::Range<usize>) -> std::ops::Range<usize> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_items_are_dimmed_except_while_renamed() {
+        assert_eq!(content_opacity(true, false), HIDDEN_DIM, "a hidden item is dimmed, like Finder");
+        assert_eq!(content_opacity(true, true), 1.0, "its rename field reads at full contrast");
+        assert_eq!(content_opacity(false, false), 1.0);
+    }
 
     #[test]
     fn map_range_through_truncation() {
