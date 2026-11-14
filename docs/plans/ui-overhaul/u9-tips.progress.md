@@ -1,5 +1,5 @@
 # u9-tips progress
-Branch: `ui-u9-tips` · PR: none · Last updated: 2026-11-14 · State: Ready for critique
+Branch: `ui-u9-tips` · PR: none · Last updated: 2026-11-14 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -23,6 +23,7 @@ Branch: `ui-u9-tips` · PR: none · Last updated: 2026-11-14 · State: Ready for
 - Q8 (asked 2026-11-14): `always` shows tips; only `off` suppresses → **yes** (user).
 - Q9 (asked 2026-11-14): no new key; using the taught key or changing folder closes it → **yes** (user).
 - Q10 (asked 2026-11-14): ⇧⌘G is the palette now, so the trigger is a **path-mode** palette confirmation landing on a folder in `Ui.palette_recents` → **yes** (user). Copy unchanged.
+- Q11 (critique, 2026-11-14): keep the ⌘F tip even though U4's zero-match footer already offers ⌘F → **keep** (user).
 
 ## Decisions
 - Offers that follow a navigation are deferred (`cx.defer_in`): GPUI delivers `cx.emit` as an effect after the current update, so a synchronous offer was closed by the navigation's own `Entered` right after it appeared (backtrace: `apply_emit_effect` → `on_pane_event` → `close_tip`). Affects the GoTo tip and the FilterEnded → Search tip.
@@ -34,10 +35,6 @@ Branch: `ui-u9-tips` · PR: none · Last updated: 2026-11-14 · State: Ready for
 - `file-list` gained a `debug_selector` so the scroll tests can find it (`column-0` already had one).
 - The plan's Finish says push and open the PR; the execute-plan skill says commit locally and stop at "Ready for critique" (the critic opens the PR). Followed the skill.
 - Q1–Q5, Q7–Q10: every recommended answer accepted by the user, 2026-11-14.
-- `TipBook::on_screen` stores `Option<TipId>` (not a bool) so `tips::key_used` can close only the tip whose key ran. The plan's sketch had a bool; the behavior needs the id.
-- `tracing` added to `crow-core` (`crates/crow-core/Cargo.toml:16`); the plan's state-file spec names `tracing::warn!` and the crate is already a workspace dependency.
-- Q6 settled by code, not by the user: U1's `Keycap` has `text_role()` (`crates/crow-app/src/chrome.rs:56-60`), so the tip uses `KeycapWeight::Key` with `.text_role("accent")` instead of a second keycap style. Recorded here per the plan's Q6 fallback.
-- Bottom bar height: U5 settled 30 px (`crates/crow-app/src/bottom_bar.rs:733`) but exported no constant. Add `bottom_bar::HEIGHT` and use it for `render` and the tip's `bottom` offset (the plan's `BOTTOM_BAR_HEIGHT`).
 - Plan line numbers are stale (merged `window.rs` is 7529 lines). Current locations are recorded in the Log/Notes as items start.
 
 ## Bench (100k fixture, same machine, release)
@@ -66,3 +63,19 @@ The clean comparison is branch 9.50 ms vs `main` 9.33 ms p99: 0.17 ms, within ru
 
 ## Next
 Ready for critique. The critic should look at: the deferred offers (`cx.defer_in`) around navigation, the render-time tip guard, and the `enter` hook for `FilterEnded`. Hand checks (tips, VoiceOver) still need a human.
+
+## Critique
+Critic session: 2026-11-14 · Base: main @ 9e109cb · Head reviewed: 79a7b74
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | Clicking another tab in the tab bar left the tip up. The plan closes it when "the active tab changes"; only ⌘T, close and cycle did (new test `tip_closes_when_a_tab_is_clicked` failed before the fix). | `crates/crow-app/src/window.rs` tab `on_click` | plan | fix | fixed (84232fe) |
+| C2 | Decisions listed four entries twice (on_screen, tracing, Q6, bottom bar height). | this file | record | fix | fixed (this commit) |
+| C3 | The ⌘F tip repeats U4's zero-match footer button "Search subfolders too ⌘F", which the user has seen on both failed filters before the tip fires. | `pane/pane_filter.rs:194-207` | UX | ask | Q11 → keep it (user) |
+| C4 | `TipId::all()` is unused; `ZeroMatchStreak::new()` duplicates `Default`; `TipBook` has both `is_on_screen()` and `on_screen()`; `offer_tip` takes an unused `_window`. All in the plan's sketch. | `crow-core/src/tips.rs`, `window.rs` `offer_tip` | code sense | note | left (plan's API, harmless) |
+| C5 | The tip floats over the list's bottom-right rows in list view without the preview, right while the user is scrolling there. The position is the plan's. | `tips.rs` `render_tip` | UI | note | left; hand check |
+| C6 | `show_palette` now returns early on `search_blocked()` before `key_used`; same condition as `open_palette`'s own guard, so no behavior change. | `window.rs` `show_palette` | code | note | checked, fine |
+
+Checks re-run: fmt ✓ · clippy ✓ · tests ✓ (276 app, 79 core) · bench (100k, interleaved, same machine): branch p99 8.66 · 8.68 ms, warm first paint 11 · 12 ms; `main` p99 8.67 ms, first paint 10 ms. Within noise. A first `main` run stalled (one 241 s frame, p99 34.9 ms) and was dropped; the 33 ms `main` runs in the Bench table above are likely the same stall, not machine load
+Looked at in the app: not driven. Desktop-control tools weren't in this session. The branch bundle built and launched on a 300-file folder with a fresh `CROW_STATE_DIR`, but nobody looked at it. Position and size are covered by `tip_sits_above_the_bar_at_the_right_edge`. Look, themes, narrow window and VoiceOver remain hand checks.
+Verdict: Better. The tips are small, appear once, honor `hints = "off"` and stay out of the way of overlays. The logic sits in `crow-core` with unit tests and the triggers are well covered. The one gap (tab click) is fixed.
