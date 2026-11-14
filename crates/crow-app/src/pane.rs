@@ -41,7 +41,7 @@ use crate::icons::{Glyph, glyph};
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, content_opacity, drop_target, effect_tint, format_time, highlight_text, icon,
+    active_selection, color, color_alpha, content_opacity, effect_tint, format_time, highlight_text, icon,
     inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
@@ -229,13 +229,15 @@ struct Filtering {
     _subscription: Subscription,
 }
 
+/// Where a drop would land, drawn as an outline. Only set when the drop would act.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DropTarget {
     pub folder: PathBuf,
-    /// The folder's own row.
-    pub header: usize,
-    /// One past the last row of its subtree.
-    pub end: usize,
+    /// List view: the column, always 0. Column view: the column under the pointer.
+    pub column: usize,
+    /// The folder's row and its expanded subtree; `None` for the folder the list or
+    /// column shows, outlined as a whole.
+    pub rows: Option<std::ops::Range<usize>>,
 }
 
 pub struct Pane {
@@ -264,9 +266,9 @@ pub struct Pane {
     applied_view: Option<(u64, PathBuf)>,
     /// List view: the uniform list's viewport, captured at prepaint.
     list_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// The list row a drag would drop on, drawn from state rather than drag-over styles.
+    /// The list row under a drag, drawn from state rather than drag-over styles.
     drop_row: Option<usize>,
-    /// The folder a list-view drop would land in, and the rows it covers.
+    /// Where a drop would land in either view, and the rows it covers.
     drop_target: Option<DropTarget>,
     /// Column view: each column's list viewport, captured at prepaint.
     column_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
@@ -1427,18 +1429,55 @@ impl Pane {
         self.update_drag_row(position, cx);
     }
 
-    /// Where a drop on row `ix` lands: the folder row itself, or the open folder
-    /// that lists a file row. `None` means the root folder (no highlight).
-    fn drop_target_for_row(&self, ix: usize, cx: &gpui::App) -> Option<DropTarget> {
-        let folder = self.folders.first()?.read(cx);
-        let header = folder.drop_header(ix)?;
-        let (entry, _) = folder.row(header)?;
-        Some(DropTarget { folder: entry.path.clone(), header, end: folder.subtree_end(header) })
+    /// Where a drop at `pointer` lands, if dropping the dragged items there would act:
+    /// a folder row (with its expanded subtree), the expanded folder that lists a nested
+    /// row, or else the folder the list or column shows.
+    fn drop_target_at(&self, pointer: Point<Pixels>, cx: &gpui::App) -> Option<DropTarget> {
+        let target = match self.mode {
+            ViewMode::List => {
+                let bounds = self.list_bounds.get()?;
+                if !bounds.contains(&pointer) {
+                    return None;
+                }
+                let folder = self.folders.first()?.read(cx);
+                match self.drag_row_at(cx, pointer).and_then(|ix| folder.drop_header(ix)) {
+                    Some(header) => DropTarget {
+                        folder: folder.row(header)?.0.path.clone(),
+                        column: 0,
+                        rows: Some(header..folder.subtree_end(header)),
+                    },
+                    None => DropTarget { folder: folder.dir().to_path_buf(), column: 0, rows: None },
+                }
+            }
+            ViewMode::Columns => {
+                let column = self
+                    .column_bounds
+                    .borrow()
+                    .iter()
+                    .find(|(_, bounds)| bounds.contains(&pointer))
+                    .map(|(k, _)| *k)?;
+                let folder = self.folders.get(column)?.read(cx);
+                let row = self
+                    .column_row_at(cx, pointer)
+                    .map(|(_, ix)| ix)
+                    .filter(|ix| folder.row(*ix).is_some_and(|(entry, _)| entry.is_dir && !entry.is_package()));
+                match row {
+                    Some(ix) => DropTarget { folder: folder.row(ix)?.0.path.clone(), column, rows: Some(ix..ix + 1) },
+                    None => DropTarget { folder: folder.dir().to_path_buf(), column, rows: None },
+                }
+            }
+        };
+        let dragged: Vec<PathBuf> = if let Some(selection) = cx.active_drag_value::<DraggedSelection>() {
+            selection.entries.iter().map(|(path, _)| path.clone()).collect()
+        } else {
+            cx.active_drag_value::<ExternalPaths>()?.paths().to_vec()
+        };
+        crate::operations::drop_would_act(&dragged, &target.folder).then_some(target)
     }
 
     fn update_drag_row(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let row = if self.mode == ViewMode::List { self.drag_row_at(cx, position) } else { None };
-        let target = row.and_then(|ix| self.drop_target_for_row(ix, cx));
+        let target = self.drop_target_at(position, cx);
         let column = if self.mode == ViewMode::Columns { self.column_row_at(cx, position) } else { None };
         if row != self.drop_row || target != self.drop_target || column != self.drop_column {
             self.drop_row = row;
@@ -1530,7 +1569,6 @@ impl Pane {
         let active = self.focus.is_focused(window) || self.filtering.is_some();
         let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
-        let drop_bg = drop_target(theme);
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
         let widths = self.table_widths();
         // Columns hidden for a narrow pane have width 0; the last shown one stretches.
@@ -1654,9 +1692,6 @@ impl Pane {
                                 cx.stop_propagation();
                             },
                         ))
-                    })
-                    .when(self.drop_target.as_ref().is_some_and(|t| t.header == ix && t.end == ix + 1), |row| {
-                        row.bg(drop_bg)
                     })
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1857,7 +1892,6 @@ impl Pane {
         let active = k == self.focused && (self.focus.is_focused(window) || self.filtering.is_some());
         let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
-        let drop_bg = drop_target(theme);
         let subtle = color(theme.role("fg-subtle"));
         let Some(folder) = self.folders.get(k).map(|f| f.read(cx)) else { return Vec::new() };
         let width = column_width(folder.entries());
@@ -1968,7 +2002,10 @@ impl Pane {
                             },
                         ))
                     })
-                    .when(navigable && self.drop_column == Some((k, ix)), |row| row.bg(drop_bg))
+                    .when(
+                        self.drop_target.as_ref().is_some_and(|t| t.column == k && t.rows == Some(ix..ix + 1)),
+                        |row| row.child(drop_outline(theme).inset_0()),
+                    )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -2146,6 +2183,10 @@ impl Pane {
                         .border_r_1()
                         .border_color(border)
                         .when(k == focused, |c| c.bg(color_alpha(theme.role("surface"), 0x40)))
+                        .relative()
+                        .when(self.drop_target.as_ref().is_some_and(|t| t.column == k && t.rows.is_none()), |c| {
+                            c.child(drop_outline(&theme).left(px(4.)).right(px(4.)).top(px(2.)).bottom(px(2.)))
+                        })
                         .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
                             this.drop_files(k, paths, window, cx)
                         }))
@@ -2229,6 +2270,17 @@ fn chevron_glyph(turn: f32, chevron: gpui::Rgba) -> impl IntoElement {
 /// adds to the raw offset even past the ends (a short list cannot scroll at
 /// all); `uniform_list` clamps it only when it lays out, so overlays drawn over
 /// the rows (the glide fill, ghost rows) clamp it the same way or they drift.
+/// The mark for a drop target: an accent outline that leaves the selection fill
+/// underneath visible. Absolute, so it never shifts the rows; callers place it.
+fn drop_outline(theme: &Theme) -> gpui::Div {
+    div()
+        .absolute()
+        .rounded_md()
+        .border_1()
+        .border_color(color(theme.role("accent")))
+        .debug_selector(|| "drop-outline".into())
+}
+
 fn shown_offset(scroll: &UniformListScrollHandle) -> f32 {
     let state = scroll.0.borrow();
     let max = f32::from(state.base_handle.max_offset().y).max(0.0);
@@ -2356,15 +2408,12 @@ impl Render for Pane {
         // A drag inside the list highlights the row under the pointer from this state; the
         // style-based drag-over highlight flickers on the platform drag path used when a
         // drag leaves the window and comes back.
-        let (drop_row, drop_target) = if cx.has_active_drag() && self.mode == ViewMode::List {
-            let row = self.drag_row_at(cx, window.mouse_position());
-            let target = row.and_then(|ix| self.drop_target_for_row(ix, cx));
-            (row, target)
+        self.drop_row = if cx.has_active_drag() && self.mode == ViewMode::List {
+            self.drag_row_at(cx, window.mouse_position())
         } else {
-            (None, None)
+            None
         };
-        self.drop_row = drop_row;
-        self.drop_target = drop_target;
+        self.drop_target = if cx.has_active_drag() { self.drop_target_at(window.mouse_position(), cx) } else { None };
         self.drop_column = if cx.has_active_drag() && self.mode == ViewMode::Columns {
             self.column_row_at(cx, window.mouse_position())
         } else {
@@ -2470,22 +2519,17 @@ impl Render for Pane {
                                 } else {
                                     None
                                 };
-                                let drop_outline =
-                                    self.drop_target.as_ref().filter(|t| t.end > t.header + 1).map(|t| {
-                                        let offset = shown_offset(&scroll);
-                                        let top = t.header as f32 * ROW_HEIGHT + offset + LIST_TOP_INSET;
-                                        let height = (t.end - t.header) as f32 * ROW_HEIGHT;
-                                        div()
-                                            .absolute()
-                                            .left(px(8.))
-                                            .right(px(8.))
-                                            .top(px(top))
-                                            .h(px(height))
-                                            .rounded_md()
-                                            .border_1()
-                                            .border_color(color(theme.role("accent")))
-                                            .debug_selector(|| "drop-outline".into())
-                                    });
+                                let drop_outline = self.drop_target.as_ref().map(|t| {
+                                    let outline = drop_outline(&theme).left(px(8.)).right(px(8.));
+                                    match &t.rows {
+                                        Some(rows) => {
+                                            let offset = shown_offset(&scroll);
+                                            let top = rows.start as f32 * ROW_HEIGHT + offset + LIST_TOP_INSET;
+                                            outline.top(px(top)).h(px(rows.len() as f32 * ROW_HEIGHT))
+                                        }
+                                        None => outline.top(px(LIST_TOP_INSET / 2.)).bottom(px(LIST_TOP_INSET / 2.)),
+                                    }
+                                });
                                 div()
                                     .relative()
                                     .flex_1()

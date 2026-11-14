@@ -8240,13 +8240,112 @@ mod tests {
 
         assert_eq!(
             hover(&mut cx, "row-deep.txt"),
-            Some(crate::pane::DropTarget { folder: root.join("alpha/inner"), header: at("inner"), end: at("zz.txt") }),
+            Some(crate::pane::DropTarget {
+                folder: root.join("alpha/inner"),
+                column: 0,
+                rows: Some(at("inner")..at("zz.txt"))
+            }),
             "a file two levels down targets its own folder, not the outer one"
         );
         assert_eq!(
             hover(&mut cx, "row-zz.txt"),
-            Some(crate::pane::DropTarget { folder: root.join("alpha"), header: at("alpha"), end: at("zz.txt") + 1 }),
+            Some(crate::pane::DropTarget {
+                folder: root.join("alpha"),
+                column: 0,
+                rows: Some(at("alpha")..at("zz.txt") + 1)
+            }),
             "a file after a nested block targets the outer folder, which spans the nested block"
+        );
+    }
+
+    /// Hover `paths` from another app over the element `selector` (plus `nudge`), draw,
+    /// and return the pane's drop target and whether an outline was drawn.
+    fn hover_target(
+        cx: &mut VisualTestContext,
+        pane: &Entity<crate::pane::Pane>,
+        selector: &'static str,
+        nudge: gpui::Point<gpui::Pixels>,
+        paths: Vec<PathBuf>,
+    ) -> (Option<crate::pane::DropTarget>, bool) {
+        let position = cx.debug_bounds(selector).expect("hover element").center() + nudge;
+        cx.simulate_event(gpui::FileDropEvent::Entered { position, paths: gpui::ExternalPaths(paths.into()) });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let target = pane.read_with(cx, |pane, _| pane.drop_target().cloned());
+        let outlined = cx.debug_bounds("drop-outline").is_some();
+        cx.simulate_event(gpui::FileDropEvent::Exited);
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        (target, outlined)
+    }
+
+    #[gpui::test]
+    fn a_drop_into_the_shown_folder_outlines_the_list(cx: &mut TestAppContext) {
+        let root = fixture("drop-root-list");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "off");
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        let pane = pane(&view, &cx);
+        let none = gpui::point(px(0.), px(0.));
+        let below = gpui::point(px(0.), px(120.));
+        let shown = Some(crate::pane::DropTarget { folder: root.clone(), column: 0, rows: None });
+
+        assert_eq!(
+            hover_target(&mut cx, &pane, "row-notes.txt", none, vec![root.join("alpha/inner")]),
+            (shown.clone(), true),
+            "a nested item over a top-level file goes to the shown folder, outlined as a whole"
+        );
+        assert_eq!(
+            hover_target(&mut cx, &pane, "row-notes.txt", below, vec![root.join("alpha/inner")]),
+            (shown, true),
+            "so does the empty space below the rows"
+        );
+        assert_eq!(
+            hover_target(&mut cx, &pane, "row-notes.txt", below, vec![root.join("notes.txt")]),
+            (None, false),
+            "an item already in the shown folder marks nothing"
+        );
+        assert_eq!(
+            hover_target(&mut cx, &pane, "row-inner", none, vec![root.join("alpha/inner")]),
+            (None, false),
+            "nor does a folder over itself"
+        );
+        assert_eq!(
+            hover_target(&mut cx, &pane, "row-beta", none, vec![root.join("alpha/inner")]),
+            (Some(crate::pane::DropTarget { folder: root.join("beta"), column: 0, rows: Some(2..3) }), true),
+            "a collapsed folder is outlined like any other target"
+        );
+    }
+
+    #[gpui::test]
+    fn column_view_outlines_the_column_or_the_folder_row(cx: &mut TestAppContext) {
+        let root = fixture("drop-root-columns");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let pane = pane(&view, &cx);
+        let none = gpui::point(px(0.), px(0.));
+
+        assert_eq!(
+            hover_target(&mut cx, &pane, "column-0-row-notes.txt", none, vec![root.join("alpha/inner")]),
+            (Some(crate::pane::DropTarget { folder: root.clone(), column: 0, rows: None }), true),
+            "a file row in a column drops into that column's folder"
+        );
+        assert_eq!(
+            hover_target(&mut cx, &pane, "column-0-row-beta", none, vec![root.join("alpha/inner")]),
+            (Some(crate::pane::DropTarget { folder: root.join("beta"), column: 0, rows: Some(1..2) }), true),
+            "a folder row is the target itself"
+        );
+        assert_eq!(
+            hover_target(&mut cx, &pane, "column-0-row-notes.txt", none, vec![root.join("notes.txt")]),
+            (None, false),
+            "an item already in the column's folder marks nothing"
         );
     }
 
@@ -8273,7 +8372,11 @@ mod tests {
         });
         assert_eq!(
             pane.read_with(&cx, |pane, _| pane.drop_target().cloned()),
-            Some(crate::pane::DropTarget { folder: root.join("alpha"), header: alpha_row, end: alpha_row + 2 }),
+            Some(crate::pane::DropTarget {
+                folder: root.join("alpha"),
+                column: 0,
+                rows: Some(alpha_row..alpha_row + 2)
+            }),
             "a file row inside the expanded folder targets that folder"
         );
         assert!(cx.debug_bounds("drop-outline").is_some(), "the whole folder block is outlined");
