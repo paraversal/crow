@@ -73,7 +73,6 @@ pub struct CrowWindow {
     /// Benchmark runs leave Recent alone, so its saves don't land in the measurement.
     bench: bool,
     show_hidden: bool,
-    /// The Go to Folder sheet, while open.
     /// A sheet asking before an operation runs (conflicts, permanent delete).
     sheet: Option<Sheet>,
     show_activity: bool,

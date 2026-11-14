@@ -1,6 +1,6 @@
 //! A single-line text field, adapted from GPUI's `examples/input.rs`
 //! (Zed Industries, Apache-2.0). Changes: theme colors, accessibility,
-//! and Return/Escape/Tab reported as events. Used by Go to Folder; rename (M4) reuses it.
+//! and Return/Escape/Tab reported as events. Used by the palette, filter, search and rename fields.
 
 use std::ops::Range;
 use std::time::{Duration, Instant};
