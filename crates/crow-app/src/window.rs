@@ -736,6 +736,7 @@ impl CrowWindow {
                         if this.search.is_some() {
                             this.close_search(window, cx);
                         }
+                        this.close_tip(cx);
                         this.tabs.activate(i);
                         this.focus_center(window, cx);
                         cx.notify();
@@ -8005,6 +8006,23 @@ mod tests {
             settle(&view, &mut cx);
         }
         assert_eq!(tip(&view, &cx), Some(TipId::Search), "a filter dropped by navigation ends the session too");
+    }
+
+    #[gpui::test]
+    fn tip_closes_when_a_tab_is_clicked(cx: &mut TestAppContext) {
+        let root = long_fixture("tip-tab-click", 250);
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-t");
+        settle(&view, &mut cx);
+        scroll(&mut cx, "file-list", 60.);
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), Some(TipId::Filter));
+
+        let bounds = cx.debug_bounds("tab-0").expect("other tab on screen");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(tip(&view, &cx), None, "switching tabs by click closes the tip");
+        assert_eq!(view.read_with(&cx, |_, cx| crate::tips::owner(cx)), None, "and frees it app-wide");
     }
 
     #[gpui::test]
