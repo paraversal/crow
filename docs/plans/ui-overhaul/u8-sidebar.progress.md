@@ -4,7 +4,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| I1 Row model and name cache | todo | |
+| I1 Row model and name cache | done | `RowLook`/`BarTone`, `looks`, `looks_for_test`, per-path name cache; `sidebar_looks_follow_rows`; no visible change intended |
 | I2 Twin hints | todo | |
 | I3 One fill per meaning | todo | |
 | I4 Disk row | todo | |
@@ -51,5 +51,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 ## Log
 - 2026-11-14: read AGENTS.md, the plan, the ui-overhaul index, `sidebar.rs`, `style.rs`, `ui.rs`, `pane.rs`, `window.rs` (focus, events, tests), `crow-core/sidebar.rs`, `crow-macos/names.rs`, `volumes.rs`. Asked Q1–Q13; all recommended answers chosen. Branch created from `main` (`a3da329`).
 
+- 2026-11-14: I1 done. `RowLook` reproduces today's fills/bar; name cache keyed by path, pruned when the row set changes. `cargo fmt --check`, clippy, workspace tests green. Not hand-compared against a screenshot; the element tree is unchanged apart from reading the look.
+
 ## Next
-I1: add `RowLook`/`BarTone`, `looks`, `looks_for_test`, and the per-path display-name cache; keep today's rendering; add `sidebar_looks_follow_rows`.
+I2: `crow_core::twin_hints` + unit tests; `looks` fills hints/spoken; render the hint after the name; window tests for twins.

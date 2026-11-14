@@ -3053,6 +3053,23 @@ mod tests {
         cx.read(Sidebar::paths)
     }
 
+    /// What each selectable sidebar row shows, as the window renders it.
+    fn sidebar_looks(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> Vec<crate::sidebar::RowLook> {
+        let sidebar = view.read_with(cx, |w, _| w.sidebar.clone());
+        cx.update(|window, cx| sidebar.read_with(cx, |s, cx| s.looks_for_test(window, cx)))
+    }
+
+    #[gpui::test]
+    fn sidebar_looks_follow_rows(cx: &mut TestAppContext) {
+        let root = fixture("looks");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        let looks = sidebar_looks(&view, &mut cx);
+        let labels: Vec<&str> = looks.iter().map(|look| look.label.as_str()).collect();
+        assert_eq!(labels, ["alpha", "beta"]);
+        assert!(looks.iter().all(|look| look.spoken == look.label), "no hint or mark yet: {looks:?}");
+    }
+
     #[gpui::test]
     fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) {
         let root = fixture("contexts");
