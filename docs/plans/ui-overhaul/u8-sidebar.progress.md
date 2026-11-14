@@ -70,6 +70,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: Ready 
 - 2026-11-14: I9 done. `PreviousGroup`/`NextGroup` on `alt-up`/`alt-down` in the `Sidebar` context, skipping empty groups; the jump emits `Show` too. Test with two favorite groups + Recent.
 - 2026-11-14: Finish docs. README sidebar paragraph now mentions twin parents/alias, Vim mark letters, Locations free space + bar, group jumps and the center following the cursor. `docs/testing.md`: automated summary and five hand rows (twins, follows cursor, fills, disk row, mark letters) plus a group-jump row; the Locations row now says "with free space and a bar".
 - 2026-11-14: Bench (Q9), once: `cold_first_paint=149ms cold_load=802ms frames=599 avg=8.35ms p50=8.33ms p95=8.54ms p99=8.61ms max=16.47ms warm_first_paint=9ms warm_load=262ms`. No comparison run; the pane rows did not change.
+- 2026-11-14: Q6 also covers undo and redo (both change free space): `operations::undo`/`redo` success now refresh volumes too.
 - 2026-11-14: `./scripts/bundle.sh` builds `target/bundle/Crow.app`. Hand checks not run (need a human at the screen); listed above.
 
 ## Next

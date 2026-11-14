@@ -234,6 +234,7 @@ pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf
                     let restored = reversed.results();
                     ops.redo_stack.push(reversed);
                     message(label, false, cx);
+                    crate::ui::refresh_volumes(cx);
                     on_done(restored, cx);
                 }
                 Err(e) => message(e.to_string(), true, cx),
@@ -266,6 +267,7 @@ pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static
                     });
                     ops.undo_stack.push(ops.log.len() - 1);
                     message(format!("Redo {label}"), false, cx);
+                    crate::ui::refresh_volumes(cx);
                     on_done(results, cx);
                 }
                 Err(e) => message(e.to_string(), true, cx),
