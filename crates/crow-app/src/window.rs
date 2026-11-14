@@ -83,6 +83,9 @@ pub struct CrowWindow {
     palette: Option<Palette>,
     /// Cmd-F, while its results replace the pane.
     search: Option<Entity<SearchView>>,
+    /// The folder a sidebar arrow walk is showing. Walking records no Recent visits
+    /// (they would re-rank Recent under the cursor); leaving the sidebar records this one.
+    walk_visit: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -298,6 +301,7 @@ impl CrowWindow {
             picker: None,
             palette: None,
             search: None,
+            walk_visit: None,
             _subscriptions: subscriptions,
         }
     }
@@ -410,6 +414,7 @@ impl CrowWindow {
     fn switch_focus(&mut self, _: &SwitchFocus, window: &mut Window, cx: &mut Context<Self>) {
         let sidebar = self.sidebar.read(cx).focus_handle(cx);
         if sidebar.is_focused(window) {
+            self.record_walk_visit(cx);
             self.focus_center(window, cx);
         } else {
             window.focus(&sidebar, cx);
@@ -1011,8 +1016,11 @@ impl CrowWindow {
                 if self.search.is_some() {
                     self.close_search(window, cx);
                 }
-                if !self.bench {
-                    ui::record_visit(dir, cx);
+                if self.walk_visit.as_ref() != Some(dir) {
+                    self.walk_visit = None;
+                    if !self.bench {
+                        ui::record_visit(dir, cx);
+                    }
                 }
                 let dir = dir.clone();
                 self.sidebar.update(cx, |s, cx| s.set_current(dir, cx));
@@ -1417,6 +1425,15 @@ impl CrowWindow {
 }
 
 impl CrowWindow {
+    /// Tab, Return, → or a click out of the sidebar: if an arrow walk left the pane on
+    /// its folder, that folder is a visit.
+    fn record_walk_visit(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.walk_visit.take() else { return };
+        if !self.bench && self.pane().read(cx).current_dir(cx) == dir {
+            ui::record_visit(&dir, cx);
+        }
+    }
+
     fn on_sidebar_event(&mut self, event: &SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             SidebarEvent::Show(dir) => {
@@ -1424,6 +1441,7 @@ impl CrowWindow {
                 if self.search.is_some() {
                     self.close_search(window, cx);
                 }
+                self.walk_visit = Some(dir.clone());
                 self.pane().update(cx, |pane, cx| pane.show_from_sidebar(dir, cx));
                 // close_search focuses the center; the cursor walk stays in the sidebar.
                 let sidebar = self.sidebar.read(cx).focus_handle(cx);
@@ -1436,6 +1454,7 @@ impl CrowWindow {
                     self.close_search(window, cx);
                 }
                 self.pane().update(cx, |pane, cx| pane.open_from_sidebar(dir, cx));
+                self.record_walk_visit(cx);
                 self.focus_center(window, cx);
             }
             SidebarEvent::Run(request) => self.run_request(request.clone(), window, cx),
@@ -3406,6 +3425,60 @@ mod tests {
         cx.simulate_keystrokes("alt-up");
         settle(&view, &mut cx);
         assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 0);
+    }
+
+    #[gpui::test]
+    fn walking_recent_keeps_the_cursor_on_the_shown_folder(cx: &mut TestAppContext) {
+        let root = fixture("recent-walk");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]).replace("show = false", "show = true"));
+        // beta ranks above alpha, which ranks above root: a visit to alpha would tie it with beta.
+        for d in ["alpha", "beta", "alpha", "beta", "beta"] {
+            pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.join(d), cx));
+            settle(&view, &mut cx);
+        }
+        assert_eq!(sidebar_paths(&cx), [root.join("beta"), root.join("alpha"), root.clone()]);
+        cx.simulate_keystrokes("tab");
+        for (step, want) in [root.join("alpha"), root.clone()].into_iter().enumerate() {
+            cx.simulate_keystrokes("down");
+            settle(&view, &mut cx);
+            assert_eq!(dir(&view, &cx), want);
+            let looks = sidebar_looks(&view, &mut cx);
+            assert!(
+                looks[step + 1].ring && looks[step + 1].current,
+                "Recent kept its order under the cursor: {looks:?}"
+            );
+        }
+        assert_eq!(
+            sidebar_paths(&cx),
+            [root.join("beta"), root.join("alpha"), root.clone()],
+            "the walk re-ranked nothing"
+        );
+    }
+
+    #[gpui::test]
+    fn a_sidebar_walk_counts_only_the_folder_you_leave_on(cx: &mut TestAppContext) {
+        let root = fixture("walk-visits");
+        std::fs::create_dir_all(root.join("gamma")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        write_config(
+            &view,
+            &mut cx,
+            "sidebar.toml",
+            &favorites_toml(&[&root.join("alpha"), &root.join("beta"), &root.join("gamma")]),
+        );
+        let visited = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.global::<Ui>().palette_recents.clone());
+        cx.simulate_keystrokes("tab down down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("gamma"));
+        let during = visited(&mut cx);
+        assert!(!during.contains(&root.join("beta")) && !during.contains(&root.join("gamma")), "{during:?}");
+
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        let after = visited(&mut cx);
+        assert!(after.contains(&root.join("gamma")), "leaving the sidebar counts gamma: {after:?}");
+        assert!(!after.contains(&root.join("beta")), "beta was only passed: {after:?}");
     }
 
     #[gpui::test]
