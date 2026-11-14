@@ -3232,6 +3232,32 @@ mod tests {
     }
 
     #[gpui::test]
+    fn symlinked_twin_says_alias(cx: &mut TestAppContext) {
+        let root = fixture("alias");
+        std::fs::create_dir_all(root.join("real/git")).expect("create fixture");
+        std::fs::create_dir_all(root.join("link")).expect("create fixture");
+        std::os::unix::fs::symlink(root.join("real/git"), root.join("link/git")).expect("create symlink");
+        let (view, mut cx) = open(cx, &root);
+        write_config(
+            &view,
+            &mut cx,
+            "sidebar.toml",
+            &favorites_toml(&[&root.join("real/git"), &root.join("link/git")]),
+        );
+        for _ in 0..400 {
+            cx.run_until_parked();
+            if cx.update(|_, cx| cx.global::<Ui>().aliases.contains(&root.join("link/git"))) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let looks = sidebar_looks(&view, &mut cx);
+        assert_eq!(looks[0].hint.as_deref(), Some("real"));
+        assert_eq!(looks[1].hint.as_deref(), Some("link · alias"));
+        assert_eq!(looks[1].spoken, "git, in link, alias");
+    }
+
+    #[gpui::test]
     fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) {
         let root = fixture("contexts");
         std::fs::write(root.join("beta/b.txt"), "").expect("create fixture");

@@ -1,6 +1,7 @@
 //! App-wide UI state: settings, view settings, the sidebar's configuration,
 //! recent folders, volumes and the theme, reloaded live for every window.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -45,6 +46,8 @@ pub struct Ui {
     /// More of the same ranking for the command palette (favorites included).
     pub palette_recents: Vec<PathBuf>,
     pub volumes: Vec<crow_macos::Volume>,
+    /// Sidebar rows whose path is a symlink, filled by the Recent refresh.
+    pub aliases: HashSet<PathBuf>,
     pub config_dir: PathBuf,
     pub state_dir: PathBuf,
     pub home: PathBuf,
@@ -81,6 +84,7 @@ impl Ui {
             recent_list: Vec::new(),
             palette_recents: Vec::new(),
             volumes: Vec::new(),
+            aliases: HashSet::new(),
             config_dir,
             state_dir,
             home,
@@ -449,22 +453,31 @@ pub fn refresh_recent(cx: &mut App) {
     let count = sidebar_count.max(50);
     let favorites: Vec<PathBuf> = ui.favorites().into_iter().flat_map(|(_, f)| f).map(|f| f.path).collect();
     let file = ui.state_dir.join("recent.json");
+    let alias_candidates = favorites.clone();
     let task = cx.background_spawn(async move {
         if let Err(e) = recent.save(&file) {
             tracing::warn!("{}: {e}", file.display());
         }
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        recent.top(count, now, &zoxide, |p| p != Path::new("/") && p.is_dir())
+        let list = recent.top(count, now, &zoxide, |p| p != Path::new("/") && p.is_dir());
+        // A sidebar row can only be a symlink (Finder aliases are files, not folders).
+        let aliases: HashSet<PathBuf> = alias_candidates
+            .into_iter()
+            .chain(list.iter().cloned())
+            .filter(|path| path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()))
+            .collect();
+        (list, aliases)
     });
     cx.spawn(async move |cx| {
-        let list = task.await;
+        let (list, aliases) = task.await;
         cx.update(|cx| {
             let ui = cx.global_mut::<Ui>();
             let sidebar: Vec<PathBuf> =
                 list.iter().filter(|path| !favorites.contains(path)).take(sidebar_count).cloned().collect();
-            let changed = ui.recent_list != sidebar || ui.palette_recents != list;
+            let changed = ui.recent_list != sidebar || ui.palette_recents != list || ui.aliases != aliases;
             ui.recent_list = sidebar;
             ui.palette_recents = list;
+            ui.aliases = aliases;
             if changed {
                 cx.refresh_windows();
             }

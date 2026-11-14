@@ -61,5 +61,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 
 - 2026-11-14: I5 done. `right` is the mark letter only in the Vim layer; spoken label keeps "mark k" after any twin hint. Window test covers Finder layer, Vim layer, and `m a` moving the letter. Workspace green.
 
+- 2026-11-14: I6 done. The existing `refresh_recent` background task now also stats favorites + the Recent list and stores symlinks in `Ui.aliases` on the main thread; `load_sidebar` itself stays I/O-free (every sidebar reload calls `refresh_recent`). Alias text only on twins, as the plan says: "link · alias", spoken "git, in link, alias". Test creates a real symlink. Workspace green.
+
 ## Next
-I6: `Ui.aliases` from the `refresh_recent` background task; " · alias" on twin hints; window test with a symlink.
+I8: `SidebarEvent::Show`, `History::replace_current`, `Pane::show`, `right` binding; then I9 group jumps.

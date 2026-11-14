@@ -311,10 +311,11 @@ impl Sidebar {
                 input_rows.push(i);
             }
         }
-        let mut hint_by_row: Vec<Option<(String, String)>> = vec![None; selectable.len()];
+        let mut hint_by_row: Vec<Option<(String, String, bool)>> = vec![None; selectable.len()];
         for (n, hint) in crow_core::twin_hints(&inputs).into_iter().enumerate() {
             let Some(distance) = hint else { continue };
             let input = &inputs[n];
+            let alias = ui.aliases.contains(input.path);
             let (shown, name) = if distance == usize::MAX {
                 let parent = input.path.parent().unwrap_or(input.path);
                 let text = crow_core::abbreviate_home(parent, &ui.home);
@@ -329,7 +330,8 @@ impl Sidebar {
                 };
                 (shown, name)
             };
-            hint_by_row[input_rows[n]] = Some((shown, name));
+            let shown = if alias { format!("{shown} · alias") } else { shown };
+            hint_by_row[input_rows[n]] = Some((shown, name, alias));
         }
 
         let mut looks = Vec::with_capacity(selectable.len());
@@ -348,13 +350,14 @@ impl Sidebar {
                 _ => None,
             };
             let (hint, spoken) = match &hint_by_row[i] {
-                Some((shown, name)) => {
+                Some((shown, name, alias)) => {
+                    let alias = if *alias { ", alias" } else { "" };
                     let spoken = match row {
                         Row::Favorite(_, f) => match f.key {
-                            Some(k) if vim => format!("{label}, in {name}, mark {k}"),
-                            _ => format!("{label}, in {name}"),
+                            Some(k) if vim => format!("{label}, in {name}{alias}, mark {k}"),
+                            _ => format!("{label}, in {name}{alias}"),
                         },
-                        _ => format!("{label}, in {name}"),
+                        _ => format!("{label}, in {name}{alias}"),
                     };
                     (Some(shown.clone()), spoken)
                 }
