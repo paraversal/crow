@@ -1,5 +1,5 @@
 # u11-finish progress
-Branch: `ui-u11-finish` · PR: none (do not merge; user: "DONT merge back to main") · Last updated: 2026-11-14 · State: Ready for critique
+Branch: `ui-u11-finish` · PR: none (do not merge; user: "DONT merge back to main") · Last updated: 2026-11-14 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -238,3 +238,20 @@ Follow-ups: see the progress file's I9 list.
 ## Next
 Ready for critique. The critic should run the `critique` skill, fix what is clearly wrong, and open
 the PR titled "UI U11: Whole-window pass, docs and bench". Do not merge.
+
+## Critique
+Critic session: 2026-11-14 · Base: main @ `def19f0` · Head reviewed: `4592352`
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | The folder summary said "0 items" for a folder that can't be listed (and for a frame while it is loading), both as the focused folder and under the cursor. Reproduced with a `chmod 000` folder. | `pane.rs` `preview_parts`, `child_count` | code | fix | fixed (`1d2d62b`, test `unreadable_folder_summary_has_no_count`, fails without the fix) |
+| C2 | I7 asked for one consolidated "By hand" table (the plan's Hand checks rows, per-plan rows merged, ordered by region). testing.md keeps the per-plan rows in their old order and adds a sentence saying "Rows are grouped by window region", which isn't true. Duplicates remain (Tooltips / Toolbar, Sheets, Search field / Search, VoiceOver). | `docs/testing.md` "By hand" | plan | ask | Q-C1 |
+| C3 | The announced filter count only updates after a keystroke; if the folder changes while filtering (a file appears), VoiceOver keeps the old count until the next keystroke. Visible count is live. | `pane.rs` `filter_announce` | code | note | left (minor; first keystroke fixes it) |
+| C4 | `one_accent_fill_in_column_view` counts with `selection_fills`, a copy of the render predicate, so it can't catch a change in the render code (and doesn't see U10's glide layer, which also paints `active_selection`). | `pane.rs` `selection_fills` | code sense | note | left |
+| C5 | `same_key_everywhere` checks `keys::text` across scopes only, not the palette row or the hint the plan names. Both read the same lookup, so the risk is low. `search_count_is_announced` checks the footer text, not "once per settled search". | `window.rs` tests | code | note | left |
+| C6 | The committed `built-filter-*` shots have no cursor row (the plan's state: cursor on `view_settings.rs`), so the preview shows the folder summary instead of the file the board shows. The shot is correct about the app, just not about the plan's state. | `img/built-filter-*.png` | plan | note | left |
+| C7 | With a folder under the cursor, the summary's "n items" repeats the child column right beside it. Only the modified date is new information. Plan asked for it (Q2, user approved). | screenshot (folder cursor, head vs main) | UX | note | left |
+
+Checks re-run: fmt ✓ · clippy ✓ · tests ✓ (310 app, 87 core, 30 fs, 4 macos, 18 search, 6 theme) · bench (100k, 1280×800, FireBox, interleaved): `main` p99 8.61 / 8.61 / 9.90 ms, warm 6–8 ms; head p99 9.72 / 8.58 / 8.61 ms, warm 8–9 ms. No regression.
+Looked at in the app: `main` and head release builds via a copy of `shot.sh`: column view with a folder cursor (main: empty right half; head: summary), file cursor (preview fills the rest), plus the agent's 18 committed shots against the assembled boards. Not looked at: VoiceOver, IME, light theme live, narrow window live, Vim live (shots only).
+Verdict: Better. The dead quarter is gone without a bench cost, the docs read as one piece, and the constants and ring are unified; the one correctness slip (C1) is fixed. The hand-check table (C2) is the main gap left against the plan.
