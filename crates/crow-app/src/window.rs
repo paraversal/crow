@@ -3340,6 +3340,27 @@ mod tests {
     }
 
     #[gpui::test]
+    fn unreadable_folder_summary_has_no_count(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fixture("locked-summary");
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).expect("create fixture");
+        std::fs::write(locked.join("a.txt"), "x").expect("create fixture");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("lock fixture");
+        let (view, mut cx) = open_sized(cx, &locked, 1280., 800.);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+        settle(&view, &mut cx);
+        let label = view.read_with(&cx, |w, cx| w.pane().read(cx).preview_label(cx));
+        // The same folder under the cursor, with its child column failing to list.
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.reveal(locked.clone(), cx));
+        settle(&view, &mut cx);
+        let cursor_label = view.read_with(&cx, |w, cx| w.pane().read(cx).preview_label(cx));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("unlock fixture");
+        assert_eq!(label.as_deref(), Some("locked, Folder"), "a folder that can't be listed has no item count");
+        assert_eq!(cursor_label.as_deref(), Some("locked, Folder"), "nor when the cursor is on it");
+    }
+
+    #[gpui::test]
     fn folder_cursor_shows_summary(cx: &mut TestAppContext) {
         let root = fixture("folder-summary");
         let (view, mut cx) = open_sized(cx, &root, 1280., 800.);

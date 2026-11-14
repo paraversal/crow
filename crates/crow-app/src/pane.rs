@@ -544,7 +544,9 @@ impl Pane {
                 created: None,
                 added: None,
             });
-        Some((entry, Some(focused.entries().len())))
+        // No count while it is still listing or could not be listed: "0 items" would be wrong.
+        let items = (!focused.is_loading() && focused.error().is_none()).then(|| focused.entries().len());
+        Some((entry, items))
     }
 
     /// The preview column's aria label: a folder's summary or a file's preview.
@@ -561,7 +563,7 @@ impl Pane {
     /// The column is already on screen, so this costs no disk I/O.
     fn child_count(&self, entry: &Entry, cx: &gpui::App) -> Option<usize> {
         let child = self.folders.get(self.focused + 1)?.read(cx);
-        (!child.is_loading() && child.dir() == entry.path).then(|| child.entries().len())
+        (!child.is_loading() && child.error().is_none() && child.dir() == entry.path).then(|| child.entries().len())
     }
 
     pub fn preview(&self, cx: &gpui::App) -> Option<&Preview> {
