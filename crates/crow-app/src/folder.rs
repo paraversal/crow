@@ -702,12 +702,16 @@ impl Folder {
             let mode = self.arrival_mode;
             self.start_effect(&wanted, Fx::Arrive, mode, cx);
         }
-        if self.auto_select
-            && self.selection.is_empty()
-            && !self.loading
-            && let Some(first) = self.entries.first()
-        {
-            self.selection.select_only(first.path.clone());
+        // Only the first full load selects the first item. After that an empty
+        // selection stays empty, as in Finder: trashing or moving the selected
+        // item leaves nothing selected rather than jumping to the top.
+        if self.auto_select && !self.loading {
+            self.auto_select = false;
+            if self.selection.is_empty()
+                && let Some(first) = self.entries.first()
+            {
+                self.selection.select_only(first.path.clone());
+            }
         }
         self.prune_selection();
         self.settle_cursor(cx);

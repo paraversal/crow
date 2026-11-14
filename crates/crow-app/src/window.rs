@@ -7449,8 +7449,8 @@ mod tests {
         settle(&view, &mut cx);
         assert!(!root.join("notes.txt").exists());
 
-        // Rename beta: "beta" is selected; typing replaces it in one step, then a second run.
-        cx.simulate_keystrokes("home down");
+        // Rename beta: nothing is selected after the trash, so ↓ ↓ lands on beta.
+        cx.simulate_keystrokes("down down");
         assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
@@ -7507,7 +7507,7 @@ mod tests {
         settle(&view, &mut cx);
         assert!(!root.join("notes.txt").exists(), "{mode}: trashed");
         assert!(!names(&view, &cx).contains(&"notes.txt".to_owned()), "{mode}: gone from the list");
-        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "{mode}: the cursor lands where it does today");
+        assert_eq!(selected(&view, &cx), None, "{mode}: nothing is selected afterwards, as in Finder");
         assert!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.error(cx).is_none()), "{mode}: no error");
     }
 
@@ -7538,6 +7538,9 @@ mod tests {
         assert!(!root.join("notes.txt").exists(), "trashed from the column");
         assert!(!names(&view, &cx).contains(&"notes.txt".to_owned()), "gone from the column");
         assert!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.error(cx).is_none()), "no error");
+        assert_eq!(selected(&view, &cx), None, "nothing is selected afterwards, as in Finder");
+        cx.simulate_keystrokes("down");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "↓ from nothing starts at the top");
     }
 
     #[gpui::test]
@@ -7828,6 +7831,20 @@ mod tests {
         assert!(root.join("alpha").is_dir(), "a folder dropped onto itself stays put");
         let message = cx.update(|_, cx| cx.global::<Operations>().message.clone());
         assert!(message.is_none_or(|(_, error)| !error), "…without an error");
+    }
+
+    #[gpui::test]
+    fn moving_the_selected_item_away_in_columns_leaves_nothing_selected(cx: &mut TestAppContext) {
+        let root = fixture("move-columns-selection");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("down down"); // notes.txt
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+        drop_on(&mut cx, "column-0-row-alpha", vec![root.join("notes.txt")]);
+        settle(&view, &mut cx);
+        assert!(root.join("alpha/notes.txt").exists(), "moved into alpha");
+        assert_eq!(selected(&view, &cx), None, "the moved item was the selection: nothing is selected, as in Finder");
     }
 
     #[gpui::test]
