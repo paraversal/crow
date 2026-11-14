@@ -517,9 +517,10 @@ impl Pane {
         let here = self.focused_folder().clone();
         let dir = here.read(cx).dir().to_path_buf();
         let mine: Vec<PathBuf> = paths.into_iter().filter(|p| p.parent() == Some(dir.as_path())).collect();
+        let mode = cx.global::<Ui>().feedback.mode;
         for folder in self.folders.clone() {
             if folder == here && !mine.is_empty() {
-                folder.update(cx, |f, cx| f.select_when_present(mine.clone(), cx));
+                folder.update(cx, |f, cx| f.select_when_present(mine.clone(), mode, cx));
             } else {
                 folder.update(cx, |f, cx| f.reload(cx));
             }

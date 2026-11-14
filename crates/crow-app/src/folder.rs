@@ -154,6 +154,8 @@ pub struct Folder {
     select_after_load: Option<PathBuf>,
     /// Items an operation produced: selected as soon as they appear in the listing.
     select_when_present: Vec<PathBuf>,
+    /// The mode their Arrive effect plays in.
+    arrival_mode: Effective,
     /// Select the first item once loaded. Off for column-view children, which show
     /// a folder's contents without selecting anything until you move into them.
     auto_select: bool,
@@ -223,6 +225,7 @@ impl Folder {
             cursor_ix: None,
             select_after_load: None,
             select_when_present: Vec::new(),
+            arrival_mode: Effective::Off,
             auto_select,
             type_select: TypeSelect::default(),
             show_hidden,
@@ -456,8 +459,10 @@ impl Folder {
     }
 
     /// Select `paths` once they show up (an operation's results), then forget them.
-    pub fn select_when_present(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+    /// They play Arrive in `mode` when they appear.
+    pub fn select_when_present(&mut self, paths: Vec<PathBuf>, mode: Effective, cx: &mut Context<Self>) {
         self.select_when_present = paths;
+        self.arrival_mode = mode;
         self.reload(cx);
     }
 
@@ -513,17 +518,30 @@ impl Folder {
         &self.effects
     }
 
-    /// How far up the rows below a removed row have slid (Full motion's FLIP close).
-    /// `ix` is the row's index in the listing as it is now; the shift starts at one
-    /// row and eases to zero, so the row begins where it was before the removal.
+    /// How far the rows below an effect have moved (Full motion's FLIP). A leaving
+    /// row's close slides the rows below up; an arriving row's open slides them down
+    /// from their old slot. `ix` is the row's index in the listing as it is now.
     pub fn row_shift(&self, ix: usize, mode: Effective, now: Instant, row_height: f32) -> f32 {
         if mode != Effective::Full {
             return 0.0;
         }
+        let mut shift = 0.0;
+        // Arriving rows: the rows below start one row up and slide down into place.
+        for effect in &self.effects {
+            if effect.fx != Fx::Arrive || effect.removed || effect.row_index >= ix {
+                continue;
+            }
+            let open = effect.first_phase();
+            let elapsed = now.saturating_duration_since(effect.started);
+            if elapsed < open {
+                let t = if open.is_zero() { 1.0 } else { elapsed.as_secs_f32() / open.as_secs_f32() };
+                shift -= row_height * (1.0 - motion::ease_out(t));
+            }
+        }
         let mut removed: Vec<&RowEffect> =
             self.effects.iter().filter(|effect| effect.removed && effect.fx.leaving()).collect();
         if removed.is_empty() {
-            return 0.0;
+            return shift;
         }
         removed.sort_by_key(|effect| effect.row_index);
         // The row's index before the removals: each removed row at or above it adds one.
@@ -533,7 +551,6 @@ impl Folder {
                 original += 1;
             }
         }
-        let mut shift = 0.0;
         for effect in removed {
             if effect.row_index >= original {
                 continue;
@@ -679,9 +696,11 @@ impl Folder {
         {
             let wanted = std::mem::take(&mut self.select_when_present);
             self.selection.clear();
-            for path in wanted {
-                self.selection.toggle(path);
+            for path in &wanted {
+                self.selection.toggle(path.clone());
             }
+            let mode = self.arrival_mode;
+            self.start_effect(&wanted, Fx::Arrive, mode, cx);
         }
         if self.auto_select
             && self.selection.is_empty()

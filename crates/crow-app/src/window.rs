@@ -7184,6 +7184,48 @@ mod tests {
     }
 
     #[gpui::test]
+    fn new_folder_arrives_and_its_rename_takes_typing_at_once(cx: &mut TestAppContext) {
+        let root = fixture("newfolder-arrive");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("cmd-shift-n");
+        settle(&view, &mut cx);
+        cx.run_until_parked();
+        let effects = pane(&view, &cx).read_with(&cx, |pane, cx| pane.effects(cx));
+        assert!(
+            effects.iter().any(|(name, fx)| name == "untitled folder" && *fx == Fx::Arrive),
+            "the new folder arrives: {effects:?}"
+        );
+        cx.simulate_input("Projects");
+        assert_eq!(
+            pane(&view, &cx).read_with(&cx, |pane, cx| pane.rename_text(cx)).as_deref(),
+            Some("Projects"),
+            "typing goes into the field without waiting for the animation"
+        );
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert!(root.join("Projects").is_dir());
+    }
+
+    #[gpui::test]
+    fn undo_arrives_in_full_motion(cx: &mut TestAppContext) {
+        let root = fixture("undo-arrive");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("down down cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists());
+        cx.simulate_keystrokes("cmd-z");
+        settle(&view, &mut cx);
+        assert!(root.join("notes.txt").exists(), "undo put it back");
+        let effects = pane(&view, &cx).read_with(&cx, |pane, cx| pane.effects(cx));
+        assert!(
+            effects.iter().any(|(name, fx)| name == "notes.txt" && *fx == Fx::Arrive),
+            "the restored row arrives: {effects:?}"
+        );
+    }
+
+    #[gpui::test]
     fn new_file_creates_and_renames(cx: &mut TestAppContext) {
         let root = fixture("newfile");
         let (view, mut cx) = open(cx, &root);
