@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crow_core::motion::Fx;
 use crow_core::{HintsMode, SidebarEdit, Tabs, TipId, ViewMode, ZeroMatchStreak};
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
@@ -879,7 +880,17 @@ impl CrowWindow {
             Primary::Hints(hints)
         };
 
-        let mut state = BarState { primary, error, count, path, transient_max: None };
+        let (progress_done, progress_id) = ops.progress_done.map_or((None, 0), |(fraction, id)| (Some(fraction), id));
+        let mut state = BarState {
+            primary,
+            error,
+            count,
+            path,
+            transient_max: None,
+            message_id: ops.message_generation,
+            progress_done,
+            progress_id,
+        };
         // Narrow windows lose hints from the right and fold the path's middle (I7).
         bottom_bar::fit_to_window(&mut state, window);
         state
@@ -1140,8 +1151,42 @@ impl CrowWindow {
 
     fn start(&mut self, plan: Plan, resolutions: HashMap<PathBuf, Resolution>, cx: &mut Context<Self>) {
         let rename_result = matches!(plan.request, Request::NewFolder { .. } | Request::NewFile { .. });
+        let trash_paths = match &plan.request {
+            Request::Trash { paths } => Some(paths.clone()),
+            _ => None,
+        };
+        let move_paths = match &plan.request {
+            Request::Move { paths, into } => Some((paths.clone(), into.clone())),
+            _ => None,
+        };
+        let failed_paths =
+            trash_paths.clone().or_else(|| move_paths.as_ref().map(|(paths, _)| paths.clone())).or_else(|| match &plan
+                .request
+            {
+                Request::Copy { paths, .. } | Request::Duplicate { paths } => Some(paths.clone()),
+                _ => None,
+            });
         let pane = self.pane().downgrade();
+        // The effect starts with the operation, not the key press: a conflict or a
+        // delete sheet may have come first, and a second operation is refused.
+        if cx.global::<Operations>().running.is_none() {
+            if let Some(paths) = &trash_paths {
+                pane.update(cx, |pane, cx| pane.start_effect(paths.clone(), Fx::Trash, cx)).ok();
+            }
+            if let Some((paths, into)) = &move_paths {
+                pane.update(cx, |pane, cx| pane.start_effect(paths.clone(), Fx::MoveOut, cx)).ok();
+                // The folder the items land in pulses, in the list and in the sidebar.
+                pane.update(cx, |pane, cx| pane.start_effect(vec![into.clone()], Fx::Receive, cx)).ok();
+                self.sidebar.update(cx, |sidebar, cx| sidebar.pulse(into.clone(), cx));
+            }
+        }
         operations::execute(plan, resolutions, cx, move |outcome, cx| {
+            if outcome.error.is_some()
+                && let Some(paths) = &failed_paths
+            {
+                // Whatever is still there refuses.
+                pane.update(cx, |pane, cx| pane.start_effect(paths.clone(), Fx::Refuse, cx)).ok();
+            }
             let results = outcome.record.results();
             pane.update(cx, |pane, cx| pane.show_results(results, rename_result, cx)).ok();
         });
@@ -1396,6 +1441,7 @@ impl CrowWindow {
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                 .child(body),
             &theme,
+            cx.global::<Ui>().feedback.mode,
             cx.listener(|this, _, window, cx| this.close_sheet(window, cx)),
         ))
     }
@@ -1535,7 +1581,7 @@ impl CrowWindow {
         match ui.sidebar.find_key(key, &ui.home) {
             Some(target) => self.pane().update(cx, |pane, cx| pane.navigate(target, cx)),
             None => {
-                window.play_system_bell();
+                crate::feedback::refuse(crate::feedback::RefuseTarget::None, window, cx);
                 // A typo, not a lasting problem: an info message that retires.
                 operations::message(format!("No mark {key}"), false, cx);
                 cx.notify();
@@ -1703,6 +1749,7 @@ impl CrowWindow {
                         ),
                 ),
             &theme,
+            cx.global::<Ui>().feedback.mode,
             cx.listener(|this, _, window, cx| this.close_why(window, cx)),
         ))
     }
@@ -1985,7 +2032,7 @@ impl CrowWindow {
                     this.refresh_palette("", cx);
                     this.update_palette_field(cx);
                 } else {
-                    window.play_system_bell();
+                    crate::feedback::refuse(crate::feedback::RefuseTarget::Field(input), window, cx);
                 }
             }
             TextInputEvent::Confirmed => this.confirm_palette(false, window, cx),
@@ -2154,7 +2201,7 @@ impl CrowWindow {
             return;
         }
         if palette.path.is_none() {
-            window.play_system_bell();
+            crate::feedback::refuse(crate::feedback::RefuseTarget::Field(&palette.input), window, cx);
             return;
         }
         let input = palette.input.clone();
@@ -2291,7 +2338,7 @@ impl CrowWindow {
                         cx.notify();
                     }
                     Some(_) => {}
-                    None => window.play_system_bell(),
+                    None => crate::feedback::refuse(crate::feedback::RefuseTarget::None, window, cx),
                 }
             })
             .ok();
@@ -2466,6 +2513,7 @@ impl CrowWindow {
                 .child(list)
                 .child(footer),
             &theme,
+            cx.global::<Ui>().feedback.mode,
             cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
         ))
     }
@@ -2880,6 +2928,7 @@ impl CrowWindow {
                         ),
                 ),
             &theme,
+            cx.global::<Ui>().feedback.mode,
             cx.listener(|this, _, window, cx| this.cancel_picker(window, cx)),
         ))
     }
@@ -2930,6 +2979,7 @@ impl Render for CrowWindow {
                     key,
                     &theme,
                     f32::from(window.viewport_size().width),
+                    cx.global::<Ui>().feedback.mode,
                     cx.listener(|this, _, _, cx| this.close_tip(cx)),
                 )
             }),
@@ -3669,6 +3719,26 @@ mod tests {
     }
 
     #[gpui::test]
+    fn dropping_on_a_favorite_in_full_motion_pulses_it(cx: &mut TestAppContext) {
+        let root = fixture("drop-favorite-full");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("beta")]));
+        let sidebar = view.read_with(&cx, |window, _| window.sidebar.clone());
+        drop_on(&mut cx, "sidebar-0", vec![root.join("notes.txt")]);
+        for _ in 0..200 {
+            if sidebar.read_with(&cx, |sidebar, _| sidebar.receiving(&root.join("beta"))) {
+                break;
+            }
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(sidebar.read_with(&cx, |sidebar, _| sidebar.receiving(&root.join("beta"))), "the favorite pulses");
+        settle(&view, &mut cx);
+        assert!(root.join("beta/notes.txt").exists());
+    }
+
+    #[gpui::test]
     fn dropping_on_a_favorite_moves_into_it(cx: &mut TestAppContext) {
         let root = fixture("drop-favorite");
         let (view, mut cx) = open(cx, &root);
@@ -3677,11 +3747,67 @@ mod tests {
         settle(&view, &mut cx);
         assert!(root.join("beta/notes.txt").exists());
 
+        assert_eq!(sidebar_paths(&cx), [root.join("beta")], "the middle of a row is not an insertion point");
+
         // Folders dropped on a group's title become favorites.
         drop_on(&mut cx, "sidebar-header-Favorites", vec![root.join("alpha")]);
         settle(&view, &mut cx);
         assert_eq!(sidebar_paths(&cx), [root.join("beta"), root.join("alpha")]);
         assert!(root.join("alpha").is_dir(), "added, not moved");
+    }
+
+    #[gpui::test]
+    fn dropping_between_favorites_adds_a_favorite_there(cx: &mut TestAppContext) {
+        let root = fixture("drop-between");
+        for name in ["gamma", "delta"] {
+            std::fs::create_dir_all(root.join(name)).expect("create fixture");
+        }
+        let (view, mut cx) = open(cx, &root);
+        let (alpha, beta, gamma, delta) =
+            (root.join("alpha"), root.join("beta"), root.join("gamma"), root.join("delta"));
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha, &beta]));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+
+        // A folder from another app over the lower edge of the first favorite: the line
+        // marks the boundary before the second, and no row takes the drop fill.
+        let first = cx.debug_bounds("sidebar-0").expect("first favorite row");
+        let edge = gpui::point(first.left() + gpui::px(20.), first.bottom() - gpui::px(2.));
+        let paths = gpui::ExternalPaths(vec![gamma.clone()].into());
+        cx.simulate_event(gpui::FileDropEvent::Entered { position: edge, paths });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: edge });
+        cx.run_until_parked();
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.insert_slot()), Some((0, 1)), "between alpha and beta");
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.drop_target()), None, "no row is the target");
+        assert!(sidebar_looks(&view, &mut cx).iter().all(|look| !look.drop));
+        cx.simulate_event(gpui::FileDropEvent::Submit { position: edge });
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), [alpha.clone(), gamma.clone(), beta.clone()], "added at that place");
+        assert!(gamma.is_dir() && !alpha.join("gamma").exists(), "added, not moved");
+
+        // A folder dragged from the list onto the upper edge of the first favorite goes first.
+        let from = cx.debug_bounds("row-delta").expect("delta row").center();
+        let first = cx.debug_bounds("sidebar-0").expect("first favorite row");
+        let edge = gpui::point(first.left() + gpui::px(20.), first.top() + gpui::px(2.));
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(edge, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.insert_slot()), Some((0, 0)), "above alpha");
+        cx.simulate_mouse_up(edge, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), [delta.clone(), alpha.clone(), gamma, beta]);
+        assert!(delta.is_dir(), "added, not moved");
+
+        // A file can't be a favorite: dropped between rows it is left where it is.
+        let last = cx.debug_bounds("sidebar-3").expect("last favorite row");
+        drop_at(
+            &mut cx,
+            gpui::point(last.left() + gpui::px(20.), last.bottom() - gpui::px(2.)),
+            vec![root.join("notes.txt")],
+        );
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx).len(), 4);
+        assert!(root.join("notes.txt").exists(), "not moved into the folder next to the line");
     }
 
     #[gpui::test]
@@ -3989,6 +4115,7 @@ mod tests {
                     ..Default::default()
                 },
                 cancel: handle,
+                started: std::time::Instant::now(),
             });
             cx.refresh_windows();
         });
@@ -4119,6 +4246,7 @@ mod tests {
                 label: "Copy 12 items to a folder with a rather long name indeed".into(),
                 progress: crow_fs::ops::Progress { done_bytes: 1, total_bytes: 4, ..Default::default() },
                 cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                started: std::time::Instant::now(),
             });
         });
         let dir = config_dir(&cx);
@@ -4303,6 +4431,7 @@ mod tests {
                 label: "Copy 1 item to x".into(),
                 progress: crow_fs::ops::Progress { total_items: 1, total_bytes: 1, ..Default::default() },
                 cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                started: std::time::Instant::now(),
             });
         });
         let dir = config_dir(&cx);
@@ -5669,7 +5798,7 @@ mod tests {
         std::fs::write(root.join(".secret"), "").expect("create fixture");
         let (view, mut cx) = open(cx, &root);
         let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.item_count(cx));
-        assert_eq!(count(&cx), 3);
+        assert_eq!(count(&cx), 4, "hidden files show by default");
 
         cx.simulate_keystrokes("cmd-k");
         settle(&view, &mut cx);
@@ -5680,7 +5809,7 @@ mod tests {
         settle(&view, &mut cx);
 
         assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "Return closes the palette");
-        assert_eq!(count(&cx), 4, "the command ran");
+        assert_eq!(count(&cx), 3, "the command ran");
     }
 
     #[gpui::test]
@@ -5995,14 +6124,14 @@ mod tests {
         cx.simulate_keystrokes("cmd-k");
         cx.simulate_input(">hidden");
         settle(&view, &mut cx);
-        assert_eq!(state(&cx), Some(false), "hidden files are off");
+        assert_eq!(state(&cx), Some(true), "hidden files are on by default");
 
         cx.simulate_keystrokes("enter");
         settle(&view, &mut cx);
         cx.simulate_keystrokes("cmd-k");
         cx.simulate_input(">hidden");
         settle(&view, &mut cx);
-        assert_eq!(state(&cx), Some(true), "the command turned them on");
+        assert_eq!(state(&cx), Some(false), "the command turned them off");
     }
 
     #[gpui::test]
@@ -6071,6 +6200,8 @@ mod tests {
         let root = fixture("palette-path-hidden");
         std::fs::create_dir_all(root.join(".hidden")).expect("create fixture");
         let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-shift-.");
+        settle(&view, &mut cx);
         cx.simulate_keystrokes("cmd-k");
         cx.simulate_input(&format!("{}/", root.display()));
         settle_palette(&view, &mut cx);
@@ -6375,13 +6506,13 @@ mod tests {
         std::fs::write(root.join(".secret"), "").expect("create fixture");
         let (view, mut cx) = open(cx, &root);
         let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.item_count(cx));
-        assert_eq!(count(&cx), 3);
+        assert_eq!(count(&cx), 4, "hidden files show by default");
 
         cx.simulate_keystrokes("cmd-t cmd-shift-.");
         settle(&view, &mut cx);
-        assert_eq!(count(&cx), 4);
+        assert_eq!(count(&cx), 3);
         cx.simulate_keystrokes("cmd-shift-[");
-        assert_eq!(count(&cx), 4, "The other tab shows hidden files too");
+        assert_eq!(count(&cx), 3, "The other tab hides hidden files too");
     }
 
     fn selected_names(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Vec<String> {
@@ -7132,6 +7263,48 @@ mod tests {
     }
 
     #[gpui::test]
+    fn new_folder_arrives_and_its_rename_takes_typing_at_once(cx: &mut TestAppContext) {
+        let root = fixture("newfolder-arrive");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("cmd-shift-n");
+        settle(&view, &mut cx);
+        cx.run_until_parked();
+        let effects = pane(&view, &cx).read_with(&cx, |pane, cx| pane.effects(cx));
+        assert!(
+            effects.iter().any(|(name, fx)| name == "untitled folder" && *fx == Fx::Arrive),
+            "the new folder arrives: {effects:?}"
+        );
+        cx.simulate_input("Projects");
+        assert_eq!(
+            pane(&view, &cx).read_with(&cx, |pane, cx| pane.rename_text(cx)).as_deref(),
+            Some("Projects"),
+            "typing goes into the field without waiting for the animation"
+        );
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert!(root.join("Projects").is_dir());
+    }
+
+    #[gpui::test]
+    fn undo_arrives_in_full_motion(cx: &mut TestAppContext) {
+        let root = fixture("undo-arrive");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("down down cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists());
+        cx.simulate_keystrokes("cmd-z");
+        settle(&view, &mut cx);
+        assert!(root.join("notes.txt").exists(), "undo put it back");
+        let effects = pane(&view, &cx).read_with(&cx, |pane, cx| pane.effects(cx));
+        assert!(
+            effects.iter().any(|(name, fx)| name == "notes.txt" && *fx == Fx::Arrive),
+            "the restored row arrives: {effects:?}"
+        );
+    }
+
+    #[gpui::test]
     fn new_file_creates_and_renames(cx: &mut TestAppContext) {
         let root = fixture("newfile");
         let (view, mut cx) = open(cx, &root);
@@ -7334,8 +7507,8 @@ mod tests {
         settle(&view, &mut cx);
         assert!(!root.join("notes.txt").exists());
 
-        // Rename beta: "beta" is selected; typing replaces it in one step, then a second run.
-        cx.simulate_keystrokes("home down");
+        // Rename beta: nothing is selected after the trash, so ↓ ↓ lands on beta.
+        cx.simulate_keystrokes("down down");
         assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
@@ -7371,6 +7544,90 @@ mod tests {
         cx.simulate_keystrokes("cmd-z");
         settle(&view, &mut cx);
         assert!(root.join("notes.txt").exists(), "list ⌘Z undoes the trash");
+    }
+
+    /// Set `motion` in the test's settings.toml and reload, as a user would.
+    fn set_motion(cx: &mut VisualTestContext, mode: &str) {
+        cx.update(|_, cx| {
+            let dir = cx.global::<crate::ui::Ui>().config_dir.clone();
+            std::fs::write(dir.join("settings.toml"), format!("motion = \"{mode}\"\n")).expect("write settings");
+            crate::ui::reload_config(cx);
+        });
+    }
+
+    fn trash_in_mode(mode: &str, cx: &mut TestAppContext) {
+        let root = fixture(&format!("trash-{mode}"));
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, mode);
+        cx.simulate_keystrokes("down down"); // notes.txt
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+        cx.simulate_keystrokes("cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists(), "{mode}: trashed");
+        assert!(!names(&view, &cx).contains(&"notes.txt".to_owned()), "{mode}: gone from the list");
+        assert_eq!(selected(&view, &cx), None, "{mode}: nothing is selected afterwards, as in Finder");
+        assert!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.error(cx).is_none()), "{mode}: no error");
+    }
+
+    #[gpui::test]
+    fn trash_in_off_motion_leaves_the_listing(cx: &mut TestAppContext) {
+        trash_in_mode("off", cx);
+    }
+
+    #[gpui::test]
+    fn trash_in_low_motion_leaves_the_listing(cx: &mut TestAppContext) {
+        trash_in_mode("low", cx);
+    }
+
+    #[gpui::test]
+    fn trash_in_full_motion_leaves_the_listing(cx: &mut TestAppContext) {
+        trash_in_mode("full", cx);
+    }
+
+    #[gpui::test]
+    fn trash_in_full_motion_in_columns_leaves_the_listing(cx: &mut TestAppContext) {
+        let root = fixture("trash-full-columns");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("down down cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists(), "trashed from the column");
+        assert!(!names(&view, &cx).contains(&"notes.txt".to_owned()), "gone from the column");
+        assert!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.error(cx).is_none()), "no error");
+        assert_eq!(selected(&view, &cx), None, "nothing is selected afterwards, as in Finder");
+        cx.simulate_keystrokes("down");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "↓ from nothing starts at the top");
+    }
+
+    #[gpui::test]
+    fn trash_three_items_in_full_motion(cx: &mut TestAppContext) {
+        let root = fixture("trash-three");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("cmd-a cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(names(&view, &cx).is_empty(), "all three rows left the list");
+        assert!(!root.join("alpha").exists() && !root.join("beta").exists() && !root.join("notes.txt").exists());
+    }
+
+    #[gpui::test]
+    fn trash_five_hundred_items_in_full_motion(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("crow-app-trash-500-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create fixture");
+        for i in 0..500 {
+            std::fs::write(root.join(format!("file-{i:03}.txt")), "x").expect("create fixture");
+        }
+        let root = root.canonicalize().expect("canonical fixture path");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("cmd-a cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(names(&view, &cx).is_empty(), "all 500 rows left the list");
+        assert!(!root.join("file-000.txt").exists() && !root.join("file-499.txt").exists());
+        assert!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.error(cx).is_none()), "no error");
     }
 
     #[gpui::test]
@@ -7451,6 +7708,11 @@ mod tests {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("no element {selector}")).center();
+        drop_at(cx, at, paths);
+    }
+
+    /// Drop `paths` from another app at `at`.
+    fn drop_at(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>, paths: Vec<PathBuf>) {
         cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
         cx.run_until_parked();
         cx.simulate_event(gpui::FileDropEvent::Entered { position: at, paths: gpui::ExternalPaths(paths.into()) });
@@ -7590,6 +7852,35 @@ mod tests {
     }
 
     #[gpui::test]
+    fn dropping_on_a_folder_row_in_full_motion_moves_and_leaves_the_listing(cx: &mut TestAppContext) {
+        let root = fixture("drop-row-full");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        drop_on(&mut cx, "row-alpha", vec![root.join("notes.txt")]);
+        settle(&view, &mut cx);
+        assert!(root.join("alpha/notes.txt").exists(), "dropped onto alpha: moved into it");
+        assert!(!root.join("notes.txt").exists(), "…and left its old place");
+        assert!(!names(&view, &cx).contains(&"notes.txt".to_owned()), "the source row left the list");
+    }
+
+    #[gpui::test]
+    fn a_move_starts_effects_on_the_source_and_the_target(cx: &mut TestAppContext) {
+        let root = fixture("move-effects");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        let pane = pane(&view, &cx);
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.start_effect(vec![root.join("notes.txt")], Fx::MoveOut, cx);
+                pane.start_effect(vec![root.join("alpha")], Fx::Receive, cx);
+            });
+        });
+        let effects = pane.read_with(&cx, |pane, cx| pane.effects(cx));
+        assert!(effects.iter().any(|(name, fx)| name == "notes.txt" && *fx == Fx::MoveOut), "{effects:?}");
+        assert!(effects.iter().any(|(name, fx)| name == "alpha" && *fx == Fx::Receive), "{effects:?}");
+    }
+
+    #[gpui::test]
     fn dropping_on_a_folder_row_moves_into_that_folder(cx: &mut TestAppContext) {
         let root = fixture("drop-row");
         let (view, mut cx) = open(cx, &root);
@@ -7603,6 +7894,20 @@ mod tests {
         assert!(root.join("alpha").is_dir(), "a folder dropped onto itself stays put");
         let message = cx.update(|_, cx| cx.global::<Operations>().message.clone());
         assert!(message.is_none_or(|(_, error)| !error), "…without an error");
+    }
+
+    #[gpui::test]
+    fn moving_the_selected_item_away_in_columns_leaves_nothing_selected(cx: &mut TestAppContext) {
+        let root = fixture("move-columns-selection");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("down down"); // notes.txt
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+        drop_on(&mut cx, "column-0-row-alpha", vec![root.join("notes.txt")]);
+        settle(&view, &mut cx);
+        assert!(root.join("alpha/notes.txt").exists(), "moved into alpha");
+        assert_eq!(selected(&view, &cx), None, "the moved item was the selection: nothing is selected, as in Finder");
     }
 
     #[gpui::test]
@@ -8026,9 +8331,196 @@ mod tests {
     }
 
     #[gpui::test]
+    fn cursor_glide_sits_on_the_cursor_row(cx: &mut TestAppContext) {
+        let root = long_fixture("glide", 50);
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("down down");
+        settle(&view, &mut cx);
+        for _ in 0..20 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(50));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+        }
+        let glide = cx.debug_bounds("glide").expect("the glide fill");
+        let row = cx.debug_bounds("row-f002.txt").expect("the cursor row");
+        assert!((glide.top() - row.top()).abs() <= px(1.), "glide {glide:?} vs row {row:?}");
+    }
+
+    #[gpui::test]
+    fn cursor_glide_stays_on_its_row_while_the_trackpad_scrolls(cx: &mut TestAppContext) {
+        let root = long_fixture("glide-scroll", 80);
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("down down down down down");
+        settle(&view, &mut cx);
+        let frames = |cx: &mut VisualTestContext, n: usize| {
+            for _ in 0..n {
+                cx.executor().advance_clock(std::time::Duration::from_millis(16));
+                cx.update(|window, cx| {
+                    window.simulate_next_frame(cx);
+                });
+                cx.run_until_parked();
+            }
+        };
+        frames(&mut cx, 30);
+        let before = selected(&view, &cx);
+        assert_eq!(before.as_deref(), Some("f005.txt"));
+        let row = cx.debug_bounds("row-f005.txt").expect("the cursor row");
+        // A trackpad scroll: precise pixel deltas, a few frames apart.
+        for _ in 0..4 {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: row.center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-10.))),
+                touch_phase: gpui::TouchPhase::Moved,
+                ..Default::default()
+            });
+            frames(&mut cx, 1);
+            let glide = cx.debug_bounds("glide").expect("the glide fill");
+            let row = cx.debug_bounds("row-f005.txt").expect("the cursor row");
+            assert!((glide.top() - row.top()).abs() <= px(1.), "mid-scroll: glide {glide:?} vs row {row:?}");
+        }
+        assert_eq!(selected(&view, &cx), before, "scrolling never moves the cursor");
+        let moved = cx.debug_bounds("row-f005.txt").expect("the cursor row");
+        assert!(moved.top() < row.top(), "the view scrolled: {moved:?} vs {row:?}");
+    }
+
+    #[gpui::test]
+    fn cursor_glide_stays_put_when_a_short_list_cannot_scroll(cx: &mut TestAppContext) {
+        let root = long_fixture("glide-short", 6);
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("down down");
+        settle(&view, &mut cx);
+        let frames = |cx: &mut VisualTestContext, n: usize| {
+            for _ in 0..n {
+                cx.executor().advance_clock(std::time::Duration::from_millis(16));
+                cx.update(|window, cx| {
+                    window.simulate_next_frame(cx);
+                });
+                cx.run_until_parked();
+            }
+        };
+        frames(&mut cx, 30);
+        let row = cx.debug_bounds("row-f002.txt").expect("the cursor row");
+        // Trackpad scrolls both ways on a list that fits: nothing may move.
+        for dy in [-15., -15., 40., 40.] {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: row.center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(dy))),
+                touch_phase: gpui::TouchPhase::Moved,
+                ..Default::default()
+            });
+            frames(&mut cx, 1);
+            let glide = cx.debug_bounds("glide").expect("the glide fill");
+            let now = cx.debug_bounds("row-f002.txt").expect("the cursor row");
+            assert_eq!(now.top(), row.top(), "the list cannot scroll");
+            assert!((glide.top() - now.top()).abs() <= px(1.), "after {dy}: glide {glide:?} vs row {now:?}");
+        }
+    }
+
+    fn disclose(mode: &str, cx: &mut TestAppContext) -> (Entity<CrowWindow>, VisualTestContext, PathBuf) {
+        let root = fixture(&format!("disclose-{mode}"));
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, mode);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        assert_eq!(names(&view, &cx), ["alpha", "inner", "beta", "notes.txt"], "{mode}: alpha is open");
+        (view, cx, root)
+    }
+
+    #[gpui::test]
+    fn opening_a_folder_in_full_reveals_its_rows_and_slides_the_rest_down(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        let (view, cx, root) = disclose("full", cx);
+        let alpha = root.join("alpha");
+        let probe = |ix, ms| {
+            pane(&view, &cx).read_with(&cx, |p, cx| p.disclosure_probe(&alpha, ix, Duration::from_millis(ms), cx))
+        };
+        let (beta_shift, _, turn) = probe(2, 0).expect("a disclosure for alpha");
+        assert_eq!(beta_shift, -1.0, "beta starts where inner lands");
+        assert_eq!(turn, Some(0.0), "the chevron starts closed");
+        let (_, inner_opacity, _) = probe(1, 0).expect("disclosure");
+        assert_eq!(inner_opacity, 0.0, "inner shows as the gap opens");
+        let (beta_mid, _, turn_mid) = probe(2, 60).expect("disclosure");
+        assert!(beta_mid > -1.0 && beta_mid < 0.0, "beta slides down: {beta_mid}");
+        let inner_mid = probe(1, 60).expect("disclosure").1;
+        assert!(inner_mid > 0.0, "inner has started to show: {inner_mid}");
+        assert!(turn_mid.is_some_and(|t| t > 0.0 && t < 1.0), "the chevron turns: {turn_mid:?}");
+        assert_eq!(probe(2, 400).expect("disclosure"), (0.0, 1.0, None), "settled");
+        assert!(pane(&view, &cx).read_with(&cx, |p, cx| p.animating(cx)), "frames keep coming while it moves");
+    }
+
+    #[gpui::test]
+    fn closing_a_folder_in_full_slides_the_rows_below_up(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        let (view, mut cx, root) = disclose("full", cx);
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert_eq!(names(&view, &cx), ["alpha", "beta", "notes.txt"], "alpha is closed");
+        let alpha = root.join("alpha");
+        let probe = |ix, ms| {
+            pane(&view, &cx).read_with(&cx, |p, cx| p.disclosure_probe(&alpha, ix, Duration::from_millis(ms), cx))
+        };
+        let (beta_shift, _, turn) = probe(1, 0).expect("a disclosure for alpha");
+        assert_eq!(beta_shift, 1.0, "beta starts where it was");
+        assert_eq!(turn, Some(1.0), "the chevron starts open");
+        assert_eq!(probe(0, 0).expect("disclosure").0, 0.0, "alpha itself stays");
+        assert_eq!(probe(1, 400).expect("disclosure"), (0.0, 1.0, None), "settled");
+    }
+
+    #[gpui::test]
+    fn opening_a_folder_in_low_fades_without_moving(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        let (view, cx, root) = disclose("low", cx);
+        let alpha = root.join("alpha");
+        let probe = |ix, ms| {
+            pane(&view, &cx).read_with(&cx, |p, cx| p.disclosure_probe(&alpha, ix, Duration::from_millis(ms), cx))
+        };
+        let (_, inner_opacity, turn) = probe(1, 40).expect("a disclosure for alpha");
+        assert!(inner_opacity > 0.0 && inner_opacity < 1.0, "inner fades in: {inner_opacity}");
+        assert_eq!(turn, None, "Low turns the chevron at once");
+        assert_eq!(probe(2, 0).expect("disclosure").0, 0.0, "Low moves nothing");
+    }
+
+    #[gpui::test]
+    fn opening_a_folder_with_motion_off_changes_in_one_frame(cx: &mut TestAppContext) {
+        let (view, cx, root) = disclose("off", cx);
+        let alpha = root.join("alpha");
+        let probe =
+            pane(&view, &cx).read_with(&cx, |p, cx| p.disclosure_probe(&alpha, 1, std::time::Duration::ZERO, cx));
+        assert_eq!(probe, None, "off records nothing");
+        assert!(!pane(&view, &cx).read_with(&cx, |p, cx| p.animating(cx)), "and asks for no frames");
+    }
+
+    #[gpui::test]
+    fn cursor_glide_lags_at_most_one_row(cx: &mut TestAppContext) {
+        let root = long_fixture("glide-lag", 50);
+        let (_view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        // Hold ↓ at the usual repeat: one row every 30 ms.
+        for _ in 0..5 {
+            cx.simulate_keystrokes("down");
+            cx.executor().advance_clock(std::time::Duration::from_millis(30));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+        }
+        let glide = cx.debug_bounds("glide").expect("the glide fill");
+        let row = cx.debug_bounds("row-f005.txt").expect("the cursor row");
+        let lag = f32::from(row.top()) - f32::from(glide.top());
+        assert!(lag.abs() <= crate::pane::ROW_HEIGHT + 1.0, "the fill lags {lag} px: {glide:?} vs {row:?}");
+    }
+
+    #[gpui::test]
     fn tip_sits_above_the_bar_at_the_right_edge(cx: &mut TestAppContext) {
         let root = long_fixture("tip-layout", 250);
         let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "off");
         scroll(&mut cx, "file-list", 60.);
         settle(&view, &mut cx);
         let tip = cx.debug_bounds("tip").expect("the tip is laid out");

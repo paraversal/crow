@@ -22,5 +22,9 @@ Items move here from fix lists when they turn out larger than the list can hold.
 - **Where it runs:** locally and nightly, not on every CI push (it is long). Decide the dependency (`proptest` vs a small hand-rolled shrinker) in its plan.
 **Questions for its plan:** test platform only, or also the real app driven via accessibility? How long per run in CI? Which invariants are must-haves for M7?
 
+## D2 Folder sizes (planned)
+**From:** the user, 2026-11-14: show folder sizes, maybe from an index updated as things change.
+**Plan:** [`folder-sizes.md`](folder-sizes.md). The sizes are measured lazily for the folders on screen, cached, and kept correct with FSEvents history (a folder's mtime doesn't change when files deeper inside do). Counting rules borrowed from asimeow.
+
 ## Moved here later
 - (U7-fix X6 or X7, if they turn out larger than the fix list: add them here with their findings.)

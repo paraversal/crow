@@ -17,8 +17,9 @@ use crate::actions::{
     CopyFiles as CrowCopyFiles, CutFiles as CrowCutFiles, PasteFiles as CrowPasteFiles, Redo as CrowRedo,
     SelectAll as CrowSelectAll, Undo as CrowUndo,
 };
-use crate::style::{color, color_alpha};
+use crate::style::{color, color_alpha, effect_tint};
 use crate::ui::Ui;
+use crow_core::motion::{self, Effective, Fx};
 
 actions!(
     text_input,
@@ -128,6 +129,9 @@ pub struct TextInput {
     was_focused: bool,
     /// The blink timer runs for the field's whole life; it notifies only while focused.
     blink_loop: bool,
+    /// A refused key: the field shakes (Full) or its ring tints red (Low) until this passes.
+    refuse: Option<(u64, Instant)>,
+    refuse_generation: u64,
 }
 
 /// The field's own undo history. Inside a text field ⌘Z undoes typing, never a file operation.
@@ -180,6 +184,8 @@ impl TextInput {
             blink_due: cx.background_executor().now() + CARET_BLINK_INTERVAL,
             was_focused: false,
             blink_loop: false,
+            refuse: None,
+            refuse_generation: 0,
         }
     }
 
@@ -191,6 +197,36 @@ impl TextInput {
     pub fn bare(mut self) -> Self {
         self.chrome = false;
         self
+    }
+
+    /// Refuse a key: one alert beep, then the shake (Full) or red ring (Low).
+    pub fn refuse(&mut self, cx: &mut Context<Self>) {
+        crate::feedback::play(crow_core::motion::Event::Refuse, cx);
+        self.refuse_visual(cx);
+    }
+
+    /// The visual half of `refuse`, for callers that already beeped.
+    pub fn refuse_visual(&mut self, cx: &mut Context<Self>) {
+        let mode = cx.global::<Ui>().feedback.mode;
+        if mode == crow_core::motion::Effective::Off {
+            return;
+        }
+        self.refuse_generation += 1;
+        let generation = self.refuse_generation;
+        self.refuse = Some((generation, Instant::now()));
+        cx.notify();
+        let total: Duration = crow_core::motion::phases(mode, crow_core::motion::Fx::Refuse).iter().sum();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(total + Duration::from_millis(250)).await;
+            this.update(cx, |this, cx| {
+                if this.refuse_generation == generation {
+                    this.refuse = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn with_role(mut self, role: Role) -> Self {
@@ -309,7 +345,7 @@ impl TextInput {
         if self.selected_range.is_empty() {
             let start = previous_word_start(&self.content, self.cursor_offset());
             if start == self.cursor_offset() {
-                window.play_system_bell();
+                self.refuse(cx);
                 return;
             }
             self.select_to(start, window, cx);
@@ -322,7 +358,7 @@ impl TextInput {
         if self.selected_range.is_empty() {
             let end = next_word_end(&self.content, self.cursor_offset());
             if end == self.cursor_offset() {
-                window.play_system_bell();
+                self.refuse(cx);
                 return;
             }
             self.select_to(end, window, cx);
@@ -350,7 +386,7 @@ impl TextInput {
                 if self.report_backspace_at_start {
                     cx.emit(TextInputEvent::BackspaceAtStart);
                 } else {
-                    window.play_system_bell();
+                    self.refuse(cx);
                 }
                 return;
             }
@@ -363,7 +399,7 @@ impl TextInput {
         if self.selected_range.is_empty() {
             let next = self.next_boundary(self.cursor_offset());
             if self.cursor_offset() == next {
-                window.play_system_bell();
+                self.refuse(cx);
                 return;
             }
             self.select_to(next, window, cx)
@@ -498,7 +534,7 @@ impl TextInput {
                 self.history.redo.push(self.snapshot());
                 self.restore(snapshot, window, cx);
             }
-            None => window.play_system_bell(),
+            None => self.refuse(cx),
         }
     }
 
@@ -508,7 +544,7 @@ impl TextInput {
                 self.history.undo.push(self.snapshot());
                 self.restore(snapshot, window, cx);
             }
-            None => window.play_system_bell(),
+            None => self.refuse(cx),
         }
     }
 
@@ -989,8 +1025,26 @@ impl Element for TextElement {
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_blink_loop(window, cx);
+        // The refuse shake is drawn from the clock: keep frames coming while it runs.
+        if self.refuse.is_some() {
+            window.request_animation_frame();
+        }
         let theme = cx.global::<Ui>().theme.clone();
         let chrome = self.chrome;
+        let mode = cx.global::<Ui>().feedback.mode;
+        let now = Instant::now();
+        let refuse_look = self.refuse.and_then(|(_, started)| {
+            if mode == Effective::Off {
+                return None;
+            }
+            let phases = motion::phases(mode, Fx::Refuse);
+            Some(motion::look_in(&phases, mode, Fx::Refuse, started, now))
+        });
+        let tint = refuse_look.and_then(|look| effect_tint(look, &theme));
+        let border = match refuse_look {
+            Some(look) if look.tint > 0.0 => color(theme.role("error")),
+            _ => color(theme.role("accent")),
+        };
         div()
             .id("text-input")
             .role(self.role)
@@ -998,6 +1052,8 @@ impl Render for TextInput {
             .aria_placeholder(self.placeholder.clone())
             .aria_value(self.content.clone())
             .flex()
+            .relative()
+            .when_some(refuse_look, |field, look| field.left(px(look.dx)))
             // keys::context_stack adds TextInput for Filter, Search and Palette.
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
@@ -1036,14 +1092,9 @@ impl Render for TextInput {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
             .when(chrome, |field| {
-                field
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(color(theme.role("bg")))
-                    .border_1()
-                    .border_color(color(theme.role("accent")))
+                field.px_2().py_1().rounded_md().bg(color(theme.role("bg"))).border_1().border_color(border)
             })
+            .when_some(tint, |field, tint| field.child(div().absolute().inset_0().rounded_md().bg(tint)))
             .child(TextElement { input: cx.entity() })
     }
 }

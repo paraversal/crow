@@ -15,16 +15,19 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crow_core::motion::{Effective, Fx, Look};
 use crow_core::{
     Align, Column, ColumnContext, ColumnWidth, History, KeymapLayer, ResizeDrag, TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS,
     TableLayout, TipId, ViewChange, ViewMode,
 };
 use crow_fs::{Entry, Sort, SortKey};
+use crow_theme::Theme;
 use gpui::{
-    Action, Bounds, ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalDragPayload, ExternalPaths,
-    FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle, SharedString, Subscription,
-    UniformListScrollHandle, Window, canvas, div, img, point, prelude::*, px, uniform_list,
+    Action, AnimationExt, AnyElement, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter,
+    ExternalDragPayload, ExternalPaths, FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle,
+    SharedString, SpringAnimation, SpringConfig, Subscription, UniformListScrollHandle, Window, canvas, div, img,
+    point, prelude::*, px, uniform_list,
 };
 
 use crate::actions::{
@@ -34,11 +37,12 @@ use crate::actions::{
 };
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
+use crate::icons::{Glyph, glyph};
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, drop_target, format_time, highlight_text, icon, inactive_selection, kind,
-    map_range, truncate_middle, truncate_middle_parts,
+    active_selection, color, color_alpha, content_opacity, drop_target, effect_tint, format_time, highlight_text, icon,
+    inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -47,7 +51,7 @@ use crow_fs::ops::Request;
 mod pane_filter;
 use pane_filter::FilterPlace;
 
-const ROW_HEIGHT: f32 = 24.0;
+pub(crate) const ROW_HEIGHT: f32 = 24.0;
 
 /// The first row a uniform list shows. Its scroll offset is negative once
 /// scrolled down (`drag_row_at` adds it to a pointer position).
@@ -404,6 +408,30 @@ impl Pane {
         (0..folder.row_count()).filter_map(|ix| folder.row(ix).map(|(e, d)| (e.name.clone(), d))).collect()
     }
 
+    /// The focused folder's disclosure probe (see `Folder::disclosure_probe`), for tests.
+    #[cfg(test)]
+    pub fn disclosure_probe(
+        &self,
+        path: &std::path::Path,
+        ix: usize,
+        after: std::time::Duration,
+        cx: &gpui::App,
+    ) -> Option<(f32, f32, Option<f32>)> {
+        self.focused_folder().read(cx).disclosure_probe(path, ix, after)
+    }
+
+    /// Whether the focused folder has motion running, for tests.
+    #[cfg(test)]
+    pub fn animating(&self, cx: &gpui::App) -> bool {
+        self.focused_folder().read(cx).animating(Instant::now())
+    }
+
+    /// The feedback effects running on the focused folder's rows, for tests.
+    #[cfg(test)]
+    pub fn effects(&self, cx: &gpui::App) -> Vec<(String, Fx)> {
+        self.focused_folder().read(cx).effects().iter().map(|effect| (effect.entry.name.clone(), effect.fx)).collect()
+    }
+
     pub fn error(&self, cx: &gpui::App) -> Option<SharedString> {
         self.status.clone().or_else(|| self.folders.iter().find_map(|f| f.read(cx).error().cloned()))
     }
@@ -508,13 +536,21 @@ impl Pane {
         let here = self.focused_folder().clone();
         let dir = here.read(cx).dir().to_path_buf();
         let mine: Vec<PathBuf> = paths.into_iter().filter(|p| p.parent() == Some(dir.as_path())).collect();
+        let mode = cx.global::<Ui>().feedback.mode;
         for folder in self.folders.clone() {
             if folder == here && !mine.is_empty() {
-                folder.update(cx, |f, cx| f.select_when_present(mine.clone(), cx));
+                folder.update(cx, |f, cx| f.select_when_present(mine.clone(), mode, cx));
             } else {
                 folder.update(cx, |f, cx| f.reload(cx));
             }
         }
+    }
+
+    /// Start a feedback effect on the focused folder's visible rows among `paths`.
+    pub fn start_effect(&mut self, paths: Vec<PathBuf>, fx: Fx, cx: &mut Context<Self>) {
+        let mode = cx.global::<Ui>().feedback.mode;
+        let folder = self.focused_folder().clone();
+        folder.update(cx, |folder, cx| folder.start_effect(&paths, fx, mode, cx));
     }
 
     /// The selected items of the focused folder, in display order.
@@ -1340,9 +1376,12 @@ impl Pane {
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
         let font_size = px(ui.settings.font_size);
+        let mode = ui.feedback.mode;
+        let now = Instant::now();
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
         let active = self.focus.is_focused(window) || self.filtering.is_some();
+        let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let drop_bg = drop_target(theme);
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
@@ -1380,6 +1419,15 @@ impl Pane {
                 let drag_label: SharedString =
                     if drag_count > 1 { format!("{drag_count} items").into() } else { entry.name.clone().into() };
                 let handoff = DragHandoff::new();
+                let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
+                let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
+                let tint = effect_tint(look, theme);
+                let dim = content_opacity(
+                    entry.hidden,
+                    self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
+                );
+                let reveal = folder.disclosure_opacity(ix, now);
+                let turn = folder.chevron_turn(&entry.path, now).unwrap_or(if expanded { 1.0 } else { 0.0 });
                 let row = div()
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
@@ -1392,10 +1440,14 @@ impl Pane {
                     .h(px(ROW_HEIGHT))
                     .mx_2()
                     .rounded_md()
+                    .relative()
                     .flex()
                     .items_center()
-                    .when(ix % 2 == 1, |row| row.bg(stripe))
-                    .when(selected, |row| row.bg(selection_bg))
+                    .when(shift != 0.0, |row| row.top(px(shift)))
+                    .when(look.opacity * reveal < 1.0, |row| row.opacity(look.opacity * reveal))
+                    .when(ix % 2 == 1 && !(selected && glide && cursor == Some(ix)), |row| row.bg(stripe))
+                    .when(draws_selection_fill(selected, glide, cursor == Some(ix)), |row| row.bg(selection_bg))
+                    .when_some(tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
                     .debug_selector(|| format!("row-{}", entry.name))
                     .on_drag(DraggedSelection { entries: drag_entries }, {
                         let handoff = handoff.clone();
@@ -1504,27 +1556,31 @@ impl Pane {
                                         cx.stop_propagation();
                                         pane.update(cx, |folder, cx| folder.toggle_expansion(path.clone(), cx));
                                     }))
-                                    .child(chevron_glyph(expanded, muted))
+                                    .child(chevron_glyph(turn, muted))
                                     .into_any_element()
                             } else {
                                 div().w(px(TRIANGLE_WIDTH)).flex_none().into_any_element()
                             })
+                            .child(row_icon(&entry, look, theme))
                             .child(
-                                div()
-                                    .size(px(16.))
-                                    .flex_none()
-                                    .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
-                            )
-                            .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
-                                Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
-                                None => match ranges {
-                                    Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
-                                        .whitespace_nowrap()
-                                        .child(highlight_text(name.text.clone(), &ranges, theme, selected && active))
-                                        .into_any_element(),
-                                    _ => div().whitespace_nowrap().child(name.text.clone()).into_any_element(),
-                                },
-                            }),
+                                div().relative().left(px(look.dx)).opacity(dim).child(
+                                    match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                                        Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
+                                        None => match ranges {
+                                            Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
+                                                .whitespace_nowrap()
+                                                .child(highlight_text(
+                                                    name.text.clone(),
+                                                    &ranges,
+                                                    theme,
+                                                    selected && active,
+                                                ))
+                                                .into_any_element(),
+                                            _ => div().whitespace_nowrap().child(name.text.clone()).into_any_element(),
+                                        },
+                                    },
+                                ),
+                            ),
                     );
                 row.children(cells.into_iter().enumerate().filter(|(i, _)| widths[i + 1] > 0.0).map(
                     |(i, (text, align))| {
@@ -1537,6 +1593,7 @@ impl Pane {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .text_color(muted)
+                            .opacity(dim)
                             .when(align == Align::Right, |cell| cell.text_right())
                             .child(text)
                     },
@@ -1641,8 +1698,11 @@ impl Pane {
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
         let font_size = px(ui.settings.font_size);
+        let mode = ui.feedback.mode;
+        let now = Instant::now();
         // Spec: only the focused column shows its selection in the accent color.
         let active = k == self.focused && (self.focus.is_focused(window) || self.filtering.is_some());
+        let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let drop_bg = drop_target(theme);
         let subtle = color(theme.role("fg-subtle"));
@@ -1669,6 +1729,13 @@ impl Pane {
                 let drag_label: SharedString =
                     if drag_count > 1 { format!("{drag_count} items").into() } else { entry.name.clone().into() };
                 let handoff = DragHandoff::new();
+                let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
+                let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
+                let tint = effect_tint(look, theme);
+                let dim = content_opacity(
+                    entry.hidden,
+                    self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
+                );
                 div()
                     .id(ix)
                     .role(Role::ListBoxOption)
@@ -1681,10 +1748,14 @@ impl Pane {
                     .w_full()
                     .px(px(CELL_PADDING))
                     .rounded_md()
+                    .relative()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .when(selected, |row| row.bg(selection_bg))
+                    .when(shift != 0.0, |row| row.top(px(shift)))
+                    .when(look.opacity < 1.0, |row| row.opacity(look.opacity))
+                    .when(draws_selection_fill(selected, glide, cursor == Some(ix)), |row| row.bg(selection_bg))
+                    .when_some(tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
                     .debug_selector(|| format!("column-{k}-row-{}", entry.name))
                     .on_drag(DraggedSelection { entries: drag_entries }, {
                         let handoff = handoff.clone();
@@ -1756,29 +1827,28 @@ impl Pane {
                             this.open_selected(cx);
                         }
                     }))
+                    .child(row_icon(&entry, look, theme))
                     .child(
-                        div()
-                            .size(px(16.))
-                            .flex_none()
-                            .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
+                        div().relative().left(px(look.dx)).flex_1().opacity(dim).child(
+                            match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                                Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
+                                None => match ranges {
+                                    Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .child(highlight_text(name.text.clone(), &ranges, theme, selected && active))
+                                        .into_any_element(),
+                                    _ => div()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .child(name.text.clone())
+                                        .into_any_element(),
+                                },
+                            },
+                        ),
                     )
-                    .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
-                        Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
-                        None => match ranges {
-                            Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
-                                .flex_1()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .child(highlight_text(name.text.clone(), &ranges, theme, selected && active))
-                                .into_any_element(),
-                            _ => div()
-                                .flex_1()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .child(name.text.clone())
-                                .into_any_element(),
-                        },
-                    })
                     .child(div().w(px(10.)).flex_none().text_color(subtle).child(if navigable { "›" } else { "" }))
             })
             .collect()
@@ -1786,6 +1856,11 @@ impl Pane {
 
     fn render_columns(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
+        let (mode, font_size) = {
+            let ui = cx.global::<Ui>();
+            (ui.feedback.mode, px(ui.settings.font_size))
+        };
+        let now = Instant::now();
         let border = color(theme.role("border"));
         let focused = self.focused;
         let mut strip = div().id("columns").size_full().flex().overflow_x_scroll().track_scroll(&self.strip_scroll);
@@ -1812,18 +1887,72 @@ impl Pane {
                 (None, None, None)
             };
             let has_field = field.is_some();
+            let glide =
+                mode == Effective::Full && k == focused && (self.focus.is_focused(window) || self.filtering.is_some());
             let body = match no_matches {
                 Some(block) => block,
-                None => uniform_list(
-                    ("column-list", k),
-                    shown,
-                    cx.processor(move |this, range, window, cx| this.render_column_rows(k, range, window, cx)),
-                )
-                .track_scroll(&scroll)
-                .flex_1()
-                .min_h_0()
-                .px_1()
-                .into_any_element(),
+                None => {
+                    let ghosts = {
+                        let f = folder.read(cx);
+                        Ghosts {
+                            folder: f,
+                            mode,
+                            now,
+                            scroll: &scroll,
+                            theme: &theme,
+                            font_size,
+                            side_inset: 4.0,
+                            top_inset: 0.0,
+                        }
+                        .render()
+                    };
+                    let glide_fill = if glide {
+                        let f = folder.read(cx);
+                        f.cursor_ix().map(|ix| {
+                            let offset = shown_offset(&scroll);
+                            let y = ix as f32 * ROW_HEIGHT;
+                            div()
+                                .absolute()
+                                .left(px(4.))
+                                .right(px(4.))
+                                .h(px(ROW_HEIGHT))
+                                .rounded_md()
+                                .bg(active_selection(&theme))
+                                .debug_selector(move || format!("column-glide-{k}"))
+                                .with_spring(
+                                    ("glide", k),
+                                    SpringAnimation::new(SpringConfig::new(2500.0, 2.0 * 2500.0f32.sqrt(), 1.0))
+                                        .to(px(y)),
+                                    move |el, y| el.top(px(f32::from(y) + offset)),
+                                )
+                        })
+                    } else {
+                        None
+                    };
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .children(glide_fill)
+                        .child(
+                            uniform_list(
+                                ("column-list", k),
+                                shown,
+                                cx.processor(move |this, range, window, cx| {
+                                    this.render_column_rows(k, range, window, cx)
+                                }),
+                            )
+                            .track_scroll(&scroll)
+                            .flex_1()
+                            .min_h_0()
+                            .px_1(),
+                        )
+                        .children(ghosts)
+                        .into_any_element()
+                }
             };
             strip =
                 strip.child(
@@ -1896,23 +2025,24 @@ fn drag_combo_left(cursor_x: f32, width: f32) -> f32 {
 
 /// A chevron drawn as a path: expanding rotates the same glyph instead of swapping in a
 /// different one that sits lower in its box.
-fn chevron_glyph(expanded: bool, chevron: gpui::Rgba) -> impl IntoElement {
+/// The disclosure chevron, turned `turn` of the way from closed (0, pointing
+/// right) to open (1, pointing down); Full motion turns it in between.
+fn chevron_glyph(turn: f32, chevron: gpui::Rgba) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
             let (width, height) = (bounds.size.width, bounds.size.height);
             let origin = bounds.origin;
-            let p = |x: f32, y: f32| point(origin.x + width * x, origin.y + height * y);
+            let (sin, cos) = (turn * std::f32::consts::FRAC_PI_2).sin_cos();
+            // The closed chevron's points, turned clockwise about the center.
+            let p = |x: f32, y: f32| {
+                let (dx, dy) = (x - 0.5, y - 0.5);
+                point(origin.x + width * (0.5 + dx * cos - dy * sin), origin.y + height * (0.5 + dx * sin + dy * cos))
+            };
             let mut builder = PathBuilder::stroke(px(2.));
-            if expanded {
-                builder.move_to(p(0.2, 0.35));
-                builder.line_to(p(0.5, 0.65));
-                builder.line_to(p(0.8, 0.35));
-            } else {
-                builder.move_to(p(0.35, 0.2));
-                builder.line_to(p(0.65, 0.5));
-                builder.line_to(p(0.35, 0.8));
-            }
+            builder.move_to(p(0.35, 0.2));
+            builder.line_to(p(0.65, 0.5));
+            builder.line_to(p(0.35, 0.8));
             if let Ok(path) = builder.build() {
                 window.paint_path(path, chevron);
             }
@@ -1920,6 +2050,107 @@ fn chevron_glyph(expanded: bool, chevron: gpui::Rgba) -> impl IntoElement {
     )
     .w(px(14.))
     .h(px(14.))
+}
+
+/// The vertical scroll offset the list's rows are drawn at. A trackpad scroll
+/// adds to the raw offset even past the ends (a short list cannot scroll at
+/// all); `uniform_list` clamps it only when it lays out, so overlays drawn over
+/// the rows (the glide fill, ghost rows) clamp it the same way or they drift.
+fn shown_offset(scroll: &UniformListScrollHandle) -> f32 {
+    let state = scroll.0.borrow();
+    let max = f32::from(state.base_handle.max_offset().y).max(0.0);
+    f32::from(state.base_handle.offset().y).clamp(-max, 0.0)
+}
+
+/// Whether a row draws its own selection fill. While the cursor glides (Full motion,
+/// focused list), the cursor row leaves its fill to the gliding one under the rows;
+/// every other selected row keeps its own, so a multiple selection still shows.
+fn draws_selection_fill(selected: bool, glide: bool, is_cursor: bool) -> bool {
+    selected && !(glide && is_cursor)
+}
+
+/// The file icon with the trash glyph drawn over it while a row is swallowed.
+fn row_icon(entry: &Entry, look: Look, theme: &Theme) -> Div {
+    div()
+        .relative()
+        .size(px(16.))
+        .flex_none()
+        .child(
+            div()
+                .opacity((1.0 - look.trash) * content_opacity(entry.hidden, false))
+                .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
+        )
+        .when(look.trash > 0.0, |slot| {
+            slot.child(
+                div().absolute().inset_0().flex().items_center().justify_center().opacity(look.trash).child(glyph(
+                    Glyph::Trash,
+                    look.trash_size,
+                    "fg-muted",
+                    theme,
+                )),
+            )
+        })
+}
+
+/// A row drawn over the list while its swallow finishes after the listing dropped it.
+fn ghost_row(entry: &Entry, look: Look, theme: &Theme, font_size: Pixels) -> Div {
+    div()
+        .h(px(ROW_HEIGHT))
+        .w_full()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px(px(CELL_PADDING))
+        .opacity(look.opacity)
+        .child(row_icon(entry, look, theme))
+        .child(
+            div()
+                .relative()
+                .left(px(look.dx))
+                .opacity(content_opacity(entry.hidden, false))
+                .text_size(font_size)
+                .whitespace_nowrap()
+                .child(entry.name.clone()),
+        )
+}
+
+/// Ghost rows for effects whose entry left the listing before the swallow ended.
+struct Ghosts<'a> {
+    folder: &'a Folder,
+    mode: Effective,
+    now: Instant,
+    scroll: &'a UniformListScrollHandle,
+    theme: &'a Theme,
+    font_size: Pixels,
+    side_inset: f32,
+    top_inset: f32,
+}
+
+impl Ghosts<'_> {
+    fn render(&self) -> Vec<AnyElement> {
+        if self.mode != Effective::Full {
+            return Vec::new();
+        }
+        let offset = shown_offset(self.scroll);
+        self.folder
+            .effects()
+            .iter()
+            .filter(|effect| effect.fx.leaving() && effect.removed && effect.entering(self.now))
+            .map(|effect| {
+                let look = effect.look(self.mode, self.now);
+                let top = effect.row_index as f32 * ROW_HEIGHT + offset + self.top_inset;
+                div()
+                    .absolute()
+                    .left(px(self.side_inset))
+                    .right(px(self.side_inset))
+                    .top(px(top))
+                    .h(px(ROW_HEIGHT))
+                    .overflow_hidden()
+                    .child(ghost_row(&effect.entry, look, self.theme, self.font_size))
+                    .into_any_element()
+            })
+            .collect()
+    }
 }
 
 /// Column view: the shared width, widened for long names up to a cap. Estimated from
@@ -1943,6 +2174,12 @@ fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.bench_step(window, cx);
+        // Row effects and disclosures are drawn from the clock: keep frames coming
+        // while one runs (GPUI only redraws on its own for its animation elements).
+        let frame_now = Instant::now();
+        if self.folders.iter().any(|folder| folder.read(cx).animating(frame_now)) {
+            window.request_animation_frame();
+        }
         // A drag inside the list highlights the row under the pointer from this state; the
         // style-based drag-over highlight flickers on the platform drag path used when a
         // drag leaves the window and comes back.
@@ -1972,6 +2209,12 @@ impl Render for Pane {
             (title, focused.entries().len(), focused.row_count(), focused.filter().is_some())
         };
         let filtering = self.filtering.is_some();
+        let (mode, font_size, theme) = {
+            let ui = cx.global::<Ui>();
+            (ui.feedback.mode, px(ui.settings.font_size), ui.theme.clone())
+        };
+        let now = Instant::now();
+        let glide = mode == Effective::Full && (self.focus.is_focused(window) || self.filtering.is_some());
         // The field is inside the list now: while it has focus, the list's actions must be
         // off the focus path so AppKit's menu equivalents let those keys through.
         let filter_focused = self
@@ -2008,11 +2251,64 @@ impl Render for Pane {
                         let bounds = self.list_bounds.clone();
                         let body = match no_matches {
                             Some(block) => block,
-                            None => uniform_list("entries", rows, cx.processor(Self::render_table_rows))
-                                .track_scroll(&scroll)
-                                .pt(px(LIST_TOP_INSET))
-                                .flex_1()
-                                .into_any_element(),
+                            None => {
+                                let ghosts = {
+                                    let folder = self.folders[0].read(cx);
+                                    Ghosts {
+                                        folder,
+                                        mode,
+                                        now,
+                                        scroll: &scroll,
+                                        theme: &theme,
+                                        font_size,
+                                        side_inset: 8.0,
+                                        top_inset: LIST_TOP_INSET,
+                                    }
+                                    .render()
+                                };
+                                let glide_fill = if glide {
+                                    let folder = self.folders[0].read(cx);
+                                    folder.cursor_ix().map(|ix| {
+                                        let offset = shown_offset(&scroll);
+                                        let y = ix as f32 * ROW_HEIGHT;
+                                        div()
+                                            .absolute()
+                                            .left(px(8.))
+                                            .right(px(8.))
+                                            .h(px(ROW_HEIGHT))
+                                            .rounded_md()
+                                            .bg(active_selection(&theme))
+                                            .debug_selector(|| "glide".into())
+                                            .with_spring(
+                                                "glide",
+                                                SpringAnimation::new(SpringConfig::new(
+                                                    2500.0,
+                                                    2.0 * 2500.0f32.sqrt(),
+                                                    1.0,
+                                                ))
+                                                .to(px(y)),
+                                                move |el, y| el.top(px(f32::from(y) + offset + LIST_TOP_INSET)),
+                                            )
+                                    })
+                                } else {
+                                    None
+                                };
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_hidden()
+                                    .children(glide_fill)
+                                    .child(
+                                        uniform_list("entries", rows, cx.processor(Self::render_table_rows))
+                                            .track_scroll(&scroll)
+                                            .pt(px(LIST_TOP_INSET))
+                                            .flex_1(),
+                                    )
+                                    .children(ghosts)
+                                    .into_any_element()
+                            }
                         };
                         div()
                             .flex_1()
@@ -2166,7 +2462,15 @@ impl Pane {
 
 #[cfg(test)]
 mod tests {
-    use super::drag_combo_left;
+    use super::{drag_combo_left, draws_selection_fill};
+
+    #[test]
+    fn gliding_hands_only_the_cursor_rows_fill_to_the_glide() {
+        assert!(!draws_selection_fill(true, true, true), "the cursor row: the glide draws its fill");
+        assert!(draws_selection_fill(true, true, false), "other selected rows keep theirs (⌘A in Full)");
+        assert!(draws_selection_fill(true, false, true), "no glide: the cursor row fills itself");
+        assert!(!draws_selection_fill(false, true, false), "unselected rows draw none");
+    }
 
     #[test]
     fn drag_combo_touches_the_cursor_only_when_it_has_to() {

@@ -3,10 +3,14 @@
 //! machine; this module decides when the app may ask and how a tip looks.
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use crow_core::motion::{self, Effective};
 use crow_core::{HintsMode, TIPS_FILE, TipBook, TipId, TipState};
-use gpui::{App, AppContext, EntityId, Global, IntoElement, Role, SharedString, Task, Window, div, prelude::*, px};
+use gpui::{
+    Animation, AnimationExt, AnyElement, App, AppContext, EntityId, Global, IntoElement, Role, SharedString, Task,
+    Window, div, prelude::*, px,
+};
 
 use crate::actions::{ShowCommandPalette, ShowSearch, StartFilter};
 use crate::chrome::{Keycap, KeycapWeight};
@@ -155,8 +159,9 @@ pub fn render_tip(
     key: SharedString,
     theme: &crow_theme::Theme,
     window_width: f32,
+    mode: Effective,
     on_got_it: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
+) -> AnyElement {
     let sentence = text(id, &key);
     let max_width = (window_width - 24.).min(440.);
     let surface = color(theme.role("surface"));
@@ -164,7 +169,7 @@ pub fn render_tip(
     let hover = color(theme.role("border"));
     let selection = color(theme.role("selection"));
     let fg = color(theme.role("fg"));
-    div()
+    let card = div()
         .id("tip")
         .debug_selector(|| "tip".into())
         .role(Role::Status)
@@ -208,5 +213,20 @@ pub fn render_tip(
                 .active(move |style| style.bg(selection))
                 .on_click(on_got_it)
                 .child("Got it"),
-        )
+        );
+    let element_id = SharedString::from(format!("tip-{id:?}"));
+    match mode {
+        Effective::Off => card.into_any_element(),
+        Effective::Low => card
+            .with_animation(element_id, Animation::new(Duration::from_millis(motion::ms::LOW_IN)), |el, t| {
+                el.opacity(motion::ease_out(t))
+            })
+            .into_any_element(),
+        Effective::Full => card
+            .with_animation(element_id, Animation::new(Duration::from_millis(motion::ms::TIP_FULL)), |el, t| {
+                let e = motion::ease_out(t);
+                el.opacity(e).bottom(px(crate::bottom_bar::HEIGHT + 8. + 8. * (1. - e)))
+            })
+            .into_any_element(),
+    }
 }

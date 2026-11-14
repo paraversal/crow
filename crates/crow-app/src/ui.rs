@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crow_core::motion::Effective;
 use crow_core::{
     Exclude, Recent, RecentCommands, Settings, SidebarConfig, Views, load_settings, load_sidebar, load_views,
 };
@@ -13,6 +14,7 @@ use crow_theme::Theme;
 use gpui::{App, AppContext, Global, SharedString};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::feedback::{self, Feedback};
 use crate::style::variant_of;
 
 const FADE: Duration = Duration::from_millis(500);
@@ -20,6 +22,8 @@ const FADE_REDUCED_MOTION: Duration = Duration::from_millis(150);
 
 pub struct Ui {
     pub settings: Settings,
+    /// The motion mode and sound set in effect, and macOS's UI-sounds switch.
+    pub feedback: Feedback,
     /// The colors on screen: the current theme, or a step of a fade towards it.
     pub theme: Theme,
     /// Where the colors are heading; equal to `theme` when no fade is running.
@@ -68,6 +72,7 @@ impl Ui {
         let recent_commands = RecentCommands::load(&state_dir.join("palette-commands.json"));
         let mut ui = Ui {
             settings: Settings::default(),
+            feedback: Feedback::default(),
             target: theme.clone(),
             theme,
             fade: None,
@@ -94,6 +99,7 @@ impl Ui {
         ui.load_views();
         ui.load_sidebar();
         ui.load_exclude();
+        ui.feedback = Feedback::read(&ui.settings);
         ui
     }
 
@@ -101,6 +107,12 @@ impl Ui {
     #[cfg(test)]
     pub fn config_error(&self) -> Option<SharedString> {
         self.errors.iter().flatten().next().cloned()
+    }
+
+    /// How long the running theme fade lasts, for tests.
+    #[cfg(test)]
+    pub fn fade_duration(&self) -> Option<Duration> {
+        self.fade.as_ref().map(|(_, _, duration)| *duration)
     }
 
     /// The first config file problem and the file it names, with the config dir
@@ -202,6 +214,9 @@ pub fn init(cx: &mut App) {
     ui.target = theme.clone();
     ui.theme = theme;
     cx.set_global(ui);
+    let feedback = cx.global::<Ui>().feedback;
+    cx.set_reduce_motion(feedback.mode == Effective::Off);
+    feedback::preload(feedback.sound);
     crate::usage::init(cx);
     crate::tips::init(cx);
 
@@ -278,12 +293,34 @@ fn poll(cx: &mut App) {
     if config_changed {
         reload_config(cx);
     }
+    // Reduce Motion and the UI-sounds switch can change without a config edit.
+    refresh_feedback(cx);
     if config_changed || theme_changed {
         reload_theme(cx);
     }
     if mounts_changed {
         refresh_volumes(cx);
     }
+}
+
+/// Recompute the effective motion mode and sound set from settings, Reduce Motion
+/// and the UI-sounds switch, and apply them. In `off`, GPUI's own switch freezes
+/// every `with_animation` (Low still needs fades, so it stays false there); a new
+/// sound set is preloaded so its first play does no disk I/O.
+pub fn refresh_feedback(cx: &mut App) {
+    let (feedback, changed) = {
+        let ui = cx.global_mut::<Ui>();
+        let feedback = Feedback::read(&ui.settings);
+        let changed = feedback != ui.feedback;
+        ui.feedback = feedback;
+        (feedback, changed)
+    };
+    if !changed {
+        return;
+    }
+    cx.set_reduce_motion(feedback.mode == Effective::Off);
+    feedback::preload(feedback.sound);
+    cx.refresh_windows();
 }
 
 /// Reload every config file. Views always count as changed (cheap, and panes only
@@ -303,6 +340,7 @@ pub fn reload_config(cx: &mut App) {
     if settings {
         crate::menus::refresh(cx);
     }
+    refresh_feedback(cx);
     cx.refresh_windows();
 }
 
@@ -344,8 +382,16 @@ pub fn set_theme(theme: Theme, cx: &mut App) {
     }
     tracing::info!(theme = %theme.name, "theme changed");
     let fading = ui.fade.is_some();
-    if ui.fade_enabled && !theme.same_colors(&ui.theme) {
-        let duration = if crow_macos::reduce_motion() { FADE_REDUCED_MOTION } else { FADE };
+    // Off: colors change at once. Low: a short fade. Full: the full half second.
+    let duration = match ui.feedback.mode {
+        Effective::Off => None,
+        Effective::Low => Some(FADE_REDUCED_MOTION),
+        Effective::Full => Some(FADE),
+    };
+    if ui.fade_enabled
+        && let Some(duration) = duration
+        && !theme.same_colors(&ui.theme)
+    {
         // A change mid-fade starts from the colors on screen, not the old theme.
         ui.fade = Some((ui.theme.clone(), Instant::now(), duration));
         ui.target = theme;
@@ -576,4 +622,41 @@ pub fn use_view_as_defaults(dir: PathBuf, cx: &mut App) {
 /// Change the favorites in `sidebar.toml`.
 pub fn edit_sidebar(edit: crow_core::SidebarEdit, cx: &mut App) {
     write_config(SIDEBAR, move |config, home| crow_core::edit_sidebar(config, home, &edit), cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crow_theme::Rgb;
+
+    fn other_theme() -> Theme {
+        let mut theme = crow_theme::fallback();
+        theme.id = "other".into();
+        theme.palette.insert("accent".into(), Rgb(0x123456));
+        theme
+    }
+
+    #[gpui::test]
+    fn theme_fade_follows_the_motion_mode(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("crow-ui-fade-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let ui = Ui::new(root.join("config"), root.join("state"), crow_core::home(), crow_theme::fallback(), true);
+        cx.update(|cx| cx.set_global(ui));
+        for (mode, expected) in [
+            (Effective::Off, None),
+            (Effective::Low, Some(Duration::from_millis(150))),
+            (Effective::Full, Some(Duration::from_millis(500))),
+        ] {
+            cx.update(|cx| {
+                let ui = cx.global_mut::<Ui>();
+                ui.feedback.mode = mode;
+                ui.fade = None;
+                ui.theme = crow_theme::fallback();
+                ui.target = crow_theme::fallback();
+                set_theme(other_theme(), cx);
+                assert_eq!(cx.global::<Ui>().fade_duration(), expected, "{mode:?}");
+            });
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

@@ -76,7 +76,7 @@ highlighted rows. It needs a GPU, so it runs locally, not in CI.
 | Measure | Budget |
 | --- | --- |
 | First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms; U1: 10 ms; U4: 10–11 ms, filtered 10–17 ms; U5: 10–11 ms) |
-| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms; U4: 8.85–8.95 ms, main on the same machine 8.84–8.86 ms, filtered 8.82–9.03 ms; U5: 8.87–9.06 ms, main on the same machine 8.86–8.95 ms) |
+| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms; U4: 8.85–8.95 ms, main on the same machine 8.84–8.86 ms, filtered 8.82–9.03 ms; U5: 8.87–9.06 ms, main on the same machine 8.86–8.95 ms; U10: Full 9.73–9.83 ms, Off 9.83 ms, Low 9.97 ms; warm first paint 8–10 ms in all three) |
 | Search, 200k nested files, every file matches (names + contents) | first hit 4 ms; total 4.1 s (M6). `--bench-search` includes the walk, fuzzy names and content reads. |
 
 ## By hand (each milestone)
@@ -109,7 +109,7 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Live updates | With a folder open, create, rename and delete files from Terminal; the list follows without jumping. |
 | Live theme | Switch macOS light/dark, or edit a scheme in the theme index: colors fade over about half a second (faster with Reduce Motion). |
 | Theme picker | Cmd-Option-T, arrow through themes (each shows at once), Esc returns; Return keeps one and writes it to `settings.toml`. Apply to All Apps changes `~/.local/state/themes/current.json`. |
-| Favorites | Drag a favorite up and down: one insertion line shows the exact target (under a group title for that group's start), the line never shifts rows, and the end of a group is reachable; dropping on a group title still moves the favorite to its start. Drag a folder from the list onto a group title; drop a file onto a favorite. Check `sidebar.toml` keeps your comments. Add `icon = "🚀"` and `color = "blue"` to one. |
+| Favorites | Drag a favorite up and down: one insertion line shows the exact target (under a group title for that group's start), the line never shifts rows, and the end of a group is reachable; dropping on a group title still moves the favorite to its start. Drag a folder from the list onto a group title, and between two favorites (from the list and from Finder): the line shows at the row's upper or lower edge with no row fill, and the folder is added there, not moved; over the middle of a favorite the row fills instead and the drop moves into it. Drop a file onto a favorite. Check `sidebar.toml` keeps your comments. Add `icon = "🚀"` and `color = "blue"` to one. |
 | Recent | Visit a few folders (and `cd` around with zoxide): they appear under Recent, favorites excluded. |
 | Locations | Mount a disk image: it appears without a restart, with free space and a bar; ⏏ ejects it. |
 | Sidebar twins | Visit two folders with the same name (e.g. `~/a/git`, `~/b/git`): Recent shows "git a" and "git b" with the hint dimmer; with a long name (the sidebar is a fixed 210 px) the hint truncates and goes before the name does. VoiceOver reads "git, in a". |
@@ -157,3 +157,30 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Find Everything | From the list press ⇧⌘A (or Edit ▸ Find Everything…): search opens in the current folder with the rules off; typing finds files inside `node_modules`. With search open, ⇧⌘A from the sidebar flips the rules and returns focus to the query field. |
 | Typing is not stolen | Rename a file and type `/`, Space and Return: the characters stay in the field (Return commits) and no filter or Quick Look opens. Same in the filter, search and palette fields. |
 | Help search | Help ▸ type "trash": macOS points at File ▸ Move to Trash. |
+
+## Motion and sound (U10)
+
+`crow --motion-lab` opens a fake folder where every feedback event (trash, move, undo, new
+folder, refuse, copy, tip, sheet) can be fired in Off, Low and Full and in the three sound
+sets, with slow motion ×5 and the cursor glide. The lab and the app share
+`crow_core::motion`, so a duration or look changed there changes both. `p` opens the mock
+sheet; `Esc` closes it.
+
+In the bundled app (`./scripts/bundle.sh`), FireBox dark and Solarized Light, each in
+`motion = off`, `low`, `full`, sound `finder` and `crow`:
+
+| Check | How |
+| --- | --- |
+| Trash | ⌘⌫ one file, three files, and a folder of 500 files, in list and column view: the row fades (Low) or its icon becomes a trash and swallows the name while the gap closes (Full); Off removes it in one frame. One sound per operation; afterwards nothing is selected (as in Finder), and ↓ starts at the first row. The animation runs smoothly to its end without moving the mouse. |
+| Move | Drag a file onto a folder row and onto a sidebar favorite: the source fades, the target row pulses (Full after the fly phase, Low at once), the favorite pulses; Purr in `crow`. |
+| New folder | ⇧⌘N: the new folder arrives (rows below slide down in Full), then the rename field opens and takes typing at once. Pop in `crow`. |
+| Undo | ⌘Z after a trash: the file arrives; Bottle in `crow`. |
+| Refuse | `chflags uchg` a file, then ⌘⌫: Full shakes the row, Low tints it red, Off only beeps; the error line shows. A refused key in a text field (⌥⌫ at the start) shakes/tints the field. |
+| Copy | Copy a 2 GB file: progress, the bar fades at the end, Glass in `crow` (only if it ran over a second). |
+| Reduce Motion | With `motion = "auto"`, toggle System Settings ▸ Accessibility ▸ Reduce Motion: Full ↔ Low without a relaunch. |
+| Sounds off | System Settings ▸ Sound: "Play user interface sound effects" off → no sounds except the alert. Alert volume low → Crow's sounds are as quiet as Finder's (NSSound follows the output volume; Q7). |
+| Sheets and tips | Cmd-K, Cmd-J, ⇧⌘G and the theme picker fade in (140 ms Full, 120 Low); a tip rises 8 px and fades in Full, fades in Low. Tooltips still appear without motion. |
+| Expand and collapse | List view, a folder with a few items: → or the triangle. Full: the triangle turns, the rows below slide down and the new rows show from the top as the gap opens; ← slides the rows below back up. Low: the new rows fade in, nothing moves. Off: one frame. A folder with hundreds of items opens without a long slide. |
+| Hidden items | A folder with dotfiles (Home): hidden files and folders show dimmed (icon, name and every column) in list and column view, in light and dark themes; selected, the fill stays full and the name stays readable; renaming one shows the field at full contrast. |
+| Glide | Full, hold ↓: the selection fill follows within one row and settles; ⌘A shows every row selected. Trackpad scroll a long list and a short one that fits: the fill stays on the cursor row and never drifts; the cursor never moves. |
+| Lab | `crow --motion-lab` still runs, matches the app, and its sheet (`p`) fades like the app's. |

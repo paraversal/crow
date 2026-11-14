@@ -10,7 +10,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
+use crow_core::motion::{self, Fx};
 use crow_core::{Favorite, SidebarEdit, Slot};
 use crow_fs::ops::Request;
 use gpui::{
@@ -25,7 +27,7 @@ use crate::actions::{
 use crate::chrome::with_tooltip;
 use crate::palette::CommandId;
 use crate::pane::DraggedSelection;
-use crate::style::{color, current_location, cursor_ring, drop_target, icon};
+use crate::style::{color, current_location, cursor_ring, drop_target, effect_tint, icon};
 use crate::ui::{self, Ui};
 
 pub enum SidebarEvent {
@@ -214,6 +216,10 @@ pub struct Sidebar {
     names: RefCell<HashMap<PathBuf, Rc<[String]>>>,
     /// The paths in `names`, in row order, so a changed sidebar prunes stale entries.
     name_paths: RefCell<Vec<PathBuf>>,
+    /// A row pulsing because a move landed in its folder, and when it started.
+    receive: Option<(PathBuf, Instant)>,
+    /// Bumped per pulse, so an older timer cannot clear a newer one.
+    receive_generation: u64,
 }
 
 impl Focusable for Sidebar {
@@ -234,7 +240,40 @@ impl Sidebar {
             insert_slot: None,
             names: RefCell::new(HashMap::new()),
             name_paths: RefCell::new(Vec::new()),
+            receive: None,
+            receive_generation: 0,
         }
+    }
+
+    /// Pulse the row for `path` after a move lands in its folder. Full waits out the
+    /// fly phase; Low tints at once; Off does nothing.
+    pub fn pulse(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let mode = cx.global::<Ui>().feedback.mode;
+        let total: Duration = motion::phases(mode, Fx::Receive).iter().sum();
+        if total.is_zero() {
+            return;
+        }
+        self.receive = Some((path, Instant::now()));
+        self.receive_generation += 1;
+        let generation = self.receive_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(total).await;
+            this.update(cx, |this, cx| {
+                if this.receive_generation == generation {
+                    this.receive = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Whether the row for `path` is pulsing, for tests.
+    #[cfg(test)]
+    pub fn receiving(&self, path: &Path) -> bool {
+        self.receive.as_ref().is_some_and(|(target, _)| target == path)
     }
 
     pub fn set_current(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
@@ -460,14 +499,24 @@ impl Sidebar {
         self.insert_slot
     }
 
-    /// The one place a dragged favorite would go, from the pointer: the upper half of a
-    /// favorite inserts before it, the lower half after it; a group title inserts first.
-    fn favorite_slot_at(&self, position: Point<Pixels>) -> Option<Slot> {
+    /// Where a drag would insert a favorite, from the pointer. A dragged favorite always
+    /// lands between rows: the upper half of a favorite inserts before it, the lower half
+    /// after it, and a group title inserts first. Other drags (`edges_only`) insert only
+    /// from a favorite's upper or lower quarter, as in Finder; the middle of the row is
+    /// left to moving into its folder, and a group title to adding at the group's end.
+    fn favorite_slot_at(&self, position: Point<Pixels>, edges_only: bool) -> Option<Slot> {
         let layout = self.layout.borrow();
         let slot_of = |target: &Option<DropTarget>, favorite: &Option<Slot>, bounds: &Bounds<Pixels>| {
             if let Some(slot) = favorite {
-                Some(if position.y < bounds.center().y { *slot } else { (slot.0, slot.1 + 1) })
-            } else if let Some(DropTarget::Group(group)) = target {
+                let band = bounds.size.height / if edges_only { 4.0 } else { 2.0 };
+                if position.y < bounds.top() + band {
+                    Some(*slot)
+                } else if position.y >= bounds.bottom() - band {
+                    Some((slot.0, slot.1 + 1))
+                } else {
+                    None
+                }
+            } else if let (Some(DropTarget::Group(group)), false) = (target, edges_only) {
                 Some((*group, 0))
             } else {
                 None
@@ -665,19 +714,43 @@ impl Sidebar {
         }
     }
 
-    /// Folders dropped on a group's title join that group.
-    fn add_dropped(&mut self, group: usize, paths: &ExternalPaths, cx: &mut Context<Self>) {
-        let at = cx.global::<Ui>().favorites().get(group).map_or(0, |(_, f)| f.len());
-        for (n, path) in paths.paths().iter().filter(|p| p.is_dir()).enumerate() {
-            ui::edit_sidebar(SidebarEdit::Add { path: path.clone(), at: (group, at + n) }, cx);
+    /// The slot after a group's last favorite.
+    fn group_end(&self, group: usize, cx: &gpui::App) -> Slot {
+        (group, cx.global::<Ui>().favorites().get(group).map_or(0, |(_, f)| f.len()))
+    }
+
+    /// Folders dropped on a group's title or between two favorites join the group there.
+    fn add_folders(&mut self, at: Slot, folders: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if folders.is_empty() {
+            cx.emit(SidebarEvent::Message("Only folders can be added to the sidebar".into(), true));
+            return;
+        }
+        for (n, path) in folders.into_iter().enumerate() {
+            ui::edit_sidebar(SidebarEdit::Add { path, at: (at.0, at.1 + n) }, cx);
         }
     }
 }
 
+/// The folders among dropped paths from another app.
+fn folders_of_paths(paths: &ExternalPaths) -> Vec<PathBuf> {
+    paths.paths().iter().filter(|p| p.is_dir()).cloned().collect()
+}
+
+/// The folders in a selection dragged from a pane, which already knows which are folders.
+fn folders_of_selection(selection: &DraggedSelection) -> Vec<PathBuf> {
+    selection.entries.iter().filter(|(_, dir)| *dir).map(|(path, _)| path.clone()).collect()
+}
+
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The receive pulse is drawn from the clock: keep frames coming while it runs.
+        if self.receive.is_some() {
+            window.request_animation_frame();
+        }
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
+        let mode = ui.feedback.mode;
+        let now = Instant::now();
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
         let rows = rows(ui);
         let focused = self.focus.is_focused(window);
@@ -690,9 +763,13 @@ impl Render for Sidebar {
         // A drag's target comes from the pointer and the last layout, so the
         // highlight only changes when the pointer enters a different row.
         if cx.has_active_drag() {
-            self.drop_target = self.target_at(window.mouse_position());
-            self.insert_slot =
-                if self.dragging_favorite.get() { self.favorite_slot_at(window.mouse_position()) } else { None };
+            let position = window.mouse_position();
+            self.insert_slot = self.favorite_slot_at(position, !self.dragging_favorite.get());
+            // Between two favorites the line shows where the drop goes; no row fills.
+            self.drop_target = match self.insert_slot {
+                Some(_) if !self.dragging_favorite.get() => None,
+                _ => self.target_at(position),
+            };
         } else {
             self.drop_target = None;
             self.insert_slot = None;
@@ -727,9 +804,13 @@ impl Render for Sidebar {
                             !self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Group(g)),
                             |header| header.bg(drop_bg),
                         )
-                        .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| this.add_dropped(g, paths, cx)))
+                        .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                            let at = this.group_end(g, cx);
+                            this.add_folders(at, folders_of_paths(paths), cx)
+                        }))
                         .on_drop(cx.listener(move |this, selection: &DraggedSelection, _, cx| {
-                            this.add_dropped(g, &selection.external(), cx)
+                            let at = this.group_end(g, cx);
+                            this.add_folders(at, folders_of_selection(selection), cx)
                         }))
                         .on_drop(cx.listener(move |_, dragged: &DraggedFavorite, _, cx| {
                             ui::edit_sidebar(SidebarEdit::Move { from: dragged.slot, to: (g, 0) }, cx);
@@ -759,6 +840,10 @@ impl Render for Sidebar {
                 _ => None,
             };
             let target = path.clone();
+            let receive_tint = self.receive.as_ref().filter(|(target, _)| target == &path).and_then(|(_, started)| {
+                let phases = motion::phases(mode, Fx::Receive);
+                effect_tint(motion::look_in(&phases, mode, Fx::Receive, *started, now), &theme)
+            });
             let mut item = div()
                 .id(SharedString::from(format!("sidebar-{i}")))
                 .debug_selector(move || format!("sidebar-{i}"))
@@ -778,20 +863,23 @@ impl Render for Sidebar {
                 .when(look.current && !look.drop, |row| row.bg(current_location(&theme)))
                 .when(look.drop, |row| row.bg(drop_bg))
                 .when(look.ring, |row| row.shadow(cursor_ring(&theme)))
+                .when_some(receive_tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.cursor = i;
                     cx.emit(SidebarEvent::Open(target.clone()));
                 }))
                 .on_drop({
                     let into = path.clone();
-                    cx.listener(move |this, paths: &ExternalPaths, window, cx| {
-                        this.drop_on(into.clone(), paths, window, cx)
+                    cx.listener(move |this, paths: &ExternalPaths, window, cx| match this.insert_slot {
+                        Some(at) => this.add_folders(at, folders_of_paths(paths), cx),
+                        None => this.drop_on(into.clone(), paths, window, cx),
                     })
                 })
                 .on_drop({
                     let into = path.clone();
-                    cx.listener(move |this, selection: &DraggedSelection, window, cx| {
-                        this.drop_on(into.clone(), &selection.external(), window, cx)
+                    cx.listener(move |this, selection: &DraggedSelection, window, cx| match this.insert_slot {
+                        Some(at) => this.add_folders(at, folders_of_selection(selection), cx),
+                        None => this.drop_on(into.clone(), &selection.external(), window, cx),
                     })
                 });
             if let Row::Favorite(slot, _) = &row {
@@ -807,7 +895,7 @@ impl Render for Sidebar {
                 // The one insertion line: above the first favorite of a group for slot 0,
                 // below a favorite for the boundary after it. No row changes height.
                 let line = self.insert_slot.and_then(|target| {
-                    if target == slot {
+                    if target == slot && slot.1 == 0 {
                         Some(false)
                     } else if target == (slot.0, slot.1 + 1) {
                         Some(true)

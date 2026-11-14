@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::motion::{MotionMode, SoundSet};
+
 /// The documented default `settings.toml`, written on first launch. Parsing it
 /// must give exactly `Settings::default()` (a test checks this).
 pub const DEFAULT_SETTINGS: &str = r#"# Crow settings. Changes apply immediately; delete a line to get its default back.
@@ -24,11 +26,23 @@ keymap = "finder"
 # "off" hides every hint and tip.
 hints = "auto"
 
+# Motion: "auto" (default) follows macOS Reduce Motion (full when it is off, low
+# when it is on); "off" changes state in one frame; "low" fades opacity and color
+# only; "full" also moves and resizes (trash swallows the row, the gap closes).
+motion = "auto"
+
+# Feedback sounds: "crow" (default) plays Finder's trash sounds plus soft ticks
+# for move, new folder, undo and copy; "finder" plays only the sounds Finder
+# itself makes (trash, empty trash, the alert); "off" is silent. macOS "Play user
+# interface sound effects" off silences all but the alert.
+sound = "crow"
+
 # Interface font. Empty uses the system font.
 font_family = ""
 font_size = 13.0
 
-show_hidden_files = false
+# List dotfiles and other hidden items. View ▸ Show Hidden Files (Shift-Cmd-.) toggles it.
+show_hidden_files = true
 
 # The preview pane on the right in list view and the preview column in column view.
 # View ▸ Hide Preview (Shift-Cmd-P) toggles it; Quick Look still works.
@@ -98,6 +112,8 @@ pub struct Settings {
     pub theme: String,
     pub keymap: KeymapLayer,
     pub hints: HintsMode,
+    pub motion: MotionMode,
+    pub sound: SoundSet,
     pub font_family: String,
     pub font_size: f32,
     pub show_hidden_files: bool,
@@ -113,9 +129,11 @@ impl Default for Settings {
             theme: "system".into(),
             keymap: KeymapLayer::Finder,
             hints: HintsMode::Auto,
+            motion: MotionMode::Auto,
+            sound: SoundSet::Crow,
             font_family: String::new(),
             font_size: 13.0,
-            show_hidden_files: false,
+            show_hidden_files: true,
             show_preview: true,
             palette_recent_commands: true,
             view_per_folder: true,
@@ -268,6 +286,28 @@ mod tests {
         let dir = temp_dir("hints-bad");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("settings.toml"), "hints = \"sometimes\"\n").unwrap();
+        let err = load_settings(&dir).expect_err("rejects an unknown mode").to_string();
+        assert!(err.contains("settings.toml"), "{err}");
+        assert!(err.contains("line 1"), "{err}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn motion_and_sound_values_parse() {
+        let parse = |text: &str| toml::from_str::<Settings>(text).expect("parses");
+        assert_eq!(parse("motion = \"auto\"").motion, MotionMode::Auto);
+        assert_eq!(parse("motion = \"off\"").motion, MotionMode::Off);
+        assert_eq!(parse("motion = \"low\"").motion, MotionMode::Low);
+        assert_eq!(parse("motion = \"full\"").motion, MotionMode::Full);
+        assert_eq!(parse("sound = \"off\"").sound, SoundSet::Off);
+        assert_eq!(parse("sound = \"finder\"").sound, SoundSet::Finder);
+        assert_eq!(parse("sound = \"crow\"").sound, SoundSet::Crow);
+        assert_eq!(parse("theme = \"system\"").motion, MotionMode::Auto, "a missing line is Auto");
+        assert_eq!(parse("theme = \"system\"").sound, SoundSet::Crow, "a missing line is Crow");
+
+        let dir = temp_dir("motion-bad");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.toml"), "motion = \"slow\"\n").unwrap();
         let err = load_settings(&dir).expect_err("rejects an unknown mode").to_string();
         assert!(err.contains("settings.toml"), "{err}");
         assert!(err.contains("line 1"), "{err}");

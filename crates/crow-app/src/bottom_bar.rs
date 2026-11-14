@@ -4,10 +4,11 @@
 
 use std::ops::Range;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui::{
-    Action, AnyElement, App, Entity, FontWeight, IntoElement, KeyBinding, Pixels, Role, SharedString, TextRun, Window,
-    div, img, prelude::*, px, relative,
+    Action, Animation, AnimationExt, AnyElement, App, Entity, FontWeight, IntoElement, KeyBinding, Pixels, Role,
+    SharedString, TextRun, Window, div, img, prelude::*, px, relative,
 };
 
 use crate::actions::{
@@ -24,6 +25,7 @@ use crate::style::{color, color_alpha, error_soft, icon};
 use crate::text_input::{self, Complete, Confirm};
 use crate::ui::Ui;
 use crate::usage;
+use crow_core::motion::{self, Effective};
 use crow_core::{HintsMode, idle_hint_visible};
 use crow_fs::human_size;
 
@@ -39,6 +41,11 @@ pub struct BarState {
     /// The most the transient slot may take, so the path keeps its first and last
     /// segments (set by `fit_to_window`).
     pub transient_max: Option<Pixels>,
+    /// Bumped by every message; the transient fades in when it changes.
+    pub message_id: u64,
+    /// A finished operation's fraction while its bar fades, and its id.
+    pub progress_done: Option<f32>,
+    pub progress_id: u64,
 }
 
 /// The transient slot's one primary item.
@@ -704,6 +711,21 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         .gap(px(14.))
         .children(primary_el)
         .children(error_el);
+    // A new message or error fades in; hints appear at once (they follow focus).
+    let error_key = state.error.as_ref().map(|error| error.text.clone()).unwrap_or_default();
+    let transient = if (state.error.is_some() || !matches!(state.primary, Primary::Hints(_)))
+        && (state.message_id > 0 || state.error.is_some())
+        && ui.feedback.mode != Effective::Off
+    {
+        let key = SharedString::from(format!("bar-message-{}-{error_key}", state.message_id));
+        transient
+            .with_animation(key, Animation::new(Duration::from_millis(motion::ms::STATUS)), |el, t| {
+                el.opacity(0.3 + 0.7 * motion::ease_out(t))
+            })
+            .into_any_element()
+    } else {
+        transient.into_any_element()
+    };
 
     let counts_spoken = state.count.spoken.clone();
     let counts = (!state.count.text.is_empty()).then(|| {
@@ -723,7 +745,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         )
     });
 
-    let progress = match &state.primary {
+    let progress: Option<AnyElement> = match &state.primary {
         Primary::Running(running) => Some(
             div()
                 .id("bar-progress")
@@ -733,9 +755,31 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
                 .left_0()
                 .h(px(2.))
                 .w(relative(running.fraction))
-                .bg(color(theme.role("accent"))),
+                .bg(color(theme.role("accent")))
+                .into_any_element(),
         ),
-        _ => None,
+        _ => state.progress_done.and_then(|fraction| {
+            if ui.feedback.mode == Effective::Off {
+                return None;
+            }
+            let bar = div()
+                .id("bar-progress")
+                .debug_selector(|| "bar-progress".into())
+                .absolute()
+                .top_0()
+                .left_0()
+                .h(px(2.))
+                .w(relative(fraction))
+                .bg(color(theme.role("accent")));
+            Some(
+                bar.with_animation(
+                    ("bar-progress-done", state.progress_id),
+                    Animation::new(Duration::from_millis(motion::ms::COPY_FADE)),
+                    |el, t| el.opacity(1.0 - motion::ease_in(t)),
+                )
+                .into_any_element(),
+            )
+        }),
     };
 
     div()
@@ -767,7 +811,12 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     fn running(label: &str, progress: Progress) -> Running {
-        Running { label: label.to_owned(), progress, cancel: Arc::new(AtomicBool::new(false)) }
+        Running {
+            label: label.to_owned(),
+            progress,
+            cancel: Arc::new(AtomicBool::new(false)),
+            started: std::time::Instant::now(),
+        }
     }
 
     #[test]

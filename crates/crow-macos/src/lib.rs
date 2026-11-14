@@ -10,6 +10,7 @@ mod icons;
 mod metadata;
 mod names;
 mod quick_look;
+mod sound;
 mod spotlight;
 mod volumes;
 
@@ -19,6 +20,7 @@ pub use icons::icon_png;
 pub use metadata::{kind_name, tags, thumbnail_png};
 pub use names::display_components;
 pub use quick_look::{QuickLookKey, set_quick_look_key_handler, toggle_quick_look, update_quick_look};
+pub use sound::{Sound, beep, play, preload, set_volume, stop, ui_sounds_enabled};
 pub use spotlight::{SpotlightHit, spotlight_names};
 pub use volumes::{MountWatcher, Volume, eject, reduce_motion, volumes, watch_mounts};
 

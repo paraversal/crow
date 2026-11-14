@@ -35,13 +35,23 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), font, hidden files, the preview (`show_preview`), whether views follow folders (`view_per_folder`), window size |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), font, hidden files (shown by default), the preview (`show_preview`), whether views follow folders (`view_per_folder`), window size |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
 
 Themes come from the global index in `~/.config/themes`. View ▸ Theme… (Cmd-Option-T)
 previews each theme as you move through the list; Apply to All Apps (Cmd-Return) sets it for every app that reads the index.
+
+Motion follows `motion`: `"auto"` (default) uses Full unless macOS Reduce Motion is on, then Low;
+`"off"` changes state in one frame; `"low"` fades opacity and color only; `"full"` also moves —
+a trashed row's icon becomes a trash and swallows the name, a move pulses its target, results
+arrive, the selection fill glides between rows, and sheets and tips fade in. `sound` picks
+`"crow"` (Finder's trash sounds plus soft ticks for move, new folder, undo and copy), `"finder"`
+(only the sounds Finder itself makes) or `"off"`. The two are separate settings; macOS
+"Play user interface sound effects" off silences everything but the alert. `crow --motion-lab`
+opens a fake folder to try every mode and sound set (see below).
+
 Recent folders are kept in `~/.local/state/crow/recent.json`, merged with zoxide's list when it's installed.
 Commands run from the palette are remembered in `~/.local/state/crow/palette-commands.json`.
 Key-use counts, which retire idle bottom-bar hints, live next to it in `~/.local/state/crow/usage.json`.
@@ -64,7 +74,8 @@ switches list and columns; with `view_per_folder = false` in `settings.toml` a w
 view you give it, and Cmd-2/Cmd-3 save nothing. In the list, Right opens the selected folder inline (Right again goes into it); Left steps to the row that contains a nested one, closes an open folder, or goes up from the top level. In columns, Left and Right move between them, and Left in the leftmost column goes up a folder. Vim `h`/`l` follow the same keys.
 
 Sidebar: drag favorites to reorder them (or Cmd-Option-Up/Down), drop files on any row to move or
-copy them there, drop folders on a group's title to add them. Ctrl-Cmd-T adds the selected folder.
+copy them there, drop folders between two favorites (a line shows where) or on a group's title to add
+them. Ctrl-Cmd-T adds the selected folder.
 Same-named folders show their parent after the name (and "alias" for a symlink); with
 `keymap = "vim"`, favorites with a `key` show the letter on the right. Locations shows free space
 and a bar that warns near full. In the sidebar, Cmd-Delete removes a favorite or forgets a recent
@@ -148,3 +159,9 @@ Results open with Return, reveal with Cmd-R, Quick Look with Space, and take the
 trash keys. "Go to ⌘K" in the band opens the command palette.
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).
+
+Dev tools: `crow --motion-lab` opens a fake folder where every feedback event (trash, move,
+undo, new folder, refuse, copy, tip, empty Trash) can be fired in the three motion modes and
+three sound sets, with slow motion ×5 and the cursor glide — the reference the app's motion
+is tuned against. `crow --bench DIR` and the other `--bench-*` flags are listed in
+[docs/testing.md](docs/testing.md#performance).

@@ -11,6 +11,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
+use crow_core::motion::{self, Effective, Fx, Look};
 use crow_core::{Selection, TypeSelect};
 use crow_fs::{Entry, FolderChange, FolderWatcher, Sort};
 use futures::StreamExt;
@@ -56,6 +57,112 @@ enum FlatRow {
     Child(Entry, usize),
 }
 
+/// A feedback effect playing on one row (trash, move out, receive, arrive, refuse).
+/// The folder keeps it until the effect's phases end, so the row can render its look
+/// and the rows below can close the gap after the listing drops it.
+pub struct RowEffect {
+    pub path: PathBuf,
+    pub fx: Fx,
+    /// The mode's phases for this effect, computed once at start.
+    phases: Vec<Duration>,
+    /// The row's index when the effect started, for the ghost and the FLIP shift.
+    pub row_index: usize,
+    pub started: Instant,
+    /// The row's entry, for a ghost after the listing drops it.
+    pub entry: Entry,
+    /// The listing dropped this row while the effect was running.
+    pub removed: bool,
+    /// When the listing dropped it, so the close starts then, not before.
+    removed_at: Option<Instant>,
+}
+
+impl RowEffect {
+    fn new(path: PathBuf, fx: Fx, mode: Effective, row_index: usize, entry: Entry) -> Self {
+        RowEffect {
+            path,
+            fx,
+            phases: motion::phases(mode, fx),
+            row_index,
+            started: Instant::now(),
+            entry,
+            removed: false,
+            removed_at: None,
+        }
+    }
+
+    /// How the row looks at `now`: each phase in turn, then the last one at its end.
+    pub fn look(&self, mode: Effective, now: Instant) -> Look {
+        motion::look_in(&self.phases, mode, self.fx, self.started, now)
+    }
+
+    /// Still in the first phase: the row is drawn where it is, not closing yet.
+    pub fn entering(&self, now: Instant) -> bool {
+        self.phases.first().is_some_and(|first| now.saturating_duration_since(self.started) < *first)
+    }
+
+    /// The first phase's length (the swallow or fade out).
+    fn first_phase(&self) -> Duration {
+        self.phases.first().copied().unwrap_or_default()
+    }
+
+    /// The second phase's length (the close), or zero when there is none.
+    fn close_phase(&self) -> Duration {
+        self.phases.get(1).copied().unwrap_or_default()
+    }
+
+    /// When the close starts: after the swallow, or when the listing dropped the
+    /// row if that came later (the ghost covers an early removal).
+    fn close_start(&self) -> Instant {
+        let after_swallow = self.started + self.first_phase();
+        match self.removed_at {
+            Some(removed) if removed > after_swallow => removed,
+            _ => after_swallow,
+        }
+    }
+}
+
+/// A folder row opening or closing inline (list view, Full and Low motion).
+struct Disclosure {
+    path: PathBuf,
+    opening: bool,
+    mode: Effective,
+    /// When the triangle was toggled: the chevron turns from here.
+    toggled: Instant,
+    /// When the child rows appeared (opening) or left (closing): rows move from here.
+    /// An opening waits for the child listing, which loads in the background.
+    started: Option<Instant>,
+    /// The folder's row index then, and how many rows it showed or hid.
+    parent_ix: usize,
+    rows: usize,
+}
+
+impl Disclosure {
+    fn duration(&self) -> Duration {
+        motion::disclose_duration(self.mode)
+    }
+
+    /// Progress of the rows' motion at `now`, while it runs.
+    fn progress(&self, now: Instant) -> Option<f32> {
+        let started = self.started?;
+        let elapsed = now.saturating_duration_since(started);
+        let duration = self.duration();
+        (elapsed < duration).then(|| elapsed.as_secs_f32() / duration.as_secs_f32())
+    }
+
+    fn running(&self, now: Instant) -> bool {
+        self.progress(now).is_some() || now.saturating_duration_since(self.toggled) < self.duration()
+    }
+}
+
+/// An opening whose child rows never showed up (an empty folder) is dropped after this.
+const DISCLOSE_WAIT: Duration = Duration::from_secs(2);
+
+/// At most this many visible rows animate per operation; the rest just go.
+const MAX_EFFECTS: usize = 20;
+/// A removed row's close may start after the effect's own phases (the watcher can
+/// lag); keep the effect this much longer so the FLIP is never cut short.
+const WATCH_GRACE: Duration = Duration::from_millis(250);
+
 /// A folder opened inline (list view): its listing and the events that change it.
 struct ChildFolder {
     folder: Entity<Folder>,
@@ -83,6 +190,8 @@ pub struct Folder {
     select_after_load: Option<PathBuf>,
     /// Items an operation produced: selected as soon as they appear in the listing.
     select_when_present: Vec<PathBuf>,
+    /// The mode their Arrive effect plays in.
+    arrival_mode: Effective,
     /// Select the first item once loaded. Off for column-view children, which show
     /// a folder's contents without selecting anything until you move into them.
     auto_select: bool,
@@ -100,6 +209,12 @@ pub struct Folder {
     rows: Arc<Vec<FlatRow>>,
     /// Bumped whenever the selection or the visible rows change.
     selection_generation: u64,
+    /// Feedback effects on visible rows (trash, refuse), cleared when their phases end.
+    effects: Vec<RowEffect>,
+    /// Bumped per effect batch, so an older timer cannot clear a newer effect.
+    effect_generation: u64,
+    /// Folders opening or closing inline (list view).
+    disclosures: Vec<Disclosure>,
     /// The selected rows for dragging, rebuilt only after one of those changes.
     selection_entries: SelectionCache,
     /// The selected files' bytes and folders among them, cached the same way.
@@ -148,6 +263,7 @@ impl Folder {
             cursor_ix: None,
             select_after_load: None,
             select_when_present: Vec::new(),
+            arrival_mode: Effective::Off,
             auto_select,
             type_select: TypeSelect::default(),
             show_hidden,
@@ -157,6 +273,9 @@ impl Folder {
             expanded: HashSet::new(),
             rows: Arc::new(Vec::new()),
             selection_generation: 0,
+            effects: Vec::new(),
+            effect_generation: 0,
+            disclosures: Vec::new(),
             selection_entries: RefCell::new(None),
             selection_bytes: RefCell::new(None),
             scroll: UniformListScrollHandle::new(),
@@ -379,9 +498,227 @@ impl Folder {
     }
 
     /// Select `paths` once they show up (an operation's results), then forget them.
-    pub fn select_when_present(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+    /// They play Arrive in `mode` when they appear.
+    pub fn select_when_present(&mut self, paths: Vec<PathBuf>, mode: Effective, cx: &mut Context<Self>) {
         self.select_when_present = paths;
+        self.arrival_mode = mode;
         self.reload(cx);
+    }
+
+    // ----- feedback effects -----
+
+    /// Start `fx` on the visible rows among `paths` (at most 20), for `mode`'s
+    /// duration. `off` starts nothing: the state changes in one frame.
+    pub fn start_effect(&mut self, paths: &[PathBuf], fx: Fx, mode: Effective, cx: &mut Context<Self>) {
+        let phases = motion::phases(mode, fx);
+        let total: Duration = phases.iter().sum();
+        if total.is_zero() {
+            return;
+        }
+        let wanted: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        let mut started = 0;
+        for ix in 0..self.row_count() {
+            if started >= MAX_EFFECTS {
+                break;
+            }
+            let Some(entry) = self.row(ix).map(|(entry, _)| entry.clone()) else { continue };
+            if !wanted.contains(entry.path.as_path()) {
+                continue;
+            }
+            self.effects.retain(|effect| effect.path != entry.path);
+            self.effects.push(RowEffect::new(entry.path.clone(), fx, mode, ix, entry));
+            started += 1;
+        }
+        if started == 0 {
+            return;
+        }
+        self.effect_generation += 1;
+        let generation = self.effect_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(total + WATCH_GRACE).await;
+            this.update(cx, |this, cx| {
+                if this.effect_generation == generation {
+                    this.effects.clear();
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// How the row at `path` looks right now, if an effect is playing on it.
+    pub fn effect_look(&self, path: &Path, mode: Effective, now: Instant) -> Option<Look> {
+        self.effects.iter().find(|effect| effect.path == path).map(|effect| effect.look(mode, now))
+    }
+
+    pub fn effects(&self) -> &[RowEffect] {
+        &self.effects
+    }
+
+    /// How far the rows below an effect have moved (Full motion's FLIP). A leaving
+    /// row's close slides the rows below up; an arriving row's open slides them down
+    /// from their old slot. `ix` is the row's index in the listing as it is now.
+    pub fn row_shift(&self, ix: usize, mode: Effective, now: Instant, row_height: f32) -> f32 {
+        if mode != Effective::Full {
+            return 0.0;
+        }
+        let mut shift = self.disclosure_shift(ix, now) * row_height;
+        // Arriving rows: the rows below start one row up and slide down into place.
+        for effect in &self.effects {
+            if effect.fx != Fx::Arrive || effect.removed || effect.row_index >= ix {
+                continue;
+            }
+            let open = effect.first_phase();
+            let elapsed = now.saturating_duration_since(effect.started);
+            if elapsed < open {
+                let t = if open.is_zero() { 1.0 } else { elapsed.as_secs_f32() / open.as_secs_f32() };
+                shift -= row_height * (1.0 - motion::ease_out(t));
+            }
+        }
+        let mut removed: Vec<&RowEffect> =
+            self.effects.iter().filter(|effect| effect.removed && effect.fx.leaving()).collect();
+        if removed.is_empty() {
+            return shift;
+        }
+        removed.sort_by_key(|effect| effect.row_index);
+        // The row's index before the removals: each removed row at or above it adds one.
+        let mut original = ix;
+        for effect in &removed {
+            if effect.row_index <= original {
+                original += 1;
+            }
+        }
+        for effect in removed {
+            if effect.row_index >= original {
+                continue;
+            }
+            let close_start = effect.close_start();
+            if now < close_start {
+                continue;
+            }
+            let close = effect.close_phase();
+            let t = if close.is_zero() {
+                1.0
+            } else {
+                (now.saturating_duration_since(close_start).as_secs_f32() / close.as_secs_f32()).min(1.0)
+            };
+            shift += row_height * (1.0 - motion::ease_out(t));
+        }
+        shift
+    }
+
+    // ----- disclosure motion (list view) -----
+
+    /// The rows nested under row `ix`: how many follow it at a greater depth.
+    fn descendant_rows(&self, ix: usize) -> usize {
+        let Some((_, depth)) = self.row(ix) else { return 0 };
+        (ix + 1..self.row_count()).take_while(|row| self.row(*row).is_some_and(|(_, d)| d > depth)).count()
+    }
+
+    /// Note that `path` is about to open or close, in the current motion mode.
+    /// A closing's rows leave now; an opening's arrive with the child listing.
+    fn record_disclosure(&mut self, path: PathBuf, opening: bool, cx: &gpui::App) {
+        let mode = cx.try_global::<crate::ui::Ui>().map_or(Effective::Off, |ui| ui.feedback.mode);
+        let now = Instant::now();
+        self.disclosures.retain(|d| {
+            d.path != path
+                && (d.running(now) || d.started.is_none() && now.saturating_duration_since(d.toggled) < DISCLOSE_WAIT)
+        });
+        if mode == Effective::Off {
+            return;
+        }
+        let parent_ix = self.index_of_path(&path).unwrap_or(0);
+        let (started, rows) = if opening { (None, 0) } else { (Some(now), self.descendant_rows(parent_ix)) };
+        self.disclosures.push(Disclosure { path, opening, mode, toggled: now, started, parent_ix, rows });
+    }
+
+    /// Start the openings whose child rows have just appeared.
+    fn start_disclosures(&mut self) {
+        let now = Instant::now();
+        for ix in 0..self.disclosures.len() {
+            let d = &self.disclosures[ix];
+            if !d.opening || d.started.is_some() || now.saturating_duration_since(d.toggled) >= DISCLOSE_WAIT {
+                continue;
+            }
+            let Some(parent_ix) = self.index_of_path(&d.path) else { continue };
+            let rows = self.descendant_rows(parent_ix);
+            if rows == 0 {
+                continue;
+            }
+            let d = &mut self.disclosures[ix];
+            d.started = Some(now);
+            d.parent_ix = parent_ix;
+            d.rows = rows;
+        }
+    }
+
+    /// For tests: row `ix`'s shift (rows), opacity and `path`'s chevron turn, `after`
+    /// the disclosure of `path` started moving (or was toggled, for the chevron).
+    #[cfg(test)]
+    pub fn disclosure_probe(&self, path: &Path, ix: usize, after: Duration) -> Option<(f32, f32, Option<f32>)> {
+        let d = self.disclosures.iter().rev().find(|d| d.path == path)?;
+        let rows_at = d.started? + after;
+        let chevron_at = d.toggled + after;
+        Some((
+            self.disclosure_shift(ix, rows_at),
+            self.disclosure_opacity(ix, rows_at),
+            self.chevron_turn(path, chevron_at),
+        ))
+    }
+
+    /// Whether any row effect or disclosure is still moving: the pane asks for frames.
+    pub fn animating(&self, now: Instant) -> bool {
+        !self.effects.is_empty()
+            || self.disclosures.iter().any(|d| {
+                d.running(now)
+                    || d.opening && d.started.is_none() && now.saturating_duration_since(d.toggled) < DISCLOSE_WAIT
+            })
+    }
+
+    /// Full: how far row `ix` sits from its place, in rows, because a folder above
+    /// it is opening or closing.
+    fn disclosure_shift(&self, ix: usize, now: Instant) -> f32 {
+        let mut shift = 0.0;
+        for d in &self.disclosures {
+            if d.mode != Effective::Full {
+                continue;
+            }
+            let Some(t) = d.progress(now) else { continue };
+            let below = if d.opening { d.parent_ix + d.rows } else { d.parent_ix };
+            if ix > below {
+                shift += motion::disclose_shift(d.opening, d.rows, t);
+            }
+        }
+        shift
+    }
+
+    /// The opacity of row `ix` while the folder above it opens (1 otherwise).
+    pub fn disclosure_opacity(&self, ix: usize, now: Instant) -> f32 {
+        let mut opacity = 1.0;
+        for d in &self.disclosures {
+            if !d.opening || ix <= d.parent_ix || ix > d.parent_ix + d.rows {
+                continue;
+            }
+            if let Some(t) = d.progress(now) {
+                opacity *= motion::disclose_opacity(d.mode, ix - d.parent_ix, d.rows, t);
+            }
+        }
+        opacity
+    }
+
+    /// Full: how far the chevron for `path` has turned towards open (0 closed, 1
+    /// open) while it turns; `None` when it is at rest.
+    pub fn chevron_turn(&self, path: &Path, now: Instant) -> Option<f32> {
+        let d = self.disclosures.iter().rev().find(|d| d.path == path && d.mode == Effective::Full)?;
+        let elapsed = now.saturating_duration_since(d.toggled);
+        let duration = d.duration();
+        if elapsed >= duration {
+            return None;
+        }
+        let t = motion::ease_out(elapsed.as_secs_f32() / duration.as_secs_f32());
+        Some(if d.opening { t } else { 1.0 - t })
     }
 
     /// List the folder again now rather than waiting for the watcher.
@@ -479,6 +816,24 @@ impl Folder {
     /// Swap in a new listing, keeping the selection on the same items.
     fn replace_entries(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
         self.entries = Arc::new(entries);
+        if !self.effects.is_empty() {
+            let present: HashSet<PathBuf> = self.entries.iter().map(|entry| entry.path.clone()).collect();
+            let mut restored = Vec::new();
+            for effect in &mut self.effects {
+                if present.contains(&effect.path) {
+                    // Undo put the row back: stop its leaving effect rather than hide it.
+                    if effect.removed {
+                        restored.push(effect.path.clone());
+                    }
+                } else {
+                    if !effect.removed {
+                        effect.removed = true;
+                        effect.removed_at = Some(Instant::now());
+                    }
+                }
+            }
+            self.effects.retain(|effect| !restored.contains(&effect.path));
+        }
         self.sync_children(cx);
         self.rebuild_rows(cx);
         if let Some(target) = self.select_after_load.clone()
@@ -492,16 +847,22 @@ impl Folder {
         {
             let wanted = std::mem::take(&mut self.select_when_present);
             self.selection.clear();
-            for path in wanted {
-                self.selection.toggle(path);
+            for path in &wanted {
+                self.selection.toggle(path.clone());
             }
+            let mode = self.arrival_mode;
+            self.start_effect(&wanted, Fx::Arrive, mode, cx);
         }
-        if self.auto_select
-            && self.selection.is_empty()
-            && !self.loading
-            && let Some(first) = self.entries.first()
-        {
-            self.selection.select_only(first.path.clone());
+        // Only the first full load selects the first item. After that an empty
+        // selection stays empty, as in Finder: trashing or moving the selected
+        // item leaves nothing selected rather than jumping to the top.
+        if self.auto_select && !self.loading {
+            self.auto_select = false;
+            if self.selection.is_empty()
+                && let Some(first) = self.entries.first()
+            {
+                self.selection.select_only(first.path.clone());
+            }
         }
         self.prune_selection();
         self.settle_cursor(cx);
@@ -617,6 +978,7 @@ impl Folder {
     /// A child folder's listing or expansion changed: redraw the rows it contributes.
     fn child_changed(&mut self, cx: &mut Context<Self>) {
         self.rebuild_rows(cx);
+        self.start_disclosures();
         self.prune_selection();
         self.settle_cursor(cx);
         cx.emit(FolderEvent::Changed);
@@ -626,9 +988,17 @@ impl Folder {
     /// List view: show `path`'s contents inline. A row nested under an open
     /// folder is opened by the folder that lists it.
     pub fn expand(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !self.is_expanded(&path, cx) {
+            self.record_disclosure(path.clone(), true, cx);
+        }
+        self.expand_inner(path, cx);
+        self.start_disclosures();
+    }
+
+    fn expand_inner(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !self.entries.iter().any(|entry| entry.path == path && entry.is_dir && !entry.is_package()) {
             if let Some(owner) = self.owner_of(&path, cx) {
-                owner.update(cx, |owner, cx| owner.expand(path, cx));
+                owner.update(cx, |owner, cx| owner.expand_inner(path, cx));
             }
             return;
         }
@@ -643,10 +1013,17 @@ impl Folder {
 
     /// List view: hide `path`'s contents, and everything below it.
     pub fn collapse(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if self.is_expanded(path, cx) {
+            self.record_disclosure(path.to_path_buf(), false, cx);
+        }
+        self.collapse_inner(path, cx);
+    }
+
+    fn collapse_inner(&mut self, path: &Path, cx: &mut Context<Self>) {
         if !self.expanded.remove(path) {
             if let Some(owner) = self.owner_of(path, cx) {
                 let path = path.to_path_buf();
-                owner.update(cx, |owner, cx| owner.collapse(&path, cx));
+                owner.update(cx, |owner, cx| owner.collapse_inner(&path, cx));
             }
             return;
         }

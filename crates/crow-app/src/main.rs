@@ -7,17 +7,20 @@
 //! crow --make-fixture DIR [N]      create N (default 100,000) empty files in DIR
 //! crow --make-search-fixture DIR [N]  create N (default 200,000) nested text files
 //! crow --bench-search DIR [QUERY]  time a name+contents walk, print first hit and total
+//! crow --motion-lab                a fake folder to try motion modes and feedback sounds
 //! ```
 
 mod actions;
 mod bottom_bar;
 mod chrome;
 mod extensions;
+mod feedback;
 mod folder;
 mod icons;
 mod keys;
 mod logging;
 mod menus;
+mod motion_lab;
 mod operations;
 mod palette;
 mod pane;
@@ -151,6 +154,21 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+
+    if args.first().map(String::as_str) == Some("--motion-lab") {
+        gpui_platform::application().with_assets(icons::Assets).run(|cx: &mut App| {
+            ui::init(cx);
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            motion_lab::open(cx);
+            cx.activate(true);
+        });
+        return ExitCode::SUCCESS;
     }
 
     let bench_filter_at = args.iter().position(|a| a == "--bench-filter");
