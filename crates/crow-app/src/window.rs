@@ -3204,6 +3204,34 @@ mod tests {
     }
 
     #[gpui::test]
+    fn vim_marks_show_as_letters_in_the_sidebar(cx: &mut TestAppContext) {
+        let root = fixture("marks-letters");
+        let (view, mut cx) = open(cx, &root);
+        let toml = format!(
+            "[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\", key = \"a\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n",
+            root.join("alpha").display(),
+            root.join("beta").display()
+        );
+        write_config(&view, &mut cx, "sidebar.toml", &toml);
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks.iter().all(|look| look.right.is_none()), "the Finder layer shows no letters: {looks:?}");
+
+        use_vim(&view, &mut cx);
+        let looks = sidebar_looks(&view, &mut cx);
+        assert_eq!(looks[0].right.as_deref(), Some("a"));
+        assert!(looks[1].right.is_none(), "only the marked favorite shows a letter");
+
+        cx.simulate_keystrokes("down cmd-down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+        cx.simulate_keystrokes("m a");
+        settle(&view, &mut cx);
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks[0].right.is_none(), "the mark moved away from alpha");
+        assert_eq!(looks[1].right.as_deref(), Some("a"), "beta now shows the mark");
+    }
+
+    #[gpui::test]
     fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) {
         let root = fixture("contexts");
         std::fs::write(root.join("beta/b.txt"), "").expect("create fixture");

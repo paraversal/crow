@@ -8,7 +8,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 | I2 Twin hints | done | `crow_core::twin_hints` + 8 unit tests; hints/spoken in `looks`; hint rendered after the name; 4 window tests |
 | I3 One fill per meaning | done | current folder `selection`, cursor an inset accent ring; drop replaces the fill; tests |
 | I4 Disk row | done | neutral `fg-subtle` bar, warning at 90 %, "182 GB free" right-aligned, aria ", almost full"; volumes refresh after operations |
-| I5 Mark letters | todo | |
+| I5 Mark letters | done | Vim layer shows the key in the right slot; live `m x` test |
 | I6 Alias marker | todo | Q3 = yes |
 | I7 Favorites header hint | skipped | Q7 = no |
 | I8 Center follows the sidebar cursor | todo | Q11 = yes, Q12 = replace, Q13 = yes |
@@ -59,5 +59,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 
 - 2026-11-14: I4 done. `short_bytes`, `bar_tone` (`>= 0.9`), free text in the right slot, track `surface-raised`, fill `fg-subtle`/`warning`, spoken ", almost full". `operations::finish` now calls `refresh_volumes`; `refresh_volumes` returns early when the app has no watchers, so `init_for_tests` keeps `volumes` empty (the plan's invariant; otherwise real volumes appeared in every sidebar test). Unit tests for sizes/tone; window test for the disk row and warning. Workspace green.
 
+- 2026-11-14: I5 done. `right` is the mark letter only in the Vim layer; spoken label keeps "mark k" after any twin hint. Window test covers Finder layer, Vim layer, and `m a` moving the letter. Workspace green.
+
 ## Next
-I5: mark letters in the Vim layer (`right = Some(k)`), window test.
+I6: `Ui.aliases` from the `refresh_recent` background task; " · alias" on twin hints; window test with a symlink.

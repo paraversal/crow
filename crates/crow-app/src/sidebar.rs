@@ -344,6 +344,7 @@ impl Sidebar {
             };
             let right = match row {
                 Row::Volume(v) if v.total_bytes > 0 => Some(format!("{} free", short_bytes(v.free_bytes))),
+                Row::Favorite(_, f) => f.key.filter(|_| vim).map(|key| key.to_string()),
                 _ => None,
             };
             let (hint, spoken) = match &hint_by_row[i] {
