@@ -18,7 +18,7 @@ Design reference: canvas board "Discovery kit" §3 "Tips that wait for a reason"
 - Inherited: keys shown come from the live keymap (U1 I1), drawn as a `Keycap` (U1 I2). The key-use counter and `hints` setting come from U5; reuse them, don't build a second counter.
 
 ## Current state
-![Crow after M6, as it ships, with eight numbered findings](img/today-annotated.png)
+![Crow after M6, as it ships, with eight numbered findings](../ui-overhaul/img/today-annotated.png)
 Take from it: finding 1 (no key is mentioned anywhere) and finding 7 (one status slot at the bottom right, `"18 items"`): the tip floats above that corner.
 
 No tip code exists. The parts the plan builds on:
@@ -48,10 +48,10 @@ No tip code exists. The parts the plan builds on:
 **Tests.** Keystroke tests live in `window.rs` `mod tests` (`:1808`); helpers `open`, `settle`, `pane`, `dir`, `rows`, `write_config` (`:1821-1891`); clicks use `cx.debug_bounds("<selector>")` + `simulate_mouse_down/up` (`:1963-1972`).
 
 ## Target
-![Discovery kit §3: the three tips, each a raised card with a keycap, one sentence and Got it](img/discovery-3.png)
+![Discovery kit §3: the three tips, each a raised card with a keycap, one sentence and Got it](../ui-overhaul/img/discovery-3.png)
 Take from it: the card (surface fill, raised border, shadow, 10 px radius), the accent keycap on the left, one line of `fg` text, the small "Got it" button on the right, and the exact copy of the three tips.
 
-![Assembled target, filtering in column view, bottom bar with hints](img/assembled-filter.png)
+![Assembled target, filtering in column view, bottom bar with hints](../ui-overhaul/img/assembled-filter.png)
 Take from it: the bottom bar is one 28 px row with the path left and hints plus counts right; a tip sits above that row's right end, inside the window, over the preview or the rightmost column. No tip is drawn in this board; the position follows the Discovery kit text "bottom right".
 
 ### The three tips
@@ -143,7 +143,7 @@ Migration-free: one field, a list of string ids. Unknown ids are kept on load an
 - *Done when:* the global loads in the app and in tests; key uses retire tips (unit-checked through I3's tests).
 
 ### I3 Showing and closing the tip in the window
-![Discovery kit §3: card, accent keycap, sentence, Got it](img/discovery-3.png)
+![Discovery kit §3: card, accent keycap, sentence, Got it](../ui-overhaul/img/discovery-3.png)
 - *Where:* `window.rs`: `CrowWindow` gains `tip: Option<TipId>`; `render_tip` lives in `tips.rs` as `pub fn render_tip(id, theme, key_text, on_got_it) -> impl IntoElement`; `Render for CrowWindow` (`:1722`) adds `.children(tip)` between `.child(path_bar)` (`:1793`) and `.children(go_to)` (`:1794`).
 - *Change:*
   - `CrowWindow::offer_tip(&mut self, id, window, cx)`: returns early if any blocking state (check 6) holds or the key text for the action is `None`; else `tips::request(id, cx.entity_id(), cx)` and on success `self.tip = Some(id)`, `cx.notify()`.
@@ -161,7 +161,7 @@ Migration-free: one field, a list of string ids. Unknown ids are kept on load an
 - *Done when:* tests pass; the tip renders bottom right in both views (hand check).
 
 ### I4 Trigger: scrolling a long folder → `/`
-![Assembled target: the tip sits above the bottom bar's right end](img/assembled-filter.png)
+![Assembled target: the tip sits above the bottom bar's right end](../ui-overhaul/img/assembled-filter.png)
 - *Where:* `pane.rs`: new `PaneEvent::LongFolderScrolled`; listeners on the list body (`:1782-1806`, the `div` wrapping `uniform_list("entries")`) and on each column container (`:1580-1612`).
 - *Change:* `.on_scroll(cx.listener(move |this, event: &ScrollEvent, _, cx| this.on_list_scroll(k, cx)))` (k = 0 in list view). `on_list_scroll(k)`: return if `self.filtering.is_some()`, or `tips::wants(TipId::Filter, cx)` is false (cheap: not retired and hints not off); read folder `k`'s `entries().len()` and first visible row; if ≥ the constants, `cx.emit(PaneEvent::LongFolderScrolled)`. `CrowWindow::on_pane_event` maps it to `offer_tip(TipId::Filter)`. The listener runs in the bubble phase after the `uniform_list` applied the delta (children's listeners run first); verify, and if the offset isn't updated yet, defer the check with `cx.defer` (record which in the progress file).
 - *Edge cases:* a column in column view with ≥ 200 entries while another column is focused still counts (the scroll is in that column); a folder still loading with < 200 entries doesn't count yet; scrolling back up never closes the tip.
@@ -188,7 +188,7 @@ Migration-free: one field, a list of string ids. Unknown ids are kept on load an
 - *Done when:* passes; `tips.json` written only off the main thread (read the code path once more).
 
 ## Seams with other U plans
-- **U5 (required).** U5's plan (`../done/u5-bottom-bar.md`) defines what U9 uses: `crow_core::HintsMode { Auto, Always, Off }` as `Settings.hints`; the app-side module `crate::usage` with `usage::uses(&dyn Action, &App) -> u32` (read) and `usage::record(&dyn Action, &mut App)` (called inside the `StartFilter`, `ShowSearch` and `ShowCommandPalette` handlers, so key, menu and palette uses all count), plus `usage::record_key` / `usage::count_key` for named, non-action counters (use these for dismissed tips if that is simpler than `tips.json`; record the choice). If U5 merged under other names, use those and record the mapping in the progress file. U9 needs exactly: (a) read `hints` live, (b) read the use count of `StartFilter`, `ShowSearch`, `ShowCommandPalette`, (c) a single place where uses are recorded, to call `tips::key_used` from. If U5 doesn't count one of these three actions (e.g. U5 counts only idle hints shown in the list), ASK whether U5's counter should add it or U9 should rely on its own retired set alone. U5 proposes a 30 px bottom bar (its Q12); use U5's exported height for the tip's `bottom`, else 28 px (today's).
+- **U5 (required).** U5's plan (`u5-bottom-bar.md`) defines what U9 uses: `crow_core::HintsMode { Auto, Always, Off }` as `Settings.hints`; the app-side module `crate::usage` with `usage::uses(&dyn Action, &App) -> u32` (read) and `usage::record(&dyn Action, &mut App)` (called inside the `StartFilter`, `ShowSearch` and `ShowCommandPalette` handlers, so key, menu and palette uses all count), plus `usage::record_key` / `usage::count_key` for named, non-action counters (use these for dismissed tips if that is simpler than `tips.json`; record the choice). If U5 merged under other names, use those and record the mapping in the progress file. U9 needs exactly: (a) read `hints` live, (b) read the use count of `StartFilter`, `ShowSearch`, `ShowCommandPalette`, (c) a single place where uses are recorded, to call `tips::key_used` from. If U5 doesn't count one of these three actions (e.g. U5 counts only idle hints shown in the list), ASK whether U5's counter should add it or U9 should rely on its own retired set alone. U5 proposes a 30 px bottom bar (its Q12); use U5's exported height for the tip's `bottom`, else 28 px (today's).
 - **U1.** Key text from the live keymap (I1) and `Keycap` (I2). If the `Key` weight can't take an accent text role, see Q6. The U1 Sheet (I4) and scrim draw above the tip; openers close it anyway.
 - **U4.** Moves the filter into the focused column and adds ⌘F escalation; I5 hooks the filter's two exit points wherever U4 left them. U4's zero-match state D already shows "Search subfolders too ⌘F"; the ⌘F tip comes after the filter closes, so they don't show together.
 - **U2/U7.** Menu or palette runs of the three actions count as key uses (Q7); no change needed if they call the same handlers (today they do: `pane.rs:432`, `window.rs:1423`).
