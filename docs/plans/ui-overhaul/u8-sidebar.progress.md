@@ -1,5 +1,5 @@
 # u8-sidebar progress
-Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: In critique
+Branch: `ui-u8-sidebar` · PR: https://github.com/paraversal/file-crow/pull/20 · Last updated: 2026-11-14 · State: PR open
 
 ## Status
 | Item | State | Notes |
