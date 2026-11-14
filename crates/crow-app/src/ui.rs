@@ -263,6 +263,17 @@ pub fn init(cx: &mut App) {
         }
     })
     .detach();
+    install_drag_cancel(cx);
+}
+
+/// Escape ends an in-window drag and flies the combo back, like AppKit's cancel.
+fn install_drag_cancel(cx: &mut App) {
+    cx.intercept_keystrokes(|event, window, cx| {
+        if event.keystroke.key == "escape" && window.cancel_active_drag(cx) {
+            cx.stop_propagation();
+        }
+    })
+    .detach();
 }
 
 /// Default settings and the embedded theme, with config files in a fresh temp folder
@@ -282,6 +293,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     crate::extensions::init(cx);
     crate::usage::init(cx);
     crate::tips::init(cx);
+    install_drag_cancel(cx);
     root.join("config")
 }
 

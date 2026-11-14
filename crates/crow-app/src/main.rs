@@ -189,7 +189,21 @@ fn main() -> ExitCode {
         }
     };
 
-    gpui_platform::application().with_assets(icons::Assets).run(move |cx: &mut App| {
+    let reopen = start.clone();
+    let app = gpui_platform::application().with_assets(icons::Assets);
+    // Crow stays resident with no windows, like Finder: the Dock icon reopens it.
+    app.on_reopen(move |cx| {
+        if cx.windows().is_empty() {
+            window::open(reopen.clone(), false, None, cx);
+        } else {
+            let front =
+                cx.window_stack().and_then(|stack| stack.first().copied()).or_else(|| cx.windows().first().copied());
+            if let Some(handle) = front {
+                handle.update(cx, |_, window, _| window.activate_window()).ok();
+            }
+        }
+    });
+    app.run(move |cx: &mut App| {
         ui::init(cx);
         extensions::init(cx);
         operations::init(cx, std::sync::Arc::new(crow_macos::SystemTrash));
@@ -197,12 +211,6 @@ fn main() -> ExitCode {
         cx.bind_keys(actions::vim_keymap());
         cx.bind_keys(text_input::keymap());
         menus::init(cx);
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
         window::open(start.clone(), bench, bench_filter.clone(), cx);
         cx.activate(true);
     });

@@ -207,6 +207,10 @@ pub struct Folder {
     expanded: HashSet<PathBuf>,
     /// The rows list view draws: this folder's entries with expanded children flattened in.
     rows: Arc<Vec<FlatRow>>,
+    /// For each row, one past the last row of its subtree.
+    row_ends: Arc<Vec<usize>>,
+    /// For each nested row, the row of the expanded folder that contains it.
+    row_parents: Arc<Vec<Option<usize>>>,
     /// Bumped whenever the selection or the visible rows change.
     selection_generation: u64,
     /// Feedback effects on visible rows (trash, refuse), cleared when their phases end.
@@ -272,6 +276,8 @@ impl Folder {
             children: HashMap::new(),
             expanded: HashSet::new(),
             rows: Arc::new(Vec::new()),
+            row_ends: Arc::new(Vec::new()),
+            row_parents: Arc::new(Vec::new()),
             selection_generation: 0,
             effects: Vec::new(),
             effect_generation: 0,
@@ -368,8 +374,12 @@ impl Folder {
 
     /// The expanded folder row that contains row `ix`, if it is nested.
     pub fn parent_row(&self, ix: usize) -> Option<usize> {
-        let (_, depth) = self.row(ix)?;
-        (0..ix).rev().find(|row| self.row(*row).is_some_and(|(_, d)| d + 1 == depth))
+        self.row_parents.get(ix).copied().flatten()
+    }
+
+    /// The row after the last row of the subtree rooted at `ix` (exclusive).
+    pub fn subtree_end(&self, ix: usize) -> usize {
+        self.row_ends.get(ix).copied().unwrap_or(self.row_count())
     }
 
     fn row_path<'a>(row: &'a FlatRow, entries: &'a [Entry]) -> Option<&'a Path> {
@@ -919,6 +929,8 @@ impl Folder {
                 rows.push(FlatRow::Own(i));
                 ranges.push(range.map_or((u32::MAX, u32::MAX), |r| (r.start as u32, r.end as u32)));
             }
+            self.row_ends = Arc::new((1..=rows.len()).collect());
+            self.row_parents = Arc::new(vec![None; rows.len()]);
             self.rows = Arc::new(rows);
             self.match_ranges = Arc::new(ranges);
             return;
@@ -947,7 +959,35 @@ impl Folder {
                 }
             }
         }
+        let mut ends = vec![rows.len(); rows.len()];
+        let mut parents = vec![None; rows.len()];
+        let mut stack: Vec<(usize, usize)> = Vec::new();
+        let mut last_at_depth: Vec<usize> = Vec::new();
+        for (ix, row) in rows.iter().enumerate() {
+            let depth = match row {
+                FlatRow::Own(_) => 0,
+                FlatRow::Child(_, depth) => *depth,
+            };
+            if depth > 0 {
+                parents[ix] = last_at_depth.get(depth - 1).copied();
+            }
+            if last_at_depth.len() > depth {
+                last_at_depth.truncate(depth);
+            }
+            last_at_depth.push(ix);
+            while let Some(&(top, top_depth)) = stack.last() {
+                if depth <= top_depth {
+                    ends[top] = ix;
+                    stack.pop();
+                } else {
+                    break;
+                }
+            }
+            stack.push((ix, depth));
+        }
         self.rows = Arc::new(rows);
+        self.row_ends = Arc::new(ends);
+        self.row_parents = Arc::new(parents);
     }
 
     /// Drop selected paths that are no longer visible anywhere in the tree.

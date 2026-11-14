@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use crow_core::motion::Fx;
 use crow_core::{HintsMode, SidebarEdit, Tabs, TipId, ViewMode, ZeroMatchStreak};
 use gpui::{
-    AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
-    Render, Role, ScrollHandle, SharedString, Subscription, TitlebarOptions, Toggled, Window, WindowBounds,
-    WindowOptions, div, img, point, prelude::*, px, size, transparent_black,
+    App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role,
+    ScrollHandle, SharedString, Subscription, TitlebarOptions, Toggled, Window, WindowBounds, WindowOptions, div, img,
+    point, prelude::*, px, size, transparent_black,
 };
 
 use crate::actions::{
@@ -277,17 +277,19 @@ impl CrowWindow {
         });
         let focus = pane.read(cx).focus_handle().clone();
         window.focus(&focus, cx);
-        // The red close button: the last window asks before cutting an operation off.
-        let this = cx.entity().downgrade();
-        window.on_window_should_close(cx, move |window, cx| {
-            this.update(cx, |this, cx| this.may_close(window, cx)).unwrap_or(true)
-        });
         let owner = cx.entity_id();
         let subscriptions = vec![
             cx.observe(&pane, |_, _, cx| cx.notify()),
             cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)),
             cx.subscribe_in(&sidebar, window, |this, _, event, window, cx| this.on_sidebar_event(event, window, cx)),
             cx.observe_window_appearance(window, |_, _, cx| reload_theme(cx)),
+            // Another window coming to the front mid-drag must be able to receive it,
+            // even while the pointer stays inside Crow's bounds.
+            cx.observe_window_activation(window, |_, window, cx| {
+                if !window.is_window_active() {
+                    window.promote_active_drag_to_platform(cx);
+                }
+            }),
             // Focus on an element that left the tree (an emptied results list, a hidden pane)
             // dispatches keys from the bare root, above the Crow context, so every key goes dead.
             cx.on_focus_lost(window, |this, window, cx| this.focus_center(window, cx)),
@@ -376,34 +378,21 @@ impl CrowWindow {
         }
         self.close_tip(cx);
         if self.tabs.close_active().is_none() {
-            // The last tab closes the window, which may have to ask first.
-            if self.may_close(window, cx) {
-                window.remove_window();
-            }
+            // The last tab closes the window; Crow stays running with no windows.
+            window.remove_window();
             return;
         }
         self.focus_center(window, cx);
         cx.notify();
     }
 
-    /// Whether this window may close now. The last window takes Crow with it, so while
-    /// an operation runs it asks first (and says no for now).
-    fn may_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let last = cx.windows().len() <= 1;
-        if !last || cx.global::<Operations>().running.is_none() {
-            return true;
-        }
-        self.ask_to_stop(AfterStop::CloseWindow, window, cx);
-        false
-    }
-
-    fn ask_to_stop(&mut self, then: AfterStop, window: &mut Window, cx: &mut Context<Self>) {
+    fn ask_to_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.sheet, Some(Sheet::StopOperation { .. })) {
             return;
         }
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.sheet = Some(Sheet::StopOperation { then, focus });
+        self.sheet = Some(Sheet::StopOperation { focus });
         window.activate_window();
         cx.notify();
     }
@@ -1005,18 +994,10 @@ enum Sheet {
         paths: Vec<PathBuf>,
         focus: FocusHandle,
     },
-    /// Closing the last window or quitting would stop the running operation partway.
+    /// Quitting would stop the running operation partway.
     StopOperation {
-        then: AfterStop,
         focus: FocusHandle,
     },
-}
-
-/// What happens once the running operation has stopped.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum AfterStop {
-    CloseWindow,
-    Quit,
 }
 
 impl Sheet {
@@ -1030,6 +1011,7 @@ impl Sheet {
 }
 
 /// Quit, unless an operation is running: then the active Crow window asks first.
+/// With no window there is nobody to ask, so cancel cleanly and quit when idle.
 pub fn quit(cx: &mut App) {
     if cx.global::<Operations>().running.is_none() {
         cx.quit();
@@ -1042,28 +1024,23 @@ pub fn quit(cx: &mut App) {
     match target {
         // Deferred: ⌘Q and the palette dispatch from inside that window's own update.
         Some(handle) => cx.defer(move |cx| {
-            if handle.update(cx, |this, window, cx| this.ask_to_stop(AfterStop::Quit, window, cx)).is_err() {
+            if handle.update(cx, |this, window, cx| this.ask_to_stop(window, cx)).is_err() {
                 cx.quit();
             }
         }),
-        None => cx.quit(),
+        None => stop_then_quit(cx),
     }
 }
 
 /// Cancel the running operation, wait for it to wind down (its undo record lands in
-/// the log), then close `window` or quit.
-fn stop_then(then: AfterStop, window: AnyWindowHandle, cx: &mut App) {
+/// the log), then quit.
+fn stop_then_quit(cx: &mut App) {
     operations::cancel_running(cx);
     cx.spawn(async move |cx| {
         while cx.update(|cx| cx.global::<Operations>().running.is_some()) {
             cx.background_executor().timer(std::time::Duration::from_millis(30)).await;
         }
-        cx.update(|cx| match then {
-            AfterStop::Quit => cx.quit(),
-            AfterStop::CloseWindow => {
-                window.update(cx, |_, window, _| window.remove_window()).ok();
-            }
-        });
+        cx.update(|cx| cx.quit());
     })
     .detach();
 }
@@ -1228,8 +1205,8 @@ impl CrowWindow {
                     Err(e) => operations::message(e.to_string(), true, cx),
                 }
             }
-            Some(Sheet::StopOperation { then, .. }) => {
-                stop_then(then, window.window_handle(), cx);
+            Some(Sheet::StopOperation { .. }) => {
+                stop_then_quit(cx);
                 return;
             }
             None => {}
@@ -1303,16 +1280,13 @@ impl CrowWindow {
                         .into_any_element(),
                 )
             }
-            Sheet::StopOperation { then, .. } => {
+            Sheet::StopOperation { .. } => {
                 let label = cx
                     .global::<Operations>()
                     .running
                     .as_ref()
                     .map_or_else(|| "The operation".to_owned(), |r| operations::running_label(&r.label));
-                let (verb, confirm) = match then {
-                    AfterStop::CloseWindow => ("Closing the last window quits Crow", "Stop and Close"),
-                    AfterStop::Quit => ("Quitting", "Stop and Quit"),
-                };
+                let (verb, confirm) = ("Quitting", "Stop and Quit");
                 (
                     format!("{label} is still running"),
                     div()
@@ -6654,35 +6628,33 @@ mod tests {
     }
 
     #[gpui::test]
-    fn closing_the_last_window_mid_operation_asks_first(app: &mut TestAppContext) {
-        let root = fixture("close-guard");
-        let (view, mut cx) = open(app, &root);
+    fn closing_the_last_window_leaves_the_app_running(app: &mut TestAppContext) {
+        let root = fixture("close-resident");
+        let (_view, mut cx) = open(app, &root);
         let cancel = inject_running(&mut cx);
-        let windows = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.windows().len());
-        let asking = |view: &Entity<CrowWindow>, cx: &VisualTestContext| {
-            view.read_with(cx, |w, _| {
-                matches!(w.sheet, Some(Sheet::StopOperation { then: AfterStop::CloseWindow, .. }))
-            })
-        };
 
         cx.simulate_keystrokes("cmd-w");
-        assert!(asking(&view, &cx), "the last window asks before cutting the move off");
-        assert_eq!(windows(&mut cx), 1);
+        app.run_until_parked();
+        assert_eq!(app.update(|cx| cx.windows().len()), 0, "the window closes");
+        assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "the operation keeps running");
+        app.update(|cx| cx.global_mut::<Operations>().running = None);
+    }
 
-        cx.simulate_keystrokes("escape");
-        assert!(view.read_with(&cx, |w, _| w.sheet.is_none()), "Esc keeps it running");
-        assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "and does not cancel");
+    #[gpui::test]
+    fn quitting_with_no_window_cancels_the_operation_first(app: &mut TestAppContext) {
+        let root = fixture("quit-resident");
+        let (_view, mut cx) = open(app, &root);
+        let cancel = inject_running(&mut cx);
 
         cx.simulate_keystrokes("cmd-w");
-        cx.simulate_keystrokes("enter");
-        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed), "Stop and Close cancels the operation");
-        assert_eq!(windows(&mut cx), 1, "the window waits for the operation to wind down");
+        app.run_until_parked();
+        assert_eq!(app.update(|cx| cx.windows().len()), 0);
 
-        // The operation finishes cancelling: then the window closes.
+        app.update(quit);
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed), "quit cancels the operation");
         app.update(|cx| cx.global_mut::<Operations>().running = None);
         app.executor().advance_clock(std::time::Duration::from_millis(100));
         app.run_until_parked();
-        assert_eq!(app.update(|cx| cx.windows().len()), 0, "closed once the operation stopped");
     }
 
     #[gpui::test]
@@ -6709,7 +6681,7 @@ mod tests {
         cx.update(|_, cx| quit(cx));
         cx.run_until_parked();
         assert!(
-            view.read_with(&cx, |w, _| matches!(w.sheet, Some(Sheet::StopOperation { then: AfterStop::Quit, .. }))),
+            view.read_with(&cx, |w, _| matches!(w.sheet, Some(Sheet::StopOperation { .. }))),
             "⌘Q asks while the move runs"
         );
         cx.simulate_keystrokes("escape");
@@ -8092,6 +8064,83 @@ mod tests {
     }
 
     #[gpui::test]
+    fn deactivating_the_window_promotes_an_active_drag(cx: &mut TestAppContext) {
+        struct Probe {
+            fired: std::rc::Rc<std::cell::Cell<bool>>,
+            _activation: Subscription,
+        }
+        impl Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let fired = self.fired.clone();
+                div()
+                    .id("probe")
+                    .debug_selector(|| "probe".into())
+                    .size(px(80.))
+                    .on_drag((), |_, _, _, cx| cx.new(|_| gpui::Empty))
+                    .external_drag_payload::<()>(move |_, _, _| {
+                        fired.set(true);
+                        Some(gpui::ExternalDragPayload::Files(gpui::FileDragPaths::default()))
+                    })
+            }
+        }
+
+        let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let fired_for_view = fired.clone();
+        let (_probe, cx) = cx.add_window_view(|window, cx| {
+            let activation = cx.observe_window_activation(window, |_, window, cx| {
+                if !window.is_window_active() {
+                    window.promote_active_drag_to_platform(cx);
+                }
+            });
+            Probe { fired: fired_for_view, _activation: activation }
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let center = cx.debug_bounds("probe").expect("probe").center();
+        cx.simulate_mouse_down(center, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            center + gpui::point(px(20.), px(20.)),
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        assert!(cx.update(|_, cx| cx.has_active_drag()), "the drag started in-window");
+        cx.deactivate_window();
+        assert!(fired.get(), "deactivation hands the drag to the platform");
+    }
+
+    #[gpui::test]
+    fn escape_cancels_a_drag_and_returns_the_combo(cx: &mut TestAppContext) {
+        let root = fixture("drag-escape");
+        let (_view, mut cx) = open(cx, &root);
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let from = cx.debug_bounds("row-notes.txt").expect("notes.txt row").center();
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            from + gpui::point(px(120.), px(40.)),
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        assert!(cx.update(|_, cx| cx.has_active_drag()), "the drag started in-window");
+
+        cx.simulate_keystrokes("escape");
+        assert!(!cx.update(|_, cx| cx.has_active_drag()), "Escape ends the drag");
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert!(cx.debug_bounds("drag-combo").is_some(), "the combo is still flying back");
+
+        for _ in 0..20 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+        }
+        assert!(cx.debug_bounds("drag-combo").is_none(), "the combo landed and disappeared");
+    }
+
+    #[gpui::test]
     fn dragging_a_row_onto_a_folder_moves_it(cx: &mut TestAppContext) {
         let root = fixture("drag-row");
         let (view, mut cx) = open(cx, &root);
@@ -8105,6 +8154,90 @@ mod tests {
         settle(&view, &mut cx);
         assert!(root.join("alpha/notes.txt").exists(), "the dragged file moved into the folder under the pointer");
         assert!(!root.join("notes.txt").exists(), "…and left its old place");
+    }
+
+    #[gpui::test]
+    fn dropping_a_file_back_into_its_expanded_folder_is_a_no_op(cx: &mut TestAppContext) {
+        let root = fixture("drop-self");
+        std::fs::remove_dir_all(root.join("alpha/inner")).expect("drop fixture dir");
+        std::fs::write(root.join("alpha/inner.txt"), "hello\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "off");
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+
+        drop_on(&mut cx, "row-inner.txt", vec![root.join("alpha/inner.txt")]);
+        settle(&view, &mut cx);
+        assert!(root.join("alpha/inner.txt").exists(), "the file stays in its folder");
+        assert!(!root.join("inner.txt").exists(), "and does not move to the root");
+    }
+
+    #[gpui::test]
+    fn dropping_from_an_expanded_folder_into_a_sibling_moves_it(cx: &mut TestAppContext) {
+        let root = fixture("drop-sibling");
+        std::fs::remove_dir_all(root.join("alpha/inner")).expect("drop fixture dir");
+        std::fs::write(root.join("alpha/inner.txt"), "hello\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "off");
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+
+        drop_on(&mut cx, "row-beta", vec![root.join("alpha/inner.txt")]);
+        settle(&view, &mut cx);
+        assert!(root.join("beta/inner.txt").exists(), "the file moved into the sibling");
+        assert!(!root.join("alpha/inner.txt").exists(), "and left the expanded folder");
+    }
+
+    #[gpui::test]
+    fn dropping_onto_a_file_inside_an_expanded_folder_targets_its_folder(cx: &mut TestAppContext) {
+        let root = fixture("drop-nested");
+        std::fs::remove_dir_all(root.join("alpha/inner")).expect("drop fixture dir");
+        std::fs::write(root.join("alpha/inner.txt"), "hello\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "off");
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+
+        drop_on(&mut cx, "row-inner.txt", vec![root.join("notes.txt")]);
+        settle(&view, &mut cx);
+        assert!(root.join("alpha/notes.txt").exists(), "the file moved into the expanded folder");
+        assert!(!root.join("notes.txt").exists(), "and left the root");
+    }
+
+    #[gpui::test]
+    fn expanded_folder_drop_target_is_outlined(cx: &mut TestAppContext) {
+        let root = fixture("drop-outline");
+        std::fs::remove_dir_all(root.join("alpha/inner")).expect("drop fixture dir");
+        std::fs::write(root.join("alpha/inner.txt"), "hello\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "off");
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        let pane = pane(&view, &cx);
+        let alpha_row = pane
+            .read_with(&cx, |pane, cx| pane.rows(cx).iter().position(|(name, _)| name == "alpha").expect("alpha row"));
+        let at = cx.debug_bounds("row-inner.txt").expect("inner row").center();
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position: at,
+            paths: gpui::ExternalPaths(vec![root.join("notes.txt")].into()),
+        });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: at });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(
+            pane.read_with(&cx, |pane, _| pane.drop_target().cloned()),
+            Some(crate::pane::DropTarget { folder: root.join("alpha"), header: alpha_row, end: alpha_row + 2 }),
+            "a file row inside the expanded folder targets that folder"
+        );
+        assert!(cx.debug_bounds("drop-outline").is_some(), "the whole folder block is outlined");
+
+        cx.simulate_event(gpui::FileDropEvent::Exited);
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(pane.read_with(&cx, |pane, _| pane.drop_target().cloned()), None);
+        assert!(cx.debug_bounds("drop-outline").is_none(), "leaving clears the outline");
     }
 
     #[gpui::test]

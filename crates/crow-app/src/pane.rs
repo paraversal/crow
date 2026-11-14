@@ -168,6 +168,7 @@ impl Render for DraggedFiles {
         let inside =
             position.x >= px(0.) && position.y >= px(0.) && position.x < size.width && position.y < size.height;
         div()
+            .debug_selector(|| "drag-combo".into())
             .when(!inside, |element| element.invisible())
             .ml(px(left))
             .flex()
@@ -228,6 +229,15 @@ struct Filtering {
     _subscription: Subscription,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DropTarget {
+    pub folder: PathBuf,
+    /// The folder's own row.
+    pub header: usize,
+    /// One past the last row of its subtree.
+    pub end: usize,
+}
+
 pub struct Pane {
     history: History,
     mode: ViewMode,
@@ -256,6 +266,8 @@ pub struct Pane {
     list_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The list row a drag would drop on, drawn from state rather than drag-over styles.
     drop_row: Option<usize>,
+    /// The folder a list-view drop would land in, and the rows it covers.
+    drop_target: Option<DropTarget>,
     /// Column view: each column's list viewport, captured at prepaint.
     column_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
     /// The column and row a drag would drop on in column view.
@@ -322,6 +334,7 @@ impl Pane {
             applied_view: None,
             list_bounds: Rc::new(Cell::new(None)),
             drop_row: None,
+            drop_target: None,
             column_bounds: Rc::new(RefCell::new(HashMap::new())),
             drop_column: None,
             mark_pending: None,
@@ -1238,9 +1251,13 @@ impl Pane {
 
     /// Files dropped from Crow, Finder or another app (see `operations::drop_request`).
     fn drop_into(&mut self, into: PathBuf, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_row = None;
+        self.drop_target = None;
+        self.drop_column = None;
         if let Some(request) = crate::operations::drop_request(paths.paths(), into, window.modifiers().alt) {
             cx.emit(PaneEvent::Run(request));
         }
+        cx.notify();
     }
 
     fn quick_look(&mut self, _: &QuickLook, window: &mut Window, cx: &mut Context<Self>) {
@@ -1410,11 +1427,29 @@ impl Pane {
         self.update_drag_row(position, cx);
     }
 
+    /// Where a drop on row `ix` lands: the folder row itself, or the open folder
+    /// that lists a file row. `None` means the root folder (no highlight).
+    fn drop_target_for_row(&self, ix: usize, cx: &gpui::App) -> Option<DropTarget> {
+        let folder = self.folders.first()?.read(cx);
+        let (entry, depth) = folder.row(ix)?;
+        if entry.is_dir && !entry.is_package() {
+            Some(DropTarget { folder: entry.path.clone(), header: ix, end: folder.subtree_end(ix) })
+        } else if depth > 0 {
+            let header = folder.parent_row(ix)?;
+            let (parent, _) = folder.row(header)?;
+            Some(DropTarget { folder: parent.path.clone(), header, end: folder.subtree_end(header) })
+        } else {
+            None
+        }
+    }
+
     fn update_drag_row(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let row = if self.mode == ViewMode::List { self.drag_row_at(cx, position) } else { None };
+        let target = row.and_then(|ix| self.drop_target_for_row(ix, cx));
         let column = if self.mode == ViewMode::Columns { self.column_row_at(cx, position) } else { None };
-        if row != self.drop_row || column != self.drop_column {
+        if row != self.drop_row || target != self.drop_target || column != self.drop_column {
             self.drop_row = row;
+            self.drop_target = target;
             self.drop_column = column;
             cx.notify();
         }
@@ -1423,6 +1458,11 @@ impl Pane {
     #[cfg(test)]
     pub fn drop_row(&self) -> Option<usize> {
         self.drop_row
+    }
+
+    #[cfg(test)]
+    pub fn drop_target(&self) -> Option<&DropTarget> {
+        self.drop_target.as_ref()
     }
 
     #[cfg(test)]
@@ -1523,6 +1563,13 @@ impl Pane {
                 let name = truncate_middle_parts(&entry.name, name_room, font_size, window);
                 let ranges = folder.row_match(ix).map(|range| map_range(&name, range));
                 let expanded = folder.is_expanded(&entry.path, cx);
+                let drop_folder = if entry.is_dir && !entry.is_package() {
+                    Some(entry.path.clone())
+                } else if depth > 0 {
+                    folder.parent_row(ix).and_then(|parent| folder.row(parent)).map(|(parent, _)| parent.path.clone())
+                } else {
+                    None
+                };
                 let drag_entries = if selected {
                     selected_entries.clone()
                 } else {
@@ -1607,9 +1654,8 @@ impl Pane {
                         }
                         Some(ExternalDragPayload::Files(FileDragPaths::new(entries.iter().cloned())))
                     })
-                    .when(entry.is_dir && !entry.is_package(), |row| {
-                        let target = entry.path.clone();
-                        let target_selection = entry.path.clone();
+                    .when_some(drop_folder, |row, target| {
+                        let target_selection = target.clone();
                         row.on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
                             this.drop_into(target.clone(), paths, window, cx);
                             cx.stop_propagation();
@@ -1621,7 +1667,9 @@ impl Pane {
                             },
                         ))
                     })
-                    .when(entry.is_dir && !entry.is_package() && self.drop_row == Some(ix), |row| row.bg(drop_bg))
+                    .when(self.drop_target.as_ref().is_some_and(|t| t.header == ix && t.end == ix + 1), |row| {
+                        row.bg(drop_bg)
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -2320,11 +2368,15 @@ impl Render for Pane {
         // A drag inside the list highlights the row under the pointer from this state; the
         // style-based drag-over highlight flickers on the platform drag path used when a
         // drag leaves the window and comes back.
-        self.drop_row = if cx.has_active_drag() && self.mode == ViewMode::List {
-            self.drag_row_at(cx, window.mouse_position())
+        let (drop_row, drop_target) = if cx.has_active_drag() && self.mode == ViewMode::List {
+            let row = self.drag_row_at(cx, window.mouse_position());
+            let target = row.and_then(|ix| self.drop_target_for_row(ix, cx));
+            (row, target)
         } else {
-            None
+            (None, None)
         };
+        self.drop_row = drop_row;
+        self.drop_target = drop_target;
         self.drop_column = if cx.has_active_drag() && self.mode == ViewMode::Columns {
             self.column_row_at(cx, window.mouse_position())
         } else {
@@ -2430,6 +2482,22 @@ impl Render for Pane {
                                 } else {
                                     None
                                 };
+                                let drop_outline =
+                                    self.drop_target.as_ref().filter(|t| t.end > t.header + 1).map(|t| {
+                                        let offset = shown_offset(&scroll);
+                                        let top = t.header as f32 * ROW_HEIGHT + offset + LIST_TOP_INSET;
+                                        let height = (t.end - t.header) as f32 * ROW_HEIGHT;
+                                        div()
+                                            .absolute()
+                                            .left(px(8.))
+                                            .right(px(8.))
+                                            .top(px(top))
+                                            .h(px(height))
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(color(theme.role("accent")))
+                                            .debug_selector(|| "drop-outline".into())
+                                    });
                                 div()
                                     .relative()
                                     .flex_1()
@@ -2444,6 +2512,7 @@ impl Render for Pane {
                                             .flex_1(),
                                     )
                                     .children(ghosts)
+                                    .children(drop_outline)
                                     .into_any_element()
                             }
                         };
