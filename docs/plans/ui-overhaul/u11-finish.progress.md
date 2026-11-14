@@ -1,5 +1,5 @@
 # u11-finish progress
-Branch: `ui-u11-finish` · PR: none (do not merge; user: "DONT merge back to main") · Last updated: 2026-11-14 · State: in progress
+Branch: `ui-u11-finish` · PR: none (do not merge; user: "DONT merge back to main") · Last updated: 2026-11-14 · State: Ready for critique
 
 ## Status
 | Item | State | Notes |
@@ -154,6 +154,7 @@ Each state also in `solarized-light` (the two Vim states in FireBox only). Repea
 - `package.json` / `package-lock.json` are untracked in the working tree (not mine; left alone).
 
 ## Log
+- 2026-11-14: Finish. README and testing.md pass done; 18 shots committed; bench on the head (8.66–9.54 ms p99, 8 ms warm) within noise of `main`; `cargo fmt --check`, clippy `-D warnings` and `cargo test --workspace` green (308 app, 87 core, 30 fs, 4 macos, 18 search, 6 theme). Bundle built before the final shots. State set to Ready for critique; not pushed, no PR (the critique agent opens it).
 - 2026-11-14: read AGENTS.md, the skill, the U11 plan, the index, all U1–U10 progress files. Branch + progress file. I1 bench on `main` and M6 (`target/m6-wt`, `CARGO_TARGET_DIR=target/m6-target`).
 - 2026-11-14: asked Q1–Q11; all recommended answers accepted. I2 scripts written, tested, and made deterministic; 18 shots from the neutral tree. Found and fixed the zoxide leak; verified no `/Users/` in the shots.
 - 2026-11-14: I4: `BAND_HEIGHT`, `field_ring`, contrast audit. I5: preview `flex_1` + folder summary. I6: a11y-tree spike (None), filter-count throttle. Tests: `assembled_layout_matches_boards`, `same_key_everywhere`, `one_accent_fill_in_column_view`, `column_preview_fills_the_rest`, `folder_cursor_shows_summary`, `filter_count_is_announced`, `search_count_is_announced`. `cargo fmt --check`, clippy `-D warnings`, `cargo test --workspace` green (307 app, 87 core, 30 fs, 4 macos, 18 search, 6 theme).
