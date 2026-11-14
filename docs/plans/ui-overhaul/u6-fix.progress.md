@@ -1,5 +1,5 @@
 # U6 fix progress
-Branch: `ui-u6-fix` · PR: none yet · Last updated: 2026-11-14
+Branch: `ui-u6-fix` · PR: https://github.com/paraversal/file-crow/pull/15 · Last updated: 2026-11-14
 
 ## Status
 | Item | State | Notes |
@@ -56,4 +56,4 @@ Branch: `ui-u6-fix` · PR: none yet · Last updated: 2026-11-14
 - 2026-11-14: F5 implemented (`unicode-segmentation` added to crow-search). Bench `--bench-search target/fixture-search-200k`: first hit 5 ms, total 2491 ms, 200000 hits — no regression vs the 3.7–4.4 s in the U6 progress (names don't match "needle" in that fixture, so only the non-ASCII path is theoretically touched).
 
 ## Next
-Push `ui-u6-fix` and open the PR; the remaining hand checks are for the user.
+PR open; CI runs. The unchecked hand checks (light theme, VoiceOver, idle look, This Mac, narrow window) are for the user before the squash merge.
