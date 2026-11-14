@@ -14,6 +14,7 @@ mod actions;
 mod bottom_bar;
 mod chrome;
 mod extensions;
+mod feedback;
 mod folder;
 mod icons;
 mod keys;

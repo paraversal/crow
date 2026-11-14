@@ -6,6 +6,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crow_core::motion::{
+    self, Clip, Cue, Effective, Event, Fx, Look, MotionMode, SoundSet, Tint, ease_in, ease_in_out, ease_out, ms,
+};
 use crow_macos::Sound;
 use crow_theme::Theme;
 use gpui::{
@@ -14,125 +17,12 @@ use gpui::{
     point, prelude::*, px, size,
 };
 
+use crate::feedback;
 use crate::icons::{Glyph, glyph};
 use crate::style::{active_selection, color, color_alpha, error_soft, icon, ui_font};
 use crate::ui::Ui;
 
 const ROW: f32 = 24.;
-
-/// Base durations in ms (×5 in slow motion).
-mod ms {
-    pub const TRASH_SWALLOW: u64 = 180;
-    pub const TRASH_CLOSE: u64 = 140;
-    pub const MOVE_FLY: u64 = 260;
-    pub const MOVE_CLOSE: u64 = 140;
-    pub const RECEIVE: u64 = 360;
-    pub const ARRIVE_OPEN: u64 = 120;
-    pub const ARRIVE_IN: u64 = 180;
-    pub const ARRIVE_TINT: u64 = 420;
-    pub const REFUSE: u64 = 320;
-    pub const TIP_FULL: u64 = 220;
-    pub const LOW_OUT: u64 = 140;
-    pub const LOW_IN: u64 = 160;
-    pub const LOW_TINT: u64 = 420;
-    pub const STATUS: u64 = 140;
-    pub const COPY: u64 = 1600;
-    pub const COPY_FADE: u64 = 320;
-}
-
-fn ease_in(t: f32) -> f32 {
-    t * t * t
-}
-fn ease_out(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(3)
-}
-fn ease_in_out(t: f32) -> f32 {
-    if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Mode {
-    Off,
-    Low,
-    Full,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum SoundSet {
-    Off,
-    /// Only the sounds Finder itself makes: trash, empty trash, the alert.
-    Finder,
-    /// Finder's sounds plus soft system ticks for move, new folder, undo, copy.
-    Crow,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Event {
-    Trash,
-    EmptyTrash,
-    Move,
-    NewFolder,
-    Undo,
-    Refuse,
-    CopyDone,
-}
-
-enum Cue {
-    /// A sound at a volume, optionally cut after `Clip` with a short fade.
-    Play(Sound, f32, Option<Clip>),
-    Beep,
-}
-
-const SYSTEM_SOUNDS: &str = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds";
-
-#[derive(Clone, Copy)]
-struct Clip {
-    keep: Duration,
-    fade: Duration,
-}
-
-const TRASH_CLIP: Clip = Clip { keep: Duration::from_millis(450), fade: Duration::from_millis(150) };
-
-fn finder_sound(name: &str) -> Sound {
-    Sound::File(PathBuf::from(SYSTEM_SOUNDS).join(name))
-}
-
-fn cue(set: SoundSet, event: Event) -> Option<Cue> {
-    match (set, event) {
-        (SoundSet::Off, _) => None,
-        // Finder's trash sound is 2.2 s; keep the toss, fade out the paper tail.
-        (_, Event::Trash) => Some(Cue::Play(finder_sound("finder/move to trash.aif"), 0.6, Some(TRASH_CLIP))),
-        (_, Event::EmptyTrash) => Some(Cue::Play(finder_sound("finder/empty trash.aif"), 0.6, None)),
-        (_, Event::Refuse) => Some(Cue::Beep),
-        (SoundSet::Finder, _) => None,
-        (SoundSet::Crow, Event::Move) => Some(Cue::Play(Sound::Named("Purr"), 0.35, None)),
-        (SoundSet::Crow, Event::NewFolder) => Some(Cue::Play(Sound::Named("Pop"), 0.3, None)),
-        (SoundSet::Crow, Event::Undo) => Some(Cue::Play(Sound::Named("Bottle"), 0.3, None)),
-        (SoundSet::Crow, Event::CopyDone) => Some(Cue::Play(Sound::Named("Glass"), 0.35, None)),
-    }
-}
-
-fn all_sounds() -> Vec<Sound> {
-    vec![
-        finder_sound("finder/move to trash.aif"),
-        finder_sound("finder/empty trash.aif"),
-        Sound::Named("Purr"),
-        Sound::Named("Pop"),
-        Sound::Named("Bottle"),
-        Sound::Named("Glass"),
-    ]
-}
-
-/// What is happening to a row.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Fx {
-    Idle,
-    Trash,
-    MoveOut,
-    Receive,
-    Arrive,
-    Refuse,
-}
 
 #[derive(Clone)]
 struct Row {
@@ -150,7 +40,7 @@ struct Row {
 
 impl Row {
     fn leaving(&self) -> bool {
-        matches!(self.fx, Fx::Trash | Fx::MoveOut)
+        self.fx.leaving()
     }
 }
 
@@ -169,42 +59,8 @@ struct Undo {
     into: Option<u64>,
 }
 
-/// How a row looks at one moment of an effect.
-#[derive(Clone, Copy)]
-struct Look {
-    height: f32,
-    opacity: f32,
-    dx: f32,
-    trash: f32,
-    trash_size: f32,
-    tint: f32,
-    tint_kind: Tint,
-    badge: f32,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Tint {
-    Accent,
-    Error,
-}
-
-impl Default for Look {
-    fn default() -> Self {
-        Look {
-            height: 1.0,
-            opacity: 1.0,
-            dx: 0.0,
-            trash: 0.0,
-            trash_size: 16.0,
-            tint: 0.0,
-            tint_kind: Tint::Accent,
-            badge: 0.0,
-        }
-    }
-}
-
 pub fn open(cx: &mut App) {
-    crow_macos::preload(&all_sounds());
+    crow_macos::preload(&motion::all_sounds().into_iter().map(feedback::sound).collect::<Vec<_>>());
     // The lab chooses motion itself; GPUI's own switch would freeze every animation.
     cx.set_reduce_motion(false);
     let bounds = Bounds::centered(None, size(px(720.), px(600.)), cx);
@@ -229,7 +85,7 @@ pub fn open(cx: &mut App) {
 
 pub struct MotionLab {
     focus: FocusHandle,
-    mode: Mode,
+    mode: Effective,
     sounds: SoundSet,
     slow: bool,
     glide: bool,
@@ -286,7 +142,7 @@ impl MotionLab {
                 into: None,
             })
             .collect();
-        let mode = if crow_macos::reduce_motion() { Mode::Low } else { Mode::Full };
+        let mode = MotionMode::Auto.resolve(crow_macos::reduce_motion());
         MotionLab {
             focus: cx.focus_handle(),
             mode,
@@ -311,7 +167,12 @@ impl MotionLab {
     }
 
     fn dur(&self, base: u64) -> Duration {
-        Duration::from_millis(if self.slow { base * 5 } else { base })
+        self.scaled(Duration::from_millis(base))
+    }
+
+    /// Slow motion ×5, for the lab's slow switch.
+    fn scaled(&self, base: Duration) -> Duration {
+        if self.slow { base * 5 } else { base }
     }
 
     fn next_generation(&mut self) -> u64 {
@@ -320,8 +181,9 @@ impl MotionLab {
     }
 
     fn play(&mut self, event: Event, cx: &mut Context<Self>) {
-        match cue(self.sounds, event) {
-            Some(Cue::Play(sound, volume, clip)) => {
+        match motion::cue(self.sounds, event) {
+            Some(Cue::Play { sound, volume, clip }) => {
+                let sound = feedback::sound(sound);
                 crow_macos::play(&sound, volume);
                 self.sound_generation += 1;
                 if let Some(clip) = clip {
@@ -442,12 +304,12 @@ impl MotionLab {
         self.play(Event::Trash, cx);
         self.say(format!("Moved “{name}” to the Trash · ⌘Z puts it back"));
         let total = match self.mode {
-            Mode::Off => Duration::ZERO,
-            Mode::Low => self.dur(ms::LOW_OUT),
-            Mode::Full => self.dur(ms::TRASH_SWALLOW + ms::TRASH_CLOSE),
+            Effective::Off => Duration::ZERO,
+            Effective::Low => self.dur(ms::LOW_OUT),
+            Effective::Full => self.dur(ms::TRASH_SWALLOW + ms::TRASH_CLOSE),
         };
         self.start_fx(id, Fx::Trash, total, cx);
-        if self.mode == Mode::Off {
+        if self.mode == Effective::Off {
             let generation = self.rows[i].generation;
             self.finish(id, generation);
         }
@@ -479,18 +341,18 @@ impl MotionLab {
         self.say(format!("Moved “{name}” into {target_name} · ⌘Z puts it back"));
 
         match self.mode {
-            Mode::Off => {
+            Effective::Off => {
                 self.play(Event::Move, cx);
                 self.start_fx(id, Fx::MoveOut, Duration::ZERO, cx);
                 let generation = self.generation;
                 self.finish(id, generation);
             }
-            Mode::Low => {
+            Effective::Low => {
                 self.play(Event::Move, cx);
                 self.start_fx(id, Fx::MoveOut, self.dur(ms::LOW_OUT), cx);
                 self.start_fx(target, Fx::Receive, self.dur(ms::LOW_TINT), cx);
             }
-            Mode::Full => {
+            Effective::Full => {
                 let fly = self.dur(ms::MOVE_FLY);
                 self.start_fx(id, Fx::MoveOut, self.dur(ms::MOVE_FLY + ms::MOVE_CLOSE), cx);
                 self.start_fx(target, Fx::Receive, self.dur(ms::MOVE_FLY + ms::RECEIVE), cx);
@@ -510,11 +372,11 @@ impl MotionLab {
         self.rows.insert(index, row);
         self.cursor = id;
         let total = match self.mode {
-            Mode::Off => Duration::ZERO,
-            Mode::Low => self.dur(ms::LOW_TINT),
-            Mode::Full => self.dur(ms::ARRIVE_OPEN + ms::ARRIVE_IN + ms::ARRIVE_TINT),
+            Effective::Off => Duration::ZERO,
+            Effective::Low => self.dur(ms::LOW_TINT),
+            Effective::Full => self.dur(ms::ARRIVE_OPEN + ms::ARRIVE_IN + ms::ARRIVE_TINT),
         };
-        if self.mode == Mode::Off {
+        if self.mode == Effective::Off {
             self.rows[index].fx = Fx::Idle;
         } else {
             self.start_fx(id, Fx::Arrive, total, cx);
@@ -566,9 +428,9 @@ impl MotionLab {
         self.play(Event::Refuse, cx);
         self.say(format!("“{name}” is locked"));
         let total = match self.mode {
-            Mode::Off => return,
-            Mode::Low => self.dur(ms::LOW_TINT),
-            Mode::Full => self.dur(ms::REFUSE),
+            Effective::Off => return,
+            Effective::Low => self.dur(ms::LOW_TINT),
+            Effective::Full => self.dur(ms::REFUSE),
         };
         self.start_fx(self.cursor, Fx::Refuse, total, cx);
     }
@@ -600,8 +462,8 @@ impl MotionLab {
             this.play(Event::CopyDone, cx);
             this.say("Copied 3 items to Backup");
             let fade = match this.mode {
-                Mode::Off => Duration::ZERO,
-                Mode::Low | Mode::Full => this.dur(ms::COPY_FADE),
+                Effective::Off => Duration::ZERO,
+                Effective::Low | Effective::Full => this.dur(ms::COPY_FADE),
             };
             this.after(fade, cx, move |this, _| {
                 if this.copy.map(|(g, _)| g) == Some(generation) {
@@ -635,9 +497,9 @@ impl MotionLab {
             "e" if plain => self.refuse(cx),
             "c" if plain => self.copy(cx),
             "t" if plain => self.toggle_tip(),
-            "1" if plain => self.mode = Mode::Off,
-            "2" if plain => self.mode = Mode::Low,
-            "3" if plain => self.mode = Mode::Full,
+            "1" if plain => self.mode = Effective::Off,
+            "2" if plain => self.mode = Effective::Low,
+            "3" if plain => self.mode = Effective::Full,
             "s" if plain => {
                 self.sounds = match self.sounds {
                     SoundSet::Off => SoundSet::Finder,
@@ -653,86 +515,8 @@ impl MotionLab {
         cx.notify();
     }
 
-    /// How row effect `fx` looks in phase `phase` at progress `t` (already eased per phase).
-    fn look(mode: Mode, fx: Fx, phase: usize, t: f32) -> Look {
-        let mut look = Look::default();
-        match (mode, fx, phase) {
-            (_, Fx::Idle, _) | (Mode::Off, _, _) => {}
-            // Full trash: the icon turns into a trash, the name slides into it, the trash gulps, the gap closes.
-            (Mode::Full, Fx::Trash, 0) => {
-                let e = ease_in(t);
-                look.trash = (t * 2.5).min(1.0);
-                look.dx = -22.0 * e;
-                look.opacity = 1.0 - e;
-            }
-            (Mode::Full, Fx::Trash, _) => {
-                let e = ease_out(t);
-                look.trash = 1.0 - e;
-                look.trash_size = 16.0 + 3.0 * (t * std::f32::consts::PI).sin();
-                look.opacity = 0.0;
-                look.height = 1.0 - e;
-            }
-            // Full move: the ghost flies; the row stays as an empty slot, then closes.
-            (Mode::Full, Fx::MoveOut, 0) => look.opacity = 0.0,
-            (Mode::Full, Fx::MoveOut, _) => {
-                look.opacity = 0.0;
-                look.height = 1.0 - ease_out(t);
-            }
-            // Full receive: wait for the ghost, then a short accent pulse and a +1 badge.
-            (Mode::Full, Fx::Receive, 0) => {}
-            (Mode::Full, Fx::Receive, _) => {
-                look.tint = 1.0 - ease_in(t);
-                look.badge = 1.0 - ease_in(t);
-            }
-            // Full arrive: the gap opens, the row slides in, a tint fades.
-            (Mode::Full, Fx::Arrive, 0) => {
-                look.height = ease_out(t);
-                look.opacity = 0.0;
-                look.tint = 1.0;
-            }
-            (Mode::Full, Fx::Arrive, 1) => {
-                let e = ease_out(t);
-                look.opacity = e;
-                look.dx = -12.0 * (1.0 - e);
-                look.tint = 1.0;
-            }
-            (Mode::Full, Fx::Arrive, _) => look.tint = 1.0 - ease_in_out(t),
-            // Full refuse: a damped shake with an error tint.
-            (Mode::Full, Fx::Refuse, _) => {
-                look.dx = 5.0 * (t * 3.0 * std::f32::consts::TAU).sin() * (1.0 - t);
-                look.tint = 1.0 - t;
-                look.tint_kind = Tint::Error;
-            }
-            // Low: opacity and tint only; nothing moves, gaps snap.
-            (Mode::Low, Fx::Trash | Fx::MoveOut, _) => look.opacity = 1.0 - ease_out(t),
-            (Mode::Low, Fx::Receive, _) => {
-                look.tint = 1.0 - ease_in(t);
-                look.badge = 1.0 - ease_in(t);
-            }
-            (Mode::Low, Fx::Arrive, _) => {
-                look.opacity = (t * ms::LOW_TINT as f32 / ms::LOW_IN as f32).min(1.0);
-                look.tint = 1.0 - ease_in(t);
-            }
-            (Mode::Low, Fx::Refuse, _) => {
-                look.tint = 1.0 - ease_in(t);
-                look.tint_kind = Tint::Error;
-            }
-        }
-        look
-    }
-
     fn phases(&self, fx: Fx) -> Vec<Animation> {
-        let a = |base: u64| Animation::new(self.dur(base));
-        match (self.mode, fx) {
-            (Mode::Off, _) | (_, Fx::Idle) => vec![],
-            (Mode::Full, Fx::Trash) => vec![a(ms::TRASH_SWALLOW), a(ms::TRASH_CLOSE)],
-            (Mode::Full, Fx::MoveOut) => vec![a(ms::MOVE_FLY), a(ms::MOVE_CLOSE)],
-            (Mode::Full, Fx::Receive) => vec![a(ms::MOVE_FLY), a(ms::RECEIVE)],
-            (Mode::Full, Fx::Arrive) => vec![a(ms::ARRIVE_OPEN), a(ms::ARRIVE_IN), a(ms::ARRIVE_TINT)],
-            (Mode::Full, Fx::Refuse) => vec![a(ms::REFUSE)],
-            (Mode::Low, Fx::Trash | Fx::MoveOut) => vec![a(ms::LOW_OUT)],
-            (Mode::Low, Fx::Receive | Fx::Arrive | Fx::Refuse) => vec![a(ms::LOW_TINT)],
-        }
+        motion::phases(self.mode, fx).into_iter().map(|d| Animation::new(self.scaled(d))).collect()
     }
 
     fn render_row(&self, row: &Row, theme: &Theme, glide: bool) -> gpui::AnyElement {
@@ -752,7 +536,7 @@ impl MotionLab {
         let (mode, fx) = (self.mode, row.fx);
         div()
             .with_animations(("row", row.id * 100_000 + row.generation), phases, move |_, phase, t| {
-                spec.render(Self::look(mode, fx, phase, t))
+                spec.render(motion::look(mode, fx, phase, t))
             })
             .into_any_element()
     }
@@ -881,9 +665,9 @@ impl Render for MotionLab {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let font = ui_font(&ui.settings.font_family);
-        let glide = self.mode == Mode::Full && self.glide;
+        let glide = self.mode == Effective::Full && self.glide;
 
-        let mode_chip = |this: &Self, mode: Mode, label: &'static str, cx: &mut Context<Self>| {
+        let mode_chip = |this: &Self, mode: Effective, label: &'static str, cx: &mut Context<Self>| {
             chip(label, this.mode == mode, &theme)
                 .id(label)
                 .role(Role::RadioButton)
@@ -918,9 +702,9 @@ impl Render for MotionLab {
             .child(caption("Motion 1 2 3", &theme))
             .child(
                 group(&theme)
-                    .child(mode_chip(self, Mode::Off, "Off", cx))
-                    .child(mode_chip(self, Mode::Low, "Low", cx))
-                    .child(mode_chip(self, Mode::Full, "Full", cx)),
+                    .child(mode_chip(self, Effective::Off, "Off", cx))
+                    .child(mode_chip(self, Effective::Low, "Low", cx))
+                    .child(mode_chip(self, Effective::Full, "Full", cx)),
             )
             .child(caption("Sound s", &theme))
             .child(
@@ -1068,13 +852,13 @@ impl Render for MotionLab {
                 .child(div().flex_1().child("puts back what you just trashed"))
                 .child(div().text_color(color(theme.role("fg-muted"))).child("Got it"));
             match self.mode {
-                Mode::Off => strip.into_any_element(),
-                Mode::Low => strip
+                Effective::Off => strip.into_any_element(),
+                Effective::Low => strip
                     .with_animation(("tip", generation), Animation::new(self.dur(ms::LOW_IN)), |el, t| {
                         el.opacity(ease_out(t))
                     })
                     .into_any_element(),
-                Mode::Full => strip
+                Effective::Full => strip
                     .with_animation(("tip", generation), Animation::new(self.dur(ms::TIP_FULL)), |el, t| {
                         let e = ease_out(t);
                         el.opacity(e).relative().top(px(8.0 * (1.0 - e)))
@@ -1089,7 +873,7 @@ impl Render for MotionLab {
             if done {
                 let bar = bar.w_full();
                 match self.mode {
-                    Mode::Off => bar.into_any_element(),
+                    Effective::Off => bar.into_any_element(),
                     _ => bar
                         .with_animation(("copy-done", generation), Animation::new(self.dur(ms::COPY_FADE)), |el, t| {
                             el.opacity(1.0 - ease_in(t))
@@ -1100,7 +884,7 @@ impl Render for MotionLab {
                 // Progress is information, not decoration: it moves in every mode
                 // (Off steps it four times a second instead of every frame).
                 let mut animation = Animation::new(Duration::from_millis(ms::COPY));
-                if self.mode == Mode::Off {
+                if self.mode == Effective::Off {
                     animation = animation.with_max_fps(4.0);
                 }
                 bar.with_animation(("copy", generation), animation, |el, t| el.w(gpui::relative(t))).into_any_element()
@@ -1108,7 +892,7 @@ impl Render for MotionLab {
         });
         let status_text = div().child(self.status.clone());
         let status: gpui::AnyElement = match self.mode {
-            Mode::Off => status_text.into_any_element(),
+            Effective::Off => status_text.into_any_element(),
             _ => status_text
                 .with_animation(("status", self.status_generation), Animation::new(self.dur(ms::STATUS)), |el, t| {
                     el.opacity(0.3 + 0.7 * ease_out(t))

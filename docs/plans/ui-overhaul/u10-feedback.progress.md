@@ -4,8 +4,8 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| I1 Bring the lab and the sound module over | todo | |
-| I2 Settings and the effective mode | todo | needs Q1 |
+| I1 Bring the lab and the sound module over | done (2e6c76d + next) | lab cherry-picked; pure parts in `crow-core::motion` with 6 tests; `feedback::sound` maps `SoundId` → `NSSound`; README documents `--motion-lab`. Lab smoke-runs (window opens, no panic); look/sound hand check pending. |
+| I2 Settings and the effective mode | todo | needs Q1 (answered: `crow`) |
 | I3 Trash | todo | needs R1 spike |
 | I4 Move into a folder | todo | needs Q4 |
 | I5 Arrive | todo | |
@@ -15,11 +15,11 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 | I9 Docs, tests, bench | todo | |
 
 ## Questions
-- Q1 (asked 2026-11-14): default sound set → pending.
-- Q2 (asked 2026-11-14): cursor glide in Full → pending.
-- Q3 (asked 2026-11-14): sheets and palette fade/scale → pending.
-- Q4 (asked 2026-11-14): "+1" count on a move's target → pending.
-- Q5 (asked 2026-11-14): does `off` silence sounds → pending.
+- Q1 (asked 2026-11-14): default sound set → **`crow`** (user).
+- Q2 (asked 2026-11-14): cursor glide in Full → **yes, Full only** (user).
+- Q3 (asked 2026-11-14): sheets and palette fade/scale → **yes**; add to the lab first, user tries it (user).
+- Q4 (asked 2026-11-14): "+1" count on a move's target → **pulse only, no count** (user).
+- Q5 (asked 2026-11-14): does `off` silence sounds → **no**, separate settings (user).
 
 ## Decisions
 - Branch from `main` at `92d671e` (U9 merged at `0718a7c`; plan commit `92d671e` on `main`) — plan says so — plan.

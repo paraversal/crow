@@ -5,6 +5,7 @@ mod config;
 mod exclude;
 mod extensions;
 mod history;
+pub mod motion;
 mod paths;
 mod recent;
 mod recent_commands;
