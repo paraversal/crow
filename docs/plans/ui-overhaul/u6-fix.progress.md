@@ -37,13 +37,13 @@ Branch: `ui-u6-fix` · PR: https://github.com/paraversal/file-crow/pull/15 · La
 ## Hand checks
 - [x] F2 search rows: every Modified value on one line; verified in the bundle screenshot (Yesterday / 12. Nov / Today 12:09). A light theme still needs a look.
 - [x] F3 footer reads "1 folder skipped ›" in the bundle (screenshot). VoiceOver still needs a look.
-- [ ] F8.3 content line: number right-aligned, no colon (screenshot verified for content rows).
+- [ ] F8.3 content line: number right-aligned, no colon, 8 px gap before the text, indent trimmed. The first screenshot showed the number running into the text (`16use`, `7#`) and indented lines with wide gaps; fixed after review, not re-checked in the bundle yet.
 - [x] F4 covered by `search_invalid_regex_shows_the_error` (error and footer equal the one-line text); the red body is not in the screenshot.
 - [ ] F7 idle: not visible in the search screenshot; covered by `search_idle_*` tests for behaviour, the look still needs a manual pass.
-- [x] F8.1/F8.2/F8.3/F8.4 checked in the bundle screenshot: name rows one line, content rows after them with a right-aligned number, weak/fuzzy names below content rows; skipped path wording is singular. Light theme still needs a look.
+- [x] F8.1/F8.2/F8.4 checked in the bundle screenshot: name rows one line, content rows after them with a right-aligned number, weak/fuzzy names below content rows; skipped path wording is singular. Light theme still needs a look.
 
 ## Found along the way
-- (none yet)
+- Matching gap (not fixed, separate from this list): an accented query never matches an NFD name (`résumé` vs `Re\u{301}sume\u{301}.pdf`), because nucleo normalizes only the haystack and its all-ASCII-first-grapheme byte path can't match a non-ASCII needle char. `resume` does match. Fix would fold the needle in `FuzzyMatcher::new` (nucleo `chars::normalize` + NFD-strip) — ask before doing it.
 
 ## Log
 - 2026-11-14: read the plan, U6 plan, U6 progress, `search.rs`, `engine.rs`, `style.rs`, `bottom_bar.rs`, `chrome.rs`, window search tests. PR #14 merged; branched `ui-u6-fix` from `origin/main` (`50a4d17`). Probed nucleo scores for "config": contiguous names 166/159, scattered `gpui-stop-synthetic-drag-on-file-drag.patch` 109.
@@ -54,6 +54,8 @@ Branch: `ui-u6-fix` · PR: https://github.com/paraversal/file-crow/pull/15 · La
 - 2026-11-14: F6 measured and optimised; F7.1–F7.7 and F8.1–F8.4 implemented per the answers. All `search_*` window tests (37), `search::tests` (8) and `bottom_bar::tests` (5) pass.
 - 2026-11-14: bundle check: built `target/bundle/Crow.app`, launched it on the repo folder with a temporary debug env hook that opens search with "config" (hook reverted), and screenshotted `img/u6-fix-search.png`. Verified the top row selected and previewed, one-line name rows, content lines with right-aligned numbers, one-line Modified dates, "1 folder skipped ›" and the footer counts. The OS screen-recording prompt from Ghostty overlaps the middle of the capture; it is not Crow UI. Light theme, VoiceOver and the idle state still need a human pass.
 - 2026-11-14: F5 implemented (`unicode-segmentation` added to crow-search). Bench `--bench-search target/fixture-search-200k`: first hit 5 ms, total 2491 ms, 200000 hits — no regression vs the 3.7–4.4 s in the U6 progress (names don't match "needle" in that fixture, so only the non-ASCII path is theoretically touched).
+
+- 2026-11-14 (review fixes): F8.2 strong names now come from nucleo's own ranges (one merged range), with the case-insensitive substring as a fallback, so accent-folded (`resume` → `Résumé.pdf`) and NFD names rank in the name block; `contiguous_name_matches_are_strong` uses the real matcher. F8.3 content line: 8 px gap between number and text, leading indent trimmed in `content_excerpt` (ranges shifted; test extended). fmt, clippy, `cargo test --workspace` green (197 app, 57 core, 27 search, 4 macos, 13, 6 theme).
 
 ## Next
 PR open; CI runs. The unchecked hand checks (light theme, VoiceOver, idle look, This Mac, narrow window) are for the user before the squash merge.

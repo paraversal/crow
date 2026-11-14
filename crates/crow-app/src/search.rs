@@ -1641,6 +1641,7 @@ impl SearchView {
                         div()
                             .flex()
                             .items_center()
+                            .gap(px(8.))
                             .text_size(px(11.))
                             .text_color(muted)
                             .overflow_hidden()
@@ -1976,7 +1977,7 @@ impl Row {
             HitKind::Content { line, text, ranges } => (Some((line, text, ranges)), false, Vec::new()),
             HitKind::Name { ranges } => (None, true, ranges),
         };
-        let strong_name = name_match && name_has_query(&hit.path, query);
+        let strong_name = name_match && is_strong_name(&hit.path, &name_ranges, query);
         Self::new(
             hit.path,
             hit.is_dir,
@@ -2045,12 +2046,17 @@ impl Row {
     }
 }
 
-/// Whether the file name contains `query` contiguously, case-insensitively.
-/// Those name hits rank above content hits; scattered fuzzy name hits do not.
-fn name_has_query(path: &Path, query: &str) -> bool {
+/// Whether a name hit matched the query contiguously, so it ranks above
+/// content hits; scattered fuzzy name hits do not. nucleo's own ranges decide
+/// (one merged range), so accent folding and NFD names count like the matcher
+/// does; a plain case-insensitive substring also counts.
+fn is_strong_name(path: &Path, ranges: &[Range<usize>], query: &str) -> bool {
     let query = query.trim();
     if query.is_empty() {
         return false;
+    }
+    if ranges.len() == 1 {
+        return true;
     }
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else { return false };
     name.to_lowercase().contains(&query.to_lowercase())
@@ -2069,7 +2075,15 @@ fn ascii_match_ranges(name: &str, query: &str) -> Vec<Range<usize>> {
 
 /// A long matching line starts near its first match, with a leading ellipsis.
 fn content_excerpt(text: &str, ranges: &[Range<usize>]) -> (String, Vec<Range<usize>>) {
-    let text = text.replace('\t', " ");
+    // Drop the line's indent so the text starts right after the line number.
+    let indent = text.len() - text.trim_start().len();
+    let text = text[indent..].replace('\t', " ");
+    let ranges: Vec<Range<usize>> = ranges
+        .iter()
+        .map(|range| range.start.saturating_sub(indent)..range.end.saturating_sub(indent))
+        .filter(|range| !range.is_empty())
+        .collect();
+    let ranges = ranges.as_slice();
     let first = ranges.first().map_or(0, |range| range.start);
     if first <= 60 {
         return (text, ranges.to_vec());
@@ -2174,10 +2188,19 @@ mod tests {
 
     #[test]
     fn contiguous_name_matches_are_strong() {
-        assert!(name_has_query(Path::new("/a/configuration.md"), "config"));
-        assert!(name_has_query(Path::new("/a/Config.toml"), "CONFIG"));
-        assert!(!name_has_query(Path::new("/a/gpui-stop-synthetic-drag.patch"), "config"));
-        assert!(!name_has_query(Path::new("/a/config.toml"), "  "));
+        // The ranges the engine would report for this name and query.
+        fn strong(name: &str, query: &str) -> bool {
+            let ranges =
+                crow_search::FuzzyMatcher::new(query).indices(name).map(|(_, ranges)| ranges).unwrap_or_default();
+            is_strong_name(&Path::new("/a").join(name), &ranges, query)
+        }
+        assert!(strong("configuration.md", "config"));
+        assert!(strong("Config.toml", "CONFIG"));
+        assert!(!strong("gpui-stop-synthetic-drag-on-file-drag.patch", "config"));
+        assert!(!is_strong_name(Path::new("/a/config.toml"), &std::iter::once(0..6).collect::<Vec<_>>(), "  "));
+        // Accent folding and decomposed names, as nucleo matches them.
+        assert!(strong("R\u{e9}sum\u{e9}.pdf", "resume"));
+        assert!(strong("Re\u{301}sume\u{301}.pdf", "resume"));
     }
 
     #[test]
@@ -2201,6 +2224,11 @@ mod tests {
         assert_eq!(text, "needle in beta");
         let expected: Vec<Range<usize>> = std::iter::once(0..6).collect();
         assert_eq!(ranges, expected);
+        // The indent goes; the ranges follow the text.
+        let hit: Vec<Range<usize>> = std::iter::once(9..15).collect();
+        let (text, ranges) = content_excerpt("    \t    needle()", &hit);
+        assert_eq!(text, "needle()");
+        assert_eq!(&text[ranges[0].clone()], "needle");
     }
 
     #[test]
