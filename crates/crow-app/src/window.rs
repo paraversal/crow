@@ -1097,14 +1097,7 @@ impl CrowWindow {
             }
             PaneEvent::LongFolderScrolled => self.offer_tip(TipId::Filter, window, cx),
             PaneEvent::Paste { into, move_items } => {
-                // Our clipboard if the pasteboard still holds what we put there; otherwise
-                // whatever another app (Finder) copied.
-                let ops = cx.global::<Operations>();
-                let ours = ops.clipboard.as_ref().filter(|c| c.change_count == crow_macos::pasteboard_change_count());
-                let (paths, cut) = match ours {
-                    Some(c) => (c.paths.clone(), c.cut),
-                    None => (crow_macos::read_file_urls(), false),
-                };
+                let (paths, cut) = operations::pasteboard_paths(cx);
                 if paths.is_empty() {
                     return;
                 }
@@ -9198,5 +9191,196 @@ mod tests {
         assert!(list_focused(&view, &mut cx));
         cx.simulate_keystrokes("down");
         assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    }
+
+    // ----- context menu -----
+
+    use crate::palette::CommandId;
+
+    fn right_click(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+        cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::default());
+        cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::default());
+    }
+
+    fn row_center(cx: &mut VisualTestContext, selector: &'static str) -> gpui::Point<gpui::Pixels> {
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is on screen")).center()
+    }
+
+    fn open_menu(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Option<crate::context_menu::MenuKind> {
+        pane(view, cx).read_with(cx, |p, _| p.context_menu())
+    }
+
+    /// Pick the menu line running `id`, as a click on it would.
+    fn choose(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, id: CommandId) {
+        let kind = open_menu(view, cx).expect("a menu is open");
+        let ix = crate::context_menu::slots(kind).iter().position(|slot| *slot == Some(id)).expect("in the menu");
+        let pane = pane(view, cx);
+        pane.update_in(cx, |p, window, cx| p.choose_context_item(Some(ix), window, cx));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn right_click_on_an_unselected_row_selects_it_first(cx: &mut TestAppContext) {
+        use crate::context_menu::MenuKind;
+        let root = fixture("context-row");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down shift-down");
+        let alpha = row_center(&mut cx, "row-alpha");
+        right_click(&mut cx, alpha);
+        assert_eq!(selected_names(&view, &cx), ["alpha"], "Finder selects the row it opens the menu for");
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Items));
+        assert!(list_focused(&view, &mut cx));
+    }
+
+    #[gpui::test]
+    fn right_click_inside_the_selection_keeps_it(cx: &mut TestAppContext) {
+        use crate::context_menu::MenuKind;
+        let root = fixture("context-selection");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down shift-down");
+        let beta = row_center(&mut cx, "row-beta");
+        right_click(&mut cx, beta);
+        assert_eq!(selected_names(&view, &cx), ["beta", "notes.txt"]);
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Items));
+
+        choose(&view, &mut cx, CommandId::MoveToTrash);
+        settle(&view, &mut cx);
+        assert!(!root.join("beta").exists() && !root.join("notes.txt").exists(), "both went to the Trash");
+        assert!(root.join("alpha").exists());
+        assert_eq!(open_menu(&view, &cx), None, "the menu is closed");
+    }
+
+    #[gpui::test]
+    fn ctrl_click_opens_the_menu_like_a_right_click(cx: &mut TestAppContext) {
+        use crate::context_menu::MenuKind;
+        let root = fixture("context-ctrl");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down");
+        let notes = row_center(&mut cx, "row-notes.txt");
+        cx.simulate_click(notes, gpui::Modifiers::control());
+        assert_eq!(selected_names(&view, &cx), ["notes.txt"]);
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Items));
+
+        // Dismissing the menu runs nothing.
+        let pane = pane(&view, &cx);
+        pane.update_in(&mut cx, |p, window, cx| p.choose_context_item(None, window, cx));
+        cx.run_until_parked();
+        assert_eq!(open_menu(&view, &cx), None);
+        assert_eq!(selected_names(&view, &cx), ["notes.txt"]);
+
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::control());
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Folder), "Ctrl-click on empty space");
+        assert!(selected_names(&view, &cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn right_click_on_empty_space_offers_new_folder(cx: &mut TestAppContext) {
+        use crate::context_menu::MenuKind;
+        let root = fixture("context-empty");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down");
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        right_click(&mut cx, empty);
+        assert!(selected_names(&view, &cx).is_empty(), "empty space deselects, as in Finder");
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Folder));
+
+        choose(&view, &mut cx, CommandId::NewFolder);
+        settle(&view, &mut cx);
+        cx.run_until_parked();
+        let renaming = pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx));
+        assert_eq!(renaming.as_deref(), Some("untitled folder"), "created, and its rename started as with ⇧⌘N");
+        assert!(root.join("untitled folder").is_dir());
+    }
+
+    #[gpui::test]
+    fn right_click_in_a_column_works_on_that_column(cx: &mut TestAppContext) {
+        use crate::context_menu::MenuKind;
+        let root = fixture("context-columns");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.folder_count());
+        let focused = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.focused_index());
+
+        let notes = row_center(&mut cx, "column-0-row-notes.txt");
+        right_click(&mut cx, notes);
+        settle(&view, &mut cx);
+        assert_eq!((focused(&cx), count(&cx)), (0, 1), "the first column takes focus; a file opens no column");
+        assert_eq!(selected_names(&view, &cx), ["notes.txt"]);
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Items));
+
+        choose(&view, &mut cx, CommandId::Duplicate);
+        settle(&view, &mut cx);
+        assert!(root.join("notes copy.txt").exists(), "Duplicate ran on the column's selection");
+
+        let empty = below_rows(&mut cx, "column-0-row-notes.txt");
+        right_click(&mut cx, empty);
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Folder));
+        assert!(selected_names(&view, &cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn copy_path_puts_the_selected_paths_on_the_clipboard(cx: &mut TestAppContext) {
+        let root = fixture("copy-path");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down shift-down cmd-alt-c");
+        let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+        let expected = format!("{}\n{}", root.join("beta").display(), root.join("notes.txt").display());
+        assert_eq!(text.as_deref(), Some(expected.as_str()), "⌥⌘C copies one path per line");
+
+        // With nothing selected it copies the folder's own path, as Finder does.
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        cx.simulate_keystrokes("cmd-alt-c");
+        let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+        assert_eq!(text, Some(root.display().to_string()));
+
+        // And from the menu.
+        let alpha = row_center(&mut cx, "row-alpha");
+        right_click(&mut cx, alpha);
+        choose(&view, &mut cx, CommandId::CopyPath);
+        let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+        assert_eq!(text, Some(root.join("alpha").display().to_string()));
+    }
+
+    #[gpui::test]
+    fn context_menu_lines_use_the_menu_bar_names_and_keys(cx: &mut TestAppContext) {
+        use crate::context_menu::{MenuKind, MenuState, entries};
+        use crow_macos::{ContextMenuEntry, MenuShortcut};
+        let root = fixture("context-lines");
+        let (view, mut cx) = open(cx, &root);
+        let line = |cx: &mut VisualTestContext, title: &str| {
+            let state = MenuState { selected: 1, selected_folders: 0, can_paste: false };
+            cx.update(|_, cx| entries(MenuKind::Items, state, crate::keys::KeyScope::List, cx))
+                .into_iter()
+                .find(|entry| matches!(entry, ContextMenuEntry::Item { title: t, .. } if t == title))
+                .unwrap_or_else(|| panic!("{title} is in the menu"))
+        };
+        let shortcut =
+            |key: &str, cmd: bool, alt: bool| Some(MenuShortcut { key: key.into(), cmd, alt, ..Default::default() });
+        assert_eq!(
+            line(&mut cx, "Move to Trash"),
+            ContextMenuEntry::Item {
+                title: "Move to Trash".into(),
+                shortcut: shortcut("backspace", true, false),
+                enabled: true
+            }
+        );
+        assert_eq!(
+            line(&mut cx, "Paste"),
+            ContextMenuEntry::Item { title: "Paste".into(), shortcut: shortcut("v", true, false), enabled: false },
+            "nothing to paste"
+        );
+        assert_eq!(
+            line(&mut cx, "Copy Path"),
+            ContextMenuEntry::Item { title: "Copy Path".into(), shortcut: shortcut("c", true, true), enabled: true }
+        );
+        // The Vim layer's `y y` can't be shown in a native menu; ⌘C still is.
+        use_vim(&view, &mut cx);
+        assert_eq!(
+            line(&mut cx, "Copy"),
+            ContextMenuEntry::Item { title: "Copy".into(), shortcut: shortcut("c", true, false), enabled: true }
+        );
     }
 }

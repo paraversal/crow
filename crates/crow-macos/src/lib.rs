@@ -4,6 +4,7 @@
 //! background task by mistake) every function here degrades instead of
 //! crashing: no icon, plain path names, no panel, no drag.
 
+mod context_menu;
 mod drag;
 mod files;
 mod icons;
@@ -14,6 +15,7 @@ mod sound;
 mod spotlight;
 mod volumes;
 
+pub use context_menu::{ContextMenuEntry, MenuShortcut, show_context_menu};
 pub use drag::{ComboDrag, begin_drag, remember_mouse_down};
 pub use files::{SystemTrash, open_path, pasteboard_change_count, read_file_urls, write_file_urls};
 pub use icons::icon_png;
@@ -57,4 +59,19 @@ pub fn show_about_panel() {
 /// False when nothing opened it (no app for its type, or not on the main thread).
 pub fn open_in_default_app(path: &Path) -> bool {
     main_thread().is_some() && NSWorkspace::sharedWorkspace().openURL(&ns_url(path))
+}
+
+/// Show `paths` selected in Finder windows (Finder's own "Show in Enclosing Folder").
+pub fn reveal_in_finder(paths: &[std::path::PathBuf]) {
+    if main_thread().is_none() || paths.is_empty() {
+        return;
+    }
+    let urls: Vec<Retained<NSURL>> = paths.iter().map(|path| ns_url(path)).collect();
+    NSWorkspace::sharedWorkspace()
+        .activateFileViewerSelectingURLs(&objc2_foundation::NSArray::from_retained_slice(&urls));
+}
+
+/// Open the folder `dir` itself in a Finder window.
+pub fn open_folder_in_finder(dir: &Path) -> bool {
+    main_thread().is_some() && NSWorkspace::sharedWorkspace().selectFile_inFileViewerRootedAtPath(None, &ns_string(dir))
 }

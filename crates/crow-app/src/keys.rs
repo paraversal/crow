@@ -355,6 +355,7 @@ mod tests {
                 (CommandId::Cut, "⌘X"),
                 (CommandId::Paste, "⌘V"),
                 (CommandId::PasteMove, "⌥⌘V"),
+                (CommandId::CopyPath, "⌥⌘C"),
                 (CommandId::SelectAll, "⌘A"),
                 (CommandId::StartFilter, "/"),
                 (CommandId::ShowSearch, "⌘F"),
@@ -380,11 +381,11 @@ mod tests {
                     "{id:?}"
                 );
             }
-            for id in [CommandId::UseViewAsDefaults, CommandId::ResetFolderView] {
+            for id in [CommandId::UseViewAsDefaults, CommandId::ResetFolderView, CommandId::ShowInFinder] {
                 let command = COMMANDS.iter().find(|c| c.id == id).unwrap();
                 assert_eq!(text(command.action, command.scope, cx), None, "{id:?} has no binding");
             }
-            assert_eq!(COMMANDS.len(), expected.len() + 2, "every command is in the table");
+            assert_eq!(COMMANDS.len(), expected.len() + 3, "every command is in the table");
         });
     }
 }

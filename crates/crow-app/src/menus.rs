@@ -218,6 +218,7 @@ mod tests {
                 "—",
                 "Add to Sidebar",
                 "Eject",
+                "Show in Finder",
             ]
         );
         assert_eq!(
@@ -230,6 +231,7 @@ mod tests {
                 "Copy",
                 "Paste",
                 "Move Item Here",
+                "Copy Path",
                 "Select All",
                 "—",
                 "Filter This Folder",

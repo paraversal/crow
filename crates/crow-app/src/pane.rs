@@ -31,13 +31,15 @@ use gpui::{
 };
 
 use crate::actions::{
-    BeginJump, BeginMark, ClearFilter, CopyFiles, CutFiles, DeletePermanently, Duplicate, ExtendDown, ExtendUp,
-    MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection,
-    PasteFiles, PasteMoveFiles, QuickLook, Rename, SelectAll, StartFilter,
+    BeginJump, BeginMark, ClearFilter, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, ExtendDown,
+    ExtendUp, MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFile, NewFolder,
+    OpenSelection, PasteFiles, PasteMoveFiles, QuickLook, Rename, SelectAll, ShowInFinder, StartFilter,
 };
+use crate::context_menu::{MenuKind, MenuState};
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
 use crate::icons::{Glyph, glyph};
+use crate::keys::KeyScope;
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
@@ -288,6 +290,8 @@ pub struct Pane {
     /// A row took the current mouse-down; the list behind it must not treat it as a
     /// click on empty space. Rows handle the event before the list (deeper hitbox).
     row_pressed: bool,
+    /// The context menu on screen and what it was opened for, until it closes.
+    context_menu: Option<MenuKind>,
 }
 
 struct Bench {
@@ -348,6 +352,7 @@ impl Pane {
             filter_announce_gen: 0,
             focus_list_after_filter: false,
             row_pressed: false,
+            context_menu: None,
             sidebar_walk: false,
         };
         pane.enter(dir, cx);
@@ -1347,6 +1352,10 @@ impl Pane {
 
     /// A press on row `ix` of folder `k`: Finder's click, Cmd-click and Shift-click.
     fn press(&mut self, k: usize, ix: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.modifiers.control {
+            self.context_press(k, Some(ix), window, cx);
+            return;
+        }
         self.row_pressed = true;
         // AppKit wants the mouse-down event when a GPUI drag later leaves the window.
         crow_macos::remember_mouse_down();
@@ -1375,13 +1384,11 @@ impl Pane {
     /// the column becomes the focused one and the columns to its right close.
     /// Cmd- and Shift-clicks keep the selection.
     fn press_empty(&mut self, k: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.row_pressed) {
+        if !self.empty_space_pressed(k, event) {
             return;
         }
-        // A column also holds the filter field and its footer: only its list counts.
-        if self.mode == ViewMode::Columns
-            && !self.column_bounds.borrow().get(&k).is_some_and(|bounds| bounds.contains(&event.position))
-        {
+        if event.modifiers.control {
+            self.context_press(k, None, window, cx);
             return;
         }
         window.focus(&self.focus, cx);
@@ -1396,6 +1403,129 @@ impl Pane {
         self.with_focused(cx, |f, cx| f.clear_selection(cx));
         self.load_preview(cx);
         cx.notify();
+    }
+
+    /// Whether this press in folder `k` landed on its list but on no row.
+    fn empty_space_pressed(&mut self, k: usize, event: &MouseDownEvent) -> bool {
+        if std::mem::take(&mut self.row_pressed) {
+            return false;
+        }
+        // A column also holds the filter field and its footer: only its list counts.
+        self.mode != ViewMode::Columns
+            || self.column_bounds.borrow().get(&k).is_some_and(|bounds| bounds.contains(&event.position))
+    }
+
+    fn context_press_empty(&mut self, k: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.empty_space_pressed(k, event) {
+            self.context_press(k, None, window, cx);
+        }
+    }
+
+    // ----- context menu -----
+
+    /// A right-click or Ctrl-click in folder `k`: on row `row`, or on empty space. Like
+    /// Finder, an unselected row is selected first and a row in the selection keeps it;
+    /// empty space deselects and the menu is about the folder shown.
+    fn context_press(&mut self, k: usize, row: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        if row.is_some() {
+            self.row_pressed = true;
+        }
+        window.focus(&self.focus, cx);
+        if k != self.focused {
+            self.drop_filter(cx);
+            self.focused = k;
+        }
+        let kind = match row {
+            Some(ix) => {
+                self.with_focused(cx, |f, cx| {
+                    let selected = f.row(ix).is_some_and(|(entry, _)| f.is_selected(&entry.path));
+                    if !selected {
+                        f.select_only(ix, cx);
+                    }
+                });
+                MenuKind::Items
+            }
+            None => {
+                self.with_focused(cx, |f, cx| f.clear_selection(cx));
+                MenuKind::Folder
+            }
+        };
+        self.load_preview(cx);
+        cx.notify();
+        self.open_context_menu(kind, window, cx);
+    }
+
+    fn open_context_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
+        let state = {
+            let folder = self.focused_folder().read(cx);
+            let (_, selected_folders) = folder.selected_bytes();
+            MenuState {
+                selected: folder.selected_count(),
+                selected_folders,
+                can_paste: !crate::operations::pasteboard_paths(cx).0.is_empty(),
+            }
+        };
+        let scope = match (self.mode, self.filtering.is_some()) {
+            (ViewMode::List, false) => KeyScope::List,
+            (ViewMode::List, true) => KeyScope::ListFiltered,
+            (ViewMode::Columns, false) => KeyScope::Columns,
+            (ViewMode::Columns, true) => KeyScope::ColumnsFiltered,
+        };
+        let entries = crate::context_menu::entries(kind, state, scope, cx);
+        self.context_menu = Some(kind);
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        // Off the main thread (tests) nothing opens; `choose_context_item` stands in for the click.
+        if !crow_macos::show_context_menu(window, entries, move |chosen| {
+            sender.send(chosen).ok();
+        }) {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let chosen = receiver.await.ok().flatten();
+            this.update_in(cx, |this, window, cx| this.context_menu_closed(chosen, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// The menu closed, with the item at `chosen` picked (an index into its slots), or none.
+    fn context_menu_closed(&mut self, chosen: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(kind) = self.context_menu.take() else { return };
+        let Some(id) = chosen.and_then(|ix| crate::context_menu::slots(kind).get(ix).copied().flatten()) else {
+            return;
+        };
+        // The list has focus, so the action runs exactly as its key would.
+        window.focus(&self.focus, cx);
+        window.dispatch_action(crate::context_menu::command(id).action.boxed_clone(), cx);
+    }
+
+    #[cfg(test)]
+    pub fn context_menu(&self) -> Option<MenuKind> {
+        self.context_menu
+    }
+
+    #[cfg(test)]
+    pub fn choose_context_item(&mut self, chosen: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.context_menu_closed(chosen, window, cx);
+    }
+
+    fn copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
+        let mut paths = self.selected_paths(cx);
+        if paths.is_empty() {
+            paths.push(self.current_dir(cx));
+        }
+        let text = paths.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>().join("\n");
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        let what = if paths.len() == 1 { "path".to_owned() } else { format!("{} paths", paths.len()) };
+        crate::operations::message(format!("Copied {what}"), false, cx);
+    }
+
+    fn show_in_finder(&mut self, _: &ShowInFinder, _: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.selected_paths(cx);
+        if paths.is_empty() {
+            crow_macos::open_folder_in_finder(&self.current_dir(cx));
+        } else {
+            crow_macos::reveal_in_finder(&paths);
+        }
     }
 
     // ----- scroll -----
@@ -1732,6 +1862,12 @@ impl Pane {
                             this.press(0, ix, event, window, cx)
                         }),
                     )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            this.context_press(0, Some(ix), window, cx)
+                        }),
+                    )
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         if event.click_count() == 2 {
                             this.open_selected(cx);
@@ -2045,6 +2181,12 @@ impl Pane {
                             this.press(k, ix, event, window, cx)
                         }),
                     )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                            this.context_press(k, Some(ix), window, cx)
+                        }),
+                    )
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         if event.click_count() == 2 {
                             this.open_selected(cx);
@@ -2231,6 +2373,12 @@ impl Pane {
                             MouseButton::Left,
                             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                                 this.press_empty(k, event, window, cx)
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                this.context_press_empty(k, event, window, cx)
                             }),
                         )
                         .children(field)
@@ -2599,6 +2747,12 @@ impl Render for Pane {
                                     this.press_empty(0, event, window, cx)
                                 }),
                             )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                    this.context_press_empty(0, event, window, cx)
+                                }),
+                            )
                             .child(body)
                     })
                     // Dropped on the list but not on a folder row: into the folder shown.
@@ -2650,6 +2804,8 @@ impl Render for Pane {
                     .on_action(cx.listener(Self::cut_files))
                     .on_action(cx.listener(Self::paste_files))
                     .on_action(cx.listener(Self::paste_move_files))
+                    .on_action(cx.listener(Self::copy_path))
+                    .on_action(cx.listener(Self::show_in_finder))
                     .on_action(cx.listener(Self::begin_mark))
                     .on_action(cx.listener(Self::begin_jump))
                     .on_action(cx.listener(Self::start_filter))

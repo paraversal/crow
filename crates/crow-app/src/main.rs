@@ -13,6 +13,7 @@
 mod actions;
 mod bottom_bar;
 mod chrome;
+mod context_menu;
 mod extensions;
 mod feedback;
 mod folder;
