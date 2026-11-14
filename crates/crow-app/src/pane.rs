@@ -16,14 +16,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crow_core::{
-    Align, Column, ColumnContext, ColumnWidth, History, KeymapLayer, ResizeDrag, TableLayout, ViewChange, ViewMode,
+    Align, Column, ColumnContext, ColumnWidth, History, KeymapLayer, ResizeDrag, TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS,
+    TableLayout, TipId, ViewChange, ViewMode,
 };
 use crow_fs::{Entry, Sort, SortKey};
 use gpui::{
     Action, Bounds, ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalDragPayload, ExternalPaths,
     FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle, SharedString, Subscription,
-    Window, canvas, div, img, point, prelude::*, px, uniform_list,
+    UniformListScrollHandle, Window, canvas, div, img, point, prelude::*, px, uniform_list,
 };
 
 use crate::actions::{
@@ -47,6 +48,14 @@ mod pane_filter;
 use pane_filter::FilterPlace;
 
 const ROW_HEIGHT: f32 = 24.0;
+
+/// The first row a uniform list shows. Its scroll offset is negative once
+/// scrolled down (`drag_row_at` adds it to a pointer position).
+fn first_visible_row(handle: &UniformListScrollHandle) -> usize {
+    let offset = f32::from(handle.0.borrow().base_handle.offset().y);
+    (-offset / ROW_HEIGHT).max(0.).floor() as usize
+}
+
 /// Space between the list header's line and the first row, so a highlighted first row's
 /// rounded corners don't meet the straight line and leave dark wedges at its ends.
 pub(crate) const LIST_TOP_INSET: f32 = 4.0;
@@ -78,6 +87,14 @@ pub enum PaneEvent {
     Mark {
         key: char,
         set: bool,
+    },
+    /// A pointer or touch scroll left a long folder scrolled past the tip threshold.
+    LongFolderScrolled,
+    /// A filter session ended: `empty` is an empty query, `matches` the focused
+    /// folder's row count at close.
+    FilterEnded {
+        empty: bool,
+        matches: usize,
     },
 }
 
@@ -637,6 +654,8 @@ impl Pane {
 
     fn enter(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         if self.filtering.take().is_some() {
+            // Navigating away ends the filter session like Esc does.
+            self.emit_filter_end(cx);
             self.focus_list_after_filter = true;
         }
         self.folders.clear();
@@ -762,6 +781,7 @@ impl Pane {
             return;
         }
         crate::usage::record(&StartFilter, cx);
+        crate::tips::key_used(TipId::Filter, cx);
         let folder = crate::style::display_name(self.focused_folder().read(cx).dir());
         let input = cx.new(|cx| TextInput::new("", format!("Filter {folder}"), cx).bare());
         let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
@@ -814,6 +834,7 @@ impl Pane {
         if self.filtering.take().is_none() {
             return;
         }
+        self.emit_filter_end(cx);
         for folder in &self.folders {
             folder.update(cx, |folder, cx| folder.set_filter(None, cx));
         }
@@ -828,11 +849,22 @@ impl Pane {
         if self.filtering.take().is_none() {
             return;
         }
+        self.emit_filter_end(cx);
         for folder in &self.folders {
             folder.update(cx, |folder, cx| folder.set_filter(None, cx));
         }
         self.focus_list_after_filter = true;
         cx.notify();
+    }
+
+    /// Tell the window how the filter session ended, before the folders' filters
+    /// are cleared (the query and matches are gone after that).
+    fn emit_filter_end(&self, cx: &mut Context<Self>) {
+        let (empty, matches) = {
+            let folder = self.focused_folder().read(cx);
+            (folder.filter().is_none(), folder.row_count())
+        };
+        cx.emit(PaneEvent::FilterEnded { empty, matches });
     }
 
     // ----- actions -----
@@ -1162,6 +1194,24 @@ impl Pane {
         });
         self.load_preview(cx);
         cx.notify();
+    }
+
+    // ----- scroll -----
+
+    /// A pointer or touch scroll in folder `k`'s list: suggest `/` once a long
+    /// folder is scrolled well past its first screen.
+    fn on_list_scroll(&mut self, k: usize, cx: &mut Context<Self>) {
+        if self.filtering.is_some() || !crate::tips::wants(TipId::Filter, cx) {
+            return;
+        }
+        let Some(folder) = self.folders.get(k) else { return };
+        let folder = folder.read(cx);
+        if folder.entries().len() < TIP_SCROLL_ENTRIES {
+            return;
+        }
+        if first_visible_row(folder.scroll()) >= TIP_SCROLL_ROWS {
+            cx.emit(PaneEvent::LongFolderScrolled);
+        }
     }
 
     // ----- benchmark -----
@@ -1810,6 +1860,7 @@ impl Pane {
                         .on_drop(cx.listener(move |this, selection: &DraggedSelection, window, cx| {
                             this.drop_files(k, &selection.external(), window, cx)
                         }))
+                        .on_scroll(cx.listener(move |this, _, _, cx| this.on_list_scroll(k, cx)))
                         .children(field)
                         .child(body)
                         .children(footer),
@@ -1977,6 +2028,9 @@ impl Render for Pane {
                                 }
                                 bounds.set(new);
                             })
+                            // The list's own scroll handler runs first (deeper hitbox), so
+                            // the offset read here is this event's.
+                            .on_scroll(cx.listener(|this, _, _, cx| this.on_list_scroll(0, cx)))
                             .child(body)
                     })
                     // Dropped on the list but not on a folder row: into the folder shown.
@@ -1993,6 +2047,7 @@ impl Render for Pane {
         };
         let list = div()
             .id("file-list")
+            .debug_selector(|| "file-list".into())
             .role(Role::ListBox)
             .aria_label(if filtered {
                 format!("{title}, {shown} of {total} items")

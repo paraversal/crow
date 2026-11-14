@@ -27,7 +27,9 @@ tabs closing search, the Tab cycle while searching, ↓ into the results and ↑
 (⇧⌘P in list and column view, `show_preview` live reload, the palette chip), the blinking caret,
 the bottom bar
 (hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
-path folding and hint dropping, messages that retire), closing or quitting during an operation, ⌥ word moves in
+path folding and hint dropping, messages that retire), the contextual tips (a long-folder scroll, two
+zero-match filters, a typed path for a recent folder, Got it, `hints = "off"`, one at a time, closing on a
+folder change or an overlay, and the retired set surviving a relaunch), closing or quitting during an operation, ⌥ word moves in
 text fields, the list's Name column following the window width, the menu bar
 (every registry command listed, Finder keys, enabled by focus, dispatch matching the key) and the
 Vim layer (motions, marks). Shared chrome has its own tests: key text from the live keymap (including the
@@ -38,7 +40,9 @@ config folder.
 `crates/crow-core` tests the config models on their own: view layers and glob rules, `exclude.toml`
 defaults and validation, editing `views.toml` and `sidebar.toml` without losing comments, and
 frecency with zoxide's scores. It also tests the remembered palette commands: move to front, cap,
-round trip, and a broken file starting empty.
+round trip, and a broken file starting empty; and the tip state: round trip with unknown ids kept,
+a broken file starting empty, showing once, the key-use and `hints = "off"` refusals, the cooldown,
+and the zero-match streak.
 
 `crates/crow-search` tests the engine on temp trees: dev rules and sentinels skip and are counted,
 Search everything walks them, hidden files follow the setting, fuzzy names score, literal and
@@ -98,6 +102,8 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Word moves | In the filter, search and palette fields: ⌥←/⌥→ jump by word (`m5-fix.md` is three words), ⌥⇧←/→ select, ⌥⌫ deletes a word. |
 | List width | List view: widen and narrow the window: Name grows and shrinks, Date/Size/Kind keep their widths; past Name's minimum, Kind and then Size shrink; at the 640 px minimum whole columns hide from the right, so no cell is cut at the edge (names end in “…”). Drag Name's divider: Date gives up or takes the width. |
 | Bottom bar, VoiceOver | Cmd-F5: the count reads "18 items in <folder>"; an error reads "Error: …" once; Open and Cancel read as buttons. |
+| Tips | With a fresh `CROW_STATE_DIR`: scroll a 200+ item folder → "Type / to filter this folder by name." bottom right above the bottom bar, in list and column view, FireBox and Solarized Light; Got it closes it and it never returns after relaunch. Two zero-match filters in a row → the ⌘F tip; ⇧⌘G to a recent folder → the ⌘K tip. Using the key closes and retires a tip. `hints = "off"` shows none. Opening Activity closes a tip; a narrow window wraps the text inside 12 px margins. |
+| Tips with VoiceOver | The tip is read once when it appears ("Tip: …"); "Got it" is a button that VoiceOver can press. |
 | Table | Drag header dividers to resize; click headers to sort and reverse. |
 | Preview pane | Select an image, a PDF, a text file and a folder: thumbnail, text, icon. Tags show for tagged files. |
 | Live updates | With a folder open, create, rename and delete files from Terminal; the list follows without jumping. |

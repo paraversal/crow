@@ -5,12 +5,12 @@ Branch: `ui-u9-tips` · PR: none · Last updated: 2026-11-14 · State: in progre
 | Item | State | Notes |
 | --- | --- | --- |
 | I1 Tip model in `crow-core` | done | `crates/crow-core/src/tips.rs`: `TipId`, `TipState` (`tips.json`), `TipBook`, `ZeroMatchStreak`, constants; 7 unit tests. `tracing` added to `crow-core` (workspace dep, named by the plan). |
-| I2 App glue: `Tips` global, persistence, key uses | todo | |
-| I3 Showing and closing the tip in the window | todo | |
-| I4 Trigger: scrolling a long folder → `/` | todo | |
-| I5 Trigger: two zero-match filters → ⌘F | todo | |
-| I6 Trigger: Go to Folder for a known folder → ⌘K | blocked (Q10) | plan's `go_to_folder` no longer exists as a sheet; ⇧⌘G opens the palette |
-| I7 Persistence across launches | todo | |
+| I2 App glue: `Tips` global, persistence, key uses | done | `crates/crow-app/src/tips.rs`: `Tips` global (`tips.json` in the state dir, chained background saves), `init` from `ui::init` and `init_for_tests`, `request`/`closed`/`key_used`/`wants`/`key_text`/`text`; `key_used` called from `Pane::start_filter`, `CrowWindow::show_search` (refocus and open) and `show_palette`. |
+| I3 Showing and closing the tip in the window | done | `CrowWindow.tip`, `offer_tip`/`close_tip`/`tip_blocked`; `render_tip` (surface card, accent `Key` cap, sentence, Got it, `Role::Status`); drawn after the bottom bar, before sheets; one render guard closes on hints off / another owner / a blocking state; `cx.on_release` clears the owner. Tests: Got it, folder change, hints off, busy states, one at a time, layout (12 px right, 8 px above the 30 px bar). |
+| I4 Trigger: scrolling a long folder → `/` | done | `PaneEvent::LongFolderScrolled`; `.on_scroll` on the list body and each column; `first_visible_row` = `floor(-offset.y / 24)`; early return via `tips::wants`. Tests: 250-file list and column, short folder, key use. The listener sees the offset updated (the inner list's handler runs first). |
+| I5 Trigger: two zero-match filters → ⌘F | done | `PaneEvent::FilterEnded { empty, matches }` from `close_filter`, `drop_filter` and `Pane::enter` (navigation takes the filter directly, not through `drop_filter`); `CrowWindow.zero_streak`; the offer is deferred past a navigation's `Entered`. Tests: two in a row, reset on a match, dropped by navigation, key retires. |
+| I6 Trigger: Go to Folder for a known folder → ⌘K | done | Q10 applied: `confirm_palette`'s path-mode folder branch and `reveal_typed_path`'s directory branch call `known_folder` (`palette_recents`, not the current folder); the offer is deferred past the navigation's `Entered`. Tests: recent folder, new folder, ⌘K retires. |
+| I7 Persistence across launches | done | `tip_state_survives_reload`: Got it, reload, no second scroll tip; a never-shown Search tip still shows (cooldown cleared). Saves are all in `background_spawn`. |
 
 ## Questions
 - Q1 (asked 2026-11-14): retired when shown → **yes** (user).
@@ -25,6 +25,14 @@ Branch: `ui-u9-tips` · PR: none · Last updated: 2026-11-14 · State: in progre
 - Q10 (asked 2026-11-14): ⇧⌘G is the palette now, so the trigger is a **path-mode** palette confirmation landing on a folder in `Ui.palette_recents` → **yes** (user). Copy unchanged.
 
 ## Decisions
+- Offers that follow a navigation are deferred (`cx.defer_in`): GPUI delivers `cx.emit` as an effect after the current update, so a synchronous offer was closed by the navigation's own `Entered` right after it appeared (backtrace: `apply_emit_effect` → `on_pane_event` → `close_tip`). Affects the GoTo tip and the FilterEnded → Search tip.
+- `Pane::enter` emits `FilterEnded` itself: navigation takes `self.filtering` directly (`pane.rs:655`), so `drop_filter` is not on that path. The plan's "a filter dropped by navigation counts like Esc" needed this hook.
+- Blocking states close a shown tip in one `render` guard (`tip_blocked`) rather than at each opener; the guard runs before the frame is built, so the tip is never drawn under an overlay. Openers still `notify()`.
+- `TipBook::on_screen` stores `Option<TipId>` (not a bool) so `tips::key_used` can close only the tip whose key ran. The plan's sketch had a bool; the behavior needs the id.
+- `tracing` added to `crow-core` (`crates/crow-core/Cargo.toml:16`); the plan's state-file spec names `tracing::warn!` and the crate is already a workspace dependency.
+- `bottom_bar::HEIGHT = 30.` added and used by `render` and the tip's offset (the plan's `BOTTOM_BAR_HEIGHT`; U5 had the number inline).
+- `file-list` gained a `debug_selector` so the scroll tests can find it (`column-0` already had one).
+- The plan's Finish says push and open the PR; the execute-plan skill says commit locally and stop at "Ready for critique" (the critic opens the PR). Followed the skill.
 - Q1–Q5, Q7–Q10: every recommended answer accepted by the user, 2026-11-14.
 - `TipBook::on_screen` stores `Option<TipId>` (not a bool) so `tips::key_used` can close only the tip whose key ran. The plan's sketch had a bool; the behavior needs the id.
 - `tracing` added to `crow-core` (`crates/crow-core/Cargo.toml:16`); the plan's state-file spec names `tracing::warn!` and the crate is already a workspace dependency.
@@ -40,7 +48,8 @@ Branch: `ui-u9-tips` · PR: none · Last updated: 2026-11-14 · State: in progre
 - ⇧⌘G is no longer a separate sheet: it opens the command palette with the current path typed (`window.rs:444-449`). This is the Q10 conflict, not a bug.
 
 ## Log
+- 2026-11-14: I2–I7 done. `cargo fmt --check`, clippy (`-D warnings`) and `cargo test --workspace` green (275 app tests, 79 core). README and `docs/testing.md` updated (tips paragraph, automated list, hand rows). Bench on the branch: p99 9.66–9.68 ms, warm first paint 6–9 ms (first run after compiling: 34.96 ms, discarded as cold).
 - 2026-11-14: read `AGENTS.md`, the U9 plan, the UI overhaul README, U5's progress file, and the merged code (`window.rs`, `pane.rs`, `folder.rs`, `ui.rs`, `usage.rs`, `keys.rs`, `chrome.rs`, `bottom_bar.rs`, GPUI's `uniform_list`/`on_scroll`). Created the branch and this file. Asked Q1–Q10.
 
 ## Next
-I2: `crates/crow-app/src/tips.rs` (`Tips` global, persistence, key uses).
+Compare the bench with `main`, run `./scripts/bundle.sh`, then set the state to Ready for critique.

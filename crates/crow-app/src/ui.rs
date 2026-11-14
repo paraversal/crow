@@ -203,6 +203,7 @@ pub fn init(cx: &mut App) {
     ui.theme = theme;
     cx.set_global(ui);
     crate::usage::init(cx);
+    crate::tips::init(cx);
 
     let (theme_tx, theme_rx) = mpsc::channel();
     let theme_watcher = crow_theme::watch(theme_tx).inspect_err(|e| tracing::warn!("theme watch: {e}")).ok();
@@ -265,6 +266,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     cx.set_global(ui);
     crate::extensions::init(cx);
     crate::usage::init(cx);
+    crate::tips::init(cx);
     root.join("config")
 }
 
