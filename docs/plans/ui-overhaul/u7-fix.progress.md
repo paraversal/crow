@@ -1,5 +1,5 @@
 # u7-fix progress
-Branch: `ui-u7-fix` · PR: none (critic opens it) · Last updated: 2026-11-14 · State: PR open
+Branch: `ui-u7-fix` · PR: https://github.com/paraversal/file-crow/pull/18 · Last updated: 2026-11-14 · State: PR open
 
 ## Status
 | Item | State | Notes |
