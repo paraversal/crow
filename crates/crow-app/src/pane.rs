@@ -15,16 +15,18 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crow_core::motion::{Effective, Fx, Look, Tint};
 use crow_core::{
     Align, Column, ColumnContext, ColumnWidth, History, KeymapLayer, ResizeDrag, TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS,
     TableLayout, TipId, ViewChange, ViewMode,
 };
 use crow_fs::{Entry, Sort, SortKey};
+use crow_theme::Theme;
 use gpui::{
-    Action, Bounds, ClickEvent, Context, Entity, EntityId, EventEmitter, ExternalDragPayload, ExternalPaths,
-    FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle, SharedString, Subscription,
-    UniformListScrollHandle, Window, canvas, div, img, point, prelude::*, px, uniform_list,
+    Action, AnyElement, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter, ExternalDragPayload,
+    ExternalPaths, FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle, SharedString,
+    Subscription, UniformListScrollHandle, Window, canvas, div, img, point, prelude::*, px, uniform_list,
 };
 
 use crate::actions::{
@@ -34,11 +36,12 @@ use crate::actions::{
 };
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
+use crate::icons::{Glyph, glyph};
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, drop_target, format_time, highlight_text, icon, inactive_selection, kind,
-    map_range, truncate_middle, truncate_middle_parts,
+    active_selection, color, color_alpha, drop_target, error_soft, format_time, highlight_text, icon,
+    inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -515,6 +518,13 @@ impl Pane {
                 folder.update(cx, |f, cx| f.reload(cx));
             }
         }
+    }
+
+    /// Start a feedback effect on the focused folder's visible rows among `paths`.
+    pub fn start_effect(&mut self, paths: Vec<PathBuf>, fx: Fx, cx: &mut Context<Self>) {
+        let mode = cx.global::<Ui>().feedback.mode;
+        let folder = self.focused_folder().clone();
+        folder.update(cx, |folder, cx| folder.start_effect(&paths, fx, mode, cx));
     }
 
     /// The selected items of the focused folder, in display order.
@@ -1340,6 +1350,8 @@ impl Pane {
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
         let font_size = px(ui.settings.font_size);
+        let mode = ui.feedback.mode;
+        let now = Instant::now();
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
         let active = self.focus.is_focused(window) || self.filtering.is_some();
@@ -1380,6 +1392,9 @@ impl Pane {
                 let drag_label: SharedString =
                     if drag_count > 1 { format!("{drag_count} items").into() } else { entry.name.clone().into() };
                 let handoff = DragHandoff::new();
+                let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
+                let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
+                let tint = row_tint(look, theme);
                 let row = div()
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
@@ -1392,10 +1407,14 @@ impl Pane {
                     .h(px(ROW_HEIGHT))
                     .mx_2()
                     .rounded_md()
+                    .relative()
                     .flex()
                     .items_center()
+                    .when(shift != 0.0, |row| row.top(px(shift)))
+                    .when(look.opacity < 1.0, |row| row.opacity(look.opacity))
                     .when(ix % 2 == 1, |row| row.bg(stripe))
                     .when(selected, |row| row.bg(selection_bg))
+                    .when_some(tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
                     .debug_selector(|| format!("row-{}", entry.name))
                     .on_drag(DraggedSelection { entries: drag_entries }, {
                         let handoff = handoff.clone();
@@ -1509,22 +1528,26 @@ impl Pane {
                             } else {
                                 div().w(px(TRIANGLE_WIDTH)).flex_none().into_any_element()
                             })
+                            .child(row_icon(&entry, look, theme))
                             .child(
-                                div()
-                                    .size(px(16.))
-                                    .flex_none()
-                                    .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
-                            )
-                            .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
-                                Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
-                                None => match ranges {
-                                    Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
-                                        .whitespace_nowrap()
-                                        .child(highlight_text(name.text.clone(), &ranges, theme, selected && active))
-                                        .into_any_element(),
-                                    _ => div().whitespace_nowrap().child(name.text.clone()).into_any_element(),
-                                },
-                            }),
+                                div().relative().left(px(look.dx)).child(
+                                    match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                                        Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
+                                        None => match ranges {
+                                            Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
+                                                .whitespace_nowrap()
+                                                .child(highlight_text(
+                                                    name.text.clone(),
+                                                    &ranges,
+                                                    theme,
+                                                    selected && active,
+                                                ))
+                                                .into_any_element(),
+                                            _ => div().whitespace_nowrap().child(name.text.clone()).into_any_element(),
+                                        },
+                                    },
+                                ),
+                            ),
                     );
                 row.children(cells.into_iter().enumerate().filter(|(i, _)| widths[i + 1] > 0.0).map(
                     |(i, (text, align))| {
@@ -1641,6 +1664,8 @@ impl Pane {
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
         let font_size = px(ui.settings.font_size);
+        let mode = ui.feedback.mode;
+        let now = Instant::now();
         // Spec: only the focused column shows its selection in the accent color.
         let active = k == self.focused && (self.focus.is_focused(window) || self.filtering.is_some());
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
@@ -1669,6 +1694,9 @@ impl Pane {
                 let drag_label: SharedString =
                     if drag_count > 1 { format!("{drag_count} items").into() } else { entry.name.clone().into() };
                 let handoff = DragHandoff::new();
+                let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
+                let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
+                let tint = row_tint(look, theme);
                 div()
                     .id(ix)
                     .role(Role::ListBoxOption)
@@ -1681,10 +1709,14 @@ impl Pane {
                     .w_full()
                     .px(px(CELL_PADDING))
                     .rounded_md()
+                    .relative()
                     .flex()
                     .items_center()
                     .gap_2()
+                    .when(shift != 0.0, |row| row.top(px(shift)))
+                    .when(look.opacity < 1.0, |row| row.opacity(look.opacity))
                     .when(selected, |row| row.bg(selection_bg))
+                    .when_some(tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
                     .debug_selector(|| format!("column-{k}-row-{}", entry.name))
                     .on_drag(DraggedSelection { entries: drag_entries }, {
                         let handoff = handoff.clone();
@@ -1756,29 +1788,28 @@ impl Pane {
                             this.open_selected(cx);
                         }
                     }))
+                    .child(row_icon(&entry, look, theme))
                     .child(
-                        div()
-                            .size(px(16.))
-                            .flex_none()
-                            .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
+                        div().relative().left(px(look.dx)).flex_1().child(
+                            match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                                Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
+                                None => match ranges {
+                                    Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .child(highlight_text(name.text.clone(), &ranges, theme, selected && active))
+                                        .into_any_element(),
+                                    _ => div()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .child(name.text.clone())
+                                        .into_any_element(),
+                                },
+                            },
+                        ),
                     )
-                    .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
-                        Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
-                        None => match ranges {
-                            Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
-                                .flex_1()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .child(highlight_text(name.text.clone(), &ranges, theme, selected && active))
-                                .into_any_element(),
-                            _ => div()
-                                .flex_1()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .child(name.text.clone())
-                                .into_any_element(),
-                        },
-                    })
                     .child(div().w(px(10.)).flex_none().text_color(subtle).child(if navigable { "›" } else { "" }))
             })
             .collect()
@@ -1786,6 +1817,11 @@ impl Pane {
 
     fn render_columns(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
+        let (mode, font_size) = {
+            let ui = cx.global::<Ui>();
+            (ui.feedback.mode, px(ui.settings.font_size))
+        };
+        let now = Instant::now();
         let border = color(theme.role("border"));
         let focused = self.focused;
         let mut strip = div().id("columns").size_full().flex().overflow_x_scroll().track_scroll(&self.strip_scroll);
@@ -1814,16 +1850,44 @@ impl Pane {
             let has_field = field.is_some();
             let body = match no_matches {
                 Some(block) => block,
-                None => uniform_list(
-                    ("column-list", k),
-                    shown,
-                    cx.processor(move |this, range, window, cx| this.render_column_rows(k, range, window, cx)),
-                )
-                .track_scroll(&scroll)
-                .flex_1()
-                .min_h_0()
-                .px_1()
-                .into_any_element(),
+                None => {
+                    let ghosts = {
+                        let f = folder.read(cx);
+                        Ghosts {
+                            folder: f,
+                            mode,
+                            now,
+                            scroll: &scroll,
+                            theme: &theme,
+                            font_size,
+                            side_inset: 4.0,
+                            top_inset: 0.0,
+                        }
+                        .render()
+                    };
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .child(
+                            uniform_list(
+                                ("column-list", k),
+                                shown,
+                                cx.processor(move |this, range, window, cx| {
+                                    this.render_column_rows(k, range, window, cx)
+                                }),
+                            )
+                            .track_scroll(&scroll)
+                            .flex_1()
+                            .min_h_0()
+                            .px_1(),
+                        )
+                        .children(ghosts)
+                        .into_any_element()
+                }
             };
             strip =
                 strip.child(
@@ -1922,6 +1986,95 @@ fn chevron_glyph(expanded: bool, chevron: gpui::Rgba) -> impl IntoElement {
     .h(px(14.))
 }
 
+/// The file icon with the trash glyph drawn over it while a row is swallowed.
+fn row_icon(entry: &Entry, look: Look, theme: &Theme) -> Div {
+    div()
+        .relative()
+        .size(px(16.))
+        .flex_none()
+        .child(
+            div().opacity(1.0 - look.trash).children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
+        )
+        .when(look.trash > 0.0, |slot| {
+            slot.child(
+                div().absolute().inset_0().flex().items_center().justify_center().opacity(look.trash).child(glyph(
+                    Glyph::Trash,
+                    look.trash_size,
+                    "fg-muted",
+                    theme,
+                )),
+            )
+        })
+}
+
+/// The fill an effect puts over a row: accent for a receive, error for a refuse.
+fn row_tint(look: Look, theme: &Theme) -> Option<gpui::Rgba> {
+    if look.tint <= 0.0 {
+        return None;
+    }
+    Some(match look.tint_kind {
+        Tint::Accent => color_alpha(theme.role("accent"), (look.tint * 0x50 as f32) as u8),
+        Tint::Error => {
+            let mut color = error_soft(theme);
+            color.a *= look.tint * 2.0;
+            color
+        }
+    })
+}
+
+/// A row drawn over the list while its swallow finishes after the listing dropped it.
+fn ghost_row(entry: &Entry, look: Look, theme: &Theme, font_size: Pixels) -> Div {
+    div()
+        .h(px(ROW_HEIGHT))
+        .w_full()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px(px(CELL_PADDING))
+        .opacity(look.opacity)
+        .child(row_icon(entry, look, theme))
+        .child(div().relative().left(px(look.dx)).text_size(font_size).whitespace_nowrap().child(entry.name.clone()))
+}
+
+/// Ghost rows for effects whose entry left the listing before the swallow ended.
+struct Ghosts<'a> {
+    folder: &'a Folder,
+    mode: Effective,
+    now: Instant,
+    scroll: &'a UniformListScrollHandle,
+    theme: &'a Theme,
+    font_size: Pixels,
+    side_inset: f32,
+    top_inset: f32,
+}
+
+impl Ghosts<'_> {
+    fn render(&self) -> Vec<AnyElement> {
+        if self.mode != Effective::Full {
+            return Vec::new();
+        }
+        let offset = f32::from(self.scroll.0.borrow().base_handle.offset().y);
+        self.folder
+            .effects()
+            .iter()
+            .filter(|effect| effect.fx.leaving() && effect.removed && effect.entering(self.now))
+            .map(|effect| {
+                let look = effect.look(self.mode, self.now);
+                let top = effect.row_index as f32 * ROW_HEIGHT + offset + self.top_inset;
+                div()
+                    .absolute()
+                    .left(px(self.side_inset))
+                    .right(px(self.side_inset))
+                    .top(px(top))
+                    .h(px(ROW_HEIGHT))
+                    .overflow_hidden()
+                    .child(ghost_row(&effect.entry, look, self.theme, self.font_size))
+                    .into_any_element()
+            })
+            .collect()
+    }
+}
+
 /// Column view: the shared width, widened for long names up to a cap. Estimated from
 /// name lengths (about 7 pt per character) so it costs nothing per frame.
 fn column_width(entries: &[Entry]) -> f32 {
@@ -1972,6 +2125,11 @@ impl Render for Pane {
             (title, focused.entries().len(), focused.row_count(), focused.filter().is_some())
         };
         let filtering = self.filtering.is_some();
+        let (mode, font_size, theme) = {
+            let ui = cx.global::<Ui>();
+            (ui.feedback.mode, px(ui.settings.font_size), ui.theme.clone())
+        };
+        let now = Instant::now();
         // The field is inside the list now: while it has focus, the list's actions must be
         // off the focus path so AppKit's menu equivalents let those keys through.
         let filter_focused = self
@@ -2008,11 +2166,36 @@ impl Render for Pane {
                         let bounds = self.list_bounds.clone();
                         let body = match no_matches {
                             Some(block) => block,
-                            None => uniform_list("entries", rows, cx.processor(Self::render_table_rows))
-                                .track_scroll(&scroll)
-                                .pt(px(LIST_TOP_INSET))
-                                .flex_1()
-                                .into_any_element(),
+                            None => {
+                                let ghosts = {
+                                    let folder = self.folders[0].read(cx);
+                                    Ghosts {
+                                        folder,
+                                        mode,
+                                        now,
+                                        scroll: &scroll,
+                                        theme: &theme,
+                                        font_size,
+                                        side_inset: 8.0,
+                                        top_inset: LIST_TOP_INSET,
+                                    }
+                                    .render()
+                                };
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_hidden()
+                                    .child(
+                                        uniform_list("entries", rows, cx.processor(Self::render_table_rows))
+                                            .track_scroll(&scroll)
+                                            .pt(px(LIST_TOP_INSET))
+                                            .flex_1(),
+                                    )
+                                    .children(ghosts)
+                                    .into_any_element()
+                            }
                         };
                         div()
                             .flex_1()

@@ -767,7 +767,12 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     fn running(label: &str, progress: Progress) -> Running {
-        Running { label: label.to_owned(), progress, cancel: Arc::new(AtomicBool::new(false)) }
+        Running {
+            label: label.to_owned(),
+            progress,
+            cancel: Arc::new(AtomicBool::new(false)),
+            started: std::time::Instant::now(),
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crow_core::motion::Fx;
 use crow_core::{HintsMode, SidebarEdit, Tabs, TipId, ViewMode, ZeroMatchStreak};
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
@@ -1140,8 +1141,25 @@ impl CrowWindow {
 
     fn start(&mut self, plan: Plan, resolutions: HashMap<PathBuf, Resolution>, cx: &mut Context<Self>) {
         let rename_result = matches!(plan.request, Request::NewFolder { .. } | Request::NewFile { .. });
+        let trash_paths = match &plan.request {
+            Request::Trash { paths } => Some(paths.clone()),
+            _ => None,
+        };
         let pane = self.pane().downgrade();
+        // The effect starts with the operation, not the key press: a conflict or a
+        // delete sheet may have come first, and a second operation is refused.
+        if cx.global::<Operations>().running.is_none()
+            && let Some(paths) = &trash_paths
+        {
+            pane.update(cx, |pane, cx| pane.start_effect(paths.clone(), Fx::Trash, cx)).ok();
+        }
         operations::execute(plan, resolutions, cx, move |outcome, cx| {
+            if outcome.error.is_some()
+                && let Some(paths) = &trash_paths
+            {
+                // Whatever is still there refuses.
+                pane.update(cx, |pane, cx| pane.start_effect(paths.clone(), Fx::Refuse, cx)).ok();
+            }
             let results = outcome.record.results();
             pane.update(cx, |pane, cx| pane.show_results(results, rename_result, cx)).ok();
         });
@@ -3989,6 +4007,7 @@ mod tests {
                     ..Default::default()
                 },
                 cancel: handle,
+                started: std::time::Instant::now(),
             });
             cx.refresh_windows();
         });
@@ -4119,6 +4138,7 @@ mod tests {
                 label: "Copy 12 items to a folder with a rather long name indeed".into(),
                 progress: crow_fs::ops::Progress { done_bytes: 1, total_bytes: 4, ..Default::default() },
                 cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                started: std::time::Instant::now(),
             });
         });
         let dir = config_dir(&cx);
@@ -4303,6 +4323,7 @@ mod tests {
                 label: "Copy 1 item to x".into(),
                 progress: crow_fs::ops::Progress { total_items: 1, total_bytes: 1, ..Default::default() },
                 cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                started: std::time::Instant::now(),
             });
         });
         let dir = config_dir(&cx);
@@ -7371,6 +7392,87 @@ mod tests {
         cx.simulate_keystrokes("cmd-z");
         settle(&view, &mut cx);
         assert!(root.join("notes.txt").exists(), "list ⌘Z undoes the trash");
+    }
+
+    /// Set `motion` in the test's settings.toml and reload, as a user would.
+    fn set_motion(cx: &mut VisualTestContext, mode: &str) {
+        cx.update(|_, cx| {
+            let dir = cx.global::<crate::ui::Ui>().config_dir.clone();
+            std::fs::write(dir.join("settings.toml"), format!("motion = \"{mode}\"\n")).expect("write settings");
+            crate::ui::reload_config(cx);
+        });
+    }
+
+    fn trash_in_mode(mode: &str, cx: &mut TestAppContext) {
+        let root = fixture(&format!("trash-{mode}"));
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, mode);
+        cx.simulate_keystrokes("down down"); // notes.txt
+        assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+        cx.simulate_keystrokes("cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists(), "{mode}: trashed");
+        assert!(!names(&view, &cx).contains(&"notes.txt".to_owned()), "{mode}: gone from the list");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "{mode}: the cursor lands where it does today");
+        assert!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.error(cx).is_none()), "{mode}: no error");
+    }
+
+    #[gpui::test]
+    fn trash_in_off_motion_leaves_the_listing(cx: &mut TestAppContext) {
+        trash_in_mode("off", cx);
+    }
+
+    #[gpui::test]
+    fn trash_in_low_motion_leaves_the_listing(cx: &mut TestAppContext) {
+        trash_in_mode("low", cx);
+    }
+
+    #[gpui::test]
+    fn trash_in_full_motion_leaves_the_listing(cx: &mut TestAppContext) {
+        trash_in_mode("full", cx);
+    }
+
+    #[gpui::test]
+    fn trash_in_full_motion_in_columns_leaves_the_listing(cx: &mut TestAppContext) {
+        let root = fixture("trash-full-columns");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("down down cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists(), "trashed from the column");
+        assert!(!names(&view, &cx).contains(&"notes.txt".to_owned()), "gone from the column");
+        assert!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.error(cx).is_none()), "no error");
+    }
+
+    #[gpui::test]
+    fn trash_three_items_in_full_motion(cx: &mut TestAppContext) {
+        let root = fixture("trash-three");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("cmd-a cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(names(&view, &cx).is_empty(), "all three rows left the list");
+        assert!(!root.join("alpha").exists() && !root.join("beta").exists() && !root.join("notes.txt").exists());
+    }
+
+    #[gpui::test]
+    fn trash_five_hundred_items_in_full_motion(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!("crow-app-trash-500-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create fixture");
+        for i in 0..500 {
+            std::fs::write(root.join(format!("file-{i:03}.txt")), "x").expect("create fixture");
+        }
+        let root = root.canonicalize().expect("canonical fixture path");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("cmd-a cmd-backspace");
+        settle(&view, &mut cx);
+        assert!(names(&view, &cx).is_empty(), "all 500 rows left the list");
+        assert!(!root.join("file-000.txt").exists() && !root.join("file-499.txt").exists());
+        assert!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.error(cx).is_none()), "no error");
     }
 
     #[gpui::test]

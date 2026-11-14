@@ -11,6 +11,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
+use crow_core::motion::{self, Effective, Fx, Look};
 use crow_core::{Selection, TypeSelect};
 use crow_fs::{Entry, FolderChange, FolderWatcher, Sort};
 use futures::StreamExt;
@@ -56,6 +57,88 @@ enum FlatRow {
     Child(Entry, usize),
 }
 
+/// A feedback effect playing on one row (trash, move out, receive, arrive, refuse).
+/// The folder keeps it until the effect's phases end, so the row can render its look
+/// and the rows below can close the gap after the listing drops it.
+pub struct RowEffect {
+    pub path: PathBuf,
+    pub fx: Fx,
+    /// The mode's phases for this effect, computed once at start.
+    phases: Vec<Duration>,
+    /// The row's index when the effect started, for the ghost and the FLIP shift.
+    pub row_index: usize,
+    pub started: Instant,
+    /// The row's entry, for a ghost after the listing drops it.
+    pub entry: Entry,
+    /// The listing dropped this row while the effect was running.
+    pub removed: bool,
+    /// When the listing dropped it, so the close starts then, not before.
+    removed_at: Option<Instant>,
+}
+
+impl RowEffect {
+    fn new(path: PathBuf, fx: Fx, mode: Effective, row_index: usize, entry: Entry) -> Self {
+        RowEffect {
+            path,
+            fx,
+            phases: motion::phases(mode, fx),
+            row_index,
+            started: Instant::now(),
+            entry,
+            removed: false,
+            removed_at: None,
+        }
+    }
+
+    /// How the row looks at `now`: each phase in turn, then the last one at its end.
+    pub fn look(&self, mode: Effective, now: Instant) -> Look {
+        if self.phases.is_empty() {
+            return Look::default();
+        }
+        let mut remaining = now.saturating_duration_since(self.started);
+        for (phase, duration) in self.phases.iter().enumerate() {
+            if remaining < *duration || phase == self.phases.len() - 1 {
+                let t =
+                    if duration.is_zero() { 1.0 } else { (remaining.as_secs_f32() / duration.as_secs_f32()).min(1.0) };
+                return motion::look(mode, self.fx, phase, t);
+            }
+            remaining -= *duration;
+        }
+        motion::look(mode, self.fx, self.phases.len() - 1, 1.0)
+    }
+
+    /// Still in the first phase: the row is drawn where it is, not closing yet.
+    pub fn entering(&self, now: Instant) -> bool {
+        self.phases.first().is_some_and(|first| now.saturating_duration_since(self.started) < *first)
+    }
+
+    /// The first phase's length (the swallow or fade out).
+    fn first_phase(&self) -> Duration {
+        self.phases.first().copied().unwrap_or_default()
+    }
+
+    /// The second phase's length (the close), or zero when there is none.
+    fn close_phase(&self) -> Duration {
+        self.phases.get(1).copied().unwrap_or_default()
+    }
+
+    /// When the close starts: after the swallow, or when the listing dropped the
+    /// row if that came later (the ghost covers an early removal).
+    fn close_start(&self) -> Instant {
+        let after_swallow = self.started + self.first_phase();
+        match self.removed_at {
+            Some(removed) if removed > after_swallow => removed,
+            _ => after_swallow,
+        }
+    }
+}
+
+/// At most this many visible rows animate per operation; the rest just go.
+const MAX_EFFECTS: usize = 20;
+/// A removed row's close may start after the effect's own phases (the watcher can
+/// lag); keep the effect this much longer so the FLIP is never cut short.
+const WATCH_GRACE: Duration = Duration::from_millis(250);
+
 /// A folder opened inline (list view): its listing and the events that change it.
 struct ChildFolder {
     folder: Entity<Folder>,
@@ -100,6 +183,10 @@ pub struct Folder {
     rows: Arc<Vec<FlatRow>>,
     /// Bumped whenever the selection or the visible rows change.
     selection_generation: u64,
+    /// Feedback effects on visible rows (trash, refuse), cleared when their phases end.
+    effects: Vec<RowEffect>,
+    /// Bumped per effect batch, so an older timer cannot clear a newer effect.
+    effect_generation: u64,
     /// The selected rows for dragging, rebuilt only after one of those changes.
     selection_entries: SelectionCache,
     /// The selected files' bytes and folders among them, cached the same way.
@@ -157,6 +244,8 @@ impl Folder {
             expanded: HashSet::new(),
             rows: Arc::new(Vec::new()),
             selection_generation: 0,
+            effects: Vec::new(),
+            effect_generation: 0,
             selection_entries: RefCell::new(None),
             selection_bytes: RefCell::new(None),
             scroll: UniformListScrollHandle::new(),
@@ -384,6 +473,98 @@ impl Folder {
         self.reload(cx);
     }
 
+    // ----- feedback effects -----
+
+    /// Start `fx` on the visible rows among `paths` (at most 20), for `mode`'s
+    /// duration. `off` starts nothing: the state changes in one frame.
+    pub fn start_effect(&mut self, paths: &[PathBuf], fx: Fx, mode: Effective, cx: &mut Context<Self>) {
+        let phases = motion::phases(mode, fx);
+        let total: Duration = phases.iter().sum();
+        if total.is_zero() {
+            return;
+        }
+        let wanted: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        let mut started = 0;
+        for ix in 0..self.row_count() {
+            if started >= MAX_EFFECTS {
+                break;
+            }
+            let Some(entry) = self.row(ix).map(|(entry, _)| entry.clone()) else { continue };
+            if !wanted.contains(entry.path.as_path()) {
+                continue;
+            }
+            self.effects.retain(|effect| effect.path != entry.path);
+            self.effects.push(RowEffect::new(entry.path.clone(), fx, mode, ix, entry));
+            started += 1;
+        }
+        if started == 0 {
+            return;
+        }
+        self.effect_generation += 1;
+        let generation = self.effect_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(total + WATCH_GRACE).await;
+            this.update(cx, |this, cx| {
+                if this.effect_generation == generation {
+                    this.effects.clear();
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// How the row at `path` looks right now, if an effect is playing on it.
+    pub fn effect_look(&self, path: &Path, mode: Effective, now: Instant) -> Option<Look> {
+        self.effects.iter().find(|effect| effect.path == path).map(|effect| effect.look(mode, now))
+    }
+
+    pub fn effects(&self) -> &[RowEffect] {
+        &self.effects
+    }
+
+    /// How far up the rows below a removed row have slid (Full motion's FLIP close).
+    /// `ix` is the row's index in the listing as it is now; the shift starts at one
+    /// row and eases to zero, so the row begins where it was before the removal.
+    pub fn row_shift(&self, ix: usize, mode: Effective, now: Instant, row_height: f32) -> f32 {
+        if mode != Effective::Full {
+            return 0.0;
+        }
+        let mut removed: Vec<&RowEffect> =
+            self.effects.iter().filter(|effect| effect.removed && effect.fx.leaving()).collect();
+        if removed.is_empty() {
+            return 0.0;
+        }
+        removed.sort_by_key(|effect| effect.row_index);
+        // The row's index before the removals: each removed row at or above it adds one.
+        let mut original = ix;
+        for effect in &removed {
+            if effect.row_index <= original {
+                original += 1;
+            }
+        }
+        let mut shift = 0.0;
+        for effect in removed {
+            if effect.row_index >= original {
+                continue;
+            }
+            let close_start = effect.close_start();
+            if now < close_start {
+                continue;
+            }
+            let close = effect.close_phase();
+            let t = if close.is_zero() {
+                1.0
+            } else {
+                (now.saturating_duration_since(close_start).as_secs_f32() / close.as_secs_f32()).min(1.0)
+            };
+            shift += row_height * (1.0 - motion::ease_out(t));
+        }
+        shift
+    }
+
     /// List the folder again now rather than waiting for the watcher.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.load(cx);
@@ -479,6 +660,24 @@ impl Folder {
     /// Swap in a new listing, keeping the selection on the same items.
     fn replace_entries(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
         self.entries = Arc::new(entries);
+        if !self.effects.is_empty() {
+            let present: HashSet<PathBuf> = self.entries.iter().map(|entry| entry.path.clone()).collect();
+            let mut restored = Vec::new();
+            for effect in &mut self.effects {
+                if present.contains(&effect.path) {
+                    // Undo put the row back: stop its leaving effect rather than hide it.
+                    if effect.removed {
+                        restored.push(effect.path.clone());
+                    }
+                } else {
+                    if !effect.removed {
+                        effect.removed = true;
+                        effect.removed_at = Some(Instant::now());
+                    }
+                }
+            }
+            self.effects.retain(|effect| !restored.contains(&effect.path));
+        }
         self.sync_children(cx);
         self.rebuild_rows(cx);
         if let Some(target) = self.select_after_load.clone()

@@ -47,6 +47,8 @@ pub struct Running {
     pub label: String,
     pub progress: Progress,
     pub cancel: Arc<AtomicBool>,
+    /// When the operation started, so a short copy stays silent.
+    pub started: Instant,
 }
 
 /// The plan's label in the progressive form the bar shows: "Copy 3 items" → "Copying 3 items".
@@ -148,10 +150,16 @@ pub fn execute(
     }
     let ops = cx.global_mut::<Operations>();
     let cancel = Arc::new(AtomicBool::new(false));
-    ops.running = Some(Running { label: plan.label.clone(), progress: Progress::default(), cancel: cancel.clone() });
+    ops.running = Some(Running {
+        label: plan.label.clone(),
+        progress: Progress::default(),
+        cancel: cancel.clone(),
+        started: Instant::now(),
+    });
     ops.message_generation += 1;
     ops.message = None;
     let trash = ops.trash.clone();
+    let event = crate::feedback::event_for(&plan.request);
     let (tx, mut rx) = unbounded::<Progress>();
     let task = cx.background_spawn(async move {
         let mut last_sent = Instant::now() - Duration::from_secs(1);
@@ -176,7 +184,7 @@ pub fn execute(
         }
         let outcome = task.await;
         cx.update(|cx| {
-            finish(&outcome, cx);
+            finish(&outcome, event, cx);
             on_done(&outcome, cx);
             cx.refresh_windows();
         });
@@ -184,8 +192,12 @@ pub fn execute(
     .detach();
 }
 
-fn finish(outcome: &Outcome, cx: &mut App) {
+fn finish(outcome: &Outcome, event: Option<crow_core::motion::Event>, cx: &mut App) {
     let label = outcome.record.label.clone();
+    let shown = {
+        let ops = cx.global::<Operations>();
+        ops.running.as_ref().is_some_and(|running| running.started.elapsed() >= Duration::from_secs(1))
+    };
     {
         let ops = cx.global_mut::<Operations>();
         ops.running = None;
@@ -205,9 +217,22 @@ fn finish(outcome: &Outcome, cx: &mut App) {
         }
     }
     match (&outcome.error, outcome.cancelled) {
-        (Some(e), _) => message(e.to_string(), true, cx),
+        (Some(e), _) => {
+            crate::feedback::play(crow_core::motion::Event::Refuse, cx);
+            message(e.to_string(), true, cx);
+        }
         (None, true) => message(format!("{label}: cancelled"), false, cx),
-        (None, false) => clear_message(cx),
+        (None, false) => {
+            // A copy that never showed its progress bar stays silent, and so does a
+            // plan that did nothing.
+            if let Some(event) = event
+                && !outcome.record.steps.is_empty()
+                && (event != crow_core::motion::Event::CopyDone || shown)
+            {
+                crate::feedback::play(event, cx);
+            }
+            clear_message(cx);
+        }
     }
     // Copying or trashing changes free space; the sidebar shouldn't wait for the minute poll.
     crate::ui::refresh_volumes(cx);
@@ -234,6 +259,7 @@ pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf
                     let restored = reversed.results();
                     ops.redo_stack.push(reversed);
                     message(label, false, cx);
+                    crate::feedback::play(crow_core::motion::Event::Undo, cx);
                     crate::ui::refresh_volumes(cx);
                     on_done(restored, cx);
                 }
@@ -267,6 +293,7 @@ pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static
                     });
                     ops.undo_stack.push(ops.log.len() - 1);
                     message(format!("Redo {label}"), false, cx);
+                    crate::feedback::play(crow_core::motion::Event::Undo, cx);
                     crate::ui::refresh_volumes(cx);
                     on_done(results, cx);
                 }
