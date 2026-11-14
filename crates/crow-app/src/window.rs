@@ -1881,15 +1881,19 @@ impl CrowWindow {
         {
             return;
         }
-        let (here, subfolders) = {
+        let (cwd, here, subfolders) = {
             let pane = self.pane().read(cx);
-            (crate::style::display_name(&pane.current_dir(cx)), pane.subfolders(cx))
+            let cwd = pane.current_dir(cx);
+            (cwd.clone(), crate::style::display_name(&cwd), pane.subfolders(cx))
         };
         let (home, favorites, recents) = {
             let ui = cx.global::<Ui>();
             let favorites: Vec<PathBuf> =
                 ui.favorites().into_iter().flat_map(|(_, group)| group).map(|f| f.path).collect();
-            (ui.home.clone(), favorites, ui.palette_recents.clone())
+            // The folder you are in is the most recent visit but never a place to go,
+            // so the first row is the one before it.
+            let recents: Vec<PathBuf> = ui.palette_recents.iter().filter(|path| **path != cwd).cloned().collect();
+            (ui.home.clone(), favorites, recents)
         };
         let folders = {
             let ui = cx.global::<Ui>();
@@ -2248,7 +2252,9 @@ impl CrowWindow {
             context.push_str(" vim");
         }
         let muted = color(theme.role("fg-muted"));
-        let border = color(theme.role("surface-raised"));
+        // `border`, not `surface-raised`: some themes (Solarized Light) make
+        // surface-raised the same colour as the sheet's surface.
+        let border = color(theme.role("border"));
         let pair = |cap: Option<Keycap>, label: &'static str| {
             div()
                 .flex()
@@ -2258,7 +2264,10 @@ impl CrowWindow {
                 .child(div().text_size(px(12.)).text_color(muted).child(label))
                 .into_any_element()
         };
-        let confirm = Keycap::for_action(&crate::text_input::Confirm, KeyScope::Palette, KeycapWeight::Outline, cx);
+        let outline = |action: &dyn gpui::Action| {
+            Keycap::for_action(action, KeyScope::Palette, KeycapWeight::Outline, cx).map(|cap| cap.border("border"))
+        };
+        let confirm = outline(&crate::text_input::Confirm);
         let footer: gpui::AnyElement = if commands {
             div()
                 .h(px(PALETTE_FOOTER))
@@ -2269,10 +2278,7 @@ impl CrowWindow {
                 .border_t_1()
                 .border_color(border)
                 .child(pair(confirm, "run"))
-                .child(pair(
-                    Keycap::for_action(&crate::text_input::Backspace, KeyScope::Palette, KeycapWeight::Outline, cx),
-                    "folders",
-                ))
+                .child(pair(outline(&crate::text_input::Backspace), "folders"))
                 .into_any_element()
         } else {
             div()
@@ -2284,16 +2290,10 @@ impl CrowWindow {
                 .border_t_1()
                 .border_color(border)
                 .child(pair(confirm, "go"))
-                .child(pair(
-                    Keycap::for_action(&PaletteOpenInTab, KeyScope::Palette, KeycapWeight::Outline, cx),
-                    "new tab",
-                ))
-                .child(pair(
-                    Keycap::for_action(&crate::text_input::Complete, KeyScope::Palette, KeycapWeight::Outline, cx),
-                    "complete",
-                ))
+                .child(pair(outline(&PaletteOpenInTab), "new tab"))
+                .child(pair(outline(&crate::text_input::Complete), "complete"))
                 .child(div().flex_1())
-                .child(pair(Some(Keycap::text(">", KeycapWeight::Outline)), "commands"))
+                .child(pair(Some(Keycap::text(">", KeycapWeight::Outline).border("border")), "commands"))
                 .into_any_element()
         };
         let token = div()
@@ -2574,7 +2574,9 @@ impl CrowWindow {
         }
         let fg = color(theme.role("fg"));
         let muted = color(theme.role("fg-muted"));
-        let border = color(theme.role("surface-raised"));
+        // `border`, not `surface-raised`: some themes (Solarized Light) make
+        // surface-raised the same colour as the sheet's surface.
+        let border = color(theme.role("border"));
         let hover = color(theme.role("surface-raised"));
         let chip = toggle.map(|on| {
             div()
@@ -4936,7 +4938,7 @@ mod tests {
         });
         assert_eq!(mode, PaletteMode::Commands, "the palette starts in command mode");
         assert_eq!(text, "", "the > lives in the token, not the field");
-        assert!(rows.iter().any(|row| row == "Quit Crow"), "command rows: {rows:?}");
+        assert!(rows.iter().any(|row| row == "New Window"), "command rows: {rows:?}");
     }
 
     #[gpui::test]
@@ -5085,6 +5087,11 @@ mod tests {
         let root = fixture("palette-vim");
         let (view, mut cx) = open(cx, &root);
         use_vim(&view, &mut cx);
+        // Visit alpha so Recent has a row above the "In" header.
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.join("alpha"), cx));
+        settle(&view, &mut cx);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.clone(), cx));
+        settle(&view, &mut cx);
         cx.simulate_keystrokes("cmd-k");
         settle(&view, &mut cx);
         let cursor = |cx: &VisualTestContext| view.read_with(cx, |w, _| w.palette.as_ref().map(|p| p.cursor));
@@ -5137,6 +5144,9 @@ mod tests {
             pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(twin, cx));
             settle(&view, &mut cx);
         }
+        // Back to root: the folder you are in is left out of the palette.
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.clone(), cx));
+        settle(&view, &mut cx);
 
         cx.simulate_keystrokes("cmd-k");
         cx.simulate_input("twin");
@@ -5144,6 +5154,31 @@ mod tests {
         let rows = view.read_with(&cx, |w, _| w.palette_rows());
         assert_eq!(rows.len(), 2, "two folders named twin: {rows:?}");
         assert!(rows[0].ends_with("/a/twin") && rows[1].ends_with("/b/twin"), "the paths tell them apart: {rows:?}");
+    }
+
+    #[gpui::test]
+    fn palette_leaves_out_the_current_folder(cx: &mut TestAppContext) {
+        let root = fixture("palette-here");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-up");
+        settle(&view, &mut cx);
+        assert!(
+            cx.read(|cx| cx.global::<Ui>().palette_recents.contains(&root)),
+            "the folder we are in is a recent visit"
+        );
+
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        assert_eq!(rows.first().map(String::as_str), Some("# Recent"), "{rows:?}");
+        assert!(rows[1].ends_with("/alpha"), "the first row is the folder before this one: {rows:?}");
+        let label = crow_core::abbreviate_home(&root, &cx.read(|cx| cx.global::<Ui>().home.clone()));
+        assert!(!rows.contains(&label), "the current folder is not a row: {rows:?}");
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"), "Cmd-K then Return goes somewhere");
     }
 
     #[gpui::test]
@@ -5184,8 +5219,8 @@ mod tests {
         cx.simulate_keystrokes("cmd-k");
         settle(&view, &mut cx);
 
-        // Recent holds root and alpha, so item 2 is the first favorite.
-        cx.simulate_keystrokes("down");
+        // Recent holds alpha (root is where we are, so it is left out): item 1 is
+        // the first favorite.
         cx.simulate_keystrokes("down");
         let cursor = view.read_with(&cx, |w, _| {
             let palette = w.palette.as_ref()?;

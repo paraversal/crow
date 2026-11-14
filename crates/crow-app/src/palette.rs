@@ -774,7 +774,8 @@ fn folder_item(folder: &FolderCandidate, matched: Vec<Range<usize>>) -> Item {
 }
 
 /// Command rows for `query`. An empty query lists every command in registry
-/// order; with `show_recent`, up to five remembered commands come first under a
+/// order except Quit (so `>` then Return never quits; typing finds it); with
+/// `show_recent`, up to five remembered commands come first under a
 /// "Recently used" header and are not repeated below. A typed query is a flat
 /// list, best score first.
 pub fn command_listing(query: &str, recent_ids: &[CommandId], show_recent: bool) -> Listing {
@@ -789,6 +790,7 @@ pub fn command_listing(query: &str, recent_ids: &[CommandId], show_recent: bool)
 
     let query = query.trim();
     if query.is_empty() {
+        let listed: Vec<&Command> = listed.iter().copied().filter(|command| command.id != CommandId::Quit).collect();
         let mut recent: Vec<&Command> = Vec::new();
         if show_recent {
             for id in recent_ids {
@@ -1085,6 +1087,23 @@ mod tests {
         assert_eq!(count_text(0), "No places");
         assert_eq!(count_text(1), "1 place");
         assert_eq!(count_text(5), "5 places");
+    }
+
+    #[test]
+    fn an_empty_command_query_leaves_out_quit() {
+        assert!(!command_ids("").contains(&CommandId::Quit), "> then Return must not quit");
+        let recent = command_listing("", &[CommandId::Quit, CommandId::NewTab], true);
+        let ids: Vec<CommandId> = recent
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Command { command, .. } => Some(command.id),
+                Item::Folder { .. } => None,
+            })
+            .collect();
+        assert_eq!(ids.first(), Some(&CommandId::NewTab), "not even under Recently used");
+        assert!(!ids.contains(&CommandId::Quit));
+        assert!(command_ids("quit").contains(&CommandId::Quit), "typing still finds it");
     }
 
     #[test]
