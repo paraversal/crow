@@ -11,6 +11,7 @@ Status: Phase 1 (the "daily driver" MVP), milestone M6.
 ./scripts/fetch-gpui.sh          # once: Zed's GPUI at a pinned commit, into vendor/, with patches/gpui-*.patch applied
 cargo run --release -p crow-app  # opens your home folder
 ./scripts/bundle.sh --open       # builds and opens target/bundle/Crow.app
+./scripts/bundle.sh --install    # ...and copies it to /Applications (CROW_INSTALL_DIR to change)
 ```
 
 Running as `Crow.app` makes macOS privacy prompts name Crow instead of your terminal.

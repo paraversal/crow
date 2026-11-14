@@ -2,12 +2,26 @@
 # Build target/bundle/Crow.app. Running Crow as an app (not from a terminal) makes
 # macOS privacy prompts (Desktop, Downloads, Full Disk Access) name Crow itself.
 #
-#   scripts/bundle.sh          build and sign ad hoc
-#   scripts/bundle.sh --open   ...then launch it
+#   scripts/bundle.sh             build and sign ad hoc
+#   scripts/bundle.sh --open      ...then launch it
+#   scripts/bundle.sh --install   ...then copy it to /Applications (replacing an older Crow)
+#
+# The options combine: `--install --open` launches the installed copy.
+# Set CROW_INSTALL_DIR to install somewhere else (e.g. ~/Applications).
 #
 # Set CROW_SIGN_IDENTITY to a Developer ID to sign for distribution instead.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+open_after=false
+install=false
+for arg in "$@"; do
+  case "$arg" in
+    --open) open_after=true ;;
+    --install) install=true ;;
+    *) echo "unknown option: $arg (use --open, --install)" >&2; exit 2 ;;
+  esac
+done
 
 [ -d vendor/zed/.git ] || ./scripts/fetch-gpui.sh
 cargo build --release -p crow-app
@@ -45,5 +59,17 @@ PLIST
 
 codesign --force --sign "${CROW_SIGN_IDENTITY:--}" --timestamp=none "$app"
 echo "built $app ($version)"
-[ "${1:-}" = "--open" ] && open "$app"
+
+if $install; then
+  dest_dir="${CROW_INSTALL_DIR:-/Applications}"
+  mkdir -p "$dest_dir"
+  # A running Crow keeps the old binary until it quits; quit it so the next launch is new.
+  osascript -e 'if application id "io.github.paraversal.crow" is running then tell application id "io.github.paraversal.crow" to quit' >/dev/null 2>&1 || true
+  rm -rf "$dest_dir/Crow.app"
+  ditto "$app" "$dest_dir/Crow.app"
+  app="$dest_dir/Crow.app"
+  echo "installed $app"
+fi
+
+if $open_after; then open "$app"; fi
 exit 0
