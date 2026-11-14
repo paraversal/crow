@@ -11,7 +11,7 @@ Branch: `ui-u11-finish` · PR: none (do not merge; user: "DONT merge back to mai
 | I5 Preview fills the rest + folder summary (Q2) | done | `flex_1` + `min_w(300)`; folder summary with the child column's count; 2 tests. |
 | I6 Accessibility sweep | done (hand check open) | `debug_a11y_tree_json` is None in tests (verified with a spike, reverted) → hand sweep is the fallback; filter count throttled to one announcement per burst; 2 tests. |
 | I7 Docs pass | done | README: status line, Toolbar / Menus / Hints and tips / Palette / Search sections, Keys deduped, config row and state files; testing.md: automated paragraph, region guide, U11 rows, one VoiceOver row. |
-| I8 Bench vs `main` | done | Head p99 8.66–9.54 ms vs `main` 9.64–9.77; warm 8 ms. Numbers in testing.md. |
+| I8 Bench vs `main` | done | Head p99 8.66–9.86 ms vs `main` 9.64–9.77; warm 8–10 ms. Numbers in testing.md. |
 | I9 Follow-ups recorded | done | List below; "Later" note added to the index. |
 | I10 PR | drafted | Body below; 18 shots committed as `img/built-*.png`; the critic opens the PR. |
 
