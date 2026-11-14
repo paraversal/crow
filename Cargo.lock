@@ -1123,6 +1123,7 @@ dependencies = [
  "ignore",
  "nucleo-matcher",
  "regex-syntax",
+ "unicode-segmentation",
 ]
 
 [[package]]

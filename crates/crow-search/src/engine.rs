@@ -14,6 +14,7 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch};
 use ignore::{WalkBuilder, WalkParallel, WalkState};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::rules::RuleSet;
 
@@ -89,20 +90,49 @@ impl FuzzyMatcher {
     }
 
     /// The score and the matched characters as byte ranges in `haystack`.
-    /// Nucleo reports codepoint indices; adjacent matches merge into one range.
+    /// Nucleo indexes its own `Utf32Str`: bytes for ASCII (and for non-ASCII
+    /// strings whose every grapheme starts with an ASCII char), else one index
+    /// per grapheme. Adjacent matches merge into one range.
     pub fn indices(&mut self, haystack: &str) -> Option<(u32, Vec<Range<usize>>)> {
         let needle = Utf32Str::new(&self.needle, &mut self.needle_buf);
         let haystack_utf32 = Utf32Str::new(haystack, &mut self.haystack_buf);
         let mut indices = Vec::new();
         let score = self.matcher.fuzzy_indices(haystack_utf32, needle, &mut indices)?;
-        let offsets: Vec<usize> = haystack.char_indices().map(|(offset, _)| offset).collect();
+        indices.sort_unstable();
+        indices.dedup();
         let mut ranges: Vec<Range<usize>> = Vec::new();
-        for index in indices {
-            let Some(&start) = offsets.get(index as usize) else { continue };
-            let end = offsets.get(index as usize + 1).copied().unwrap_or(haystack.len());
+        let mut push = |span: Range<usize>| {
+            if span.is_empty() {
+                return;
+            }
             match ranges.last_mut() {
-                Some(last) if last.end == start => last.end = end,
-                _ => ranges.push(start..end),
+                Some(last) if last.end >= span.start => last.end = last.end.max(span.end),
+                _ => ranges.push(span),
+            }
+        };
+        if haystack.is_ascii() {
+            for index in indices {
+                let start = index as usize;
+                push(start..start + 1);
+            }
+        } else {
+            let graphemes: Vec<(usize, &str)> = haystack.grapheme_indices(true).collect();
+            let ascii_starts = graphemes.iter().all(|(_, grapheme)| grapheme.chars().next().is_some_and(|c| c.is_ascii()));
+            if ascii_starts {
+                // Nucleo matched raw bytes; an index is the start of a grapheme,
+                // widened to the whole grapheme (a hit on `e` covers `e\u{301}`).
+                for index in indices {
+                    let start = index as usize;
+                    if let Some((byte, grapheme)) = graphemes.iter().find(|entry| entry.0 == start) {
+                        push(*byte..*byte + grapheme.len());
+                    }
+                }
+            } else {
+                for index in indices {
+                    if let Some(&(byte, grapheme)) = graphemes.get(index as usize) {
+                        push(byte..byte + grapheme.len());
+                    }
+                }
             }
         }
         Some((u32::from(score), ranges))
@@ -516,6 +546,24 @@ mod tests {
             let name = "r\u{e9}sum\u{e9}.txt";
             name.is_char_boundary(range.start) && name.is_char_boundary(range.end)
         }));
+    }
+
+    #[test]
+    fn name_ranges_follow_nucleo_indexing() {
+        fn matched(haystack: &str, needle: &str) -> Vec<String> {
+            let mut matcher = FuzzyMatcher::new(needle);
+            let (_, ranges) = matcher.indices(haystack).expect("a match");
+            assert!(
+                ranges.iter().all(|range| haystack.is_char_boundary(range.start) && haystack.is_char_boundary(range.end)),
+                "{haystack:?} gave ranges {ranges:?}"
+            );
+            ranges.iter().map(|range| haystack[range.clone()].to_owned()).collect()
+        }
+        assert_eq!(matched("Re\u{301}sume\u{301} final.txt", "final"), ["final"]);
+        assert_eq!(matched("re\u{301}sume\u{301}.txt", "sum"), ["sum"]);
+        assert_eq!(matched("e\u{301}x", "e"), ["e\u{301}"]);
+        assert_eq!(matched("日本 notes.txt", "notes"), ["notes"]);
+        assert_eq!(matched("r\u{e9}sum\u{e9}.txt", "sum"), ["sum"]);
     }
 
     #[test]
