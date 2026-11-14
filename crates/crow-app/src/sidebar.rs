@@ -892,6 +892,7 @@ impl Render for Sidebar {
                     div()
                         .id(SharedString::from(format!("eject-{i}")))
                         .ml(px(8.))
+                        .flex_shrink_0()
                         .role(Role::Button)
                         .aria_label(format!("Eject {}", v.name))
                         .px_1()
