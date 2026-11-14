@@ -1,5 +1,5 @@
 # housekeeping progress
-Branch: `housekeeping` · Last updated: 2026-11-14 · State: PR open · PR: (pending)
+Branch: `housekeeping` · Last updated: 2026-11-14 · State: PR open · PR: https://github.com/paraversal/file-crow/pull/24
 
 ## Status
 | Item | State | Notes |
