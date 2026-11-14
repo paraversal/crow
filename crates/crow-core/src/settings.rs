@@ -28,7 +28,7 @@ hints = "auto"
 
 # Motion: "auto" (default) follows macOS Reduce Motion (full when it is off, low
 # when it is on); "off" changes state in one frame; "low" fades opacity and color
-# only; "full" also moves and resizes (trash swallows the row, a move flies).
+# only; "full" also moves and resizes (trash swallows the row, the gap closes).
 motion = "auto"
 
 # Feedback sounds: "crow" (default) plays Finder's trash sounds plus soft ticks
