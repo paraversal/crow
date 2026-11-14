@@ -126,7 +126,7 @@ pub fn set_quick_look_key_handler(handler: impl Fn(QuickLookKey) + 'static) {
 /// from a GPUI event handler runs that loop while GPUI still holds its `App`
 /// borrow, so GPUI's own main-queue timers fire into a borrowed `App` and panic.
 /// A main-queue operation starts after the handler (and the borrow) has returned.
-fn on_main_queue(f: impl Fn() + 'static) {
+pub(crate) fn on_main_queue(f: impl Fn() + 'static) {
     let block = RcBlock::new(f);
     // SAFETY: NSObject operations on the main queue run on the main thread.
     unsafe { NSOperationQueue::mainQueue().addOperationWithBlock(&block) };

@@ -170,7 +170,15 @@ File operations use Finder's keys: Return renames, Cmd-Shift-N new folder, Cmd-O
 Cmd-D duplicate, Cmd-Delete moves to the Trash, Cmd-Option-Delete deletes permanently (after asking),
 Cmd-C / Cmd-X / Cmd-V copy, cut and paste (also to and from Finder), Cmd-Option-V moves,
 Cmd-Z / Cmd-Shift-Z undo and redo, Esc cancels a running operation, Cmd-Option-L shows activity.
-Nothing is ever overwritten: name clashes ask first, and Replace moves the old item to the Trash.
+Cmd-Option-C copies the selected items' paths (one per line; the folder's own path with nothing
+selected). Nothing is ever overwritten: name clashes ask first, and Replace moves the old item to the Trash.
+
+Clicking empty space in the list deselects (focus stays on the list); in column view it also closes
+the columns to the right of the one clicked. Right-click or Ctrl-click opens a native menu with the
+same names and keys as the menu bar: on items, Open, Quick Look, Rename, Duplicate, Copy, Cut,
+Paste, Copy Path, Show in Finder, Add to Sidebar and Move to Trash (an unselected row is selected
+first, a row in the selection keeps it); on empty space, New Folder, New File, Paste and Show in
+Finder (opens the folder itself in Finder).
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).
 

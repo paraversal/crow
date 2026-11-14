@@ -12,11 +12,12 @@ use crow_search::FuzzyMatcher;
 use gpui::{Action, SharedString};
 
 use crate::actions::{
-    AddToSidebar, CloseTab, CopyFiles, CutFiles, DeletePermanently, Duplicate, Eject, GoBack, GoForward, GoToFolder,
-    MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection,
-    PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView, SearchEverything,
-    SearchReveal, SelectAll, ShowCommandPalette, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity,
-    ToggleHiddenFiles, TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
+    AddToSidebar, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, Eject, GoBack, GoForward,
+    GoToFolder, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent,
+    OpenSelection, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView,
+    SearchEverything, SearchReveal, SelectAll, ShowCommandPalette, ShowInFinder, ShowSearch, ShowThemePicker,
+    StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles, TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns,
+    ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -92,6 +93,8 @@ pub enum CommandId {
     Cut,
     Paste,
     PasteMove,
+    CopyPath,
+    ShowInFinder,
     SelectAll,
     StartFilter,
     Undo,
@@ -158,6 +161,8 @@ impl CommandId {
             CommandId::Cut => "cut",
             CommandId::Paste => "paste",
             CommandId::PasteMove => "paste-move",
+            CommandId::CopyPath => "copy-path",
+            CommandId::ShowInFinder => "show-in-finder",
             CommandId::SelectAll => "select-all",
             CommandId::StartFilter => "start-filter",
             CommandId::Undo => "undo",
@@ -344,6 +349,14 @@ pub const COMMANDS: &[Command] = &[
         palette: true,
     },
     Command {
+        id: CommandId::CopyPath,
+        label: "Copy Path",
+        action: &CopyPath,
+        scope: KeyScope::List,
+        menu: Some(MenuSlot { menu: MenuName::Edit, section: 1, title: "Copy Path" }),
+        palette: true,
+    },
+    Command {
         id: CommandId::SelectAll,
         label: "Select All",
         action: &SelectAll,
@@ -365,6 +378,16 @@ pub const COMMANDS: &[Command] = &[
         action: &ShowSearch,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::Edit, section: 2, title: "Find…" }),
+        palette: true,
+    },
+    // After Find…: both score the same for "find", and ties keep this order. Its menu
+    // place is set by the slot (File, after Eject), not by this position.
+    Command {
+        id: CommandId::ShowInFinder,
+        label: "Show in Finder",
+        action: &ShowInFinder,
+        scope: KeyScope::List,
+        menu: Some(MenuSlot { menu: MenuName::File, section: 2, title: "Show in Finder" }),
         palette: true,
     },
     Command {

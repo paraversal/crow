@@ -1097,14 +1097,7 @@ impl CrowWindow {
             }
             PaneEvent::LongFolderScrolled => self.offer_tip(TipId::Filter, window, cx),
             PaneEvent::Paste { into, move_items } => {
-                // Our clipboard if the pasteboard still holds what we put there; otherwise
-                // whatever another app (Finder) copied.
-                let ops = cx.global::<Operations>();
-                let ours = ops.clipboard.as_ref().filter(|c| c.change_count == crow_macos::pasteboard_change_count());
-                let (paths, cut) = match ours {
-                    Some(c) => (c.paths.clone(), c.cut),
-                    None => (crow_macos::read_file_urls(), false),
-                };
+                let (paths, cut) = operations::pasteboard_paths(cx);
                 if paths.is_empty() {
                     return;
                 }
@@ -7677,6 +7670,20 @@ mod tests {
     }
 
     #[gpui::test]
+    fn palette_copy_path_copies_the_selection(cx: &mut TestAppContext) {
+        let root = fixture("palette-copy-path");
+        let (_view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("cmd-k");
+        cx.run_until_parked();
+        cx.simulate_input(">copy path");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+        assert_eq!(text, Some(root.join("beta").display().to_string()), "the palette ran Copy Path");
+    }
+
+    #[gpui::test]
     fn plain_keys_stay_in_every_text_field(cx: &mut TestAppContext) {
         use crate::actions::{CopyFiles, CutFiles, MoveToTrash, PasteFiles, QuickLook, Rename, SelectAll, StartFilter};
 
@@ -9104,5 +9111,328 @@ mod tests {
         assert_eq!(tip.right(), viewport.width - px(12.), "12 px from the right edge");
         assert_eq!(tip.bottom(), viewport.height - px(crate::bottom_bar::HEIGHT + 8.), "8 px above the bottom bar");
         assert!(tip.size.width >= px(280.) && tip.size.width <= px(440.), "{:?}", tip.size);
+    }
+
+    // ----- click on empty space -----
+
+    fn list_focused(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> bool {
+        let focus = pane(view, cx).read_with(cx, |p, _| p.focus_handle().clone());
+        cx.update(|window, _| focus.is_focused(window))
+    }
+
+    /// A point in the list body below the last row.
+    fn below_rows(cx: &mut VisualTestContext, last_row: &'static str) -> gpui::Point<gpui::Pixels> {
+        let row = cx.debug_bounds(last_row).unwrap_or_else(|| panic!("{last_row} is on screen"));
+        point(row.center().x, row.bottom() + px(40.))
+    }
+
+    #[gpui::test]
+    fn click_below_rows_clears_the_selection(cx: &mut TestAppContext) {
+        let root = fixture("empty-click-list");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down shift-down");
+        assert_eq!(selected_names(&view, &cx), ["beta", "notes.txt"]);
+
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        assert!(selected_names(&view, &cx).is_empty(), "a click on empty space deselects");
+        assert_eq!(selected(&view, &cx), None, "…and leaves no cursor");
+        assert!(list_focused(&view, &mut cx), "focus stays on the list");
+
+        cx.simulate_keystrokes("down");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "↓ starts again from the first row");
+    }
+
+    #[gpui::test]
+    fn click_in_the_row_gutter_clears_the_selection(cx: &mut TestAppContext) {
+        let root = fixture("empty-click-gutter");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down");
+        let row = cx.debug_bounds("row-beta").expect("beta row");
+        cx.simulate_click(point(row.left() - px(4.), row.center().y), gpui::Modifiers::default());
+        assert!(selected_names(&view, &cx).is_empty(), "the gutter beside a row is empty space");
+    }
+
+    #[gpui::test]
+    fn click_on_a_row_still_selects_it(cx: &mut TestAppContext) {
+        let root = fixture("empty-click-row");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down");
+        click_selector(&mut cx, "row-notes.txt");
+        assert_eq!(selected_names(&view, &cx), ["notes.txt"]);
+        // The row's press must not leave the next empty-space click ignored.
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        assert!(selected_names(&view, &cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn cmd_or_shift_click_on_empty_space_keeps_the_selection(cx: &mut TestAppContext) {
+        let root = fixture("empty-click-modifiers");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down shift-down");
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::command());
+        assert_eq!(selected_names(&view, &cx), ["beta", "notes.txt"], "Cmd-click on empty space");
+        cx.simulate_click(empty, gpui::Modifiers::shift());
+        assert_eq!(selected_names(&view, &cx), ["beta", "notes.txt"], "Shift-click on empty space");
+    }
+
+    #[gpui::test]
+    fn click_on_empty_space_in_a_column_closes_the_columns_right_of_it(cx: &mut TestAppContext) {
+        let root = fixture("empty-click-columns");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        // alpha is selected in column 0 and its contents are column 1, with focus there and
+        // its first item (the folder inner) selected, so inner's contents are column 2.
+        let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.folder_count());
+        let focused = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.focused_index());
+        assert_eq!((count(&cx), focused(&cx)), (3, 1));
+
+        let empty = below_rows(&mut cx, "column-1-row-inner");
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!((count(&cx), focused(&cx)), (2, 1), "inner's column closes; alpha's stays focused");
+        assert!(selected_names(&view, &cx).is_empty());
+
+        let empty = below_rows(&mut cx, "column-0-row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(focused(&cx), 0, "the clicked column takes focus");
+        assert_eq!(count(&cx), 1, "the columns to its right close");
+        assert!(selected_names(&view, &cx).is_empty(), "nothing is selected in it");
+        assert!(list_focused(&view, &mut cx));
+        cx.simulate_keystrokes("down");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    }
+
+    #[gpui::test]
+    fn click_on_empty_space_commits_a_rename(cx: &mut TestAppContext) {
+        let root = fixture("rename-empty-click");
+        let (view, mut cx) = open(cx, &root);
+        click_selector(&mut cx, "row-notes.txt");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("renamed");
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "the rename closed");
+        assert!(root.join("renamed.txt").exists(), "and was applied");
+        assert!(!root.join("notes.txt").exists());
+    }
+
+    #[gpui::test]
+    fn click_inside_the_rename_field_keeps_it_open(cx: &mut TestAppContext) {
+        let root = fixture("rename-field-click");
+        let (view, mut cx) = open(cx, &root);
+        click_selector(&mut cx, "row-notes.txt");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("renamed");
+        // Render the field as focused so Escape reaches it.
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let field = cx.debug_bounds("row-name-notes.txt").expect("the rename field").center();
+        cx.simulate_click(field, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "clicking the field keeps the rename");
+        assert!(root.join("notes.txt").exists(), "and does not apply it");
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()));
+    }
+
+    // ----- context menu -----
+
+    use crate::palette::CommandId;
+
+    fn right_click(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+        cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::default());
+        cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::default());
+    }
+
+    fn row_center(cx: &mut VisualTestContext, selector: &'static str) -> gpui::Point<gpui::Pixels> {
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is on screen")).center()
+    }
+
+    fn open_menu(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Option<crate::context_menu::MenuKind> {
+        pane(view, cx).read_with(cx, |p, _| p.context_menu())
+    }
+
+    /// Pick the menu line running `id`, as a click on it would.
+    fn choose(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, id: CommandId) {
+        let kind = open_menu(view, cx).expect("a menu is open");
+        let ix = crate::context_menu::slots(kind).iter().position(|slot| *slot == Some(id)).expect("in the menu");
+        let pane = pane(view, cx);
+        pane.update_in(cx, |p, window, cx| p.choose_context_item(Some(ix), window, cx));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn right_click_on_an_unselected_row_selects_it_first(cx: &mut TestAppContext) {
+        use crate::context_menu::MenuKind;
+        let root = fixture("context-row");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down shift-down");
+        let alpha = row_center(&mut cx, "row-alpha");
+        right_click(&mut cx, alpha);
+        assert_eq!(selected_names(&view, &cx), ["alpha"], "Finder selects the row it opens the menu for");
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Items));
+        assert!(list_focused(&view, &mut cx));
+    }
+
+    #[gpui::test]
+    fn right_click_inside_the_selection_keeps_it(cx: &mut TestAppContext) {
+        use crate::context_menu::MenuKind;
+        let root = fixture("context-selection");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down shift-down");
+        let beta = row_center(&mut cx, "row-beta");
+        right_click(&mut cx, beta);
+        assert_eq!(selected_names(&view, &cx), ["beta", "notes.txt"]);
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Items));
+
+        choose(&view, &mut cx, CommandId::MoveToTrash);
+        settle(&view, &mut cx);
+        assert!(!root.join("beta").exists() && !root.join("notes.txt").exists(), "both went to the Trash");
+        assert!(root.join("alpha").exists());
+        assert_eq!(open_menu(&view, &cx), None, "the menu is closed");
+    }
+
+    #[gpui::test]
+    fn ctrl_click_opens_the_menu_like_a_right_click(cx: &mut TestAppContext) {
+        use crate::context_menu::MenuKind;
+        let root = fixture("context-ctrl");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down");
+        let notes = row_center(&mut cx, "row-notes.txt");
+        cx.simulate_click(notes, gpui::Modifiers::control());
+        assert_eq!(selected_names(&view, &cx), ["notes.txt"]);
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Items));
+
+        // Dismissing the menu runs nothing.
+        let pane = pane(&view, &cx);
+        pane.update_in(&mut cx, |p, window, cx| p.choose_context_item(None, window, cx));
+        cx.run_until_parked();
+        assert_eq!(open_menu(&view, &cx), None);
+        assert_eq!(selected_names(&view, &cx), ["notes.txt"]);
+
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::control());
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Folder), "Ctrl-click on empty space");
+        assert!(selected_names(&view, &cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn right_click_on_empty_space_offers_new_folder(cx: &mut TestAppContext) {
+        use crate::context_menu::MenuKind;
+        let root = fixture("context-empty");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down");
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        right_click(&mut cx, empty);
+        assert!(selected_names(&view, &cx).is_empty(), "empty space deselects, as in Finder");
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Folder));
+
+        choose(&view, &mut cx, CommandId::NewFolder);
+        settle(&view, &mut cx);
+        cx.run_until_parked();
+        let renaming = pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx));
+        assert_eq!(renaming.as_deref(), Some("untitled folder"), "created, and its rename started as with ⇧⌘N");
+        assert!(root.join("untitled folder").is_dir());
+    }
+
+    #[gpui::test]
+    fn right_click_in_a_column_works_on_that_column(cx: &mut TestAppContext) {
+        use crate::context_menu::MenuKind;
+        let root = fixture("context-columns");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.folder_count());
+        let focused = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.focused_index());
+
+        let notes = row_center(&mut cx, "column-0-row-notes.txt");
+        right_click(&mut cx, notes);
+        settle(&view, &mut cx);
+        assert_eq!((focused(&cx), count(&cx)), (0, 1), "the first column takes focus; a file opens no column");
+        assert_eq!(selected_names(&view, &cx), ["notes.txt"]);
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Items));
+
+        choose(&view, &mut cx, CommandId::Duplicate);
+        settle(&view, &mut cx);
+        assert!(root.join("notes copy.txt").exists(), "Duplicate ran on the column's selection");
+
+        let empty = below_rows(&mut cx, "column-0-row-notes.txt");
+        right_click(&mut cx, empty);
+        assert_eq!(open_menu(&view, &cx), Some(MenuKind::Folder));
+        assert!(selected_names(&view, &cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn copy_path_puts_the_selected_paths_on_the_clipboard(cx: &mut TestAppContext) {
+        let root = fixture("copy-path");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down shift-down cmd-alt-c");
+        let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+        let expected = format!("{}\n{}", root.join("beta").display(), root.join("notes.txt").display());
+        assert_eq!(text.as_deref(), Some(expected.as_str()), "⌥⌘C copies one path per line");
+        let message = cx.read(|cx| cx.global::<Operations>().message.clone());
+        assert_eq!(message.map(|(text, _)| text.to_string()).as_deref(), Some("Copied 2 paths"));
+
+        // With nothing selected it copies the folder's own path, as Finder does.
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        cx.simulate_keystrokes("cmd-alt-c");
+        let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+        assert_eq!(text, Some(root.display().to_string()));
+
+        // And from the menu.
+        let alpha = row_center(&mut cx, "row-alpha");
+        right_click(&mut cx, alpha);
+        choose(&view, &mut cx, CommandId::CopyPath);
+        let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+        assert_eq!(text, Some(root.join("alpha").display().to_string()));
+    }
+
+    #[gpui::test]
+    fn context_menu_lines_use_the_menu_bar_names_and_keys(cx: &mut TestAppContext) {
+        use crate::context_menu::{MenuKind, MenuState, entries};
+        use crow_macos::{ContextMenuEntry, MenuShortcut};
+        let root = fixture("context-lines");
+        let (view, mut cx) = open(cx, &root);
+        let line = |cx: &mut VisualTestContext, title: &str| {
+            let state = MenuState { selected: 1, selected_folders: 0, can_paste: false };
+            cx.update(|_, cx| entries(MenuKind::Items, state, crate::keys::KeyScope::List, cx))
+                .into_iter()
+                .find(|entry| matches!(entry, ContextMenuEntry::Item { title: t, .. } if t == title))
+                .unwrap_or_else(|| panic!("{title} is in the menu"))
+        };
+        let shortcut =
+            |key: &str, cmd: bool, alt: bool| Some(MenuShortcut { key: key.into(), cmd, alt, ..Default::default() });
+        assert_eq!(
+            line(&mut cx, "Move to Trash"),
+            ContextMenuEntry::Item {
+                title: "Move to Trash".into(),
+                shortcut: shortcut("backspace", true, false),
+                enabled: true
+            }
+        );
+        assert_eq!(
+            line(&mut cx, "Paste"),
+            ContextMenuEntry::Item { title: "Paste".into(), shortcut: shortcut("v", true, false), enabled: false },
+            "nothing to paste"
+        );
+        assert_eq!(
+            line(&mut cx, "Copy Path"),
+            ContextMenuEntry::Item { title: "Copy Path".into(), shortcut: shortcut("c", true, true), enabled: true }
+        );
+        // The Vim layer's `y y` can't be shown in a native menu; ⌘C still is.
+        use_vim(&view, &mut cx);
+        assert_eq!(
+            line(&mut cx, "Copy"),
+            ContextMenuEntry::Item { title: "Copy".into(), shortcut: shortcut("c", true, false), enabled: true }
+        );
     }
 }

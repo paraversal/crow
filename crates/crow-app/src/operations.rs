@@ -81,6 +81,20 @@ pub struct Clipboard {
     pub change_count: Option<isize>,
 }
 
+/// What a paste would bring in, and whether it moves them: our clipboard if the
+/// pasteboard still holds what we put there; otherwise whatever another app (Finder) copied.
+pub fn pasteboard_paths(cx: &App) -> (Vec<PathBuf>, bool) {
+    let ours = cx
+        .global::<Operations>()
+        .clipboard
+        .as_ref()
+        .filter(|c| c.change_count == crow_macos::pasteboard_change_count());
+    match ours {
+        Some(c) => (c.paths.clone(), c.cut),
+        None => (crow_macos::read_file_urls(), false),
+    }
+}
+
 pub struct Operations {
     trash: Arc<dyn Trash>,
     undo_stack: Vec<usize>,

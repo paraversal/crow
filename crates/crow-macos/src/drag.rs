@@ -76,7 +76,7 @@ thread_local! {
 const ICON: f64 = 22.0;
 const GAP: f64 = 8.0;
 
-fn ns_view(window: &impl HasWindowHandle) -> Option<Retained<NSView>> {
+pub(crate) fn ns_view(window: &impl HasWindowHandle) -> Option<Retained<NSView>> {
     let handle = window.window_handle().ok()?;
     let RawWindowHandle::AppKit(appkit) = handle.as_raw() else { return None };
     // SAFETY: the window owns this live NSView; retaining it only extends its lifetime.
