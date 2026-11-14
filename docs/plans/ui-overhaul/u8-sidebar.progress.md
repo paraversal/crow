@@ -28,6 +28,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: In cri
 - Q11 (answered 2026-11-13, in the plan): I8 scope → yes.
 - Q12 (asked 2026-11-14): history while arrowing → answer: replace (one Back step for the walk; first move pushes the folder you were in).
 - Q13 (asked 2026-11-14): → in the sidebar → answer: bind `right` to OpenSelection.
+- Q14 (critique, asked 2026-11-14): arrowing through Recent re-ranks it under the cursor; how should a walk count toward Recent? → answer: only the folder you leave on (Tab, Return, →, click on a row) gets a visit; arrow moves record none.
 
 ## Decisions
 - Q7 = no: I7 is not built.
@@ -46,6 +47,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: In cri
 - [ ] Sidebar fills: open a favorite: only it is filled. Tab into the sidebar and arrow: an accent ring moves, no second fill; Tab out: the ring goes. Drag a file over the current row: the drop highlight shows. Check in a light and a dark theme.
 - [ ] Disk row: Locations shows "<n> GB free" right-aligned and a grey bar; fill a disk image past 90 %: the bar turns to the warning color. VoiceOver still reads free and total.
 - [ ] Mark letters: with `keymap = "vim"`, favorites with a `key` show the letter on the right; `m x` on another folder moves it; Finder layer shows none.
+- [ ] Recent walk (critique Q14): ⌥↓ to Recent and arrow through it: the rows keep their order while you move; Tab out: the folder you stayed on counts as a visit (it may move up in Recent); folders you only passed don't.
 - [ ] ⌥↑/⌥↓: Tab into the sidebar, press them: the cursor jumps to the first row of the previous/next group (Favorites groups, Recent, Locations).
 
 ## Found along the way
@@ -79,7 +81,7 @@ Critic session: 2026-11-14 · Base: main @ a3da329 · Head reviewed: 234c82f
 | # | Finding | Where | Area | Kind | Outcome |
 | --- | --- | --- | --- | --- | --- |
 | C1 | Q10 ("current folder" aria description) is recorded under Decisions as done, but no row ever set it. | `sidebar.rs` row element | plan | fix | fixed (b123be3) |
-| C2 | Walking Recent with the arrows reorders Recent under the cursor: every `Show` goes through `PaneEvent::Entered` → `ui::record_visit`, which re-ranks Recent. Throwaway test (alpha 2 visits, beta 3; Tab on beta, Down to alpha): alpha jumps to the top, the ring stays on index 1 (now beta) while the center shows alpha; the next Down lands on a row already passed. Also every folder walked past gets a frecency visit. Not visible in my real-app run because zoxide scores dominated. | `window.rs` `on_pane_event` Entered, `sidebar.rs` `move_down` | UX / code | ask | Q14 |
+| C2 | Walking Recent with the arrows reorders Recent under the cursor: every `Show` goes through `PaneEvent::Entered` → `ui::record_visit`, which re-ranks Recent. Throwaway test (alpha 2 visits, beta 3; Tab on beta, Down to alpha): alpha jumps to the top, the ring stays on index 1 (now beta) while the center shows alpha; the next Down lands on a row already passed. Also every folder walked past gets a frecency visit. Not visible in my real-app run because zoxide scores dominated. | `window.rs` `on_pane_event` Entered, `sidebar.rs` `move_down` | UX / code | ask | Q14 → count only where the walk ends; fixed (898e035) |
 | C3 | The twins hand check said "a narrow window truncates the hint", but the sidebar is a fixed 210 px; only a long name truncates it. | `docs/testing.md`, Hand checks | record | fix | fixed (critique docs commit) |
 | C4 | `sidebar_walk` is a bool reset only by `navigate`/back/forward; history visits from `apply_mode` (pane.rs:630) and the root-column ← (:938) don't reset it, so a later walk could replace that step. Tried two key sequences; neither reproduced it (columns don't move history the way I expected). Anchoring the walk on the folder it last showed (`Option<PathBuf>`) would make it independent of who else navigates. | `pane.rs:247`, `:436-443` | code | note | left: no repro |
 | C5 | `refresh_volumes` returns early without the `Watchers` global, a test-only guard in production code. Production installs watchers (ui.rs:222) before the first refresh (:231), so nothing breaks; recorded as a Decision by the agent. | `ui.rs:502-507` | code sense | note | left |
@@ -89,7 +91,7 @@ Critic session: 2026-11-14 · Base: main @ a3da329 · Head reviewed: 234c82f
 
 Checks re-run: fmt ✓ · clippy ✓ · tests ✓ (385) · bench not needed: the pane's rows are unchanged (agent's single run recorded above)
 Looked at in the app: branch build with a throwaway `CROW_CONFIG_DIR`/`CROW_STATE_DIR`, FireBox (dark), Vim layer on: twins "git Coding / Work / Projects · alias", Recent "projects ~ · alias", marks f/w on the right, red color dot, "Macintosh HD 1.6 TB free" with a neutral bar; Tab + Down shows the folder with fill and ring on the same row, list keeps no focus; ⌥↓ into Recent and arrows walk it. Not looked at: a light theme, VoiceOver, a nearly full disk, `main` side by side (the sidebar changes are all intended and listed in the plan).
-Verdict: pending Q14.
+Verdict: better. The sidebar now has one fill, readable twins, marks and a calm disk row, and arrowing shows folders as Finder does; the one real regression found (walking Recent re-ranked it under the cursor) is fixed. A mouse click from the sidebar into the list after a walk records no visit (only Tab/Return/→/row click do); noted, not fixed.
 
 ## Next
 Ready for critique. The critic should hand-check the ring/shadow and light/dark contrast, plus the I8 feel in list and column view; the plan's `Finish` push/PR step is left to the critic (execute-plan skill).
