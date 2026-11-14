@@ -767,6 +767,7 @@ impl Render for Sidebar {
                 .aria_position_in_set(i + 1)
                 .aria_size_of_set(selectable_count)
                 .aria_selected(cursor)
+                .when(look.current, |row| row.aria_description("current folder"))
                 .when(cursor, |row| row.aria_active_descendant())
                 .px_2()
                 .py(px(3.))
