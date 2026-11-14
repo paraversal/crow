@@ -41,6 +41,10 @@ Branch: ui-u7-palette · PR: https://github.com/paraversal/file-crow/pull/16 · 
 - [ ] `>` becomes the Commands token; Backspace removes it; menu column, on/off chip, keycaps follow the Vim layer.
 - [ ] Run two commands, quit, relaunch: `>` shows them under Recently used; `palette_recent_commands = false` hides it live and stops recording.
 - [ ] FireBox and Solarized Light: token, highlights, chip, keycaps; narrow window keeps 16 px margins.
+- [ ] Palette first row: in a folder you visit often, ⌘K ↵ goes to the folder you were in before (the current folder is not listed).
+- [ ] Palette `>` ↵ does not quit; typing `quit` still lists Quit Crow.
+- [ ] Solarized Light: input and footer dividers, footer keycap outlines and the on/off chip border are visible.
+- [ ] VoiceOver (critic couldn't check): field reads "Go to folder"/"Search commands", rows read "name, path, section, visited …", the count is announced.
 
 Automated layout check (throwaway test, since removed) read the rendered bounds in the test platform:
 sheet 620×526 at (458, 52) — top offset 52, max list 440; header 26 px; folder row 44 px;
@@ -71,11 +75,6 @@ Checks re-run on 89f6da1: fmt ✓ · clippy ✓ · tests ✓ (339: +1 C2, +1 C5,
 Looked at in the app (bundled branch and `main`, temp config/state dirs, scripted keys, window-only captures): folder mode empty and "git" (twins, highlights, ages), command mode empty and "hid" (token, chip, keycaps), ⇥ into path mode ("this folder"), Gruvbox dark hard and Solarized Light, 640 × 560 window, Vim layer keycaps ("cw" for Rename). Not looked at: VoiceOver, trackpad scrolling, IME in the bare field, FireBox.
 Re-looked after the fixes (Solarized Light, Finder layer): rows inset, first row the previous folder, dividers and keycap outlines visible, `>` starts on New Window. U1's sheet border has the same surface-raised problem in Solarized Light (outside U7, noted).
 Verdict: clearly better than `main`: twins are told apart, sources and ages read at a glance, keys teach themselves, and ⇥ makes the palette a real navigator. Both things that needed to change before merge (C5, C6) are fixed.
-
-- [ ] Palette first row: in a folder you visit often, ⌘K ↵ goes to the folder you were in before (the current folder is not listed).
-- [ ] Palette `>` ↵ does not quit; typing `quit` still lists Quit Crow.
-- [ ] Solarized Light: input and footer dividers, footer keycap outlines and the on/off chip border are visible.
-- [ ] VoiceOver (critic couldn't check): field reads "Go to folder"/"Search commands", rows read "name, path, section, visited …", the count is announced.
 
 ## Found along the way
 - Go to Folder's Tab completion still runs `read_dir` on the main thread (`window.rs`, the `go_to_folder` subscription). The palette runs its own completion in `background_spawn`; moving Go to Folder off the main thread is the follow-up the plan names.
