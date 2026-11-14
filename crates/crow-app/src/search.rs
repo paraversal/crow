@@ -556,11 +556,10 @@ impl SearchView {
         }
         if let Some(path) = self.selection.cursor().cloned()
             && let Some(&index) = self.by_path.get(&path)
+            && self.cursor != index
         {
-            if self.cursor != index {
-                self.cursor = index;
-                self.scroll.scroll_to_item(index, ScrollStrategy::Nearest);
-            }
+            self.cursor = index;
+            self.scroll.scroll_to_item(index, ScrollStrategy::Nearest);
         }
     }
 
@@ -1637,10 +1636,8 @@ impl SearchView {
                     .collect();
                 let name = highlight_text(truncated.text.clone(), &name_ranges, theme, on_selection);
                 // Name matches stay one line; the content line is for content-only hits.
-                let content = (!row.name_match)
-                    .then(|| row.content_shown.as_ref())
-                    .flatten()
-                    .map(|(line, text, ranges)| {
+                let content =
+                    (!row.name_match).then_some(row.content_shown.as_ref()).flatten().map(|(line, text, ranges)| {
                         div()
                             .flex()
                             .items_center()
@@ -2147,7 +2144,10 @@ mod tests {
         assert_eq!(footer_summary(state(false, 2, 1, false, None)), "2 results in 1 file");
         assert_eq!(footer_summary(state(false, 0, 0, false, None)), "No results");
         assert_eq!(footer_summary(state(false, 20_000, 10, true, None)), "First 20000 files · refine the search");
-        assert_eq!(footer_summary(state(false, 0, 0, false, Some("Invalid pattern: unclosed group"))), "Invalid pattern: unclosed group");
+        assert_eq!(
+            footer_summary(state(false, 0, 0, false, Some("Invalid pattern: unclosed group"))),
+            "Invalid pattern: unclosed group"
+        );
     }
 
     #[test]

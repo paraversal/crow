@@ -732,12 +732,7 @@ impl CrowWindow {
         let sidebar_focused = focus == BarFocus::Sidebar;
         let count = if let Some(search) = &self.search {
             let search = search.read(cx);
-            search_count(
-                search.result_count(),
-                search.selected_count(),
-                search.is_searching(),
-                !search.has_query(cx),
-            )
+            search_count(search.result_count(), search.selected_count(), search.is_searching(), !search.has_query(cx))
         } else if sidebar_focused {
             self.sidebar
                 .read(cx)
@@ -2258,6 +2253,10 @@ mod tests {
 
     use super::*;
 
+    fn test_ranges(start: usize, end: usize) -> Vec<std::ops::Range<usize>> {
+        std::iter::once(start..end).collect()
+    }
+
     /// `root/{alpha/inner/, beta/, notes.txt}`, canonicalized (macOS temp dirs sit behind /private).
     fn fixture(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("crow-app-{name}-{}", std::process::id()));
@@ -3447,18 +3446,22 @@ mod tests {
         let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
         cx.simulate_input("qqzz");
         wait_for_search(&view, &mut cx);
-        let hit = |path: PathBuf, kind: HitKind, score| Hit { path, is_dir: false, score, kind, modified: None, size: 0 };
+        let hit =
+            |path: PathBuf, kind: HitKind, score| Hit { path, is_dir: false, score, kind, modified: None, size: 0 };
 
         // The walker found a content hit first; the name hit arrives in a later batch.
         let content = hit(
             root.join("notes.txt"),
-            HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: vec![0..4] },
+            HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: test_ranges(0, 4) },
             0,
         );
         search.update(&mut cx, |search, cx| search.add_test_hits(vec![content], cx));
-        assert_eq!(search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path), Some(root.join("notes.txt")));
+        assert_eq!(
+            search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path),
+            Some(root.join("notes.txt"))
+        );
 
-        let name = hit(name_path.clone(), HitKind::Name { ranges: vec![0..4] }, 100);
+        let name = hit(name_path.clone(), HitKind::Name { ranges: test_ranges(0, 4) }, 100);
         search.update(&mut cx, |search, cx| search.add_test_hits(vec![name], cx));
         wait_for_preview(&view, &mut cx, &name_path);
         assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 0);
@@ -3480,11 +3483,12 @@ mod tests {
         let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
         cx.simulate_input("qqzz");
         wait_for_search(&view, &mut cx);
-        let hit = |path: PathBuf, kind: HitKind, score| Hit { path, is_dir: false, score, kind, modified: None, size: 0 };
-        let first = hit(first_path, HitKind::Name { ranges: vec![0..4] }, 100);
+        let hit =
+            |path: PathBuf, kind: HitKind, score| Hit { path, is_dir: false, score, kind, modified: None, size: 0 };
+        let first = hit(first_path, HitKind::Name { ranges: test_ranges(0, 4) }, 100);
         let content = hit(
             root.join("notes.txt"),
-            HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: vec![0..4] },
+            HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: test_ranges(0, 4) },
             0,
         );
         search.update(&mut cx, |search, cx| search.add_test_hits(vec![content, first], cx));
@@ -3493,14 +3497,19 @@ mod tests {
         cx.simulate_keystrokes("tab");
         cx.simulate_keystrokes("down");
         assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 1);
-        assert_eq!(search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path), Some(root.join("notes.txt")));
+        assert_eq!(
+            search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path),
+            Some(root.join("notes.txt"))
+        );
 
-        let better = hit(better_path, HitKind::Name { ranges: vec![0..4] }, 200);
+        let better = hit(better_path, HitKind::Name { ranges: test_ranges(0, 4) }, 200);
         search.update(&mut cx, |search, cx| search.add_test_hits(vec![better], cx));
         assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 2, "the user's row moved down");
-        assert_eq!(search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path), Some(root.join("notes.txt")));
+        assert_eq!(
+            search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path),
+            Some(root.join("notes.txt"))
+        );
     }
-
 
     #[gpui::test]
     fn search_contiguous_name_hits_come_before_contents_and_weak_names(cx: &mut TestAppContext) {
@@ -3516,17 +3525,18 @@ mod tests {
         let strong = outside.join("qqzz-zebra.txt");
         let weak = outside.join("q-a-q-b-z-c-z.txt");
         let content = root.join("notes.txt");
-        let hit = |path: PathBuf, kind: HitKind, score| Hit { path, is_dir: false, score, kind, modified: None, size: 0 };
+        let hit =
+            |path: PathBuf, kind: HitKind, score| Hit { path, is_dir: false, score, kind, modified: None, size: 0 };
         search.update(&mut cx, |search, cx| {
             search.add_test_hits(
                 vec![
                     hit(
                         content.clone(),
-                        HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: vec![0..4] },
+                        HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: test_ranges(0, 4) },
                         0,
                     ),
                     hit(weak.clone(), HitKind::Name { ranges: vec![0..1, 2..3, 4..6, 7..8] }, 80),
-                    hit(strong.clone(), HitKind::Name { ranges: vec![0..4] }, 100),
+                    hit(strong.clone(), HitKind::Name { ranges: test_ranges(0, 4) }, 100),
                 ],
                 cx,
             );

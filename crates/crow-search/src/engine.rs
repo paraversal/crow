@@ -117,7 +117,8 @@ impl FuzzyMatcher {
             }
         } else {
             let graphemes: Vec<(usize, &str)> = haystack.grapheme_indices(true).collect();
-            let ascii_starts = graphemes.iter().all(|(_, grapheme)| grapheme.chars().next().is_some_and(|c| c.is_ascii()));
+            let ascii_starts =
+                graphemes.iter().all(|(_, grapheme)| grapheme.chars().next().is_some_and(|c| c.is_ascii()));
             if ascii_starts {
                 // Nucleo matched raw bytes; an index is the start of a grapheme,
                 // widened to the whole grapheme (a hit on `e` covers `e\u{301}`).
@@ -288,10 +289,7 @@ impl ContentPattern {
             return Err("the pattern is empty".to_owned());
         }
         let pattern = if case_insensitive { regex_syntax::escape(text) } else { text.to_owned() };
-        RegexMatcherBuilder::new()
-            .case_insensitive(case_insensitive)
-            .build(&pattern)
-            .map_err(pattern_error)?;
+        RegexMatcherBuilder::new().case_insensitive(case_insensitive).build(&pattern).map_err(pattern_error)?;
         Ok(ContentPattern { pattern, case_insensitive })
     }
 }
@@ -301,7 +299,7 @@ impl ContentPattern {
 /// `"Invalid pattern: unclosed group"`.
 fn pattern_error(e: impl std::fmt::Display) -> String {
     let text = e.to_string();
-    let line = text.lines().map(str::trim).filter(|line| !line.is_empty()).next_back().unwrap_or("the pattern");
+    let line = text.lines().map(str::trim).rfind(|line| !line.is_empty()).unwrap_or("the pattern");
     let line = line.strip_prefix("error: ").unwrap_or(line);
     format!("Invalid pattern: {line}")
 }
@@ -554,7 +552,9 @@ mod tests {
             let mut matcher = FuzzyMatcher::new(needle);
             let (_, ranges) = matcher.indices(haystack).expect("a match");
             assert!(
-                ranges.iter().all(|range| haystack.is_char_boundary(range.start) && haystack.is_char_boundary(range.end)),
+                ranges
+                    .iter()
+                    .all(|range| haystack.is_char_boundary(range.start) && haystack.is_char_boundary(range.end)),
                 "{haystack:?} gave ranges {ranges:?}"
             );
             ranges.iter().map(|range| haystack[range.clone()].to_owned()).collect()

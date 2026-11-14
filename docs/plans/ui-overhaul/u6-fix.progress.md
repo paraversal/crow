@@ -49,6 +49,7 @@ Branch: `ui-u6-fix` · PR: none yet · Last updated: 2026-11-14
 - 2026-11-14: measured "4. Nov 2024" width for F2: 69.5 px at 12 px. Asked Q1-Q6; all answered (see Questions).
 - 2026-11-14: F1 and F2 implemented; both new window tests plus `search_name_hits_outrank_content_hits` and `format_time_short_buckets` pass.
 - 2026-11-14: F3 and F4 implemented; `skipped_text`, `footer_summary_copy`, `pattern_errors_are_one_line` and `search_invalid_regex_shows_the_error` pass.
+- 2026-11-14: `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo test --workspace` green (197 app, 57 core, 27 search, 4 macos, 13 fs? and 6 theme — see the run). README search paragraph and `docs/testing.md` (automated search sentence, Search, Skipped folders, Search idle, Search errors rows) updated.
 - 2026-11-14: F6 measured and optimised; F7.1–F7.7 and F8.1–F8.4 implemented per the answers. All `search_*` window tests (37), `search::tests` (8) and `bottom_bar::tests` (5) pass.
 - 2026-11-14: F5 implemented (`unicode-segmentation` added to crow-search). Bench `--bench-search target/fixture-search-200k`: first hit 5 ms, total 2491 ms, 200000 hits — no regression vs the 3.7–4.4 s in the U6 progress (names don't match "needle" in that fixture, so only the non-ASCII path is theoretically touched).
 

@@ -109,10 +109,12 @@ reads no file contents) and Cmd-Shift-M cycles the three. Cmd-F again focuses th
 the query; Tab goes field → results → sidebar → field (no results: straight to the sidebar); Done or
 Esc (from anywhere) closes, and with the skipped list open Esc closes that first. The scope bar
 switches the folder, Home or This Mac (Spotlight, names only); its switch skips the folders named in
-`exclude.toml` sets, as Cmd-Shift-A does for every set. Name matches come first with their letters
-highlighted; content hits show the line number and the line under the name, and the footer counts
-results and files and lists what was skipped. With nothing typed, four examples fill the field. The
-right preview follows the selected result in list and column view, at the hit line for content hits.
+`exclude.toml` sets, as Cmd-Shift-A does for every set. Name matches whose name contains the query
+come first with their letters highlighted; scattered fuzzy name hits follow the content hits. A name
+match stays one line, a content-only hit shows its line number and line under the name, and the
+footer counts results and files and lists what was skipped (relative to the folder). With nothing
+typed, four examples fill the field. The right preview follows the selected result in list and
+column view, at the hit line for content hits.
 Results open with Return, reveal with Cmd-R, Quick Look with Space, and take the usual copy, cut and
 trash keys. "Go to ⌘K" in the band opens the command palette.
 
