@@ -5,7 +5,7 @@ Branch: `ui-u7-fix` · PR: none · Last updated: 2026-11-14 · State: in progres
 | Item | State | Notes |
 | --- | --- | --- |
 | X1 Palette: more room under section headers | done | header 34 px, `pt(10)/pb(8)`, label line height 16; test `palette_header_leaves_room_above_the_first_row` (8 px gap). Only the eye check in the bundle is left. |
-| X2 Text fields: blinking caret, more room on the left | todo | left-room part needs the user (Q1) |
+| X2 Text fields: blinking caret, more room on the left | done | 2 px text inset, caret just before the first glyph, x-height-centered text, 500/500 blink; test `caret_blinks_in_text_fields`. Bundle check of the vertical look pending. |
 | X3 Search field: ↓ moves into the results | todo | ↑ part needs the user (Q2) |
 | X4 New File | todo | key and name need the user (Q3, Q4) |
 | X5 Hide the preview | todo | key and state location need the user (Q5, Q6) |
@@ -13,12 +13,13 @@ Branch: `ui-u7-fix` · PR: none · Last updated: 2026-11-14 · State: in progres
 | X7 Deleted file stays in the list | todo | reproduce first |
 
 ## Questions
-- Q1 (X2, to ask): which fields need more room on the left, and how much? Bare fields (palette, filter, search) have no padding; the chrome field (Go to Folder, rename) has 2 px.
-- Q2 (X3, to ask): should ↑ on the first result row return to the search field?
-- Q3 (X4, to ask): key for New File — ⌥⌘N or none?
-- Q4 (X4, to ask): new file name — `untitled` or `untitled.txt`?
-- Q5 (X5, to ask): key for Show/Hide Preview — ⇧⌘P?
-- Q6 (X5, to ask): `show_preview` in settings.toml (recommended) or per window?
+- Q1 (X2, asked 2026-11-14): which fields need more room on the left, and how much? → answer: the 2 px text inset in every field, and the text should also be vertically centered (it read slightly low). Implemented both.
+- Q2 (X3, asked 2026-11-14): should ↑ on the first result row return to the search field? → answer: yes.
+- Q3 (X4, asked 2026-11-14): key for New File → answer: ⌥⌘N.
+- Q4 (X4, asked 2026-11-14): new file name → answer: "untitled" without extension, whole name selected; no warning when an extension changes (Crow has no such warning today, so nothing to remove).
+- Q5 (X5, asked 2026-11-14): key for Show/Hide Preview → answer: ⇧⌘P.
+- Q6 (X5, asked 2026-11-14): where the preview state lives → answer: `show_preview` in settings.toml.
+- Q7 (X5, asked 2026-11-14): hide the search preview too? → answer: yes, one switch hides every right-hand preview.
 
 ## Decisions
 - Base: `main` at a3a8e96, U7 (PR #16) is merged, so the branch starts from it (plan's condition met).
@@ -40,6 +41,7 @@ Branch: `ui-u7-fix` · PR: none · Last updated: 2026-11-14 · State: in progres
 ## Log
 - 2026-11-14 Plan read; branch `ui-u7-fix` created from `main` (a3a8e96, U7 merged). Progress file added.
 - 2026-11-14 X1 implemented and tested (28 palette tests green, `cargo fmt --check` clean).
+- 2026-11-14 X2 implemented: 2 px text inset (caret, selection, IME bounds and hit-testing follow), the text is centered on its x-height band, and the caret blinks 500/500 on a per-field executor-clock loop that only notifies the input entity. Focus changes are reconciled in `paint` (focus listeners registered during render never fired in tests; the loop + paint check is simpler and has no listener lifetime). `caret_blinks_in_text_fields` covers focus, off, on, typing, blur; all 227 crow-app tests pass. Visual check in the bundle still to do.
 
 ## Next
-Ask the open questions (X2 left room, X3 ↑, X4 key/name, X5 key/state) before building X2–X5; X6 and X7 start with measurements.
+X3: ↓ in the search field focuses the results, ↑ on row 0 returns to the field.

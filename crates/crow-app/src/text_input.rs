@@ -3,6 +3,7 @@
 //! and Return/Escape/Tab reported as events. Used by Go to Folder; rename (M4) reuses it.
 
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
@@ -88,6 +89,14 @@ pub fn keymap() -> Vec<KeyBinding> {
     ]
 }
 
+/// Room between a field's left edge and its text, so the caret sits before the
+/// first glyph instead of on it. The caret stays at the insertion point; the text
+/// is shifted right by this much.
+const TEXT_INSET: f32 = 2.;
+
+/// How long the caret stays on or off while the field has focus.
+const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+
 pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
@@ -109,6 +118,16 @@ pub struct TextInput {
     scroll_x: Pixels,
     is_selecting: bool,
     history: History,
+    /// The caret is drawn while this is true; a timer flips it every
+    /// `CARET_BLINK_INTERVAL` while the field has focus.
+    caret_visible: bool,
+    /// When the caret next changes phase. Edits and caret moves push it out and
+    /// turn the caret on, so it is solid while typing.
+    blink_due: Instant,
+    /// The focus state paint last saw, so gaining focus can turn the caret on at once.
+    was_focused: bool,
+    /// The blink timer runs for the field's whole life; it notifies only while focused.
+    blink_loop: bool,
 }
 
 /// The field's own undo history. Inside a text field ⌘Z undoes typing, never a file operation.
@@ -157,6 +176,10 @@ impl TextInput {
             scroll_x: px(0.),
             is_selecting: false,
             history: History::default(),
+            caret_visible: true,
+            blink_due: cx.background_executor().now() + CARET_BLINK_INTERVAL,
+            was_focused: false,
+            blink_loop: false,
         }
     }
 
@@ -209,6 +232,7 @@ impl TextInput {
         self.selected_range = self.content.len()..self.content.len();
         self.selection_reversed = false;
         self.marked_range = None;
+        self.touch_caret(cx);
         window.notify_text_input_changed(&self.focus_handle);
         cx.emit(TextInputEvent::Changed);
         cx.notify();
@@ -219,6 +243,7 @@ impl TextInput {
         let end = range.end.min(self.content.len());
         self.selected_range = range.start.min(end)..end;
         self.selection_reversed = false;
+        self.touch_caret(cx);
         window.notify_text_selection_changed(&self.focus_handle);
         cx.notify();
     }
@@ -426,6 +451,7 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range.take();
         self.history.last = Some((kind, cursor));
+        self.touch_caret(cx);
         window.notify_text_input_changed(&self.focus_handle);
         cx.emit(TextInputEvent::Changed);
         cx.notify();
@@ -459,6 +485,7 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.history.last = None;
+        self.touch_caret(cx);
         window.notify_text_input_changed(&self.focus_handle);
         cx.emit(TextInputEvent::Changed);
         cx.notify();
@@ -485,9 +512,70 @@ impl TextInput {
         }
     }
 
+    /// Start the field's blink timer. It lives as long as the input and only
+    /// notifies while the field has focus.
+    fn start_blink_loop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blink_loop {
+            return;
+        }
+        self.blink_loop = true;
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                let delay = this
+                    .update(cx, |input, cx| {
+                        let delay = input.blink_due.saturating_duration_since(cx.background_executor().now());
+                        if delay.is_zero() { Duration::from_millis(8) } else { delay }
+                    })
+                    .unwrap_or(CARET_BLINK_INTERVAL);
+                cx.background_executor().timer(delay).await;
+                let keep_going = this
+                    .update_in(cx, |input, window, cx| {
+                        let now = cx.background_executor().now();
+                        if !input.focus_handle.is_focused(window) {
+                            // Not drawn anyway; keep the state honest for the next focus.
+                            input.caret_visible = false;
+                            input.blink_due = now + CARET_BLINK_INTERVAL;
+                            return true;
+                        }
+                        if input.marked_range.is_some() {
+                            input.caret_visible = true;
+                            input.blink_due = now + CARET_BLINK_INTERVAL;
+                            return true;
+                        }
+                        if now < input.blink_due {
+                            return true;
+                        }
+                        input.caret_visible = !input.caret_visible;
+                        input.blink_due = now + CARET_BLINK_INTERVAL;
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Whether the caret is currently in its "on" phase. Tests read this.
+    #[cfg(test)]
+    pub(crate) fn caret_visible(&self) -> bool {
+        self.caret_visible
+    }
+
+    /// Every edit and caret move turns the caret back on and pushes the next
+    /// blink phase out, so the caret stays solid while typing.
+    fn touch_caret(&mut self, cx: &App) {
+        self.caret_visible = true;
+        self.blink_due = cx.background_executor().now() + CARET_BLINK_INTERVAL;
+    }
+
     fn move_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         self.selection_reversed = false;
+        self.touch_caret(cx);
         window.notify_text_selection_changed(&self.focus_handle);
         cx.notify()
     }
@@ -510,8 +598,8 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        // The line is painted shifted left by `scroll_x`; undo that before hit-testing.
-        line.closest_index_for_x(position.x - bounds.left() + self.scroll_x)
+        // The line is painted inset and shifted left by `scroll_x`; undo both before hit-testing.
+        line.closest_index_for_x(position.x - bounds.left() - px(TEXT_INSET) + self.scroll_x)
     }
 
     fn select_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
@@ -524,6 +612,7 @@ impl TextInput {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        self.touch_caret(cx);
         window.notify_text_selection_changed(&self.focus_handle);
         cx.notify()
     }
@@ -672,6 +761,7 @@ impl EntityInputHandler for TextInput {
             })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         self.selection_reversed = false;
+        self.touch_caret(cx);
 
         window.notify_text_input_changed(&self.focus_handle);
         cx.emit(TextInputEvent::Changed);
@@ -691,8 +781,8 @@ impl EntityInputHandler for TextInput {
         }
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
-            point(bounds.left() + last_layout.x_for_index(range.start) - self.scroll_x, bounds.top()),
-            point(bounds.left() + last_layout.x_for_index(range.end) - self.scroll_x, bounds.bottom()),
+            point(bounds.left() + px(TEXT_INSET) + last_layout.x_for_index(range.start) - self.scroll_x, bounds.top()),
+            point(bounds.left() + px(TEXT_INSET) + last_layout.x_for_index(range.end) - self.scroll_x, bounds.bottom()),
         ))
     }
 
@@ -718,7 +808,7 @@ impl EntityInputHandler for TextInput {
         if last_layout.text != self.content {
             return None;
         }
-        let utf8_index = last_layout.closest_index_for_x(line_point.x + self.scroll_x);
+        let utf8_index = last_layout.closest_index_for_x(line_point.x + self.scroll_x - px(TEXT_INSET));
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -729,6 +819,8 @@ struct TextElement {
 
 struct PrepaintState {
     line: Option<ShapedLine>,
+    /// The line's vertical offset inside the field's bounds (see `prepaint`).
+    text_top: Pixels,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
     scroll_x: Pixels,
@@ -812,14 +904,24 @@ impl Element for TextElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window.text_system().shape_line(display_text, font_size, &runs, None);
 
+        // Center the lowercase band, not ascent+descent: the ascent reserves room
+        // for accents, which leaves the text reading a little low in the field.
+        let x_height =
+            line.runs.first().map_or(px(0.), |run| window.text_system().x_height(run.font_id, line.font_size));
+        let text_top = (x_height - (line.ascent - line.descent)) / 2.;
+
         let cursor_pos = line.x_for_index(cursor);
-        let scroll_x = scroll_for_caret(cursor_pos, line.width, bounds.size.width, input.scroll_x);
-        let x = |index| bounds.left() + line.x_for_index(index) - scroll_x;
+        let text_width = bounds.size.width - px(TEXT_INSET);
+        let scroll_x = scroll_for_caret(cursor_pos, line.width, text_width, input.scroll_x);
+        // The caret sits at the insertion point; the text is inset, so the caret
+        // lands just before the first glyph instead of on it.
+        let caret_x = |index| bounds.left() + line.x_for_index(index) - scroll_x;
+        let text_x = bounds.left() + px(TEXT_INSET) - scroll_x;
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
-                    Bounds::new(point(x(cursor), bounds.top()), size(px(2.), bounds.bottom() - bounds.top())),
+                    Bounds::new(point(caret_x(cursor), bounds.top()), size(px(2.), bounds.bottom() - bounds.top())),
                     cursor_color,
                 )),
             )
@@ -827,15 +929,15 @@ impl Element for TextElement {
             (
                 Some(fill(
                     Bounds::from_corners(
-                        point(x(selected_range.start), bounds.top()),
-                        point(x(selected_range.end), bounds.bottom()),
+                        point(text_x + line.x_for_index(selected_range.start), bounds.top()),
+                        point(text_x + line.x_for_index(selected_range.end), bounds.bottom()),
                     ),
                     selection_color,
                 )),
                 None,
             )
         };
-        PrepaintState { line: Some(line), cursor, selection, scroll_x }
+        PrepaintState { line: Some(line), text_top, scroll_x, selection, cursor }
     }
 
     fn paint(
@@ -851,21 +953,31 @@ impl Element for TextElement {
         let focus_handle = self.input.read(cx).focus_handle.clone();
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
         let scroll_x = prepaint.scroll_x;
+        let text_top = prepaint.text_top;
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(selection) = prepaint.selection.take() {
                 window.paint_quad(selection)
             }
             let Some(line) = prepaint.line.take() else { return };
-            let origin = point(bounds.left() - scroll_x, bounds.top());
+            let origin = point(bounds.left() + px(TEXT_INSET) - scroll_x, bounds.top() + text_top);
             if let Err(e) = line.paint(origin, window.line_height(), gpui::TextAlign::Left, None, window, cx) {
                 tracing::warn!("text input paint: {e}");
             }
-            if focus_handle.is_focused(window)
-                && let Some(cursor) = prepaint.cursor.take()
-            {
+            let focused = focus_handle.is_focused(window);
+            let caret_shown = focused && {
+                let input = self.input.read(cx);
+                // A frame that first sees focus shows the caret even before the loop's next tick.
+                input.caret_visible || input.marked_range.is_some() || !input.was_focused
+            };
+            if caret_shown && let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
             }
-            self.input.update(cx, |input, _cx| {
+            self.input.update(cx, |input, ctx| {
+                if input.was_focused != focused {
+                    input.was_focused = focused;
+                    input.caret_visible = focused;
+                    input.blink_due = ctx.background_executor().now() + CARET_BLINK_INTERVAL;
+                }
                 input.last_layout = Some(line);
                 input.last_bounds = Some(bounds);
                 input.scroll_x = scroll_x;
@@ -875,7 +987,8 @@ impl Element for TextElement {
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.start_blink_loop(window, cx);
         let theme = cx.global::<Ui>().theme.clone();
         let chrome = self.chrome;
         div()

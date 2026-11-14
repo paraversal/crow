@@ -3698,6 +3698,33 @@ mod tests {
     }
 
     #[gpui::test]
+    fn caret_blinks_in_text_fields(cx: &mut TestAppContext) {
+        let root = fixture("caret-blink");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        let input = view.read_with(&cx, |w, _| w.palette.as_ref().expect("the palette is open").input.clone());
+        assert!(input.read_with(&cx, |input, _| input.caret_visible()), "visible while the field has focus");
+
+        let executor = cx.executor();
+        executor.advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        assert!(!input.read_with(&cx, |input, _| input.caret_visible()), "the caret goes off after 500 ms");
+        executor.advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        assert!(input.read_with(&cx, |input, _| input.caret_visible()), "and back on after another 500 ms");
+
+        cx.simulate_input("a");
+        assert!(input.read_with(&cx, |input, _| input.caret_visible()), "typing shows the caret at once");
+
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        executor.advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        assert!(!input.read_with(&cx, |input, _| input.caret_visible()), "no caret without focus");
+    }
+
+    #[gpui::test]
     fn navigating_clears_an_operation_error(cx: &mut TestAppContext) {
         let root = fixture("bar-message-nav");
         let (view, mut cx) = open(cx, &root);
