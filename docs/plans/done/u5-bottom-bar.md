@@ -11,7 +11,7 @@ Design reference: canvas boards "Bottom bar" B (idle hints), C (hints follow foc
 Finding 7 of "Today, annotated": one status slot shows "18 items", Vim hints, progress, operation messages and config errors by priority, so one hides the other. A broken `views.toml` is invisible while an operation runs, and a finished operation's message replaces the item count until the next operation. Finding 8: the path bar itself is good and stays. Nothing on screen mentions `/`, ⌘F or ⌘K (the overhaul's main complaint); the bottom bar is where idle key hints go, and where the sidebar's reorder/remove keys become findable.
 
 ## Decided
-- Scope (from the combined draft (since folded into these plans) §U5): three slots, **path** (unchanged look) · **transient** (hints, operation progress with Cancel esc, op messages, errors) · **counts**. "Errors no longer lose to hints: show the error token *and* drop hints." Up to three Outline-keycap hints chosen by focus; Vim mark pending keeps its text; hints drop first when the window is narrow (path wins). Progress: 2 px accent bar along the top edge plus "Copying 3 items to Backup  1.2 of 4.8 GB · 26 %  Cancel esc". Error: `error`-tinted token with the message and an **Open** button that opens the config file at fault. Counts: aria says whose count ("18 items in jules"); "n of N shown" while filtering; "n selected · size" with a selection.
+- Scope (from the combined draft (since folded into these plans) §U5): three slots, **path** (unchanged look) · **transient** (hints, operation progress with Cancel esc, op messages, errors) · **counts**. "Errors no longer lose to hints: show the error token *and* drop hints." Up to three Outline-keycap hints chosen by focus; Vim mark pending keeps its text; hints drop first when the window is narrow (path wins). Progress: 2 px accent bar along the top edge plus "Copying 3 items to Backup  1.2 of 4.8 GB · 26 %  Cancel esc". Error: `error`-tinted token with the message and an **Open** button that opens the config file at fault. Counts: aria says whose count ("18 items in me"); "n of N shown" while filtering; "n selected · size" with a selection.
 - Q4 (index): "`hints = "auto" | "always" | "off"` in `settings.toml`, default `auto`: each idle hint retires after its key has been used 3 times (counts in `~/.local/state/crow/`)." Focus hints (filtering, sidebar, search) never retire; `off` hides all hints and, from U9, tips.
 - Q7 (index): new options flat, typed and documented so a future settings page can list them.
 - Q9: U9 (tips) is included and reuses this plan's key-use counter and the `hints` setting.
@@ -106,9 +106,9 @@ Exact strings (recommended grammar; Q3 confirms):
 | State | Text | Aria label |
 | --- | --- | --- |
 | loading, nothing listed yet | "Loading…" | "Loading {folder}" |
-| default | "18 items" / "1 item" | "18 items in jules" |
-| one file selected | "18 items · 1.2 KB" | "18 items in jules, selected item 1.2 KB" |
-| ≥ 2 selected | "3 selected · 4.2 MB" | "3 of 18 selected in jules, 4.2 MB" |
+| default | "18 items" / "1 item" | "18 items in me" |
+| one file selected | "18 items · 1.2 KB" | "18 items in me, selected item 1.2 KB" |
+| ≥ 2 selected | "3 selected · 4.2 MB" | "3 of 18 selected in me, 4.2 MB" |
 | filtering | "1 of 2 shown" (+ " · 1.2 KB" or " · 3 selected · 4.2 MB") | "1 of 2 shown in src, …" |
 | sidebar focused | "Favorites · 6" (group of the cursor row, its row count) | "Favorites, 6 items" |
 | search | "44 results"; with a selection "1 of 44 selected" | "1 of 44 results selected" |
@@ -237,7 +237,7 @@ Error pill with Open; stays until the file is fixed.
 | Bottom bar error | Break `views.toml` while an operation runs: progress and the red token show together, hints are gone; Open opens `views.toml`; fixing it removes the token. |
 | Bottom bar counts | Column view: hover the count, the tooltip names the focused column's folder. Filter: "n of N shown". Select several files: "n selected · size". |
 | Narrow window | Shrink the window: hints disappear right to left before the path is cut. |
-| VoiceOver | Cmd-F5: the count reads "18 items in jules"; an error reads "Error: …" once; Open and Cancel read as buttons. |
+| VoiceOver | Cmd-F5: the count reads "18 items in me"; an error reads "Error: …" once; Open and Cancel read as buttons. |
 
 ## Finish
 - README: Keys (bottom bar hints, the `hints` setting), Configuration table row for `settings.toml` (add "key hints"), and that key-use counts live in `~/.local/state/crow/usage.json` next to `recent.json`.

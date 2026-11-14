@@ -1068,11 +1068,11 @@ mod tests {
     #[test]
     #[allow(clippy::single_range_in_vec_init)] // The matched list is the point of the test.
     fn name_ranges_are_the_part_inside_the_name() {
-        let candidates = folders(&[], &[p("/home/me/Files/Coding/git")], &[]);
+        let candidates = folders(&[], &[p("/home/me/Projects/git")], &[]);
         let listing = folder_listing("git", &candidates, "Coding");
         let Item::Folder { label, matched, .. } = &listing.items[0] else { panic!("a folder row") };
-        assert_eq!(label, "~/Files/Coding/git");
-        assert_eq!(matched.first(), Some(&(15..18)), "the path line highlights the name in place");
+        assert_eq!(label, "~/Projects/git");
+        assert_eq!(matched.first(), Some(&(11..14)), "the path line highlights the name in place");
         assert_eq!(listing.items[0].name_ranges().first(), Some(&(0..3)), "the name line gets it shifted");
 
         let straddling = Item::Folder {

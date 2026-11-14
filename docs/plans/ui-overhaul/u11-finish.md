@@ -52,7 +52,7 @@ Search mode: field grown over the title with accent ring and All/Names/Contents,
 Gallery of the picked variants (check every one against the app in I4):
 
 ![Top band B](img/top-band-b.png)
-Band B: drawn chevrons, title, segmented list/columns, "Go to ⌘K", search field "Search jules ⌘F"; tooltip "Back to Desktop ⌘[" under the back button.
+Band B: drawn chevrons, title, segmented list/columns, "Go to ⌘K", search field "Search me ⌘F"; tooltip "Back to Desktop ⌘[" under the back button.
 
 ![Top band D](img/top-band-d.png)
 Band D: field with accent ring across the band, All/Names/Contents, "Done esc". It also shows a scope token "in file-crow ⌄" and "names + contents" inside the field, which the assembled board and U3 do not; follow U3.
@@ -85,7 +85,7 @@ Scope bar, rules switch, rows with icon / highlighted name / folder / modified, 
 Idle pane: "Search names and contents in file-crow", four example chips with explanations, foot line "Esc returns to file-crow · ⌘R reveals a result · Space previews".
 
 ![Palette B](img/palette-b.png)
-Sheet with scrim, "5 places", sections Recent / Favorites / In jules, two-line rows, "just now / 2 h ago", footer keycaps go / new tab / complete / commands.
+Sheet with scrim, "5 places", sections Recent / Favorites / In me, two-line rows, "just now / 2 h ago", footer keycaps go / new tab / complete / commands.
 
 ![Palette C](img/palette-c.png)
 "Commands" token, "2 of 34", menu column, on/off chip, Key-weight caps, "Recently used". Its menu column says "Search" for Search everything; U2 has no Search menu, so the app must show U2's menu name.

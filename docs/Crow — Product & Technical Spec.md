@@ -1,6 +1,6 @@
 # Crow — Product & Technical Spec
 
-Nov 12, 2026 · @Jules
+Nov 12, 2026 · @paraversal
 
 Crow is a macOS file explorer that keeps Finder's directness and fixes where it fails: it should be fast and correct, behave predictably, make every action easy to read, put the keyboard first and be fully yours to customize. This spec turns the feasibility study into decisions. It replaces that study's stack choice with Rust.
 

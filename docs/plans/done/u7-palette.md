@@ -111,7 +111,7 @@ Take from it: the palette's sheet should read as part of this window (same row f
 ### VoiceOver
 - Dialog "Go to or Command Palette" (`Role::Dialog`). Field label: folder mode "Go to folder", command mode "Search commands" (pass an explicit aria label to `TextInput`, not the placeholder).
 - List: `Role::ListBox`, label "Places" / "Commands". Each section: `Role::Group` with `aria_label` = header text; header text itself `Role::Label`.
-- Folder option label: "<name>, <abbreviated path>, <section>[, visited <age>]", e.g. "git, ~/Files/Coding/git, Recent, visited 2 h ago". Twins therefore differ.
+- Folder option label: "<name>, <abbreviated path>, <section>[, visited <age>]", e.g. "git, ~/Projects/git, Recent, visited 2 h ago". Twins therefore differ.
 - Command option label: "<label>, <menu> menu[, on|off]"; `aria_keyshortcuts` with the key string; `aria_toggled` for toggles.
 - Options keep `aria_position_in_set`/`aria_size_of_set` over items (not headers), `aria_selected`, `aria_active_descendant` on the cursor row.
 - Count text is `Role::Status` so changes are announced.
@@ -134,7 +134,7 @@ Take from it: the palette's sheet should read as part of this window (same row f
 - *Where*: `crates/crow-search/src/engine.rs` `FuzzyMatcher`; `crates/crow-search/Cargo.toml`.
 - *Change*: add `pub fn indices(&mut self, haystack: &str) -> Option<(u32, Vec<Range<usize>>)>`: calls `Matcher::fuzzy_indices`, sorts and dedups indices (nucleo may leave them unsorted), maps each index to the **byte range** of that grapheme (`unicode_segmentation::UnicodeSegmentation::grapheme_indices(true)`; for ASCII the index is the byte), and merges adjacent ranges. Add `unicode-segmentation = "1"` to crow-search (already in the lock file through nucleo and crow-app; ask if the version differs). `score` stays for the search walk.
 - *Edge cases*: empty needle → `Some((0, vec![]))`; combining accents (`é` as e + U+0301) count as one grapheme; a needle longer than the haystack → `None`.
-- *Tests* (`engine.rs` tests): `fuzzy_indices_are_byte_ranges` ("git" in "~/Files/Coding/git" → the last three bytes, merged into one range); `fuzzy_indices_handle_graphemes` (needle "ub" in "Über/ub" gives ranges on char boundaries, a combining-accent case); `fuzzy_indices_score_matches_score` (same score as `score`).
+- *Tests* (`engine.rs` tests): `fuzzy_indices_are_byte_ranges` ("git" in "~/Projects/git" → the last three bytes, merged into one range); `fuzzy_indices_handle_graphemes` (needle "ub" in "Über/ub" gives ranges on char boundaries, a combining-accent case); `fuzzy_indices_score_matches_score` (same score as `score`).
 - *Done when*: tests pass; nothing else changed.
 
 ### I2 Folder model: sources, sections, highlights, last visit
@@ -149,7 +149,7 @@ Take from it: the palette's sheet should read as part of this window (same row f
   - `pub fn relative_age(now: u64, then: u64) -> String` with the strings in Target.
   - `show_palette` passes `|p| ui.recent.last_visit(p)` and the focused folder's name.
 - *Edge cases*: home (`label` "~", name "~"); root ("/"); a label with no `/`; a favorite outside home (absolute label); the same folder as favorite and recent (one row, Favorites); clock skew (`then > now` → "just now").
-- *Tests* (`palette.rs` unit tests, new `mod tests`): `sections_follow_source_order_and_skip_empty`; `a_favorite_that_is_recent_shows_once_under_favorites`; `section_caps_apply`; `name_ranges_are_the_part_inside_the_name` ("git" vs "~/Files/Coding/git": name gets 0..3, path gets 15..18); `relative_age_strings` (boundaries 59 s, 1 h, 23 h 59 m, 1 day, 6 days, 8 days); `count_text` ("1 place", "5 places", "No places"). `recent.rs`: `last_visit_is_the_latest_visit`.
+- *Tests* (`palette.rs` unit tests, new `mod tests`): `sections_follow_source_order_and_skip_empty`; `a_favorite_that_is_recent_shows_once_under_favorites`; `section_caps_apply`; `name_ranges_are_the_part_inside_the_name` ("git" vs "~/Projects/git": name gets 0..3, path gets 15..18); `relative_age_strings` (boundaries 59 s, 1 h, 23 h 59 m, 1 day, 6 days, 8 days); `count_text` ("1 place", "5 places", "No places"). `recent.rs`: `last_visit_is_the_latest_visit`.
 - *Done when*: the existing palette keystroke tests pass unchanged (the UI still renders the old way, reading `Listing.items`).
 
 ### I3 Folder mode on the Sheet: input row, sections, two-line rows, footer

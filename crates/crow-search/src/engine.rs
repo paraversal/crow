@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn fuzzy_indices_are_byte_ranges() {
-        let haystack = "~/Files/Coding/git";
+        let haystack = "~/Projects/git";
         let mut matcher = FuzzyMatcher::new("git");
         let (_, ranges) = matcher.indices(haystack).expect("a match");
         let start = haystack.len() - 3;
