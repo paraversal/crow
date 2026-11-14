@@ -9243,6 +9243,21 @@ mod tests {
         assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()));
     }
 
+    #[gpui::test]
+    fn rename_field_in_the_list_has_room_for_its_text(cx: &mut TestAppContext) {
+        let root = fixture("rename-field-width");
+        let (view, mut cx) = open(cx, &root);
+        click_selector(&mut cx, "row-notes.txt");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("renamed");
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let field = cx.debug_bounds("row-name-notes.txt").expect("the rename field");
+        assert!(field.size.width > px(40.), "the field is wide enough for the typed name; got {:?}", field.size);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "the rename is still open");
+    }
+
     // ----- context menu -----
 
     use crate::palette::CommandId;

@@ -1946,6 +1946,10 @@ impl Pane {
                                     .relative()
                                     .left(px(look.dx))
                                     .opacity(dim)
+                                    // The rename field fills the name column; without this it
+                                    // has no intrinsic width and collapses to zero.
+                                    .flex_1()
+                                    .min_w_0()
                                     .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
                                         Some(r) => div()
                                             .flex_1()
