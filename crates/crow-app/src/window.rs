@@ -7670,6 +7670,20 @@ mod tests {
     }
 
     #[gpui::test]
+    fn palette_copy_path_copies_the_selection(cx: &mut TestAppContext) {
+        let root = fixture("palette-copy-path");
+        let (_view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("cmd-k");
+        cx.run_until_parked();
+        cx.simulate_input(">copy path");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+        assert_eq!(text, Some(root.join("beta").display().to_string()), "the palette ran Copy Path");
+    }
+
+    #[gpui::test]
     fn plain_keys_stay_in_every_text_field(cx: &mut TestAppContext) {
         use crate::actions::{CopyFiles, CutFiles, MoveToTrash, PasteFiles, QuickLook, Rename, SelectAll, StartFilter};
 
@@ -9364,6 +9378,8 @@ mod tests {
         let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
         let expected = format!("{}\n{}", root.join("beta").display(), root.join("notes.txt").display());
         assert_eq!(text.as_deref(), Some(expected.as_str()), "⌥⌘C copies one path per line");
+        let message = cx.read(|cx| cx.global::<Operations>().message.clone());
+        assert_eq!(message.map(|(text, _)| text.to_string()).as_deref(), Some("Copied 2 paths"));
 
         // With nothing selected it copies the folder's own path, as Finder does.
         let empty = below_rows(&mut cx, "row-notes.txt");

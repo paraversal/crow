@@ -719,6 +719,8 @@ impl Pane {
             CommandId::Cut => self.cut_files(&CutFiles, window, cx),
             CommandId::Paste => self.paste_files(&PasteFiles, window, cx),
             CommandId::PasteMove => self.paste_move_files(&PasteMoveFiles, window, cx),
+            CommandId::CopyPath => self.copy_path(&CopyPath, window, cx),
+            CommandId::ShowInFinder => self.show_in_finder(&ShowInFinder, window, cx),
             CommandId::SelectAll => self.select_all(&SelectAll, window, cx),
             CommandId::StartFilter => self.start_filter(&StartFilter, window, cx),
             _ => {}
@@ -1538,6 +1540,7 @@ impl Pane {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         let what = if paths.len() == 1 { "path".to_owned() } else { format!("{} paths", paths.len()) };
         crate::operations::message(format!("Copied {what}"), false, cx);
+        cx.notify();
     }
 
     fn show_in_finder(&mut self, _: &ShowInFinder, _: &mut Window, cx: &mut Context<Self>) {
