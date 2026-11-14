@@ -1,5 +1,5 @@
 # context-menu progress
-Branch: context-menu · PR: none · Last updated: 2026-11-14 · State: In critique
+Branch: context-menu · PR: https://github.com/paraversal/file-crow/pull/25 · Last updated: 2026-11-14 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -47,9 +47,9 @@ Critic session: 2026-11-14 · Base: main @ 05deb55 · Head reviewed: e0f8786
 
 | # | Finding | Where | Area | Kind | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| C1 | Clicking empty space (or another row) while a rename was open left the field unfocused and the list's actions off the focus path: the rename never committed and the pane was stuck. Plan C1 says a rename in progress commits. | `pane.rs` `press`/`press_empty`/`context_press`; seen in the bundle | plan / UX | fix | fixed (commit below) |
-| C2 | The hand check said a running copy's progress keeps updating while the native menu is open; AppKit's tracking loop pauses GPUI frames (plan Q1). Seen: the selection clear did not render until the menu closed. | `docs/testing.md` | plan / docs | fix | fixed (commit below) |
-| C3 | The palette comment said Show in Finder sits "under Add to Sidebar"; it is after Eject. | `palette.rs` | code sense | fix | fixed (commit below) |
+| C1 | Clicking empty space (or another row) while a rename was open left the field unfocused and the list's actions off the focus path: the rename never committed and the pane was stuck. Plan C1 says a rename in progress commits. | `pane.rs` `press`/`press_empty`/`context_press`; seen in the bundle | plan / UX | fix | fixed (d697a97) |
+| C2 | The hand check said a running copy's progress keeps updating while the native menu is open; AppKit's tracking loop pauses GPUI frames (plan Q1). Seen: the selection clear did not render until the menu closed. | `docs/testing.md` | plan / docs | fix | fixed (d697a97) |
+| C3 | The palette comment said Show in Finder sits "under Add to Sidebar"; it is after Eject. | `palette.rs` | code sense | fix | fixed (d697a97) |
 | C4 | Open shows ⌘↓ in the context menu and key hints but ⌘O in the native menu bar (GPUI takes the first binding, the hints the last). Pre-existing; the context menu follows the hints and Finder. | `actions.rs:126`, `context_menu.rs` `shortcut` | UX / consistency | note | left (pre-existing; the menu bar is the outlier) |
 | C5 | AppKit injects an "AutoFill" submenu into the context menu when the filter field had focus. | seen in the bundle | UX | note | left (system behavior, not ours) |
 | C6 | After an empty click commits a rename, the operation's completion re-selects the renamed item (`show_results` → `select_when_present`), so "nothing selected" is transient; clicking a row during a rename does the same. | `pane.rs:669` | UX | note | left (operation result; the plan asks for the commit, not the selection after) |
