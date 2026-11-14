@@ -2247,6 +2247,8 @@ mod tests {
 
     use gpui::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle};
 
+    use crow_search::{Hit, HitKind};
+
     use crate::actions::StartFilter;
 
     use super::*;
@@ -3424,6 +3426,82 @@ mod tests {
         let paths = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search").read(cx).result_paths());
         assert_eq!(paths.first().and_then(|path| path.file_name()), Some("m5-notes.md".as_ref()), "{paths:?}");
         assert!(paths.iter().any(|path| path.ends_with("deep.txt")), "{paths:?}");
+    }
+
+    #[gpui::test]
+    fn search_selects_the_best_first_row_until_the_user_moves(cx: &mut TestAppContext) {
+        let root = fixture("search-selection");
+        std::fs::write(root.join("zebra.txt"), "nothing\n").expect("create fixture");
+        std::fs::write(root.join("notes.txt"), "zebra lives here\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        cx.simulate_input("qqzz");
+        wait_for_search(&view, &mut cx);
+        let hit = |name: &str, kind: HitKind, score| Hit {
+            path: root.join(name),
+            is_dir: false,
+            score,
+            kind,
+            modified: None,
+            size: 0,
+        };
+
+        // The walker found a content hit first; the name hit arrives in a later batch.
+        let content = hit(
+            "notes.txt",
+            HitKind::Content { line: 1, text: "zebra lives here".to_owned(), ranges: vec![0..5] },
+            0,
+        );
+        search.update(&mut cx, |search, cx| search.add_test_hits(vec![content], cx));
+        assert_eq!(search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path), Some(root.join("notes.txt")));
+
+        let name = hit("zebra.txt", HitKind::Name { ranges: vec![0..5] }, 100);
+        search.update(&mut cx, |search, cx| search.add_test_hits(vec![name], cx));
+        wait_for_preview(&view, &mut cx, &root.join("zebra.txt"));
+        assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 0);
+        assert_eq!(search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path), Some(root.join("zebra.txt")));
+    }
+
+    #[gpui::test]
+    fn search_keeps_the_users_row_when_better_rows_arrive(cx: &mut TestAppContext) {
+        let root = fixture("search-selection-moved");
+        std::fs::write(root.join("zebra.txt"), "nothing\n").expect("create fixture");
+        std::fs::write(root.join("zebra2.txt"), "nothing\n").expect("create fixture");
+        std::fs::write(root.join("notes.txt"), "zebra lives here\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        cx.simulate_input("qqzz");
+        wait_for_search(&view, &mut cx);
+        let hit = |name: &str, kind: HitKind, score| Hit {
+            path: root.join(name),
+            is_dir: false,
+            score,
+            kind,
+            modified: None,
+            size: 0,
+        };
+        let first = hit("zebra.txt", HitKind::Name { ranges: vec![0..5] }, 100);
+        let content = hit(
+            "notes.txt",
+            HitKind::Content { line: 1, text: "zebra lives here".to_owned(), ranges: vec![0..5] },
+            0,
+        );
+        search.update(&mut cx, |search, cx| search.add_test_hits(vec![content, first], cx));
+        settle(&view, &mut cx);
+
+        cx.simulate_keystrokes("tab");
+        cx.simulate_keystrokes("down");
+        assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 1);
+        assert_eq!(search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path), Some(root.join("notes.txt")));
+
+        let better = hit("zebra2.txt", HitKind::Name { ranges: vec![0..5] }, 200);
+        search.update(&mut cx, |search, cx| search.add_test_hits(vec![better], cx));
+        assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 2, "the user's row moved down");
+        assert_eq!(search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path), Some(root.join("notes.txt")));
     }
 
     #[gpui::test]

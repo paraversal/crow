@@ -32,8 +32,8 @@ use crate::keys::{self, KeyScope};
 use crate::pane::DraggedSelection;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, format_time, highlight_text, icon, inactive_selection, map_range,
-    truncate_middle_parts,
+    active_selection, color, color_alpha, format_time, format_time_short, highlight_text, icon, inactive_selection,
+    map_range, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -121,6 +121,8 @@ pub struct SearchView {
     exclude_generation: u64,
     selection: Selection<PathBuf>,
     cursor: usize,
+    /// The user picked a row, so streaming batches stop re-selecting the best hit.
+    user_moved: bool,
     /// Every accepted hit, including extra content lines for the same row.
     hit_count: usize,
     /// How many leading rows are name matches.
@@ -246,6 +248,7 @@ impl SearchView {
             exclude_generation,
             selection: Selection::default(),
             cursor: 0,
+            user_moved: false,
             hit_count: 0,
             name_count: 0,
             preview: None,
@@ -315,6 +318,7 @@ impl SearchView {
         self.show_skipped = false;
         self.selection.clear();
         self.cursor = 0;
+        self.user_moved = false;
         self.hit_count = 0;
         self.name_count = 0;
         self.preview = None;
@@ -493,20 +497,26 @@ impl SearchView {
         }
     }
 
-    /// Keep the keyboard cursor on the same path after rows above it move, and
-    /// select the best first result once there is one.
+    /// Until the user picks a row, keep the best row selected as batches arrive.
+    /// After that, keep the keyboard cursor on the same path when rows above it move.
     fn follow_selection(&mut self) {
-        if self.selection.is_empty() {
+        if !self.user_moved {
             if let Some(first) = self.results.first() {
                 self.selection.select_only(first.path.clone());
-                self.cursor = 0;
+                if self.cursor != 0 {
+                    self.cursor = 0;
+                    self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                }
             }
             return;
         }
         if let Some(path) = self.selection.cursor().cloned()
             && let Some(&index) = self.by_path.get(&path)
         {
-            self.cursor = index;
+            if self.cursor != index {
+                self.cursor = index;
+                self.scroll.scroll_to_item(index, ScrollStrategy::Nearest);
+            }
         }
     }
 
@@ -593,6 +603,12 @@ impl SearchView {
             .iter()
             .find(|row| row.path == path)
             .and_then(|row| row.content.as_ref().map(|(line, text, _)| (*line, text.clone())))
+    }
+
+    /// Hand the view one batch, as the walker would, for deterministic order tests.
+    #[cfg(test)]
+    pub fn add_test_hits(&mut self, hits: Vec<Hit>, cx: &mut Context<Self>) {
+        self.add_hits(hits, cx);
     }
 
     pub fn is_searching(&self) -> bool {
@@ -728,6 +744,7 @@ impl SearchView {
         let Some(row) = self.results.get(ix) else { return };
         self.selection.select_only(row.path.clone());
         self.cursor = ix;
+        self.user_moved = true;
         window.focus(&self.focus, cx);
         self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
         self.load_preview(cx);
@@ -737,6 +754,7 @@ impl SearchView {
     fn press(&mut self, ix: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         let Some(row) = self.results.get(ix) else { return };
+        self.user_moved = true;
         if event.modifiers.platform {
             self.selection.toggle(row.path.clone());
             if self.selection.cursor().is_none() {
@@ -762,6 +780,7 @@ impl SearchView {
         let at = |index: usize| paths[index].clone();
         self.selection.extend_to(target, position, at);
         self.cursor = target;
+        self.user_moved = true;
     }
 
     fn selected_paths(&self) -> Vec<PathBuf> {
@@ -893,6 +912,7 @@ impl SearchView {
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         let paths = self.results.iter().map(|row| row.path.clone());
         self.selection.select_all(paths);
+        self.user_moved = true;
         cx.notify();
     }
 
@@ -1500,7 +1520,7 @@ impl SearchView {
             .border_color(border)
             .child(div().flex_1().child("Name"))
             .child(div().w(px(180.)).flex_none().child("Folder"))
-            .child(div().w(px(100.)).flex_none().child("Modified"));
+            .child(div().w(px(110.)).flex_none().child("Modified"));
         div()
             .id("search-results-list")
             .flex_1()
@@ -1611,6 +1631,7 @@ impl SearchView {
                     .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                         if event.click_count() == 2 {
                             this.cursor = i;
+                            this.user_moved = true;
                             this.open_selected(cx);
                         }
                     }))
@@ -1692,11 +1713,14 @@ impl SearchView {
                     )
                     .child(
                         div()
-                            .w(px(100.))
+                            .w(px(110.))
                             .flex_none()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_size(px(12.))
                             .text_color(muted)
-                            .child(format_time(row.modified)),
+                            .child(format_time_short(row.modified)),
                     )
                     .into_any_element()
                     .into()

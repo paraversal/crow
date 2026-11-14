@@ -4,8 +4,8 @@ Branch: `ui-u6-fix` · PR: none yet · Last updated: 2026-11-14
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| F1 Selection on the first-arrived row | todo | |
-| F2 Modified column wraps | todo | |
+| F1 Selection on the first-arrived row | done (commit pending) | `user_moved`; two window tests (best row until the user moves, cursor follows the user's path) |
+| F2 Modified column wraps | done (commit pending) | `format_time_short(_at)`, 110 px, no-wrap cell; bucket test | |
 | F3 "1 folders skipped" | todo | |
 | F4 Regex errors four lines | todo | |
 | F5 NFD name highlights | todo | |
@@ -16,19 +16,19 @@ Branch: `ui-u6-fix` · PR: none yet · Last updated: 2026-11-14
 | F7.4 Hide example 3 without an enabled set | todo | |
 | F7.5 Folder label cap | todo | |
 | F7.6 `content_excerpt` once per row | todo | |
-| F7.7 Bottom bar "0 results" in idle | todo (Q3) | |
-| F8.1 Content line on name rows | todo (Q4) | |
-| F8.2 Weak fuzzy name hits | todo (Q5) | |
-| F8.3 Content line format | todo (Q6) | |
-| F8.4 Skipped list paths | todo (Q7) | |
+| F7.7 Bottom bar "0 results" in idle | todo — answer: show nothing in idle | |
+| F8.1 Content line on name rows | todo — answer: name-only rows | |
+| F8.2 Weak fuzzy name hits | todo — answer: contiguous substring in name block; weak fuzzy after content | |
+| F8.3 Content line format | todo — answer: no colon, number right-aligned 28 px | |
+| F8.4 Skipped list paths | todo — answer: relative to scope root / ~ for Home | |
 
 ## Questions
-- Q1 (asked 2026-11-14): Modified column width. Measured "4. Nov 2024" at 12 px SF system font = 69.5 px (`osascript` AppKit bridge, `sizeWithAttributes`), so 100 px fits with room. Keep 100 px or widen to 110? → pending
-- Q2 (asked 2026-11-14): content line on name-match rows (F8.1). → pending
-- Q3 (asked 2026-11-14): bottom-bar count in idle (F7.7). → pending
-- Q4 (asked 2026-11-14): weak fuzzy name hits vs content hits (F8.2). → pending
-- Q5 (asked 2026-11-14): content line format (F8.3). → pending
-- Q6 (asked 2026-11-14): skipped list paths (F8.4). → pending
+- Q1 (asked 2026-11-14): Modified column width. Measured "4. Nov 2024" at 12 px SF system font = 69.5 px. → answer: widen to 110 px
+- Q2 (asked 2026-11-14): content line on name-match rows (F8.1). → answer: name-match rows show only the name (recommended option)
+- Q3 (asked 2026-11-14): bottom-bar count in idle (F7.7). → answer: show nothing
+- Q4 (asked 2026-11-14): weak fuzzy name hits vs content hits (F8.2). → answer: contiguous substring only in the name block; scattered fuzzy names after content rows, not dropped
+- Q5 (asked 2026-11-14): content line format (F8.3). → answer: board format, no colon, right-aligned 28 px number
+- Q6 (asked 2026-11-14): skipped list paths (F8.4). → answer: relative to the scope root; ~ for Home
 
 ## Decisions
 - PR #14 was already merged to `main` when this list started, so the fix branches `ui-u6-fix` from updated `main` (plan's fallback) instead of pushing to PR #14 — plan.
@@ -46,7 +46,8 @@ Branch: `ui-u6-fix` · PR: none yet · Last updated: 2026-11-14
 
 ## Log
 - 2026-11-14: read the plan, U6 plan, U6 progress, `search.rs`, `engine.rs`, `style.rs`, `bottom_bar.rs`, `chrome.rs`, window search tests. PR #14 merged; branched `ui-u6-fix` from `origin/main` (`50a4d17`). Probed nucleo scores for "config": contiguous names 166/159, scattered `gpui-stop-synthetic-drag-on-file-drag.patch` 109.
-- 2026-11-14: measured "4. Nov 2024" width for F2: 69.5 px at 12 px.
+- 2026-11-14: measured "4. Nov 2024" width for F2: 69.5 px at 12 px. Asked Q1-Q6; all answered (see Questions).
+- 2026-11-14: F1 and F2 implemented; both new window tests plus `search_name_hits_outrank_content_hits` and `format_time_short_buckets` pass.
 
 ## Next
-Ask Q1–Q6; then implement F1 (no open question).
+Implement F1.

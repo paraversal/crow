@@ -99,6 +99,30 @@ pub fn format_time(t: Option<std::time::SystemTime>) -> String {
     }
 }
 
+/// A narrow column's date: "Today 14:32", "Yesterday", "4. Nov", "4. Nov 2024".
+pub fn format_time_short(t: Option<std::time::SystemTime>) -> String {
+    format_time_short_at(t, std::time::SystemTime::now())
+}
+
+/// `format_time_short` with an explicit "now", so the buckets are testable.
+pub fn format_time_short_at(t: Option<std::time::SystemTime>, now: std::time::SystemTime) -> String {
+    use chrono::Datelike as _;
+    let Some(t) = t else { return "—".into() };
+    let local: chrono::DateTime<chrono::Local> = t.into();
+    let now: chrono::DateTime<chrono::Local> = now.into();
+    let date = local.date_naive();
+    let today = now.date_naive();
+    if date == today {
+        local.format("Today %H:%M").to_string()
+    } else if Some(date) == today.pred_opt() {
+        "Yesterday".into()
+    } else if date.year() == today.year() {
+        local.format("%-d. %b").to_string()
+    } else {
+        local.format("%-d. %b %Y").to_string()
+    }
+}
+
 /// A folder's own name for labels: the volume name at the root, else the last
 /// component as Finder writes it.
 pub fn display_name(dir: &Path) -> String {
@@ -248,7 +272,21 @@ mod tests {
     }
 
     #[test]
-    fn tints_follow_roles() {
+    fn format_time_short_buckets() {
+        use chrono::TimeZone as _;
+        let at = |y, m, d, hour, minute| -> std::time::SystemTime {
+            chrono::Local.with_ymd_and_hms(y, m, d, hour, minute, 0).unwrap().into()
+        };
+        let now = at(2026, 11, 14, 18, 0);
+        assert_eq!(format_time_short_at(Some(at(2026, 11, 14, 14, 32)), now), "Today 14:32");
+        assert_eq!(format_time_short_at(Some(at(2026, 11, 13, 9, 5)), now), "Yesterday");
+        assert_eq!(format_time_short_at(Some(at(2026, 11, 4, 9, 0)), now), "4. Nov");
+        assert_eq!(format_time_short_at(Some(at(2024, 11, 4, 9, 0)), now), "4. Nov 2024");
+        assert_eq!(format_time_short_at(None, now), "—");
+    }
+
+    #[test]
+    fn tint_follows_roles() {
         let theme = crow_theme::fallback();
         assert_eq!(active_selection(&theme), color_alpha(theme.role("accent"), 0x55));
         assert_eq!(inactive_selection(&theme), color(theme.role("selection")));
