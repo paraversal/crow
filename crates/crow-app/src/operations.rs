@@ -84,6 +84,9 @@ pub struct Operations {
     /// Bumped by every message, so an old timer cannot clear a newer one and the
     /// bar can fade in a new one.
     pub message_generation: u64,
+    /// The fraction a finished operation's bar shows while it fades, and its id.
+    pub progress_done: Option<(f32, u64)>,
+    progress_generation: u64,
 }
 
 /// Info messages clear after this long; errors stay until something replaces them.
@@ -133,6 +136,8 @@ pub fn init(cx: &mut App, trash: Arc<dyn Trash>) {
         clipboard: None,
         message: None,
         message_generation: 0,
+        progress_done: None,
+        progress_generation: 0,
     });
 }
 
@@ -199,9 +204,32 @@ fn finish(outcome: &Outcome, event: Option<crow_core::motion::Event>, cx: &mut A
         let ops = cx.global::<Operations>();
         ops.running.as_ref().is_some_and(|running| running.started.elapsed() >= Duration::from_secs(1))
     };
-    {
+    let done_fraction = {
+        let ops = cx.global::<Operations>();
+        ops.running.as_ref().map(|running| {
+            let p = &running.progress;
+            let (done, total) = if p.total_bytes > 0 {
+                (p.done_bytes, p.total_bytes)
+            } else {
+                (p.done_items as u64, p.total_items as u64)
+            };
+            if total == 0 { 0.0 } else { (done as f32 / total as f32).clamp(0.0, 1.0) }
+        })
+    };
+    let progress_id = {
         let ops = cx.global_mut::<Operations>();
         ops.running = None;
+        if let Some(fraction) = done_fraction {
+            ops.progress_generation += 1;
+            let generation = ops.progress_generation;
+            ops.progress_done = Some((fraction, generation));
+            Some(generation)
+        } else {
+            None
+        }
+    };
+    {
+        let ops = cx.global_mut::<Operations>();
         if !outcome.record.steps.is_empty() {
             tracing::info!(label = %label, steps = outcome.record.steps.len(), "operation done");
             ops.log.push(LogEntry {
@@ -237,6 +265,19 @@ fn finish(outcome: &Outcome, event: Option<crow_core::motion::Event>, cx: &mut A
     }
     // Copying or trashing changes free space; the sidebar shouldn't wait for the minute poll.
     crate::ui::refresh_volumes(cx);
+    if let Some(generation) = progress_id {
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(Duration::from_millis(crow_core::motion::ms::COPY_FADE)).await;
+            cx.update(|cx| {
+                let ops = cx.global_mut::<Operations>();
+                if ops.progress_generation == generation {
+                    ops.progress_done = None;
+                    cx.refresh_windows();
+                }
+            });
+        })
+        .detach();
+    }
 }
 
 /// Undo log entry `index` (the newest by default). Undo checks the disk first and

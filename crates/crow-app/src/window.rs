@@ -880,8 +880,17 @@ impl CrowWindow {
             Primary::Hints(hints)
         };
 
-        let mut state =
-            BarState { primary, error, count, path, transient_max: None, message_id: ops.message_generation };
+        let (progress_done, progress_id) = ops.progress_done.map_or((None, 0), |(fraction, id)| (Some(fraction), id));
+        let mut state = BarState {
+            primary,
+            error,
+            count,
+            path,
+            transient_max: None,
+            message_id: ops.message_generation,
+            progress_done,
+            progress_id,
+        };
         // Narrow windows lose hints from the right and fold the path's middle (I7).
         bottom_bar::fit_to_window(&mut state, window);
         state
@@ -1432,6 +1441,7 @@ impl CrowWindow {
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                 .child(body),
             &theme,
+            cx.global::<Ui>().feedback.mode,
             cx.listener(|this, _, window, cx| this.close_sheet(window, cx)),
         ))
     }
@@ -1739,6 +1749,7 @@ impl CrowWindow {
                         ),
                 ),
             &theme,
+            cx.global::<Ui>().feedback.mode,
             cx.listener(|this, _, window, cx| this.close_why(window, cx)),
         ))
     }
@@ -2502,6 +2513,7 @@ impl CrowWindow {
                 .child(list)
                 .child(footer),
             &theme,
+            cx.global::<Ui>().feedback.mode,
             cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
         ))
     }
@@ -2916,6 +2928,7 @@ impl CrowWindow {
                         ),
                 ),
             &theme,
+            cx.global::<Ui>().feedback.mode,
             cx.listener(|this, _, window, cx| this.cancel_picker(window, cx)),
         ))
     }
@@ -2966,6 +2979,7 @@ impl Render for CrowWindow {
                     key,
                     &theme,
                     f32::from(window.viewport_size().width),
+                    cx.global::<Ui>().feedback.mode,
                     cx.listener(|this, _, _, cx| this.close_tip(cx)),
                 )
             }),
@@ -8240,6 +8254,7 @@ mod tests {
     fn tip_sits_above_the_bar_at_the_right_edge(cx: &mut TestAppContext) {
         let root = long_fixture("tip-layout", 250);
         let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "off");
         scroll(&mut cx, "file-list", 60.);
         settle(&view, &mut cx);
         let tip = cx.debug_bounds("tip").expect("the tip is laid out");

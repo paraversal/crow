@@ -43,6 +43,9 @@ pub struct BarState {
     pub transient_max: Option<Pixels>,
     /// Bumped by every message; the transient fades in when it changes.
     pub message_id: u64,
+    /// A finished operation's fraction while its bar fades, and its id.
+    pub progress_done: Option<f32>,
+    pub progress_id: u64,
 }
 
 /// The transient slot's one primary item.
@@ -742,7 +745,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         )
     });
 
-    let progress = match &state.primary {
+    let progress: Option<AnyElement> = match &state.primary {
         Primary::Running(running) => Some(
             div()
                 .id("bar-progress")
@@ -752,9 +755,31 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
                 .left_0()
                 .h(px(2.))
                 .w(relative(running.fraction))
-                .bg(color(theme.role("accent"))),
+                .bg(color(theme.role("accent")))
+                .into_any_element(),
         ),
-        _ => None,
+        _ => state.progress_done.and_then(|fraction| {
+            if ui.feedback.mode == Effective::Off {
+                return None;
+            }
+            let bar = div()
+                .id("bar-progress")
+                .debug_selector(|| "bar-progress".into())
+                .absolute()
+                .top_0()
+                .left_0()
+                .h(px(2.))
+                .w(relative(fraction))
+                .bg(color(theme.role("accent")));
+            Some(
+                bar.with_animation(
+                    ("bar-progress-done", state.progress_id),
+                    Animation::new(Duration::from_millis(motion::ms::COPY_FADE)),
+                    |el, t| el.opacity(1.0 - motion::ease_in(t)),
+                )
+                .into_any_element(),
+            )
+        }),
     };
 
     div()

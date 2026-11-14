@@ -100,6 +100,8 @@ pub struct MotionLab {
     status: SharedString,
     status_generation: u64,
     tip: Option<u64>,
+    /// Whether the mock sheet (Q3) is open.
+    sheet: bool,
     /// Copy progress: its generation and whether it finished.
     copy: Option<(u64, bool)>,
     ui_sounds: bool,
@@ -160,6 +162,7 @@ impl MotionLab {
             status: "Try ⌘⌫, m, ⌘Z, ⇧⌘N, c, t, e on the list".into(),
             status_generation: 0,
             tip: None,
+            sheet: false,
             copy: None,
             ui_sounds: crow_macos::ui_sounds_enabled(),
             sound_generation: 0,
@@ -509,6 +512,8 @@ impl MotionLab {
             }
             "x" if plain => self.slow = !self.slow,
             "g" if plain => self.glide = !self.glide,
+            "p" if plain => self.sheet = !self.sheet,
+            "escape" => self.sheet = false,
             _ => return,
         }
         cx.stop_propagation();
@@ -773,7 +778,8 @@ impl Render for MotionLab {
             .child(event_button("Refuse", "e", |this, cx| this.refuse(cx), cx))
             .child(event_button("Copy", "c", |this, cx| this.copy(cx), cx))
             .child(event_button("Tip", "t", |this, _| this.toggle_tip(), cx))
-            .child(event_button("Empty Trash", "⇧⌘⌫", |this, cx| this.empty_trash(cx), cx));
+            .child(event_button("Empty Trash", "⇧⌘⌫", |this, cx| this.empty_trash(cx), cx))
+            .child(event_button("Sheet", "p", |this, _| this.sheet = !this.sheet, cx));
 
         // The list: a glide highlight under the rows (Full), the rows, and flying ghosts on top.
         let cursor_y = self.index_of(self.cursor).map_or(0.0, |i| self.settled_y(i));
@@ -923,6 +929,25 @@ impl Render for MotionLab {
             })
             .child(div().pl(px(10.)).border_l_1().border_color(color(theme.role("border"))).child(trash_label));
 
+        let sheet = self.sheet.then(|| {
+            let panel = crate::chrome::sheet_panel("lab-sheet", crate::chrome::SheetWidth::Narrow, &theme)
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("A sheet"))
+                .child("Esc or a click outside closes it. This is the Q3 entrance.");
+            crate::chrome::sheet(
+                panel,
+                &theme,
+                self.mode,
+                cx.listener(|this, _, _, cx| {
+                    this.sheet = false;
+                    cx.notify();
+                }),
+            )
+        });
+
         div()
             .id("motion-lab")
             .role(Role::Application)
@@ -930,6 +955,7 @@ impl Render for MotionLab {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(color(theme.role("bg")))
@@ -943,6 +969,7 @@ impl Render for MotionLab {
             )
             .children(tip)
             .child(bottom)
+            .children(sheet)
     }
 }
 

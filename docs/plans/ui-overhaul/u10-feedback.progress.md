@@ -10,8 +10,8 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 | I4 Move into a folder | done | `Move` starts MoveOut on visible sources, Receive on the target folder row (list and columns) and a `Sidebar::pulse` on the target favorite. No flight or count (Q4). Purr on success through `operations::finish`. Tests: drop on a row in Full, source/target effects, favorite pulse. |
 | I5 Arrive | done | Results selected by `show_results` play Arrive when they appear; Full's open phase slides the rows below down from their old slot (`-ROW × (1 − ease_out(t))`). New folder/file, duplicate, paste/copy, undo/redo all go through it. Rename starts immediately. Sounds: Pop, Bottle, Glass (>1 s). Tests: new folder Arrive + typing, undo Arrive. |
 | I6 Refuse and errors | done | Every bell site goes through `feedback::refuse` (or `TextInput::refuse`): one beep, then Full shakes the field / Low tints its ring red / Off just beeps. Operation errors Refuse the rows that remain (trash, move, copy). The bar's message/error transient fades in on change. |
-| I7 Small entrances | in progress | Q3 = yes; sheets/palette in the lab first |
-| I8 Cursor glide | todo | needs Q2 |
+| I7 Small entrances | done (scale open Q6) | Tip rises 8 px + fades (Full) / fades (Low); bar message and error fade; a finished progress bar fades over 320 ms; sheets and the palette fade in (140/120 ms) and the lab has a mock sheet (`p`). GPUI has no element scale, so 0.98→1 is not implemented; Q6. |
+| I8 Cursor glide | in progress | Q2 = yes, Full only |
 | I9 Docs, tests, bench | todo | |
 
 ## Questions
@@ -20,6 +20,8 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 - Q3 (asked 2026-11-14): sheets and palette fade/scale → **yes**; add to the lab first, user tries it (user).
 - Q4 (asked 2026-11-14): "+1" count on a move's target → **pulse only, no count** (user).
 - Q5 (asked 2026-11-14): does `off` silence sounds → **no**, separate settings (user).
+- Q6 (asked 2026-11-14): sheets/palette 0.98→1 scale → pending (GPUI has no element transform; fade is in).
+- Q7 (asked 2026-11-14): R3 NSSound volume vs alert volume → pending (keep NSSound or AudioServices + cache copy).
 
 ## Decisions
 - Branch from `main` at `92d671e` (U9 merged at `0718a7c`; plan commit `92d671e` on `main`) — plan says so — plan.
@@ -54,6 +56,7 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 - 2026-11-14: I4: a `Move` starts MoveOut on the visible sources and Receive on the target row; the sidebar pulses the target favorite. No flight or count (Q4). Purr on success. 3 new tests.
 - 2026-11-14: I5: Arrive starts when `select_when_present` results appear; `row_shift` also handles the open phase (rows below start one row up and slide down). Rename opens at once. Pop/Bottle/Glass wired in `operations`. 2 new tests.
 - 2026-11-14: I6: `feedback::refuse`/`TextInput::refuse` replace every `play_system_bell`; the field shakes (Full) or tints red (Low); operation errors refuse the remaining rows; the bar transient fades on a new message or error.
+- 2026-11-14: I7: tip rise/fade, bar message/error fade, progress-done fade (320 ms), sheet/palette fade (140/120 ms) and a mock sheet in the lab (`p`). GPUI has no element scale: the 0.98→1 part is Q6.
 
 ## Next
-I7: small entrances — tip rise/fade (U9), progress bar fade, sheets/palette fade+scale in the lab first (Q3), then the app.
+I8: cursor glide in Full (spring k = 900, under the rows), then the lag check and bench.

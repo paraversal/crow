@@ -2,9 +2,12 @@
 //! surfaces from these, so a keycap, a tooltip and an overlay look the same
 //! everywhere.
 
+use std::time::Duration;
+
+use crow_core::motion::{self, Effective};
 use gpui::{
-    App, Context, Div, IntoElement, KeyBinding, Render, RenderOnce, Role, SharedString, Stateful,
-    StatefulInteractiveElement, Window, div, prelude::*, px,
+    Animation, AnimationExt, App, Context, Div, IntoElement, KeyBinding, Render, RenderOnce, Role, SharedString,
+    Stateful, StatefulInteractiveElement, Window, div, prelude::*, px,
 };
 
 use crate::keys::{self, KeyScope};
@@ -284,10 +287,24 @@ pub fn sheet_panel(id: impl Into<gpui::ElementId>, width: SheetWidth, theme: &cr
 /// A full-window scrim with a centered panel. A left mouse-down outside the
 /// panel runs the overlay's own cancel path (`on_dismiss`), exactly like Esc.
 pub fn sheet(
-    panel: impl IntoElement,
+    panel: impl IntoElement + gpui::Styled + 'static,
     theme: &crow_theme::Theme,
+    mode: Effective,
     on_dismiss: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    let panel: gpui::AnyElement = match mode {
+        Effective::Off => panel.into_any_element(),
+        Effective::Low => panel
+            .with_animation("sheet-open", Animation::new(Duration::from_millis(120)), |el, t| {
+                el.opacity(motion::ease_out(t))
+            })
+            .into_any_element(),
+        Effective::Full => panel
+            .with_animation("sheet-open", Animation::new(Duration::from_millis(140)), |el, t| {
+                el.opacity(motion::ease_out(t))
+            })
+            .into_any_element(),
+    };
     div()
         .id("sheet-scrim")
         .debug_selector(|| "sheet-scrim".into())
