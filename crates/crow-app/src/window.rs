@@ -3222,6 +3222,77 @@ mod tests {
     }
 
     #[gpui::test]
+    fn long_names_stay_in_their_rows(cx: &mut TestAppContext) {
+        let root = fixture("long-names");
+        for name in [
+            format!("{}.txt", "a".repeat(200)),
+            "🙂 ملف عربي.txt".to_owned(),
+            "Résumé.txt".to_owned(),
+            // APFS is normalization-insensitive: this and the NFC name are one entry.
+            "Re\u{301}sume\u{301}.txt".to_owned(),
+        ] {
+            std::fs::write(root.join(name), "x").expect("create fixture");
+        }
+        let mut deep = root.clone();
+        for level in 0..20 {
+            deep = deep.join(format!("level-{level}"));
+        }
+        std::fs::create_dir_all(&deep).expect("create fixture");
+        // The names as the listing reports them (the filesystem may normalize).
+        let names: Vec<String> = std::fs::read_dir(&root)
+            .expect("read fixture")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| !matches!(name.as_str(), "alpha" | "beta" | "notes.txt"))
+            .collect();
+        assert!(names.len() >= 4, "the edge-case names exist: {names:?}");
+        for width in [1280., 700.] {
+            let (view, mut cx) = open_sized(cx, &root, width, 800.);
+            let list = cx.debug_bounds("file-list").expect("list");
+            let selector = |text: String| Box::leak(text.into_boxed_str()) as &'static str;
+            for name in &names {
+                let row = cx.debug_bounds(selector(format!("row-{name}"))).expect("list row");
+                assert!(
+                    row.left() >= list.left() && row.right() <= list.right(),
+                    "{name:?} stays inside its row at {width}"
+                );
+                let text = cx.debug_bounds(selector(format!("row-name-{name}"))).expect("list name");
+                assert!(
+                    text.left() >= row.left() && text.right() <= row.right(),
+                    "{name:?} text stays inside its row at {width}"
+                );
+            }
+            pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+            settle(&view, &mut cx);
+            let strip = cx.debug_bounds("columns").expect("strip");
+            for name in &names {
+                let row = cx.debug_bounds(selector(format!("column-0-row-{name}"))).expect("column row");
+                assert!(
+                    row.left() >= strip.left() && row.right() <= strip.right(),
+                    "{name:?} stays inside its column at {width}"
+                );
+                let text = cx.debug_bounds(selector(format!("column-0-row-name-{name}"))).expect("column name");
+                assert!(
+                    text.left() >= row.left() && text.right() <= row.right(),
+                    "{name:?} text stays inside its column at {width}"
+                );
+            }
+            // The deep folder as a favorite and in the path bar.
+            write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&deep]));
+            let sidebar = cx.debug_bounds("sidebar").expect("sidebar");
+            let favorite = cx.debug_bounds("sidebar-0").expect("favorite row");
+            assert!(favorite.right() <= sidebar.right(), "the favorite stays inside the sidebar at {width}");
+            pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(deep.clone(), cx));
+            settle(&view, &mut cx);
+            let bar = cx.debug_bounds("path-bar").expect("bar");
+            for i in 0..12 {
+                let Some(segment) = cx.debug_bounds(selector(format!("path-segment-{i}"))) else { break };
+                assert!(segment.right() <= bar.right(), "path segment {i} stays inside the bar at {width}");
+            }
+        }
+    }
+
+    #[gpui::test]
     fn one_accent_fill_in_column_view(cx: &mut TestAppContext) {
         let root = fixture("one-fill");
         std::fs::create_dir_all(root.join("alpha/inner")).expect("create fixture");

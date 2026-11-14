@@ -7,7 +7,7 @@ Branch: `ui-u11-finish` · PR: none (do not merge; user: "DONT merge back to mai
 | I1 Start: baseline, inherited list, bench on `main` | done (23ab6e6) | U1–U10 merged; inherited table; measures re-read; 6 bench lines. |
 | I2 Reproducible window screenshots | done | `scripts/shot.sh` + `scripts/window-id.swift`; 18 shots in `target/shots/` from a neutral tree; byte-identical repeat runs; commands below. |
 | I3 Findings checklist | done | Table below: every row ok, fixed, or test-covered. |
-| I4 Visual drift sweep | done | `BAND_HEIGHT`, `field_ring` (2 px, both fields); contrast audit below; 3 tests. |
+| I4 Visual drift sweep | done | `BAND_HEIGHT`, `field_ring` (2 px, both fields); contrast audit below; 4 tests incl. `long_names_stay_in_their_rows`. |
 | I5 Preview fills the rest + folder summary (Q2) | done | `flex_1` + `min_w(300)`; folder summary with the child column's count; 2 tests. |
 | I6 Accessibility sweep | done (hand check open) | `debug_a11y_tree_json` is None in tests (verified with a spike, reverted) → hand sweep is the fallback; filter count throttled to one announcement per burst; 2 tests. |
 | I7 Docs pass | done | README: status line, Toolbar / Menus / Hints and tips / Palette / Search sections, Keys deduped, config row and state files; testing.md: automated paragraph, region guide, U11 rows, one VoiceOver row. |
@@ -39,7 +39,8 @@ Settled by plan/code, not asked: Q4 (plan wins on copy conflicts), Q6 (macOS cho
 - Q5: filter field goes from `border_1` to `border_2` with `style::field_ring`; search uses the same helper. `cursor_ring` stays 1.5 px for rows.
 - `BAND_HEIGHT = 52` in `style.rs`, used by the band, the sheet's top offset, the activity list and `PALETTE_TOP`.
 - I6: `debug_a11y_tree_json()` returns `None` in the test platform (spike printed `A11Y none`, reverted), so the a11y sweep is by hand. The filter count's aria label is throttled 300 ms past the last keystroke (visible count stays live); the search footer already announces once when it settles ("Searching" → summary).
-- I5: the preview column is `flex_1().min_w(PREVIEW_COLUMN_WIDTH)`; a folder cursor shows `preview::folder_summary` with the child column's count (no I/O) and aria "name, Folder, n items".
+- I5: the preview column is `flex_1().min_w(PREVIEW_COLUMN_WIDTH)`; a folder cursor shows `preview::folder_summary` with the child column's count (no I/O) and aria "name, Folder, n items". With no cursor (no matches, still loading) it shows the focused folder's own summary, so the strip is never empty.
+- I4 edge cases: APFS is normalization-insensitive, so an NFC name and its NFD twin are one entry; the test uses the names the listing reports. Row and name elements carry `row-name-*` / `column-{k}-row-name-*` selectors so the test measures the text, not just the row.
 
 ## Merged plans (I1)
 | Plan | PR | Merge commit |

@@ -1675,8 +1675,15 @@ impl Pane {
                             })
                             .child(row_icon(&entry, look, theme))
                             .child(
-                                div().relative().left(px(look.dx)).opacity(dim).child(
-                                    match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                                div()
+                                    .debug_selector({
+                                        let name = entry.name.clone();
+                                        move || format!("row-name-{name}")
+                                    })
+                                    .relative()
+                                    .left(px(look.dx))
+                                    .opacity(dim)
+                                    .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
                                         Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
                                         None => match ranges {
                                             Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
@@ -1690,8 +1697,7 @@ impl Pane {
                                                 .into_any_element(),
                                             _ => div().whitespace_nowrap().child(name.text.clone()).into_any_element(),
                                         },
-                                    },
-                                ),
+                                    }),
                             ),
                     );
                 row.children(cells.into_iter().enumerate().filter(|(i, _)| widths[i + 1] > 0.0).map(
@@ -1941,8 +1947,16 @@ impl Pane {
                     }))
                     .child(row_icon(&entry, look, theme))
                     .child(
-                        div().relative().left(px(look.dx)).flex_1().opacity(dim).child(
-                            match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                        div()
+                            .debug_selector({
+                                let name = entry.name.clone();
+                                move || format!("column-{k}-row-name-{name}")
+                            })
+                            .relative()
+                            .left(px(look.dx))
+                            .flex_1()
+                            .opacity(dim)
+                            .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
                                 Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
                                 None => match ranges {
                                     Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
@@ -1958,8 +1972,7 @@ impl Pane {
                                         .child(name.text.clone())
                                         .into_any_element(),
                                 },
-                            },
-                        ),
+                            }),
                     )
                     .child(div().w(px(10.)).flex_none().text_color(subtle).child(if navigable { "›" } else { "" }))
             })
