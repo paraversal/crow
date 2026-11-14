@@ -25,6 +25,7 @@ pub enum Glyph {
     ChevronDown,
     ChevronRight,
     AlertCircle,
+    Trash,
 }
 
 impl Glyph {
@@ -40,6 +41,7 @@ impl Glyph {
         Glyph::ChevronDown,
         Glyph::ChevronRight,
         Glyph::AlertCircle,
+        Glyph::Trash,
     ];
 
     pub fn path(self) -> &'static str {
@@ -54,6 +56,7 @@ impl Glyph {
             Glyph::ChevronDown => "icons/chevron-down.svg",
             Glyph::ChevronRight => "icons/chevron-right.svg",
             Glyph::AlertCircle => "icons/alert-circle.svg",
+            Glyph::Trash => "icons/trash-2.svg",
         }
     }
 }
@@ -70,6 +73,7 @@ const FILES: &[(&str, &[u8])] = &[
     ("icons/x.svg", include_bytes!("../assets/icons/x.svg")),
     ("icons/chevron-down.svg", include_bytes!("../assets/icons/chevron-down.svg")),
     ("icons/alert-circle.svg", include_bytes!("../assets/icons/alert-circle.svg")),
+    ("icons/trash-2.svg", include_bytes!("../assets/icons/trash-2.svg")),
     ("icons/LICENSE", include_bytes!("../assets/icons/LICENSE")),
 ];
 
