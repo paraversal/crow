@@ -89,6 +89,8 @@ pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
+    /// Spoken name when it differs from the placeholder.
+    aria_label: Option<SharedString>,
     /// Whether to draw the field box. Bare inputs sit inside a field the parent draws.
     chrome: bool,
     role: Role,
@@ -138,6 +140,7 @@ impl TextInput {
             focus_handle: cx.focus_handle(),
             content,
             placeholder: placeholder.into(),
+            aria_label: None,
             chrome: true,
             role: Role::TextInput,
             selected_range: end..end,
@@ -163,6 +166,12 @@ impl TextInput {
 
     pub fn with_role(mut self, role: Role) -> Self {
         self.role = role;
+        self
+    }
+
+    /// The spoken name, when the placeholder is not the right one.
+    pub fn with_aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
         self
     }
 
@@ -851,7 +860,7 @@ impl Render for TextInput {
         div()
             .id("text-input")
             .role(self.role)
-            .aria_label(self.placeholder.clone())
+            .aria_label(self.aria_label.clone().unwrap_or_else(|| self.placeholder.clone()))
             .aria_placeholder(self.placeholder.clone())
             .aria_value(self.content.clone())
             .flex()

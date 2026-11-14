@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use crow_core::{SidebarEdit, Tabs, ViewMode};
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
-    Render, Role, ScrollStrategy, SharedString, Subscription, TitlebarOptions, UniformListScrollHandle, Window,
-    WindowBounds, WindowOptions, div, img, point, prelude::*, px, size, transparent_black, uniform_list,
+    Render, Role, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
+    img, point, prelude::*, px, size, transparent_black,
 };
 
 use crate::actions::{
@@ -22,13 +22,13 @@ use crate::chrome::{self, Keycap, KeycapWeight, SheetWidth, with_action_tooltip,
 use crate::icons::{self, Glyph};
 use crate::keys::{self, KeyScope};
 use crate::operations::{self, Clipboard, Operations};
-use crate::palette::{self, Item};
+use crate::palette::{self, Item, Row, Source};
 use crate::pane::Pane;
 use crate::pane::PaneEvent;
 use crate::preview;
 use crate::search::{SearchEvent, SearchView};
 use crate::sidebar::{Sidebar, SidebarEvent};
-use crate::style::{active_selection, color, icon, ui_font};
+use crate::style::{active_selection, color, highlight_text, icon, truncate_middle_with_ranges, ui_font};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::{self, Ui, reload_theme};
 use crow_fs::Entry;
@@ -114,7 +114,7 @@ struct Palette {
     here: String,
     cursor: usize,
     folders: Vec<palette::FolderCandidate>,
-    scroll: UniformListScrollHandle,
+    scroll: ScrollHandle,
     _subscription: Subscription,
 }
 
@@ -127,6 +127,75 @@ impl Palette {
             Item::Folder { .. } => None,
         }
     }
+}
+
+/// Palette layout, in points. U10 tunes these against the assembled boards.
+const PALETTE_TOP: f32 = 52.;
+const PALETTE_WIDTH: f32 = 620.;
+const PALETTE_MARGIN: f32 = 16.;
+const PALETTE_BOTTOM: f32 = 24.;
+const PALETTE_INPUT: f32 = 50.;
+const PALETTE_FOOTER: f32 = 34.;
+const PALETTE_DIVIDER: f32 = 1.;
+const PALETTE_LIST_PAD: f32 = 6.;
+const PALETTE_FOLDER_ROW: f32 = 44.;
+const PALETTE_COMMAND_ROW: f32 = 40.;
+const PALETTE_HEADER_ROW: f32 = 26.;
+const PALETTE_EMPTY_ROW: f32 = 44.;
+const PALETTE_MAX_LIST: f32 = 440.;
+/// The path line's width inside a folder row: the sheet minus list padding, row
+/// padding, the icon, its gap, the age column and one more gap.
+const PALETTE_PATH_WIDTH: f32 = PALETTE_WIDTH - 2. * PALETTE_LIST_PAD - 20. - 22. - 12. - 70. - 12.;
+
+fn palette_item_height(item: &Item) -> f32 {
+    match item {
+        Item::Command(_) => PALETTE_COMMAND_ROW,
+        Item::Folder { .. } => PALETTE_FOLDER_ROW,
+    }
+}
+
+/// The list's content height, padding included.
+fn palette_content_height(listing: &palette::Listing) -> f32 {
+    if listing.items.is_empty() {
+        return PALETTE_EMPTY_ROW;
+    }
+    let rows: f32 = listing
+        .rows
+        .iter()
+        .map(|row| match row {
+            Row::Header(_) => PALETTE_HEADER_ROW,
+            Row::Item(i) => palette_item_height(&listing.items[*i]),
+        })
+        .sum();
+    rows + 2. * PALETTE_LIST_PAD
+}
+
+fn palette_list_height(window: &Window, content: f32) -> f32 {
+    let available = f32::from(window.viewport_size().height)
+        - PALETTE_TOP
+        - PALETTE_INPUT
+        - PALETTE_FOOTER
+        - 2. * PALETTE_DIVIDER
+        - PALETTE_BOTTOM;
+    content.min(available.clamp(PALETTE_FOLDER_ROW, PALETTE_MAX_LIST))
+}
+
+/// Where the cursor's row starts in the list, and how tall it is.
+fn palette_row_y(listing: &palette::Listing, cursor: usize) -> (f32, f32) {
+    let mut y = PALETTE_LIST_PAD;
+    for row in &listing.rows {
+        match row {
+            Row::Header(_) => y += PALETTE_HEADER_ROW,
+            Row::Item(i) => {
+                let height = palette_item_height(&listing.items[*i]);
+                if *i == cursor {
+                    return (y, height);
+                }
+                y += height;
+            }
+        }
+    }
+    (y, PALETTE_FOLDER_ROW)
 }
 
 impl CrowWindow {
@@ -1776,7 +1845,9 @@ impl CrowWindow {
             palette::folder_candidates(favorites, recents, subfolders, &home, |path| ui.recent.last_visit(path))
         };
         let listing = palette::listing(query, &folders, &here);
-        let input = cx.new(|cx| TextInput::new(query, "Go to Folder or > for Commands", cx));
+        let input = cx.new(|cx| {
+            TextInput::new(query, "Go to a folder, or > for commands", cx).bare().with_aria_label("Go to folder")
+        });
         let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
             TextInputEvent::Changed => {
                 let query = input.read(cx).text().to_owned();
@@ -1794,7 +1865,7 @@ impl CrowWindow {
             here,
             cursor: 0,
             folders,
-            scroll: UniformListScrollHandle::new(),
+            scroll: ScrollHandle::new(),
             _subscription: subscription,
         });
         cx.notify();
@@ -1804,15 +1875,29 @@ impl CrowWindow {
         let Some(palette) = &mut self.palette else { return };
         palette.listing = palette::listing(query, &palette.folders, &palette.here);
         palette.cursor = 0;
-        palette.scroll.scroll_to_item(0, ScrollStrategy::Center);
+        palette.scroll.set_offset(point(px(0.), px(0.)));
         cx.notify();
     }
 
-    fn move_palette(&mut self, delta: isize, cx: &mut Context<Self>) {
+    fn move_palette(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(palette) = &mut self.palette else { return };
-        let last = palette.listing.items.len().saturating_sub(1);
+        let Some(last) = palette.listing.items.len().checked_sub(1) else { return };
         palette.cursor = palette.cursor.saturating_add_signed(delta).min(last);
-        palette.scroll.scroll_to_item(palette.cursor, ScrollStrategy::Center);
+        let content = palette_content_height(&palette.listing);
+        let visible = palette_list_height(window, content);
+        let (y, height) = palette_row_y(&palette.listing, palette.cursor);
+        let max = (content - visible).max(0.);
+        let current = f32::from(palette.scroll.offset().y);
+        let mut target = current;
+        if y < -current {
+            target = -y;
+        } else if y + height > -current + visible {
+            target = -(y + height - visible);
+        }
+        let target = target.clamp(-max, 0.);
+        if target != current {
+            palette.scroll.set_offset(point(px(0.), px(target)));
+        }
         cx.notify();
     }
 
@@ -1886,126 +1971,342 @@ impl CrowWindow {
         }
     }
 
-    fn render_palette(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let (input, scroll, count) = {
-            let palette = self.palette.as_ref()?;
-            (palette.input.clone(), palette.scroll.clone(), palette.listing.items.len())
-        };
+    fn render_palette(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let palette = self.palette.as_ref()?;
+        let input = palette.input.clone();
+        let scroll = palette.scroll.clone();
+        let count = palette.listing.count.clone();
+        let query = input.read(cx).text().to_owned();
+        let commands = query.starts_with('>');
+        let content = palette_content_height(&palette.listing);
+        let height = palette_list_height(window, content);
+        let width = (f32::from(window.viewport_size().width) - 2. * PALETTE_MARGIN).min(PALETTE_WIDTH);
+        let rows = self.render_palette_rows(window, cx);
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
-        let muted = color(theme.role("fg-muted"));
         let mut context = "Sheet Palette".to_owned();
         if vim {
             context.push_str(" vim");
         }
-        let list: gpui::AnyElement = if count == 0 {
+        let muted = color(theme.role("fg-muted"));
+        let border = color(theme.role("surface-raised"));
+        let pair = |cap: Option<Keycap>, label: &'static str| {
             div()
-                .id("palette-empty")
-                .p_2()
-                .role(Role::Label)
-                .aria_label("No matches")
-                .child("No matches")
-                .into_any_element()
-        } else {
-            let height = (count.min(14) as f32) * 26.0;
-            div()
-                .id("palette-list")
-                .role(Role::ListBox)
-                .aria_label("Commands and folders")
-                .h(px(height))
                 .flex()
-                .flex_col()
-                .child(
-                    uniform_list("palette-items", count, cx.processor(Self::render_palette_rows))
-                        .track_scroll(&scroll)
-                        .flex_1(),
-                )
+                .items_center()
+                .gap(px(6.))
+                .children(cap)
+                .child(div().text_size(px(12.)).text_color(muted).child(label))
                 .into_any_element()
         };
-        let run = keys::text(&crate::text_input::Confirm, KeyScope::Palette, cx)
-            .map_or_else(|| "Return".to_owned(), |key| key.to_string());
-        let new_tab = keys::text(&PaletteOpenInTab, KeyScope::Palette, cx)
-            .map_or_else(|| "Return".to_owned(), |key| key.to_string());
-        let footer = format!("> commands · {run} runs · {new_tab} opens a folder in a new tab");
+        let confirm = Keycap::for_action(&crate::text_input::Confirm, KeyScope::Palette, KeycapWeight::Outline, cx);
+        let footer: gpui::AnyElement = if commands {
+            div()
+                .h(px(PALETTE_FOOTER))
+                .px(px(16.))
+                .flex()
+                .items_center()
+                .gap(px(16.))
+                .border_t_1()
+                .border_color(border)
+                .child(pair(confirm, "run"))
+                .child(pair(
+                    Keycap::for_action(&crate::text_input::Backspace, KeyScope::Palette, KeycapWeight::Outline, cx),
+                    "folders",
+                ))
+                .into_any_element()
+        } else {
+            div()
+                .h(px(PALETTE_FOOTER))
+                .px(px(16.))
+                .flex()
+                .items_center()
+                .gap(px(16.))
+                .border_t_1()
+                .border_color(border)
+                .child(pair(confirm, "go"))
+                .child(pair(
+                    Keycap::for_action(&PaletteOpenInTab, KeyScope::Palette, KeycapWeight::Outline, cx),
+                    "new tab",
+                ))
+                .child(pair(
+                    Keycap::for_action(&crate::text_input::Complete, KeyScope::Palette, KeycapWeight::Outline, cx),
+                    "complete",
+                ))
+                .child(div().flex_1())
+                .child(div().text_size(px(12.)).text_color(muted).child("> commands"))
+                .into_any_element()
+        };
+        let input_row = div()
+            .h(px(PALETTE_INPUT))
+            .px(px(16.))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .border_b_1()
+            .border_color(border)
+            .child(icons::glyph(Glyph::GoTo, 16., "fg-muted", &theme))
+            .child(div().flex_1().min_w_0().text_size(px(15.)).child(input))
+            .child(
+                div()
+                    .id("palette-count")
+                    .role(Role::Status)
+                    .aria_label(count.to_string())
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .child(count),
+            );
+        let list = div()
+            .id("palette-list")
+            .role(Role::ListBox)
+            .aria_label(if commands { "Commands" } else { "Places" })
+            .h(px(height))
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
+            .py(px(PALETTE_LIST_PAD))
+            .children(rows);
         Some(chrome::sheet(
             chrome::sheet_panel("palette", SheetWidth::Wide, &theme)
-                .aria_label("Command Palette")
+                .w(px(width))
+                .aria_label("Go to or Command Palette")
                 // keys::context_stack (KeyScope::Palette/ThemePicker) mirrors this.
                 .key_context(context.as_str())
-                .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_palette(-1, cx)))
-                .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_palette(1, cx)))
+                .on_action(cx.listener(|this, _: &MoveUp, window, cx| this.move_palette(-1, window, cx)))
+                .on_action(cx.listener(|this, _: &MoveDown, window, cx| this.move_palette(1, window, cx)))
                 .on_action(cx.listener(Self::palette_open_in_tab))
-                .p_3()
                 .flex()
                 .flex_col()
-                .gap_2()
-                .child(input)
+                .child(input_row)
                 .child(list)
-                .child(div().text_size(px(12.)).text_color(muted).child(footer)),
+                .child(footer),
             &theme,
             cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
         ))
     }
 
-    fn render_palette_rows(
-        &mut self,
-        range: std::ops::Range<usize>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<impl IntoElement + use<>> {
+    fn render_palette_rows(&self, window: &mut Window, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let Some(palette) = self.palette.as_ref() else { return Vec::new() };
-        let ui = cx.global::<Ui>();
-        let theme = &ui.theme;
-        let (fg, muted) = (color(theme.role("fg")), color(theme.role("fg-muted")));
-        let (cursor, count) = (palette.cursor, palette.listing.items.len());
-        range
-            .filter_map(|i| {
-                let item = palette.listing.items.get(i)?;
-                let selected = i == cursor;
-                let keys = palette.row_keys(i, cx);
-                let (icon_path, label) = match item {
-                    Item::Command(command) => (None, command.label.to_owned()),
-                    Item::Folder { path, label, .. } => (Some(path.clone()), label.clone()),
-                };
-                let row = div()
-                    .id(("palette-row", i))
-                    .role(Role::ListBoxOption)
-                    .aria_label(label.clone())
-                    .aria_position_in_set(i + 1)
-                    .aria_size_of_set(count)
-                    .aria_selected(selected)
-                    .when(selected, |row| row.aria_active_descendant())
-                    .h(px(26.))
-                    .px_2()
-                    .rounded_md()
+        let theme = cx.global::<Ui>().theme.clone();
+        let muted = color(theme.role("fg-muted"));
+        if palette.listing.items.is_empty() {
+            let query = palette.input.read(cx).text().to_owned();
+            let text: SharedString = if query.starts_with('>') {
+                format!("No commands match \"{}\"", query.trim_start_matches('>')).into()
+            } else if query.is_empty() {
+                "Type a folder name, or > for commands".into()
+            } else {
+                format!("No folders match \"{query}\"").into()
+            };
+            return vec![
+                div()
+                    .id("palette-empty")
+                    .debug_selector(|| "palette-empty".into())
+                    .h(px(PALETTE_EMPTY_ROW))
+                    .px(px(10.))
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .when(selected, |row| row.bg(active_selection(theme)))
-                    .debug_selector(|| format!("palette-row-{i}"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(palette) = &mut this.palette {
-                            palette.cursor = i;
-                        }
-                        this.confirm_palette(false, window, cx);
-                    }))
-                    .child(div().size(px(16.)).flex_none().children(
-                        icon_path.and_then(|path| icon(&path, true, 16)).map(|image| img(image).size(px(16.))),
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(fg)
-                            .child(label),
-                    )
-                    .child(div().text_size(px(11.)).text_color(muted).children(keys));
-                Some(row.into_any_element())
+                    .role(Role::Label)
+                    .aria_label(text.clone())
+                    .text_size(px(13.))
+                    .text_color(muted)
+                    .child(text)
+                    .into_any_element(),
+            ];
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let mut sections: Vec<(SharedString, Vec<gpui::AnyElement>)> = Vec::new();
+        let mut headers = 0usize;
+        for row in &palette.listing.rows {
+            match row {
+                Row::Header(text) => {
+                    let label = text.clone();
+                    let k = headers;
+                    let header = div()
+                        .id(("palette-header", k))
+                        .debug_selector(|| format!("palette-header-{k}"))
+                        .h(px(PALETTE_HEADER_ROW))
+                        .px(px(10.))
+                        .pt(px(8.))
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(muted)
+                        .child(div().id(("palette-header-label", k)).role(Role::Label).child(text.clone()))
+                        .into_any_element();
+                    headers += 1;
+                    sections.push((label, vec![header]));
+                }
+                Row::Item(i) => {
+                    let selected = *i == palette.cursor;
+                    let row = match &palette.listing.items[*i] {
+                        Item::Command(_) => self.render_palette_command_row(&palette.listing, *i, selected, &theme, cx),
+                        Item::Folder { .. } => self.render_palette_folder_row(
+                            &palette.listing,
+                            *i,
+                            &palette.here,
+                            selected,
+                            &theme,
+                            now,
+                            window,
+                            cx,
+                        ),
+                    };
+                    match sections.last_mut() {
+                        Some((_, rows)) => rows.push(row),
+                        None => sections.push(("Places".into(), vec![row])),
+                    }
+                }
+            }
+        }
+        sections
+            .into_iter()
+            .enumerate()
+            .map(|(k, (label, rows))| {
+                div()
+                    .id(("palette-section", k))
+                    .role(Role::Group)
+                    .aria_label(label)
+                    .flex()
+                    .flex_col()
+                    .children(rows)
+                    .into_any_element()
             })
             .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_palette_folder_row(
+        &self,
+        listing: &palette::Listing,
+        i: usize,
+        here: &str,
+        selected: bool,
+        theme: &crow_theme::Theme,
+        now: u64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Item::Folder { path, label, name_start, source, last_visit, matched, .. } = &listing.items[i] else {
+            return div().into_any_element();
+        };
+        let name = label[*name_start..].to_owned();
+        let (name_text, name_ranges) = (name.clone(), listing.items[i].name_ranges());
+        let (path_text, path_ranges) =
+            truncate_middle_with_ranges(label, matched, px(PALETTE_PATH_WIDTH), px(12.), window);
+        let section = palette::section_header(*source, here);
+        let age = if *source == Source::Recent {
+            last_visit.as_ref().map(|then| palette::relative_age(now, *then))
+        } else {
+            None
+        };
+        let aria = match &age {
+            Some(age) => format!("{name}, {label}, {section}, visited {age}"),
+            None => format!("{name}, {label}, {section}"),
+        };
+        let muted = color(theme.role("fg-muted"));
+        let hover = color(theme.role("surface-raised"));
+        div()
+            .id(("palette-row", i))
+            .debug_selector(|| format!("palette-row-{i}"))
+            .role(Role::ListBoxOption)
+            .aria_label(aria)
+            .aria_position_in_set(i + 1)
+            .aria_size_of_set(listing.items.len())
+            .aria_selected(selected)
+            .when(selected, |row| row.aria_active_descendant())
+            .h(px(PALETTE_FOLDER_ROW))
+            .px(px(10.))
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .when(selected, |row| row.bg(active_selection(theme)))
+            .when(!selected, |row| row.hover(move |style| style.bg(hover)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(palette) = &mut this.palette {
+                    palette.cursor = i;
+                }
+                this.confirm_palette(false, window, cx);
+            }))
+            .child(div().size(px(22.)).flex_none().children(icon(path, true, 22).map(|image| img(image).size(px(22.)))))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .child(div().text_size(px(14.)).overflow_hidden().whitespace_nowrap().child(highlight_text(
+                        name_text,
+                        &name_ranges,
+                        theme,
+                        selected,
+                    )))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(muted)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(highlight_text(path_text, &path_ranges, theme, selected)),
+                    ),
+            )
+            .children(age.map(|age| div().text_size(px(12.)).text_color(muted).child(age)))
+            .into_any_element()
+    }
+
+    fn render_palette_command_row(
+        &self,
+        listing: &palette::Listing,
+        i: usize,
+        selected: bool,
+        theme: &crow_theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Item::Command(command) = &listing.items[i] else { return div().into_any_element() };
+        let binding = keys::binding_for(command.action, command.scope, cx);
+        let mut aria = command.label.to_owned();
+        if let Some(slot) = command.menu {
+            aria.push_str(&format!(", {} menu", slot.menu.title()));
+        }
+        let muted = color(theme.role("fg-muted"));
+        let hover = color(theme.role("surface-raised"));
+        div()
+            .id(("palette-row", i))
+            .debug_selector(|| format!("palette-row-{i}"))
+            .role(Role::ListBoxOption)
+            .aria_label(aria)
+            .when_some(binding.as_ref().map(keys::chord_text), |row, shortcut| row.aria_keyshortcuts(shortcut))
+            .aria_position_in_set(i + 1)
+            .aria_size_of_set(listing.items.len())
+            .aria_selected(selected)
+            .when(selected, |row| row.aria_active_descendant())
+            .h(px(PALETTE_COMMAND_ROW))
+            .px(px(10.))
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .when(selected, |row| row.bg(active_selection(theme)))
+            .when(!selected, |row| row.hover(move |style| style.bg(hover)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(palette) = &mut this.palette {
+                    palette.cursor = i;
+                }
+                this.confirm_palette(false, window, cx);
+            }))
+            .child(
+                div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_size(px(14.)).child(command.label),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .children(self.palette.as_ref().and_then(|palette| palette.row_keys(i, cx))),
+            )
+            .into_any_element()
     }
 
     fn render_picker(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -2164,7 +2465,7 @@ impl Render for CrowWindow {
         let activity = self.show_activity.then(|| self.render_activity(cx));
         let why = self.render_why(cx);
         let picker = self.render_picker(cx);
-        let palette = self.render_palette(cx);
+        let palette = self.render_palette(window, cx);
         let center: gpui::AnyElement = match &self.search {
             Some(search) => div().flex_1().min_w_0().h_full().child(search.clone()).into_any_element(),
             None => div().flex_1().min_w_0().h_full().child(self.pane().clone()).into_any_element(),
@@ -2246,6 +2547,27 @@ impl Render for CrowWindow {
             .children(why)
             .children(picker)
             .children(palette)
+    }
+}
+
+#[cfg(test)]
+impl CrowWindow {
+    /// The palette's rows for tests: "# Header", a folder's abbreviated path or a
+    /// command's label.
+    fn palette_rows(&self) -> Vec<String> {
+        let Some(palette) = self.palette.as_ref() else { return Vec::new() };
+        palette
+            .listing
+            .rows
+            .iter()
+            .map(|row| match row {
+                Row::Header(text) => format!("# {text}"),
+                Row::Item(i) => match &palette.listing.items[*i] {
+                    Item::Folder { label, .. } => label.clone(),
+                    Item::Command(command) => command.label.to_owned(),
+                },
+            })
+            .collect()
     }
 }
 
@@ -4414,12 +4736,102 @@ mod tests {
         settle(&view, &mut cx);
         let cursor = |cx: &VisualTestContext| view.read_with(cx, |w, _| w.palette.as_ref().map(|p| p.cursor));
         assert_eq!(cursor(&cx), Some(0));
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        assert!(rows[2].starts_with("# "), "a section header sits after the first item: {rows:?}");
         cx.simulate_keystrokes("j");
-        assert_eq!(cursor(&cx), Some(1), "j moves down");
+        assert_eq!(cursor(&cx), Some(1), "j moves down across the header");
         cx.simulate_keystrokes("k");
         assert_eq!(cursor(&cx), Some(0), "k moves up");
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(&cx, |w, _| w.palette.is_none()));
+    }
+
+    #[gpui::test]
+    fn palette_lists_sections_in_order(cx: &mut TestAppContext) {
+        let root = fixture("palette-sections");
+        // gamma stays in "In": alpha becomes Recent and beta is a favorite.
+        std::fs::create_dir_all(root.join("gamma")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("beta")]));
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-up");
+        settle(&view, &mut cx);
+
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        assert_eq!(rows.first().map(String::as_str), Some("# Recent"), "{rows:?}");
+        let favorites = rows.iter().position(|row| row == "# Favorites").expect("a Favorites header");
+        let here = rows.iter().position(|row| row.starts_with("# In ")).expect("an In header");
+        assert!(favorites < here, "Recent, then Favorites, then In: {rows:?}");
+        assert_eq!(rows[here], format!("# In {}", root.file_name().unwrap().to_string_lossy()));
+        assert!(rows[1..favorites].iter().any(|row| row.ends_with("/alpha")), "alpha is Recent: {rows:?}");
+        assert_eq!(rows.iter().filter(|row| row.ends_with("/beta")).count(), 1, "beta once only: {rows:?}");
+        assert!(rows[favorites + 1..here].iter().any(|row| row.ends_with("/beta")), "under Favorites: {rows:?}");
+        assert!(rows[here + 1..].iter().any(|row| row.ends_with("/gamma")), "gamma is In: {rows:?}");
+    }
+
+    #[gpui::test]
+    fn palette_twins_get_distinct_labels(cx: &mut TestAppContext) {
+        let root = fixture("palette-match");
+        for side in ["a", "b"] {
+            std::fs::create_dir_all(root.join(side).join("twin")).expect("create fixture");
+        }
+        let (view, mut cx) = open(cx, &root);
+        for side in ["a", "b"] {
+            let twin = root.join(side).join("twin");
+            pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(twin, cx));
+            settle(&view, &mut cx);
+        }
+
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input("twin");
+        settle(&view, &mut cx);
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        assert_eq!(rows.len(), 2, "two folders named twin: {rows:?}");
+        assert!(rows[0].ends_with("/a/twin") && rows[1].ends_with("/b/twin"), "the paths tell them apart: {rows:?}");
+    }
+
+    #[gpui::test]
+    fn palette_count_says_places(cx: &mut TestAppContext) {
+        let root = fixture("palette-count");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input("alpha");
+        settle(&view, &mut cx);
+        let (rows, count) =
+            view.read_with(&cx, |w, _| (w.palette_rows(), w.palette.as_ref().map(|p| p.listing.count.to_string())));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(count.as_deref(), Some("1 place"));
+    }
+
+    #[gpui::test]
+    fn palette_cursor_skips_headers(cx: &mut TestAppContext) {
+        let root = fixture("palette-cursor");
+        std::fs::create_dir_all(root.join("gamma")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("beta")]));
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-up");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+
+        // Recent holds root and alpha, so item 2 is the first favorite.
+        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("down");
+        let cursor = view.read_with(&cx, |w, _| {
+            let palette = w.palette.as_ref()?;
+            match palette.listing.items.get(palette.cursor)? {
+                Item::Folder { label, .. } => Some(label.clone()),
+                Item::Command(_) => None,
+            }
+        });
+        assert!(cursor.as_deref().is_some_and(|label| label.ends_with("/beta")), "down crossed the header: {cursor:?}");
+        cx.simulate_keystrokes("up up up");
+        assert_eq!(view.read_with(&cx, |w, _| w.palette.as_ref().map(|p| p.cursor)), Some(0), "up at the top stays");
     }
 
     #[gpui::test]

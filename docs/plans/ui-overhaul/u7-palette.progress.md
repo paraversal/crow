@@ -12,7 +12,7 @@ Branch: ui-u7-palette · PR: none · Last updated: 2026-11-14
 | --- | --- | --- |
 | I1 Match ranges from the fuzzy matcher | in progress | Implementation shipped by U6; add byte-range + score tests |
 | I2 Folder model | done | `Source`, `name_start`, `last_visit`, `Listing`/`Row`, `folder_listing`, `relative_age`; tests in palette.rs + `Recent::last_visit` |
-| I3 Folder mode on the Sheet | todo | |
+| I3 Folder mode on the Sheet | done | U1 Sheet (Wide, scrim, scrim click), 50 px input row with Go to glyph + count (`Role::Status`), scrolling div of `Role::Group` sections, 44 px two-line rows (name + middle-truncated path, accent matches), Recent ages, keycap footer; `truncate_middle_with_ranges` and `TextInput::with_aria_label` added; `palette_rows` helper + 4 tests |
 | I4 Command mode | todo | |
 | I5 ⇥ completion and path mode | todo | |
 | I6 Recently used commands | todo | |
@@ -42,4 +42,4 @@ Branch: ui-u7-palette · PR: none · Last updated: 2026-11-14
 - 2026-11-14: I1 done (U6 already implemented `indices`; added byte-range + score tests). I2 done: palette model replaced `items()` with `listing()`; window holds a `Listing` but still draws the old 26 px rows. Found the section-order/ranking conflict (asked; user chose flat typed queries).
 
 ## Next
-I3: folder mode on the Sheet (Wide, 50 px input row, sections, 44 px two-line rows, footer keycaps).
+I4: command mode (token, menu column, chip, keycaps, recent commands shell).

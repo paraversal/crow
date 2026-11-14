@@ -643,7 +643,8 @@ pub fn relative_age(now: u64, then: u64) -> String {
     }
 }
 
-fn header(source: Source, here: &str) -> SharedString {
+/// The section title: "Recent", "Favorites" or "In <here>".
+pub fn section_header(source: Source, here: &str) -> SharedString {
     match source {
         Source::Recent => "Recent".into(),
         Source::Favorite => "Favorites".into(),
@@ -691,7 +692,7 @@ pub fn folder_listing(query: &str, folders: &[FolderCandidate], here: &str) -> L
                 if group.is_empty() {
                     continue;
                 }
-                rows.push(Row::Header(header(source, here)));
+                rows.push(Row::Header(section_header(source, here)));
                 for folder in group {
                     rows.push(Row::Item(items.len()));
                     items.push(folder_item(folder, Vec::new()));
