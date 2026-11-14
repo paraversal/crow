@@ -1,5 +1,5 @@
 # u11-finish progress
-Branch: `ui-u11-finish` · PR: none (do not merge; user: "DONT merge back to main") · Last updated: 2026-11-14 · State: In critique
+Branch: `ui-u11-finish` · PR: https://github.com/paraversal/file-crow/pull/23 (do not merge) · Last updated: 2026-11-14 · State: PR open
 
 ## Status
 | Item | State | Notes |
