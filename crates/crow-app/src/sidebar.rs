@@ -251,32 +251,93 @@ impl Sidebar {
     fn looks(&self, rows: &[Row], focused: bool, ui: &Ui) -> Vec<RowLook> {
         self.prune_names(rows);
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
-        let mut looks = Vec::new();
-        let mut index = 0;
-        for row in rows {
-            if matches!(row, Row::Header(..)) {
-                continue;
-            }
-            let i = index;
-            index += 1;
-            let label = match row {
-                Row::Header(..) => unreachable!(),
+        let selectable: Vec<&Row> = rows.iter().filter(|row| !matches!(row, Row::Header(..))).collect();
+        let labels: Vec<String> = selectable
+            .iter()
+            .map(|row| match row {
                 Row::Favorite(_, f) => f.name.clone().unwrap_or_else(|| self.display_name(&f.path)),
                 Row::Recent(path) => self.display_name(path),
                 Row::Volume(v) => v.name.clone(),
+                Row::Header(..) => unreachable!(),
+            })
+            .collect();
+
+        // Twins are compared across Favorites and Recent, never volumes.
+        let mut ancestors_for: Vec<Option<Vec<String>>> = Vec::with_capacity(selectable.len());
+        for row in &selectable {
+            let ancestors = match row {
+                Row::Favorite(..) | Row::Recent(..) => {
+                    let mut names = self.components(row.path().expect("a row with a path")).to_vec();
+                    names.reverse();
+                    Some(names)
+                }
+                _ => None,
             };
-            let spoken = match row {
-                Row::Volume(v) => format!(
-                    "{label}, {} free of {}{}",
-                    human_bytes(v.free_bytes),
-                    human_bytes(v.total_bytes),
-                    if v.ejectable { ", ejectable" } else { "" }
-                ),
-                Row::Favorite(_, f) => match f.key {
-                    Some(k) if vim => format!("{label}, mark {k}"),
-                    _ => label.clone(),
-                },
-                _ => label.clone(),
+            ancestors_for.push(ancestors);
+        }
+        let mut inputs = Vec::new();
+        let mut input_rows = Vec::new();
+        for (i, row) in selectable.iter().enumerate() {
+            if let Some(ancestors) = &ancestors_for[i] {
+                inputs.push(crow_core::TwinInput {
+                    label: &labels[i],
+                    path: row.path().expect("a row with a path"),
+                    ancestors,
+                });
+                input_rows.push(i);
+            }
+        }
+        let mut hint_by_row: Vec<Option<(String, String)>> = vec![None; selectable.len()];
+        for (n, hint) in crow_core::twin_hints(&inputs).into_iter().enumerate() {
+            let Some(distance) = hint else { continue };
+            let input = &inputs[n];
+            let (shown, name) = if distance == usize::MAX {
+                let parent = input.path.parent().unwrap_or(input.path);
+                let text = crow_core::abbreviate_home(parent, &ui.home);
+                (text.clone(), text)
+            } else {
+                let name =
+                    input.ancestors.get(distance).or_else(|| input.ancestors.last()).cloned().unwrap_or_default();
+                let shown = if input.path.ancestors().nth(distance) == Some(ui.home.as_path()) {
+                    "~".to_owned()
+                } else {
+                    name.clone()
+                };
+                (shown, name)
+            };
+            hint_by_row[input_rows[n]] = Some((shown, name));
+        }
+
+        let mut looks = Vec::with_capacity(selectable.len());
+        for (i, row) in selectable.into_iter().enumerate() {
+            let label = labels[i].clone();
+            let (hint, spoken) = match &hint_by_row[i] {
+                Some((shown, name)) => {
+                    let spoken = match row {
+                        Row::Favorite(_, f) => match f.key {
+                            Some(k) if vim => format!("{label}, in {name}, mark {k}"),
+                            _ => format!("{label}, in {name}"),
+                        },
+                        _ => format!("{label}, in {name}"),
+                    };
+                    (Some(shown.clone()), spoken)
+                }
+                None => {
+                    let spoken = match row {
+                        Row::Volume(v) => format!(
+                            "{label}, {} free of {}{}",
+                            human_bytes(v.free_bytes),
+                            human_bytes(v.total_bytes),
+                            if v.ejectable { ", ejectable" } else { "" }
+                        ),
+                        Row::Favorite(_, f) => match f.key {
+                            Some(k) if vim => format!("{label}, mark {k}"),
+                            _ => label.clone(),
+                        },
+                        _ => label.clone(),
+                    };
+                    (None, spoken)
+                }
             };
             let bar = match row {
                 Row::Volume(v) if v.total_bytes > 0 => {
@@ -287,7 +348,7 @@ impl Sidebar {
             };
             looks.push(RowLook {
                 label,
-                hint: None,
+                hint,
                 right: None,
                 spoken,
                 current: row.path().is_some_and(|path| path == self.current),
@@ -531,6 +592,7 @@ impl Render for Sidebar {
         let selectable_count = rows.iter().filter(|r| !matches!(r, Row::Header(..))).count();
         self.cursor = self.cursor.min(selectable_count.saturating_sub(1));
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
+        let subtle = theme.role("fg-subtle");
         let drop_bg = drop_target(&theme);
 
         // A drag's target comes from the pointer and the last layout, so the
@@ -693,17 +755,42 @@ impl Render for Sidebar {
                     div().w(px(16.)).children(icon(&path, true, 16).map(|i| img(i).size(px(16.)))).into_any_element()
                 }
             };
-            let mut line = div().flex().items_center().gap_2().h(px(20.)).child(icon_element).child(
+            let mut line = div().flex().items_center().h(px(20.)).child(div().mr(px(8.)).child(icon_element)).child(
                 div()
-                    .flex_1()
+                    .flex_shrink_1()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(13.))
                     .text_color(color(fg))
                     .child(look.label.clone()),
             );
+            match &look.hint {
+                Some(hint) => {
+                    line = line.child(
+                        div()
+                            .flex_1()
+                            .flex_basis(px(0.))
+                            .min_w_0()
+                            .ml(px(6.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(12.))
+                            .text_color(color(subtle))
+                            .child(hint.clone()),
+                    );
+                }
+                None => line = line.child(div().flex_1()),
+            }
             if let (Some(tint), Row::Favorite(_, Favorite { icon: None, .. })) = (tint, &row) {
-                line = line.child(div().size(px(7.)).rounded_full().bg(color(tint)));
+                line = line.child(div().ml(px(8.)).size(px(7.)).rounded_full().bg(color(tint)));
+            }
+            if let Some(right) = &look.right {
+                line = line.child(
+                    div().flex_shrink_0().ml(px(6.)).text_size(px(11.)).text_color(color(subtle)).child(right.clone()),
+                );
             }
             if let Row::Volume(v) = &row
                 && v.ejectable
@@ -712,6 +799,7 @@ impl Render for Sidebar {
                 line = line.child(
                     div()
                         .id(SharedString::from(format!("eject-{i}")))
+                        .ml(px(8.))
                         .role(Role::Button)
                         .aria_label(format!("Eject {}", v.name))
                         .px_1()

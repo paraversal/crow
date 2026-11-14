@@ -137,6 +137,85 @@ impl SidebarConfig {
 /// Where a favorite is: group index, item index.
 pub type Slot = (usize, usize);
 
+/// A sidebar row as the twin comparison sees it: what it shows, where it is, and
+/// its ancestors' display names nearest first (ending with the volume name).
+pub struct TwinInput<'a> {
+    pub label: &'a str,
+    pub path: &'a Path,
+    pub ancestors: &'a [String],
+}
+
+/// For each row, the distance of the ancestor that tells it apart from the other
+/// rows with the same shown label. `None` when it is not a twin; `Some(usize::MAX)`
+/// when no ancestor separates it (the caller falls back to the parent's path).
+///
+/// Labels compare case-insensitively. The same path twice is one place: both copies
+/// get the same hint, and a path is never a twin of itself.
+pub fn twin_hints(rows: &[TwinInput]) -> Vec<Option<usize>> {
+    let mut hints = vec![None; rows.len()];
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let label = row.label.to_lowercase();
+        match groups.iter_mut().find(|(name, _)| *name == label) {
+            Some((_, group)) => group.push(i),
+            None => groups.push((label, vec![i])),
+        }
+    }
+    for (_, group) in groups {
+        let mut paths: Vec<&Path> = Vec::new();
+        let mut first_row: Vec<usize> = Vec::new();
+        let mut unique_of: Vec<usize> = Vec::with_capacity(group.len());
+        for &row in &group {
+            match paths.iter().position(|path| *path == rows[row].path) {
+                Some(unique) => unique_of.push(unique),
+                None => {
+                    unique_of.push(paths.len());
+                    paths.push(rows[row].path);
+                    first_row.push(row);
+                }
+            }
+        }
+        if paths.len() < 2 {
+            continue;
+        }
+        let depth = first_row.iter().map(|&row| rows[row].ancestors.len()).max().unwrap_or(0);
+        let mut resolved: Vec<Option<usize>> = vec![None; paths.len()];
+        let mut left: Vec<usize> = (0..paths.len()).collect();
+        for distance in 1..=depth {
+            let names: Vec<Option<String>> = left
+                .iter()
+                .map(|&unique| {
+                    let ancestors = rows[first_row[unique]].ancestors;
+                    ancestors.get(distance).or_else(|| ancestors.last()).map(|name| name.to_lowercase())
+                })
+                .collect();
+            let mut still = Vec::new();
+            for (n, &unique) in left.iter().enumerate() {
+                let Some(name) = &names[n] else {
+                    still.push(unique);
+                    continue;
+                };
+                if names.iter().filter(|other| other.as_deref() == Some(name.as_str())).count() == 1 {
+                    resolved[unique] = Some(distance);
+                } else {
+                    still.push(unique);
+                }
+            }
+            left = still;
+            if left.is_empty() {
+                break;
+            }
+        }
+        for unique in left {
+            resolved[unique] = Some(usize::MAX);
+        }
+        for (&row, &unique) in group.iter().zip(&unique_of) {
+            hints[row] = resolved[unique];
+        }
+    }
+    hints
+}
+
 /// One change to the favorites, as the sidebar makes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarEdit {
@@ -366,6 +445,97 @@ mod tests {
         assert_eq!(c.find_key('d', Path::new(HOME)), Some(PathBuf::from("/tmp/x")));
         assert_eq!(c.group[0].items.iter().filter(|i| i.key.is_some()).count(), 1);
         assert_eq!(c.group[0].items.last().unwrap().path, "/tmp/x");
+    }
+
+    #[test]
+    fn twins_need_two_paths() {
+        let a = ["git".to_owned(), "one".to_owned(), "/".to_owned()];
+        let one = [TwinInput { label: "git", path: Path::new("/one/git"), ancestors: &a }];
+        assert_eq!(twin_hints(&one), [None]);
+        let twice = [
+            TwinInput { label: "git", path: Path::new("/one/git"), ancestors: &a },
+            TwinInput { label: "git", path: Path::new("/one/git"), ancestors: &a },
+        ];
+        assert_eq!(twin_hints(&twice), [None, None], "a path is not its own twin");
+    }
+
+    #[test]
+    fn twin_hint_is_the_parent() {
+        let one = ["git".to_owned(), "one".to_owned(), "/".to_owned()];
+        let two = ["git".to_owned(), "two".to_owned(), "/".to_owned()];
+        let rows = [
+            TwinInput { label: "git", path: Path::new("/one/git"), ancestors: &one },
+            TwinInput { label: "git", path: Path::new("/two/git"), ancestors: &two },
+        ];
+        assert_eq!(twin_hints(&rows), [Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn twin_hints_walk_up_until_parents_differ() {
+        let a = ["git".to_owned(), "x".to_owned(), "a".to_owned(), "/".to_owned()];
+        let b = ["git".to_owned(), "x".to_owned(), "b".to_owned(), "/".to_owned()];
+        let rows = [
+            TwinInput { label: "git", path: Path::new("/a/x/git"), ancestors: &a },
+            TwinInput { label: "git", path: Path::new("/b/x/git"), ancestors: &b },
+        ];
+        assert_eq!(twin_hints(&rows), [Some(2), Some(2)]);
+    }
+
+    #[test]
+    fn twins_mix_levels() {
+        let a = ["git".to_owned(), "x".to_owned(), "a".to_owned(), "/".to_owned()];
+        let b = ["git".to_owned(), "x".to_owned(), "b".to_owned(), "/".to_owned()];
+        let c = ["git".to_owned(), "c".to_owned(), "/".to_owned()];
+        let rows = [
+            TwinInput { label: "git", path: Path::new("/a/x/git"), ancestors: &a },
+            TwinInput { label: "git", path: Path::new("/b/x/git"), ancestors: &b },
+            TwinInput { label: "git", path: Path::new("/c/git"), ancestors: &c },
+        ];
+        assert_eq!(twin_hints(&rows), [Some(2), Some(2), Some(1)]);
+    }
+
+    #[test]
+    fn twins_compare_shown_names_case_insensitively() {
+        let one = ["git".to_owned(), "one".to_owned(), "/".to_owned()];
+        let two = ["git".to_owned(), "two".to_owned(), "/".to_owned()];
+        let rows = [
+            TwinInput { label: "Git", path: Path::new("/one/git"), ancestors: &one },
+            TwinInput { label: "git", path: Path::new("/two/git"), ancestors: &two },
+        ];
+        assert_eq!(twin_hints(&rows), [Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn same_path_twice_shares_its_hint() {
+        let one = ["git".to_owned(), "one".to_owned(), "/".to_owned()];
+        let two = ["git".to_owned(), "two".to_owned(), "/".to_owned()];
+        let rows = [
+            TwinInput { label: "git", path: Path::new("/one/git"), ancestors: &one },
+            TwinInput { label: "git", path: Path::new("/one/git"), ancestors: &one },
+            TwinInput { label: "git", path: Path::new("/two/git"), ancestors: &two },
+        ];
+        assert_eq!(twin_hints(&rows), [Some(1), Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn twin_at_volume_root_uses_volume_name() {
+        let root = ["git".to_owned(), "/".to_owned()];
+        let backup = ["git".to_owned(), "Backup".to_owned()];
+        let rows = [
+            TwinInput { label: "git", path: Path::new("/git"), ancestors: &root },
+            TwinInput { label: "git", path: Path::new("/Volumes/Backup/git"), ancestors: &backup },
+        ];
+        assert_eq!(twin_hints(&rows), [Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn indistinguishable_twins_fall_back_to_parent_path() {
+        let backup = ["git".to_owned(), "Backup".to_owned()];
+        let rows = [
+            TwinInput { label: "git", path: Path::new("/Volumes/A/git"), ancestors: &backup },
+            TwinInput { label: "git", path: Path::new("/Volumes/B/git"), ancestors: &backup },
+        ];
+        assert_eq!(twin_hints(&rows), [Some(usize::MAX), Some(usize::MAX)]);
     }
 
     #[test]

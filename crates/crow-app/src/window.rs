@@ -3071,6 +3071,67 @@ mod tests {
     }
 
     #[gpui::test]
+    fn sidebar_twins_get_their_parent_in_label_and_aria(cx: &mut TestAppContext) {
+        let root = fixture("twins");
+        std::fs::create_dir_all(root.join("one/git")).expect("create fixture");
+        std::fs::create_dir_all(root.join("two/git")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("one/git"), &root.join("two/git")]));
+        let looks = sidebar_looks(&view, &mut cx);
+        let hints: Vec<Option<&str>> = looks.iter().map(|look| look.hint.as_deref()).collect();
+        assert_eq!(hints, [Some("one"), Some("two")]);
+        assert_eq!(looks[0].spoken, "git, in one");
+        assert_eq!(looks[1].spoken, "git, in two");
+    }
+
+    #[gpui::test]
+    fn sidebar_twins_span_favorites_and_recent(cx: &mut TestAppContext) {
+        let root = fixture("twins-recent");
+        std::fs::create_dir_all(root.join("one/git")).expect("create fixture");
+        std::fs::create_dir_all(root.join("two/git")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        write_config(
+            &view,
+            &mut cx,
+            "sidebar.toml",
+            &favorites_toml(&[&root.join("one/git")]).replace("show = false", "show = true"),
+        );
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.join("two/git"), cx));
+        settle(&view, &mut cx);
+        let looks = sidebar_looks(&view, &mut cx);
+        let git: Vec<&crate::sidebar::RowLook> = looks.iter().filter(|look| look.label == "git").collect();
+        assert_eq!(git.len(), 2, "one favorite, one recent: {looks:?}");
+        assert_eq!(git[0].hint.as_deref(), Some("one"));
+        assert_eq!(git[1].hint.as_deref(), Some("two"));
+    }
+
+    #[gpui::test]
+    fn sidebar_twins_walk_up(cx: &mut TestAppContext) {
+        let root = fixture("twins-walk");
+        std::fs::create_dir_all(root.join("x/a/git")).expect("create fixture");
+        std::fs::create_dir_all(root.join("y/a/git")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("x/a/git"), &root.join("y/a/git")]));
+        let looks = sidebar_looks(&view, &mut cx);
+        let hints: Vec<Option<&str>> = looks.iter().map(|look| look.hint.as_deref()).collect();
+        assert_eq!(hints, [Some("x"), Some("y")]);
+    }
+
+    #[gpui::test]
+    fn sidebar_twin_in_home_shows_a_tilde(cx: &mut TestAppContext) {
+        let root = fixture("twins-home");
+        std::fs::create_dir_all(root.join("git")).expect("create fixture");
+        std::fs::create_dir_all(root.join("other/git")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<Ui>().home = root.clone());
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("git"), &root.join("other/git")]));
+        let looks = sidebar_looks(&view, &mut cx);
+        assert_eq!(looks[0].hint.as_deref(), Some("~"));
+        assert_eq!(looks[1].hint.as_deref(), Some("other"));
+        assert_eq!(looks[0].spoken, format!("git, in {}", root.file_name().unwrap().to_string_lossy()));
+    }
+
+    #[gpui::test]
     fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) {
         let root = fixture("contexts");
         std::fs::write(root.join("beta/b.txt"), "").expect("create fixture");

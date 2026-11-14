@@ -5,7 +5,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 | Item | State | Notes |
 | --- | --- | --- |
 | I1 Row model and name cache | done | `RowLook`/`BarTone`, `looks`, `looks_for_test`, per-path name cache; `sidebar_looks_follow_rows`; no visible change intended |
-| I2 Twin hints | todo | |
+| I2 Twin hints | done | `crow_core::twin_hints` + 8 unit tests; hints/spoken in `looks`; hint rendered after the name; 4 window tests |
 | I3 One fill per meaning | todo | |
 | I4 Disk row | todo | |
 | I5 Mark letters | todo | |
@@ -53,5 +53,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 
 - 2026-11-14: I1 done. `RowLook` reproduces today's fills/bar; name cache keyed by path, pruned when the row set changes. `cargo fmt --check`, clippy, workspace tests green. Not hand-compared against a screenshot; the element tree is unchanged apart from reading the look.
 
+- 2026-11-14: I2 done. `twin_hints` dedupes paths, compares labels and ancestors case-insensitively, walks up unresolved twins only, falls back to `usize::MAX`. `looks` maps the distance to the ancestor name (home shown "~", spoken by its display name) and appends the mark after the hint. Line spacing now explicit (icon 8, hint 6, dot 8, right 6, eject 8) so the hint margin is not doubled by the old flex gap. Tests: 8 crow-core unit, 4 window. Workspace green.
+
 ## Next
-I2: `crow_core::twin_hints` + unit tests; `looks` fills hints/spoken; render the hint after the name; window tests for twins.
+I3: current folder fill + cursor ring; remove the temporary `cursor_fill`; extend the drop test.
