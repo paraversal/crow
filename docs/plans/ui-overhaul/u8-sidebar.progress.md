@@ -6,7 +6,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 | --- | --- | --- |
 | I1 Row model and name cache | done | `RowLook`/`BarTone`, `looks`, `looks_for_test`, per-path name cache; `sidebar_looks_follow_rows`; no visible change intended |
 | I2 Twin hints | done | `crow_core::twin_hints` + 8 unit tests; hints/spoken in `looks`; hint rendered after the name; 4 window tests |
-| I3 One fill per meaning | todo | |
+| I3 One fill per meaning | done | current folder `selection`, cursor an inset accent ring; drop replaces the fill; tests |
 | I4 Disk row | todo | |
 | I5 Mark letters | todo | |
 | I6 Alias marker | todo | Q3 = yes |
@@ -55,5 +55,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 
 - 2026-11-14: I2 done. `twin_hints` dedupes paths, compares labels and ancestors case-insensitively, walks up unresolved twins only, falls back to `usize::MAX`. `looks` maps the distance to the ancestor name (home shown "~", spoken by its display name) and appends the mark after the hint. Line spacing now explicit (icon 8, hint 6, dot 8, right 6, eject 8) so the hint margin is not doubled by the old flex gap. Tests: 8 crow-core unit, 4 window. Workspace green.
 
+- 2026-11-14: I3 done. Removed the temporary cursor fill; `ring = focused && cursor` draws `style::cursor_ring` as an inset shadow. Current fill is skipped while a drop highlight covers the row. Tests: ring moves with Tab/Down and Vim j, no ring when unfocused, drop look clears. Not yet hand-checked on screen (ring contrast/light-dark) — listed under Hand checks.
+
 ## Next
-I3: current folder fill + cursor ring; remove the temporary `cursor_fill`; extend the drop test.
+I4: `DISK_WARNING_USED`, `bar_tone`, `short_bytes`, free text in the right slot, neutral bar; unit + window tests.

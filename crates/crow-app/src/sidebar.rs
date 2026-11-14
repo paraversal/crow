@@ -22,7 +22,7 @@ use crate::actions::{Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, 
 use crate::chrome::with_tooltip;
 use crate::palette::CommandId;
 use crate::pane::DraggedSelection;
-use crate::style::{active_selection, color, current_location, drop_target, icon};
+use crate::style::{color, current_location, cursor_ring, drop_target, icon};
 use crate::ui::{self, Ui};
 
 pub enum SidebarEvent {
@@ -122,8 +122,6 @@ pub struct RowLook {
     pub ring: bool,
     pub drop: bool,
     pub bar: Option<(f32, BarTone)>,
-    /// I1 only: today's cursor fill. Removed in I3, when the cursor becomes a ring.
-    cursor_fill: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -352,10 +350,9 @@ impl Sidebar {
                 right: None,
                 spoken,
                 current: row.path().is_some_and(|path| path == self.current),
-                ring: false,
+                ring: focused && i == self.cursor,
                 drop: !self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Row(i)),
                 bar,
-                cursor_fill: focused && i == self.cursor,
             });
         }
         looks
@@ -682,9 +679,9 @@ impl Render for Sidebar {
                 .flex()
                 .flex_col()
                 .relative()
-                .when(look.current, |row| row.bg(current_location(&theme)))
-                .when(look.cursor_fill, |row| row.bg(active_selection(&theme)))
+                .when(look.current && !look.drop, |row| row.bg(current_location(&theme)))
                 .when(look.drop, |row| row.bg(drop_bg))
+                .when(look.ring, |row| row.shadow(cursor_ring(&theme)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.cursor = i;
                     cx.emit(SidebarEvent::Open(target.clone()));

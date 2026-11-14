@@ -3132,6 +3132,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn sidebar_cursor_is_a_ring_and_only_the_current_folder_is_filled(cx: &mut TestAppContext) {
+        let root = fixture("ring");
+        let (view, mut cx) = open(cx, &root.join("alpha"));
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks[0].current && !looks[0].ring, "unfocused: the current folder is filled: {looks:?}");
+        assert!(!looks[1].current && !looks[1].ring);
+
+        cx.simulate_keystrokes("tab");
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks[0].current && looks[0].ring, "cursor 0 on the current folder: fill and ring");
+        assert!(!looks[1].ring);
+
+        cx.simulate_keystrokes("down");
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks[0].current && !looks[0].ring, "the fill stays on the current folder");
+        assert!(looks[1].ring && !looks[1].current, "the cursor is a ring, not a second fill");
+
+        cx.simulate_keystrokes("tab");
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks.iter().all(|look| !look.ring), "no ring while the list has focus");
+        assert!(looks[0].current, "the current folder stays filled");
+    }
+
+    #[gpui::test]
+    fn sidebar_vim_j_moves_the_ring(cx: &mut TestAppContext) {
+        let root = fixture("ring-vim");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("tab j");
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks[1].ring && !looks[0].ring, "j moves the ring: {looks:?}");
+    }
+
+    #[gpui::test]
     fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) {
         let root = fixture("contexts");
         std::fs::write(root.join("beta/b.txt"), "").expect("create fixture");
@@ -7090,6 +7127,7 @@ mod tests {
         cx.simulate_event(gpui::FileDropEvent::Pending { position: second });
         cx.run_until_parked();
         assert_eq!(target(&cx), Some((true, 1)), "the row under the pointer is highlighted");
+        assert!(sidebar_looks(&view, &mut cx)[1].drop, "the row's look carries the drop fill");
         for _ in 0..8 {
             cx.simulate_event(gpui::FileDropEvent::Pending { position: second });
             cx.run_until_parked();
@@ -7104,6 +7142,7 @@ mod tests {
         cx.simulate_event(gpui::FileDropEvent::Exited);
         cx.run_until_parked();
         assert_eq!(target(&cx), None, "leaving the window clears it");
+        assert!(sidebar_looks(&view, &mut cx).iter().all(|look| !look.drop), "…and every row's drop fill goes");
     }
 
     #[gpui::test]
