@@ -5725,7 +5725,7 @@ mod tests {
         std::fs::write(root.join(".secret"), "").expect("create fixture");
         let (view, mut cx) = open(cx, &root);
         let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.item_count(cx));
-        assert_eq!(count(&cx), 3);
+        assert_eq!(count(&cx), 4, "hidden files show by default");
 
         cx.simulate_keystrokes("cmd-k");
         settle(&view, &mut cx);
@@ -5736,7 +5736,7 @@ mod tests {
         settle(&view, &mut cx);
 
         assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "Return closes the palette");
-        assert_eq!(count(&cx), 4, "the command ran");
+        assert_eq!(count(&cx), 3, "the command ran");
     }
 
     #[gpui::test]
@@ -6051,14 +6051,14 @@ mod tests {
         cx.simulate_keystrokes("cmd-k");
         cx.simulate_input(">hidden");
         settle(&view, &mut cx);
-        assert_eq!(state(&cx), Some(false), "hidden files are off");
+        assert_eq!(state(&cx), Some(true), "hidden files are on by default");
 
         cx.simulate_keystrokes("enter");
         settle(&view, &mut cx);
         cx.simulate_keystrokes("cmd-k");
         cx.simulate_input(">hidden");
         settle(&view, &mut cx);
-        assert_eq!(state(&cx), Some(true), "the command turned them on");
+        assert_eq!(state(&cx), Some(false), "the command turned them off");
     }
 
     #[gpui::test]
@@ -6127,6 +6127,8 @@ mod tests {
         let root = fixture("palette-path-hidden");
         std::fs::create_dir_all(root.join(".hidden")).expect("create fixture");
         let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-shift-.");
+        settle(&view, &mut cx);
         cx.simulate_keystrokes("cmd-k");
         cx.simulate_input(&format!("{}/", root.display()));
         settle_palette(&view, &mut cx);
@@ -6431,13 +6433,13 @@ mod tests {
         std::fs::write(root.join(".secret"), "").expect("create fixture");
         let (view, mut cx) = open(cx, &root);
         let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.item_count(cx));
-        assert_eq!(count(&cx), 3);
+        assert_eq!(count(&cx), 4, "hidden files show by default");
 
         cx.simulate_keystrokes("cmd-t cmd-shift-.");
         settle(&view, &mut cx);
-        assert_eq!(count(&cx), 4);
+        assert_eq!(count(&cx), 3);
         cx.simulate_keystrokes("cmd-shift-[");
-        assert_eq!(count(&cx), 4, "The other tab shows hidden files too");
+        assert_eq!(count(&cx), 3, "The other tab hides hidden files too");
     }
 
     fn selected_names(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Vec<String> {
