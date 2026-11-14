@@ -1,5 +1,5 @@
 # u10-feedback progress
-Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: PR open
+Branch: `ui-u10-feedback` · PR: https://github.com/paraversal/file-crow/pull/22 · Last updated: 2026-11-14 · State: PR open
 
 ## Status
 | Item | State | Notes |
