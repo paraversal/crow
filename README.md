@@ -33,7 +33,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), font, hidden files, the preview (`show_preview`), window size |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), font, hidden files, the preview (`show_preview`), whether views follow folders (`view_per_folder`), window size |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
@@ -48,14 +48,18 @@ Logs go to `~/Library/Logs/Crow/crow.log`.
 ## Keys
 
 Finder's keys work as in Finder: arrows (Shift extends), Option-Up/Down, Cmd-Up/Down,
-Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (Tab completes),
+Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (opens Cmd-K on this folder's
+path: type a name, Tab completes, Return goes there or selects a file),
 Cmd-Shift-. and Space. Cmd-Shift-P shows or hides the preview pane on the right (in list and
 column view, search included; Quick Look still works). Typing a name selects it. Tab moves focus between the sidebar and the list.
 Column headers sort (click again to reverse) and their dividers resize.
 Type `/` to filter the focused folder: the field opens as the first row of the focused column
 (or under the list header), showing the query and "n of N", and matching letters are highlighted.
 Esc clears it, arrows move within the matches, and Return opens the selection. Cmd-F carries the
-filter text into a search of that folder. Cmd-2 shows a list, Cmd-3 columns. In the list, Right opens the selected folder inline (Right again goes into it); Left steps to the row that contains a nested one, closes an open folder, or goes up from the top level. In columns, Left and Right move between them, and Left in the leftmost column goes up a folder. Vim `h`/`l` follow the same keys.
+filter text into a search of that folder. Cmd-2 shows a list, Cmd-3 columns. A window shows each
+folder in that folder's view, so moving into a folder with its own view (or a `views.toml` rule)
+switches list and columns; with `view_per_folder = false` in `settings.toml` a window keeps the
+view you give it, and Cmd-2/Cmd-3 save nothing. In the list, Right opens the selected folder inline (Right again goes into it); Left steps to the row that contains a nested one, closes an open folder, or goes up from the top level. In columns, Left and Right move between them, and Left in the leftmost column goes up a folder. Vim `h`/`l` follow the same keys.
 
 Sidebar: drag favorites to reorder them (or Cmd-Option-Up/Down), drop files on any row to move or
 copy them there, drop folders on a group's title to add them. Ctrl-Cmd-T adds the selected folder.
@@ -70,8 +74,8 @@ Enclosing Folder, Go to…, Go to Folder…), Window and Help. Use as Defaults, 
 This Folder and Zoom have no shortcut. Cmd-Shift-A from anywhere opens search with every
 `exclude.toml` set off. Shortcuts shown in the command palette, tooltips and hints come from
 the live keymap, so they follow `keymap = "vim"` too. Hover a nav arrow, a view button, the Go to button, the search field, a path segment, a disk row,
-Search everything or Cancel during an operation to see its name and key. Sheets (Go to Folder,
-Why This View?, the theme picker, Cmd-K and the delete/conflict questions) dim the window;
+Search everything or Cancel during an operation to see its name and key. Sheets
+(Why This View?, the theme picker, Cmd-K and the delete/conflict questions) dim the window;
 clicking outside one cancels it exactly like Esc.
 
 The bottom bar has three slots: the path, a transient one (hints, operation progress, messages,
@@ -112,7 +116,9 @@ hand, with the parent's subfolders listed. Start with `>`: it becomes a Commands
 (Backspace on the empty field goes back to folders) and rows show the menu, the label, an on/off
 chip for toggles and their keys. Commands you run from the palette are remembered under Recently
 used; `palette_recent_commands = false` hides that section and stops recording.
-Cmd-F, or the top band's Search field, searches names and contents in the current folder; the same
+Cmd-F, or the top band's Search field, searches names and contents in the current folder (in
+columns, the focused column, not the subfolder previewed to its right: press Right first to search
+that one); the same
 field moves into the band while searching, where All / Names / Contents choose what to match (Names
 reads no file contents) and Cmd-Shift-M cycles the three. Cmd-F again focuses the field and selects
 the query; Tab goes field → results → sidebar → field (no results: straight to the sidebar); Done or

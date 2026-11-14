@@ -257,9 +257,12 @@ struct Bench {
 }
 
 impl Pane {
+    /// `start_mode` is the view a window keeps when `view_per_folder` is off; `None`
+    /// lets the folder decide.
     pub fn new(
         dir: PathBuf,
         show_hidden: bool,
+        start_mode: Option<ViewMode>,
         bench: bool,
         bench_filter: Option<String>,
         cx: &mut Context<Self>,
@@ -299,6 +302,9 @@ impl Pane {
             focus_list_after_filter: false,
         };
         pane.enter(dir, cx);
+        if let Some(mode) = start_mode.filter(|_| !cx.global::<Ui>().settings.view_per_folder) {
+            pane.apply_mode(mode, cx);
+        }
         if let Some(filter) = pane.bench.as_ref().and_then(|bench| bench.filter.clone()) {
             let folder = pane.folders[0].clone();
             folder.update(cx, |folder, cx| folder.set_filter(Some(filter), cx));
@@ -531,9 +537,10 @@ impl Pane {
         self.sort
     }
 
-    /// Switch view as the user asked (Cmd-2, Cmd-3), and remember it for the folder shown.
+    /// Switch view as the user asked (Cmd-2, Cmd-3), and remember it for the folder
+    /// shown, unless views don't follow folders: then it is this window's alone.
     pub fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
-        if self.apply_mode(mode, cx) {
+        if self.apply_mode(mode, cx) && cx.global::<Ui>().settings.view_per_folder {
             self.remember(ViewChange::View(mode), cx);
         }
     }
@@ -565,7 +572,9 @@ impl Pane {
         // Columns are one browsing session: entering a folder may switch to column
         // view, but a views.toml reload while its columns are open (the parent's
         // setting, say) must not yank the mode out from under the chain.
-        if self.mode != ViewMode::Columns || self.folders.len() == 1 {
+        // With `view_per_folder = false` the window keeps its view.
+        let per_folder = cx.global::<Ui>().settings.view_per_folder;
+        if per_folder && (self.mode != ViewMode::Columns || self.folders.len() == 1) {
             self.apply_mode(resolved.view.0, cx);
         }
         cx.notify();

@@ -80,7 +80,10 @@ impl FuzzyMatcher {
         let mut config = Config::DEFAULT;
         config.ignore_case = true;
         FuzzyMatcher {
-            needle: needle.to_owned(),
+            // With `ignore_case`, nucleo compares against a lowercased haystack and
+            // expects the needle lowercased too; an uppercase needle letter can pass
+            // its prefilter and then trip an assert ("should have been caught by prefilter").
+            needle: needle.to_lowercase(),
             matcher: Matcher::new(config),
             haystack_buf: Vec::new(),
             needle_buf: Vec::new(),
@@ -596,6 +599,16 @@ mod tests {
         assert_eq!(matched("e\u{301}x", "e"), ["e\u{301}"]);
         assert_eq!(matched("日本 notes.txt", "notes"), ["notes"]);
         assert_eq!(matched("r\u{e9}sum\u{e9}.txt", "sum"), ["sum"]);
+    }
+
+    #[test]
+    fn uppercase_needles_match_without_panicking() {
+        // nucleo 0.3.1 asserted here before the needle was lowercased.
+        let mut matcher = FuzzyMatcher::new("Docs");
+        assert!(matcher.score("~/Documents/Docs").is_some());
+        assert!(matcher.indices("~/Documents/Docs").is_some());
+        let mut matcher = FuzzyMatcher::new("dT");
+        assert!(matcher.score("~/a/dT/b/dTx").is_some());
     }
 
     #[test]

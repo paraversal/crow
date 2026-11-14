@@ -74,7 +74,6 @@ pub struct CrowWindow {
     bench: bool,
     show_hidden: bool,
     /// The Go to Folder sheet, while open.
-    go_to: Option<(Entity<TextInput>, Subscription)>,
     /// A sheet asking before an operation runs (conflicts, permanent delete).
     sheet: Option<Sheet>,
     show_activity: bool,
@@ -260,7 +259,8 @@ impl CrowWindow {
         if !bench {
             ui::record_visit(&dir, cx);
         }
-        let pane = cx.new(|cx| Pane::new(dir.clone(), show_hidden, bench, bench_filter, cx));
+        let start_mode = Some(cx.global::<Ui>().views.default_view());
+        let pane = cx.new(|cx| Pane::new(dir.clone(), show_hidden, start_mode, bench, bench_filter, cx));
         let sidebar = cx.new(|cx| {
             let mut sidebar = Sidebar::new(cx);
             sidebar.set_current(dir, cx);
@@ -293,7 +293,6 @@ impl CrowWindow {
             sidebar,
             bench,
             show_hidden,
-            go_to: None,
             sheet: None,
             show_activity: false,
             why: None,
@@ -344,7 +343,9 @@ impl CrowWindow {
             self.close_search(window, cx);
         }
         let show_hidden = self.show_hidden;
-        let pane = cx.new(|cx| Pane::new(dir, show_hidden, false, None, cx));
+        // A new tab keeps the window's view when views don't follow folders.
+        let start_mode = Some(self.pane().read(cx).mode());
+        let pane = cx.new(|cx| Pane::new(dir, show_hidden, start_mode, false, None, cx));
         self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
         self._subscriptions
             .push(cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)));
@@ -434,63 +435,12 @@ impl CrowWindow {
         cx.notify();
     }
 
+    /// Shift-Cmd-G: the palette with this folder's path typed, ready for a child's
+    /// name, Tab completion or a whole new path (Finder's Go to Folder, in Cmd-K).
     fn go_to_folder(&mut self, _: &GoToFolder, window: &mut Window, cx: &mut Context<Self>) {
         let current = home_relative(&self.pane().read(cx).current_dir(cx));
-        let input = cx.new(|cx| TextInput::new(current, "Go to Folder", cx));
-        let subscription = cx.subscribe_in(&input, window, |this, input, event: &TextInputEvent, window, cx| {
-            let typed = input.read(cx).text().to_owned();
-            let cwd = this.pane().read(cx).current_dir(cx);
-            let home = home_dir();
-            match event {
-                TextInputEvent::Changed => {}
-                TextInputEvent::CompletionRequested => {
-                    if let Some(completed) = crow_core::complete_typed(&typed, &cwd, &home) {
-                        input.update(cx, |input, cx| input.set_text(completed, window, cx));
-                    }
-                }
-                TextInputEvent::Cancelled => this.close_go_to(window, cx),
-                TextInputEvent::BackspaceAtStart => {}
-                TextInputEvent::Confirmed => {
-                    let target = crow_core::resolve_typed(&typed, &cwd, &home);
-                    if target.is_dir() {
-                        this.pane().update(cx, |pane, cx| pane.navigate(target, cx));
-                    } else if target.exists() {
-                        this.pane().update(cx, |pane, cx| pane.reveal(target, cx));
-                    } else {
-                        window.play_system_bell();
-                        return;
-                    }
-                    this.close_go_to(window, cx);
-                }
-            }
-        });
-        let focus = input.read(cx).focus_handle(cx);
-        window.focus(&focus, cx);
-        self.go_to = Some((input, subscription));
-        cx.notify();
-    }
-
-    fn close_go_to(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.go_to = None;
-        self.focus_center(window, cx);
-        cx.notify();
-    }
-
-    fn render_go_to(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let (input, _) = self.go_to.as_ref()?;
-        let theme = cx.global::<Ui>().theme.clone();
-        Some(chrome::sheet(
-            chrome::sheet_panel("go-to-folder", chrome::SheetWidth::Narrow, &theme)
-                .aria_label("Go to Folder")
-                .p_3()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(div().text_size(px(12.)).text_color(color(theme.role("fg-muted"))).child("Go to Folder"))
-                .child(input.clone()),
-            &theme,
-            cx.listener(|this, _, window, cx| this.close_go_to(window, cx)),
-        ))
+        let typed = if current.ends_with('/') { current } else { format!("{current}/") };
+        self.open_palette(&typed, window, cx);
     }
 
     fn view_as_list(&mut self, _: &ViewAsList, _: &mut Window, cx: &mut Context<Self>) {
@@ -811,11 +761,7 @@ impl CrowWindow {
 
     /// Which element owns the keys, for the bar's hints.
     fn bar_focus(&self, window: &Window, pane: &Pane, cx: &App) -> BarFocus {
-        let overlay = self.go_to.is_some()
-            || self.sheet.is_some()
-            || self.why.is_some()
-            || self.picker.is_some()
-            || self.palette.is_some();
+        let overlay = self.sheet.is_some() || self.why.is_some() || self.picker.is_some() || self.palette.is_some();
         if overlay || pane.is_renaming() {
             return BarFocus::Overlay;
         }
@@ -1559,7 +1505,13 @@ impl CrowWindow {
         let views_file = ui.config_dir.join("views.toml");
         let folder = crow_core::abbreviate_home(&dir, &ui.home);
         let (fg, muted) = (theme.role("fg"), theme.role("fg-muted"));
-        let mode = match resolved.view.0 {
+        // With `view_per_folder = false` the window's own view is what shows.
+        let (view, view_source) = if ui.settings.view_per_folder {
+            (resolved.view.0, resolved.view.1.to_string())
+        } else {
+            (self.pane().read(cx).mode(), "this window (view_per_folder = false in settings.toml)".to_owned())
+        };
+        let mode = match view {
             ViewMode::List => "List",
             ViewMode::Columns => "Columns",
         };
@@ -1580,7 +1532,7 @@ impl CrowWindow {
         };
         let columns = resolved.columns.0.join(", ");
         let lines: Vec<(&str, String, String)> = vec![
-            ("View", mode.into(), resolved.view.1.to_string()),
+            ("View", mode.into(), view_source),
             ("Sort", sort_title(resolved.sort.0).into(), resolved.sort.1.to_string()),
             ("Order", direction.into(), resolved.ascending.1.to_string()),
             (
@@ -1766,11 +1718,7 @@ impl CrowWindow {
 
     /// Whether an overlay other than search is open (search itself is checked by `open_search`).
     fn search_blocked(&self) -> bool {
-        self.search.is_some()
-            || self.picker.is_some()
-            || self.go_to.is_some()
-            || self.sheet.is_some()
-            || self.palette.is_some()
+        self.search.is_some() || self.picker.is_some() || self.sheet.is_some() || self.palette.is_some()
     }
 
     fn search_everything(&mut self, _: &SearchEverything, window: &mut Window, cx: &mut Context<Self>) {
@@ -1879,12 +1827,7 @@ impl CrowWindow {
     }
 
     fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.is_some()
-            || self.picker.is_some()
-            || self.go_to.is_some()
-            || self.sheet.is_some()
-            || self.search.is_some()
-        {
+        if self.palette.is_some() || self.picker.is_some() || self.sheet.is_some() || self.search.is_some() {
             return;
         }
         let (cwd, here, subfolders) = {
@@ -1966,6 +1909,10 @@ impl CrowWindow {
             scroll: ScrollHandle::new(),
             _subscription: subscription,
         });
+        // A typed path (Shift-Cmd-G) lists that folder's children right away.
+        if mode == PaletteMode::Folders && text.starts_with(['/', '~']) {
+            self.refresh_palette(&text, cx);
+        }
         cx.notify();
     }
 
@@ -2181,8 +2128,14 @@ impl CrowWindow {
     }
 
     fn confirm_palette(&mut self, new_tab: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(palette) = self.palette.take() else { return };
+        let Some(palette) = self.palette.as_ref() else { return };
         let item = palette.listing.items.get(palette.cursor).cloned();
+        // A typed path with no folder row may name a file: reveal it, as Go to Folder did.
+        if item.is_none() && palette.path.is_some() {
+            self.reveal_typed_path(window, cx);
+            return;
+        }
+        self.palette = None;
         self.focus_center(window, cx);
         match item {
             Some(Item::Command { command, .. }) => {
@@ -2194,6 +2147,41 @@ impl CrowWindow {
             None => {}
         }
         cx.notify();
+    }
+
+    /// Return on a path that lists no folder: off the main thread, check whether it
+    /// names a file; reveal it if so, otherwise beep and leave the palette open.
+    fn reveal_typed_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_ref() else { return };
+        let typed = palette.input.read(cx).text().to_owned();
+        let cwd = self.pane().read(cx).current_dir(cx);
+        let home = cx.global::<Ui>().home.clone();
+        let task = cx.background_spawn(async move {
+            let target = crow_core::resolve_typed(&typed, &cwd, &home);
+            target.exists().then(|| (target.is_dir(), target, typed))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let found = task.await;
+            this.update_in(cx, |this, window, cx| {
+                let Some(palette) = this.palette.as_ref() else { return };
+                match found {
+                    Some((is_dir, target, typed)) if palette.input.read(cx).text() == typed => {
+                        this.palette = None;
+                        this.focus_center(window, cx);
+                        if is_dir {
+                            this.pane().update(cx, |pane, cx| pane.navigate(target, cx));
+                        } else {
+                            this.pane().update(cx, |pane, cx| pane.reveal(target, cx));
+                        }
+                        cx.notify();
+                    }
+                    Some(_) => {}
+                    None => window.play_system_bell(),
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn run_command(&mut self, command: palette::CommandId, window: &mut Window, cx: &mut Context<Self>) {
@@ -2810,7 +2798,6 @@ impl Render for CrowWindow {
             None
         };
         let path_bar = self.render_bottom_bar(window, cx);
-        let go_to = self.render_go_to(cx);
         let sheet = self.render_sheet(cx);
         let activity = self.show_activity.then(|| self.render_activity(cx));
         let why = self.render_why(cx);
@@ -2892,7 +2879,6 @@ impl Render for CrowWindow {
             .children(tab_bar)
             .child(div().flex_1().min_h_0().flex().child(sidebar).child(center).children(preview))
             .child(path_bar)
-            .children(go_to)
             .children(sheet)
             .children(activity)
             .children(why)
@@ -3209,6 +3195,42 @@ mod tests {
         cx.simulate_keystrokes("cmd-[");
         settle(&view, &mut cx);
         assert_eq!(mode(&cx), ViewMode::Columns);
+    }
+
+    #[gpui::test]
+    fn view_per_folder_off_keeps_the_window_view(cx: &mut TestAppContext) {
+        let root = fixture("views-locked");
+        let (view, mut cx) = open(cx, &root);
+        let mode = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.mode());
+        write_config(&view, &mut cx, "settings.toml", "view_per_folder = false\n");
+        let views = format!("[folder.\"{}\"]\nview = \"columns\"\n", root.join("beta").display());
+        write_config(&view, &mut cx, "views.toml", &views);
+
+        pane(&view, &cx).update(&mut cx, |p, cx| p.navigate(root.join("beta"), cx));
+        settle(&view, &mut cx);
+        assert_eq!(mode(&cx), ViewMode::List, "the folder's own view is ignored");
+
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        assert_eq!(mode(&cx), ViewMode::Columns);
+        let text = std::fs::read_to_string(config_dir(&cx).join("views.toml")).unwrap();
+        assert_eq!(text, views, "Cmd-3 saves nothing");
+
+        cx.simulate_keystrokes("cmd-[");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root);
+        assert_eq!(mode(&cx), ViewMode::Columns, "going back keeps the window's view");
+
+        cx.simulate_keystrokes("cmd-t");
+        settle(&view, &mut cx);
+        assert_eq!(mode(&cx), ViewMode::Columns, "a new tab copies its window");
+
+        cx.simulate_keystrokes("cmd-2");
+        settle(&view, &mut cx);
+        write_config(&view, &mut cx, "settings.toml", "view_per_folder = true\n");
+        pane(&view, &cx).update(&mut cx, |p, cx| p.navigate(root.join("beta"), cx));
+        settle(&view, &mut cx);
+        assert_eq!(mode(&cx), ViewMode::Columns, "turned back on, folders decide again");
     }
 
     #[gpui::test]
@@ -4791,10 +4813,10 @@ mod tests {
         cx.simulate_keystrokes("cmd-f");
         cx.simulate_input("notes");
         wait_for_search(&view, &mut cx);
-        cx.simulate_keystrokes("cmd-shift-g");
-        assert!(view.read_with(&cx, |w, _| w.go_to.is_some()), "Go to Folder opens over search");
+        cx.simulate_keystrokes("cmd-j");
+        assert!(view.read_with(&cx, |w, _| w.why.is_some()), "Why This View opens over search");
         cx.simulate_keystrokes("escape");
-        assert!(view.read_with(&cx, |w, _| w.go_to.is_none() && w.search.is_some()));
+        assert!(view.read_with(&cx, |w, _| w.why.is_none() && w.search.is_some()));
         assert!(search_input_focused(&view, &mut cx), "focus goes back to the field, not the hidden pane");
         cx.simulate_keystrokes("escape");
         assert!(view.read_with(&cx, |w, _| w.search.is_none()), "Esc in the field still closes search");
@@ -6263,9 +6285,9 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-shift-g");
         settle(&view, &mut cx);
-        assert!(view.read_with(&cx, |w, _| w.go_to.is_some()), "Go to Folder is open");
+        assert!(view.read_with(&cx, |w, _| w.palette.is_some()), "Go to Folder (the palette) is open");
         click_scrim(&mut cx);
-        assert!(view.read_with(&cx, |w, _| w.go_to.is_none()), "a scrim click closes it like Escape");
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "a scrim click closes it like Escape");
         assert!(focused(&mut cx), "focus goes back to the pane");
         assert!(root.join("notes.txt").exists());
 
@@ -6325,31 +6347,44 @@ mod tests {
     }
 
     #[gpui::test]
-    fn go_to_folder_completes_navigates_and_reveals_files(cx: &mut TestAppContext) {
+    fn go_to_folder_opens_the_palette_on_this_folder(cx: &mut TestAppContext) {
         let root = fixture("goto");
         let (view, mut cx) = open(cx, &root);
-        let sheet_open = |cx: &VisualTestContext| view.read_with(cx, |w, _| w.go_to.is_some());
+        let typed = |cx: &VisualTestContext| {
+            view.read_with(cx, |w, cx| w.palette.as_ref().map(|p| p.input.read(cx).text().to_owned()))
+        };
 
-        cx.simulate_keystrokes("cmd-shift-g cmd-a");
+        cx.simulate_keystrokes("cmd-shift-g");
+        settle(&view, &mut cx);
+        assert_eq!(typed(&cx), Some(format!("{}/", root.display())), "starts on this folder's path");
         cx.simulate_input("al");
+        settle(&view, &mut cx);
         cx.simulate_keystrokes("tab");
-        let typed = view.read_with(&cx, |w, cx| w.go_to.as_ref().map(|(i, _)| i.read(cx).text().to_owned()));
-        assert_eq!(typed.as_deref(), Some("alpha/"), "Tab completes a unique folder");
+        settle(&view, &mut cx);
+        assert!(typed(&cx).is_some_and(|t| t.ends_with("/alpha/")), "Tab completes a folder: {:?}", typed(&cx));
         cx.simulate_input("inner");
+        settle(&view, &mut cx);
         cx.simulate_keystrokes("enter");
         settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root.join("alpha/inner"));
-        assert!(!sheet_open(&cx), "Return closes the sheet");
+        assert!(typed(&cx).is_none(), "Return closes the palette");
 
         cx.simulate_keystrokes("cmd-shift-g cmd-a");
         cx.simulate_input(&root.join("notes.txt").display().to_string());
+        settle(&view, &mut cx);
         cx.simulate_keystrokes("enter");
         settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), root, "a file opens its folder…");
         assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "…with the file selected");
 
-        cx.simulate_keystrokes("cmd-shift-g escape");
-        assert!(!sheet_open(&cx), "Escape closes the sheet");
+        cx.simulate_keystrokes("cmd-shift-g cmd-a");
+        cx.simulate_input(&root.join("nothing-here").display().to_string());
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert!(typed(&cx).is_some(), "a missing path keeps the palette open");
+        cx.simulate_keystrokes("escape");
+        assert!(typed(&cx).is_none(), "Escape closes it");
         assert_eq!(dir(&view, &cx), root, "…without going anywhere");
     }
 
@@ -6732,12 +6767,12 @@ mod tests {
         list_actions_off("filter", &mut cx);
         cx.simulate_keystrokes("escape");
 
-        // Go to Folder field.
+        // Go to Folder (the palette on a path).
         cx.simulate_keystrokes("cmd-shift-g");
         cx.run_until_parked();
         cx.simulate_input("/ ");
         let text = view
-            .read_with(&cx, |w, cx| w.go_to.as_ref().map(|(input, _)| input.read(cx).text().to_owned()))
+            .read_with(&cx, |w, cx| w.palette.as_ref().map(|p| p.input.read(cx).text().to_owned()))
             .expect("Go to Folder stays open");
         assert!(text.ends_with("/ "), "slash and space land in Go to Folder, got {text:?}");
         list_actions_off("Go to Folder", &mut cx);

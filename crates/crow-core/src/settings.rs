@@ -39,6 +39,11 @@ show_preview = true
 palette_recent_commands = true
 
 # How folders are shown (list or columns, sort, list columns) is set in views.toml.
+# true: each folder opens in its own view, so a window switches between list and
+# columns as you move. false: a window keeps the view you give it (Cmd-2, Cmd-3,
+# which then save nothing); new windows start in views.toml's [defaults] view and
+# new tabs copy their window. Sort and list columns still follow each folder.
+view_per_folder = true
 
 [window]
 # Size of every new window, in points. Restored sessions keep their own sizes.
@@ -98,6 +103,7 @@ pub struct Settings {
     pub show_hidden_files: bool,
     pub show_preview: bool,
     pub palette_recent_commands: bool,
+    pub view_per_folder: bool,
     pub window: WindowDefaults,
 }
 
@@ -112,6 +118,7 @@ impl Default for Settings {
             show_hidden_files: false,
             show_preview: true,
             palette_recent_commands: true,
+            view_per_folder: true,
             window: WindowDefaults::default(),
         }
     }
