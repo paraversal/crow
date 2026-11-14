@@ -3,7 +3,7 @@
 A Finder-style file explorer for macOS, written in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 It keeps Finder's directness and aims to be faster, more predictable and keyboard-first.
 
-Status: Phase 1 (the "daily driver" MVP), milestone M6.
+Status: Phase 1 (the "daily driver" MVP): M6 and the UI overhaul are done; next is M7 (hardening).
 
 ## Build and run
 
@@ -35,7 +35,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), font, hidden files (shown by default), the preview (`show_preview`), whether views follow folders (`view_per_folder`), window size |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), font, hidden files (shown by default), the preview (`show_preview`), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
@@ -54,8 +54,79 @@ opens a fake folder to try every mode and sound set (see below).
 
 Recent folders are kept in `~/.local/state/crow/recent.json`, merged with zoxide's list when it's installed.
 Commands run from the palette are remembered in `~/.local/state/crow/palette-commands.json`.
-Key-use counts, which retire idle bottom-bar hints, live next to it in `~/.local/state/crow/usage.json`.
+Key-use counts, which retire idle bottom-bar hints, live next to it in `~/.local/state/crow/usage.json`, and the tips you have already seen in `tips.json`.
 Logs go to `~/Library/Logs/Crow/crow.log`.
+
+## Toolbar
+
+The top band holds Back and Forward (drawn chevrons, faded at the ends of history), the folder
+title, the list/columns switch, "Go to ⌘K" and the search field "Search <folder> ⌘F". Every
+control has a tooltip that names it and its key; a disabled control is the same icon at 40 %
+opacity. While searching, the field grows across the band with All / Names / Contents and Done esc.
+Toolbar icons are [Lucide](https://lucide.dev) 1.72.0, ISC-licensed; the notice is at
+`crates/crow-app/assets/icons/LICENSE` (also copied into `Crow.app/Contents/Resources/`).
+
+## Menus
+
+File, Edit, View, Go, Window and Help list every command with its key — always the Finder key,
+also in the Vim layer — and grey out what the focused view cannot do. Edit carries Filter This
+Folder, Find… and Find Everything…; Go carries Back, Forward, Enclosing Folder, Go to…, Go to
+Folder… and Reveal Result. Find Everything… (⇧⌘A) opens search with every `exclude.toml` set off.
+Use as Defaults, Reset View for This Folder and Zoom have no shortcut. Sheets (Why This View?,
+the theme picker, Cmd-K and the delete/conflict questions) dim the window; clicking outside one
+cancels it exactly like Esc.
+
+## Hints and tips
+
+The bottom bar has three slots: the path, a transient one (hints, operation progress, messages,
+errors) and counts. Hints follow focus: the filter field (Return open, Esc clear, `⌘F` search
+deeper), the sidebar (`⌘⌥↑↓` reorder, `⌘⌫` remove, `⌘E` eject a disk), search results and the
+search field. The idle hint shows `/` filter (Search and Go to carry their keys on the toolbar);
+after you have used it three times it retires (`hints = "always"` keeps every hint, `"off"` hides
+hints and tips). While an operation runs, a 2 px accent line along the bar's top edge and
+"Copying … · n %" with Cancel esc replace the hints; the path and count stay. A broken config file
+shows an error pill with its file name, line and an Open button, beside progress rather than
+instead of it. Counts name the focused folder ("18 items in Documents"), the selection and its
+size, or the cursor's sidebar group (while filtering, the field itself says "n of N"). When room
+runs short the path keeps its first and last segments: its middle folds into a "…" (click it for
+the deepest hidden folder), then hints drop from the right, then a long progress line or error is
+cut with an ellipsis.
+
+A contextual tip appears once, bottom right above the bar, when you visibly do something the slow
+way: scrolling a folder of 200+ items ("Type / to filter this folder by name."), two filters in a
+row that matched nothing ("⌘F searches subfolders and file contents too."), or typing a whole path
+in the palette for a folder it already lists ("⌘K finds recent and favorite folders by a few
+letters."). It retires the moment it shows; Got it, using its key, changing folder or opening an
+overlay closes it. The retired ids live in `~/.local/state/crow/tips.json`.
+
+## Palette
+
+Cmd-K opens the command palette over a scrim: folders are grouped into Recent, Favorites and
+In <folder>, each row showing the name and the abbreviated path, so two folders called `git` are
+told apart; matched letters are accent in both lines and Recent rows carry the last visit.
+Return goes there and Cmd-Return opens a folder in a new tab. Tab appends the highlighted
+folder's path and `/`, so the next letters search inside it; typing `/` or `~/` does the same by
+hand, with the parent's subfolders listed. Start with `>`: it becomes a Commands token
+(Backspace on the empty field goes back to folders) and rows show the menu, the label, an on/off
+chip for toggles and their keys. Commands you run from the palette are remembered under Recently
+used; `palette_recent_commands = false` hides that section and stops recording.
+
+## Search
+
+Cmd-F, or the top band's Search field, searches names and contents in the current folder (in
+columns, the focused column, not the subfolder previewed to its right: press Right first to search
+that one); the same field moves into the band while searching, where All / Names / Contents choose
+what to match (Names reads no file contents) and Cmd-Shift-M cycles the three. Cmd-F again focuses
+the field and selects the query; Tab goes field → results → sidebar → field (no results: straight
+to the sidebar); Done or Esc (from anywhere) closes, and with the skipped list open Esc closes that
+first. The scope bar switches the folder, Home or This Mac (Spotlight, names only); its switch
+skips the folders named in `exclude.toml` sets, as Cmd-Shift-A does for every set. Name matches
+whose name contains the query come first with their letters highlighted; scattered fuzzy name hits
+follow the content hits. A name match stays one line, a content-only hit shows its line number and
+line under the name, and the footer counts results and files and lists what was skipped (relative
+to the folder). With nothing typed, four examples fill the field. The right preview follows the
+selected result in list and column view, at the hit line for content hits. Results open with
+Return, reveal with Cmd-R, Quick Look with Space, and take the usual copy, cut and trash keys.
 
 ## Keys
 
@@ -83,38 +154,11 @@ folder, Cmd-E ejects a disk, and Option-Up/Down jump between groups. Tab into th
 the folder shows in the center while focus stays in the sidebar.
 
 With `keymap = "vim"`: j/k, h/l (parent and open, or columns), gg/G, yy/dd/p (copy, cut, paste),
-u and Ctrl-R, cw renames, `-` goes up, `m x` marks the folder as favorite x and `'x` jumps there.
+u and Ctrl-R, cw renames, `-` goes up, `m x` marks the folder as favorite x and `'x` jumps there. Letters no longer select by name
+in this layer.
 
-Menus list every command with its key and grey out what the focused view cannot do: File,
-Edit (including Filter This Folder, Find… and Find Everything…), View, Go (Back, Forward,
-Enclosing Folder, Go to…, Go to Folder…), Window and Help. Use as Defaults, Reset View for
-This Folder and Zoom have no shortcut. Cmd-Shift-A from anywhere opens search with every
-`exclude.toml` set off. Shortcuts shown in the command palette, tooltips and hints come from
-the live keymap, so they follow `keymap = "vim"` too. Hover a nav arrow, a view button, the Go to button, the search field, a path segment, a disk row,
-Search everything or Cancel during an operation to see its name and key. Sheets
-(Why This View?, the theme picker, Cmd-K and the delete/conflict questions) dim the window;
-clicking outside one cancels it exactly like Esc.
-
-The bottom bar has three slots: the path, a transient one (hints, operation progress, messages,
-errors) and counts. The idle hint shows `/` filter (Search and Go to carry their keys on the
-toolbar); after you have used it three times it retires (`hints = "always"` keeps every hint, `"off"` hides hints and the
-one-time tips). Hints follow focus: the filter field (Return open, Esc clear, `⌘F` search deeper),
-the sidebar (`⌘⌥↑↓` reorder, `⌘⌫` remove, `⌘E` eject a disk), search results and the search field.
-While an operation runs, a 2 px accent line along the bar's top edge and "Copying … · n %" with
-Cancel esc replace the hints; the path and count stay. A broken config file shows an error pill with
-its file name, line and an Open button, beside progress rather than instead of it. Counts name the
-focused folder ("18 items in Documents"), the selection and its size, or the cursor's sidebar
-group (while filtering, the field itself says "n of N"). When room runs short the path keeps its
-first and last segments: its middle folds into a "…" (click it for the deepest hidden folder),
-then hints drop from the right, then a long progress line or error is cut with an ellipsis.
-
-A contextual tip appears once, bottom right above the bar, when you visibly do something the
-slow way: scrolling a folder of 200+ items ("Type / to filter this folder by name."), two filters
-in a row that matched nothing ("⌘F searches subfolders and file contents too."), or typing a whole
-path in the palette for a folder it already lists ("⌘K finds recent and favorite folders by a few
-letters."). It retires the moment it shows; Got it, using its key, changing folder or opening an
-overlay closes it. The retired ids live in `~/.local/state/crow/tips.json`; `hints = "off"` hides
-tips as well.
+Shortcuts shown in the command palette, tooltips and hints come from the live keymap, so they
+follow `keymap = "vim"` too.
 
 Closing the last window or quitting while an operation runs asks first: Esc keeps it running,
 Return stops it cleanly (finished items stay and Undo can reverse them; the item in progress is never left half done) and then closes or quits. In every text field
@@ -122,41 +166,11 @@ Return stops it cleanly (finished items stay and Undo can reverse them; the item
 takes whatever width the window gives; the other columns keep the widths you drag them to, and
 dragging Name's own divider trades width with the column after it.
 
-Toolbar icons are [Lucide](https://lucide.dev) 1.72.0, ISC-licensed; the notice is at
-`crates/crow-app/assets/icons/LICENSE` (also copied into `Crow.app/Contents/Resources/`).
-Letters no longer select by name in this layer.
-
 File operations use Finder's keys: Return renames, Cmd-Shift-N new folder, Cmd-Option-N new file,
 Cmd-D duplicate, Cmd-Delete moves to the Trash, Cmd-Option-Delete deletes permanently (after asking),
 Cmd-C / Cmd-X / Cmd-V copy, cut and paste (also to and from Finder), Cmd-Option-V moves,
 Cmd-Z / Cmd-Shift-Z undo and redo, Esc cancels a running operation, Cmd-Option-L shows activity.
 Nothing is ever overwritten: name clashes ask first, and Replace moves the old item to the Trash.
-
-Cmd-K opens the command palette over a scrim: folders are grouped into Recent, Favorites and
-In <folder>, each row showing the name and the abbreviated path, so two folders called `git` are
-told apart; matched letters are accent in both lines and Recent rows carry the last visit.
-Return goes there and Cmd-Return opens a folder in a new tab. Tab appends the highlighted
-folder's path and `/`, so the next letters search inside it; typing `/` or `~/` does the same by
-hand, with the parent's subfolders listed. Start with `>`: it becomes a Commands token
-(Backspace on the empty field goes back to folders) and rows show the menu, the label, an on/off
-chip for toggles and their keys. Commands you run from the palette are remembered under Recently
-used; `palette_recent_commands = false` hides that section and stops recording.
-Cmd-F, or the top band's Search field, searches names and contents in the current folder (in
-columns, the focused column, not the subfolder previewed to its right: press Right first to search
-that one); the same
-field moves into the band while searching, where All / Names / Contents choose what to match (Names
-reads no file contents) and Cmd-Shift-M cycles the three. Cmd-F again focuses the field and selects
-the query; Tab goes field → results → sidebar → field (no results: straight to the sidebar); Done or
-Esc (from anywhere) closes, and with the skipped list open Esc closes that first. The scope bar
-switches the folder, Home or This Mac (Spotlight, names only); its switch skips the folders named in
-`exclude.toml` sets, as Cmd-Shift-A does for every set. Name matches whose name contains the query
-come first with their letters highlighted; scattered fuzzy name hits follow the content hits. A name
-match stays one line, a content-only hit shows its line number and line under the name, and the
-footer counts results and files and lists what was skipped (relative to the folder). With nothing
-typed, four examples fill the field. The right preview follows the selected result in list and
-column view, at the hit line for content hits.
-Results open with Return, reveal with Cmd-R, Quick Look with Space, and take the usual copy, cut and
-trash keys. "Go to ⌘K" in the band opens the command palette.
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).
 

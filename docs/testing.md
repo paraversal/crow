@@ -32,7 +32,12 @@ zero-match filters, a typed path for a recent folder, Got it, `hints = "off"`, o
 folder change or an overlay, and the retired set surviving a relaunch), closing or quitting during an operation, ⌥ word moves in
 text fields, the list's Name column following the window width, the menu bar
 (every registry command listed, Finder keys, enabled by focus, dispatch matching the key) and the
-Vim layer (motions, marks). Shared chrome has its own tests: key text from the live keymap (including the
+Vim layer (motions, marks). The finish pass adds the whole-window checks: the assembled layout at
+1280×800 (band, sidebar, row, filter field and scope bar heights), one key for each of ShowSearch,
+ShowCommandPalette, StartFilter, GoToFolder and SearchReveal in every scope and both layers, exactly
+one accent fill (none in the pane while the sidebar has the keys), the preview column taking the
+strip's remaining width, the folder summary for a folder cursor and with no matches, and the filter
+and search counts as announced. Shared chrome has its own tests: key text from the live keymap (including the
 Vim layer and the palette's old strings), keycap weights, tooltip text and a hover, the sheet scrim
 (closing outside, staying open inside), and the selection tint roles. Each test gets its own temp
 config folder.
@@ -75,13 +80,16 @@ highlighted rows. It needs a GPU, so it runs locally, not in CI.
 
 | Measure | Budget |
 | --- | --- |
-| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms; U1: 10 ms; U4: 10–11 ms, filtered 10–17 ms; U5: 10–11 ms) |
-| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms; U4: 8.85–8.95 ms, main on the same machine 8.84–8.86 ms, filtered 8.82–9.03 ms; U5: 8.87–9.06 ms, main on the same machine 8.86–8.95 ms; U10: Full 9.73–9.83 ms, Off 9.83 ms, Low 9.97 ms; warm first paint 8–10 ms in all three) |
+| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms; U1: 10 ms; U4: 10–11 ms, filtered 10–17 ms; U5: 10–11 ms; U11: 8 ms warm, 39–70 ms cold) |
+| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms; U4: 8.85–8.95 ms, main on the same machine 8.84–8.86 ms, filtered 8.82–9.03 ms; U5: 8.87–9.06 ms, main on the same machine 8.86–8.95 ms; U10: Full 9.73–9.83 ms, Off 9.83 ms, Low 9.97 ms; warm first paint 8–10 ms in all three; UI overhaul as a whole (U11): 8.66–9.54 ms, `main` on the same machine 9.64–9.77 ms, M6 8.66–8.69 ms) |
 | Search, 200k nested files, every file matches (names + contents) | first hit 4 ms; total 4.1 s (M6). `--bench-search` includes the walk, fuzzy names and content reads. |
 
 ## By hand (each milestone)
 
 Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
+
+Rows are grouped by window region: band, sidebar, pane, filter, search, palette, sheets, bottom bar,
+tips, themes, VoiceOver. Committed screenshots come from `scripts/shot.sh` (see the plan's I2).
 
 | Check | How |
 | --- | --- |
@@ -101,9 +109,10 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Close during an operation | Copy a large folder to another disk, then ⌘W the only window (or click its red button, or ⌘Q): a sheet asks. Esc keeps the copy running; Return stops it and closes (or quits) once it has wound down. With a second window open, closing one does not ask. |
 | Word moves | In the filter, search and palette fields: ⌥←/⌥→ jump by word (`m5-fix.md` is three words), ⌥⇧←/→ select, ⌥⌫ deletes a word. |
 | List width | List view: widen and narrow the window: Name grows and shrinks, Date/Size/Kind keep their widths; past Name's minimum, Kind and then Size shrink; at the 640 px minimum whole columns hide from the right, so no cell is cut at the edge (names end in “…”). Drag Name's divider: Date gives up or takes the width. |
-| Bottom bar, VoiceOver | Cmd-F5: the count reads "18 items in <folder>"; an error reads "Error: …" once; Open and Cancel read as buttons. |
+| VoiceOver | Cmd-F5: the band reads as a toolbar; the field announces "Search <folder>, Command F"; Done reads "Done, close search, Escape"; rows read name, details and "n of N"; the count reads "18 items in <folder>"; the filter count is announced once typing pauses; the search footer reads once when a search settles; a tip is read once and "Got it" is a button; an error reads "Error: …" once and Open and Cancel read as buttons; every sheet reads its title. |
 | Tips | With a fresh `CROW_STATE_DIR`: scroll a 200+ item folder → "Type / to filter this folder by name." bottom right above the bottom bar, in list and column view, FireBox and Solarized Light; Got it closes it and it never returns after relaunch. Two zero-match filters in a row → the ⌘F tip; ⇧⌘G to a recent folder → the ⌘K tip. Using the key closes and retires a tip. `hints = "off"` shows none. Opening Activity closes a tip; a narrow window wraps the text inside 12 px margins. |
-| Tips with VoiceOver | The tip is read once when it appears ("Tip: …"); "Got it" is a button that VoiceOver can press. |
+| Whole window | `scripts/shot.sh filter crates/crow-core/src firebox finder 'text:/|text:vi'` and the same with `solarized-light`: compare with `docs/plans/ui-overhaul/img/assembled-filter.png`; then `search crates` with `cmd:f|text:config`. One accent fill on screen (the focused column's cursor, or the field's ring while filtering); band, sidebar, rows, filter field, scope bar and bottom bar at the heights in the plan's table. |
+| Preview column | Column view: the preview takes the rest of the strip, never narrower than 300 px; with a folder under the cursor it shows the folder icon, name, "Folder · n items" and modified; with no matches the folder you are filtering shows the same summary. ⇧⌘P hides it and the columns keep their widths. |
 | Table | Drag header dividers to resize; click headers to sort and reverse. |
 | Preview pane | Select an image, a PDF, a text file and a folder: thumbnail, text, icon. Tags show for tagged files. |
 | Live updates | With a folder open, create, rename and delete files from Terminal; the list follows without jumping. |
@@ -123,7 +132,6 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Search field | Click the field: search opens with the cursor in the field; the field spans the band with an accent ring; Done esc on the right. Tab to the results: the ring goes; Tab again to the sidebar, again back to the field (with nothing typed, Tab goes straight to the sidebar). From any of them Cmd-F brings the field back with the query selected, and Esc closes. Esc or Done returns to the folder with keys going to the list. |
 | All / Names / Contents | Search a word that's in file names and inside files: Names drops the content lines, Contents drops the name-only rows. Names in Home is fast (no file reads). Switch to This Mac: the control shows Names, faded. Cmd-Shift-M in the field and in the results cycles All → Names → Contents. |
 | Narrow window | Shrink the window: the title truncates, then the field shrinks, then Go to loses its label. In search mode the field shrinks but the match control and Done stay whole. |
-| VoiceOver | Cmd-F5: the band reads as a toolbar; the field announces "Search <folder>, Command F"; in search mode the field is a search field and Done reads "Done, close search, Escape". |
 | View settings | Cmd-3 in one folder, then visit another: it keeps its own view; going up in column view stays in columns. Add a `[[rule]]` to `views.toml` with the folder open: it applies at once. Cmd-J explains each value. Set `view_per_folder = false`: Cmd-3, then visit that folder with its own list view and go Back: the window stays in columns, Cmd-T opens columns, `views.toml` is unchanged, Cmd-J says "this window". |
 | Go to Folder | Shift-Cmd-G opens Cmd-K with this folder's path and `/` typed and its subfolders listed; type a few letters, Tab, Return goes there; a file's full path selects it in its folder; a missing path beeps and stays open. Typing a capitalised name (`Docs`) never crashes. |
 | Inline folders | In the list, the chevron (›/⌄) opens and closes a folder inline; Right opens a folder indented under it (Right again goes in), Left steps to the containing row, Left again closes it. Option-click is a normal click. Select across levels (Cmd-click or Shift-click a nested row) and copy or trash: every selected row is included. Navigate away and back: expansions are gone. |
@@ -144,7 +152,6 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Search idle | Cmd-F with nothing typed: the heading follows All / Names / Contents and the four left-aligned examples fill the field, switch to This Mac, or flip the switch; the fourth is plain key text and disappears when no `exclude.toml` set is enabled. The key line follows `keymap = "vim"`. |
 | Search errors | Type `/(/`: one red footer line, "Invalid pattern: unclosed group"; no rows, and the body shows "Can't search: Invalid pattern: unclosed group" and suggests removing the slashes. |
 | Search themes | FireBox and a light scheme: switch knob, selected segment and match highlights on the selected row stay readable; VoiceOver reads the switch as on/off and the footer once per finished search. |
-| VoiceOver | Cmd-F5, move through the list: each row reads name, details and "n of N". |
 | Privacy prompts | Open Desktop, Documents, Downloads: the prompt names Crow. |
 | Tooltips | Hover back, forward, both view buttons, a path segment, the disk row, Search everything and Cancel during a copy: each shows its name, and its key where it has one ("Back to Desktop ⌘["). VoiceOver still reads the old labels. |
 | Sheets | Open Shift-Cmd-G, Cmd-J, the theme picker, Cmd-K and a permanent delete: each sits on a darkened window (check a dark and a light theme); clicking outside closes it like Esc (picker reverts, delete does nothing), clicking inside doesn't. The window can still be dragged. |

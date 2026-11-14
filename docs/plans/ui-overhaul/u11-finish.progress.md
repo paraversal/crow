@@ -10,10 +10,10 @@ Branch: `ui-u11-finish` · PR: none (do not merge; user: "DONT merge back to mai
 | I4 Visual drift sweep | done | `BAND_HEIGHT`, `field_ring` (2 px, both fields); contrast audit below; 3 tests. |
 | I5 Preview fills the rest + folder summary (Q2) | done | `flex_1` + `min_w(300)`; folder summary with the child column's count; 2 tests. |
 | I6 Accessibility sweep | done (hand check open) | `debug_a11y_tree_json` is None in tests (verified with a spike, reverted) → hand sweep is the fallback; filter count throttled to one announcement per burst; 2 tests. |
-| I7 Docs pass | todo | README/testing.md; Q11 wording accepted. |
-| I8 Bench vs `main` | todo | Procedure proven in I1. |
-| I9 Follow-ups recorded | todo | Q10 accepted (index note). |
-| I10 PR | todo | Q8: commit shots as `img/built-*.png`; critic opens the PR. |
+| I7 Docs pass | done | README: status line, Toolbar / Menus / Hints and tips / Palette / Search sections, Keys deduped, config row and state files; testing.md: automated paragraph, region guide, U11 rows, one VoiceOver row. |
+| I8 Bench vs `main` | done | Head p99 8.66–9.54 ms vs `main` 9.64–9.77; warm 8 ms. Numbers in testing.md. |
+| I9 Follow-ups recorded | done | List below; "Later" note added to the index. |
+| I10 PR | drafted | Body below; 18 shots committed as `img/built-*.png`; the critic opens the PR. |
 
 ## Questions
 All asked 2026-11-14 in one batch; every recommended answer accepted.
@@ -101,6 +101,15 @@ Settled by plan/code, not asked: Q4 (plan wins on copy conflicts), Q6 (macOS cho
 
 `main` p99 is ~1.1 ms above M6 (each side's spread ≤ 0.13 ms), consistent with U10's Full motion (U10: Full 9.73–9.83, Off 9.07). Budget p99 < 12.5 ms; both inside. Warm paint 7–10 ms on both (< 50 ms).
 
+### I8 on the branch head (same config, same fixture)
+| Run | warm first paint | p50 | p95 | p99 | max |
+| --- | --- | --- | --- | --- | --- |
+| head 1 | 8 ms | 8.33 | 8.59 | 9.54 | 20.13 |
+| head 2 | 8 ms | 8.33 | 8.51 | 8.66 | 19.18 |
+| head 3 | 8 ms | 8.33 | 8.52 | 9.53 | 18.23 |
+
+Head is within noise of `main` (9.64–9.77) and ~1 ms above M6, the same gap `main` already had from U10's Full motion. Budget p99 < 12.5 ms; warm paint 8 ms < 50 ms. No regression.
+
 ## I3 Findings checklist
 | # | Finding | Status | Evidence |
 | --- | --- | --- | --- |
@@ -149,5 +158,76 @@ Each state also in `solarized-light` (the two Vim states in FireBox only). Repea
 - 2026-11-14: asked Q1–Q11; all recommended answers accepted. I2 scripts written, tested, and made deterministic; 18 shots from the neutral tree. Found and fixed the zoxide leak; verified no `/Users/` in the shots.
 - 2026-11-14: I4: `BAND_HEIGHT`, `field_ring`, contrast audit. I5: preview `flex_1` + folder summary. I6: a11y-tree spike (None), filter-count throttle. Tests: `assembled_layout_matches_boards`, `same_key_everywhere`, `one_accent_fill_in_column_view`, `column_preview_fills_the_rest`, `folder_cursor_shows_summary`, `filter_count_is_announced`, `search_count_is_announced`. `cargo fmt --check`, clippy `-D warnings`, `cargo test --workspace` green (307 app, 87 core, 30 fs, 4 macos, 18 search, 6 theme).
 
+## I9 Follow-ups (not in the overhaul)
+- Animations plan: band growing into search mode, sheet and tip fades, hint retirement, honoring Reduce Motion.
+- In-app settings page for the flat typed options in `settings.toml`.
+- M7: editable path bar.
+- Board-only details (Q3): line icons per favorite, clock icons in Recent, syntax-coloured preview with line numbers, 196 px columns, darker focused-column tint, scope token inside the search field.
+- Theme-index contrast in Solarized Light (see the audit): `fg`/`surface` 4.39, `fg-subtle`/`bg` 2.93, `accent`/`surface` 3.00, `error`/`surface` 3.77, `fg` on `active_selection` 3.08–3.39, `bg-inset` = `bg` and `selection` ≈ `bg` (so the sidebar has no fill and the inactive selection is nearly invisible). FireBox passes everywhere.
+- U8 C6: the sidebar hints do not mention ⌥↑/↓ or →.
+- U7: palette view still lives in `window.rs`; Vim j/k block typing those letters; the home row reads "~" twice.
+- U8: `short_bytes` rounds after the unit choice.
+- U9: the tip floats over the list's bottom-right rows (plan position).
+- U10: the sidebar's current-folder fill does not glide (user deferred).
+- `recent.rs` zoxide discovery ignores `PATH` (absolute candidates), so a shot harness needs a stub; a product switch (e.g. `[recent] zoxide = false`) is a later decision.
+- `docs/plans/after-ui-overhaul.md`: UI fuzzing (D1) and the rest of the inbox.
+
+## I10 PR body (for the critic)
+Title: "UI U11: Whole-window pass, docs and bench"
+
+```
+U11 checks that U1–U10 add up to the assembled boards, fixes the drift, closes the findings,
+writes the docs once and records the bench. No merge.
+
+Findings (I3): 1 toolbar ok · 2 glyph buttons ok · 3 one selection ok · 4 twins ok (tests) ·
+5 disk bar ok · 6 dead quarter fixed (preview fills the rest, folder summary) · 7 status slots ok
+(test) · 8 path bar ok (tests) · H1 menus ok · H2 filter in column ok · H3 search header ok ·
+H4 sheets ok.
+
+What changed
+- scripts/shot.sh + scripts/window-id.swift: reproducible 1280×800 window shots from a clean
+  config (zoxide stubbed, neutral tree, optional scripted keys).
+- style::field_ring (2 px) for both text fields; style::BAND_HEIGHT for the band, sheets, palette
+  and activity list.
+- The preview column takes the strip's remaining width (min 300); a folder cursor — or a column
+  with no rows — shows the folder summary with the child column's count.
+- The filter count is announced once typing pauses (300 ms); the search footer already settles once.
+- README: status line, Toolbar / Menus / Hints and tips / Palette / Search sections, Keys deduped,
+  config table and state files. testing.md: automated list, region guide, U11 hand rows, one
+  VoiceOver row, bench numbers.
+
+Bench (100k, 1280×800, FireBox, same machine)
+| | warm first paint | p99 |
+| main (U10) | 7–10 ms | 9.64–9.77 ms |
+| M6 | 7–10 ms | 8.66–8.69 ms |
+| head | 8 ms | 8.66–9.54 ms |
+Budget: p99 < 12.5 ms, warm paint < 50 ms. Head is within noise of main.
+
+Screenshots: docs/plans/ui-overhaul/img/built-*.png (18: 8 states × FireBox/Solarized Light,
+plus Vim filter and search). Board | Crow for filter and search at 1280×800 (2×), FireBox:
+
+| Board | Crow |
+| --- | --- |
+| ![assembled filter](docs/plans/ui-overhaul/img/assembled-filter.png) | ![built filter](docs/plans/ui-overhaul/img/built-filter-firebox.png) |
+| ![assembled search](docs/plans/ui-overhaul/img/assembled-search.png) | ![built search](docs/plans/ui-overhaul/img/built-search-firebox.png) |
+
+Light theme and Vim shots: built-filter-solarized-light.png, built-search-solarized-light.png,
+built-filter-vim-firebox.png, built-search-vim-firebox.png.
+
+Not verified: VoiceOver by hand (the a11y tree is unavailable in tests), the light-theme contrast
+(theme-index roles fail; recorded, not patched), and the plan's hand-check table.
+Follow-ups: see the progress file's I9 list.
+```
+
+## Hand checks (what was checked, what wasn't)
+- Checked by pixel sampling: idle shot has exactly one accent row fill and a `selection` sidebar row;
+  the search field's ring is accent at 0x8c; the disk bar is neutral.
+- Checked by eye (vision pass on the shots): band contents, filter field in the column, no-match
+  state with the folder summary, search scope bar and footer, palette token/menu column/keycaps,
+  tip card and Got it, light-theme search.
+- Not checked: VoiceOver (needs a human at the screen), IME, the full `docs/testing.md` table,
+  a real 90 % disk, Vim typing in the palette.
+
 ## Next
-Commit the I2–I6 work, retake the shots (the field ring and preview changed), then I7 docs, I8 bench, I9 follow-ups, I10 PR body.
+Ready for critique. The critic should run the `critique` skill, fix what is clearly wrong, and open
+the PR titled "UI U11: Whole-window pass, docs and bench". Do not merge.

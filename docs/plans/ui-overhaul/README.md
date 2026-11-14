@@ -81,3 +81,19 @@ Each plan restates the answers it depends on.
 - Plans that touch per-frame rendering of the pane (U1, U4, U5) run the bench (`--bench target/fixture-100k`) and compare with `main`. U8 runs it once and records the numbers (the sidebar renders every frame, but no pane rows change).
 - Each plan's PR updates README and `docs/testing.md` for what it changed. Before every commit: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. Don't merge.
 - Match the canvas boards named in each plan. When a board and the plan disagree, the plan wins; when the plan is silent, ASK.
+
+## Later
+
+Not in the overhaul, roughly in order of payoff:
+
+- Animations plan: the band growing into search mode, sheet and tip fades, hint retirement, honoring
+  Reduce Motion like the theme fade. U10 covered feedback motion; the rest waits for its own plan.
+- In-app settings page: list the flat, typed options in `settings.toml` (`theme`, `keymap`, `font_*`,
+  `show_hidden_files`, `hints`, `palette_recent_commands`, `motion`, `sound`, `show_preview`,
+  `view_per_folder`, `[window]`).
+- M7: an editable path bar in the bottom bar (Q10).
+- Board-only details: line icons per favorite and clock icons in Recent, a syntax-coloured text
+  preview with line numbers, 196 px columns, a darker focused-column tint, a scope token inside the
+  search field.
+- Theme-index roles that miss contrast in Solarized Light (recorded in `u11-finish.progress.md`).
+- UI fuzzing and the rest of the inbox: [`../after-ui-overhaul.md`](../after-ui-overhaul.md).
