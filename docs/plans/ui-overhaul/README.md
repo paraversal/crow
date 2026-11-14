@@ -26,7 +26,7 @@ Each plan is self-contained: its own branch, progress file and PR, carried out w
 | [U5](../done/u5-bottom-bar.md)   | Bottom bar slots: path · hints/progress/errors · counts; `hints` setting and key-use counts | U1     | `ui-u5-bottom-bar`   |
 | [U6](../done/u6-search-panel.md) | Search scope bar, footer summary, idle examples, preview, This Mac, no Kind                 | U3     | `ui-u6-search-panel` |
 | [U7](../done/u7-palette.md)      | Palette sections, two-line rows, Commands token, ⇥ completion, recent commands              | U1, U2 | `ui-u7-palette`      |
-| [U8](u8-sidebar.md)      | Sidebar twins, neutral disk bar, one fill per meaning, mark letters                         | U1     | `ui-u8-sidebar`      |
+| [U8](../done/u8-sidebar.md) | Sidebar twins, neutral disk bar, one fill per meaning, mark letters                         | U1     | `ui-u8-sidebar`      |
 | [U9](u9-tips.md)         | One-time contextual tips                                                                    | U5     | `ui-u9-tips`         |
 | [U10](u10-finish.md)     | Whole-window check against the assembled boards, docs pass, bench                           | all    | `ui-u10-finish`      |
 

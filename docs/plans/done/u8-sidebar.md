@@ -22,7 +22,7 @@ Also: Vim marks (`key` in `sidebar.toml`) are invisible; you have to remember wh
 - Animations are out of scope.
 
 ## Current state
-![Today, annotated: findings 3 (three fills), 4 (two "git" in Recent), 5 (accent disk bar)](img/today-annotated.png)
+![Today, annotated: findings 3 (three fills), 4 (two "git" in Recent), 5 (accent disk bar)](../ui-overhaul/img/today-annotated.png)
 Take from it: the Recent list with two bare "git" rows (one with Finder's alias badge in its icon), the orange disk bar, and the sidebar "jules" fill competing with two column fills.
 
 All in `crates/crow-app/src/sidebar.rs` unless noted.
@@ -41,13 +41,13 @@ All in `crates/crow-app/src/sidebar.rs` unless noted.
 - **Tests.** `window.rs` `mod tests`: helpers `fixture` (:1811), `open`, `settle`, `write_config` (:1885), `favorites_toml` (:1893), `sidebar_paths` (:1898), `use_vim` (:2094). Sidebar tests: `same_keys_mean_different_things_in_sidebar_and_list` (:1903), `favorites_reorder_remove_and_add_from_the_keyboard` (:1929), `dragging_a_favorite_down_inserts_below_the_row` (:1958), `dropping_on_a_favorite_moves_into_it` (:1991), `recent_lists_visited_folders_that_are_not_favorites` (:2007), `vim_marks_set_favorites_and_jump` (:2124), `sidebar_drop_highlight_is_steady_while_the_pointer_stays_on_a_row` (:3024), `dragging_a_row_onto_a_sidebar_favorite_moves_it` (:3058). Unit tests in sidebar.rs (:647-666): `sizes_read_like_finder`, `colors_by_name_role_or_hex`. Nothing asserts fills or aria labels today.
 
 ## Target
-![Discovery kit §4: A as built, B proposed (sidebar focused, cursor on the first "git")](img/discovery-4.png)
+![Discovery kit §4: A as built, B proposed (sidebar focused, cursor on the first "git")](../ui-overhaul/img/discovery-4.png)
 Take from B: "jules" (current folder) is the only fill; the cursor on "git" is an accent ring with no fill; twins carry "Coding" / "~ · alias" in `fg-subtle` right after the name; marks "j", "d" sit at the right edge; the disk row shows "182 GB free" right-aligned and a neutral bar. "⌃⌘T adds" in the Favorites header is a question (Q7), not scope.
 
-![Assembled, filtering: sidebar with marks f/d, Recent twins "src crow-core" (current, filled) and "src crow-app", disk row](img/assembled-filter.png)
+![Assembled, filtering: sidebar with marks f/d, Recent twins "src crow-core" (current, filled) and "src crow-app", disk row](../ui-overhaul/img/assembled-filter.png)
 Take from it: the sidebar in context; one fill (the current folder) next to the column views' own selections; twin hints after the name. Its line icons (clock, home, download) are not U8 scope (Q8).
 
-![Assembled, search: sidebar while searching](img/assembled-search.png)
+![Assembled, search: sidebar while searching](../ui-overhaul/img/assembled-search.png)
 Take from it: the sidebar is unchanged in search mode. It shows "crow-core" right-aligned on a single "src" row; that disagrees with Discovery B and the filter board. This plan follows Discovery B (hint right after the name, only on twins); see Q2.
 
 ### Layout (sidebar width stays 210 px, Q8)
@@ -102,7 +102,7 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 ## Items
 
 ### I1 Row model and name cache (no visible change)
-![Discovery kit §4 (target for the following items)](img/discovery-4.png)
+![Discovery kit §4 (target for the following items)](../ui-overhaul/img/discovery-4.png)
 - *Where*: `sidebar.rs` render (:404-602), new types in `sidebar.rs`.
 - *Change*: split what each selectable row shows from how it is drawn:
   - `struct RowLook { label: String, hint: Option<String>, right: Option<String>, spoken: String, current: bool, ring: bool, drop: bool, bar: Option<(f32, BarTone)> }` with `enum BarTone { Neutral, Warning }`.
@@ -115,7 +115,7 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 - *Done when*: no visible change (hand-compare a screenshot), tests green.
 
 ### I2 Twin hints
-![Discovery kit §4 B: "git Coding", "git ~ · alias"](img/discovery-4.png)
+![Discovery kit §4 B: "git Coding", "git ~ · alias"](../ui-overhaul/img/discovery-4.png)
 - *Where*: `crates/crow-core/src/sidebar.rs` (pure logic), `sidebar.rs` `looks`.
 - *Change*:
   - `pub fn twin_hints(rows: &[TwinInput]) -> Vec<Option<usize>>` in crow-core, where `TwinInput { label: &str, path: &Path, ancestors: &[String] }` (`ancestors` = display names nearest first, ending with the volume name) and the result is, per row, the distance of the chosen ancestor (or `None` if not a twin; `Some(usize::MAX)` meaning "fall back to the abbreviated parent path"). Implements the rules in Target › Twins. Keep it UI-free and unit-tested (AGENTS: crow-core is pure Rust).
@@ -128,7 +128,7 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 - *Done when*: tests green; hand check with two real "git" folders in Recent.
 
 ### I3 One fill per meaning: current folder filled, cursor as a ring
-![Discovery kit §4 B: "jules" filled, cursor ring on "git"](img/discovery-4.png)
+![Discovery kit §4 B: "jules" filled, cursor ring on "git"](../ui-overhaul/img/discovery-4.png)
 - *Where*: `sidebar.rs` `looks` and the row element (:490-494).
 - *Change*: `current = path == self.current`; `ring = focused && i == self.cursor`; `drop` as today. Element: `.when(current && !drop, bg(current_location))`, `.when(drop, bg(drop_highlight))`, `.when(ring, cursor_ring)`. Remove the `accent` 0x55 cursor fill and any temporary I1 field.
 - *Edge cases*: cursor on the current row (fill + ring); sidebar loses focus by Tab, by clicking the list, by opening an overlay (ring disappears: `focused` is read every render; the window re-renders on focus change — verify, else `cx.notify()` the sidebar from `switch_focus`/focus-out with `on_focus_out`); file drag over the current row (drop fill replaces current fill); favorite reordering (only the insertion line); a click on a row sets the cursor and opens it (focus moves to the list, so no ring afterwards — as today).
@@ -139,7 +139,7 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 - *Done when*: tests green; hand check light and dark: one fill, ring visible on `bg-inset` and on the fill.
 
 ### I4 Disk row: neutral bar, warning at 90 %, free space on the right
-![Discovery kit §4 B: "Macintosh HD 182 GB free", neutral bar](img/discovery-4.png)
+![Discovery kit §4 B: "Macintosh HD 182 GB free", neutral bar](../ui-overhaul/img/discovery-4.png)
 - *Where*: `sidebar.rs` (:568-601), `human_bytes` neighbors.
 - *Change*: `const DISK_WARNING_USED: f32 = 0.9;` `fn bar_tone(used: f32) -> BarTone` (`>=`). `fn short_bytes(bytes: u64) -> String` per Target. `looks` sets `right = Some(format!("{} free", short_bytes(v.free_bytes)))` and `bar` for volumes with `total_bytes > 0`. Render the bar with track `surface-raised`, fill `fg-subtle` / `warning`. Free text before the eject button. Spoken label unchanged (plus Q5 if yes).
 - *Edge cases*: `free > total` (clamp used to 0); `total == 0` (no bar, no text); network volumes with stale numbers (refresh unchanged); exactly 90 %; long volume name with eject (name truncates, free and ⏏ stay).
@@ -147,7 +147,7 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 - *Done when*: tests green; hand check with a nearly full disk image (create a small DMG and fill it).
 
 ### I5 Mark letters in the Vim layer
-![Assembled, filtering: "file-crow f", "dotfiles d"](img/assembled-filter.png)
+![Assembled, filtering: "file-crow f", "dotfiles d"](../ui-overhaul/img/assembled-filter.png)
 - *Where*: `sidebar.rs` `looks`.
 - *Change*: for `Row::Favorite(_, f)` with `f.key = Some(k)` and `vim`, `right = Some(k.to_string())`. Spoken unchanged ("`{label}, mark k`", twin hint before the mark).
 - *Edge cases*: Finder layer (no letter); switching layer live in `settings.toml` (re-render through `reload_config`); a mark moved by `m x` (old row loses it); favorite with mark and color dot (dot, then letter); favorite in two groups with a mark (the key belongs to the item that has it in `sidebar.toml`, only that row shows it).
@@ -155,7 +155,7 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 - *Done when*: tests green; hand check both layers.
 
 ### I6 Alias marker (only if Q3 = yes)
-![Discovery kit §4 B: "git ~ · alias"](img/discovery-4.png)
+![Discovery kit §4 B: "git ~ · alias"](../ui-overhaul/img/discovery-4.png)
 - *Where*: `ui.rs` `refresh_recent` (:378-410) and `load_sidebar` (:129), new `Ui.aliases: HashSet<PathBuf>`; `sidebar.rs` `looks`.
 - *Change*: in the existing background task of `refresh_recent`, collect `path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())` for the sidebar Recent list and all favorites; store in `Ui.aliases` on the main thread. `looks` appends " · alias" to a twin's hint and ", alias" to its spoken label. No main-thread I/O.
 - *Edge cases*: symlink to a symlink; dangling symlink (already filtered by `is_dir` for Recent; a dangling favorite still lists); Finder alias files are files, not folders, so they cannot be sidebar rows — symlinks only (record).
@@ -163,7 +163,7 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 - *Done when*: tests green.
 
 ### I7 Favorites header hint (only if Q7 = yes)
-![Discovery kit §4 B: "⌃⌘T adds" in the Favorites header](img/discovery-4.png)
+![Discovery kit §4 B: "⌃⌘T adds" in the Favorites header](../ui-overhaul/img/discovery-4.png)
 - *Where*: header element (:405-422).
 - *Change*: on the first favorites group's header only, a right-aligned 11 px `fg-subtle` "`<keys> adds`", keys from U1 I1 for `AddToSidebar` (live keymap; hide if unbound). Header aria label stays the title; add `aria_description("Control Command T adds the selected folder")` if GPUI's description reaches VoiceOver, else nothing. Hidden when `hints = "off"` (U5 setting; if U5 isn't merged, always shown and note it).
 - *Tests*: `favorites_header_shows_the_add_key`: header text contains "⌃⌘T" with the Finder keymap.
