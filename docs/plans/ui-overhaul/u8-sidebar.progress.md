@@ -1,5 +1,5 @@
 # u8-sidebar progress
-Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: Ready for critique
+Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -41,7 +41,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: Ready 
 - Finish: the plan says push and open the PR; the `execute-plan` skill (and AGENTS.md) says the executing agent commits locally and stops at Ready for critique, and the critic opens the PR. Followed the skill; no push, no PR.
 
 ## Hand checks
-- [ ] Sidebar twins: visit two folders with the same name (`~/a/git`, `~/b/git`): Recent shows "git a" and "git b" with the hint dimmer; a narrow window truncates the hint before the name. VoiceOver reads "git, in a".
+- [ ] Sidebar twins: visit two folders with the same name (`~/a/git`, `~/b/git`): Recent shows "git a" and "git b" with the hint dimmer; with a long name (the sidebar is a fixed 210 px) the hint truncates and goes before the name does. VoiceOver reads "git, in a".
 - [ ] Sidebar follows the cursor (I8): Tab into the sidebar: nothing navigates. Arrow down through favorites: each shows in the center, focus stays in the sidebar (ring moves, the list has no focus). Tab or → (or Return): the list has focus on that folder. With a search open, Tab to the sidebar and arrow: search closes, the folder shows. Back after an arrow walk returns to the folder you were in before the walk. List and column view.
 - [ ] Sidebar fills: open a favorite: only it is filled. Tab into the sidebar and arrow: an accent ring moves, no second fill; Tab out: the ring goes. Drag a file over the current row: the drop highlight shows. Check in a light and a dark theme.
 - [ ] Disk row: Locations shows "<n> GB free" right-aligned and a grey bar; fill a disk image past 90 %: the bar turns to the warning color. VoiceOver still reads free and total.
@@ -72,6 +72,24 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: Ready 
 - 2026-11-14: Bench (Q9), once: `cold_first_paint=149ms cold_load=802ms frames=599 avg=8.35ms p50=8.33ms p95=8.54ms p99=8.61ms max=16.47ms warm_first_paint=9ms warm_load=262ms`. No comparison run; the pane rows did not change.
 - 2026-11-14: Q6 also covers undo and redo (both change free space): `operations::undo`/`redo` success now refresh volumes too.
 - 2026-11-14: `./scripts/bundle.sh` builds `target/bundle/Crow.app`. Hand checks not run (need a human at the screen); listed above.
+
+## Critique
+Critic session: 2026-11-14 · Base: main @ a3da329 · Head reviewed: 234c82f
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | Q10 ("current folder" aria description) is recorded under Decisions as done, but no row ever set it. | `sidebar.rs` row element | plan | fix | fixed (b123be3) |
+| C2 | Walking Recent with the arrows reorders Recent under the cursor: every `Show` goes through `PaneEvent::Entered` → `ui::record_visit`, which re-ranks Recent. Throwaway test (alpha 2 visits, beta 3; Tab on beta, Down to alpha): alpha jumps to the top, the ring stays on index 1 (now beta) while the center shows alpha; the next Down lands on a row already passed. Also every folder walked past gets a frecency visit. Not visible in my real-app run because zoxide scores dominated. | `window.rs` `on_pane_event` Entered, `sidebar.rs` `move_down` | UX / code | ask | Q14 |
+| C3 | The twins hand check said "a narrow window truncates the hint", but the sidebar is a fixed 210 px; only a long name truncates it. | `docs/testing.md`, Hand checks | record | fix | fixed (critique docs commit) |
+| C4 | `sidebar_walk` is a bool reset only by `navigate`/back/forward; history visits from `apply_mode` (pane.rs:630) and the root-column ← (:938) don't reset it, so a later walk could replace that step. Tried two key sequences; neither reproduced it (columns don't move history the way I expected). Anchoring the walk on the folder it last showed (`Option<PathBuf>`) would make it independent of who else navigates. | `pane.rs:247`, `:436-443` | code | note | left: no repro |
+| C5 | `refresh_volumes` returns early without the `Watchers` global, a test-only guard in production code. Production installs watchers (ui.rs:222) before the first refresh (:231), so nothing breaks; recorded as a Decision by the agent. | `ui.rs:502-507` | code sense | note | left |
+| C6 | The new keys (⌥↑/⌥↓ group jumps, → to the list) are not in U5's sidebar-focus hints, which still show "⌥⌘↑↓ reorder · ⌘⌫ remove · ⇥ to list" (screenshot). The plan says "so U5's sidebar hints can show them", which doesn't clearly ask U8 to add them. | bottom bar, sidebar focus | UX | note | left (U9/U10 or a follow-up) |
+| C7 | `short_bytes` rounds after choosing the unit: 9.96 GB prints "10.0 GB", 999.6 GB prints "1000 GB". Cosmetic. | `sidebar.rs` `short_bytes` | code | note | left |
+| C8 | `symlinked_twin_says_alias` polls with `thread::sleep` up to 2 s for the background alias scan. Test-only; the same wait pattern as other background-I/O tests. | `window.rs` test | code | note | left |
+
+Checks re-run: fmt ✓ · clippy ✓ · tests ✓ (385) · bench not needed: the pane's rows are unchanged (agent's single run recorded above)
+Looked at in the app: branch build with a throwaway `CROW_CONFIG_DIR`/`CROW_STATE_DIR`, FireBox (dark), Vim layer on: twins "git Coding / Work / Projects · alias", Recent "projects ~ · alias", marks f/w on the right, red color dot, "Macintosh HD 1.6 TB free" with a neutral bar; Tab + Down shows the folder with fill and ring on the same row, list keeps no focus; ⌥↓ into Recent and arrows walk it. Not looked at: a light theme, VoiceOver, a nearly full disk, `main` side by side (the sidebar changes are all intended and listed in the plan).
+Verdict: pending Q14.
 
 ## Next
 Ready for critique. The critic should hand-check the ring/shadow and light/dark contrast, plus the I8 feel in list and column view; the plan's `Finish` push/PR step is left to the critic (execute-plan skill).
