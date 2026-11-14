@@ -37,6 +37,13 @@ Branch: ui-u7-palette · PR: none · Last updated: 2026-11-14
 - [ ] Run two commands, quit, relaunch: `>` shows them under Recently used; `palette_recent_commands = false` hides it live and stops recording.
 - [ ] FireBox and Solarized Light: token, highlights, chip, keycaps; narrow window keeps 16 px margins.
 
+Automated layout check (throwaway test, since removed) read the rendered bounds in the test platform:
+sheet 620×526 at (458, 52) — top offset 52, max list 440; header 26 px; folder row 44 px;
+command row 40 px; Commands token 74×24 inside the 50 px input row (list starts at 52+50+1+6=109).
+Not verified by me: the light/dark visual look and real key interactions — `screencapture` needs Screen
+Recording permission and timed out (TCC prompt), and scripted ⌘K needs Accessibility, so those stay
+with the user.
+
 ## Found along the way
 - Go to Folder's Tab completion still runs `read_dir` on the main thread (`window.rs`, the `go_to_folder` subscription). The palette runs its own completion in `background_spawn`; moving Go to Folder off the main thread is the follow-up the plan names.
 - Path mode sorts a parent's children by name when there is no partial: `crow_fs::list_dir` yields unsorted batches, and a stable order is what the UI and tests need.
