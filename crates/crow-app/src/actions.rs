@@ -72,6 +72,10 @@ actions!(
         CycleMatch,
         CloseSearch,
         SearchReveal,
+        /// ↓ in the search field: focus the results without the Tab cycle's sidebar fallback.
+        SearchFocusResults,
+        /// ↑ on the first result: back to the search field.
+        SearchFocusField,
         // Window
         NewTab,
         CloseTab,
@@ -178,6 +182,11 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("escape", CloseSearch, Some("SearchResults")),
         KeyBinding::new("up", MoveUp, Some("SearchResults")),
         KeyBinding::new("down", MoveDown, Some("SearchResults")),
+        // ↓ in the field enters the results (no sidebar fallback); ↑ on the first row
+        // comes back. "Search" is the band's own context level, so it reaches the field
+        // without stealing the results list's plain ↓ (that binding matches deeper).
+        KeyBinding::new("down", SearchFocusResults, Some("Search")),
+        KeyBinding::new("up", SearchFocusField, Some("SearchResults")),
         KeyBinding::new("alt-up", MoveToFirst, Some("SearchResults")),
         KeyBinding::new("alt-down", MoveToLast, Some("SearchResults")),
         KeyBinding::new("enter", OpenSelection, Some("SearchResults")),
@@ -254,6 +263,17 @@ mod tests {
 
     fn wins(keymap: &Keymap, input: &'static str, stack: &[&'static str], action: &dyn Action) -> bool {
         resolved(keymap, input, stack).first().is_some_and(|found| found.partial_eq(action))
+    }
+
+    #[test]
+    fn search_field_arrows_enter_and_leave_the_results() {
+        let keymap = keymap();
+        let field = ["Crow", "Search", "TextInput"];
+        let results = ["Crow", "Search", "SearchResults"];
+        assert!(wins(&keymap, "down", &field, &SearchFocusResults), "↓ in the field enters the results");
+        assert!(wins(&keymap, "up", &results, &SearchFocusField), "↑ on a row leaves them");
+        // The Vim layer's letters keep typing in the field.
+        assert!(!wins(&keymap, "j", &field, &MoveDown));
     }
 
     #[test]

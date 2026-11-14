@@ -6,7 +6,7 @@ Branch: `ui-u7-fix` · PR: none · Last updated: 2026-11-14 · State: in progres
 | --- | --- | --- |
 | X1 Palette: more room under section headers | done | header 34 px, `pt(10)/pb(8)`, label line height 16; test `palette_header_leaves_room_above_the_first_row` (8 px gap). Only the eye check in the bundle is left. |
 | X2 Text fields: blinking caret, more room on the left | done | 2 px text inset, caret just before the first glyph, x-height-centered text, 500/500 blink; test `caret_blinks_in_text_fields`. Bundle check of the vertical look pending. |
-| X3 Search field: ↓ moves into the results | todo | ↑ part needs the user (Q2) |
+| X3 Search field: ↓ moves into the results | done | ↓ in the field focuses and selects the cursor row, nothing without results; ↑ on row 0 returns to the field. Tests `search_down_from_field_focuses_results`, `search_down_without_results_stays_in_the_field`, `search_up_from_first_row_returns_to_field` plus a keymap unit test. |
 | X4 New File | todo | key and name need the user (Q3, Q4) |
 | X5 Hide the preview | todo | key and state location need the user (Q5, Q6) |
 | X6 UI freezes | todo | measure first |
@@ -24,6 +24,7 @@ Branch: `ui-u7-fix` · PR: none · Last updated: 2026-11-14 · State: in progres
 ## Decisions
 - Base: `main` at a3a8e96, U7 (PR #16) is merged, so the branch starts from it (plan's condition met).
 - X1 header: the 12 px label's default line height is 19.5 px, so 34 px with `pt(10)/pb(8)` left only 4.5 px. Added `line_height(16)` so 10 + 16 + 8 = 34 px and the label-to-row gap is 8 px, as on board B. The plan's own numbers assumed a 16 px line.
+- X3 bindings: a GPUI key predicate (`Search && TextInput`) only matches tags of one context level, so ↓ is bound on `Search` (the band's level) instead of combining `Search` and `TextInput`. The results' plain ↓ keeps winning there because `SearchResults` matches one level deeper.
 - X1 test measures the header *label* bounds, not the header box: the header and the first row are adjacent by construction (gap 0 between their boxes), while the plan's test asks for a ≥ 6 px gap. The label bottom to row top is the visible gap.
 
 ## Hand checks
@@ -41,7 +42,8 @@ Branch: `ui-u7-fix` · PR: none · Last updated: 2026-11-14 · State: in progres
 ## Log
 - 2026-11-14 Plan read; branch `ui-u7-fix` created from `main` (a3a8e96, U7 merged). Progress file added.
 - 2026-11-14 X1 implemented and tested (28 palette tests green, `cargo fmt --check` clean).
+- 2026-11-14 X3 implemented and tested; 41 search tests and the keymap tests pass.
 - 2026-11-14 X2 implemented: 2 px text inset (caret, selection, IME bounds and hit-testing follow), the text is centered on its x-height band, and the caret blinks 500/500 on a per-field executor-clock loop that only notifies the input entity. Focus changes are reconciled in `paint` (focus listeners registered during render never fired in tests; the loop + paint check is simpler and has no listener lifetime). `caret_blinks_in_text_fields` covers focus, off, on, typing, blur; all 227 crow-app tests pass. Visual check in the bundle still to do.
 
 ## Next
-X3: ↓ in the search field focuses the results, ↑ on row 0 returns to the field.
+X4: New File through crow_fs::ops, the File menu, the palette and ⌥⌘N.

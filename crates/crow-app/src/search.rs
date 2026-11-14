@@ -23,7 +23,7 @@ use gpui::{
 
 use crate::actions::{
     CloseSearch, CopyFiles, CutFiles, CycleMatch, DeletePermanently, MoveDown, MoveToFirst, MoveToLast, MoveToTrash,
-    MoveUp, OpenSelection, QuickLook, SearchEverything, SearchReveal, SelectAll,
+    MoveUp, OpenSelection, QuickLook, SearchEverything, SearchFocusField, SearchFocusResults, SearchReveal, SelectAll,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::extensions::Ext;
@@ -747,6 +747,11 @@ impl SearchView {
     }
 
     #[cfg(test)]
+    pub fn results_focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    #[cfg(test)]
     pub fn scope(&self) -> Scope {
         self.scope
     }
@@ -932,6 +937,31 @@ impl SearchView {
         }
     }
 
+    /// ↓ in the field: land on the current cursor row. With no results it does nothing,
+    /// unlike Tab, which moves on to the sidebar.
+    fn focus_results_from_field(&mut self, _: &SearchFocusResults, window: &mut Window, cx: &mut Context<Self>) {
+        if self.results.is_empty() {
+            return;
+        }
+        if self.selection.cursor().is_none() {
+            self.select_only(self.cursor.min(self.results.len() - 1), window, cx);
+        } else {
+            window.focus(&self.focus, cx);
+            self.scroll.scroll_to_item(self.cursor, ScrollStrategy::Top);
+            cx.notify();
+        }
+    }
+
+    /// ↑ on the first row goes back to the field; elsewhere it moves up as usual.
+    fn focus_field_from_results(&mut self, _: &SearchFocusField, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cursor > 0 {
+            self.move_up(&MoveUp, window, cx);
+        } else {
+            self.focus_input(window, cx);
+            cx.notify();
+        }
+    }
+
     fn move_to_first(&mut self, _: &MoveToFirst, window: &mut Window, cx: &mut Context<Self>) {
         if !self.results.is_empty() {
             self.select_only(0, window, cx);
@@ -995,6 +1025,7 @@ impl SearchView {
             .on_action(cx.listener(Self::search_everything))
             .on_action(cx.listener(Self::cycle_match))
             .on_action(cx.listener(Self::close_action))
+            .on_action(cx.listener(Self::focus_results_from_field))
             .flex_1()
             .min_w(px(160.))
             .h(px(32.))
@@ -1591,6 +1622,7 @@ impl SearchView {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
+            .on_action(cx.listener(Self::focus_field_from_results))
             .on_action(cx.listener(Self::move_to_first))
             .on_action(cx.listener(Self::move_to_last))
             .on_action(cx.listener(Self::open))

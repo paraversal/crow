@@ -4662,6 +4662,74 @@ mod tests {
         cx.update(|window, _| focus.is_focused(window))
     }
 
+    fn search_results_focused(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> bool {
+        let focus = view.read_with(cx, |w, cx| w.search.as_ref().expect("search open").read(cx).results_focus_handle());
+        cx.update(|window, _| focus.is_focused(window))
+    }
+
+    #[gpui::test]
+    fn search_down_from_field_focuses_results(cx: &mut TestAppContext) {
+        let root = fixture("search-down-field");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("a");
+        wait_for_search(&view, &mut cx);
+        let paths = view.read_with(&cx, |w, cx| {
+            let search = w.search.as_ref().expect("search open").read(cx);
+            assert!(search.result_count() >= 2, "two name hits: {}", search.result_count());
+            search.result_paths()
+        });
+
+        cx.simulate_keystrokes("down");
+        assert!(search_results_focused(&view, &mut cx), "↓ moves into the results");
+        let (cursor, selected) = view.read_with(&cx, |w, cx| {
+            let search = w.search.as_ref().expect("search open").read(cx);
+            (search.cursor(), search.selected_entry().map(|(path, _)| path))
+        });
+        assert_eq!(cursor, 0, "row 0 unless the user moved");
+        assert_eq!(selected.as_deref(), Some(paths[0].as_path()), "row 0 is selected");
+
+        cx.simulate_keystrokes("down");
+        let (cursor, selected) = view.read_with(&cx, |w, cx| {
+            let search = w.search.as_ref().expect("search open").read(cx);
+            (search.cursor(), search.selected_entry().map(|(path, _)| path))
+        });
+        assert_eq!(cursor, 1, "↓ again moves on");
+        assert_eq!(selected.as_deref(), Some(paths[1].as_path()));
+    }
+
+    #[gpui::test]
+    fn search_down_without_results_stays_in_the_field(cx: &mut TestAppContext) {
+        let root = fixture("search-down-empty");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("zzzzz");
+        wait_for_search(&view, &mut cx);
+        assert_eq!(view.read_with(&cx, |w, cx| w.search.as_ref().expect("search open").read(cx).result_count()), 0);
+        cx.simulate_keystrokes("down");
+        assert!(search_input_focused(&view, &mut cx), "↓ does nothing without results");
+    }
+
+    #[gpui::test]
+    fn search_up_from_first_row_returns_to_field(cx: &mut TestAppContext) {
+        let root = fixture("search-up-field");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("a");
+        wait_for_search(&view, &mut cx);
+        cx.simulate_keystrokes("down");
+        assert!(search_results_focused(&view, &mut cx));
+        cx.simulate_keystrokes("up");
+        assert!(search_input_focused(&view, &mut cx), "↑ on the first row returns to the field");
+        assert_eq!(view.read_with(&cx, |w, cx| w.search.as_ref().expect("search open").read(cx).cursor()), 0);
+
+        cx.simulate_keystrokes("down down");
+        assert_eq!(view.read_with(&cx, |w, cx| w.search.as_ref().expect("search open").read(cx).cursor()), 1);
+        cx.simulate_keystrokes("up");
+        assert!(search_results_focused(&view, &mut cx), "↑ below the first row just moves up");
+        assert_eq!(view.read_with(&cx, |w, cx| w.search.as_ref().expect("search open").read(cx).cursor()), 0);
+    }
+
     #[gpui::test]
     fn tab_on_an_empty_search_goes_to_the_sidebar_and_esc_still_closes(cx: &mut TestAppContext) {
         let root = fixture("search-empty-tab");
