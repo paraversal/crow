@@ -22,7 +22,7 @@ Design reference: canvas boards "Palette variants" (PaletteCompare) **B** (folde
 
 ## Current state
 
-![Palette A, as built: no scrim, two identical "git" rows, grey key text, sentence footer](img/palette-a.png)
+![Palette A, as built: no scrim, two identical "git" rows, grey key text, sentence footer](../ui-overhaul/img/palette-a.png)
 Take from it: what goes away. One-line rows, no source, no scrim, footer as a sentence.
 
 Model, `crates/crow-app/src/palette.rs`:
@@ -57,13 +57,13 @@ Tests today (`window.rs`): `command_palette_runs_a_command` (2296, types `>toggl
 
 ## Target
 
-![Palette B: grouped by source, two-line rows, match letters in accent, keycap footer, scrim](img/palette-b.png)
+![Palette B: grouped by source, two-line rows, match letters in accent, keycap footer, scrim](../ui-overhaul/img/palette-b.png)
 Take from it: 50 px input row (arrow icon, query, "5 places"), section headers, 44 px two-line rows with last visit on the right, footer of keycaps with "> commands" on the right.
 
-![Palette C: Commands token, menu column, on/off chip, Key keycaps, Recently used](img/palette-c.png)
+![Palette C: Commands token, menu column, on/off chip, Key keycaps, Recently used](../ui-overhaul/img/palette-c.png)
 Take from it: accent "Commands" token before the query, "2 of 34", 40 px rows with menu name, label with highlights, chip, keycaps. (Its "Recently used" under a typed query is overridden by the plan: empty query only.)
 
-![Assembled target window for the overall look](img/assembled-filter.png)
+![Assembled target window for the overall look](../ui-overhaul/img/assembled-filter.png)
 Take from it: the palette's sheet should read as part of this window (same row fills, keycap style, `surface` panels).
 
 ### Sheet
@@ -130,7 +130,7 @@ Take from it: the palette's sheet should read as part of this window (same row f
 
 ### I1 Match ranges from the fuzzy matcher
 - *Owner note (orchestrator):* U6 (I2, `u6-search-panel.md`) also adds `FuzzyMatcher::indices` with this same signature, and U6 lands first in the suggested order. If it is on `main`, reuse it and its tests and keep only this plan's grapheme test if U6 lacks one; if not, add it here exactly as below and U6 reuses it. Either way there is one implementation.
-![Palette B: matched letters in accent in the name and in the path](img/palette-b.png)
+![Palette B: matched letters in accent in the name and in the path](../ui-overhaul/img/palette-b.png)
 - *Where*: `crates/crow-search/src/engine.rs` `FuzzyMatcher`; `crates/crow-search/Cargo.toml`.
 - *Change*: add `pub fn indices(&mut self, haystack: &str) -> Option<(u32, Vec<Range<usize>>)>`: calls `Matcher::fuzzy_indices`, sorts and dedups indices (nucleo may leave them unsorted), maps each index to the **byte range** of that grapheme (`unicode_segmentation::UnicodeSegmentation::grapheme_indices(true)`; for ASCII the index is the byte), and merges adjacent ranges. Add `unicode-segmentation = "1"` to crow-search (already in the lock file through nucleo and crow-app; ask if the version differs). `score` stays for the search walk.
 - *Edge cases*: empty needle → `Some((0, vec![]))`; combining accents (`é` as e + U+0301) count as one grapheme; a needle longer than the haystack → `None`.
@@ -153,7 +153,7 @@ Take from it: the palette's sheet should read as part of this window (same row f
 - *Done when*: the existing palette keystroke tests pass unchanged (the UI still renders the old way, reading `Listing.items`).
 
 ### I3 Folder mode on the Sheet: input row, sections, two-line rows, footer
-![Palette B: the target folder mode](img/palette-b.png)
+![Palette B: the target folder mode](../ui-overhaul/img/palette-b.png)
 - *Where*: `window.rs` `Palette`, `show_palette`, `refresh_palette`, `move_palette`, `confirm_palette`, `render_palette`, `render_palette_rows`; `text_input.rs`; `style.rs` (only if a helper is missing from U1).
 - *Change*:
   - `Palette` gets `listing: Listing`, `cursor` over `listing.items`, `scroll: ScrollHandle` (replaces `UniformListScrollHandle`).
@@ -176,7 +176,7 @@ Take from it: the palette's sheet should read as part of this window (same row f
 - *Done when*: tests pass; a hand look in both themes matches Palette B.
 
 ### I4 Command mode: token, rows, chips, keycaps
-![Palette C: Commands token, menu column, chip and keycaps](img/palette-c.png)
+![Palette C: Commands token, menu column, chip and keycaps](../ui-overhaul/img/palette-c.png)
 - *Where*: `window.rs` palette functions; `palette.rs`; `text_input.rs`.
 - *Change*:
   - `enum PaletteMode { Folders, Commands }` in `Palette`. In the `Changed` handler: in `Folders`, if the text starts with `>`, switch to `Commands` and `set_text(rest)` (guard against handling the nested `Changed` twice; `set_text` emits `Changed` again).
@@ -194,7 +194,7 @@ Take from it: the palette's sheet should read as part of this window (same row f
 - *Done when*: tests pass; Palette C matches by hand.
 
 ### I5 ⇥ completion and path mode
-![Palette B footer: ⇥ complete](img/palette-b.png)
+![Palette B footer: ⇥ complete](../ui-overhaul/img/palette-b.png)
 - *Where*: `window.rs` palette subscription (`CompletionRequested` branch, today a no-op at 1368), `refresh_palette`; `palette.rs`; `crow-core/src/paths.rs` (reuse only).
 - *Change*:
   - Folder mode Tab with a cursor row: `set_text(label + "/")` (no double slash for `/`; `~` → `~/`). Command mode Tab: nothing. Folder mode Tab with no rows in path mode: run `crow_core::complete_typed` in `background_spawn` and apply its result on the main thread if the query is unchanged (this is the "reuse Go to Folder's completion" part; do not move Go to Folder itself off the main thread in this plan, record it as a follow-up). Tab with no rows outside path mode: bell.
@@ -210,7 +210,7 @@ Take from it: the palette's sheet should read as part of this window (same row f
 - *Done when*: tests pass; no `read_dir`/`list_dir` call on the main thread from the palette (grep the diff).
 
 ### I6 Recently used commands and `palette_recent_commands`
-![Palette C: "Recently used" section](img/palette-c.png)
+![Palette C: "Recently used" section](../ui-overhaul/img/palette-c.png)
 - *Where*: new `crates/crow-core/src/recent_commands.rs` (export in `lib.rs`); `settings.rs`; `crates/crow-app/src/ui.rs`; `palette.rs`; `window.rs` `confirm_palette`; README.
 - *Change*:
   - `CommandId::key(self) -> &'static str` (kebab-case, stable, e.g. `"toggle-hidden-files"`) and `CommandId::from_key(&str) -> Option<CommandId>`; persisted ids are these strings, so renaming a variant never breaks the file.

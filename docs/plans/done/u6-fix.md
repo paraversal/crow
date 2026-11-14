@@ -78,7 +78,7 @@ Put these to the user with the recommendation first; implement only what they pi
 
 ## Finish
 - `cargo fmt --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace`.
-- `./scripts/bundle.sh`, open `target/bundle/Crow.app` on the repo folder, search `config` and `m5`: the top row selected and previewed, dates on one line, "1 folder skipped ›", `/(/` one line. Screenshot the result next to `img/assembled-search.png` for the PR.
+- `./scripts/bundle.sh`, open `target/bundle/Crow.app` on the repo folder, search `config` and `m5`: the top row selected and previewed, dates on one line, "1 folder skipped ›", `/(/` one line. Screenshot the result next to `../ui-overhaul/img/assembled-search.png` for the PR.
 - Update `docs/testing.md` hand rows if wording changed (skipped singular, short dates); README only if behavior described there changed.
 - Progress file: each item's state, measurements (F5 bench, F6 timings), user answers to F8 and F7.7.
 - Push to `ui-u6-search-panel` (PR #14) with a comment listing the fixes; don't merge. U6 hand checks (light theme, VoiceOver, narrow window, This Mac) remain for the user.

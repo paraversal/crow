@@ -18,7 +18,7 @@ The plan's line numbers are as of `ui-u7-palette` @ 1ce2044; re-find them on `ma
 
 ### X1 Palette: more room under section headers (ui)
 **Observed (user):** "not enough padding between 'Recent' (first heading) and the first item".
-**Where:** `crates/crow-app/src/window.rs`, `PALETTE_HEADER_ROW` (26) and the header in `render_palette_rows` (`.h(26).pt(8)`, 12 px text). Text plus top padding fill the row, so the label sits about 2 px above the first row. Board B (`img/palette-b.png`) shows about 10 px between "Recent" and the first row's fill.
+**Where:** `crates/crow-app/src/window.rs`, `PALETTE_HEADER_ROW` (26) and the header in `render_palette_rows` (`.h(26).pt(8)`, 12 px text). Text plus top padding fill the row, so the label sits about 2 px above the first row. Board B (`../ui-overhaul/img/palette-b.png`) shows about 10 px between "Recent" and the first row's fill.
 **Change:** header 34 px: `pt(10)`, text 12 px, `pb(8)`; keep it a single `PALETTE_HEADER_ROW` constant so `palette_row_y` and `palette_content_height` stay right. Compare with board B, and with the first header just under the input row (the list's 6 px top padding plus `pt`). If board B and 34 px disagree visibly, take the board and record it.
 **Tests:** extend `palette_rows_are_inset_from_the_sheet` (or add `palette_header_leaves_room_above_the_first_row`): `debug_bounds("palette-header-0")` bottom to `palette-row-0` top ≥ 6 px, and the cursor still scrolls into view (`palette_cursor_skips_headers` stays green).
 **Done when:** the gap matches board B by eye in the bundle (dark and Solarized Light).

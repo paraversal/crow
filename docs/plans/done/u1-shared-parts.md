@@ -24,7 +24,7 @@ Build each part once, here, and move today's surfaces onto them **without redesi
 - From the orchestrator for U8: `cursor_ring` must never change a row's size: an inset `BoxShadow` (spread, no blur), not a border. The sidebar is 210 px wide today (`sidebar.rs:631`), not 220 as on the boards; U1 does not change that.
 
 ## Current state
-![Today, annotated: glyph buttons (2), three fills at once (3), no tooltips (1)](img/today-annotated.png)
+![Today, annotated: glyph buttons (2), three fills at once (3), no tooltips (1)](../ui-overhaul/img/today-annotated.png)
 Take from it: ‹ › and ☰ ▥ are text glyphs; sidebar "jules", the inactive column and the active row all carry a fill.
 
 **Keymap.** `actions.rs:86` `finder_keymap()` and `:174` `vim_keymap()`; both are always bound (`main.rs:172-174`, tests `window.rs:1830-1832`), plus `text_input::keymap()` (`text_input.rs:48`, context `TextInput`: enter Confirm, escape Cancel, tab Complete). The layer is chosen by context only: views append `vim` when `settings.keymap == KeymapLayer::Vim` (`pane.rs:1772-1775`, `sidebar.rs:606`, palette `window.rs:1473-1476`, picker `:1638-1641`). Context nesting: `Crow` (`window.rs:1756`) > `FileList [ColumnView] [vim|VimPending] [Filtered]` (`pane.rs:1768-1778,1824`), `Sidebar [vim]` (`sidebar.rs:622`), `Search` (`search.rs:981`) > `SearchResults` (`search.rs:720`, never gets `vim`, so the `SearchResults && vim` bindings at `actions.rs:206-207` can't fire today; out of scope, see Q8), `Filter` (`pane.rs:1649`, a sibling of the list, not inside `FileList`: `pane.rs:1876`), `Sheet` (`window.rs:876,1123`), `Sheet Palette [vim]`, `Sheet ThemePicker [vim]`. Go to Folder has no context of its own; its `TextInput` handles keys.
@@ -58,16 +58,16 @@ Activity (`render_activity` `:903`) is a non-modal popover, not a sheet; leave i
 **Tests that cover this.** `window.rs` `mod tests` (`:1803`): `open` (`:1821`, calls `ui::init_for_tests`), `settle`, `use_vim` (`:2094`), `theme_index` (`:2149`), `sheet_open` (`:2850`); clicks via `debug_selector` + `cx.debug_bounds` + `simulate_click` (`path_bar_segments_navigate_as_history_steps` `:2045`). Overlay tests: `go_to_folder_completes_navigates_and_reveals_files` `:2630`, `permanent_delete_needs_confirmation` `:2930`, `conflicts_ask_first_and_keep_both_by_default` `:2914`, `rules_apply_live_and_why_explains` `:2064`, `theme_picker_previews_reverts_and_saves` `:2371`, the `command_palette_*` tests `:2296-2368`.
 
 ## Target
-![Discovery kit §1: Outline 18 px, Key 20 px one cap per key, Text plain](img/discovery-1.png)
+![Discovery kit §1: Outline 18 px, Key 20 px one cap per key, Text plain](../ui-overhaul/img/discovery-1.png)
 Take: three weights of one component; Key splits a chord into one cap per key.
 
-![Top band B: drawn icons and a tooltip "Back to Desktop ⌘["](img/top-band-b.png)
+![Top band B: drawn icons and a tooltip "Back to Desktop ⌘["](../ui-overhaul/img/top-band-b.png)
 Take: stroke icons 16 px; the tooltip is a small raised box with label in `fg` and key in `fg-muted`. U1 builds the icons and tooltip only; the band's layout is U3.
 
-![Palette B: a sheet on a scrim, 12 px radius](img/palette-b.png)
+![Palette B: a sheet on a scrim, 12 px radius](../ui-overhaul/img/palette-b.png)
 Take: the scrim darkens the window; panel radius 12, raised border, deep shadow. U1 builds the frame; the palette's sections and rows are U7.
 
-![Assembled target: the parts in place](img/assembled-filter.png)
+![Assembled target: the parts in place](../ui-overhaul/img/assembled-filter.png)
 Take: one fill per meaning (accent = where keys go, `selection` = current location), keycaps in fields and the bottom bar.
 
 New modules in `crates/crow-app/src/`: `keys.rs` (I1), `chrome.rs` (Keycap I2, tooltip I3, Sheet I4), `icons.rs` (I5). Tints and scrim colors in `style.rs` (I4, I6). Register the modules in `main.rs:11-24`.
@@ -109,7 +109,7 @@ Performance: no change to warm first paint or scroll p99 on the 100k fixture bey
 ## Items
 
 ### I1 Keys from the live keymap
-![Palette B footer: keys drawn from the keymap](img/palette-b.png)
+![Palette B footer: keys drawn from the keymap](../ui-overhaul/img/palette-b.png)
 - *Where:* new `keys.rs`; `palette.rs`; `window.rs` (`render_palette_rows` `:1533`, footer `:1527`, `render_sheet` `:771`, `render_picker` `:1698`); `search.rs:600`; `actions.rs:99-100`.
 - *Change:*
   - `pub enum KeyScope { Window, List, Columns, Sidebar, Filter, Search, SearchResults, Palette, ThemePicker, Sheet }` and `pub fn context_stack(scope, layer: KeymapLayer) -> Vec<KeyContext>` mirroring the real nesting: Window `[Crow]`; List `[Crow, "FileList"+v]`; Columns `[Crow, "FileList ColumnView"+v]`; Sidebar `[Crow, "Sidebar"+v]`; Filter `[Crow, Filter, TextInput]`; Search `[Crow, Search, TextInput]`; SearchResults `[Crow, Search, SearchResults]`; Palette `[Crow, "Sheet Palette"+v, TextInput]`; ThemePicker `[Crow, "Sheet ThemePicker"+v]`; Sheet `[Crow, Sheet]`; `+v` = " vim" in the Vim layer. Put a comment at each view's `key_context` call pointing at `keys::context_stack` so the two stay in step.
@@ -128,7 +128,7 @@ Performance: no change to warm first paint or scroll p99 on the 100k fixture bey
 - *Done when:* no key literal is left in `crow-app/src` outside `keys.rs` and tests (`grep -n "⌘\|⇧\|⌥\|⌃" crates/crow-app/src` shows only those and the sort arrow `pane.rs:1369`), and the tests pass.
 
 ### I2 Keycap element
-![Discovery kit §1](img/discovery-1.png)
+![Discovery kit §1](../ui-overhaul/img/discovery-1.png)
 - *Where:* `chrome.rs`.
 - *Change:* `pub enum KeycapWeight { Outline, Key, Text }`; `#[derive(IntoElement)] pub struct Keycap { caps: Vec<SharedString>, weight: KeycapWeight }` with `Keycap::text(s, weight)` (one literal chord, e.g. "esc"), `Keycap::from_binding(&KeyBinding, weight)` and `Keycap::for_action(action, scope, weight, cx) -> Option<Keycap>`. `RenderOnce` per the Target sizes; theme from `cx.global::<Ui>()`. `Outline`/`Text` render one chord string; `Key` renders `caps`. Nothing in U1 uses `Outline`/`Key` yet except the tooltip (`Text`); U3–U7 do.
 - *Edge cases:* empty caps render nothing; long caps (`Space`) widen with padding, never clip; caps use `flex_none` so they don't shrink in tight rows.
@@ -136,7 +136,7 @@ Performance: no change to warm first paint or scroll p99 on the 100k fixture bey
 - *Done when:* the element exists with the three weights and tests pass; record in the progress file how it looks on FireBox and Paper (hand check).
 
 ### I3 Tooltip
-![Top band B: "Back to Desktop ⌘["](img/top-band-b.png)
+![Top band B: "Back to Desktop ⌘["](../ui-overhaul/img/top-band-b.png)
 - *Where:* `chrome.rs`; `window.rs` `render_title_bar` `:301`, `view_button` `:555`, path segments `:494`, `cancel-operation` `:540`; `sidebar.rs` volume rows (`:461-466` spoken text); `search.rs:578`; `crow-core/src/history.rs`.
 - *Change:* `struct Tooltip { label, keys: Option<SharedString>, spoken }` implementing `Render`. `pub fn tooltip_text(label: &str, keys: Option<&str>) -> String` ("Back to Desktop ⌘["), `pub fn with_tooltip<E: StatefulInteractiveElement>(element: E, label: impl Into<SharedString>, keys: Option<SharedString>) -> E` (resolve keys at render with `keys::text`; the closure builds `cx.new(|_| Tooltip{..}).into()`), and `with_action_tooltip(element, label, action, scope, cx)`. Add `History::back_target()` / `forward_target() -> Option<&Path>` (peek, no move) and `Pane::back_target`/`forward_target` for the "Back to <folder>" labels (folder name via `folder_name`). Apply to the table in Target.
 - *Edge cases:* tooltip text never replaces the element's aria label; disabled back/forward still show "Back"/"Forward" with the key; labels update on navigation because they're built at render.
@@ -144,7 +144,7 @@ Performance: no change to warm first paint or scroll p99 on the 100k fixture bey
 - *Done when:* every element in the Target table has a tooltip; hand check in the bundle.
 
 ### I4 Sheet overlay
-![Palette B on its scrim](img/palette-b.png)
+![Palette B on its scrim](../ui-overhaul/img/palette-b.png)
 - *Where:* `chrome.rs`, `style.rs`, the five `render_*` fns in `window.rs`.
 - *Change:*
   - `style.rs`: `pub fn scrim(theme: &Theme) -> Rgba` (by `theme.variant`, values per Target and Q2).
@@ -155,7 +155,7 @@ Performance: no change to warm first paint or scroll p99 on the 100k fixture bey
 - *Done when:* the five overlays use the one frame, both tests pass, light and dark scrims checked by hand.
 
 ### I5 Icons
-![Top band B icons](img/top-band-b.png)
+![Top band B icons](../ui-overhaul/img/top-band-b.png)
 - *Where:* new `crates/crow-app/assets/icons/*.svg` + `LICENSE`; `icons.rs`; `main.rs:168`; `window.rs` `render_title_bar`, `view_button`.
 - *Change:* files `chevron-left.svg`, `chevron-right.svg`, `list.svg`, `columns-3.svg`, `search.svg`, `arrow-right.svg`, `x.svg`, `chevron-down.svg` from one pinned Lucide release (Q5; downloading needs the user's OK, ask with file names, source URL and size), unmodified except stripping the `class` attribute; `LICENSE` holds Lucide's license text verbatim. `pub enum Glyph` (Target list) with `const ALL: &[Glyph]` and `fn path(self) -> &'static str` ("icons/chevron-left.svg"). `pub struct Assets;` with a `const FILES: &[(&str, &[u8])]` of `include_bytes!` entries; `impl AssetSource`: `load` returns `Cow::Borrowed`, `list` filters by prefix. `pub fn glyph(name: Glyph, size: f32, role: &str, theme: &Theme) -> Svg` = `svg().path(name.path()).size(px(size)).flex_none().text_color(color(theme.role(role)))`. Register: `gpui_platform::application().with_assets(icons::Assets).run(...)`. Replace the glyphs in `nav_button` and `view_button` (the `glyph: &'static str` params become `Glyph`) keeping button sizes.
 - *Edge cases:* tests can't register assets (`test_context.rs:177`), so icons don't paint in tests; that's fine, nothing asserts pixels. Don't switch to `svg().data()` unless the user asks (Q5 note). The eject "⏏" glyph (`sidebar.rs:585`) and row chevrons stay for now.
@@ -163,7 +163,7 @@ Performance: no change to warm first paint or scroll p99 on the 100k fixture bey
 - *Done when:* title bar shows drawn icons in the bundle at the old positions; tests pass; progress file lists each file's upstream name, Lucide version and license.
 
 ### I6 Selection tints
-![Today, annotated, finding 3: one fill per meaning is the goal](img/today-annotated.png)
+![Today, annotated, finding 3: one fill per meaning is the goal](../ui-overhaul/img/today-annotated.png)
 - *Where:* `style.rs`; `pane.rs:1153,1154,1440,1441,1714`; `sidebar.rs:388,490,491`; `search.rs:758`; `window.rs:817,1566,1632`.
 - *Change:* add `pub fn active_selection(theme) -> Rgba`, `inactive_selection`, `current_location`, `drop_target`, and `pub fn cursor_ring(theme) -> Vec<BoxShadow>` = `vec![BoxShadow { color: color_alpha(accent, 0x99).into(), offset: point(0,0), blur_radius: px(0.), spread_radius: px(1.5), .. }.inset()]` (inset so it never changes size and isn't clipped by list overflow; verify first that GPUI paints an inset zero-blur shadow as a crisp ring at 1× and 2×; if not, fall back to an absolutely positioned 1.5 px accent border overlay child, still no layout change, and record it). Replace `selection_color` with `if active { active_selection } else { inactive_selection }` and delete it; sidebar `here` → `current_location`, sidebar focused cursor → `active_selection` (U8 swaps it for `cursor_ring`); search focused → `active_selection`, unfocused → `inactive_selection` (Q6); palette/picker/conflict choice → `active_selection`; the three drop tints → `drop_target`. Leave stripe, focused column, match highlight and text selection inline (one use each, not selections).
 - *Edge cases:* the theme fade (`reload_theme`) keeps working because helpers read the current theme each render.

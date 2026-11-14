@@ -19,13 +19,13 @@ Each plan is self-contained: its own branch, progress file and PR, carried out w
 
 | Plan                     | What                                                                                        | Needs  | Branch               |
 | ------------------------ | ------------------------------------------------------------------------------------------- | ------ | -------------------- |
-| [U1](u1-shared-parts.md) | Keycaps from the live keymap, tooltip, one Sheet overlay, SVG icons, selection tints        | PR #7  | `ui-u1-shared-parts` |
-| [U2](u2-menu-bar.md)     | Menu bar built from the command registry: Edit, Go, File, View                              | PR #7  | `ui-u2-menu-bar`     |
-| [U3](u3-top-band.md)     | Toolbar: search field ⌘F, Go to ⌘K, icons; search mode band with All / Names / Contents     | U1     | `ui-u3-top-band`     |
-| [U4](u4-filter.md)       | `/` filter inside the focused column, highlights, ⌘F escalation, no-match state             | U1     | `ui-u4-filter`       |
-| [U5](u5-bottom-bar.md)   | Bottom bar slots: path · hints/progress/errors · counts; `hints` setting and key-use counts | U1     | `ui-u5-bottom-bar`   |
-| [U6](u6-search-panel.md) | Search scope bar, footer summary, idle examples, preview, This Mac, no Kind                 | U3     | `ui-u6-search-panel` |
-| [U7](u7-palette.md)      | Palette sections, two-line rows, Commands token, ⇥ completion, recent commands              | U1, U2 | `ui-u7-palette`      |
+| [U1](../done/u1-shared-parts.md) | Keycaps from the live keymap, tooltip, one Sheet overlay, SVG icons, selection tints        | PR #7  | `ui-u1-shared-parts` |
+| [U2](../done/u2-menu-bar.md)     | Menu bar built from the command registry: Edit, Go, File, View                              | PR #7  | `ui-u2-menu-bar`     |
+| [U3](../done/u3-top-band.md)     | Toolbar: search field ⌘F, Go to ⌘K, icons; search mode band with All / Names / Contents     | U1     | `ui-u3-top-band`     |
+| [U4](../done/u4-filter.md)       | `/` filter inside the focused column, highlights, ⌘F escalation, no-match state             | U1     | `ui-u4-filter`       |
+| [U5](../done/u5-bottom-bar.md)   | Bottom bar slots: path · hints/progress/errors · counts; `hints` setting and key-use counts | U1     | `ui-u5-bottom-bar`   |
+| [U6](../done/u6-search-panel.md) | Search scope bar, footer summary, idle examples, preview, This Mac, no Kind                 | U3     | `ui-u6-search-panel` |
+| [U7](../done/u7-palette.md)      | Palette sections, two-line rows, Commands token, ⇥ completion, recent commands              | U1, U2 | `ui-u7-palette`      |
 | [U8](u8-sidebar.md)      | Sidebar twins, neutral disk bar, one fill per meaning, mark letters                         | U1     | `ui-u8-sidebar`      |
 | [U9](u9-tips.md)         | One-time contextual tips                                                                    | U5     | `ui-u9-tips`         |
 | [U10](u10-finish.md)     | Whole-window check against the assembled boards, docs pass, bench                           | all    | `ui-u10-finish`      |

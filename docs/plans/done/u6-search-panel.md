@@ -29,7 +29,7 @@ Inherited constraints: theme roles only; U1 parts by name (`Keycap` Outline/Key/
 ## Current state
 As built (variant A):
 
-![Search panel A, as built: field, accent scope pills, the toggle, a help sentence, a summary row, then Name / Folder / Kind / Modified](img/search-panel-a.png)
+![Search panel A, as built: field, accent scope pills, the toggle, a help sentence, a summary row, then Name / Folder / Kind / Modified](../ui-overhaul/img/search-panel-a.png)
 Four rows of chrome; "This Folder" and "Search everything" share one pill style; content hits run inline after the name.
 
 Line numbers are on branch `m6-filter-palette-search` (= PR #7). U1 and U3 will have moved some of this; re-read before editing.
@@ -79,16 +79,16 @@ Line numbers are on branch `m6-filter-palette-search` (= PR #7). U1 and U3 will 
 ## Target
 Picked variants:
 
-![Search panel B: one scope bar with segmented scope and the Skip dev folders switch; Name / Folder / Modified; footer with counts, accent skipped link and Search everything keycap](img/search-panel-b.png)
+![Search panel B: one scope bar with segmented scope and the Skip dev folders switch; Name / Folder / Modified; footer with counts, accent skipped link and Search everything keycap](../ui-overhaul/img/search-panel-b.png)
 One 36 px bar, no help text, highlighted name matches, summary at the foot. (The board shows content lines inline; this plan puts them under the name, as the assembled board does.)
 
-![Search panel D: idle state with the heading, four example buttons with descriptions, and the key line](img/search-panel-d.png)
+![Search panel D: idle state with the heading, four example buttons with descriptions, and the key line](../ui-overhaul/img/search-panel-d.png)
 Idle body: 16 px heading, four monospace example buttons with muted descriptions, one subtle key line.
 
-![Assembled search mode: toolbar field with All / Names / Contents, scope bar, rows with content lines under names, footer, and a 300 px preview showing the file](img/assembled-search.png)
+![Assembled search mode: toolbar field with All / Names / Contents, scope bar, rows with content lines under names, footer, and a 300 px preview showing the file](../ui-overhaul/img/assembled-search.png)
 How it fits: toolbar from U3, panel from U6, preview on the right, bottom bar hints from U5. The board's syntax colors in the preview are not in scope.
 
-Not picked: ![Search panel C: name hits first, then content hits grouped per file with numbered lines](img/search-panel-c.png)
+Not picked: ![Search panel C: name hits first, then content hits grouped per file with numbered lines](../ui-overhaul/img/search-panel-c.png)
 Variant C (grouped, every matching line) is rejected for now; it needs header rows inside the uniform list. Maybe later; nothing here should block it (keep hit counting per file, I4).
 
 ### Layout (search view, top to bottom)
@@ -146,7 +146,7 @@ Variant C (grouped, every matching line) is rejected for now; it needs header ro
 ## Items
 
 ### I1 This Mac and no Kind
-![Search panel B](img/search-panel-b.png)
+![Search panel B](../ui-overhaul/img/search-panel-b.png)
 Scope labels and columns as in B.
 - **Where**: `search.rs` `Scope`, `start_search`, `render_header`, `scope_button`, `render_summary`, `render_results` header, `render_rows`, `Row`, `Row::new`; `window.rs` tests; README.md 71–72; `docs/testing.md` 82, 84.
 - **Change**: rename `Scope::Everywhere` → `Scope::ThisMac`; label "This Mac" in U3's `Scope::label` (gives the placeholder "Search This Mac" and U3's disabled-match tooltip for free) and in the segment; the Folder button label becomes the folder name (move `folder_name` to `style.rs`; add `folder_label` to `SearchView`). Delete `Row.kind`, the `kind_name` call (1021), the Kind header (712) and cell (897–907) and "kind" in the row aria label. Module doc comment (1–3): "This Folder, Home or This Mac".
@@ -163,7 +163,7 @@ Scope labels and columns as in B.
 - **Done when**: names render with highlights in results and tests pass.
 
 ### I3 Scope bar
-![Assembled search mode](img/assembled-search.png)
+![Assembled search mode](../ui-overhaul/img/assembled-search.png)
 The 38 px bar between toolbar and column header.
 - **Where**: `search.rs` `render_header` → `render_scope_bar`, `scope_button` → `scope_segment`; new `skip_label`.
 - **Change**: build the bar per Target §1. `pub fn skip_label(exclude: &Exclude) -> Option<String>`: enabled set ids in `SetName::ALL` order; 1 → "Skip dev folders"; 2 → "Skip dev and media folders"; 3+ → "Skip dev, media and system folders" (Q5); none → `None` (switch hidden). Cache it in `SearchView.skip_label` and refresh in the `exclude_generation` observer (118–128). Switch click calls `search_everything`. Remove the "Search everything" pill (576–594) and the help sentence (596–601). After U3 `render_header` holds only the scope buttons, the Search everything button and the help sentence; replace it whole with `render_scope_bar`. Don't touch `render_band`.
@@ -172,7 +172,7 @@ The 38 px bar between toolbar and column header.
 - **Done when**: bar matches the board in both themes (hand check), tests pass.
 
 ### I4 Footer, counts, errors, skipped list
-![Search panel B](img/search-panel-b.png)
+![Search panel B](../ui-overhaul/img/search-panel-b.png)
 Footer: counts, accent skipped link, Search everything with keycap.
 - **Where**: `search.rs` `render_summary` (delete), new `render_footer`, `add_hits`, `add_spotlight`, `start_search`, `render_skipped`, `Render`.
 - **Change**: add `hit_count: usize` (reset in `start_search`; `+1` per accepted hit in `add_hits`, including merged ones; `+1` per Spotlight row). Files = `results.len()`. `footer_summary(FooterState { searching, hits, files, capped, error })` per Target §4. Render order: scope bar → body (idle / empty / error / results) → skipped list → footer. Skipped list moves above the footer, Role::List. Link toggles `show_skipped`. Footer hint button calls `search_everything`. Remove "All rules off".
@@ -181,7 +181,7 @@ Footer: counts, accent skipped link, Search everything with keycap.
 - **Done when**: no summary row, footer per spec, tests pass.
 
 ### I5 Rows
-![Assembled search mode](img/assembled-search.png)
+![Assembled search mode](../ui-overhaul/img/assembled-search.png)
 Rows: icon, highlighted name, content line under it, Folder, Modified.
 - **Where**: `search.rs` `render_results` header, `render_rows`.
 - **Change**: header Name / Folder 180 / Modified 100. Row per Target §2: name via `highlight_text` (I2); content line under the name, Menlo 11 px, line number `fg-subtle`, text via `highlight_text`; Folder 12 px `fg-muted`, Modified 12 px `fg-muted` 100 px. Row height per Q3 (default: keep `ROW_HEIGHT = 40`, name vertically centered on name-only rows). Aria label per Target. Keep drag, external drag, double-click, mouse selection unchanged.
@@ -190,7 +190,7 @@ Rows: icon, highlighted name, content line under it, Folder, Modified.
 - **Done when**: rows match the assembled board's structure; tests pass.
 
 ### I6 Idle state with examples
-![Search panel D](img/search-panel-d.png)
+![Search panel D](../ui-overhaul/img/search-panel-d.png)
 Heading, four example buttons, key line.
 - **Where**: `search.rs` `render_results` empty branch (682–697) → `render_idle`, `render_empty`, `render_error`.
 - **Change**: per Target §5–7. Example click: `input.update(cx, |i, cx| i.set_text(text, window, cx))` (`text_input.rs:108`, emits `Changed` → `start_search`), then `focus_input`. Example 2 → `set_scope(ThisMac)`; example 3 → `search_everything`. Keys in the key line and example 3 come from U1's live-keymap lookup.
@@ -199,7 +199,7 @@ Heading, four example buttons, key line.
 - **Done when**: the idle body replaces "Type to search names and contents"; tests pass.
 
 ### I7 Preview pane in search mode
-![Assembled search mode](img/assembled-search.png)
+![Assembled search mode](../ui-overhaul/img/assembled-search.png)
 300 px preview of the selected result on the right.
 - **Where**: `search.rs` new `preview: Option<(Entry, Option<Preview>)>`, `load_preview`, called from `select_only` (402), `press` (411), the first-selection branches of `add_hits`/`add_spotlight`, `start_search` (clear); `window.rs` `render_preview` (418), Render 1735.
 - **Change**: `SearchView::load_preview(cx)`: take the cursor row path; if it matches the loaded one, return; `cx.spawn` → `background_spawn(stat_entry(path) then preview::fetch(&entry, &extensions))` → apply if the cursor path still matches. Split `render_preview` into `render_preview_pane(entry, preview, theme)` used by both the pane and search. Render: `preview = if let Some(search) = &self.search { search.read(cx).preview_entry().map(render) } else if list_view { … }`.

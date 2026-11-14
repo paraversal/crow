@@ -45,8 +45,8 @@ All asked 2026-11-13; answers from the user.
 - Preview `stat_entry` + `fetch_at` run in one `background_spawn`; stale results are dropped by path, and a load only starts when the selected path changes.
 
 ## Hand checks
-- [ ] Scope bar in both themes: selected segment, switch knob, hover/pressed → matches `img/search-panel-b.png`
-- [ ] Idle state: heading, four examples, key line → matches `img/search-panel-d.png`
+- [ ] Scope bar in both themes: selected segment, switch knob, hover/pressed → matches `../ui-overhaul/img/search-panel-b.png`
+- [ ] Idle state: heading, four examples, key line → matches `../ui-overhaul/img/search-panel-d.png`
 - [ ] Footer: counts, accent skipped link, keycap; Search everything flips the switch
 - [ ] Skipped list above the footer, Close works, Esc still closes search
 - [ ] Preview follows the selection in list and column view; hit line highlighted (if Q1 = yes)
