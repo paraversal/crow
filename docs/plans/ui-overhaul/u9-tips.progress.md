@@ -1,5 +1,5 @@
 # u9-tips progress
-Branch: `ui-u9-tips` · PR: none · Last updated: 2026-11-14 · State: in progress
+Branch: `ui-u9-tips` · PR: none · Last updated: 2026-11-14 · State: Ready for critique
 
 ## Status
 | Item | State | Notes |
@@ -40,6 +40,18 @@ Branch: `ui-u9-tips` · PR: none · Last updated: 2026-11-14 · State: in progre
 - Bottom bar height: U5 settled 30 px (`crates/crow-app/src/bottom_bar.rs:733`) but exported no constant. Add `bottom_bar::HEIGHT` and use it for `render` and the tip's `bottom` offset (the plan's `BOTTOM_BAR_HEIGHT`).
 - Plan line numbers are stale (merged `window.rs` is 7529 lines). Current locations are recorded in the Log/Notes as items start.
 
+## Bench (100k fixture, same machine, release)
+| Run | warm first paint | p50 | p95 | p99 |
+| --- | --- | --- | --- | --- |
+| U9 branch 1 | 6 ms | 8.33 ms | 9.42 ms | 9.66 ms |
+| U9 branch 2 | 9 ms | 8.33 ms | 9.51 ms | 9.68 ms |
+| U9 branch 3 | 9 ms | 8.32 ms | 8.55 ms | 9.50 ms |
+| `main` 1 (clean) | 9 ms | 8.34 ms | 8.50 ms | 9.33 ms |
+| `main` 2 (machine loaded) | 6 ms | 8.34 ms | 33.31 ms | 33.52 ms |
+| `main` 3 (machine loaded) | 9 ms | 8.34 ms | 8.57 ms | 33.38 ms |
+
+The clean comparison is branch 9.50 ms vs `main` 9.33 ms p99: 0.17 ms, within run-to-run noise. Two `main` runs taken while the machine was loaded (33 ms p95/p99) were discarded; the branch's clean runs were taken before and after them.
+
 ## Hand checks
 - [ ] Tips: with a fresh `CROW_STATE_DIR`, scroll a 200+ item folder → "Type / to filter this folder by name." bottom right above the bottom bar, in list and column view, FireBox and Solarized Light; Got it closes it and it never returns after relaunch. Two zero-match filters in a row → the ⌘F tip; ⇧⌘G to a recent folder → the ⌘K tip. Using the key closes and retires a tip. `hints = "off"` shows none. Opening Activity closes a tip; a narrow window wraps the text inside 12 px margins.
 - [ ] Tips with VoiceOver: the tip is read once when it appears ("Tip: …"); "Got it" is a button that VoiceOver can press.
@@ -48,8 +60,9 @@ Branch: `ui-u9-tips` · PR: none · Last updated: 2026-11-14 · State: in progre
 - ⇧⌘G is no longer a separate sheet: it opens the command palette with the current path typed (`window.rs:444-449`). This is the Q10 conflict, not a bug.
 
 ## Log
+- 2026-11-14: Finish. Bench (above) within noise of `main`; `./scripts/bundle.sh` built `target/bundle/Crow.app` signed "Crow Dev". `cargo fmt --check`, clippy (`-D warnings`) and `cargo test --workspace` green. State set to Ready for critique; not pushed, no PR (the critique agent opens it).
 - 2026-11-14: I2–I7 done. `cargo fmt --check`, clippy (`-D warnings`) and `cargo test --workspace` green (275 app tests, 79 core). README and `docs/testing.md` updated (tips paragraph, automated list, hand rows). Bench on the branch: p99 9.66–9.68 ms, warm first paint 6–9 ms (first run after compiling: 34.96 ms, discarded as cold).
 - 2026-11-14: read `AGENTS.md`, the U9 plan, the UI overhaul README, U5's progress file, and the merged code (`window.rs`, `pane.rs`, `folder.rs`, `ui.rs`, `usage.rs`, `keys.rs`, `chrome.rs`, `bottom_bar.rs`, GPUI's `uniform_list`/`on_scroll`). Created the branch and this file. Asked Q1–Q10.
 
 ## Next
-Compare the bench with `main`, run `./scripts/bundle.sh`, then set the state to Ready for critique.
+Ready for critique. The critic should look at: the deferred offers (`cx.defer_in`) around navigation, the render-time tip guard, and the `enter` hook for `FilterEnded`. Hand checks (tips, VoiceOver) still need a human.
