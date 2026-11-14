@@ -35,13 +35,23 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), font, hidden files, the preview (`show_preview`), whether views follow folders (`view_per_folder`), window size |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), font, hidden files, the preview (`show_preview`), whether views follow folders (`view_per_folder`), window size |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
 
 Themes come from the global index in `~/.config/themes`. View ▸ Theme… (Cmd-Option-T)
 previews each theme as you move through the list; Apply to All Apps (Cmd-Return) sets it for every app that reads the index.
+
+Motion follows `motion`: `"auto"` (default) uses Full unless macOS Reduce Motion is on, then Low;
+`"off"` changes state in one frame; `"low"` fades opacity and color only; `"full"` also moves —
+a trashed row's icon becomes a trash and swallows the name, a move pulses its target, results
+arrive, the selection fill glides between rows, and sheets and tips fade in. `sound` picks
+`"crow"` (Finder's trash sounds plus soft ticks for move, new folder, undo and copy), `"finder"`
+(only the sounds Finder itself makes) or `"off"`. The two are separate settings; macOS
+"Play user interface sound effects" off silences everything but the alert. `crow --motion-lab`
+opens a fake folder to try every mode and sound set (see below).
+
 Recent folders are kept in `~/.local/state/crow/recent.json`, merged with zoxide's list when it's installed.
 Commands run from the palette are remembered in `~/.local/state/crow/palette-commands.json`.
 Key-use counts, which retire idle bottom-bar hints, live next to it in `~/.local/state/crow/usage.json`.

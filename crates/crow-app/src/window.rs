@@ -8272,7 +8272,7 @@ mod tests {
     #[gpui::test]
     fn cursor_glide_lags_at_most_one_row(cx: &mut TestAppContext) {
         let root = long_fixture("glide-lag", 50);
-        let (view, mut cx) = open(cx, &root);
+        let (_view, mut cx) = open(cx, &root);
         set_motion(&mut cx, "full");
         // Hold ↓ at the usual repeat: one row every 30 ms.
         for _ in 0..5 {

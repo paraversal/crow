@@ -1,5 +1,5 @@
 # u10-feedback progress
-Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in progress
+Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: Ready for critique
 
 ## Status
 | Item | State | Notes |
@@ -11,8 +11,8 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 | I5 Arrive | done | Results selected by `show_results` play Arrive when they appear; Full's open phase slides the rows below down from their old slot (`-ROW × (1 − ease_out(t))`). New folder/file, duplicate, paste/copy, undo/redo all go through it. Rename starts immediately. Sounds: Pop, Bottle, Glass (>1 s). Tests: new folder Arrive + typing, undo Arrive. |
 | I6 Refuse and errors | done | Every bell site goes through `feedback::refuse` (or `TextInput::refuse`): one beep, then Full shakes the field / Low tints its ring red / Off just beeps. Operation errors Refuse the rows that remain (trash, move, copy). The bar's message/error transient fades in on change. |
 | I7 Small entrances | done (scale open Q6) | Tip rises 8 px + fades (Full) / fades (Low); bar message and error fade; a finished progress bar fades over 320 ms; sheets and the palette fade in (140/120 ms) and the lab has a mock sheet (`p`). GPUI has no element scale, so 0.98→1 is not implemented; Q6. |
-| I8 Cursor glide | done | Full only: one absolutely positioned fill per list/column under the rows, spring k = 2500 (the lab's 900 lagged 1.67 rows at a 30 ms repeat; 2500 passes the one-row test). Rows draw no active fill while gliding. Tests: placement, lag; bench p99 9.44 ms, warm 7 ms. |
-| I9 Docs, tests, bench | in progress | |
+| I8 Cursor glide | done | Full only: one absolutely positioned fill per list/column under the rows, spring k = 2500 (the lab's 900 lagged 1.67 rows at a 30 ms repeat; 2500 passes the one-row test). Rows draw no active fill while gliding. Tests: placement, lag; bench Full p99 9.73–9.83 ms (one busy-machine run 34 ms, three clean reruns 9.7–9.8). |
+| I9 Docs, tests, bench | done | README: `motion`/`sound` in the settings table, a paragraph on the modes and the lab. `docs/testing.md`: U10 hand checks and the lab; bench numbers in the performance table. Final bench: Full 9.73–9.83 ms, Off 9.83, Low 9.97, warm 8–10 ms. |
 
 ## Questions
 - Q1 (asked 2026-11-14): default sound set → **`crow`** (user).
@@ -61,7 +61,8 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 - 2026-11-14: I5: Arrive starts when `select_when_present` results appear; `row_shift` also handles the open phase (rows below start one row up and slide down). Rename opens at once. Pop/Bottle/Glass wired in `operations`. 2 new tests.
 - 2026-11-14: I6: `feedback::refuse`/`TextInput::refuse` replace every `play_system_bell`; the field shakes (Full) or tints red (Low); operation errors refuse the remaining rows; the bar transient fades on a new message or error.
 - 2026-11-14: I7: tip rise/fade, bar message/error fade, progress-done fade (320 ms), sheet/palette fade (140/120 ms) and a mock sheet in the lab (`p`). GPUI has no element scale: the 0.98→1 part is Q6.
-- 2026-11-14: I8: cursor glide in Full, one fill per list/column under the rows, spring k = 2500 (900 lagged 1.67 rows; 2500 passes the one-row test). Bench p99 9.44 ms, warm 7 ms.
+- 2026-11-14: I8: cursor glide in Full, one fill per list/column under the rows, spring k = 2500 (900 lagged 1.67 rows; 2500 passes the one-row test). Bench Full p99 9.73–9.83 ms.
+- 2026-11-14: I9: README and `docs/testing.md` updated; final bench in all three modes. All items done; branch ready for critique.
 
 ## Next
-I9: README (settings, modes, lab), docs/testing.md (hand checks + lab), final bench in all three modes, progress file to Ready for critique.
+Critique the branch (`critique` skill), then open the PR. Hand checks in `docs/testing.md` (Motion and sound) are for the user in the bundled app.
