@@ -377,6 +377,20 @@ impl Folder {
         self.row_parents.get(ix).copied().flatten()
     }
 
+    /// The folder row a drop on row `ix` lands in: the row itself when it is a folder,
+    /// the expanded folder that lists it when it is a nested file, `None` for a
+    /// top-level file (the drop goes to this folder).
+    pub fn drop_header(&self, ix: usize) -> Option<usize> {
+        let (entry, depth) = self.row(ix)?;
+        if entry.is_dir && !entry.is_package() {
+            Some(ix)
+        } else if depth > 0 {
+            self.parent_row(ix)
+        } else {
+            None
+        }
+    }
+
     /// The row after the last row of the subtree rooted at `ix` (exclusive).
     pub fn subtree_end(&self, ix: usize) -> usize {
         self.row_ends.get(ix).copied().unwrap_or(self.row_count())

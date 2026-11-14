@@ -1431,16 +1431,9 @@ impl Pane {
     /// that lists a file row. `None` means the root folder (no highlight).
     fn drop_target_for_row(&self, ix: usize, cx: &gpui::App) -> Option<DropTarget> {
         let folder = self.folders.first()?.read(cx);
-        let (entry, depth) = folder.row(ix)?;
-        if entry.is_dir && !entry.is_package() {
-            Some(DropTarget { folder: entry.path.clone(), header: ix, end: folder.subtree_end(ix) })
-        } else if depth > 0 {
-            let header = folder.parent_row(ix)?;
-            let (parent, _) = folder.row(header)?;
-            Some(DropTarget { folder: parent.path.clone(), header, end: folder.subtree_end(header) })
-        } else {
-            None
-        }
+        let header = folder.drop_header(ix)?;
+        let (entry, _) = folder.row(header)?;
+        Some(DropTarget { folder: entry.path.clone(), header, end: folder.subtree_end(header) })
     }
 
     fn update_drag_row(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -1563,13 +1556,8 @@ impl Pane {
                 let name = truncate_middle_parts(&entry.name, name_room, font_size, window);
                 let ranges = folder.row_match(ix).map(|range| map_range(&name, range));
                 let expanded = folder.is_expanded(&entry.path, cx);
-                let drop_folder = if entry.is_dir && !entry.is_package() {
-                    Some(entry.path.clone())
-                } else if depth > 0 {
-                    folder.parent_row(ix).and_then(|parent| folder.row(parent)).map(|(parent, _)| parent.path.clone())
-                } else {
-                    None
-                };
+                let drop_folder =
+                    folder.drop_header(ix).and_then(|header| folder.row(header)).map(|(folder, _)| folder.path.clone());
                 let drag_entries = if selected {
                     selected_entries.clone()
                 } else {
