@@ -565,8 +565,6 @@ pub enum Item {
         /// Matched letters as byte ranges in `command.label`.
         matched: Vec<Range<usize>>,
     },
-    // The U7 I3/I4 render reads the folder fields; the model lands first.
-    #[allow(dead_code)]
     Folder {
         path: PathBuf,
         label: String,
@@ -581,7 +579,6 @@ pub enum Item {
 impl Item {
     /// The matches inside the folder's name, shifted to name-relative bytes; a
     /// range that straddles the name's start is clipped.
-    #[allow(dead_code)] // U7 I3 renders the name line.
     pub fn name_ranges(&self) -> Vec<Range<usize>> {
         let Item::Folder { name_start, matched, .. } = self else { return Vec::new() };
         let name_start = *name_start;
@@ -604,12 +601,9 @@ pub enum Row {
 
 #[derive(Clone, Debug)]
 pub struct Listing {
-    // U7 I3 renders headers and the count; the model lands first.
-    #[allow(dead_code)]
     pub rows: Vec<Row>,
     pub items: Vec<Item>,
     /// The input row's count: "5 places", "2 of 34".
-    #[allow(dead_code)]
     pub count: SharedString,
 }
 
@@ -687,7 +681,6 @@ pub fn count_text(count: usize) -> SharedString {
 }
 
 /// "just now", "5 min ago", "2 h ago", "yesterday", "3 days ago", then "12 Oct".
-#[allow(dead_code)] // U7 I3 renders it on Recent rows.
 pub fn relative_age(now: u64, then: u64) -> String {
     let age = now.saturating_sub(then);
     if then >= now || age < 60 {
@@ -1041,7 +1034,7 @@ mod tests {
         assert_eq!(count(Source::Here), HERE_LIMIT);
         assert_eq!(listing.count, "29 places");
 
-        // With a query, 20 per section and 50 in all.
+        // A typed query is one flat list, capped at 50.
         let recents: Vec<PathBuf> = (0..30).map(|i| p(&format!("/home/me/Files/rec{i}"))).collect();
         let favorites: Vec<PathBuf> = (0..30).map(|i| p(&format!("/home/me/Files/fav{i}"))).collect();
         let candidates = folders(&favorites, &recents, &here);
