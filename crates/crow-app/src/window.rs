@@ -8251,6 +8251,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn cursor_glide_sits_on_the_cursor_row(cx: &mut TestAppContext) {
+        let root = long_fixture("glide", 50);
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("down down");
+        settle(&view, &mut cx);
+        for _ in 0..20 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(50));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+        }
+        let glide = cx.debug_bounds("glide").expect("the glide fill");
+        let row = cx.debug_bounds("row-f002.txt").expect("the cursor row");
+        assert!((glide.top() - row.top()).abs() <= px(1.), "glide {glide:?} vs row {row:?}");
+    }
+
+    #[gpui::test]
+    fn cursor_glide_lags_at_most_one_row(cx: &mut TestAppContext) {
+        let root = long_fixture("glide-lag", 50);
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        // Hold ↓ at the usual repeat: one row every 30 ms.
+        for _ in 0..5 {
+            cx.simulate_keystrokes("down");
+            cx.executor().advance_clock(std::time::Duration::from_millis(30));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+        }
+        let glide = cx.debug_bounds("glide").expect("the glide fill");
+        let row = cx.debug_bounds("row-f005.txt").expect("the cursor row");
+        let lag = f32::from(row.top()) - f32::from(glide.top());
+        assert!(lag.abs() <= crate::pane::ROW_HEIGHT + 1.0, "the fill lags {lag} px: {glide:?} vs {row:?}");
+    }
+
+    #[gpui::test]
     fn tip_sits_above_the_bar_at_the_right_edge(cx: &mut TestAppContext) {
         let root = long_fixture("tip-layout", 250);
         let (view, mut cx) = open(cx, &root);

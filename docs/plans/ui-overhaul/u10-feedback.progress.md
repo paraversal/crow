@@ -11,8 +11,8 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 | I5 Arrive | done | Results selected by `show_results` play Arrive when they appear; Full's open phase slides the rows below down from their old slot (`-ROW × (1 − ease_out(t))`). New folder/file, duplicate, paste/copy, undo/redo all go through it. Rename starts immediately. Sounds: Pop, Bottle, Glass (>1 s). Tests: new folder Arrive + typing, undo Arrive. |
 | I6 Refuse and errors | done | Every bell site goes through `feedback::refuse` (or `TextInput::refuse`): one beep, then Full shakes the field / Low tints its ring red / Off just beeps. Operation errors Refuse the rows that remain (trash, move, copy). The bar's message/error transient fades in on change. |
 | I7 Small entrances | done (scale open Q6) | Tip rises 8 px + fades (Full) / fades (Low); bar message and error fade; a finished progress bar fades over 320 ms; sheets and the palette fade in (140/120 ms) and the lab has a mock sheet (`p`). GPUI has no element scale, so 0.98→1 is not implemented; Q6. |
-| I8 Cursor glide | in progress | Q2 = yes, Full only |
-| I9 Docs, tests, bench | todo | |
+| I8 Cursor glide | done | Full only: one absolutely positioned fill per list/column under the rows, spring k = 2500 (the lab's 900 lagged 1.67 rows at a 30 ms repeat; 2500 passes the one-row test). Rows draw no active fill while gliding. Tests: placement, lag; bench p99 9.44 ms, warm 7 ms. |
+| I9 Docs, tests, bench | in progress | |
 
 ## Questions
 - Q1 (asked 2026-11-14): default sound set → **`crow`** (user).
@@ -20,8 +20,9 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 - Q3 (asked 2026-11-14): sheets and palette fade/scale → **yes**; add to the lab first, user tries it (user).
 - Q4 (asked 2026-11-14): "+1" count on a move's target → **pulse only, no count** (user).
 - Q5 (asked 2026-11-14): does `off` silence sounds → **no**, separate settings (user).
-- Q6 (asked 2026-11-14): sheets/palette 0.98→1 scale → pending (GPUI has no element transform; fade is in).
-- Q7 (asked 2026-11-14): R3 NSSound volume vs alert volume → pending (keep NSSound or AudioServices + cache copy).
+- Q6 (asked 2026-11-14): sheets/palette 0.98→1 scale → **fade only** (user; GPUI has no element transform).
+- Q7 (asked 2026-11-14): R3 NSSound volume vs alert volume → **keep NSSound** (user); hand check at low alert volume.
+- Q8 (asked 2026-11-14): glide stiffness → **k = 2500** (user; 900 lagged 1.67 rows).
 
 ## Decisions
 - Branch from `main` at `92d671e` (U9 merged at `0718a7c`; plan commit `92d671e` on `main`) — plan says so — plan.
@@ -30,6 +31,9 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 - Q3 sheets/palette fade+scale, lab first — user.
 - Q4 target pulse only, no count — user.
 - Q5 `motion = "off"` does not silence sound — user.
+- Q6 sheets/palette: fade only, no 0.98→1 scale — GPUI 0.2.2 has no element transform; user chose the fade.
+- Q7 keep NSSound for sounds — the user accepted the output-volume behavior (hand check with the alert slider low); AudioServices + a cache copy would be the root-cause change.
+- Q8 cursor glide k = 2500 — measured: 900 lagged 1.67 rows at a 30 ms repeat, 2500 passes the one-row test; user chose 2500.
 - Spike (I2): GPUI animations read the test clock. A probe view with `with_animation` (200 ms) recorded `t = 0.5` after `advance_clock(100 ms)` + `simulate_next_frame`. So app tests can read a mid-animation look by recording in the animator; `look()` is tested purely. Spike code reverted.
 - R1 (I3): implemented the recommended departure overlay. `uniform_list` heights never change; a row plays the swallow in place, a ghost at its last bounds finishes an early removal, and rows below get `top = ROW × (1 − ease_out(t))` from the moment the listing drops the row (not before the swallow ends). At most 20 visible rows animate.
 - R2 (I3): the common path is `show_results` → `reload`, so the row leaves within a few ms and the ghost covers the remaining swallow; the watcher (100 ms poll + stat) is the fallback. Effects live `phases + 250 ms` so a late removal's close is not cut. No spread measured on a real trash; hand check.
@@ -57,6 +61,7 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 - 2026-11-14: I5: Arrive starts when `select_when_present` results appear; `row_shift` also handles the open phase (rows below start one row up and slide down). Rename opens at once. Pop/Bottle/Glass wired in `operations`. 2 new tests.
 - 2026-11-14: I6: `feedback::refuse`/`TextInput::refuse` replace every `play_system_bell`; the field shakes (Full) or tints red (Low); operation errors refuse the remaining rows; the bar transient fades on a new message or error.
 - 2026-11-14: I7: tip rise/fade, bar message/error fade, progress-done fade (320 ms), sheet/palette fade (140/120 ms) and a mock sheet in the lab (`p`). GPUI has no element scale: the 0.98→1 part is Q6.
+- 2026-11-14: I8: cursor glide in Full, one fill per list/column under the rows, spring k = 2500 (900 lagged 1.67 rows; 2500 passes the one-row test). Bench p99 9.44 ms, warm 7 ms.
 
 ## Next
-I8: cursor glide in Full (spring k = 900, under the rows), then the lag check and bench.
+I9: README (settings, modes, lab), docs/testing.md (hand checks + lab), final bench in all three modes, progress file to Ready for critique.

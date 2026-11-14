@@ -23,10 +23,11 @@ use crow_core::{
 use crow_fs::{Entry, Sort, SortKey};
 use crow_theme::Theme;
 use gpui::{
-    Action, AnyElement, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter, ExternalDragPayload,
-    ExternalPaths, FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle, SharedString,
-    Subscription, UniformListScrollHandle, Window, canvas, div, img, point, prelude::*, px, uniform_list,
+    Action, AnimationExt, AnyElement, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter,
+    ExternalDragPayload, ExternalPaths, FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle,
+    SharedString, SpringAnimation, SpringConfig, Subscription, UniformListScrollHandle, Window, canvas, div, img,
+    point, prelude::*, px, uniform_list,
 };
 
 use crate::actions::{
@@ -50,7 +51,7 @@ use crow_fs::ops::Request;
 mod pane_filter;
 use pane_filter::FilterPlace;
 
-const ROW_HEIGHT: f32 = 24.0;
+pub(crate) const ROW_HEIGHT: f32 = 24.0;
 
 /// The first row a uniform list shows. Its scroll offset is negative once
 /// scrolled down (`drag_row_at` adds it to a pointer position).
@@ -1362,6 +1363,7 @@ impl Pane {
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
         let active = self.focus.is_focused(window) || self.filtering.is_some();
+        let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let drop_bg = drop_target(theme);
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
@@ -1419,8 +1421,8 @@ impl Pane {
                     .items_center()
                     .when(shift != 0.0, |row| row.top(px(shift)))
                     .when(look.opacity < 1.0, |row| row.opacity(look.opacity))
-                    .when(ix % 2 == 1, |row| row.bg(stripe))
-                    .when(selected, |row| row.bg(selection_bg))
+                    .when(ix % 2 == 1 && !(selected && glide), |row| row.bg(stripe))
+                    .when(selected && !glide, |row| row.bg(selection_bg))
                     .when_some(tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
                     .debug_selector(|| format!("row-{}", entry.name))
                     .on_drag(DraggedSelection { entries: drag_entries }, {
@@ -1675,6 +1677,7 @@ impl Pane {
         let now = Instant::now();
         // Spec: only the focused column shows its selection in the accent color.
         let active = k == self.focused && (self.focus.is_focused(window) || self.filtering.is_some());
+        let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let drop_bg = drop_target(theme);
         let subtle = color(theme.role("fg-subtle"));
@@ -1722,7 +1725,7 @@ impl Pane {
                     .gap_2()
                     .when(shift != 0.0, |row| row.top(px(shift)))
                     .when(look.opacity < 1.0, |row| row.opacity(look.opacity))
-                    .when(selected, |row| row.bg(selection_bg))
+                    .when(selected && !glide, |row| row.bg(selection_bg))
                     .when_some(tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
                     .debug_selector(|| format!("column-{k}-row-{}", entry.name))
                     .on_drag(DraggedSelection { entries: drag_entries }, {
@@ -1855,6 +1858,8 @@ impl Pane {
                 (None, None, None)
             };
             let has_field = field.is_some();
+            let glide =
+                mode == Effective::Full && k == focused && (self.focus.is_focused(window) || self.filtering.is_some());
             let body = match no_matches {
                 Some(block) => block,
                 None => {
@@ -1872,6 +1877,29 @@ impl Pane {
                         }
                         .render()
                     };
+                    let glide_fill = if glide {
+                        let f = folder.read(cx);
+                        f.cursor_ix().map(|ix| {
+                            let offset = f32::from(scroll.0.borrow().base_handle.offset().y);
+                            let y = ix as f32 * ROW_HEIGHT;
+                            div()
+                                .absolute()
+                                .left(px(4.))
+                                .right(px(4.))
+                                .h(px(ROW_HEIGHT))
+                                .rounded_md()
+                                .bg(active_selection(&theme))
+                                .debug_selector(move || format!("column-glide-{k}"))
+                                .with_spring(
+                                    ("glide", k),
+                                    SpringAnimation::new(SpringConfig::new(2500.0, 2.0 * 2500.0f32.sqrt(), 1.0))
+                                        .to(px(y)),
+                                    move |el, y| el.top(px(f32::from(y) + offset)),
+                                )
+                        })
+                    } else {
+                        None
+                    };
                     div()
                         .relative()
                         .flex_1()
@@ -1879,6 +1907,7 @@ impl Pane {
                         .flex()
                         .flex_col()
                         .overflow_hidden()
+                        .children(glide_fill)
                         .child(
                             uniform_list(
                                 ("column-list", k),
@@ -2122,6 +2151,7 @@ impl Render for Pane {
             (ui.feedback.mode, px(ui.settings.font_size), ui.theme.clone())
         };
         let now = Instant::now();
+        let glide = mode == Effective::Full && (self.focus.is_focused(window) || self.filtering.is_some());
         // The field is inside the list now: while it has focus, the list's actions must be
         // off the focus path so AppKit's menu equivalents let those keys through.
         let filter_focused = self
@@ -2173,12 +2203,40 @@ impl Render for Pane {
                                     }
                                     .render()
                                 };
+                                let glide_fill = if glide {
+                                    let folder = self.folders[0].read(cx);
+                                    folder.cursor_ix().map(|ix| {
+                                        let offset = f32::from(scroll.0.borrow().base_handle.offset().y);
+                                        let y = ix as f32 * ROW_HEIGHT;
+                                        div()
+                                            .absolute()
+                                            .left(px(8.))
+                                            .right(px(8.))
+                                            .h(px(ROW_HEIGHT))
+                                            .rounded_md()
+                                            .bg(active_selection(&theme))
+                                            .debug_selector(|| "glide".into())
+                                            .with_spring(
+                                                "glide",
+                                                SpringAnimation::new(SpringConfig::new(
+                                                    2500.0,
+                                                    2.0 * 2500.0f32.sqrt(),
+                                                    1.0,
+                                                ))
+                                                .to(px(y)),
+                                                move |el, y| el.top(px(f32::from(y) + offset + LIST_TOP_INSET)),
+                                            )
+                                    })
+                                } else {
+                                    None
+                                };
                                 div()
                                     .relative()
                                     .flex_1()
                                     .flex()
                                     .flex_col()
                                     .overflow_hidden()
+                                    .children(glide_fill)
                                     .child(
                                         uniform_list("entries", rows, cx.processor(Self::render_table_rows))
                                             .track_scroll(&scroll)
