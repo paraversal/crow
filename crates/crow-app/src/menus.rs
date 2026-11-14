@@ -9,7 +9,17 @@ use crate::actions as act;
 use crate::palette::{COMMANDS, Command, CommandId, MenuName, MenuSlot};
 use crate::ui::Ui;
 
-fn command_item(command: &Command, slot: MenuSlot) -> MenuItem {
+/// The toggle names the action it will take, so the menu says what a click does.
+fn menu_title(command: &Command, slot: MenuSlot, show_preview: bool) -> &'static str {
+    match command.id {
+        CommandId::TogglePreview if show_preview => "Hide Preview",
+        CommandId::TogglePreview => "Show Preview",
+        _ => slot.title,
+    }
+}
+
+fn command_item(command: &Command, slot: MenuSlot, show_preview: bool) -> MenuItem {
+    let title = menu_title(command, slot, show_preview);
     let os_action = match command.id {
         CommandId::Undo => Some(OsAction::Undo),
         CommandId::Redo => Some(OsAction::Redo),
@@ -20,7 +30,7 @@ fn command_item(command: &Command, slot: MenuSlot) -> MenuItem {
         _ => None,
     };
     MenuItem::Action {
-        name: slot.title.into(),
+        name: title.into(),
         action: command.action.boxed_clone(),
         os_action,
         checked: false,
@@ -29,7 +39,7 @@ fn command_item(command: &Command, slot: MenuSlot) -> MenuItem {
 }
 
 /// The whole menu bar in macOS order: Crow, File, Edit, View, Go, Window, Help.
-pub fn app_menus() -> Vec<Menu> {
+pub fn app_menus(show_preview: bool) -> Vec<Menu> {
     let mut menus = Vec::with_capacity(MenuName::ALL.len());
     for menu in MenuName::ALL {
         let mut items = Vec::new();
@@ -62,7 +72,7 @@ pub fn app_menus() -> Vec<Menu> {
             if section.is_some_and(|previous| previous != slot.section) {
                 items.push(MenuItem::separator());
             }
-            items.push(command_item(command, slot));
+            items.push(command_item(command, slot, show_preview));
             section = Some(slot.section);
         }
 
@@ -92,12 +102,18 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &act::HideApp, cx| cx.hide());
     cx.on_action(|_: &act::HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &act::ShowAll, cx| cx.unhide_other_apps());
-    cx.set_menus(app_menus());
+    refresh(cx);
+}
+
+/// Rebuild the menu bar; View ▸ Show/Hide Preview follows the setting.
+pub fn refresh(cx: &mut App) {
+    let show_preview = cx.global::<Ui>().settings.show_preview;
+    cx.set_menus(app_menus(show_preview));
 }
 
 #[cfg(test)]
 pub fn init_for_tests(cx: &mut App) {
-    cx.set_menus(app_menus());
+    refresh(cx);
 }
 
 #[cfg(test)]
@@ -130,7 +146,7 @@ mod tests {
 
     #[test]
     fn every_menu_command_is_in_the_menus() {
-        let menus = app_menus();
+        let menus = app_menus(true);
         for command in COMMANDS {
             let Some(slot) = command.menu else { continue };
             let menu = menus.iter().find(|menu| menu.name.as_ref() == slot.menu.title()).expect("menu exists");
@@ -138,7 +154,9 @@ mod tests {
                 .items
                 .iter()
                 .filter_map(|item| match item {
-                    MenuItem::Action { name, action, .. } if name.as_ref() == slot.title => Some(action),
+                    MenuItem::Action { name, action, .. } if name.as_ref() == menu_title(command, slot, true) => {
+                        Some(action)
+                    }
                     _ => None,
                 })
                 .collect();
@@ -150,9 +168,9 @@ mod tests {
             for item in &menu.items {
                 if let MenuItem::Action { name, action, .. } = item {
                     let from_registry = COMMANDS.iter().any(|command| {
-                        command
-                            .menu
-                            .is_some_and(|slot| slot.menu.title() == menu.name.as_ref() && slot.title == name.as_ref())
+                        command.menu.is_some_and(|slot| {
+                            slot.menu.title() == menu.name.as_ref() && menu_title(command, slot, true) == name.as_ref()
+                        })
                     });
                     assert!(
                         from_registry || is_app_action(&**action),
@@ -166,8 +184,19 @@ mod tests {
     }
 
     #[test]
+    fn preview_menu_names_the_action() {
+        let view_items = |show_preview: bool| {
+            let menus = app_menus(show_preview);
+            let view = menus.iter().find(|menu| menu.name.as_ref() == "View").expect("View menu");
+            titles(&view.items).into_iter().map(str::to_owned).collect::<Vec<_>>()
+        };
+        assert!(view_items(true).iter().any(|title| title == "Hide Preview"), "shown: the menu hides it");
+        assert!(view_items(false).iter().any(|title| title == "Show Preview"), "hidden: the menu shows it");
+    }
+
+    #[test]
     fn menus_are_in_bar_order() {
-        let menus = app_menus();
+        let menus = app_menus(true);
         let names: Vec<&str> = menus.iter().map(|menu| menu.name.as_ref()).collect();
         assert_eq!(names, ["Crow", "File", "Edit", "View", "Go", "Window", "Help"]);
 
@@ -178,6 +207,7 @@ mod tests {
                 "New Window",
                 "New Tab",
                 "New Folder",
+                "New File",
                 "Open",
                 "—",
                 "Rename",
@@ -218,6 +248,7 @@ mod tests {
                 "Reset View for This Folder",
                 "—",
                 "Show Hidden Files",
+                "Hide Preview",
                 "Show Activity",
                 "Theme…",
             ]

@@ -28,7 +28,7 @@ pub use recent_commands::RecentCommands;
 pub use selection::{Selection, TypeSelect};
 pub use settings::{
     DEFAULT_SETTINGS, HintsMode, KeymapLayer, Settings, SettingsError, ViewMode, config_dir, load_settings,
-    save_setting,
+    save_bool_setting, save_setting,
 };
 pub use sidebar::{
     DEFAULT_SIDEBAR, Favorite, FavoriteItem, Group, SidebarConfig, SidebarEdit, Slot, edit_sidebar, load_sidebar,

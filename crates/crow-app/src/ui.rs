@@ -294,6 +294,20 @@ pub fn reload_config(cx: &mut App) {
     if sidebar {
         refresh_recent(cx);
     }
+    if settings {
+        crate::menus::refresh(cx);
+    }
+    cx.refresh_windows();
+}
+
+/// View ▸ Show/Hide Preview: remember the choice for every window and the next launch.
+pub fn set_show_preview(show: bool, cx: &mut App) {
+    if cx.global::<Ui>().settings.show_preview == show {
+        return;
+    }
+    cx.global_mut::<Ui>().settings.show_preview = show;
+    write_config(SETTINGS, move |config, _| crow_core::save_bool_setting(config, "show_preview", show), cx);
+    crate::menus::refresh(cx);
     cx.refresh_windows();
 }
 

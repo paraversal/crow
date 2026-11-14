@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crow_core::{Exclude, KeymapLayer, Selection, SetName, abbreviate_home};
 use crow_fs::Entry;
@@ -23,7 +23,7 @@ use gpui::{
 
 use crate::actions::{
     CloseSearch, CopyFiles, CutFiles, CycleMatch, DeletePermanently, MoveDown, MoveToFirst, MoveToLast, MoveToTrash,
-    MoveUp, OpenSelection, QuickLook, SearchEverything, SearchReveal, SelectAll,
+    MoveUp, OpenSelection, QuickLook, SearchEverything, SearchFocusField, SearchFocusResults, SearchReveal, SelectAll,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::extensions::Ext;
@@ -387,6 +387,10 @@ impl SearchView {
         }
 
         cx.spawn(async move |this, cx| {
+            // A fast walk can queue thousands of batches. Applying them all in one
+            // turn would block drawing for seconds, so give the window a frame every
+            // few milliseconds. Tests keep draining in one go (their clock is manual).
+            let mut slice = std::time::Instant::now();
             while let Some(update) = rx.next().await {
                 let keep = this.update(cx, |this, cx| {
                     if this.generation == generation {
@@ -396,6 +400,10 @@ impl SearchView {
                 if keep.is_err() {
                     break;
                 }
+                if !cx.background_executor().is_test() && slice.elapsed().as_millis() >= 8 {
+                    cx.background_executor().timer(Duration::from_millis(1)).await;
+                    slice = std::time::Instant::now();
+                }
             }
         })
         .detach();
@@ -404,6 +412,9 @@ impl SearchView {
 
     fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
         match update {
+            // Once the result cap is hit the walk is cancelled; queued batches are
+            // dropped rather than merged, so the UI is never busy draining them.
+            Update::Hits(_) if self.capped => {}
             Update::Hits(hits) => self.add_hits(hits, cx),
             Update::Done(summary) => {
                 self.skipped = summary.skipped;
@@ -437,13 +448,18 @@ impl SearchView {
                 self.cancel.store(true, Ordering::Relaxed);
                 break;
             }
-            self.hit_count += 1;
+            // A content hit carries the file's other matching lines as a count.
+            let more = match &hit.kind {
+                HitKind::Content { more, .. } => *more,
+                HitKind::Name { .. } => 0,
+            };
+            self.hit_count += 1 + more as usize;
             if let Some(&index) = self.by_path.get(&hit.path) {
                 let row = &mut self.results[index];
                 if hit.score > row.score {
                     row.score = hit.score;
                 }
-                if let HitKind::Content { line, text, ranges } = hit.kind
+                if let HitKind::Content { line, text, ranges, .. } = hit.kind
                     && row.content.as_ref().is_none_or(|(best, _, _)| line < *best)
                 {
                     row.set_content((line, text, ranges));
@@ -454,7 +470,7 @@ impl SearchView {
                 if hit.score > row.score {
                     row.score = hit.score;
                 }
-                if let HitKind::Content { line, text, ranges } = hit.kind
+                if let HitKind::Content { line, text, ranges, .. } = hit.kind
                     && row.content.as_ref().is_none_or(|(best, _, _)| line < *best)
                 {
                     row.set_content((line, text, ranges));
@@ -747,6 +763,11 @@ impl SearchView {
     }
 
     #[cfg(test)]
+    pub fn results_focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    #[cfg(test)]
     pub fn scope(&self) -> Scope {
         self.scope
     }
@@ -932,6 +953,31 @@ impl SearchView {
         }
     }
 
+    /// ↓ in the field: land on the current cursor row. With no results it does nothing,
+    /// unlike Tab, which moves on to the sidebar.
+    fn focus_results_from_field(&mut self, _: &SearchFocusResults, window: &mut Window, cx: &mut Context<Self>) {
+        if self.results.is_empty() {
+            return;
+        }
+        if self.selection.cursor().is_none() {
+            self.select_only(self.cursor.min(self.results.len() - 1), window, cx);
+        } else {
+            window.focus(&self.focus, cx);
+            self.scroll.scroll_to_item(self.cursor, ScrollStrategy::Top);
+            cx.notify();
+        }
+    }
+
+    /// ↑ on the first row goes back to the field; elsewhere it moves up as usual.
+    fn focus_field_from_results(&mut self, _: &SearchFocusField, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cursor > 0 {
+            self.move_up(&MoveUp, window, cx);
+        } else {
+            self.focus_input(window, cx);
+            cx.notify();
+        }
+    }
+
     fn move_to_first(&mut self, _: &MoveToFirst, window: &mut Window, cx: &mut Context<Self>) {
         if !self.results.is_empty() {
             self.select_only(0, window, cx);
@@ -995,6 +1041,7 @@ impl SearchView {
             .on_action(cx.listener(Self::search_everything))
             .on_action(cx.listener(Self::cycle_match))
             .on_action(cx.listener(Self::close_action))
+            .on_action(cx.listener(Self::focus_results_from_field))
             .flex_1()
             .min_w(px(160.))
             .h(px(32.))
@@ -1591,6 +1638,7 @@ impl SearchView {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
+            .on_action(cx.listener(Self::focus_field_from_results))
             .on_action(cx.listener(Self::move_to_first))
             .on_action(cx.listener(Self::move_to_last))
             .on_action(cx.listener(Self::open))
@@ -1975,7 +2023,7 @@ impl Row {
 
     fn from_hit(hit: Hit, home: &Path, folder_root: Option<&Path>, query: &str) -> Row {
         let (content, name_match, name_ranges) = match hit.kind {
-            HitKind::Content { line, text, ranges } => (Some((line, text, ranges)), false, Vec::new()),
+            HitKind::Content { line, text, ranges, .. } => (Some((line, text, ranges)), false, Vec::new()),
             HitKind::Name { ranges } => (None, true, ranges),
         };
         let strong_name = name_match && is_strong_name(&hit.path, &name_ranges, query);

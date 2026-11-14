@@ -32,6 +32,9 @@ pub enum Request {
     NewFolder {
         parent: PathBuf,
     },
+    NewFile {
+        parent: PathBuf,
+    },
     Rename {
         path: PathBuf,
         new_name: String,
@@ -221,6 +224,12 @@ pub fn untitled_folder(dir: &Path) -> PathBuf {
     first_free(dir, std::iter::once("untitled folder".to_owned()).chain((2..).map(|n| format!("untitled folder {n}"))))
 }
 
+/// The name a new file gets before you rename it. No extension: the file is empty,
+/// and a made-up type (".txt") would decide for the user what it becomes.
+pub fn untitled_file(dir: &Path) -> PathBuf {
+    first_free(dir, std::iter::once("untitled".to_owned()).chain((2..).map(|n| format!("untitled {n}"))))
+}
+
 /// Why `name` can't be a file name, if it can't.
 pub fn check_name(name: &str) -> Result<(), OpError> {
     let why = if name.trim().is_empty() {
@@ -268,6 +277,10 @@ pub fn plan(request: Request) -> Result<Plan, OpError> {
         Request::NewFolder { parent } => (
             vec![PlannedItem { source: None, target: untitled_folder(parent), conflict: false, bytes: 0 }],
             "New Folder".into(),
+        ),
+        Request::NewFile { parent } => (
+            vec![PlannedItem { source: None, target: untitled_file(parent), conflict: false, bytes: 0 }],
+            "New File".into(),
         ),
         Request::Rename { path, new_name } => {
             check_name(new_name)?;
@@ -577,6 +590,11 @@ fn run_item(
     match request {
         Request::NewFolder { .. } => {
             std::fs::create_dir(target).map_err(io_err(target))?;
+            steps.push(Step::Created(target.clone()));
+        }
+        Request::NewFile { .. } => {
+            // `create_new` never replaces a file that appeared since planning.
+            std::fs::OpenOptions::new().write(true).create_new(true).open(target).map_err(io_err(target))?;
             steps.push(Step::Created(target.clone()));
         }
         Request::Rename { path, .. } => {

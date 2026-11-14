@@ -28,8 +28,8 @@ use gpui::{
 
 use crate::actions::{
     BeginJump, BeginMark, ClearFilter, CopyFiles, CutFiles, DeletePermanently, Duplicate, ExtendDown, ExtendUp,
-    MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFolder, OpenSelection, PasteFiles,
-    PasteMoveFiles, QuickLook, Rename, SelectAll, StartFilter,
+    MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection,
+    PasteFiles, PasteMoveFiles, QuickLook, Rename, SelectAll, StartFilter,
 };
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
@@ -257,9 +257,12 @@ struct Bench {
 }
 
 impl Pane {
+    /// `start_mode` is the view a window keeps when `view_per_folder` is off; `None`
+    /// lets the folder decide.
     pub fn new(
         dir: PathBuf,
         show_hidden: bool,
+        start_mode: Option<ViewMode>,
         bench: bool,
         bench_filter: Option<String>,
         cx: &mut Context<Self>,
@@ -299,6 +302,9 @@ impl Pane {
             focus_list_after_filter: false,
         };
         pane.enter(dir, cx);
+        if let Some(mode) = start_mode.filter(|_| !cx.global::<Ui>().settings.view_per_folder) {
+            pane.apply_mode(mode, cx);
+        }
         if let Some(filter) = pane.bench.as_ref().and_then(|bench| bench.filter.clone()) {
             let folder = pane.folders[0].clone();
             folder.update(cx, |folder, cx| folder.set_filter(Some(filter), cx));
@@ -486,6 +492,7 @@ impl Pane {
             CommandId::QuickLook => self.quick_look(&QuickLook, window, cx),
             CommandId::Rename => self.rename(&Rename, window, cx),
             CommandId::NewFolder => self.new_folder(&NewFolder, window, cx),
+            CommandId::NewFile => self.new_file(&NewFile, window, cx),
             CommandId::Duplicate => self.duplicate(&Duplicate, window, cx),
             CommandId::MoveToTrash => self.move_to_trash(&MoveToTrash, window, cx),
             CommandId::DeletePermanently => self.delete_permanently(&DeletePermanently, window, cx),
@@ -530,9 +537,10 @@ impl Pane {
         self.sort
     }
 
-    /// Switch view as the user asked (Cmd-2, Cmd-3), and remember it for the folder shown.
+    /// Switch view as the user asked (Cmd-2, Cmd-3), and remember it for the folder
+    /// shown, unless views don't follow folders: then it is this window's alone.
     pub fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
-        if self.apply_mode(mode, cx) {
+        if self.apply_mode(mode, cx) && cx.global::<Ui>().settings.view_per_folder {
             self.remember(ViewChange::View(mode), cx);
         }
     }
@@ -564,7 +572,9 @@ impl Pane {
         // Columns are one browsing session: entering a folder may switch to column
         // view, but a views.toml reload while its columns are open (the parent's
         // setting, say) must not yank the mode out from under the chain.
-        if self.mode != ViewMode::Columns || self.folders.len() == 1 {
+        // With `view_per_folder = false` the window keeps its view.
+        let per_folder = cx.global::<Ui>().settings.view_per_folder;
+        if per_folder && (self.mode != ViewMode::Columns || self.folders.len() == 1) {
             self.apply_mode(resolved.view.0, cx);
         }
         cx.notify();
@@ -957,6 +967,10 @@ impl Pane {
 
     fn new_folder(&mut self, _: &NewFolder, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(PaneEvent::Run(Request::NewFolder { parent: self.current_dir(cx) }));
+    }
+
+    fn new_file(&mut self, _: &NewFile, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(PaneEvent::Run(Request::NewFile { parent: self.current_dir(cx) }));
     }
 
     fn duplicate(&mut self, _: &Duplicate, _: &mut Window, cx: &mut Context<Self>) {
@@ -1771,11 +1785,13 @@ impl Pane {
                 );
         }
         // The preview is the last column when the focused column's cursor is a file.
-        if let Some(entry) = self.cursor_entry(cx).filter(|e| !e.is_dir || e.is_package()) {
+        let show_preview = cx.global::<Ui>().settings.show_preview;
+        if show_preview && let Some(entry) = self.cursor_entry(cx).filter(|e| !e.is_dir || e.is_package()) {
             let preview = self.preview(cx);
             strip = strip.child(
                 div()
                     .id("preview-column")
+                    .debug_selector(|| "preview-column".into())
                     .role(Role::Group)
                     .aria_label(preview::spoken(&entry, preview))
                     .w(px(PREVIEW_COLUMN_WIDTH))
@@ -1972,6 +1988,7 @@ impl Render for Pane {
                     .on_action(cx.listener(Self::rename))
                     .on_action(cx.listener(Self::quick_look))
                     .on_action(cx.listener(Self::new_folder))
+                    .on_action(cx.listener(Self::new_file))
                     .on_action(cx.listener(Self::duplicate))
                     .on_action(cx.listener(Self::move_to_trash))
                     .on_action(cx.listener(Self::delete_permanently))
@@ -2029,8 +2046,15 @@ impl Pane {
         (0..folder.row_count()).map(|ix| folder.row_match(ix)).collect()
     }
 
+    #[cfg(test)]
     pub fn folder_count(&self) -> usize {
         self.folders.len()
+    }
+
+    /// The focused folder entity, for tests that drive the watcher directly.
+    #[cfg(test)]
+    pub(crate) fn test_folder(&self) -> Entity<Folder> {
+        self.focused_folder().clone()
     }
 
     pub fn focused_index(&self) -> usize {

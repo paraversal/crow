@@ -259,6 +259,11 @@ impl Views {
         out
     }
 
+    /// The `[defaults]` view, where a window starts when views don't follow folders.
+    pub fn default_view(&self) -> ViewMode {
+        self.defaults.view.unwrap_or_default()
+    }
+
     pub fn has_folder_override(&self, dir: &Path) -> bool {
         self.folders.contains_key(dir)
     }

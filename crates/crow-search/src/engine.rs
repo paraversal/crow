@@ -18,8 +18,10 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::rules::RuleSet;
 
-/// Hits are handed to the sink in batches of at least this many.
-const BATCH: usize = 64;
+/// Hits are handed to the sink in batches of at most this many. A single file
+/// with a great many matching lines can produce more hits than this; sending
+/// them all at once makes the UI freeze while it drains one batch.
+const BATCH: usize = 256;
 
 /// What to look for. `contents` is literal and case-insensitive unless wrapped
 /// in `/…/`, which makes it a regex. `everything` ignores every exclusion set.
@@ -48,9 +50,11 @@ pub enum HitKind {
     /// The file name matched; `ranges` are the matched graphemes as byte ranges
     /// in the name.
     Name { ranges: Vec<Range<usize>> },
-    /// One matching line: its 1-based number, the line without its terminator,
-    /// and the byte ranges of the matches within `text`.
-    Content { line: u64, text: String, ranges: Vec<Range<usize>> },
+    /// The first matching line: its 1-based number, the line without its
+    /// terminator, and the byte ranges of the matches within `text`. `more` is
+    /// how many further lines matched: the results table shows one excerpt per
+    /// file, and carrying every line made huge files produce millions of hits.
+    Content { line: u64, text: String, ranges: Vec<Range<usize>>, more: u64 },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -76,7 +80,10 @@ impl FuzzyMatcher {
         let mut config = Config::DEFAULT;
         config.ignore_case = true;
         FuzzyMatcher {
-            needle: needle.to_owned(),
+            // With `ignore_case`, nucleo compares against a lowercased haystack and
+            // expects the needle lowercased too; an uppercase needle letter can pass
+            // its prefilter and then trip an assert ("should have been caught by prefilter").
+            needle: needle.to_lowercase(),
             matcher: Matcher::new(config),
             haystack_buf: Vec::new(),
             needle_buf: Vec::new(),
@@ -204,7 +211,13 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                     if let Some(content) = content.as_mut()
                         && !is_dir
                     {
-                        content.search(entry.path(), modified, size, &mut hits, &cancel);
+                        let before = hits.len();
+                        let matches = content.search(entry.path(), modified, size, &mut hits, &cancel);
+                        if matches > 1
+                            && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) = hits.get_mut(before)
+                        {
+                            *more = matches - 1;
+                        }
                     }
                     if !hits.is_empty() {
                         let _ = tx.send(hits);
@@ -217,14 +230,19 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
         let mut pending = Vec::new();
         for batch in rx {
             pending.extend(batch);
-            if pending.len() >= BATCH {
-                sink(std::mem::take(&mut pending));
+            while pending.len() >= BATCH {
+                // Hand out a bounded slice; a huge file can make `pending` huge.
+                let rest = pending.split_off(BATCH);
+                sink(std::mem::replace(&mut pending, rest));
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
             }
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
         }
-        if !pending.is_empty() {
+        if !pending.is_empty() && !cancel.load(Ordering::Relaxed) {
             sink(pending);
         }
     });
@@ -326,9 +344,10 @@ impl ContentSearch {
         size: u64,
         hits: &mut Vec<Hit>,
         cancel: &Arc<AtomicBool>,
-    ) {
-        let mut sink = ContentSink { matcher: &self.matcher, path, modified, size, hits, cancel };
+    ) -> u64 {
+        let mut sink = ContentSink { matcher: &self.matcher, path, modified, size, hits, cancel, matches: 0 };
         let _ = self.searcher.search_path(&self.matcher, path, &mut sink);
+        sink.matches
     }
 }
 
@@ -339,6 +358,8 @@ struct ContentSink<'a> {
     size: u64,
     hits: &'a mut Vec<Hit>,
     cancel: &'a Arc<AtomicBool>,
+    /// Matching lines seen in this file; only the first becomes a `Hit`.
+    matches: u64,
 }
 
 impl Sink for ContentSink<'_> {
@@ -347,6 +368,11 @@ impl Sink for ContentSink<'_> {
     fn matched(&mut self, _: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, io::Error> {
         if self.cancel.load(Ordering::Relaxed) {
             return Ok(false);
+        }
+        self.matches += 1;
+        // The first line is the excerpt the UI shows; the rest are only counted.
+        if self.matches > 1 {
+            return Ok(true);
         }
         let raw = mat.bytes();
         let text = String::from_utf8_lossy(raw);
@@ -367,7 +393,7 @@ impl Sink for ContentSink<'_> {
             path: self.path.to_path_buf(),
             is_dir: false,
             score: 0,
-            kind: HitKind::Content { line: mat.line_number().unwrap_or(0), text: text.to_owned(), ranges },
+            kind: HitKind::Content { line: mat.line_number().unwrap_or(0), text: text.to_owned(), ranges, more: 0 },
             modified: self.modified,
             size: self.size,
         });
@@ -438,10 +464,19 @@ mod tests {
     fn content(hits: &[Hit]) -> Vec<(u64, String, Vec<Range<usize>>)> {
         hits.iter()
             .filter_map(|hit| match &hit.kind {
-                HitKind::Content { line, text, ranges } => Some((*line, text.clone(), ranges.clone())),
+                HitKind::Content { line, text, ranges, .. } => Some((*line, text.clone(), ranges.clone())),
                 HitKind::Name { .. } => None,
             })
             .collect()
+    }
+
+    fn extra_matches(hits: &[Hit]) -> u64 {
+        hits.iter()
+            .filter_map(|hit| match &hit.kind {
+                HitKind::Content { more, .. } => Some(*more),
+                HitKind::Name { .. } => None,
+            })
+            .sum()
     }
 
     fn dev_tree(name: &str) -> PathBuf {
@@ -567,6 +602,16 @@ mod tests {
     }
 
     #[test]
+    fn uppercase_needles_match_without_panicking() {
+        // nucleo 0.3.1 asserted here before the needle was lowercased.
+        let mut matcher = FuzzyMatcher::new("Docs");
+        assert!(matcher.score("~/Documents/Docs").is_some());
+        assert!(matcher.indices("~/Documents/Docs").is_some());
+        let mut matcher = FuzzyMatcher::new("dT");
+        assert!(matcher.score("~/a/dT/b/dTx").is_some());
+    }
+
+    #[test]
     fn fuzzy_indices_are_byte_ranges() {
         let haystack = "~/Files/Coding/git";
         let mut matcher = FuzzyMatcher::new("git");
@@ -590,10 +635,53 @@ mod tests {
         write(&root, "lines.txt", b"alpha\nNEEDLE here\nbeta needle\n");
         let (hits, summary) = run(&root, None, Some("needle"), false, true);
         assert_eq!(summary.error, None);
-        assert_eq!(
-            content(&hits),
-            [(2, "NEEDLE here".to_owned(), ranges(0, 6)), (3, "beta needle".to_owned(), ranges(5, 11)),]
-        );
+        // One excerpt per file: its first matching line, plus the count of the rest.
+        assert_eq!(content(&hits), [(2, "NEEDLE here".to_owned(), ranges(0, 6))]);
+        assert_eq!(extra_matches(&hits), 1, "the third line is counted, not carried");
+    }
+
+    #[test]
+    fn a_file_with_many_matches_sends_one_hit_and_a_count() {
+        let root = root("batches");
+        let mut text = String::new();
+        for i in 0..2000 {
+            text.push_str(&format!("needle {i}\n"));
+        }
+        write(&root, "many.txt", text.as_bytes());
+        let query = Query {
+            names: None,
+            contents: Some("needle".into()),
+            show_hidden: false,
+            rules: rules(),
+            everything: true,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut hits = Vec::new();
+        let summary = search(&root, &query, |batch| hits.extend(batch), &cancel);
+        assert!(summary.error.is_none(), "{:?}", summary.error);
+        assert_eq!(hits.len(), 1, "only the first line becomes a hit");
+        assert_eq!(extra_matches(&hits), 1999, "the other lines are counted");
+    }
+
+    #[test]
+    fn batches_are_bounded_for_many_files() {
+        let root = root("batch-files");
+        for i in 0..1000 {
+            write(&root, &format!("file-{i}.txt"), b"needle\n");
+        }
+        let query = Query {
+            names: None,
+            contents: Some("needle".into()),
+            show_hidden: false,
+            rules: rules(),
+            everything: true,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut batches = Vec::new();
+        let summary = search(&root, &query, |batch| batches.push(batch.len()), &cancel);
+        assert!(summary.error.is_none(), "{:?}", summary.error);
+        assert!(batches.iter().all(|&len| len <= BATCH), "batches stay bounded: {batches:?}");
+        assert_eq!(batches.iter().sum::<usize>(), 1000, "every file arrives");
     }
 
     #[test]
@@ -601,9 +689,8 @@ mod tests {
         let root = root("regex");
         write(&root, "lines.txt", b"alpha\nneedle here\nbeta needle\n");
         let (hits, _) = run(&root, None, Some("/n(eed)le/"), false, true);
-        assert_eq!(content(&hits).len(), 2);
-        assert_eq!(content(&hits)[0].2, ranges(0, 6));
-        assert_eq!(content(&hits)[1].2, ranges(5, 11));
+        assert_eq!(content(&hits), [(2, "needle here".to_owned(), ranges(0, 6))]);
+        assert_eq!(extra_matches(&hits), 1, "the second matching line is counted");
     }
 
     #[test]

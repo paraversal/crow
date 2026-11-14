@@ -13,10 +13,10 @@ use gpui::{Action, SharedString};
 
 use crate::actions::{
     AddToSidebar, CloseTab, CopyFiles, CutFiles, DeletePermanently, Duplicate, Eject, GoBack, GoForward, GoToFolder,
-    MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, PasteFiles,
-    PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView, SearchEverything, SearchReveal,
-    SelectAll, ShowCommandPalette, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity,
-    ToggleHiddenFiles, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
+    MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection,
+    PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView, SearchEverything,
+    SearchReveal, SelectAll, ShowCommandPalette, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity,
+    ToggleHiddenFiles, TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -73,6 +73,7 @@ pub enum CommandId {
     NewWindow,
     SwitchFocus,
     ToggleHiddenFiles,
+    TogglePreview,
     OpenParent,
     GoBack,
     GoForward,
@@ -83,6 +84,7 @@ pub enum CommandId {
     QuickLook,
     Rename,
     NewFolder,
+    NewFile,
     Duplicate,
     MoveToTrash,
     DeletePermanently,
@@ -137,6 +139,7 @@ impl CommandId {
             CommandId::NewWindow => "new-window",
             CommandId::SwitchFocus => "switch-focus",
             CommandId::ToggleHiddenFiles => "toggle-hidden-files",
+            CommandId::TogglePreview => "toggle-preview",
             CommandId::OpenParent => "open-parent",
             CommandId::GoBack => "go-back",
             CommandId::GoForward => "go-forward",
@@ -147,6 +150,7 @@ impl CommandId {
             CommandId::QuickLook => "quick-look",
             CommandId::Rename => "rename",
             CommandId::NewFolder => "new-folder",
+            CommandId::NewFile => "new-file",
             CommandId::Duplicate => "duplicate",
             CommandId::MoveToTrash => "move-to-trash",
             CommandId::DeletePermanently => "delete-permanently",
@@ -216,6 +220,14 @@ pub const COMMANDS: &[Command] = &[
         action: &NewFolder,
         scope: KeyScope::List,
         menu: Some(MenuSlot { menu: MenuName::File, section: 0, title: "New Folder" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::NewFile,
+        label: "New File",
+        action: &NewFile,
+        scope: KeyScope::List,
+        menu: Some(MenuSlot { menu: MenuName::File, section: 0, title: "New File" }),
         palette: true,
     },
     Command {
@@ -410,6 +422,15 @@ pub const COMMANDS: &[Command] = &[
         action: &ToggleHiddenFiles,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Hidden Files" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::TogglePreview,
+        label: "Show or Hide Preview",
+        action: &TogglePreview,
+        scope: KeyScope::Window,
+        // menus::app_menus turns this into "Hide Preview" while the preview shows.
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Preview" }),
         palette: true,
     },
     Command {
