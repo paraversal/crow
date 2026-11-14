@@ -173,16 +173,19 @@ Every control added by U1–U9 has an id, a role and an aria label; tooltips nev
   - disabled controls: 40 % opacity of the enabled role;
   - light theme: repeat every shot in `solarized-light`; scrim, selection fills, accent text on `surface`, the error token and the disk bar warning must stay readable (check with Digital Color Meter: body text ≥ 4.5:1 against its background, hints ≥ 3:1). Record any role that fails; fixing a role's color belongs to the theme index, not Crow (note it, don't hex-patch);
   - Vim layer: with `keymap = "vim"`, hints, tooltips, palette keycaps and tips show the same key for the same action as the menus do, and Vim-only states (mark pending) still show their text in the transient slot. Verify which binding GPUI's menus show for actions bound in both layers (Undo: `cmd-z` and `u`): the menu must show ⌘Z. If it shows `u`, ASK (fix belongs to U1 I1's lookup or U2's menu builder);
-  - narrow window (700 px) and multiple tabs (tab bar present): band, filter field and bottom bar don't overlap or clip.
+  - narrow window (700 px) and multiple tabs (tab bar present): band, filter field and bottom bar don't overlap or clip;
+  - edge-case content (user, 2026-11-14: "edge cases like long names or huge directories … could also be tackled with tests"): a 255-byte file name, an NFD name next to its NFC twin, an emoji/RTL name, a path 20 levels deep, and the 100k fixture. Shown in list and column view, the sidebar (as a favorite), the bottom path bar, search results, the palette (two-line row) and the Why/rename sheets. Nothing overflows its row or pushes a neighbour off screen; middle or end truncation applies where the plans say. The random-input fuzzer for the same edge cases is `docs/plans/after-ui-overhaul.md` D1, not U10.
 - *Tests* (`window.rs` `mod tests`):
   - `assembled_layout_matches_boards`: open a window at 1280×800 (explicit `WindowBounds`), column view on a temp tree; `debug_bounds` for the band, sidebar, a column row, the bottom bar; start a filter (`simulate_keystrokes("/ v i")`) and check the filter field height; ⌘F and check the scope bar height. Assert the table's values (±1 px). Add `.debug_selector` ids where missing (`"top-band"`, `"bottom-bar"`, `"filter-field"`, `"scope-bar"`).
   - `same_key_everywhere`: for ShowSearch, ShowCommandPalette, StartFilter, GoToFolder, SearchReveal: the palette row's keys, the hint for that action and U1's key lookup return the same string, in Finder and in Vim layer (switch via `settings.toml` write and reload, as existing Vim tests do).
+  - `long_names_stay_in_their_rows`: the edge-case tree above at 1280×800 and 700 px; for list rows, column rows, the sidebar favorite, the path bar and a palette row, `debug_bounds` of the text stays inside its row's bounds.
   - `one_accent_fill_in_column_view`: column view three levels deep, sidebar on the current folder: count rows whose background is `active_selection` (expose a test accessor if needed): exactly 1; with the sidebar focused: 0 in the pane's inactive columns and a ring on the sidebar cursor.
 - *Done when*: every drift found is fixed or listed; the three tests pass; shots retaken.
 
 ### I5 (only if Q2 = "build here") Preview fills the rest; folder summary
 ![Filter D (folder summary in the preview area)](img/filter-d.png)
 - *Where*: `pane.rs` `render_columns` (`:1567-1633`), `preview.rs`.
+- *Seam (U7-fix X5)*: the preview can be hidden (View ▸ Hide Preview, `show_preview`). When hidden, nothing fills the rest with a preview; the columns keep their widths. Test both states.
 - *Change*: the last strip child takes the remaining width (`flex_1`, min 300 px) instead of `PREVIEW_COLUMN_WIDTH` when the strip is narrower than the pane. When the cursor is a folder, show a summary there: folder icon, name, "Folder · n items" (the count of the child column already loaded; no extra disk I/O on the main thread), modified. Verify first that `flex_1` works inside the `overflow_x_scroll` strip (`pane.rs:1571`); if not, compute the width from the pane's bounds.
 - *Tests*: `column_preview_fills_the_rest` (1280×800, two columns + file cursor: preview width = pane width − columns); `folder_cursor_shows_summary` (aria label "src, Folder, 9 items").
 - *Bench*: required (row rendering's neighbor). *Done when*: tests pass; bench within noise of I1.
@@ -221,6 +224,7 @@ Every control added by U1–U9 has an id, a role and an aria label; tooltips nev
   - M7: editable path bar (Q10).
   - Finding 6 if Q2 = defer. Board-only details from Q3 (line icons per favorite and clock icons in Recent, syntax-colored text preview with line numbers, 196 px columns, focused-column tint). "Reveal Result ⌘R" in Go if U2 left it out. Scope token inside the search field (Top band D).
   - Any inherited item from I1 the user deferred; any theme-role contrast issue from I4 (theme index, not Crow).
+  - Already collected for after the overhaul: `docs/plans/after-ui-overhaul.md` (D1 UI fuzzing, plus anything U7-fix moved there). Link it rather than repeating its items.
 - *Done when*: the list is in the progress file and PR body.
 
 ### I10 PR
