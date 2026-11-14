@@ -8205,6 +8205,52 @@ mod tests {
     }
 
     #[gpui::test]
+    fn nested_expanded_folders_target_the_innermost_folder(cx: &mut TestAppContext) {
+        let root = fixture("drop-nested-two");
+        std::fs::write(root.join("alpha/inner/deep.txt"), "hello\n").expect("create fixture");
+        std::fs::write(root.join("alpha/zz.txt"), "hello\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "off");
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("down right");
+        settle(&view, &mut cx);
+        let pane = pane(&view, &cx);
+        let rows = pane.read_with(&cx, |pane, cx| pane.rows(cx));
+        let at = |name: &str| rows.iter().position(|(row, _)| row == name).expect("row");
+        assert_eq!(
+            rows.iter().map(|(name, depth)| (name.as_str(), *depth)).collect::<Vec<_>>()[at("alpha")..=at("zz.txt")],
+            [("alpha", 0), ("inner", 1), ("deep.txt", 2), ("zz.txt", 1)],
+            "both folders are expanded"
+        );
+        let hover = |cx: &mut VisualTestContext, selector: &'static str| {
+            let position = cx.debug_bounds(selector).expect("row").center();
+            cx.simulate_event(gpui::FileDropEvent::Entered {
+                position,
+                paths: gpui::ExternalPaths(vec![root.join("notes.txt")].into()),
+            });
+            cx.simulate_event(gpui::FileDropEvent::Pending { position });
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            let target = pane.read_with(cx, |pane, _| pane.drop_target().cloned());
+            cx.simulate_event(gpui::FileDropEvent::Exited);
+            target
+        };
+
+        assert_eq!(
+            hover(&mut cx, "row-deep.txt"),
+            Some(crate::pane::DropTarget { folder: root.join("alpha/inner"), header: at("inner"), end: at("zz.txt") }),
+            "a file two levels down targets its own folder, not the outer one"
+        );
+        assert_eq!(
+            hover(&mut cx, "row-zz.txt"),
+            Some(crate::pane::DropTarget { folder: root.join("alpha"), header: at("alpha"), end: at("zz.txt") + 1 }),
+            "a file after a nested block targets the outer folder, which spans the nested block"
+        );
+    }
+
+    #[gpui::test]
     fn expanded_folder_drop_target_is_outlined(cx: &mut TestAppContext) {
         let root = fixture("drop-outline");
         std::fs::remove_dir_all(root.join("alpha/inner")).expect("drop fixture dir");
