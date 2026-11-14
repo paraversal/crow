@@ -57,18 +57,20 @@ pub fn stat_changes(dir: &Path, changed: &[PathBuf], show_hidden: bool) -> Vec<(
 /// the main thread against `entries` as they are *now*: two batches that land out
 /// of order cannot replay an older listing (a deleted file stays deleted).
 pub fn apply_stats(entries: &[Entry], stats: &[(PathBuf, Option<Entry>)], sort: &Sort, kind: KindOf) -> Vec<Entry> {
-    let gone: HashSet<&PathBuf> = stats.iter().filter(|(_, entry)| entry.is_none()).map(|(path, _)| path).collect();
-    let found: Vec<&Entry> = stats.iter().filter_map(|(_, entry)| entry.as_ref()).collect();
-    let mut out: Vec<Entry> = entries
-        .iter()
-        .filter(|entry| !gone.contains(&entry.path))
-        .filter(|entry| !found.iter().any(|found| found.path == entry.path))
-        .cloned()
-        .collect();
-    for entry in found {
-        let at = out.partition_point(|existing| compare(existing, entry, sort, kind).is_lt());
-        out.insert(at, entry.clone());
+    // One pass over the listing and one over the sorted changes: this runs on the
+    // main thread, so a burst of changes in a 100k folder must stay linear.
+    let touched: HashSet<&PathBuf> = stats.iter().map(|(path, _)| path).collect();
+    let mut found: Vec<&Entry> = stats.iter().filter_map(|(_, entry)| entry.as_ref()).collect();
+    found.sort_by(|a, b| compare(a, b, sort, kind));
+    let mut found = found.into_iter().peekable();
+    let mut out: Vec<Entry> = Vec::with_capacity(entries.len() + found.len());
+    for existing in entries.iter().filter(|entry| !touched.contains(&entry.path)) {
+        while let Some(new) = found.next_if(|new| compare(existing, new, sort, kind).is_ge()) {
+            out.push(new.clone());
+        }
+        out.push(existing.clone());
     }
+    out.extend(found.cloned());
     out
 }
 
@@ -116,6 +118,32 @@ mod tests {
 
     fn names(entries: &[Entry]) -> Vec<&str> {
         entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn apply_stats_merges_inserts_updates_and_removals_in_order() {
+        let entry = |name: &str, size: u64| Entry {
+            name: name.into(),
+            path: PathBuf::from("/d").join(name),
+            is_dir: false,
+            hidden: false,
+            size,
+            modified: None,
+            created: None,
+            added: None,
+        };
+        let sort = Sort::default();
+        let entries = vec![entry("b", 1), entry("d", 1), entry("f", 1)];
+        let stats = vec![
+            (PathBuf::from("/d/g"), Some(entry("g", 1))),
+            (PathBuf::from("/d/a"), Some(entry("a", 1))),
+            (PathBuf::from("/d/d"), None),
+            (PathBuf::from("/d/f"), Some(entry("f", 9))),
+            (PathBuf::from("/d/c"), Some(entry("c", 1))),
+        ];
+        let out = apply_stats(&entries, &stats, &sort, &kind);
+        assert_eq!(names(&out), ["a", "b", "c", "f", "g"]);
+        assert_eq!(out[3].size, 9, "an updated entry replaces the old one");
     }
 
     #[test]
