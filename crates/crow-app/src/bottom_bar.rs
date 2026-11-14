@@ -145,7 +145,10 @@ pub fn pane_count(c: PaneCounts) -> Count {
     Count { text: text.clone().into(), spoken: format!("{text} in {}", c.folder).into() }
 }
 
-pub fn search_count(results: usize, selected: usize, searching: bool) -> Count {
+pub fn search_count(results: usize, selected: usize, searching: bool, query_empty: bool) -> Count {
+    if query_empty {
+        return Count { text: "".into(), spoken: "".into() };
+    }
     if searching && results == 0 {
         return Count { text: "Searching…".into(), spoken: "Searching".into() };
     }
@@ -700,20 +703,22 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         .children(error_el);
 
     let counts_spoken = state.count.spoken.clone();
-    let counts = with_tooltip(
-        div()
-            .id("bar-counts")
-            .role(Role::Status)
-            .aria_label(counts_spoken.clone())
-            .flex_none()
-            .pl_3()
-            .border_l_1()
-            .border_color(border)
-            .text_color(fg)
-            .child(state.count.text.clone()),
-        counts_spoken,
-        None,
-    );
+    let counts = (!state.count.text.is_empty()).then(|| {
+        with_tooltip(
+            div()
+                .id("bar-counts")
+                .role(Role::Status)
+                .aria_label(counts_spoken.clone())
+                .flex_none()
+                .pl_3()
+                .border_l_1()
+                .border_color(border)
+                .text_color(fg)
+                .child(state.count.text.clone()),
+            counts_spoken,
+            None,
+        )
+    });
 
     let progress = match &state.primary {
         Primary::Running(running) => Some(
@@ -747,7 +752,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         .text_color(muted)
         .child(path)
         .child(transient)
-        .child(counts)
+        .children(counts)
         .children(progress)
 }
 
@@ -781,6 +786,15 @@ mod tests {
         assert_eq!(fit5(1000., 0., &[px(300.), px(300.)]).hints, 1);
         // Two segments never fold.
         assert_eq!(fit(px(100.), px(50.), &[px(100.), px(100.)], px(30.), px(0.), &[]).hidden, None);
+    }
+
+    #[test]
+    fn search_count_hides_in_idle() {
+        assert_eq!(search_count(0, 0, false, true).text.as_ref(), "");
+        assert_eq!(search_count(0, 0, false, true).spoken.as_ref(), "");
+        assert_eq!(search_count(0, 0, false, false).text.as_ref(), "0 results");
+        assert_eq!(search_count(0, 0, true, false).text.as_ref(), "Searching…");
+        assert_eq!(search_count(2, 1, false, false).text.as_ref(), "1 of 2 selected");
     }
 
     #[test]

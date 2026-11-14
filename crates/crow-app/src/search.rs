@@ -32,8 +32,8 @@ use crate::keys::{self, KeyScope};
 use crate::pane::DraggedSelection;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, format_time, highlight_text, icon, inactive_selection, map_range,
-    truncate_middle_parts,
+    active_selection, color, color_alpha, format_time, format_time_short, highlight_text, icon, inactive_selection,
+    map_range, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -121,10 +121,14 @@ pub struct SearchView {
     exclude_generation: u64,
     selection: Selection<PathBuf>,
     cursor: usize,
+    /// The user picked a row, so streaming batches stop re-selecting the best hit.
+    user_moved: bool,
     /// Every accepted hit, including extra content lines for the same row.
     hit_count: usize,
-    /// How many leading rows are name matches.
+    /// How many leading rows are name matches with a contiguous query match.
     name_count: usize,
+    /// How many rows after the name block are content-only hits.
+    content_count: usize,
     /// The selected row's preview, loaded off the main thread.
     preview: Option<LoadedPreview>,
     scroll: UniformListScrollHandle,
@@ -150,10 +154,14 @@ struct Row {
     score: u32,
     /// A hit on the file name, as opposed to contents only.
     name_match: bool,
+    /// The name contains the query contiguously, so it ranks above content hits.
+    strong_name: bool,
     /// Matched byte ranges in `name`.
     name_ranges: Vec<Range<usize>>,
-    /// The earliest matching line, for content hits.
+    /// The earliest matching line, for content hits; the full line and its ranges.
     content: Option<(u64, String, Vec<Range<usize>>)>,
+    /// The line as drawn: excerpted around the match, ranges shifted. Built once in `Row::new`.
+    content_shown: Option<(u64, String, Vec<Range<usize>>)>,
 }
 
 #[derive(Clone, Copy)]
@@ -246,8 +254,10 @@ impl SearchView {
             exclude_generation,
             selection: Selection::default(),
             cursor: 0,
+            user_moved: false,
             hit_count: 0,
             name_count: 0,
+            content_count: 0,
             preview: None,
             scroll: UniformListScrollHandle::new(),
             show_skipped: false,
@@ -315,8 +325,10 @@ impl SearchView {
         self.show_skipped = false;
         self.selection.clear();
         self.cursor = 0;
+        self.user_moved = false;
         self.hit_count = 0;
         self.name_count = 0;
+        self.content_count = 0;
         self.preview = None;
         let query = query.trim();
         if query.is_empty() {
@@ -413,6 +425,7 @@ impl SearchView {
 
     fn add_hits(&mut self, hits: Vec<Hit>, cx: &mut Context<Self>) {
         let root = (self.scope == Scope::Folder).then_some(self.folder.as_path());
+        let query = self.query(cx);
         let mut changed = false;
         let mut fresh: Vec<Row> = Vec::new();
         let mut fresh_at: HashMap<PathBuf, usize> = HashMap::new();
@@ -432,7 +445,7 @@ impl SearchView {
                 if let HitKind::Content { line, text, ranges } = hit.kind
                     && row.content.as_ref().is_none_or(|(best, _, _)| line < *best)
                 {
-                    row.content = Some((line, text, ranges));
+                    row.set_content((line, text, ranges));
                     changed = true;
                 }
             } else if let Some(&index) = fresh_at.get(&hit.path) {
@@ -443,10 +456,10 @@ impl SearchView {
                 if let HitKind::Content { line, text, ranges } = hit.kind
                     && row.content.as_ref().is_none_or(|(best, _, _)| line < *best)
                 {
-                    row.content = Some((line, text, ranges));
+                    row.set_content((line, text, ranges));
                 }
             } else {
-                let row = Row::from_hit(hit, &self.home, root);
+                let row = Row::from_hit(hit, &self.home, root, &query);
                 fresh_at.insert(row.path.clone(), fresh.len());
                 fresh.push(row);
                 changed = true;
@@ -465,48 +478,88 @@ impl SearchView {
         }
     }
 
-    /// Put name matches first, best score first, then content-only rows in the
-    /// order the walk found them. `results` is already in that shape, so a batch
-    /// merges its name rows into the leading block and appends its content rows.
+    /// `results` is strong name matches (best score first), then content-only
+    /// rows, then weak fuzzy name hits, each in walk order. A batch merges its
+    /// strong names into the first block, appends its content hits, then its
+    /// weak names.
     fn insert_rows(&mut self, fresh: Vec<Row>) {
-        let (mut names, contents): (Vec<Row>, Vec<Row>) = fresh.into_iter().partition(|row| row.name_match);
-        names.sort_by_key(|row| std::cmp::Reverse(row.score));
-        let old: Vec<Row> = self.results.drain(..self.name_count).collect();
-        let rest: Vec<Row> = std::mem::take(&mut self.results);
-        let mut left: VecDeque<Row> = old.into();
-        let mut right: VecDeque<Row> = names.into();
+        let (mut strong, rest): (Vec<Row>, Vec<Row>) = fresh.into_iter().partition(|row| row.strong_name);
+        let (content, weak): (Vec<Row>, Vec<Row>) = rest.into_iter().partition(|row| !row.name_match);
+        strong.sort_by_key(|row| std::cmp::Reverse(row.score));
+        if strong.is_empty() {
+            // Nothing moves in the name block: extend the content block, then the weak tail.
+            let content_added = !content.is_empty();
+            let at = self.name_count + self.content_count;
+            let added = content.len();
+            if content_added {
+                self.results.splice(at..at, content);
+                self.content_count += added;
+            }
+            let first = if content_added { at } else { self.results.len() };
+            self.results.extend(weak);
+            for (offset, row) in self.results[first..].iter().enumerate() {
+                self.by_path.insert(row.path.clone(), first + offset);
+            }
+            return;
+        }
+        let mut all = std::mem::take(&mut self.results);
+        let mut tail = all.split_off(self.name_count);
+        let old_weak = tail.split_off(self.content_count);
+        let old_content_end = all.len() + tail.len();
+        let old_total = old_content_end + old_weak.len();
+        let mut left: VecDeque<Row> = all.into_iter().collect();
+        let mut right: VecDeque<Row> = strong.into();
         let mut merged = Vec::with_capacity(left.len() + right.len());
+        let mut first_insert = None;
         loop {
             match (left.front(), right.front()) {
                 (Some(l), Some(r)) if l.score >= r.score => merged.push(left.pop_front().expect("left")),
-                (Some(_), Some(_)) => merged.push(right.pop_front().expect("right")),
+                (Some(_), Some(_)) => {
+                    if first_insert.is_none() {
+                        first_insert = Some(merged.len());
+                    }
+                    merged.push(right.pop_front().expect("right"));
+                }
                 (Some(_), None) => merged.push(left.pop_front().expect("left")),
-                (None, Some(_)) => merged.push(right.pop_front().expect("right")),
+                (None, Some(_)) => {
+                    if first_insert.is_none() {
+                        first_insert = Some(merged.len());
+                    }
+                    merged.push(right.pop_front().expect("right"));
+                }
                 (None, None) => break,
             }
         }
         self.name_count = merged.len();
-        self.results = merged.into_iter().chain(rest).chain(contents).collect();
-        self.by_path.clear();
-        for (index, row) in self.results.iter().enumerate() {
-            self.by_path.insert(row.path.clone(), index);
+        self.content_count = tail.len() + content.len();
+        let content_added = !content.is_empty();
+        self.results = merged.into_iter().chain(tail).chain(content).chain(old_weak).chain(weak).collect();
+        // Rows only move to the right, so re-index the moved suffix and index the appended rows.
+        let first = first_insert.unwrap_or(if content_added { old_content_end } else { old_total });
+        for (offset, row) in self.results[first..].iter().enumerate() {
+            self.by_path.insert(row.path.clone(), first + offset);
         }
     }
 
-    /// Keep the keyboard cursor on the same path after rows above it move, and
-    /// select the best first result once there is one.
+    /// Until the user picks a row, keep the best row selected as batches arrive.
+    /// After that, keep the keyboard cursor on the same path when rows above it move.
     fn follow_selection(&mut self) {
-        if self.selection.is_empty() {
+        if !self.user_moved {
             if let Some(first) = self.results.first() {
                 self.selection.select_only(first.path.clone());
-                self.cursor = 0;
+                if self.cursor != 0 {
+                    self.cursor = 0;
+                    self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                }
             }
             return;
         }
         if let Some(path) = self.selection.cursor().cloned()
             && let Some(&index) = self.by_path.get(&path)
+            && self.cursor != index
         {
             self.cursor = index;
+            self.scroll.scroll_to_item(index, ScrollStrategy::Nearest);
         }
     }
 
@@ -523,14 +576,12 @@ impl SearchView {
             }
             self.hit_count += 1;
             let row = Row::from_spotlight(hit, &query, &self.home);
+            self.by_path.insert(row.path.clone(), self.results.len());
             self.results.push(row);
             changed = true;
         }
-        self.by_path.clear();
-        for (index, row) in self.results.iter().enumerate() {
-            self.by_path.insert(row.path.clone(), index);
-        }
         self.name_count = self.results.len();
+        self.content_count = 0;
         let before = self.selection.cursor().cloned();
         self.follow_selection();
         if before != self.selection.cursor().cloned() {
@@ -595,8 +646,19 @@ impl SearchView {
             .and_then(|row| row.content.as_ref().map(|(line, text, _)| (*line, text.clone())))
     }
 
+    /// Hand the view one batch, as the walker would, for deterministic order tests.
+    #[cfg(test)]
+    pub fn add_test_hits(&mut self, hits: Vec<Hit>, cx: &mut Context<Self>) {
+        self.add_hits(hits, cx);
+    }
+
     pub fn is_searching(&self) -> bool {
         self.searching
+    }
+
+    /// Whether the field has a query; the bottom bar shows no count in idle.
+    pub fn has_query(&self, cx: &App) -> bool {
+        !self.query(cx).trim().is_empty()
     }
 
     /// How many results the list holds so far.
@@ -728,6 +790,7 @@ impl SearchView {
         let Some(row) = self.results.get(ix) else { return };
         self.selection.select_only(row.path.clone());
         self.cursor = ix;
+        self.user_moved = true;
         window.focus(&self.focus, cx);
         self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
         self.load_preview(cx);
@@ -737,6 +800,7 @@ impl SearchView {
     fn press(&mut self, ix: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         let Some(row) = self.results.get(ix) else { return };
+        self.user_moved = true;
         if event.modifiers.platform {
             self.selection.toggle(row.path.clone());
             if self.selection.cursor().is_none() {
@@ -762,6 +826,7 @@ impl SearchView {
         let at = |index: usize| paths[index].clone();
         self.selection.extend_to(target, position, at);
         self.cursor = target;
+        self.user_moved = true;
     }
 
     fn selected_paths(&self) -> Vec<PathBuf> {
@@ -893,6 +958,7 @@ impl SearchView {
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         let paths = self.results.iter().map(|row| row.path.clone());
         self.selection.select_all(paths);
+        self.user_moved = true;
         cx.notify();
     }
 
@@ -1153,7 +1219,7 @@ impl SearchView {
                 segment.hover(move |style| style.bg(hover)).active(move |style| style.bg(pressed))
             })
             .on_click(cx.listener(move |this, _, _, cx| this.set_scope(scope, cx)))
-            .child(label)
+            .child(div().max_w(px(160.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1182,7 +1248,7 @@ impl SearchView {
                 .id("search-skipped-link")
                 .debug_selector(|| "search-skipped-link".into())
                 .role(Role::Button)
-                .aria_label(format!("{skipped} folders skipped, show list"))
+                .aria_label(format!("{}, show list", skipped_text(skipped)))
                 .aria_expanded(self.show_skipped)
                 .flex_none()
                 .text_color(accent)
@@ -1192,7 +1258,7 @@ impl SearchView {
                     this.show_skipped = !this.show_skipped;
                     cx.notify();
                 }))
-                .child(format!("{skipped} folders skipped {chevron}"))
+                .child(format!("{} {chevron}", skipped_text(skipped)))
         });
         let hint = (self.scope != Scope::ThisMac && self.skip_label.is_some()).then(|| {
             let hint = if self.everything { "Skip folders again" } else { "Search everything" };
@@ -1237,7 +1303,15 @@ impl SearchView {
             .border_t_1()
             .border_color(color(theme.role("border")))
             .text_size(px(12.))
-            .child(div().flex_none().text_color(text_color).child(summary))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(text_color)
+                    .child(summary),
+            )
             .children(link.map(|link| {
                 div().flex().items_center().gap(px(10.)).child(div().text_color(subtle).child("·")).child(link)
             }))
@@ -1282,13 +1356,14 @@ impl SearchView {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let (fg, subtle) = (color(theme.role("fg")), color(theme.role("fg-subtle")));
-        let heading = if self.scope == Scope::ThisMac {
-            "Search names on this Mac".to_owned()
-        } else {
-            format!("Search names and contents in {}", self.scope_label())
+        let heading = match (self.scope, self.effective_match()) {
+            (Scope::ThisMac, _) => "Search names on this Mac".to_owned(),
+            (_, Match::All) => format!("Search names and contents in {}", self.scope_label()),
+            (_, Match::Names) => format!("Search names in {}", self.scope_label()),
+            (_, Match::Contents) => format!("Search contents in {}", self.scope_label()),
         };
-        let keycap = Keycap::for_action(&SearchEverything, KeyScope::Search, KeycapWeight::Key, cx)
-            .map(|keycap| keycap.into_any_element())
+        let keycap = Keycap::for_action(&SearchEverything, KeyScope::Search, KeycapWeight::Text, cx)
+            .map(|keycap| keycap.text_role("fg").into_any_element())
             .unwrap_or_else(|| div().text_color(fg).child("⇧⌘A").into_any_element());
         let spoken =
             keys::spoken_for(&SearchEverything, KeyScope::Search, cx).unwrap_or_else(|| "Shift Command A".to_owned());
@@ -1320,14 +1395,16 @@ impl SearchView {
                 "Search This Mac".to_owned(),
                 cx,
             ))
-            .child(self.render_example(
-                3,
-                keycap,
-                "also look inside node_modules, target, .git …",
-                ExampleAction::Everything,
-                format!("Search everything, {spoken}"),
-                cx,
-            ));
+            .when(self.skip_label.is_some(), |examples| {
+                examples.child(self.render_example(
+                    3,
+                    keycap,
+                    "also look inside node_modules, target, .git …",
+                    ExampleAction::Everything,
+                    format!("Search everything, {spoken}"),
+                    cx,
+                ))
+            });
         let close = keys::text(&CloseSearch, KeyScope::Search, cx).unwrap_or_else(|| "esc".into());
         let reveal = keys::text(&SearchReveal, KeyScope::SearchResults, cx).unwrap_or_else(|| "⌘R".into());
         let quick = keys::text(&QuickLook, KeyScope::SearchResults, cx).unwrap_or_else(|| "Space".into());
@@ -1377,10 +1454,9 @@ impl SearchView {
                     .aria_label(aria)
                     .min_w(px(150.))
                     .h(px(26.))
-                    .px_2()
+                    .px_3()
                     .flex()
                     .items_center()
-                    .justify_center()
                     .rounded(px(6.))
                     .border_1()
                     .border_color(raised)
@@ -1440,7 +1516,7 @@ impl SearchView {
                     div()
                         .id("search-empty-everything")
                         .role(Role::Button)
-                        .aria_label(format!("{skipped} folders were skipped. {hint}"))
+                        .aria_label(format!("{}. {hint}", skipped_was_text(skipped)))
                         .flex()
                         .items_center()
                         .gap_1()
@@ -1448,7 +1524,7 @@ impl SearchView {
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.search_everything(&SearchEverything, window, cx);
                         }))
-                        .child(format!("{skipped} folders were skipped. {hint}"))
+                        .child(format!("{}. {hint}", skipped_was_text(skipped)))
                         .children(Keycap::for_action(&SearchEverything, KeyScope::Search, KeycapWeight::Outline, cx)),
                 )
             })
@@ -1459,7 +1535,7 @@ impl SearchView {
         let theme = cx.global::<Ui>().theme.clone();
         let (error, muted) = (color(theme.role("error")), color(theme.role("fg-muted")));
         let message = self.error.as_deref().unwrap_or("Search failed");
-        let hint = message.starts_with("invalid pattern").then(|| {
+        let hint = message.starts_with("Invalid pattern").then(|| {
             div()
                 .text_size(px(13.))
                 .text_color(muted)
@@ -1500,7 +1576,7 @@ impl SearchView {
             .border_color(border)
             .child(div().flex_1().child("Name"))
             .child(div().w(px(180.)).flex_none().child("Folder"))
-            .child(div().w(px(100.)).flex_none().child("Modified"));
+            .child(div().w(px(110.)).flex_none().child("Modified"));
         div()
             .id("search-results-list")
             .flex_1()
@@ -1559,20 +1635,37 @@ impl SearchView {
                     .filter(|range| !range.is_empty())
                     .collect();
                 let name = highlight_text(truncated.text.clone(), &name_ranges, theme, on_selection);
-                let content = row.content.as_ref().map(|(line, text, ranges)| {
-                    let (text, ranges) = content_excerpt(text, ranges);
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_size(px(11.))
-                        .text_color(muted)
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(div().text_color(subtle).child(format!("{line}: ")))
-                        .child(highlight_text(text, &ranges, theme, on_selection))
-                });
+                // Name matches stay one line; the content line is for content-only hits.
+                let content =
+                    (!row.name_match).then_some(row.content_shown.as_ref()).flatten().map(|(line, text, ranges)| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(
+                                div()
+                                    .w(px(28.))
+                                    .flex_none()
+                                    .flex()
+                                    .justify_end()
+                                    .text_color(subtle)
+                                    .child(line.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(highlight_text(text.clone(), ranges, theme, on_selection)),
+                            )
+                    });
                 let entries: Arc<Vec<(PathBuf, bool)>> = if selected {
                     Arc::new(
                         self.results
@@ -1611,6 +1704,7 @@ impl SearchView {
                     .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                         if event.click_count() == 2 {
                             this.cursor = i;
+                            this.user_moved = true;
                             this.open_selected(cx);
                         }
                     }))
@@ -1692,16 +1786,38 @@ impl SearchView {
                     )
                     .child(
                         div()
-                            .w(px(100.))
+                            .w(px(110.))
                             .flex_none()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_size(px(12.))
                             .text_color(muted)
-                            .child(format_time(row.modified)),
+                            .child(format_time_short(row.modified)),
                     )
                     .into_any_element()
                     .into()
             })
             .collect()
+    }
+
+    /// A skipped folder as the list shows it: relative to the folder scope,
+    /// `~`-abbreviated for Home.
+    fn skipped_display(&self, path: &Path) -> String {
+        match self.scope {
+            Scope::Folder => path
+                .strip_prefix(&self.folder)
+                .ok()
+                .map(|relative| {
+                    if relative.as_os_str().is_empty() {
+                        ".".to_owned()
+                    } else {
+                        relative.to_string_lossy().into_owned()
+                    }
+                })
+                .unwrap_or_else(|| abbreviate_home(path, &self.home)),
+            Scope::Home | Scope::ThisMac => abbreviate_home(path, &self.home),
+        }
     }
 
     fn render_skipped(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -1711,16 +1827,17 @@ impl SearchView {
         let theme = cx.global::<Ui>().theme.clone();
         let muted = color(theme.role("fg-muted"));
         let rows = self.skipped.iter().enumerate().map(|(i, (path, rule))| {
+            let shown = self.skipped_display(path);
             div()
                 .id(("search-skipped-row", i))
                 .debug_selector(move || format!("search-skipped-row-{i}"))
                 .role(Role::ListItem)
-                .aria_label(format!("{}, {}", path.display(), rule))
+                .aria_label(format!("{shown}, {rule}"))
                 .px_3()
                 .py_1()
                 .flex()
                 .flex_col()
-                .child(div().text_size(px(12.)).child(path.display().to_string()))
+                .child(div().text_size(px(12.)).child(shown))
                 .child(div().text_size(px(11.)).text_color(muted).child(rule.clone()))
         });
         Some(
@@ -1803,7 +1920,7 @@ struct FooterState<'a> {
 
 fn footer_summary(state: FooterState<'_>) -> String {
     if let Some(error) = state.error {
-        return error.to_owned();
+        return error.lines().next().unwrap_or(error).to_owned();
     }
     if state.capped {
         return format!("First {MAX_RESULTS} files · refine the search");
@@ -1819,6 +1936,16 @@ fn footer_summary(state: FooterState<'_>) -> String {
     } else {
         format!("{prefix}{results}")
     }
+}
+
+/// "1 folder skipped" / "3 folders skipped", for the footer link and its aria label.
+pub fn skipped_text(n: usize) -> String {
+    if n == 1 { "1 folder skipped".to_owned() } else { format!("{n} folders skipped") }
+}
+
+/// The same wording as a sentence: "1 folder was skipped" / "3 folders were skipped".
+pub fn skipped_was_text(n: usize) -> String {
+    if n == 1 { "1 folder was skipped".to_owned() } else { format!("{n} folders were skipped") }
 }
 
 /// "Skip dev folders" for the enabled sets, or None when none is enabled.
@@ -1845,18 +1972,30 @@ impl Row {
         label
     }
 
-    fn from_hit(hit: Hit, home: &Path, folder_root: Option<&Path>) -> Row {
+    fn from_hit(hit: Hit, home: &Path, folder_root: Option<&Path>, query: &str) -> Row {
         let (content, name_match, name_ranges) = match hit.kind {
             HitKind::Content { line, text, ranges } => (Some((line, text, ranges)), false, Vec::new()),
             HitKind::Name { ranges } => (None, true, ranges),
         };
-        Self::new(hit.path, hit.is_dir, hit.modified, hit.score, name_match, name_ranges, content, home, folder_root)
+        let strong_name = name_match && is_strong_name(&hit.path, &name_ranges, query);
+        Self::new(
+            hit.path,
+            hit.is_dir,
+            hit.modified,
+            hit.score,
+            name_match,
+            strong_name,
+            name_ranges,
+            content,
+            home,
+            folder_root,
+        )
     }
 
     fn from_spotlight(hit: crow_macos::SpotlightHit, query: &str, home: &Path) -> Row {
         let name = hit.path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
         let ranges = ascii_match_ranges(&name, query);
-        Self::new(hit.path, hit.is_dir, hit.modified, 0, true, ranges, None, home, None)
+        Self::new(hit.path, hit.is_dir, hit.modified, 0, true, true, ranges, None, home, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1866,6 +2005,7 @@ impl Row {
         modified: Option<SystemTime>,
         score: u32,
         name_match: bool,
+        strong_name: bool,
         name_ranges: Vec<Range<usize>>,
         content: Option<(u64, String, Vec<Range<usize>>)>,
         home: &Path,
@@ -1879,8 +2019,47 @@ impl Row {
         };
         let ext = Path::new(&name).extension().and_then(|ext| ext.to_str()).unwrap_or("");
         let is_package = is_dir && matches!(ext, "app" | "bundle" | "framework" | "photoslibrary");
-        Row { path, name, folder, is_dir, is_package, modified, score, name_match, name_ranges, content }
+        let mut row = Row {
+            path,
+            name,
+            folder,
+            is_dir,
+            is_package,
+            modified,
+            score,
+            name_match,
+            strong_name,
+            name_ranges,
+            content: None,
+            content_shown: None,
+        };
+        if let Some(content) = content {
+            row.set_content(content);
+        }
+        row
     }
+
+    fn set_content(&mut self, (line, text, ranges): (u64, String, Vec<Range<usize>>)) {
+        let (shown, shown_ranges) = content_excerpt(&text, &ranges);
+        self.content = Some((line, text, ranges));
+        self.content_shown = Some((line, shown, shown_ranges));
+    }
+}
+
+/// Whether a name hit matched the query contiguously, so it ranks above
+/// content hits; scattered fuzzy name hits do not. nucleo's own ranges decide
+/// (one merged range), so accent folding and NFD names count like the matcher
+/// does; a plain case-insensitive substring also counts.
+fn is_strong_name(path: &Path, ranges: &[Range<usize>], query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return false;
+    }
+    if ranges.len() == 1 {
+        return true;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else { return false };
+    name.to_lowercase().contains(&query.to_lowercase())
 }
 
 /// Every ASCII-case-insensitive occurrence of `query` in `name`, for Spotlight
@@ -1896,7 +2075,15 @@ fn ascii_match_ranges(name: &str, query: &str) -> Vec<Range<usize>> {
 
 /// A long matching line starts near its first match, with a leading ellipsis.
 fn content_excerpt(text: &str, ranges: &[Range<usize>]) -> (String, Vec<Range<usize>>) {
-    let text = text.replace('\t', " ");
+    // Drop the line's indent so the text starts right after the line number.
+    let indent = text.len() - text.trim_start().len();
+    let text = text[indent..].replace('\t', " ");
+    let ranges: Vec<Range<usize>> = ranges
+        .iter()
+        .map(|range| range.start.saturating_sub(indent)..range.end.saturating_sub(indent))
+        .filter(|range| !range.is_empty())
+        .collect();
+    let ranges = ranges.as_slice();
     let first = ranges.first().map_or(0, |range| range.start);
     if first <= 60 {
         return (text, ranges.to_vec());
@@ -1971,7 +2158,18 @@ mod tests {
         assert_eq!(footer_summary(state(false, 2, 1, false, None)), "2 results in 1 file");
         assert_eq!(footer_summary(state(false, 0, 0, false, None)), "No results");
         assert_eq!(footer_summary(state(false, 20_000, 10, true, None)), "First 20000 files · refine the search");
-        assert_eq!(footer_summary(state(false, 0, 0, false, Some("invalid pattern"))), "invalid pattern");
+        assert_eq!(
+            footer_summary(state(false, 0, 0, false, Some("Invalid pattern: unclosed group"))),
+            "Invalid pattern: unclosed group"
+        );
+    }
+
+    #[test]
+    fn skipped_text_is_singular_for_one() {
+        assert_eq!(skipped_text(1), "1 folder skipped");
+        assert_eq!(skipped_text(3), "3 folders skipped");
+        assert_eq!(skipped_was_text(1), "1 folder was skipped");
+        assert_eq!(skipped_was_text(3), "3 folders were skipped");
     }
 
     #[test]
@@ -1986,6 +2184,23 @@ mod tests {
             set.enabled = Some(false);
         }
         assert_eq!(skip_label(&exclude), None);
+    }
+
+    #[test]
+    fn contiguous_name_matches_are_strong() {
+        // The ranges the engine would report for this name and query.
+        fn strong(name: &str, query: &str) -> bool {
+            let ranges =
+                crow_search::FuzzyMatcher::new(query).indices(name).map(|(_, ranges)| ranges).unwrap_or_default();
+            is_strong_name(&Path::new("/a").join(name), &ranges, query)
+        }
+        assert!(strong("configuration.md", "config"));
+        assert!(strong("Config.toml", "CONFIG"));
+        assert!(!strong("gpui-stop-synthetic-drag-on-file-drag.patch", "config"));
+        assert!(!is_strong_name(Path::new("/a/config.toml"), &std::iter::once(0..6).collect::<Vec<_>>(), "  "));
+        // Accent folding and decomposed names, as nucleo matches them.
+        assert!(strong("R\u{e9}sum\u{e9}.pdf", "resume"));
+        assert!(strong("Re\u{301}sume\u{301}.pdf", "resume"));
     }
 
     #[test]
@@ -2009,6 +2224,11 @@ mod tests {
         assert_eq!(text, "needle in beta");
         let expected: Vec<Range<usize>> = std::iter::once(0..6).collect();
         assert_eq!(ranges, expected);
+        // The indent goes; the ranges follow the text.
+        let hit: Vec<Range<usize>> = std::iter::once(9..15).collect();
+        let (text, ranges) = content_excerpt("    \t    needle()", &hit);
+        assert_eq!(text, "needle()");
+        assert_eq!(&text[ranges[0].clone()], "needle");
     }
 
     #[test]

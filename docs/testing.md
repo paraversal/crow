@@ -15,8 +15,9 @@ selection, type-to-select, sorting, Go to Folder, the column view's focus rules,
 drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent),
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
 (preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette, the search panel (scope bar and switch,
-footer counts and skipped list, idle examples, name-before-contents order and highlights, preview in
-list and column view at the hit line, match cycling), the top band
+footer counts and skipped list, idle examples, best-row selection while results stream and the user's
+row after they move, contiguous name hits before content and weak fuzzy names after, one-line regex
+errors, singular skipped wording, preview in list and column view at the hit line, match cycling), the top band
 (search field click, Cmd-F refocus and select-all, Done/Esc, Go to, All/Names/Contents, switching
 tabs closing search, the Tab cycle while searching, focus never left on an element that is gone), the bottom bar
 (hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
@@ -110,12 +111,12 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Filter to search | Filter a column, then press Cmd-F (or click the footer): search opens with the same text in that folder, and Esc returns to the unfiltered column. Filter something with no matches: "Nothing in … matches", the button opens search, and the hidden-files note shows when hidden files are off. |
 | Filter look | In a light and a dark theme, accent text on the selected row is readable; in the Vim layer, letters typed in the field stay there. VoiceOver reads "Filter <folder>", the count, and the no-match line. |
 | Command palette | Cmd-K: type a recent folder and Return; try Cmd-Return for a new tab and `>` for commands; Vim j/k moves the cursor. |
-| Search | Cmd-F, search a word in file names and in contents: name matches come first and their letters are highlighted; content hits show the line number and the line under the name; switch <folder> / Home / This Mac; Return, Cmd-R, Space, drag-out, Cmd-C and Cmd-Delete act on results. The right pane previews the selected result in list and column view, at the hit line. |
+| Search | Cmd-F, search a word in file names and in contents: while results stream the top row stays selected and previewed; contiguous name matches come first with their letters highlighted, scattered fuzzy name hits follow the content rows; a name match is one line, a content-only hit shows its line number and line under the name; the Modified column stays on one line ("Today 14:32", "Yesterday", "4. Nov"). Switch <folder> / Home / This Mac; Return, Cmd-R, Space, drag-out, Cmd-C and Cmd-Delete act on results. The right pane previews the selected result in list and column view, at the hit line. |
 | Search scope bar | One bar: "Search", the scope segments, and "Skip dev folders" on the right; click the switch and press Cmd-Shift-A: both flip it and the results change. Enable `media` in `exclude.toml`: the label becomes "Skip dev and media folders" without reopening. |
-| Skipped folders | Search a folder with `node_modules`: the footer says "k folders skipped ›"; click it and check each folder is listed with the rule that skipped it, above the footer. Esc closes the list first, then search. Search everything includes them and the link goes away. |
+| Skipped folders | Search a folder with `node_modules`: the footer says "1 folder skipped ›" (or "k folders skipped ›"); click it and check each folder is listed relative to the searched folder, with the rule that skipped it, above the footer. Esc closes the list first, then search. Search everything includes them and the link goes away. |
 | Spotlight | Search This Mac for a name outside the home folder: results stream in, the switch is replaced by "Spotlight: indexed volumes only". |
-| Search idle | Cmd-F with nothing typed: heading and four examples; each example fills the field, switches to This Mac, or flips the switch. The key line follows `keymap = "vim"`. |
-| Search errors | Type `/(/`: the footer shows the invalid pattern error in red; no rows, and the body suggests removing the slashes. |
+| Search idle | Cmd-F with nothing typed: the heading follows All / Names / Contents and the four left-aligned examples fill the field, switch to This Mac, or flip the switch; the fourth is plain key text and disappears when no `exclude.toml` set is enabled. The key line follows `keymap = "vim"`. |
+| Search errors | Type `/(/`: one red footer line, "Invalid pattern: unclosed group"; no rows, and the body shows "Can't search: Invalid pattern: unclosed group" and suggests removing the slashes. |
 | Search themes | FireBox and a light scheme: switch knob, selected segment and match highlights on the selected row stay readable; VoiceOver reads the switch as on/off and the footer once per finished search. |
 | VoiceOver | Cmd-F5, move through the list: each row reads name, details and "n of N". |
 | Privacy prompts | Open Desktop, Documents, Downloads: the prompt names Crow. |

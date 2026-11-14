@@ -732,7 +732,7 @@ impl CrowWindow {
         let sidebar_focused = focus == BarFocus::Sidebar;
         let count = if let Some(search) = &self.search {
             let search = search.read(cx);
-            search_count(search.result_count(), search.selected_count(), search.is_searching())
+            search_count(search.result_count(), search.selected_count(), search.is_searching(), !search.has_query(cx))
         } else if sidebar_focused {
             self.sidebar
                 .read(cx)
@@ -2247,9 +2247,15 @@ mod tests {
 
     use gpui::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle};
 
+    use crow_search::{Hit, HitKind};
+
     use crate::actions::StartFilter;
 
     use super::*;
+
+    fn test_ranges(start: usize, end: usize) -> Vec<std::ops::Range<usize>> {
+        std::iter::once(start..end).collect()
+    }
 
     /// `root/{alpha/inner/, beta/, notes.txt}`, canonicalized (macOS temp dirs sit behind /private).
     fn fixture(name: &str) -> PathBuf {
@@ -3427,6 +3433,119 @@ mod tests {
     }
 
     #[gpui::test]
+    fn search_selects_the_best_first_row_until_the_user_moves(cx: &mut TestAppContext) {
+        let root = fixture("search-selection");
+        // Name hits live outside the walked root, so the real "qqzz" search finds nothing.
+        let outside = root.parent().expect("temp parent").join(format!("crow-qqzz-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).expect("create fixture");
+        let name_path = outside.join("qqzz-zebra.txt");
+        std::fs::write(&name_path, "nothing\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        cx.simulate_input("qqzz");
+        wait_for_search(&view, &mut cx);
+        let hit =
+            |path: PathBuf, kind: HitKind, score| Hit { path, is_dir: false, score, kind, modified: None, size: 0 };
+
+        // The walker found a content hit first; the name hit arrives in a later batch.
+        let content = hit(
+            root.join("notes.txt"),
+            HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: test_ranges(0, 4) },
+            0,
+        );
+        search.update(&mut cx, |search, cx| search.add_test_hits(vec![content], cx));
+        assert_eq!(
+            search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path),
+            Some(root.join("notes.txt"))
+        );
+
+        let name = hit(name_path.clone(), HitKind::Name { ranges: test_ranges(0, 4) }, 100);
+        search.update(&mut cx, |search, cx| search.add_test_hits(vec![name], cx));
+        wait_for_preview(&view, &mut cx, &name_path);
+        assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 0);
+        assert_eq!(search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path), Some(name_path));
+    }
+
+    #[gpui::test]
+    fn search_keeps_the_users_row_when_better_rows_arrive(cx: &mut TestAppContext) {
+        let root = fixture("search-selection-moved");
+        let outside = root.parent().expect("temp parent").join(format!("crow-qqzz-moved-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).expect("create fixture");
+        let first_path = outside.join("qqzz-zebra.txt");
+        let better_path = outside.join("qqzz-better.txt");
+        std::fs::write(&first_path, "nothing\n").expect("create fixture");
+        std::fs::write(&better_path, "nothing\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        cx.simulate_input("qqzz");
+        wait_for_search(&view, &mut cx);
+        let hit =
+            |path: PathBuf, kind: HitKind, score| Hit { path, is_dir: false, score, kind, modified: None, size: 0 };
+        let first = hit(first_path, HitKind::Name { ranges: test_ranges(0, 4) }, 100);
+        let content = hit(
+            root.join("notes.txt"),
+            HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: test_ranges(0, 4) },
+            0,
+        );
+        search.update(&mut cx, |search, cx| search.add_test_hits(vec![content, first], cx));
+        settle(&view, &mut cx);
+
+        cx.simulate_keystrokes("tab");
+        cx.simulate_keystrokes("down");
+        assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 1);
+        assert_eq!(
+            search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path),
+            Some(root.join("notes.txt"))
+        );
+
+        let better = hit(better_path, HitKind::Name { ranges: test_ranges(0, 4) }, 200);
+        search.update(&mut cx, |search, cx| search.add_test_hits(vec![better], cx));
+        assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 2, "the user's row moved down");
+        assert_eq!(
+            search.read_with(&cx, |search, _| search.selected_entry()).map(|(path, _)| path),
+            Some(root.join("notes.txt"))
+        );
+    }
+
+    #[gpui::test]
+    fn search_contiguous_name_hits_come_before_contents_and_weak_names(cx: &mut TestAppContext) {
+        let root = fixture("search-weak-names");
+        let outside = root.parent().expect("temp parent").join(format!("crow-qqzz-order-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        cx.simulate_input("qqzz");
+        wait_for_search(&view, &mut cx);
+        let strong = outside.join("qqzz-zebra.txt");
+        let weak = outside.join("q-a-q-b-z-c-z.txt");
+        let content = root.join("notes.txt");
+        let hit =
+            |path: PathBuf, kind: HitKind, score| Hit { path, is_dir: false, score, kind, modified: None, size: 0 };
+        search.update(&mut cx, |search, cx| {
+            search.add_test_hits(
+                vec![
+                    hit(
+                        content.clone(),
+                        HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: test_ranges(0, 4) },
+                        0,
+                    ),
+                    hit(weak.clone(), HitKind::Name { ranges: vec![0..1, 2..3, 4..6, 7..8] }, 80),
+                    hit(strong.clone(), HitKind::Name { ranges: test_ranges(0, 4) }, 100),
+                ],
+                cx,
+            );
+        });
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert_eq!(paths, [strong, content, weak]);
+    }
+
+    #[gpui::test]
     fn search_footer_counts_hits_and_files(cx: &mut TestAppContext) {
         let root = fixture("search-footer");
         std::fs::write(root.join("a.txt"), "needle\nx\nneedle\nneedle\n").expect("create fixture");
@@ -3484,10 +3603,11 @@ mod tests {
         wait_for_search(&view, &mut cx);
         let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
         let error = search.read_with(&cx, |search, _| search.error_text()).expect("an error");
-        assert!(error.starts_with("invalid pattern"), "{error}");
+        assert_eq!(error, "Invalid pattern: unclosed group");
+        assert!(!error.contains('\n'), "{error}");
         assert!(search.read_with(&cx, |search, _| search.result_paths().is_empty()));
         let footer = search.read_with(&cx, |search, _| search.footer_summary_text());
-        assert!(footer.starts_with("invalid pattern"), "{footer}");
+        assert_eq!(footer, "Invalid pattern: unclosed group");
     }
 
     #[gpui::test]
