@@ -40,7 +40,24 @@ use std::collections::HashMap;
 
 /// Open a window on `dir`. New windows share one size from settings and step
 /// 24 pt down and right from the previous one, so they never land at random sizes.
-pub fn open(dir: PathBuf, bench: bool, bench_filter: Option<String>, cx: &mut App) {
+/// The folder Crow was started on. With no window open, the Dock icon and a ⌘Q that
+/// has to ask about a running operation open a window here.
+pub struct LaunchFolder(pub PathBuf);
+
+impl gpui::Global for LaunchFolder {}
+
+pub fn launch_folder(cx: &App) -> PathBuf {
+    cx.try_global::<LaunchFolder>()
+        .map(|folder| folder.0.clone())
+        .unwrap_or_else(|| std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from))
+}
+
+pub fn open(
+    dir: PathBuf,
+    bench: bool,
+    bench_filter: Option<String>,
+    cx: &mut App,
+) -> Option<gpui::WindowHandle<CrowWindow>> {
     let defaults = cx.global::<Ui>().settings.window.clone();
     let step = px(24.0 * cx.windows().len() as f32);
     let mut bounds = Bounds::centered(None, size(px(defaults.width as f32), px(defaults.height as f32)), cx);
@@ -56,11 +73,9 @@ pub fn open(dir: PathBuf, bench: bool, bench_filter: Option<String>, cx: &mut Ap
         window_min_size: Some(size(px(640.), px(400.))),
         ..Default::default()
     };
-    if let Err(e) =
-        cx.open_window(options, |window, cx| cx.new(|cx| CrowWindow::new(dir, bench, bench_filter, window, cx)))
-    {
-        tracing::error!("open window: {e}");
-    }
+    cx.open_window(options, |window, cx| cx.new(|cx| CrowWindow::new(dir, bench, bench_filter, window, cx)))
+        .inspect_err(|e| tracing::error!("open window: {e}"))
+        .ok()
 }
 
 /// What `CrowWindow::open_search` starts from. U3 reuses it with a query.
@@ -1011,7 +1026,7 @@ impl Sheet {
 }
 
 /// Quit, unless an operation is running: then the active Crow window asks first.
-/// With no window there is nobody to ask, so cancel cleanly and quit when idle.
+/// With no window open, one opens at the launch folder to ask.
 pub fn quit(cx: &mut App) {
     if cx.global::<Operations>().running.is_none() {
         cx.quit();
@@ -1028,7 +1043,14 @@ pub fn quit(cx: &mut App) {
                 cx.quit();
             }
         }),
-        None => stop_then_quit(cx),
+        None => match open(launch_folder(cx), false, None, cx) {
+            Some(handle) => cx.defer(move |cx| {
+                if handle.update(cx, |this, window, cx| this.ask_to_stop(window, cx)).is_err() {
+                    stop_then_quit(cx);
+                }
+            }),
+            None => stop_then_quit(cx),
+        },
     }
 }
 
@@ -6641,9 +6663,10 @@ mod tests {
     }
 
     #[gpui::test]
-    fn quitting_with_no_window_cancels_the_operation_first(app: &mut TestAppContext) {
+    fn quitting_with_no_window_opens_one_and_asks(app: &mut TestAppContext) {
         let root = fixture("quit-resident");
         let (_view, mut cx) = open(app, &root);
+        app.update(|cx| cx.set_global(LaunchFolder(root.clone())));
         let cancel = inject_running(&mut cx);
 
         cx.simulate_keystrokes("cmd-w");
@@ -6651,10 +6674,16 @@ mod tests {
         assert_eq!(app.update(|cx| cx.windows().len()), 0);
 
         app.update(quit);
-        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed), "quit cancels the operation");
-        app.update(|cx| cx.global_mut::<Operations>().running = None);
-        app.executor().advance_clock(std::time::Duration::from_millis(100));
         app.run_until_parked();
+        let handle = app
+            .update(|cx| cx.windows().first().and_then(|w| w.downcast::<CrowWindow>()))
+            .expect("⌘Q opened a window to ask in");
+        let asking = handle
+            .update(app, |this, _, _| matches!(this.sheet, Some(Sheet::StopOperation { .. })))
+            .expect("window alive");
+        assert!(asking, "the Stop and Quit sheet is up");
+        assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "nothing is cancelled before the answer");
+        app.update(|cx| cx.global_mut::<Operations>().running = None);
     }
 
     #[gpui::test]

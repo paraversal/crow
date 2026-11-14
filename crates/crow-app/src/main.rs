@@ -189,12 +189,11 @@ fn main() -> ExitCode {
         }
     };
 
-    let reopen = start.clone();
     let app = gpui_platform::application().with_assets(icons::Assets);
     // Crow stays resident with no windows, like Finder: the Dock icon reopens it.
     app.on_reopen(move |cx| {
         if cx.windows().is_empty() {
-            window::open(reopen.clone(), false, None, cx);
+            window::open(window::launch_folder(cx), false, None, cx);
         } else {
             let front =
                 cx.window_stack().and_then(|stack| stack.first().copied()).or_else(|| cx.windows().first().copied());
@@ -205,6 +204,7 @@ fn main() -> ExitCode {
     });
     app.run(move |cx: &mut App| {
         ui::init(cx);
+        cx.set_global(window::LaunchFolder(start.clone()));
         extensions::init(cx);
         operations::init(cx, std::sync::Arc::new(crow_macos::SystemTrash));
         cx.bind_keys(actions::finder_keymap());
