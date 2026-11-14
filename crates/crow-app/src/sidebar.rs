@@ -1046,6 +1046,7 @@ impl Render for Sidebar {
             .on_action(cx.listener(Self::previous_group))
             .on_action(cx.listener(Self::next_group))
             .on_action(cx.listener(Self::eject_cursor))
+            .debug_selector(|| "sidebar".into())
             .w(px(210.))
             .flex_none()
             .h_full()

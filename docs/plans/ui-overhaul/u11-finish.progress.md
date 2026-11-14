@@ -1,39 +1,45 @@
 # u11-finish progress
-Branch: `ui-u11-finish` · PR: none (do not merge; user said "DONT merge back to main") · Last updated: 2026-11-14 · State: in progress
+Branch: `ui-u11-finish` · PR: none (do not merge; user: "DONT merge back to main") · Last updated: 2026-11-14 · State: in progress
 
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| I1 Start: baseline, inherited list, bench on `main` | done (this commit) | U1–U10 merged; inherited table below; current-state facts re-read; 6 bench lines below. |
-| I2 Reproducible window screenshots | blocked (Q1) | Needs `scripts/shot.sh` + `scripts/window-id.swift`; also needs Screen Recording permission. |
-| I3 Findings checklist | todo | 12 rows; walk in the bundle. |
-| I4 Visual drift sweep | todo | Needs I2 shots; constants + 3 tests. |
-| I5 Preview fills the rest (only if Q2 = build) | blocked (Q2) | |
-| I6 Accessibility sweep | todo | Q7 mechanism already shipped (Status labels); extend to counts. |
-| I7 Docs pass | todo | README status line blocked on Q11. |
+| I1 Start: baseline, inherited list, bench on `main` | done (23ab6e6) | U1–U10 merged; inherited table; measures re-read; 6 bench lines. |
+| I2 Reproducible window screenshots | done | `scripts/shot.sh` + `scripts/window-id.swift`; 18 shots in `target/shots/` from a neutral tree; byte-identical repeat runs; commands below. |
+| I3 Findings checklist | done | Table below: every row ok, fixed, or test-covered. |
+| I4 Visual drift sweep | done | `BAND_HEIGHT`, `field_ring` (2 px, both fields); contrast audit below; 3 tests. |
+| I5 Preview fills the rest + folder summary (Q2) | done | `flex_1` + `min_w(300)`; folder summary with the child column's count; 2 tests. |
+| I6 Accessibility sweep | done (hand check open) | `debug_a11y_tree_json` is None in tests (verified with a spike, reverted) → hand sweep is the fallback; filter count throttled to one announcement per burst; 2 tests. |
+| I7 Docs pass | todo | README/testing.md; Q11 wording accepted. |
 | I8 Bench vs `main` | todo | Procedure proven in I1. |
-| I9 Follow-ups recorded | todo | Q10 for the index note. |
-| I10 PR | todo | Q8 for screenshots; the critic opens the PR per the skill. |
+| I9 Follow-ups recorded | todo | Q10 accepted (index note). |
+| I10 PR | todo | Q8: commit shots as `img/built-*.png`; critic opens the PR. |
 
 ## Questions
-- Q1 (asked 2026-11-14): may I add `scripts/shot.sh` and `scripts/window-id.swift`? Recommended yes. → pending
-- Q2 (asked 2026-11-14): finding 6 (dead quarter) — build in U11 (I5) or defer? Recommended build. → pending
-- Q3 (asked 2026-11-14): board-only details (line icons per favorite, clock icons, syntax-coloured preview, 196 px columns, darker focused-column tint) — build or defer? Recommended defer. → pending
-- Q5 (asked 2026-11-14): unify text-field focus rings (filter 1 px vs search 2 px)? Recommended one `field_ring` 2 px. → pending
-- Q8 (asked 2026-11-14): commit screenshots as `docs/plans/ui-overhaul/img/built-*.png` or keep them out? Recommended commit. → pending
-- Q9 (asked 2026-11-14): bench baseline `main` only or also M6? Recommended both (already measured both in I1). → pending
-- Q10 (asked 2026-11-14): add a "Later" list to `docs/plans/ui-overhaul/README.md`? Recommended yes. → pending
-- Q11 (asked 2026-11-14): README status line wording. Recommended "Status: Phase 1 (the "daily driver" MVP): M6 and the UI overhaul are done; next is M7 (hardening)." → pending
-
-Settled without asking (plan or code decides):
-- Q4 copy conflicts: the plan wins (index ground rule). Bottom bar "clear / search deeper" (U5), palette menu column shows U2's menu names.
-- Q6 chord order: macOS order (⌃⌥⇧⌘). Already what U1's `keys::caps` prints; U5 recorded `⌥⌘↑↓` as the live formatter's output. Nothing to change.
-- Q7 VoiceOver announcements: U5/U6/U9 shipped the `Status`-role label mechanism (U5 R5, U6 footer status, U9 tip `Role::Status`). U11 extends it to the filter and search counts; no GPUI patch, no `crow-macos` notification unless the hand check fails.
+All asked 2026-11-14 in one batch; every recommended answer accepted.
+- Q1 → yes, add `scripts/shot.sh` and `scripts/window-id.swift`.
+- Q2 → build finding 6 in U11 (I5).
+- Q3 → defer the board-only details.
+- Q5 → one `field_ring` (2 px) for both text fields.
+- Q8 → commit the shots under `docs/plans/ui-overhaul/img/built-*.png`.
+- Q9 → bench against both `main` and M6.
+- Q10 → add a "Later" list to the overhaul index.
+- Q11 → the recommended README status line.
+Settled by plan/code, not asked: Q4 (plan wins on copy conflicts), Q6 (macOS chord order, already U1/U5), Q7 (Status-label mechanism shipped by U5/U6/U9).
 
 ## Decisions
-- Branch `ui-u11-finish` from `main` at `def19f0` (U10 merged). No merge to `main`, no push: the execute-plan skill says the critic opens the PR; the user repeated "DONT merge back to main" (2026-11-14).
-- M6 bench worktree uses the current `vendor/` through a symlink (same pinned GPUI rev; the only patch added since M6 is `gpui-enter-menu-equivalent.patch`, which touches menu key equivalents, not row rendering). Recorded so the numbers are not overclaimed.
-- Bench config for every run: `/tmp/u11-bench/config/settings.toml` (`theme = "firebox"`, `hints = "always"`, `[window] width = 1280 height = 800`), `views.toml` `[defaults] view = "list"`, fresh `CROW_STATE_DIR=/tmp/u11-bench/state`.
+- Branch `ui-u11-finish` from `main` @ `def19f0`. No push, no merge; the critic opens the PR (execute-plan skill).
+- M6 bench worktree uses the current `vendor/` via a symlink (same pinned GPUI rev; only `gpui-enter-menu-equivalent.patch` postdates M6 and it touches menus, not rows).
+- Bench config: `/tmp/u11-bench/config` (`theme = "firebox"`, `hints = "always"`, `[window] 1280×800`), `views.toml` list view, fresh `CROW_STATE_DIR`.
+- **shot.sh isolation**: `PATH=/usr/bin:/bin` is not enough — `recent.rs:zoxide_candidates` also probes `/opt/homebrew/bin`, so a failing `zoxide` stub goes first on `PATH`. Verified: Recent is empty in the shots.
+- **Neutral shot tree**: shots come from a copy at `/Users/Shared/crow-boards/file-crow` (`CROW_SHOT_ROOT`), so committed images carry no `/Users/<name>` path (5818fb3 dropped the username from the repo). Paths are canonicalized (`pwd -P`) so a favorite and the current folder don't look like twins.
+- `shot.sh` takes an optional 5th argument: `|`-separated `text:`, `cmd:`, `cmdshift:`, `key:`, `wait:` steps, so every state is reproducible from the command line (Accessibility permission). Without it, the script waits for Return.
+- Search shots run in `crates/`, not the repo root: the root search pulls in gitignored `ignore/` (local openwiki) and `vendor/`, which must not reach committed images. `search-idle` stays at the root (no results).
+- The `tip` shot uses the two-zero-match-filter trigger (keyboard) instead of scrolling a 200+ folder; same card, and the plan's scroll trigger needs pointer events.
+- Q5: filter field goes from `border_1` to `border_2` with `style::field_ring`; search uses the same helper. `cursor_ring` stays 1.5 px for rows.
+- `BAND_HEIGHT = 52` in `style.rs`, used by the band, the sheet's top offset, the activity list and `PALETTE_TOP`.
+- I6: `debug_a11y_tree_json()` returns `None` in the test platform (spike printed `A11Y none`, reverted), so the a11y sweep is by hand. The filter count's aria label is throttled 300 ms past the last keystroke (visible count stays live); the search footer already announces once when it settles ("Searching" → summary).
+- I5: the preview column is `flex_1().min_w(PREVIEW_COLUMN_WIDTH)`; a folder cursor shows `preview::folder_summary` with the child column's count (no I/O) and aria "name, Folder, n items".
 
 ## Merged plans (I1)
 | Plan | PR | Merge commit |
@@ -46,7 +52,7 @@ Settled without asking (plan or code decides):
 | U6 search panel | #14 | `50a4d17` |
 | U6 fix | #15 | `0b4fdaa` |
 | U7 palette | #16 | `a3a8e96` |
-| U7 fix | #18 | `32c1a81` (list spacing) / `a3da329` (U7 fix) |
+| U7 fix | #18 | `a3da329` |
 | U8 sidebar | #20 | `ac510b3` |
 | U9 tips | #21 | `0718a7c` |
 | U10 motion and sound | #22 | `def19f0` |
@@ -55,7 +61,7 @@ Settled without asking (plan or code decides):
 | From | Item | State |
 | --- | --- | --- |
 | U1 | Light-theme scrim pair; tooltips for every Target element; Vim palette keys in the bundle; `cursor_ring` crispness | hand check |
-| U2 | Settings… and Hide Others/Show All not exercised; Undo in text fields; menu checks were run via System Events | hand check |
+| U2 | Settings… and Hide Others/Show All; Undo in text fields; menu checks were run via System Events | hand check |
 | U3 | Tooltip hover pass; Names-mode speed on a big tree; VoiceOver band | hand check |
 | U4 | Filter no-match state in a light theme; VoiceOver filter; IME in text fields | hand check |
 | U5 | Whole bottom-bar hand list (hints, progress, error, counts, narrow, VoiceOver) | hand check |
@@ -75,15 +81,13 @@ Settled without asking (plan or code decides):
 | U10 | Sidebar current-folder fill does not glide | deferred (user) |
 | U10 | Bench inconclusive on a 30 Hz display | superseded by U11 I1/I8 |
 
-## Current state (re-read on `main` @ `def19f0`, replacing the plan's facts)
-- Window: `window.rs:32-50` `open()`, default 1200×760 (`settings.rs` `[window]`), min 640×400, traffic lights (14,19), band left edge 86 px.
-- `CrowWindow::render` `window.rs:2938`: band, optional tab bar (>1 tab), `sidebar | center | preview`, bottom bar, tip, then sheet/activity/why/picker/palette. Search replaces the center; the list preview is separate.
-- Measures as merged: band 52 px (`window.rs:680`), nav buttons 28×28 (`:521`), view switch 32×26 (`view_button`), Go to 30 px (`:608`), band search button 240×30 radius 8 (`:641`), active search field 32 px + `border_2` (`search.rs:1042-1056`); sidebar 210 px (`sidebar.rs:1049`); bottom bar 30 px (`bottom_bar.rs:33`); rows 24 px (`pane.rs:54`), search rows 40 px (`search.rs:42`); columns 220–360 (`pane.rs:72-73`), preview column 300 (`pane.rs:74`); filter field 28 px radius 6 `border_1` (`pane/pane_filter.rs:52,60`), filter footer 26 px (`:122`); scope bar 38 px (`search.rs:1173`); palette top 52, width 620, input 50, folder row 44, command row 40, header 34, footer 34 (`window.rs:166-178`).
-- Tints: `style.rs:31-61` `scrim`, `active_selection` (accent 0x55), `inactive_selection`/`current_location` (`selection`), `error_soft`, `drop_target`; `cursor_ring` is an inset 1.5 px shadow (`style.rs:91`).
-- Menus: `menus.rs:42` `app_menus`, `:85` `init`; commands in `palette.rs` `COMMANDS` in menu-bar order.
-- Keymaps: `actions.rs:113+` (Finder), Vim layer adds on top; `keys::caps` prints macOS order.
-- Status: `bottom_bar.rs` slots (path · transient · counts), `Role::Status` for progress/messages/errors, `Role::Group` for hints.
-- Bench: `pane.rs:1311-1360` `bench_step`, 600 frames, prints `BENCH …`; `main.rs` `--bench`, `--bench-filter`, `--make-fixture`.
+## Current state (re-read on `main` @ `def19f0`)
+- Window: `window.rs:32-50` `open()`, default 1200×760, min 640×400, traffic lights (14,19), band left edge 86 px.
+- `CrowWindow::render` `window.rs:2938`: band, optional tab bar (>1 tab), `sidebar | center | preview`, bottom bar, tip, then sheet/activity/why/picker/palette. Search replaces the center.
+- Measures: band 52 (`BAND_HEIGHT`), nav 28×28, view switch 32×26, Go to 30, band search button 240×30 radius 8, active search field 32 + `field_ring`; sidebar 210; bottom bar 30; rows 24 (search 40); columns 220–360; preview column min 300, now fills the rest; filter field 28 radius 6 `field_ring`, footer 26; scope bar 38; palette top 52, width 620, input 50, folder row 44, command row 40, header 34, footer 34.
+- Tints: `style.rs` `scrim`, `active_selection` (accent 0x55), `inactive_selection`/`current_location` (`selection`), `error_soft`, `drop_target`, `field_ring` (accent 0x8c), `cursor_ring` (1.5 px inset).
+- Menus: `menus.rs:42` `app_menus`; commands in `palette.rs` `COMMANDS` in menu-bar order. Keymaps: `actions.rs:113+`.
+- Bench: `pane.rs` `bench_step`, 600 frames, `BENCH …`; `main.rs` `--bench`, `--bench-filter`, `--make-fixture`.
 
 ## Bench (I1, 100k fixture, 1280×800, firebox, same machine)
 | Run | warm first paint | p50 | p95 | p99 | max |
@@ -95,16 +99,55 @@ Settled without asking (plan or code decides):
 | M6 (`ad93ce1`) 2 | 8 ms | 8.32 | 8.57 | 8.69 | 22.02 |
 | M6 (`ad93ce1`) 3 | 10 ms | 8.33 | 8.53 | 8.66 | 22.37 |
 
-`main` p99 is ~1.1 ms above M6 (spread within each side ≤ 0.13 ms), consistent with U10's Full motion (U10 measured Full 9.73–9.83 ms, Off 9.07). Budget is p99 < 1.5 × 8.33 ms = 12.5 ms; both are inside it, so no optimization question yet. Warm first paint 7–10 ms on both, well under 50 ms.
+`main` p99 is ~1.1 ms above M6 (each side's spread ≤ 0.13 ms), consistent with U10's Full motion (U10: Full 9.73–9.83, Off 9.07). Budget p99 < 12.5 ms; both inside. Warm paint 7–10 ms on both (< 50 ms).
+
+## I3 Findings checklist
+| # | Finding | Status | Evidence |
+| --- | --- | --- | --- |
+| 1 | Toolbar with nothing to say | ok | `idle-firebox.png`: Go to ⌘K, "Search file-crow ⌘F", view switch; tooltips covered by U1/U3 tests (`back_button_tooltip_names_the_folder`). |
+| 2 | Glyph buttons | ok | `grep '‹\|›\|☰\|▥'`: only path-bar separators (`bottom_bar.rs`), the column disclosure (`pane.rs:1852`) and the skipped-list chevron (`search.rs:1294`) — indicators, not buttons. Toolbar glyphs are Lucide SVGs. |
+| 3 | Three selections at once | ok | Pixel check of `idle-firebox.png`: exactly one accent row fill (`.claude`), sidebar current row in `selection`. `filter-firebox.png`: 0 accent rows (the field owns the keys) + accent ring at `rgb(158,87,30)` = accent 0x8c. |
+| 4 | Recent can't tell twins apart | ok (tests) | U8 `twin_hints` tests + `sidebar_twins_get_their_parent_in_label_and_aria`; palette rows show the path line (`palette-folders-*.png`). Sidebar twin visual is in U8's hand list. |
+| 5 | Disk bar in accent | ok | `idle-firebox.png`: neutral bar, "1.6 TB free"; `bar_tone` warns at 90 % (U8 test). |
+| 6 | Dead quarter | fixed (I5) | Preview fills the rest; folder cursor shows the summary; tests `column_preview_fills_the_rest`, `folder_cursor_shows_summary`. |
+| 7 | One status slot for everything | ok (test) | `error_and_running_operation_show_together` (U5) passes; progress, error token and counts share the bar. |
+| 8 | The path bar is good | ok (tests) | `narrow_window_drops_hints_before_the_path`, `path_bar_segments_navigate_as_history_steps`. |
+| H1 | No Go/Find menu | ok (tests) | `menus_are_in_bar_order`, `menu_keys_are_the_finder_keys`, `every_menu_command_is_in_the_menus`. |
+| H2 | Filter is a full-width bar | ok | `filter-firebox.png`: field inside the focused column; list view covered by `filter_field_opens_above_the_list_rows`. |
+| H3 | Search has three header rows | ok | `search-firebox.png`: one 38 px scope bar, no help sentence, summary at the foot. |
+| H4 | Four hand-made overlays, no scrim | ok | All five overlays call `chrome::sheet` (`window.rs:1425,1696,2501,2880`); `clicking_the_scrim_closes_every_overlay`. |
+
+## I4 Contrast audit (computed from the theme index)
+FireBox (dark): fg/bg 13.76, fg/surface 11.12, fg-muted/bg 6.79, fg-subtle/bg 5.14, accent/surface 6.04, error/surface 6.49, warning/bg 7.61 — all pass.
+Solarized Light: fg/surface **4.39**, fg-muted/surface 3.64, fg-subtle/bg **2.93**, accent/surface **3.00**, error/surface **3.77**, warning/bg **2.98**, fg on `active_selection` **3.08–3.39**, `selection`/bg 1.14, `bg-inset`/bg 1.00 (no sidebar fill in either theme).
+These are theme-index roles, not Crow code (the index ground rule: note, don't hex-patch). Recorded for the follow-ups.
+
+## I2 Commands
+```
+CROW_SHOT_ROOT=/Users/Shared/crow-boards/file-crow scripts/shot.sh idle <root> firebox finder ""
+scripts/shot.sh search <root>/crates firebox finder 'cmd:f|text:config|wait:2.5'
+scripts/shot.sh search-idle <root> firebox finder 'cmd:f|wait:0.8'
+scripts/shot.sh palette-folders <root> firebox finder 'cmd:k|text:git|wait:0.8'
+scripts/shot.sh palette-commands <root> firebox finder 'cmd:k|text:>hid|wait:0.8'
+scripts/shot.sh filter <root>/crates/crow-core/src firebox finder 'text:/|text:vi|wait:0.5'
+scripts/shot.sh filter-none <root>/crates/crow-core/src firebox finder 'text:/|text:vfs|wait:0.5'
+scripts/shot.sh tip <root>/crates/crow-core/src firebox finder 'text:/|text:vfs|key:escape|text:/|text:vfs|key:escape|wait:1'
+scripts/shot.sh filter-vim <root>/crates/crow-core/src firebox vim 'text:/|text:vi|wait:0.5'
+scripts/shot.sh search-vim <root>/crates firebox vim 'cmd:f|text:config|wait:2.5'
+```
+Each state also in `solarized-light` (the two Vim states in FireBox only). Repeat run of `filter` was byte-identical.
 
 ## Hand checks
-- [ ] (from the plan's consolidated table) run after I7; recorded per row.
+- [ ] (the plan's consolidated table) run after I7; recorded per row.
 
 ## Found along the way
+- `recent.rs` `zoxide_candidates` finds zoxide by absolute paths, so `PATH` alone cannot keep private folders out of Recent. The shot harness stubs it; a real fix (an env switch or a `[recent] zoxide = false`) is a product decision, not U11's.
 - `package.json` / `package-lock.json` are untracked in the working tree (not mine; left alone).
 
 ## Log
-- 2026-11-14: read AGENTS.md, the execute-plan skill, the U11 plan, the index, all U1–U10 progress files. Confirmed U1–U10 merged on `main` (`def19f0`). Created `ui-u11-finish` and this file. Ran the I1 bench on `main` and on the M6 worktree (`target/m6-wt`, `CARGO_TARGET_DIR=target/m6-target`). Asked Q1, Q2, Q3, Q5, Q8–Q11.
+- 2026-11-14: read AGENTS.md, the skill, the U11 plan, the index, all U1–U10 progress files. Branch + progress file. I1 bench on `main` and M6 (`target/m6-wt`, `CARGO_TARGET_DIR=target/m6-target`).
+- 2026-11-14: asked Q1–Q11; all recommended answers accepted. I2 scripts written, tested, and made deterministic; 18 shots from the neutral tree. Found and fixed the zoxide leak; verified no `/Users/` in the shots.
+- 2026-11-14: I4: `BAND_HEIGHT`, `field_ring`, contrast audit. I5: preview `flex_1` + folder summary. I6: a11y-tree spike (None), filter-count throttle. Tests: `assembled_layout_matches_boards`, `same_key_everywhere`, `one_accent_fill_in_column_view`, `column_preview_fills_the_rest`, `folder_cursor_shows_summary`, `filter_count_is_announced`, `search_count_is_announced`. `cargo fmt --check`, clippy `-D warnings`, `cargo test --workspace` green (307 app, 87 core, 30 fs, 4 macos, 18 search, 6 theme).
 
 ## Next
-Ask Q1–Q11 in one batch; while waiting, start I4's constant inventory (grep for duplicated literals) and I3's checklist rows that need no screenshots.
+Commit the I2–I6 work, retake the shots (the field ring and preview changed), then I7 docs, I8 bench, I9 follow-ups, I10 PR body.

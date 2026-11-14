@@ -29,7 +29,9 @@ use crate::pane::PaneEvent;
 use crate::preview;
 use crate::search::{SearchEvent, SearchView};
 use crate::sidebar::{Sidebar, SidebarEvent};
-use crate::style::{active_selection, color, color_alpha, highlight_text, icon, truncate_middle_with_ranges, ui_font};
+use crate::style::{
+    BAND_HEIGHT, active_selection, color, color_alpha, highlight_text, icon, truncate_middle_with_ranges, ui_font,
+};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::{self, Ui, reload_theme};
 use crow_fs::Entry;
@@ -163,7 +165,7 @@ impl Palette {
 }
 
 /// Palette layout, in points. U10 tunes these against the assembled boards.
-const PALETTE_TOP: f32 = 52.;
+const PALETTE_TOP: f32 = BAND_HEIGHT;
 const PALETTE_WIDTH: f32 = 620.;
 const PALETTE_MARGIN: f32 = 16.;
 const PALETTE_BOTTOM: f32 = 24.;
@@ -675,9 +677,10 @@ impl CrowWindow {
 
         div()
             .id("toolbar")
+            .debug_selector(|| "toolbar".into())
             .role(Role::Toolbar)
             .aria_label("Toolbar")
-            .h(px(52.))
+            .h(px(BAND_HEIGHT))
             .flex_none()
             .pl(px(86.))
             .pr_3()
@@ -1478,7 +1481,7 @@ impl CrowWindow {
             .role(Role::List)
             .aria_label("Activity")
             .absolute()
-            .top(px(52.))
+            .top(px(BAND_HEIGHT))
             .right(px(12.))
             .w(px(360.))
             .max_h(px(420.))
@@ -3132,7 +3135,153 @@ mod tests {
         assert_eq!(row.top() - header.bottom(), px(crate::pane::LIST_TOP_INSET));
     }
 
+    #[gpui::test]
+    fn filter_count_is_announced(cx: &mut TestAppContext) {
+        let root = fixture("filter-announce");
+        let executor = cx.executor();
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("a");
+        cx.simulate_input("l");
+        let announced =
+            |cx: &VisualTestContext| view.read_with(cx, |w, cx| w.pane().read(cx).filter_announcement().to_string());
+        assert_eq!(announced(&cx), "3 of 3 shown", "typing does not queue one announcement per letter");
+        executor.advance_clock(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        assert_eq!(announced(&cx), "1 of 3 shown", "the count is announced once typing stops");
+    }
+
+    #[gpui::test]
+    fn search_count_is_announced(cx: &mut TestAppContext) {
+        let root = fixture("search-announce");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert_eq!(search.read_with(&cx, |search, _| search.footer_summary_text()), "1 result");
+    }
+
+    #[gpui::test]
+    fn assembled_layout_matches_boards(cx: &mut TestAppContext) {
+        let root = fixture("assembled");
+        let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+        settle(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("toolbar").expect("band").size.height, px(52.), "band");
+        assert_eq!(cx.debug_bounds("sidebar").expect("sidebar").size.width, px(210.), "sidebar");
+        assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(30.), "bottom bar");
+        assert_eq!(cx.debug_bounds("column-0-row-alpha").expect("a column row").size.height, px(24.), "row");
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("vi");
+        assert_eq!(cx.debug_bounds("filter-field").expect("filter field").size.height, px(28.), "filter field");
+        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("cmd-f");
+        wait_for_search(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("search-scope-bar").expect("scope bar").size.height, px(38.), "scope bar");
+    }
+
+    #[gpui::test]
+    fn same_key_everywhere(cx: &mut TestAppContext) {
+        let root = fixture("same-key");
+        let (view, mut cx) = open(cx, &root);
+        let actions: [(&str, &dyn gpui::Action); 5] = [
+            ("ShowSearch", &ShowSearch),
+            ("ShowCommandPalette", &ShowCommandPalette),
+            ("StartFilter", &StartFilter),
+            ("GoToFolder", &GoToFolder),
+            ("SearchReveal", &crate::actions::SearchReveal),
+        ];
+        for vim in [false, true] {
+            if vim {
+                use_vim(&view, &mut cx);
+            }
+            for (label, action) in actions {
+                let mut seen: Vec<(KeyScope, String)> = Vec::new();
+                for scope in [
+                    KeyScope::Window,
+                    KeyScope::List,
+                    KeyScope::Columns,
+                    KeyScope::Sidebar,
+                    KeyScope::Filter,
+                    KeyScope::Search,
+                    KeyScope::SearchResults,
+                    KeyScope::Palette,
+                ] {
+                    if let Some(text) = cx.read(|cx| keys::text(action, scope, cx).map(|text| text.to_string())) {
+                        seen.push((scope, text));
+                    }
+                }
+                assert!(!seen.is_empty(), "{label} has a key");
+                let first = seen[0].1.clone();
+                for (scope, text) in &seen {
+                    assert_eq!(*text, first, "{label} shows one key everywhere ({scope:?}, vim: {vim})");
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn one_accent_fill_in_column_view(cx: &mut TestAppContext) {
+        let root = fixture("one-fill");
+        std::fs::create_dir_all(root.join("alpha/inner")).expect("create fixture");
+        let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+        settle(&view, &mut cx);
+        let fills = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| view.read(cx).pane().read(cx).selection_fills(window, cx))
+        };
+        assert_eq!(fills(&mut cx), (1, 0), "the pane owns the keys: one accent fill");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(fills(&mut cx), (0, 1), "with the sidebar focused the pane's fill is inactive");
+    }
+
+    #[gpui::test]
+    fn column_preview_fills_the_rest(cx: &mut TestAppContext) {
+        let root = fixture("preview-fills");
+        let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+        settle(&view, &mut cx);
+        // alpha and beta are folders; notes.txt is a file, so no child column follows it.
+        cx.simulate_keystrokes("down down");
+        settle(&view, &mut cx);
+        let strip = cx.debug_bounds("columns").expect("strip");
+        let column = cx.debug_bounds("column-0").expect("first column");
+        let preview = cx.debug_bounds("preview-column").expect("preview column");
+        assert_eq!(preview.size.width, strip.size.width - column.size.width, "the preview takes the rest");
+    }
+
+    #[gpui::test]
+    fn folder_cursor_shows_summary(cx: &mut TestAppContext) {
+        let root = fixture("folder-summary");
+        let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+        settle(&view, &mut cx);
+        let label = view.read_with(&cx, |window, cx| window.pane().read(cx).preview_label(cx));
+        assert_eq!(label.as_deref(), Some("alpha, Folder, 1 item"));
+    }
+
     fn open(cx: &mut TestAppContext, dir: &Path) -> (Entity<CrowWindow>, VisualTestContext) {
+        open_with(cx, dir, Default::default())
+    }
+
+    /// A window at an explicit size, for layout checks against the boards (1280×800).
+    fn open_sized(
+        cx: &mut TestAppContext,
+        dir: &Path,
+        width: f32,
+        height: f32,
+    ) -> (Entity<CrowWindow>, VisualTestContext) {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(width), px(height)));
+        let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+        open_with(cx, dir, options)
+    }
+
+    fn open_with(
+        cx: &mut TestAppContext,
+        dir: &Path,
+        options: WindowOptions,
+    ) -> (Entity<CrowWindow>, VisualTestContext) {
         let trash = dir
             .parent()
             .unwrap_or(dir)
@@ -3148,9 +3297,7 @@ mod tests {
         let dir = dir.to_path_buf();
         let window: WindowHandle<CrowWindow> = cx
             .update(|cx| {
-                cx.open_window(Default::default(), |window, cx| {
-                    cx.new(|cx| CrowWindow::new(dir, false, None, window, cx))
-                })
+                cx.open_window(options, |window, cx| cx.new(|cx| CrowWindow::new(dir, false, None, window, cx)))
             })
             .expect("open window");
         let mut cx = VisualTestContext::from_window(window.into(), cx);
