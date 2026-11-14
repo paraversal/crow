@@ -30,6 +30,10 @@ font_size = 13.0
 
 show_hidden_files = false
 
+# Cmd-K: list the commands you ran from the palette under "Recently used"
+# (kept in ~/.local/state/crow/palette-commands.json). false hides the list and stops recording.
+palette_recent_commands = true
+
 # How folders are shown (list or columns, sort, list columns) is set in views.toml.
 
 [window]
@@ -88,6 +92,7 @@ pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
     pub show_hidden_files: bool,
+    pub palette_recent_commands: bool,
     pub window: WindowDefaults,
 }
 
@@ -100,6 +105,7 @@ impl Default for Settings {
             font_family: String::new(),
             font_size: 13.0,
             show_hidden_files: false,
+            palette_recent_commands: true,
             window: WindowDefaults::default(),
         }
     }

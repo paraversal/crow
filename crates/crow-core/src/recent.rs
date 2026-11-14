@@ -60,6 +60,12 @@ impl Recent {
         self.visits.remove(dir);
     }
 
+    /// When `dir` was last visited, in seconds since the epoch. `None` for
+    /// folders only zoxide knows: it reports a score, not a time.
+    pub fn last_visit(&self, dir: &Path) -> Option<u64> {
+        self.visits.get(dir).map(|visit| visit.last)
+    }
+
     /// The `count` best folders, best first. `zoxide` holds (score, path) from
     /// `zoxide query --list --score`, already weighted, and adds to Crow's own scores.
     /// `keep` filters (folders that still exist and aren't favorites, say).
@@ -143,6 +149,15 @@ mod tests {
         );
         assert_eq!(r.top(1, NOW, &[], |_| true).len(), 1);
         assert_eq!(r.top(10, NOW, &[], |p| p != Path::new("/often")).len(), 2, "keep filters");
+    }
+
+    #[test]
+    fn last_visit_is_the_latest_visit() {
+        let mut r = Recent::default();
+        assert_eq!(r.last_visit(Path::new("/a")), None, "never visited");
+        r.visit(Path::new("/a"), NOW - 500);
+        r.visit(Path::new("/a"), NOW - 100);
+        assert_eq!(r.last_visit(Path::new("/a")), Some(NOW - 100));
     }
 
     #[test]

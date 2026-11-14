@@ -7,6 +7,7 @@ mod extensions;
 mod history;
 mod paths;
 mod recent;
+mod recent_commands;
 mod selection;
 mod settings;
 mod sidebar;
@@ -23,6 +24,7 @@ pub use extensions::{
 pub use history::History;
 pub use paths::{complete_typed, resolve_typed};
 pub use recent::{Recent, parse_zoxide, query_zoxide};
+pub use recent_commands::RecentCommands;
 pub use selection::{Selection, TypeSelect};
 pub use settings::{
     DEFAULT_SETTINGS, HintsMode, KeymapLayer, Settings, SettingsError, ViewMode, config_dir, load_settings,

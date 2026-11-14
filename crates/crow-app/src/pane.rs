@@ -739,6 +739,7 @@ impl Pane {
             }
             TextInputEvent::Cancelled => this.close_filter(window, cx),
             TextInputEvent::CompletionRequested => {}
+            TextInputEvent::BackspaceAtStart => {}
         });
         let focus = input.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
@@ -946,6 +947,7 @@ impl Pane {
                     cx.notify();
                 }
                 TextInputEvent::CompletionRequested => {}
+                TextInputEvent::BackspaceAtStart => {}
             });
         let focus = input.read(cx).focus_handle(cx);
         window.focus(&focus, cx);

@@ -53,6 +53,9 @@ pub enum TextInputEvent {
     Confirmed,
     Cancelled,
     CompletionRequested,
+    /// Backspace with the caret at the start and nothing selected. Only emitted
+    /// when the input asked for it; otherwise the field rings the bell.
+    BackspaceAtStart,
 }
 
 pub fn keymap() -> Vec<KeyBinding> {
@@ -89,8 +92,12 @@ pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
+    /// Spoken name when it differs from the placeholder.
+    aria_label: Option<SharedString>,
     /// Whether to draw the field box. Bare inputs sit inside a field the parent draws.
     chrome: bool,
+    /// Report a backspace at the start instead of ringing the bell.
+    report_backspace_at_start: bool,
     role: Role,
     selected_range: Range<usize>,
     selection_reversed: bool,
@@ -138,7 +145,9 @@ impl TextInput {
             focus_handle: cx.focus_handle(),
             content,
             placeholder: placeholder.into(),
+            aria_label: None,
             chrome: true,
+            report_backspace_at_start: false,
             role: Role::TextInput,
             selected_range: end..end,
             selection_reversed: false,
@@ -163,6 +172,23 @@ impl TextInput {
 
     pub fn with_role(mut self, role: Role) -> Self {
         self.role = role;
+        self
+    }
+
+    /// The spoken name, when the placeholder is not the right one.
+    pub fn with_aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
+        self
+    }
+
+    pub fn set_aria_label(&mut self, label: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.aria_label = Some(label.into());
+        cx.notify();
+    }
+
+    /// Emit `BackspaceAtStart` at the start instead of ringing the bell.
+    pub fn report_backspace_at_start(mut self) -> Self {
+        self.report_backspace_at_start = true;
         self
     }
 
@@ -296,7 +322,11 @@ impl TextInput {
         if self.selected_range.is_empty() {
             let prev = self.previous_boundary(self.cursor_offset());
             if self.cursor_offset() == prev {
-                window.play_system_bell();
+                if self.report_backspace_at_start {
+                    cx.emit(TextInputEvent::BackspaceAtStart);
+                } else {
+                    window.play_system_bell();
+                }
                 return;
             }
             self.select_to(prev, window, cx)
@@ -851,7 +881,7 @@ impl Render for TextInput {
         div()
             .id("text-input")
             .role(self.role)
-            .aria_label(self.placeholder.clone())
+            .aria_label(self.aria_label.clone().unwrap_or_else(|| self.placeholder.clone()))
             .aria_placeholder(self.placeholder.clone())
             .aria_value(self.content.clone())
             .flex()

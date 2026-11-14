@@ -183,6 +183,27 @@ pub fn truncate_middle(text: &str, max: Pixels, font_size: Pixels, window: &Wind
     truncate_middle_parts(text, max, font_size, window).text
 }
 
+/// Middle-truncate `text` and move `ranges` into the displayed text: ranges under
+/// the ellipsis are dropped, ranges after it are shifted.
+pub fn truncate_middle_with_ranges(
+    text: &str,
+    ranges: &[std::ops::Range<usize>],
+    max: Pixels,
+    font_size: Pixels,
+    window: &Window,
+) -> (SharedString, Vec<std::ops::Range<usize>>) {
+    let truncated = truncate_middle_parts(text, max, font_size, window);
+    let mut out = Vec::new();
+    for range in ranges {
+        for mapped in map_range(&truncated, range.clone()) {
+            if !mapped.is_empty() {
+                out.push(mapped);
+            }
+        }
+    }
+    (truncated.text, out)
+}
+
 /// Map a byte range in the original text to the truncated display text, dropping the
 /// part under the ellipsis. Unused slots are `0..0`.
 pub fn map_range(t: &Truncated, range: std::ops::Range<usize>) -> [std::ops::Range<usize>; 2] {

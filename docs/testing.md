@@ -14,7 +14,7 @@ selection, type-to-select, sorting, Go to Folder, the column view's focus rules,
 (new folder and rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete),
 drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent),
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
-(preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette, the search panel (scope bar and switch,
+(preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette (sections, two-line rows and match ranges, the Commands token and chips, path mode and Tab completion, recently used commands), the search panel (scope bar and switch,
 footer counts and skipped list, idle examples, best-row selection while results stream and the user's
 row after they move, contiguous name hits before content and weak fuzzy names after, one-line regex
 errors, singular skipped wording, preview in list and column view at the hit line, match cycling), the top band
@@ -31,7 +31,8 @@ config folder.
 
 `crates/crow-core` tests the config models on their own: view layers and glob rules, `exclude.toml`
 defaults and validation, editing `views.toml` and `sidebar.toml` without losing comments, and
-frecency with zoxide's scores.
+frecency with zoxide's scores. It also tests the remembered palette commands: move to front, cap,
+round trip, and a broken file starting empty.
 
 `crates/crow-search` tests the engine on temp trees: dev rules and sentinels skip and are counted,
 Search everything walks them, hidden files follow the setting, fuzzy names score, literal and
@@ -110,7 +111,11 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Filter in columns | Cmd-3, move into a middle column, `/`: only that column gets the field and footer; no other column moves or changes width. Left or Right closes the filter. Type a 60-character query: the caret stays visible inside the field. |
 | Filter to search | Filter a column, then press Cmd-F (or click the footer): search opens with the same text in that folder, and Esc returns to the unfiltered column. Filter something with no matches: "Nothing in … matches", the button opens search, and the hidden-files note shows when hidden files are off. |
 | Filter look | In a light and a dark theme, accent text on the selected row is readable; in the Vim layer, letters typed in the field stay there. VoiceOver reads "Filter <folder>", the count, and the no-match line. |
-| Command palette | Cmd-K: type a recent folder and Return; try Cmd-Return for a new tab and `>` for commands; Vim j/k moves the cursor. |
+| Command palette | Cmd-K over a scrim; the folder you are in is not listed, so Cmd-K then Return goes to the one before it; sections Recent / Favorites / In <folder>; two folders with the same name show different paths; matched letters accented in name and path; Recent rows show "2 h ago"-style times; ↵ goes, ⌘↵ opens a tab; Vim j/k move across headers. |
+| Palette ⇥ | ⇥ on a row puts its path and `/` in the field; typing narrows to its subfolders; ↵ on "this folder" goes there; `.` shows hidden folders. |
+| Palette commands | `>` turns into the Commands token and Return on the empty list never quits (typing `quit` finds Quit Crow); Backspace on an empty field removes it; rows show menu, on/off chip for Show Hidden Files and Show Activity, and keycaps (switch to the Vim layer: keycaps follow). |
+| Recently used | Run two commands from the palette, quit, relaunch: `>` lists them under Recently used. Set `palette_recent_commands = false`: the section disappears without a restart, and new runs aren't recorded. |
+| Palette themes | FireBox and Solarized Light: token, highlights, chip and keycaps readable, the input and footer dividers visible; narrow window keeps the sheet inside with 16 px margins. |
 | Search | Cmd-F, search a word in file names and in contents: while results stream the top row stays selected and previewed; contiguous name matches come first with their letters highlighted, scattered fuzzy name hits follow the content rows; a name match is one line, a content-only hit shows its line number and line under the name; the Modified column stays on one line ("Today 14:32", "Yesterday", "4. Nov"). Switch <folder> / Home / This Mac; Return, Cmd-R, Space, drag-out, Cmd-C and Cmd-Delete act on results. The right pane previews the selected result in list and column view, at the hit line. |
 | Search scope bar | One bar: "Search", the scope segments, and "Skip dev folders" on the right; click the switch and press Cmd-Shift-A: both flip it and the results change. Enable `media` in `exclude.toml`: the label becomes "Skip dev and media folders" without reopening. |
 | Skipped folders | Search a folder with `node_modules`: the footer says "1 folder skipped ›" (or "k folders skipped ›"); click it and check each folder is listed relative to the searched folder, with the rule that skipped it, above the footer. Esc closes the list first, then search. Search everything includes them and the link goes away. |

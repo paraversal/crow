@@ -41,6 +41,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 Themes come from the global index in `~/.config/themes`. View ▸ Theme… (Cmd-Option-T)
 previews each theme as you move through the list; Apply to All Apps (Cmd-Return) sets it for every app that reads the index.
 Recent folders are kept in `~/.local/state/crow/recent.json`, merged with zoxide's list when it's installed.
+Commands run from the palette are remembered in `~/.local/state/crow/palette-commands.json`.
 Key-use counts, which retire idle bottom-bar hints, live next to it in `~/.local/state/crow/usage.json`.
 Logs go to `~/Library/Logs/Crow/crow.log`.
 
@@ -101,8 +102,15 @@ Cmd-C / Cmd-X / Cmd-V copy, cut and paste (also to and from Finder), Cmd-Option-
 Cmd-Z / Cmd-Shift-Z undo and redo, Esc cancels a running operation, Cmd-Option-L shows activity.
 Nothing is ever overwritten: name clashes ask first, and Replace moves the old item to the Trash.
 
-Cmd-K opens the command palette: type to go to a favorite, recent or subfolder; start with `>`
-for commands (labels and their keys). Return goes there, Cmd-Return opens a folder in a new tab.
+Cmd-K opens the command palette over a scrim: folders are grouped into Recent, Favorites and
+In <folder>, each row showing the name and the abbreviated path, so two folders called `git` are
+told apart; matched letters are accent in both lines and Recent rows carry the last visit.
+Return goes there and Cmd-Return opens a folder in a new tab. Tab appends the highlighted
+folder's path and `/`, so the next letters search inside it; typing `/` or `~/` does the same by
+hand, with the parent's subfolders listed. Start with `>`: it becomes a Commands token
+(Backspace on the empty field goes back to folders) and rows show the menu, the label, an on/off
+chip for toggles and their keys. Commands you run from the palette are remembered under Recently
+used; `palette_recent_commands = false` hides that section and stops recording.
 Cmd-F, or the top band's Search field, searches names and contents in the current folder; the same
 field moves into the band while searching, where All / Names / Contents choose what to match (Names
 reads no file contents) and Cmd-Shift-M cycles the three. Cmd-F again focuses the field and selects
