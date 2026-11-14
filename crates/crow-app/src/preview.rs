@@ -4,29 +4,41 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crow_core::{Extensions, PreviewContent};
+use crow_core::{Excerpt, Extensions, PreviewContent, text_excerpt};
 use crow_fs::Entry;
 use crow_theme::Theme;
 use gpui::{Div, FontWeight, Image, ImageFormat, div, img, prelude::*, px};
 
-use crate::style::{color, format_time, icon, kind};
+use crate::style::{color, color_alpha, format_time, icon, kind};
 
 /// What the preview shows for one item, loaded off the main thread.
+#[derive(Clone)]
 pub struct Preview {
     pub path: PathBuf,
     pub content: Option<PreviewContent>,
     pub image: Option<Arc<Image>>,
     pub tags: Vec<String>,
+    /// The lines around a content hit, when the search asked for one.
+    pub excerpt: Option<Excerpt>,
 }
 
 /// Run the previewers and read the tags. Blocking: call on a background thread.
 pub fn fetch(entry: &Entry, extensions: &Extensions) -> Preview {
+    fetch_at(entry, extensions, None)
+}
+
+/// `fetch`, plus the lines around a content hit when the text previewer read it.
+pub fn fetch_at(entry: &Entry, extensions: &Extensions, line: Option<u64>) -> Preview {
     let content = extensions.preview(entry);
     let image = match &content {
         Some(PreviewContent::Image(png)) => Some(Arc::new(Image::from_bytes(ImageFormat::Png, png.to_vec()))),
         _ => None,
     };
-    Preview { path: entry.path.clone(), content, image, tags: crow_macos::tags(&entry.path) }
+    let excerpt = match (&content, line) {
+        (Some(PreviewContent::Text(_)), Some(line)) => text_excerpt(&entry.path, line, 5, 12),
+        _ => None,
+    };
+    Preview { path: entry.path.clone(), content, image, tags: crow_macos::tags(&entry.path), excerpt }
 }
 
 /// What VoiceOver reads for the preview.
@@ -50,9 +62,43 @@ pub fn contents(entry: &Entry, preview: Option<&Preview>, theme: &Theme) -> Div 
     let size = if entry.is_dir { "--".to_owned() } else { crow_fs::human_size(entry.size) };
     let kind = kind(entry);
     let tags = preview.map(|p| p.tags.join(", ")).filter(|t| !t.is_empty());
+    let excerpt = preview.and_then(|p| p.excerpt.as_ref());
     let picture = match (preview.and_then(|p| p.image.clone()), preview.and_then(|p| p.content.clone())) {
         (Some(image), _) => {
             div().h(px(220.)).flex().items_center().justify_center().child(img(image).max_w_full().max_h(px(220.)))
+        }
+        (None, Some(PreviewContent::Text(_))) if excerpt.is_some() => {
+            let excerpt = excerpt.expect("checked");
+            let accent = color_alpha(theme.role("accent"), 0x1a);
+            let lines = excerpt.text.lines().enumerate().map(|(i, line)| {
+                let number = excerpt.first_line + i as u64;
+                div()
+                    .flex()
+                    .gap_1()
+                    .when(number == excerpt.hit, |row| row.bg(accent))
+                    .child(
+                        div()
+                            .w(px(28.))
+                            .flex_none()
+                            .text_right()
+                            .text_color(color(theme.role("fg-subtle")))
+                            .child(format!("{number}")),
+                    )
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(line.to_owned()))
+            });
+            div()
+                .h(px(220.))
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(border)
+                .bg(color(theme.role("bg-inset")))
+                .overflow_hidden()
+                .font_family("Menlo")
+                .text_size(px(11.))
+                .flex()
+                .flex_col()
+                .children(lines)
         }
         (None, Some(PreviewContent::Text(text))) => div()
             .h(px(220.))

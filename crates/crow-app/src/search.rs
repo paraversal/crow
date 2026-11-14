@@ -1,35 +1,40 @@
 //! Cmd-F's search panel: names and contents from `crow-search` in This Folder or
-//! Home, or Spotlight names everywhere. Results stream in; the summary counts
-//! skipped folders and lists them with the rule that skipped each one.
+//! Home, or Spotlight names on This Mac. Results stream in; the footer counts
+//! results and skipped folders, and lists the rule that skipped each one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
-use crow_core::{Selection, abbreviate_home};
+use crow_core::{Exclude, KeymapLayer, Selection, SetName, abbreviate_home};
+use crow_fs::Entry;
 use crow_fs::ops::Request;
 use crow_search::{Hit, HitKind, Query, RuleSet, Summary};
-use crow_theme::Rgb;
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use gpui::{
-    App, Context, Entity, EventEmitter, ExternalDragPayload, FileDragPaths, FocusHandle, Focusable, Image, IntoElement,
-    MouseButton, MouseDownEvent, Render, Role, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle,
-    Window, div, img, prelude::*, px, uniform_list,
+    App, Context, Entity, EventEmitter, ExternalDragPayload, FileDragPaths, FocusHandle, Focusable, FontWeight, Image,
+    IntoElement, MouseButton, MouseDownEvent, Render, Role, ScrollStrategy, SharedString, Subscription, Toggled,
+    UniformListScrollHandle, Window, div, img, prelude::*, px, uniform_list,
 };
 
 use crate::actions::{
-    CloseSearch, CopyFiles, CutFiles, DeletePermanently, MoveDown, MoveToFirst, MoveToLast, MoveToTrash, MoveUp,
-    OpenSelection, QuickLook, SearchEverything, SearchReveal, SelectAll,
+    CloseSearch, CopyFiles, CutFiles, CycleMatch, DeletePermanently, MoveDown, MoveToFirst, MoveToLast, MoveToTrash,
+    MoveUp, OpenSelection, QuickLook, SearchEverything, SearchReveal, SelectAll,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
+use crate::extensions::Ext;
 use crate::icons::{self, Glyph};
 use crate::keys::{self, KeyScope};
 use crate::pane::DraggedSelection;
-use crate::style::{active_selection, color, color_alpha, format_time, icon, inactive_selection};
+use crate::preview::{self, Preview};
+use crate::style::{
+    active_selection, color, color_alpha, format_time, highlight_text, icon, inactive_selection, map_range,
+    truncate_middle_parts,
+};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
 
@@ -40,7 +45,7 @@ const ROW_HEIGHT: f32 = 40.0;
 pub enum Scope {
     Folder,
     Home,
-    Everywhere,
+    ThisMac,
 }
 
 impl Scope {
@@ -49,8 +54,7 @@ impl Scope {
         match self {
             Scope::Folder => format!("Search {folder}").into(),
             Scope::Home => "Search Home".into(),
-            // U6 renames Everywhere to "This Mac"; this placeholder follows for free.
-            Scope::Everywhere => "Search Everywhere".into(),
+            Scope::ThisMac => "Search This Mac".into(),
         }
     }
 }
@@ -79,7 +83,7 @@ fn query_parts(text: &str, matching: Match) -> (Option<String>, Option<String>) 
 
 /// Spotlight indexes names only, so the match control never applies there.
 fn effective_match_for(scope: Scope, matching: Match) -> Match {
-    if scope == Scope::Everywhere { Match::Names } else { matching }
+    if scope == Scope::ThisMac { Match::Names } else { matching }
 }
 
 pub enum SearchEvent {
@@ -102,6 +106,8 @@ pub struct SearchView {
     scope: Scope,
     matching: Match,
     everything: bool,
+    /// "Skip dev folders"; None hides the switch when no set is enabled.
+    skip_label: Option<String>,
     input: Entity<TextInput>,
     focus: FocusHandle,
     results: Vec<Row>,
@@ -115,6 +121,12 @@ pub struct SearchView {
     exclude_generation: u64,
     selection: Selection<PathBuf>,
     cursor: usize,
+    /// Every accepted hit, including extra content lines for the same row.
+    hit_count: usize,
+    /// How many leading rows are name matches.
+    name_count: usize,
+    /// The selected row's preview, loaded off the main thread.
+    preview: Option<LoadedPreview>,
     scroll: UniformListScrollHandle,
     show_skipped: bool,
     _subscription: Subscription,
@@ -123,17 +135,32 @@ pub struct SearchView {
     _focus_subscriptions: Vec<Subscription>,
 }
 
+struct LoadedPreview {
+    entry: Entry,
+    preview: Preview,
+}
+
 struct Row {
     path: PathBuf,
     name: String,
     folder: String,
     is_dir: bool,
     is_package: bool,
-    kind: SharedString,
     modified: Option<SystemTime>,
     score: u32,
+    /// A hit on the file name, as opposed to contents only.
+    name_match: bool,
+    /// Matched byte ranges in `name`.
+    name_ranges: Vec<Range<usize>>,
     /// The earliest matching line, for content hits.
     content: Option<(u64, String, Vec<Range<usize>>)>,
+}
+
+#[derive(Clone, Copy)]
+enum ExampleAction {
+    Fill(&'static str),
+    ThisMac,
+    Everything,
 }
 
 enum Update {
@@ -174,14 +201,23 @@ impl SearchView {
                 this.start_search(&query, cx);
             }
             TextInputEvent::Confirmed => this.open_selected(cx),
-            TextInputEvent::Cancelled => cx.emit(SearchEvent::Close),
+            TextInputEvent::Cancelled => {
+                if this.show_skipped {
+                    this.show_skipped = false;
+                    cx.notify();
+                } else {
+                    cx.emit(SearchEvent::Close);
+                }
+            }
             TextInputEvent::CompletionRequested => cx.emit(SearchEvent::FocusResults),
         });
         let exclude_generation = cx.global::<Ui>().exclude_generation;
+        let skip_label_value = skip_label(&cx.global::<Ui>().exclude);
         let ui_subscription = cx.observe_global::<Ui>(move |this, cx| {
             let generation = cx.global::<Ui>().exclude_generation;
             if this.exclude_generation != generation {
                 this.exclude_generation = generation;
+                this.skip_label = skip_label(&cx.global::<Ui>().exclude);
                 let query = this.input.read(cx).text().to_owned();
                 if !query.is_empty() {
                     this.start_search(&query, cx);
@@ -196,6 +232,7 @@ impl SearchView {
             scope: Scope::Folder,
             matching: Match::All,
             everything,
+            skip_label: skip_label_value,
             input,
             focus,
             results: Vec::new(),
@@ -209,6 +246,9 @@ impl SearchView {
             exclude_generation,
             selection: Selection::default(),
             cursor: 0,
+            hit_count: 0,
+            name_count: 0,
+            preview: None,
             scroll: UniformListScrollHandle::new(),
             show_skipped: false,
             _subscription: subscription,
@@ -275,6 +315,9 @@ impl SearchView {
         self.show_skipped = false;
         self.selection.clear();
         self.cursor = 0;
+        self.hit_count = 0;
+        self.name_count = 0;
+        self.preview = None;
         let query = query.trim();
         if query.is_empty() {
             self.searching = false;
@@ -284,7 +327,7 @@ impl SearchView {
         self.searching = true;
 
         let (tx, mut rx) = unbounded();
-        if self.scope == Scope::Everywhere {
+        if self.scope == Scope::ThisMac {
             let query = query.to_owned();
             cx.background_spawn(async move {
                 let tx = tx;
@@ -311,7 +354,7 @@ impl SearchView {
             };
             let root = match self.scope {
                 Scope::Folder => self.folder.clone(),
-                Scope::Home | Scope::Everywhere => self.home.clone(),
+                Scope::Home | Scope::ThisMac => self.home.clone(),
             };
             let (names, contents) = query_parts(query, self.effective_match());
             let query = Query { names, contents, show_hidden: self.show_hidden, rules, everything: self.everything };
@@ -369,13 +412,18 @@ impl SearchView {
     }
 
     fn add_hits(&mut self, hits: Vec<Hit>, cx: &mut Context<Self>) {
+        let root = (self.scope == Scope::Folder).then_some(self.folder.as_path());
         let mut changed = false;
+        let mut fresh: Vec<Row> = Vec::new();
+        let mut fresh_at: HashMap<PathBuf, usize> = HashMap::new();
         for hit in hits {
-            if self.results.len() >= MAX_RESULTS {
+            let known = self.by_path.contains_key(&hit.path) || fresh_at.contains_key(&hit.path);
+            if !known && self.results.len() + fresh.len() >= MAX_RESULTS {
                 self.capped = true;
                 self.cancel.store(true, Ordering::Relaxed);
                 break;
             }
+            self.hit_count += 1;
             if let Some(&index) = self.by_path.get(&hit.path) {
                 let row = &mut self.results[index];
                 if hit.score > row.score {
@@ -385,50 +433,149 @@ impl SearchView {
                     && row.content.as_ref().is_none_or(|(best, _, _)| line < *best)
                 {
                     row.content = Some((line, text, ranges));
+                    changed = true;
+                }
+            } else if let Some(&index) = fresh_at.get(&hit.path) {
+                let row = &mut fresh[index];
+                if hit.score > row.score {
+                    row.score = hit.score;
+                }
+                if let HitKind::Content { line, text, ranges } = hit.kind
+                    && row.content.as_ref().is_none_or(|(best, _, _)| line < *best)
+                {
+                    row.content = Some((line, text, ranges));
                 }
             } else {
-                let row = Row::from_hit(hit, &self.home);
-                self.by_path.insert(row.path.clone(), self.results.len());
-                self.results.push(row);
+                let row = Row::from_hit(hit, &self.home, root);
+                fresh_at.insert(row.path.clone(), fresh.len());
+                fresh.push(row);
                 changed = true;
             }
         }
-        if self.selection.is_empty()
-            && let Some(first) = self.results.first()
-        {
-            self.selection.select_only(first.path.clone());
-            self.cursor = 0;
-            changed = true;
+        if !fresh.is_empty() {
+            self.insert_rows(fresh);
+        }
+        let before = self.selection.cursor().cloned();
+        self.follow_selection();
+        if before != self.selection.cursor().cloned() {
+            self.load_preview(cx);
         }
         if changed {
             cx.notify();
         }
     }
 
+    /// Put name matches first, best score first, then content-only rows in the
+    /// order the walk found them. `results` is already in that shape, so a batch
+    /// merges its name rows into the leading block and appends its content rows.
+    fn insert_rows(&mut self, fresh: Vec<Row>) {
+        let (mut names, contents): (Vec<Row>, Vec<Row>) = fresh.into_iter().partition(|row| row.name_match);
+        names.sort_by_key(|row| std::cmp::Reverse(row.score));
+        let old: Vec<Row> = self.results.drain(..self.name_count).collect();
+        let rest: Vec<Row> = std::mem::take(&mut self.results);
+        let mut left: VecDeque<Row> = old.into();
+        let mut right: VecDeque<Row> = names.into();
+        let mut merged = Vec::with_capacity(left.len() + right.len());
+        loop {
+            match (left.front(), right.front()) {
+                (Some(l), Some(r)) if l.score >= r.score => merged.push(left.pop_front().expect("left")),
+                (Some(_), Some(_)) => merged.push(right.pop_front().expect("right")),
+                (Some(_), None) => merged.push(left.pop_front().expect("left")),
+                (None, Some(_)) => merged.push(right.pop_front().expect("right")),
+                (None, None) => break,
+            }
+        }
+        self.name_count = merged.len();
+        self.results = merged.into_iter().chain(rest).chain(contents).collect();
+        self.by_path.clear();
+        for (index, row) in self.results.iter().enumerate() {
+            self.by_path.insert(row.path.clone(), index);
+        }
+    }
+
+    /// Keep the keyboard cursor on the same path after rows above it move, and
+    /// select the best first result once there is one.
+    fn follow_selection(&mut self) {
+        if self.selection.is_empty() {
+            if let Some(first) = self.results.first() {
+                self.selection.select_only(first.path.clone());
+                self.cursor = 0;
+            }
+            return;
+        }
+        if let Some(path) = self.selection.cursor().cloned()
+            && let Some(&index) = self.by_path.get(&path)
+        {
+            self.cursor = index;
+        }
+    }
+
     fn add_spotlight(&mut self, hits: Vec<crow_macos::SpotlightHit>, cx: &mut Context<Self>) {
+        let query = self.query(cx);
         let mut changed = false;
         for hit in hits {
-            if self.results.len() >= MAX_RESULTS || self.by_path.contains_key(&hit.path) {
-                if self.results.len() >= MAX_RESULTS {
-                    self.capped = true;
-                }
+            if self.by_path.contains_key(&hit.path) {
                 continue;
             }
-            let row = Row::from_spotlight(hit, &self.home);
-            self.by_path.insert(row.path.clone(), self.results.len());
+            if self.results.len() >= MAX_RESULTS {
+                self.capped = true;
+                break;
+            }
+            self.hit_count += 1;
+            let row = Row::from_spotlight(hit, &query, &self.home);
             self.results.push(row);
             changed = true;
         }
-        if self.selection.is_empty()
-            && let Some(first) = self.results.first()
-        {
-            self.selection.select_only(first.path.clone());
-            self.cursor = 0;
-            changed = true;
+        self.by_path.clear();
+        for (index, row) in self.results.iter().enumerate() {
+            self.by_path.insert(row.path.clone(), index);
+        }
+        self.name_count = self.results.len();
+        let before = self.selection.cursor().cloned();
+        self.follow_selection();
+        if before != self.selection.cursor().cloned() {
+            self.load_preview(cx);
         }
         if changed {
             cx.notify();
         }
+    }
+
+    /// Load the cursor row's preview off the main thread, unless it is loaded.
+    fn load_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.results.get(self.cursor) else {
+            self.preview = None;
+            return;
+        };
+        let path = row.path.clone();
+        let line = row.content.as_ref().map(|(line, _, _)| *line);
+        if self.preview.as_ref().is_some_and(|loaded| loaded.entry.path == path) {
+            return;
+        }
+        let extensions = cx.global::<Ext>().0.clone();
+        let requested = path.clone();
+        cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_spawn(async move {
+                    let entry = crow_fs::stat_entry(&requested).ok().flatten()?;
+                    let preview = preview::fetch_at(&entry, &extensions, line);
+                    Some(LoadedPreview { entry, preview })
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.results.get(this.cursor).is_some_and(|row| row.path == path) {
+                    this.preview = loaded;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The preview pane's parts, when a result is selected.
+    pub fn preview_parts(&self) -> Option<(Entry, Option<Preview>)> {
+        self.preview.as_ref().map(|loaded| (loaded.entry.clone(), Some(loaded.preview.clone())))
     }
 
     fn query(&self, cx: &App) -> String {
@@ -479,6 +626,49 @@ impl SearchView {
         self.skipped.len()
     }
 
+    #[cfg(test)]
+    pub fn hit_count(&self) -> usize {
+        self.hit_count
+    }
+
+    #[cfg(test)]
+    pub fn row_label(&self, index: usize) -> Option<String> {
+        self.results.get(index).map(Row::label)
+    }
+
+    #[cfg(test)]
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    #[cfg(test)]
+    pub fn skipped_open(&self) -> bool {
+        self.show_skipped
+    }
+
+    #[cfg(test)]
+    pub fn footer_summary_text(&self) -> String {
+        self.footer_text()
+    }
+
+    #[cfg(test)]
+    pub fn preview_path(&self) -> Option<PathBuf> {
+        self.preview.as_ref().map(|loaded| loaded.entry.path.clone())
+    }
+
+    #[cfg(test)]
+    pub fn preview_excerpt(&self) -> Option<(u64, String)> {
+        self.preview
+            .as_ref()
+            .and_then(|loaded| loaded.preview.excerpt.as_ref())
+            .map(|excerpt| (excerpt.hit, excerpt.text.clone()))
+    }
+
+    #[cfg(test)]
+    pub fn error_text(&self) -> Option<String> {
+        self.error.as_ref().map(ToString::to_string)
+    }
+
     pub fn everything(&self) -> bool {
         self.everything
     }
@@ -521,7 +711,7 @@ impl SearchView {
 
     /// Store the user's choice and rerun the current query. Spotlight ignores it.
     pub fn set_match(&mut self, matching: Match, cx: &mut Context<Self>) {
-        if self.scope == Scope::Everywhere || self.matching == matching {
+        if self.scope == Scope::ThisMac || self.matching == matching {
             return;
         }
         self.matching = matching;
@@ -540,6 +730,7 @@ impl SearchView {
         self.cursor = ix;
         window.focus(&self.focus, cx);
         self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        self.load_preview(cx);
         cx.notify();
     }
 
@@ -558,6 +749,7 @@ impl SearchView {
             self.cursor = ix;
         }
         self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        self.load_preview(cx);
         cx.notify();
     }
 
@@ -614,7 +806,22 @@ impl SearchView {
     // ----- actions -----
 
     fn close_action(&mut self, _: &CloseSearch, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(SearchEvent::Close);
+        if self.show_skipped {
+            self.show_skipped = false;
+            cx.notify();
+        } else {
+            cx.emit(SearchEvent::Close);
+        }
+    }
+
+    /// Esc closes the skipped list before the search. Returns whether it did.
+    pub fn close_skipped(&mut self) -> bool {
+        if self.show_skipped {
+            self.show_skipped = false;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn set_everything(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -630,6 +837,19 @@ impl SearchView {
 
     fn search_everything(&mut self, _: &SearchEverything, _: &mut Window, cx: &mut Context<Self>) {
         self.set_everything(!self.everything, cx);
+    }
+
+    /// All → Names → Contents. Spotlight is names-only, so it stays put.
+    fn cycle_match(&mut self, _: &CycleMatch, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scope == Scope::ThisMac {
+            return;
+        }
+        let next = match self.effective_match() {
+            Match::All => Match::Names,
+            Match::Names => Match::Contents,
+            Match::Contents => Match::All,
+        };
+        self.set_match(next, cx);
     }
 
     fn move_up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
@@ -706,6 +926,7 @@ impl SearchView {
             // keys::context_stack (KeyScope::Search) mirrors this.
             .key_context("Search")
             .on_action(cx.listener(Self::search_everything))
+            .on_action(cx.listener(Self::cycle_match))
             .on_action(cx.listener(Self::close_action))
             .flex_1()
             .min_w(px(160.))
@@ -748,7 +969,7 @@ impl SearchView {
 
     fn render_match_control(&self, focused: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
-        let spotlight = self.scope == Scope::Everywhere;
+        let spotlight = self.scope == Scope::ThisMac;
         let selected = self.effective_match();
         let fg = color(theme.role("fg"));
         let muted = color(theme.role("fg-muted"));
@@ -786,8 +1007,11 @@ impl SearchView {
                     }
                 }))
                 .child(label);
-            let tooltip = if spotlight { "Spotlight searches names only" } else { tooltip };
-            with_tooltip(segment, tooltip, None)
+            if spotlight {
+                with_tooltip(segment, "Spotlight searches names only", None)
+            } else {
+                with_action_tooltip(segment, tooltip, &CycleMatch, KeyScope::Search, cx)
+            }
         };
         div()
             .id("search-match")
@@ -805,133 +1029,455 @@ impl SearchView {
             .child(button(Match::Contents, "Contents", "Contents only"))
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_scope_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let muted = color(theme.role("fg-muted"));
-        let everything = self.everything;
-        div()
-            .px_3()
-            .py_2()
+        let segments = div()
+            .id("search-scope")
+            .role(Role::RadioGroup)
+            .aria_label("Search scope")
             .flex()
-            .flex_col()
-            .gap_2()
+            .flex_none()
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded(px(7.))
+            .bg(color(theme.role("surface")))
+            .child(self.scope_segment(Scope::Folder, self.folder_label.clone().into(), cx))
+            .child(self.scope_segment(Scope::Home, "Home".into(), cx))
+            .child(self.scope_segment(Scope::ThisMac, "This Mac".into(), cx));
+        let right: Option<gpui::AnyElement> = if self.scope == Scope::ThisMac {
+            Some(div().text_color(muted).child("Spotlight: indexed volumes only").into_any_element())
+        } else {
+            self.skip_label.as_ref().map(|label| self.render_skip_switch(label, cx).into_any_element())
+        };
+        div()
+            .id("search-scope-bar")
+            .debug_selector(|| "search-scope-bar".into())
+            .role(Role::Group)
+            .aria_label("Search scope")
+            .h(px(38.))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap(px(10.))
             .border_b_1()
             .border_color(color(theme.role("border")))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(self.scope_button(Scope::Folder, "This Folder", cx))
-                    .child(self.scope_button(Scope::Home, "Home", cx))
-                    .child(self.scope_button(Scope::Everywhere, "Everywhere", cx))
-                    .child(div().flex_1())
-                    .child(with_action_tooltip(
-                        div()
-                            .id("search-everything")
-                            .role(Role::Button)
-                            .aria_label("Search everything, all rules off")
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .text_size(px(12.))
-                            .text_color(color(if everything { theme.role("on-accent") } else { theme.role("fg") }))
-                            .when(everything, |button| button.bg(color(theme.role("accent"))))
-                            .when(!everything, |button| button.bg(color_alpha(theme.role("surface-raised"), 0xaa)))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.search_everything(&SearchEverything, window, cx)
-                                }),
-                            )
-                            .child("Search everything"),
-                        "Search everything, all rules off",
-                        &SearchEverything,
-                        KeyScope::Search,
-                        cx,
-                    )),
-            )
-            .child(div().text_size(px(11.)).text_color(muted).child(
-                match keys::text(&SearchEverything, KeyScope::Search, cx) {
-                    Some(keys) => {
-                        format!("{keys} turns every exclusion set off · contents are literal; /pattern/ is a regex")
-                    }
-                    None => "Contents are literal; /pattern/ is a regex".to_owned(),
-                },
-            ))
+            .text_size(px(12.))
+            .child(div().flex_none().text_color(muted).child("Search"))
+            .child(segments)
+            .child(div().flex_1())
+            .children(right)
     }
 
-    fn scope_button(&self, scope: Scope, label: &'static str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_skip_switch(&self, label: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.global::<Ui>().theme.clone();
+        let on = !self.everything;
+        let accent = color(theme.role("accent"));
+        let raised = color(theme.role("surface-raised"));
+        let knob_color = color(theme.role("bg"));
+        let hover = color_alpha(theme.role("surface-raised"), 0x60);
+        let shortcut = keys::spoken_for(&SearchEverything, KeyScope::Search, cx);
+        let switch = div()
+            .id("search-skip-switch")
+            .debug_selector(|| "search-skip-switch".into())
+            .role(Role::Switch)
+            .aria_label(label.to_owned())
+            .aria_toggled(if on { Toggled::True } else { Toggled::False })
+            .when_some(shortcut.clone(), |switch, keys| switch.aria_keyshortcuts(keys))
+            .h(px(24.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(raised)
+            .text_color(color(if on { theme.role("fg") } else { theme.role("fg-muted") }))
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.search_everything(&SearchEverything, window, cx);
+            }))
+            .child(
+                div()
+                    .relative()
+                    .w(px(22.))
+                    .h(px(12.))
+                    .flex_none()
+                    .rounded(px(6.))
+                    .bg(if on { accent } else { raised })
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(2.))
+                            .left(px(if on { 12. } else { 2. }))
+                            .size(px(8.))
+                            .rounded_full()
+                            .bg(knob_color),
+                    ),
+            )
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label.to_owned()));
+        with_action_tooltip(switch, "Skip folders listed in exclude.toml", &SearchEverything, KeyScope::Search, cx)
+    }
+
+    fn scope_segment(&self, scope: Scope, label: SharedString, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let selected = self.scope == scope;
+        let id = match scope {
+            Scope::Folder => "search-scope-folder",
+            Scope::Home => "search-scope-home",
+            Scope::ThisMac => "search-scope-this-mac",
+        };
+        let aria = match scope {
+            Scope::Folder => format!("Search in {label}"),
+            Scope::Home => "Search in Home".to_owned(),
+            Scope::ThisMac => "Search This Mac with Spotlight, names only".to_owned(),
+        };
+        let hover = color_alpha(theme.role("surface-raised"), 0x80);
+        let pressed = color(theme.role("surface-raised"));
         div()
-            .id(label)
-            .debug_selector(move || format!("search-scope-{label}"))
-            .role(Role::Button)
-            .aria_label(label)
+            .id(id)
+            .debug_selector(move || id.into())
+            .role(Role::RadioButton)
+            .aria_label(aria)
             .aria_selected(selected)
-            .px_2()
-            .py(px(3.))
-            .rounded_md()
-            .text_size(px(12.))
-            .text_color(color(if selected { theme.role("on-accent") } else { theme.role("fg") }))
-            .when(selected, |button| button.bg(color(theme.role("accent"))))
-            .when(!selected, |button| button.bg(color_alpha(theme.role("surface-raised"), 0xaa)))
+            .h(px(22.))
+            .px(px(9.))
+            .flex()
+            .items_center()
+            .rounded(px(5.))
+            .whitespace_nowrap()
+            .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
+            .when(selected, |segment| segment.bg(pressed))
+            .when(!selected, move |segment| {
+                segment.hover(move |style| style.bg(hover)).active(move |style| style.bg(pressed))
+            })
             .on_click(cx.listener(move |this, _, _, cx| this.set_scope(scope, cx)))
             .child(label)
     }
 
-    fn render_summary(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
-        let muted = color(theme.role("fg-muted"));
-        let error = color(theme.role("error"));
-        let count = self.results.len();
-        let skipped = self.skipped.len();
-        let mut summary = if self.error.is_some() {
-            "Search failed".to_owned()
-        } else if self.searching {
-            format!("Searching… {count} results")
-        } else if count == 0 {
-            "No results".to_owned()
+        let (fg, muted, subtle, accent, warning, error) = (
+            color(theme.role("fg")),
+            color(theme.role("fg-muted")),
+            color(theme.role("fg-subtle")),
+            color(theme.role("accent")),
+            color(theme.role("warning")),
+            color(theme.role("error")),
+        );
+        let summary = self.footer_text();
+        let text_color = if self.error.is_some() {
+            error
+        } else if self.capped {
+            warning
         } else {
-            format!("{count} results")
+            fg
         };
-        if self.capped {
-            summary.push_str(&format!(" (first {MAX_RESULTS})"));
-        }
-        let scope = self.scope;
-        let mut row = div()
+        let skipped = self.skipped.len();
+        let link = (skipped > 0 && !self.searching && self.error.is_none()).then(|| {
+            let chevron = if self.show_skipped { "⌄" } else { "›" };
+            div()
+                .id("search-skipped-link")
+                .debug_selector(|| "search-skipped-link".into())
+                .role(Role::Button)
+                .aria_label(format!("{skipped} folders skipped, show list"))
+                .aria_expanded(self.show_skipped)
+                .flex_none()
+                .text_color(accent)
+                .font_weight(FontWeight::MEDIUM)
+                .hover(|style| style.underline())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_skipped = !this.show_skipped;
+                    cx.notify();
+                }))
+                .child(format!("{skipped} folders skipped {chevron}"))
+        });
+        let hint = (self.scope != Scope::ThisMac && self.skip_label.is_some()).then(|| {
+            let hint = if self.everything { "Skip folders again" } else { "Search everything" };
+            with_action_tooltip(
+                div()
+                    .id("search-everything-hint")
+                    .debug_selector(|| "search-everything-hint".into())
+                    .role(Role::Button)
+                    .aria_label(hint)
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .text_color(muted)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.search_everything(&SearchEverything, window, cx);
+                    }))
+                    .child(hint)
+                    .children(Keycap::for_action(
+                        &SearchEverything,
+                        KeyScope::SearchResults,
+                        KeycapWeight::Outline,
+                        cx,
+                    )),
+                hint,
+                &SearchEverything,
+                KeyScope::SearchResults,
+                cx,
+            )
+        });
+        let aria = if self.searching { "Searching".to_owned() } else { summary.clone() };
+        div()
+            .id("search-footer")
+            .debug_selector(|| "search-footer".into())
+            .role(Role::Status)
+            .aria_label(aria)
+            .h(px(32.))
             .px_3()
-            .py_2()
             .flex()
             .items_center()
-            .gap_2()
+            .gap(px(10.))
+            .border_t_1()
+            .border_color(color(theme.role("border")))
             .text_size(px(12.))
-            .text_color(muted)
-            .child(div().flex_1().child(summary));
-        if scope == Scope::Everywhere {
-            row = row.child("Spotlight searches indexed volumes only");
-        } else if skipped > 0 {
-            row = row.child(
+            .child(div().flex_none().text_color(text_color).child(summary))
+            .children(link.map(|link| {
+                div().flex().items_center().gap(px(10.)).child(div().text_color(subtle).child("·")).child(link)
+            }))
+            .child(div().flex_1())
+            .children(hint)
+    }
+
+    /// The footer's left text, also used by tests and VoiceOver.
+    fn footer_text(&self) -> String {
+        footer_summary(FooterState {
+            searching: self.searching,
+            hits: self.hit_count,
+            files: self.results.len(),
+            capped: self.capped,
+            error: self.error.as_deref(),
+        })
+    }
+
+    /// Idle, error, empty or results, depending on the query and what has arrived.
+    fn render_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if self.query(cx).trim().is_empty() {
+            return self.render_idle(cx);
+        }
+        if self.results.is_empty() {
+            if self.error.is_some() {
+                return self.render_error(cx);
+            }
+            return self.render_empty(cx);
+        }
+        self.render_results(cx)
+    }
+
+    fn scope_label(&self) -> String {
+        match self.scope {
+            Scope::Folder => self.folder_label.clone(),
+            Scope::Home => "Home".to_owned(),
+            Scope::ThisMac => "This Mac".to_owned(),
+        }
+    }
+
+    fn render_idle(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let ui = cx.global::<Ui>();
+        let theme = ui.theme.clone();
+        let (fg, subtle) = (color(theme.role("fg")), color(theme.role("fg-subtle")));
+        let heading = if self.scope == Scope::ThisMac {
+            "Search names on this Mac".to_owned()
+        } else {
+            format!("Search names and contents in {}", self.scope_label())
+        };
+        let keycap = Keycap::for_action(&SearchEverything, KeyScope::Search, KeycapWeight::Key, cx)
+            .map(|keycap| keycap.into_any_element())
+            .unwrap_or_else(|| div().text_color(fg).child("⇧⌘A").into_any_element());
+        let spoken =
+            keys::spoken_for(&SearchEverything, KeyScope::Search, cx).unwrap_or_else(|| "Shift Command A".to_owned());
+        let examples = div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(self.render_example(
+                0,
+                div().child("config").into_any_element(),
+                "names and file contents, any case",
+                ExampleAction::Fill("config"),
+                "Search for config".to_owned(),
+                cx,
+            ))
+            .child(self.render_example(
+                1,
+                div().child("/fn \\w+_view/").into_any_element(),
+                "slashes make it a regular expression",
+                ExampleAction::Fill("/fn \\w+_view/"),
+                "Search for the regular expression fn backslash w plus underscore view".to_owned(),
+                cx,
+            ))
+            .child(self.render_example(
+                2,
+                div().child("This Mac").into_any_element(),
+                "names only, through Spotlight",
+                ExampleAction::ThisMac,
+                "Search This Mac".to_owned(),
+                cx,
+            ))
+            .child(self.render_example(
+                3,
+                keycap,
+                "also look inside node_modules, target, .git …",
+                ExampleAction::Everything,
+                format!("Search everything, {spoken}"),
+                cx,
+            ));
+        let close = keys::text(&CloseSearch, KeyScope::Search, cx).unwrap_or_else(|| "esc".into());
+        let reveal = keys::text(&SearchReveal, KeyScope::SearchResults, cx).unwrap_or_else(|| "⌘R".into());
+        let quick = keys::text(&QuickLook, KeyScope::SearchResults, cx).unwrap_or_else(|| "Space".into());
+        div()
+            .id("search-idle")
+            .debug_selector(|| "search-idle".into())
+            .flex_1()
+            .min_h_0()
+            .pt(px(34.))
+            .px(px(48.))
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .text_color(fg)
+            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(heading))
+            .child(examples)
+            .child(
                 div()
-                    .id("search-skipped-toggle")
+                    .text_size(px(12.))
+                    .text_color(subtle)
+                    .child(format!("{close} returns to {} · {reveal} reveals · {quick} previews", self.folder_label)),
+            )
+            .into_any_element()
+    }
+
+    fn render_example(
+        &self,
+        index: usize,
+        face: gpui::AnyElement,
+        description: &'static str,
+        action: ExampleAction,
+        aria: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let theme = cx.global::<Ui>().theme.clone();
+        let surface = color(theme.role("surface"));
+        let raised = color(theme.role("surface-raised"));
+        div()
+            .flex()
+            .items_center()
+            .gap(px(14.))
+            .child(
+                div()
+                    .id(("search-example", index))
+                    .debug_selector(move || format!("search-example-{index}"))
                     .role(Role::Button)
-                    .aria_label(format!("{skipped} folders skipped, show them"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_skipped = !this.show_skipped;
-                        cx.notify();
+                    .aria_label(aria)
+                    .min_w(px(150.))
+                    .h(px(26.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(raised)
+                    .bg(surface)
+                    .hover(move |style| style.bg(raised))
+                    .font_family("Menlo")
+                    .text_size(px(12.))
+                    .text_color(color(theme.role("fg")))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        match action {
+                            ExampleAction::Fill(text) => {
+                                let input = this.input.clone();
+                                input.update(cx, |input, cx| input.set_text(text, window, cx));
+                            }
+                            ExampleAction::ThisMac => this.set_scope(Scope::ThisMac, cx),
+                            ExampleAction::Everything => {
+                                this.search_everything(&SearchEverything, window, cx);
+                            }
+                        }
+                        this.focus_input(window, cx);
                     }))
-                    .child(format!("{skipped} folders skipped (rules)")),
-            );
+                    .child(face),
+            )
+            .child(div().text_color(color(theme.role("fg-muted"))).child(description))
+            .into_any_element()
+    }
+
+    fn render_empty(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.global::<Ui>().theme.clone();
+        let (muted, accent) = (color(theme.role("fg-muted")), color(theme.role("accent")));
+        if self.searching {
+            return div()
+                .flex_1()
+                .min_h_0()
+                .p_4()
+                .text_size(px(13.))
+                .text_color(muted)
+                .child("Searching…")
+                .into_any_element();
         }
-        if self.everything {
-            row = row.child("All rules off");
-        }
-        if let Some(error_text) = &self.error {
-            row = row.child(div().text_color(error).child(error_text.clone()));
-        }
-        row
+        let skipped = self.skipped.len();
+        let message = format!("No results for \"{}\" in {}", self.query(cx), self.scope_label());
+        div()
+            .id("search-empty")
+            .flex_1()
+            .min_h_0()
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .text_size(px(13.))
+            .text_color(muted)
+            .child(message)
+            .when(skipped > 0 && self.scope != Scope::ThisMac, |body| {
+                let hint = if self.everything { "Skip folders again" } else { "Search everything" };
+                body.child(
+                    div()
+                        .id("search-empty-everything")
+                        .role(Role::Button)
+                        .aria_label(format!("{skipped} folders were skipped. {hint}"))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_color(accent)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.search_everything(&SearchEverything, window, cx);
+                        }))
+                        .child(format!("{skipped} folders were skipped. {hint}"))
+                        .children(Keycap::for_action(&SearchEverything, KeyScope::Search, KeycapWeight::Outline, cx)),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_error(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.global::<Ui>().theme.clone();
+        let (error, muted) = (color(theme.role("error")), color(theme.role("fg-muted")));
+        let message = self.error.as_deref().unwrap_or("Search failed");
+        let hint = message.starts_with("invalid pattern").then(|| {
+            div()
+                .text_size(px(13.))
+                .text_color(muted)
+                .child("Slashes make it a regular expression; remove them to search literally.")
+        });
+        div()
+            .id("search-error")
+            .flex_1()
+            .min_h_0()
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .text_size(px(13.))
+            .text_color(error)
+            .child(format!("Can't search: {message}"))
+            .children(hint)
+            .into_any_element()
     }
 
     fn render_results(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -940,24 +1486,8 @@ impl SearchView {
         let muted = color(theme.role("fg-muted"));
         let border = color(theme.role("border"));
         let count = self.results.len();
-        if count == 0 {
-            let message = if self.query(cx).trim().is_empty() {
-                "Type to search names and contents"
-            } else if self.searching {
-                "Searching…"
-            } else {
-                "No results"
-            };
-            return div()
-                .flex_1()
-                .min_h_0()
-                .p_4()
-                .text_size(px(13.))
-                .text_color(muted)
-                .child(message)
-                .into_any_element();
-        }
         let scroll = self.scroll.clone();
+        let vim = ui.settings.keymap == KeymapLayer::Vim;
         let header = div()
             .h(px(26.))
             .px_2()
@@ -969,9 +1499,8 @@ impl SearchView {
             .border_b_1()
             .border_color(border)
             .child(div().flex_1().child("Name"))
-            .child(div().w(px(190.)).flex_none().child("Folder"))
-            .child(div().w(px(110.)).flex_none().child("Kind"))
-            .child(div().w(px(140.)).flex_none().child("Modified"));
+            .child(div().w(px(180.)).flex_none().child("Folder"))
+            .child(div().w(px(100.)).flex_none().child("Modified"));
         div()
             .id("search-results-list")
             .flex_1()
@@ -979,7 +1508,7 @@ impl SearchView {
             .flex()
             .flex_col()
             // keys::context_stack (KeyScope::SearchResults) mirrors this.
-            .key_context("SearchResults")
+            .key_context(if vim { "SearchResults vim" } else { "SearchResults" })
             .role(Role::ListBox)
             .aria_label(format!("Search results, {count} items"))
             .track_focus(&self.focus)
@@ -1011,31 +1540,38 @@ impl SearchView {
     ) -> Vec<impl IntoElement + use<>> {
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
-        let (fg, muted, subtle, accent) = (
-            color(theme.role("fg")),
-            color(theme.role("fg-muted")),
-            color(theme.role("fg-subtle")),
-            theme.role("accent"),
-        );
-        let selection_bg =
-            if self.focus.is_focused(window) { active_selection(theme) } else { inactive_selection(theme) };
+        let (fg, muted, subtle) =
+            (color(theme.role("fg")), color(theme.role("fg-muted")), color(theme.role("fg-subtle")));
+        let focused = self.focus.is_focused(window);
+        let selection_bg = if focused { active_selection(theme) } else { inactive_selection(theme) };
         let count = self.results.len();
         let cursor = self.cursor;
         range
             .filter_map(|i| {
                 let row = self.results.get(i)?;
                 let selected = self.selection.contains(&row.path);
-                let name_room = px(300.);
-                let name = crate::style::truncate_middle(&row.name, name_room, px(13.), window);
+                let on_selection = selected && focused;
+                let truncated = truncate_middle_parts(&row.name, px(300.), px(13.), window);
+                let name_ranges: Vec<Range<usize>> = row
+                    .name_ranges
+                    .iter()
+                    .flat_map(|range| map_range(&truncated, range.clone()))
+                    .filter(|range| !range.is_empty())
+                    .collect();
+                let name = highlight_text(truncated.text.clone(), &name_ranges, theme, on_selection);
                 let content = row.content.as_ref().map(|(line, text, ranges)| {
+                    let (text, ranges) = content_excerpt(text, ranges);
                     div()
                         .flex()
                         .items_center()
                         .gap_1()
                         .text_size(px(11.))
                         .text_color(muted)
-                        .child(format!("{line}:"))
-                        .child(highlighted(text, ranges, accent))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(div().text_color(subtle).child(format!("{line}: ")))
+                        .child(highlight_text(text, &ranges, theme, on_selection))
                 });
                 let entries: Arc<Vec<(PathBuf, bool)>> = if selected {
                     Arc::new(
@@ -1054,18 +1590,13 @@ impl SearchView {
                 div()
                     .id(("search-row", i))
                     .role(Role::ListBoxOption)
-                    .aria_label(format!(
-                        "{}, in {}, {}, modified {}",
-                        row.name,
-                        row.folder,
-                        row.kind,
-                        format_time(row.modified)
-                    ))
+                    .aria_label(row.label())
                     .aria_position_in_set(i + 1)
                     .aria_size_of_set(count)
                     .aria_selected(selected)
                     .when(cursor == i, |row| row.aria_active_descendant())
                     .h(px(ROW_HEIGHT))
+                    .w_full()
                     .px_2()
                     .rounded_md()
                     .flex()
@@ -1135,11 +1666,13 @@ impl SearchView {
                                     .min_w_0()
                                     .flex()
                                     .flex_col()
+                                    .justify_center()
                                     .child(
                                         div()
                                             .overflow_hidden()
                                             .whitespace_nowrap()
                                             .text_ellipsis()
+                                            .text_size(px(13.))
                                             .text_color(fg)
                                             .child(name),
                                     )
@@ -1148,31 +1681,20 @@ impl SearchView {
                     )
                     .child(
                         div()
-                            .w(px(190.))
+                            .w(px(180.))
                             .flex_none()
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .text_size(px(11.))
-                            .text_color(subtle)
+                            .text_size(px(12.))
+                            .text_color(muted)
                             .child(row.folder.clone()),
                     )
                     .child(
                         div()
-                            .w(px(110.))
+                            .w(px(100.))
                             .flex_none()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(11.))
-                            .text_color(muted)
-                            .child(row.kind.clone()),
-                    )
-                    .child(
-                        div()
-                            .w(px(140.))
-                            .flex_none()
-                            .text_size(px(11.))
+                            .text_size(px(12.))
                             .text_color(muted)
                             .child(format_time(row.modified)),
                     )
@@ -1186,15 +1708,15 @@ impl SearchView {
         if !self.show_skipped || self.skipped.is_empty() {
             return None;
         }
-        let ui = cx.global::<Ui>();
-        let theme = ui.theme.clone();
+        let theme = cx.global::<Ui>().theme.clone();
         let muted = color(theme.role("fg-muted"));
         let rows = self.skipped.iter().enumerate().map(|(i, (path, rule))| {
             div()
                 .id(("search-skipped-row", i))
+                .debug_selector(move || format!("search-skipped-row-{i}"))
                 .role(Role::ListItem)
                 .aria_label(format!("{}, {}", path.display(), rule))
-                .px_2()
+                .px_3()
                 .py_1()
                 .flex()
                 .flex_col()
@@ -1204,31 +1726,41 @@ impl SearchView {
         Some(
             div()
                 .id("search-skipped")
-                .role(Role::Dialog)
-                .aria_label("Skipped folders")
-                .mx_3()
-                .mb_2()
+                .role(Role::List)
+                .aria_label(format!("Skipped folders, {}", self.skipped.len()))
+                .w_full()
                 .max_h(px(220.))
-                .overflow_y_scroll()
-                .rounded_md()
-                .border_1()
+                .flex()
+                .flex_col()
+                .border_t_1()
                 .border_color(color(theme.role("border")))
                 .bg(color(theme.role("surface")))
                 .child(
                     div()
-                        .id("search-skipped-close")
-                        .role(Role::Button)
-                        .aria_label("Close skipped folders")
-                        .px_2()
+                        .flex()
+                        .items_center()
+                        .px_3()
                         .py_1()
                         .text_size(px(12.))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_skipped = false;
-                            cx.notify();
-                        }))
-                        .child("Close"),
+                        .text_color(muted)
+                        .child(div().flex_1().child("Folders skipped by exclude.toml"))
+                        .child(
+                            div()
+                                .id("search-skipped-close")
+                                .debug_selector(|| "search-skipped-close".into())
+                                .role(Role::Button)
+                                .aria_label("Close skipped folders")
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_skipped = false;
+                                    cx.notify();
+                                }))
+                                .child("Close"),
+                        ),
                 )
-                .children(rows),
+                .child(div().id("search-skipped-rows").flex_1().min_h_0().overflow_y_scroll().children(rows)),
         )
     }
 }
@@ -1237,6 +1769,7 @@ impl Render for SearchView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
+        let idle = self.query(cx).trim().is_empty();
         div()
             .id("search-view")
             .role(Role::Group)
@@ -1244,68 +1777,144 @@ impl Render for SearchView {
             // keys::context_stack (KeyScope::Search) mirrors this.
             .key_context("Search")
             .on_action(cx.listener(Self::search_everything))
+            .on_action(cx.listener(Self::cycle_match))
             .on_action(cx.listener(Self::close_action))
             .size_full()
             .flex()
             .flex_col()
             .bg(color(theme.role("bg")))
             .text_color(color(theme.role("fg")))
-            .child(self.render_header(cx))
-            .child(self.render_summary(cx))
-            .child(self.render_results(cx))
-            .children(self.render_skipped(cx))
+            .child(self.render_scope_bar(cx))
+            .child(self.render_body(cx))
+            .when(!idle, |view| view.children(self.render_skipped(cx)).child(self.render_footer(cx)))
+    }
+}
+
+/// What the footer says; a pure function so the wording is unit-tested.
+struct FooterState<'a> {
+    searching: bool,
+    /// Every accepted hit, including extra content lines for one file.
+    hits: usize,
+    /// Result rows: one per path.
+    files: usize,
+    capped: bool,
+    error: Option<&'a str>,
+}
+
+fn footer_summary(state: FooterState<'_>) -> String {
+    if let Some(error) = state.error {
+        return error.to_owned();
+    }
+    if state.capped {
+        return format!("First {MAX_RESULTS} files · refine the search");
+    }
+    let prefix = if state.searching { "Searching… " } else { "" };
+    if state.hits == 0 {
+        return if state.searching { "Searching…".to_owned() } else { "No results".to_owned() };
+    }
+    let results = if state.hits == 1 { "1 result".to_owned() } else { format!("{} results", state.hits) };
+    if state.hits > state.files {
+        let files = if state.files == 1 { "1 file".to_owned() } else { format!("{} files", state.files) };
+        format!("{prefix}{results} in {files}")
+    } else {
+        format!("{prefix}{results}")
+    }
+}
+
+/// "Skip dev folders" for the enabled sets, or None when none is enabled.
+pub fn skip_label(exclude: &Exclude) -> Option<String> {
+    let names: Vec<&str> =
+        SetName::ALL.into_iter().filter(|name| exclude.set(*name).enabled).map(SetName::id).collect();
+    match names.as_slice() {
+        [] => None,
+        [one] => Some(format!("Skip {one} folders")),
+        [first, second] => Some(format!("Skip {first} and {second} folders")),
+        _ => {
+            let (last, rest) = names.split_last().expect("not empty");
+            Some(format!("Skip {} and {last} folders", rest.join(", ")))
+        }
     }
 }
 
 impl Row {
-    fn from_hit(hit: Hit, home: &Path) -> Row {
-        let content = match hit.kind {
-            HitKind::Content { line, text, ranges } => Some((line, text, ranges)),
-            HitKind::Name => None,
+    fn label(&self) -> String {
+        let mut label = format!("{}, in {}, modified {}", self.name, self.folder, format_time(self.modified));
+        if let Some((line, text, _)) = &self.content {
+            label.push_str(&format!(", line {line}: {text}"));
+        }
+        label
+    }
+
+    fn from_hit(hit: Hit, home: &Path, folder_root: Option<&Path>) -> Row {
+        let (content, name_match, name_ranges) = match hit.kind {
+            HitKind::Content { line, text, ranges } => (Some((line, text, ranges)), false, Vec::new()),
+            HitKind::Name { ranges } => (None, true, ranges),
         };
-        Self::new(hit.path, hit.is_dir, hit.modified, hit.score, content, home)
+        Self::new(hit.path, hit.is_dir, hit.modified, hit.score, name_match, name_ranges, content, home, folder_root)
     }
 
-    fn from_spotlight(hit: crow_macos::SpotlightHit, home: &Path) -> Row {
-        Self::new(hit.path, hit.is_dir, hit.modified, 0, None, home)
+    fn from_spotlight(hit: crow_macos::SpotlightHit, query: &str, home: &Path) -> Row {
+        let name = hit.path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        let ranges = ascii_match_ranges(&name, query);
+        Self::new(hit.path, hit.is_dir, hit.modified, 0, true, ranges, None, home, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new(
         path: PathBuf,
         is_dir: bool,
         modified: Option<SystemTime>,
         score: u32,
+        name_match: bool,
+        name_ranges: Vec<Range<usize>>,
         content: Option<(u64, String, Vec<Range<usize>>)>,
         home: &Path,
+        folder_root: Option<&Path>,
     ) -> Row {
         let name = path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-        let folder = path.parent().map_or_else(String::new, |parent| abbreviate_home(parent, home));
+        let folder = match folder_root.and_then(|root| path.parent()?.strip_prefix(root).ok()) {
+            Some(relative) if relative.as_os_str().is_empty() => ".".to_owned(),
+            Some(relative) => relative.to_string_lossy().into_owned(),
+            None => path.parent().map_or_else(String::new, |parent| abbreviate_home(parent, home)),
+        };
         let ext = Path::new(&name).extension().and_then(|ext| ext.to_str()).unwrap_or("");
         let is_package = is_dir && matches!(ext, "app" | "bundle" | "framework" | "photoslibrary");
-        let kind: SharedString = crow_macos::kind_name(ext, is_dir).to_string().into();
-        Row { path, name, folder, is_dir, is_package, kind, modified, score, content }
+        Row { path, name, folder, is_dir, is_package, modified, score, name_match, name_ranges, content }
     }
 }
 
-/// The matching line with each regex range tinted.
-fn highlighted(text: &str, ranges: &[Range<usize>], accent: Rgb) -> impl IntoElement {
-    let mut row = div().flex().items_center();
-    let mut start = 0;
-    for range in ranges {
-        let end = range.end.min(text.len());
-        let from = range.start.min(end);
-        if from > start {
-            row = row.child(text[start..from].to_owned());
-        }
-        if from < end {
-            row = row.child(div().rounded_sm().bg(color_alpha(accent, 0x66)).child(text[from..end].to_owned()));
-        }
-        start = end;
+/// Every ASCII-case-insensitive occurrence of `query` in `name`, for Spotlight
+/// rows (Spotlight returns no match positions).
+fn ascii_match_ranges(name: &str, query: &str) -> Vec<Range<usize>> {
+    if query.is_empty() || !query.is_ascii() || !name.is_ascii() {
+        return Vec::new();
     }
-    if start < text.len() {
-        row = row.child(text[start..].to_owned());
+    let name = name.to_ascii_lowercase();
+    let query = query.to_ascii_lowercase();
+    name.match_indices(&query).map(|(start, _)| start..start + query.len()).collect()
+}
+
+/// A long matching line starts near its first match, with a leading ellipsis.
+fn content_excerpt(text: &str, ranges: &[Range<usize>]) -> (String, Vec<Range<usize>>) {
+    let text = text.replace('\t', " ");
+    let first = ranges.first().map_or(0, |range| range.start);
+    if first <= 60 {
+        return (text, ranges.to_vec());
     }
-    row
+    let mut offset = first - 20;
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let prefix = "\u{2026}";
+    let shifted = ranges
+        .iter()
+        .map(|range| {
+            let start = range.start.saturating_sub(offset) + prefix.len();
+            let end = range.end.saturating_sub(offset) + prefix.len();
+            start..end.max(start)
+        })
+        .collect();
+    (format!("{prefix}{}", &text[offset..]), shifted)
 }
 
 struct SearchDrag {
@@ -1352,9 +1961,60 @@ mod tests {
     }
 
     #[test]
+    fn footer_summary_copy() {
+        let state = |searching, hits, files, capped, error| FooterState { searching, hits, files, capped, error };
+        assert_eq!(footer_summary(state(true, 0, 0, false, None)), "Searching…");
+        assert_eq!(footer_summary(state(true, 44, 15, false, None)), "Searching… 44 results in 15 files");
+        assert_eq!(footer_summary(state(false, 44, 15, false, None)), "44 results in 15 files");
+        assert_eq!(footer_summary(state(false, 3, 3, false, None)), "3 results");
+        assert_eq!(footer_summary(state(false, 1, 1, false, None)), "1 result");
+        assert_eq!(footer_summary(state(false, 2, 1, false, None)), "2 results in 1 file");
+        assert_eq!(footer_summary(state(false, 0, 0, false, None)), "No results");
+        assert_eq!(footer_summary(state(false, 20_000, 10, true, None)), "First 20000 files · refine the search");
+        assert_eq!(footer_summary(state(false, 0, 0, false, Some("invalid pattern"))), "invalid pattern");
+    }
+
+    #[test]
+    fn skip_label_names_enabled_sets() {
+        let mut exclude = Exclude::default();
+        assert_eq!(skip_label(&exclude).as_deref(), Some("Skip dev folders"));
+        exclude.media.enabled = Some(true);
+        assert_eq!(skip_label(&exclude).as_deref(), Some("Skip dev and media folders"));
+        exclude.system.enabled = Some(true);
+        assert_eq!(skip_label(&exclude).as_deref(), Some("Skip dev, media and system folders"));
+        for set in [&mut exclude.dev, &mut exclude.media, &mut exclude.system] {
+            set.enabled = Some(false);
+        }
+        assert_eq!(skip_label(&exclude), None);
+    }
+
+    #[test]
+    fn spotlight_ranges_are_case_insensitive() {
+        assert_eq!(ascii_match_ranges("Config.toml", "config"), vec![0..6]);
+        assert_eq!(ascii_match_ranges("aConfig.Config", "config"), vec![1..7, 8..14]);
+        assert!(ascii_match_ranges("r\u{e9}sum\u{e9}.txt", "sum").is_empty(), "non-ASCII names keep no ranges");
+        assert!(ascii_match_ranges("Config.toml", "c\u{f6}nfig").is_empty(), "non-ASCII queries keep no ranges");
+    }
+
+    #[test]
+    fn content_excerpt_starts_near_the_match() {
+        let text = format!("{}needle{}", "x".repeat(200), "y".repeat(50));
+        let ranges: Vec<Range<usize>> = std::iter::once(200..206).collect();
+        let (shown, shifted) = content_excerpt(&text, &ranges);
+        assert!(shown.starts_with('\u{2026}'));
+        assert_eq!(&shown[shifted[0].clone()], "needle");
+        assert!(shown.len() < text.len());
+        let hit: Vec<Range<usize>> = std::iter::once(0..6).collect();
+        let (text, ranges) = content_excerpt("needle in beta", &hit);
+        assert_eq!(text, "needle in beta");
+        let expected: Vec<Range<usize>> = std::iter::once(0..6).collect();
+        assert_eq!(ranges, expected);
+    }
+
+    #[test]
     fn spotlight_forces_names() {
-        assert_eq!(effective_match_for(Scope::Everywhere, Match::Contents), Match::Names);
-        assert_eq!(effective_match_for(Scope::Everywhere, Match::All), Match::Names);
+        assert_eq!(effective_match_for(Scope::ThisMac, Match::Contents), Match::Names);
+        assert_eq!(effective_match_for(Scope::ThisMac, Match::All), Match::Names);
         assert_eq!(effective_match_for(Scope::Folder, Match::Contents), Match::Contents);
         assert_eq!(effective_match_for(Scope::Folder, Match::All), Match::All);
     }

@@ -14,7 +14,9 @@ selection, type-to-select, sorting, Go to Folder, the column view's focus rules,
 (new folder and rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete),
 drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent),
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
-(preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette, the search panel, the top band
+(preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette, the search panel (scope bar and switch,
+footer counts and skipped list, idle examples, name-before-contents order and highlights, preview in
+list and column view at the hit line, match cycling), the top band
 (search field click, Cmd-F refocus and select-all, Done/Esc, Go to, All/Names/Contents, switching
 tabs closing search, the Tab cycle while searching, focus never left on an element that is gone), the bottom bar
 (hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
@@ -33,8 +35,10 @@ frecency with zoxide's scores.
 `crates/crow-search` tests the engine on temp trees: dev rules and sentinels skip and are counted,
 Search everything walks them, hidden files follow the setting, fuzzy names score, literal and
 `/regex/` contents report the line, text and ranges, binary files are not read, and cancelling stops
-the stream. The search panel adds keystroke tests for names and contents, Search everything,
-navigating and revealing results, copy and trash, and the Vim layer.
+the stream. The search panel adds keystroke tests for names and contents, Search everything and its switch,
+scope buttons, Cmd-Shift-M cycling, idle examples, footer counts and errors, the skipped list,
+name-before-contents order, preview loading and the hit line, navigating and revealing results,
+copy and trash, and Vim j/k in the results.
 
 The operation engine (`crates/crow-fs/src/ops_tests.rs`) is tested against real temp folders:
 every operation and its undo, each conflict choice, cancelling midway, a read-only destination,
@@ -95,7 +99,7 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Locations | Mount a disk image: it appears without a restart, with a free-space bar; ⏏ ejects it. |
 | Top band | Hover Back, Forward, both view buttons, Go to and the search field: each shows a tooltip with its key ("Back to <folder> ⌘["). At the start of history Back is the same icon, faded. Traffic lights sit centred on the band. Light and dark themes. |
 | Search field | Click the field: search opens with the cursor in the field; the field spans the band with an accent ring; Done esc on the right. Tab to the results: the ring goes; Tab again to the sidebar, again back to the field (with nothing typed, Tab goes straight to the sidebar). From any of them Cmd-F brings the field back with the query selected, and Esc closes. Esc or Done returns to the folder with keys going to the list. |
-| All / Names / Contents | Search a word that's in file names and inside files: Names drops the content lines, Contents drops the name-only rows. Names in Home is fast (no file reads). Switch to Everywhere: the control shows Names, faded. |
+| All / Names / Contents | Search a word that's in file names and inside files: Names drops the content lines, Contents drops the name-only rows. Names in Home is fast (no file reads). Switch to This Mac: the control shows Names, faded. Cmd-Shift-M in the field and in the results cycles All → Names → Contents. |
 | Narrow window | Shrink the window: the title truncates, then the field shrinks, then Go to loses its label. In search mode the field shrinks but the match control and Done stay whole. |
 | VoiceOver | Cmd-F5: the band reads as a toolbar; the field announces "Search <folder>, Command F"; in search mode the field is a search field and Done reads "Done, close search, Escape". |
 | View settings | Cmd-3 in one folder, then visit another: it keeps its own view; going up in column view stays in columns. Add a `[[rule]]` to `views.toml` with the folder open: it applies at once. Cmd-J explains each value. |
@@ -106,9 +110,13 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Filter to search | Filter a column, then press Cmd-F (or click the footer): search opens with the same text in that folder, and Esc returns to the unfiltered column. Filter something with no matches: "Nothing in … matches", the button opens search, and the hidden-files note shows when hidden files are off. |
 | Filter look | In a light and a dark theme, accent text on the selected row is readable; in the Vim layer, letters typed in the field stay there. VoiceOver reads "Filter <folder>", the count, and the no-match line. |
 | Command palette | Cmd-K: type a recent folder and Return; try Cmd-Return for a new tab and `>` for commands; Vim j/k moves the cursor. |
-| Search | Cmd-F, search a word in file names and in contents: rows show the matching line with highlights; switch This Folder / Home / Everywhere; Return, Cmd-R, Space, drag-out, Cmd-C and Cmd-Delete act on results. |
-| Skipped folders | Search a folder with `node_modules`: the summary counts skipped folders; click it and check each folder is listed with the rule that skipped it. Cmd-Shift-A (Search everything) includes them. |
-| Spotlight | Search "Everywhere" for a name outside the home folder: results stream in and the summary says Spotlight only sees indexed volumes. |
+| Search | Cmd-F, search a word in file names and in contents: name matches come first and their letters are highlighted; content hits show the line number and the line under the name; switch <folder> / Home / This Mac; Return, Cmd-R, Space, drag-out, Cmd-C and Cmd-Delete act on results. The right pane previews the selected result in list and column view, at the hit line. |
+| Search scope bar | One bar: "Search", the scope segments, and "Skip dev folders" on the right; click the switch and press Cmd-Shift-A: both flip it and the results change. Enable `media` in `exclude.toml`: the label becomes "Skip dev and media folders" without reopening. |
+| Skipped folders | Search a folder with `node_modules`: the footer says "k folders skipped ›"; click it and check each folder is listed with the rule that skipped it, above the footer. Esc closes the list first, then search. Search everything includes them and the link goes away. |
+| Spotlight | Search This Mac for a name outside the home folder: results stream in, the switch is replaced by "Spotlight: indexed volumes only". |
+| Search idle | Cmd-F with nothing typed: heading and four examples; each example fills the field, switches to This Mac, or flips the switch. The key line follows `keymap = "vim"`. |
+| Search errors | Type `/(/`: the footer shows the invalid pattern error in red; no rows, and the body suggests removing the slashes. |
+| Search themes | FireBox and a light scheme: switch knob, selected segment and match highlights on the selected row stay readable; VoiceOver reads the switch as on/off and the footer once per finished search. |
 | VoiceOver | Cmd-F5, move through the list: each row reads name, details and "n of N". |
 | Privacy prompts | Open Desktop, Documents, Downloads: the prompt names Crow. |
 | Tooltips | Hover back, forward, both view buttons, a path segment, the disk row, Search everything and Cancel during a copy: each shows its name, and its key where it has one ("Back to Desktop ⌘["). VoiceOver still reads the old labels. |

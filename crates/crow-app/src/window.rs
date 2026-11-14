@@ -31,6 +31,7 @@ use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::style::{active_selection, color, icon, ui_font};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::{self, Ui, reload_theme};
+use crow_fs::Entry;
 use crow_fs::ops::{Plan, Request, Resolution};
 use std::collections::HashMap;
 
@@ -655,10 +656,21 @@ impl CrowWindow {
         let pane = self.pane().read(cx);
         let entry = pane.cursor_entry(cx);
         let preview = pane.preview(cx);
+        self.render_preview_pane(entry.as_ref(), preview, &theme)
+    }
+
+    /// The 300 px preview chrome, shared by the pane and search.
+    fn render_preview_pane(
+        &self,
+        entry: Option<&Entry>,
+        preview: Option<&crate::preview::Preview>,
+        theme: &crow_theme::Theme,
+    ) -> gpui::Stateful<gpui::Div> {
         div()
             .id("preview")
+            .debug_selector(|| "preview".into())
             .role(Role::Group)
-            .aria_label(entry.as_ref().map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview)))
+            .aria_label(entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview)))
             .w(px(300.))
             .flex_none()
             .h_full()
@@ -666,7 +678,7 @@ impl CrowWindow {
             .border_l_1()
             .border_color(color(theme.role("border")))
             .overflow_hidden()
-            .children(entry.map(|e| preview::contents(&e, preview, &theme)))
+            .children(entry.map(|e| preview::contents(e, preview, theme)))
     }
 
     /// Which element owns the keys, for the bar's hints.
@@ -2127,7 +2139,17 @@ impl Render for CrowWindow {
         let current = self.pane().read(cx).current_dir(cx);
         self.sidebar.update(cx, |s, cx| s.set_current(current, cx));
         let sidebar = self.sidebar.clone();
-        let preview = (list_view && self.search.is_none()).then(|| self.render_preview(cx));
+        let search_preview = self.search.as_ref().and_then(|search| search.read(cx).preview_parts());
+        let narrow = window.viewport_size().width < px(900.);
+        let preview: Option<gpui::AnyElement> = if self.search.is_some() {
+            if narrow { None } else { search_preview }.map(|(entry, preview)| {
+                self.render_preview_pane(Some(&entry), preview.as_ref(), &theme).into_any_element()
+            })
+        } else if list_view {
+            Some(self.render_preview(cx).into_any_element())
+        } else {
+            None
+        };
         let path_bar = self.render_bottom_bar(window, cx);
         let go_to = self.render_go_to(cx);
         let sheet = self.render_sheet(cx);
@@ -2173,6 +2195,16 @@ impl Render for CrowWindow {
                 // from wherever focus is (the sidebar, say).
                 if cx.global::<Operations>().running.is_some() {
                     operations::cancel_running(cx);
+                } else if let Some(search) = &this.search
+                    && search.update(cx, |search, cx| {
+                        let closed = search.close_skipped();
+                        if closed {
+                            cx.notify();
+                        }
+                        closed
+                    })
+                {
+                    // Esc closed the skipped list; the next one closes search.
                 } else {
                     this.close_search(window, cx);
                 }
@@ -3190,6 +3222,20 @@ mod tests {
         panic!("search never finished");
     }
 
+    /// Wait until the search preview for `path` has loaded.
+    fn wait_for_preview(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, path: &Path) {
+        for _ in 0..400 {
+            cx.run_until_parked();
+            let loaded =
+                view.read_with(cx, |w, cx| w.search.as_ref().and_then(|search| search.read(cx).preview_path()));
+            if loaded.as_deref() == Some(path) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("preview for {} never loaded", path.display());
+    }
+
     /// Click the element with this debug selector, failing if it is not on screen.
     fn click_selector(cx: &mut VisualTestContext, selector: &'static str) {
         let bounds = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is on screen"));
@@ -3222,6 +3268,34 @@ mod tests {
     }
 
     #[gpui::test]
+    fn search_scope_buttons_switch_scope(cx: &mut TestAppContext) {
+        let root = fixture("search-scope");
+        std::fs::write(root.join("notes.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+
+        // Empty query: switching scope starts no walk, Home or Spotlight.
+        click_selector(&mut cx, "search-scope-home");
+        settle(&view, &mut cx);
+        assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Home);
+
+        click_selector(&mut cx, "search-scope-this-mac");
+        settle(&view, &mut cx);
+        assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::ThisMac);
+
+        click_selector(&mut cx, "search-scope-folder");
+        settle(&view, &mut cx);
+        assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Folder);
+
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.contains(&root.join("notes.txt")), "{paths:?}");
+    }
+
+    #[gpui::test]
     fn search_everything_turns_the_rules_off(cx: &mut TestAppContext) {
         let root = fixture("search-rules");
         std::fs::create_dir_all(root.join("node_modules/pkg")).expect("create fixture");
@@ -3244,6 +3318,308 @@ mod tests {
         let paths = search.read_with(&cx, |search, _| search.result_paths());
         assert!(paths.contains(&root.join("node_modules/pkg/needle.txt")), "{paths:?}");
         assert_eq!(search.read_with(&cx, |search, _| search.skipped_count()), 0);
+    }
+
+    #[gpui::test]
+    fn search_row_aria_reads_line(cx: &mut TestAppContext) {
+        let root = fixture("search-aria");
+        std::fs::write(root.join("other.txt"), "needle in beta\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        let index = paths.iter().position(|path| path.ends_with("other.txt")).expect("content hit");
+        let label = search.read_with(&cx, |search, _| search.row_label(index)).expect("a row");
+        assert!(label.starts_with("other.txt, in "), "{label}");
+        assert!(label.ends_with(", line 1: needle in beta"), "{label}");
+    }
+
+    #[gpui::test]
+    fn search_preview_follows_the_selection(cx: &mut TestAppContext) {
+        let root = fixture("search-preview");
+        std::fs::write(root.join("a-notes.txt"), "alpha\n").expect("create fixture");
+        std::fs::write(root.join("b-notes.txt"), "beta\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.len() >= 2, "{paths:?}");
+        wait_for_preview(&view, &mut cx, &paths[0]);
+
+        cx.simulate_keystrokes("tab");
+        cx.simulate_keystrokes("down");
+        wait_for_preview(&view, &mut cx, &paths[1]);
+        assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 1);
+    }
+
+    #[gpui::test]
+    fn search_preview_shows_in_column_view(cx: &mut TestAppContext) {
+        let root = fixture("search-preview-columns");
+        std::fs::write(root.join("notes.txt"), "hello\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        let path = search.read_with(&cx, |search, _| search.result_paths()).first().cloned().expect("a result");
+        wait_for_preview(&view, &mut cx, &path);
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("preview").is_some(), "the preview pane is on screen");
+    }
+
+    #[gpui::test]
+    fn search_preview_shows_the_hit_line(cx: &mut TestAppContext) {
+        let root = fixture("search-preview-hit");
+        let mut body = String::new();
+        for n in 1..=100 {
+            body.push_str(if n == 80 { "needle on line 80\n" } else { "filler\n" });
+        }
+        std::fs::write(root.join("deep.txt"), body).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        wait_for_preview(&view, &mut cx, &root.join("deep.txt"));
+        let (hit, text) = search.read_with(&cx, |search, _| search.preview_excerpt()).expect("an excerpt");
+        assert_eq!(hit, 80);
+        assert!(text.lines().any(|line| line == "needle on line 80"), "{text}");
+    }
+
+    #[gpui::test]
+    fn search_results_vim_j_k_move_the_cursor(cx: &mut TestAppContext) {
+        let root = fixture("search-vim-results");
+        std::fs::write(root.join("notes-a.txt"), "alpha\n").expect("create fixture");
+        std::fs::write(root.join("notes-b.txt"), "beta\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert!(search.read_with(&cx, |search, _| search.result_paths()).len() >= 2);
+        cx.simulate_keystrokes("tab");
+        assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 0);
+        cx.simulate_keystrokes("j");
+        assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 1);
+        cx.simulate_keystrokes("k");
+        assert_eq!(search.read_with(&cx, |search, _| search.cursor()), 0);
+    }
+
+    #[gpui::test]
+    fn search_name_hits_outrank_content_hits(cx: &mut TestAppContext) {
+        let root = fixture("search-order");
+        std::fs::write(root.join("m5-notes.md"), "nothing\n").expect("create fixture");
+        std::fs::write(root.join("deep.txt"), "m5 lives here\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("m5");
+        wait_for_search(&view, &mut cx);
+        let paths = view.read_with(&cx, |w, cx| w.search.as_ref().expect("search").read(cx).result_paths());
+        assert_eq!(paths.first().and_then(|path| path.file_name()), Some("m5-notes.md".as_ref()), "{paths:?}");
+        assert!(paths.iter().any(|path| path.ends_with("deep.txt")), "{paths:?}");
+    }
+
+    #[gpui::test]
+    fn search_footer_counts_hits_and_files(cx: &mut TestAppContext) {
+        let root = fixture("search-footer");
+        std::fs::write(root.join("a.txt"), "needle\nx\nneedle\nneedle\n").expect("create fixture");
+        std::fs::write(root.join("b.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert_eq!(search.read_with(&cx, |search, _| search.hit_count()), 4);
+        assert_eq!(search.read_with(&cx, |search, _| search.result_paths().len()), 2);
+        assert_eq!(search.read_with(&cx, |search, _| search.footer_summary_text()), "4 results in 2 files");
+        assert!(cx.debug_bounds("search-footer").is_some());
+    }
+
+    #[gpui::test]
+    fn search_skipped_link_opens_the_list_and_escape_closes_it_first(cx: &mut TestAppContext) {
+        let root = fixture("search-skipped");
+        std::fs::create_dir_all(root.join("node_modules/pkg")).expect("create fixture");
+        std::fs::write(root.join("node_modules/pkg/needle.txt"), "needle\n").expect("create fixture");
+        std::fs::write(root.join("outside.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert!(search.read_with(&cx, |search, _| search.skipped_count()) > 0);
+
+        click_selector(&mut cx, "search-skipped-link");
+        settle(&view, &mut cx);
+        assert!(search.read_with(&cx, |search, _| search.skipped_open()));
+        assert!(cx.debug_bounds("search-skipped-row-0").is_some());
+
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_some()), "Esc closed the list, not search");
+        assert!(!search.read_with(&cx, |search, _| search.skipped_open()));
+
+        click_selector(&mut cx, "search-skipped-link");
+        settle(&view, &mut cx);
+        click_selector(&mut cx, "search-skipped-close");
+        settle(&view, &mut cx);
+        assert!(!search.read_with(&cx, |search, _| search.skipped_open()));
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "the next Esc closes search");
+    }
+
+    #[gpui::test]
+    fn search_invalid_regex_shows_the_error(cx: &mut TestAppContext) {
+        let root = fixture("search-error");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("/(/");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        let error = search.read_with(&cx, |search, _| search.error_text()).expect("an error");
+        assert!(error.starts_with("invalid pattern"), "{error}");
+        assert!(search.read_with(&cx, |search, _| search.result_paths().is_empty()));
+        let footer = search.read_with(&cx, |search, _| search.footer_summary_text());
+        assert!(footer.starts_with("invalid pattern"), "{footer}");
+    }
+
+    #[gpui::test]
+    fn search_switch_flips_rules(cx: &mut TestAppContext) {
+        let root = fixture("search-switch");
+        std::fs::create_dir_all(root.join("node_modules/pkg")).expect("create fixture");
+        std::fs::write(root.join("node_modules/pkg/needle.txt"), "needle\n").expect("create fixture");
+        std::fs::write(root.join("outside.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert!(!search.read_with(&cx, |search, _| search.everything()));
+
+        click_selector(&mut cx, "search-skip-switch");
+        wait_for_search(&view, &mut cx);
+        assert!(search.read_with(&cx, |search, _| search.everything()));
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(paths.contains(&root.join("node_modules/pkg/needle.txt")), "{paths:?}");
+
+        click_selector(&mut cx, "search-skip-switch");
+        wait_for_search(&view, &mut cx);
+        assert!(!search.read_with(&cx, |search, _| search.everything()));
+        let paths = search.read_with(&cx, |search, _| search.result_paths());
+        assert!(!paths.iter().any(|path| path.ends_with("node_modules/pkg/needle.txt")), "{paths:?}");
+    }
+
+    #[gpui::test]
+    fn search_switch_hidden_for_this_mac(cx: &mut TestAppContext) {
+        let root = fixture("search-switch-spotlight");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("search-skip-switch").is_some());
+        click_selector(&mut cx, "search-scope-this-mac");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("search-skip-switch").is_none());
+    }
+
+    #[gpui::test]
+    fn search_shift_cmd_a_from_toolbar_field_flips_rules(cx: &mut TestAppContext) {
+        let root = fixture("search-switch-key");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        focus_search_input(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-shift-a");
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert!(search.read_with(&cx, |search, _| search.everything()));
+    }
+
+    #[gpui::test]
+    fn search_opened_with_everything_shows_switch_off(cx: &mut TestAppContext) {
+        let root = fixture("search-open-everything");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-shift-a");
+        settle(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert!(search.read_with(&cx, |search, _| search.everything()));
+        assert!(cx.debug_bounds("search-skip-switch").is_some());
+    }
+
+    #[gpui::test]
+    fn search_shift_cmd_m_cycles_the_match_mode(cx: &mut TestAppContext) {
+        let root = fixture("search-cycle");
+        std::fs::write(root.join("needle.txt"), "needle\n").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        focus_search_input(&view, &mut cx);
+        cx.simulate_input("needle");
+        wait_for_search(&view, &mut cx);
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        focus_search_input(&view, &mut cx);
+
+        cx.simulate_keystrokes("cmd-shift-m");
+        assert_eq!(search.read_with(&cx, |search, _| search.matching()), crate::search::Match::Names);
+        focus_search_input(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-shift-m");
+        assert_eq!(search.read_with(&cx, |search, _| search.matching()), crate::search::Match::Contents);
+        focus_search_input(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-shift-m");
+        assert_eq!(search.read_with(&cx, |search, _| search.matching()), crate::search::Match::All);
+    }
+
+    #[gpui::test]
+    fn search_idle_example_fills_the_query(cx: &mut TestAppContext) {
+        let root = fixture("search-idle");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        click_selector(&mut cx, "search-example-0");
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "config");
+        let focus = search.read_with(&cx, |search, cx| search.input_focus_handle(cx));
+        assert!(cx.update(|window, _| focus.is_focused(window)), "focus returns to the field");
+    }
+
+    #[gpui::test]
+    fn search_idle_example_this_mac_switches_scope(cx: &mut TestAppContext) {
+        let root = fixture("search-idle-scope");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        click_selector(&mut cx, "search-example-2");
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::ThisMac);
+        assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "", "the field stays empty");
+    }
+
+    #[gpui::test]
+    fn search_idle_example_everything_flips_rules(cx: &mut TestAppContext) {
+        let root = fixture("search-idle-everything");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        click_selector(&mut cx, "search-example-3");
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        assert!(search.read_with(&cx, |search, _| search.everything()));
+    }
+
+    #[gpui::test]
+    fn search_idle_shows_for_empty_query(cx: &mut TestAppContext) {
+        let root = fixture("search-idle-again");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-f");
+        settle(&view, &mut cx);
+        cx.simulate_input("x");
+        wait_for_search(&view, &mut cx);
+        assert!(cx.debug_bounds("search-example-0").is_none());
+        cx.simulate_keystrokes("backspace");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("search-example-0").is_some());
     }
 
     #[gpui::test]
@@ -3386,7 +3762,7 @@ mod tests {
         click_selector(&mut cx, "search-match-contents");
         assert_eq!(search.read_with(&cx, |search, _| search.effective_match()), crate::search::Match::Contents);
 
-        click_selector(&mut cx, "search-scope-Everywhere");
+        click_selector(&mut cx, "search-scope-this-mac");
         settle(&view, &mut cx);
         assert_eq!(
             search.read_with(&cx, |search, _| search.effective_match()),
@@ -3399,7 +3775,7 @@ mod tests {
             crate::search::Match::Contents,
             "the stored choice survives, and clicks on Spotlight change nothing"
         );
-        click_selector(&mut cx, "search-scope-This Folder");
+        click_selector(&mut cx, "search-scope-folder");
         settle(&view, &mut cx);
         assert_eq!(search.read_with(&cx, |search, _| search.effective_match()), crate::search::Match::Contents);
     }
