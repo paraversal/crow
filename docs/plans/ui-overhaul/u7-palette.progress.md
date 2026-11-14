@@ -15,7 +15,7 @@ Branch: ui-u7-palette · PR: none · Last updated: 2026-11-14
 | I3 Folder mode on the Sheet | done (d833a58) | U1 Sheet (Wide, scrim, scrim click), 50 px input row with Go to glyph + count (`Role::Status`), scrolling div of `Role::Group` sections, 44 px two-line rows (name + middle-truncated path, accent matches), Recent ages, keycap footer; `truncate_middle_with_ranges` and `TextInput::with_aria_label` added; `palette_rows` helper + 4 tests |
 | I4 Command mode | done | `PaletteMode`, Commands token, `>` strip (idempotent against the queued nested `Changed`), `BackspaceAtStart` + `.report_backspace_at_start()`, `command_listing` with "Recently used"/"All commands" (5, not repeated), 40 px rows with 64 px menu column, toggle chip + `aria_toggled`, `Keycap::Key` from the live keymap, mode-aware placeholder/aria/footer/count; 4 tests |
 | I5 ⇥ completion and path mode | done | `path_query`, `path_listing` (this folder first, name matches, 50 cap), `Row::Status` for Loading…/missing parents; `Palette.path` caches a parent listing spawned with `crow_fs::list_dir` off the main thread (generation + parent guard drops stale results, relists when the dot rule changes); Tab completes the highlighted folder or `complete_typed` off the main thread (command mode/no rows: no-op or bell); 4 keystroke tests + 3 unit tests |
-| I6 Recently used commands | todo | |
+| I6 Recently used commands | done | `CommandId::key`/`from_key` (stable kebab ids, round-trip test), `crow_core::RecentCommands` (front/dedup/cap 5, load/save, broken → empty), `Settings.palette_recent_commands` (default true, documented), `Ui.recent_commands` loaded at startup + `ui::record_command` (background save, no-op when off), `confirm_palette` records palette runs, "Recently used" (5, not repeated) via `command_listing`; 3 keystroke tests |
 
 ## Questions
 - Q1–Q9 (asked 2026-11-14, batch of the plan's "Questions to ASK") → **all recommended answers** (from the user):
@@ -24,7 +24,10 @@ Branch: ui-u7-palette · PR: none · Last updated: 2026-11-14
 ## Decisions
 - Plan/decided scope, restated: empty-query-only "Recently used"; `palette_recent_commands` default `true`; ⇥ completion in folder mode only; footer keycaps from the live keymap.
 - Reuse U6's `FuzzyMatcher::indices` and `style::highlight_text` instead of adding a second implementation (plan's I1 owner note; shared-names table) — plan.
-- Keep `Palette::row_keys` (used by `command_palette_keys_follow_the_layer`) as the single key-lookup helper.
+- **Path mode needs a non-row line** ("Loading…", "No folder at …"): `Row::Status(SharedString)` was added to the plan's `Header | Item`. It renders as a 44 px `Role::Label` line and is never selectable.
+- Path-mode children are sorted by name when the partial is empty (plan says "listing order"; `list_dir` is unsorted, so a stable order was needed for tests and the UI).
+- `Listing.rows` (not `items`) decides the empty state, so a status-only section still draws its header.
+- Command count with a query is "m of n" without the word "commands" (Target), so `palette_gt_becomes_commands_token` asserts the two numbers, not a suffix.
 - **Deviates from Target (user approved 2026-11-14):** with a non-empty query, folder rows are one flat list by score (no section headers), like command mode. Fixed sections let a weak subsequence match in an earlier section (the start folder's long path, recorded as Recent at `window.rs:142`) outrank the folder actually named in the query, which broke the unchanged `command_palette_cmd_return_opens_a_new_tab`. Empty queries keep the Recent / Favorites / In sections and Q3 caps; typed queries cap at 50 total.
 
 ## Hand checks
@@ -42,6 +45,7 @@ Branch: ui-u7-palette · PR: none · Last updated: 2026-11-14
 - 2026-11-14: read plan, AGENTS.md, index; verified U1/U2/U6 on `main`; created branch and this file.
 - 2026-11-14: I1 done (U6 already implemented `indices`; added byte-range + score tests). I2 done: palette model replaced `items()` with `listing()`; window holds a `Listing` but still draws the old 26 px rows. Found the section-order/ranking conflict (asked; user chose flat typed queries).
 - 2026-11-14: I3 done (sheet, sections, two-line rows, keycap footer). I4 done (Commands token, mode-aware field/footer/count, menu column, toggle chips, keycaps). I5 done (path mode with off-main-thread listing, Tab completion).
+- 2026-11-14: I6 done (remembered commands + setting). Performance: `folder_listing` with 10 000 candidates, release, worst of 100 runs (empty, 1–2 letter, specific and no-match queries): **0.73 ms**, under the 4 ms budget. `refresh_palette` logs its elapsed time at `debug`. README and `docs/testing.md` updated.
 
 ## Next
-I6: remembered commands (`palette-commands.json`, `palette_recent_commands`).
+Finish: fmt/clippy/tests, `./scripts/bundle.sh`, hand checks, push, PR.

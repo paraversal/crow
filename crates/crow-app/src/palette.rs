@@ -125,6 +125,63 @@ pub struct Command {
     pub palette: bool,
 }
 
+impl CommandId {
+    /// The stable id remembered in `palette-commands.json`: renaming a variant
+    /// must not change this string.
+    pub fn key(self) -> &'static str {
+        match self {
+            CommandId::NewTab => "new-tab",
+            CommandId::CloseTab => "close-tab",
+            CommandId::NextTab => "next-tab",
+            CommandId::PreviousTab => "previous-tab",
+            CommandId::NewWindow => "new-window",
+            CommandId::SwitchFocus => "switch-focus",
+            CommandId::ToggleHiddenFiles => "toggle-hidden-files",
+            CommandId::OpenParent => "open-parent",
+            CommandId::GoBack => "go-back",
+            CommandId::GoForward => "go-forward",
+            CommandId::GoToFolder => "go-to-folder",
+            CommandId::ViewAsList => "view-as-list",
+            CommandId::ViewAsColumns => "view-as-columns",
+            CommandId::Open => "open",
+            CommandId::QuickLook => "quick-look",
+            CommandId::Rename => "rename",
+            CommandId::NewFolder => "new-folder",
+            CommandId::Duplicate => "duplicate",
+            CommandId::MoveToTrash => "move-to-trash",
+            CommandId::DeletePermanently => "delete-permanently",
+            CommandId::Copy => "copy",
+            CommandId::Cut => "cut",
+            CommandId::Paste => "paste",
+            CommandId::PasteMove => "paste-move",
+            CommandId::SelectAll => "select-all",
+            CommandId::StartFilter => "start-filter",
+            CommandId::Undo => "undo",
+            CommandId::Redo => "redo",
+            CommandId::AddToSidebar => "add-to-sidebar",
+            CommandId::ShowSearch => "show-search",
+            CommandId::SearchEverything => "search-everything",
+            CommandId::ShowCommandPalette => "show-command-palette",
+            CommandId::SearchReveal => "search-reveal",
+            CommandId::WhyThisView => "why-this-view",
+            CommandId::UseViewAsDefaults => "use-view-as-defaults",
+            CommandId::ResetFolderView => "reset-folder-view",
+            CommandId::ShowThemePicker => "show-theme-picker",
+            CommandId::ToggleActivity => "toggle-activity",
+            CommandId::RemoveFromSidebar => "remove-from-sidebar",
+            CommandId::MoveFavoriteUp => "move-favorite-up",
+            CommandId::MoveFavoriteDown => "move-favorite-down",
+            CommandId::Eject => "eject",
+            CommandId::Quit => "quit",
+        }
+    }
+
+    /// The command whose key is `key`; `None` for a command this build no longer has.
+    pub fn from_key(key: &str) -> Option<CommandId> {
+        COMMANDS.iter().find(|command| command.id.key() == key).map(|command| command.id)
+    }
+}
+
 /// User-facing commands in menu-bar order (the empty `>` palette order too).
 pub const COMMANDS: &[Command] = &[
     // Crow
@@ -559,8 +616,8 @@ pub struct Listing {
 /// Empty query: at most this many Recent rows, and this many "In" rows.
 const RECENT_LIMIT: usize = 8;
 const HERE_LIMIT: usize = 20;
-/// The "Recently used" section's cap.
-const RECENT_COMMANDS: usize = 5;
+/// How many remembered commands the "Recently used" section holds.
+pub const RECENT_COMMANDS: usize = 5;
 /// The list never holds more than this many items, headers aside.
 const TOTAL_LIMIT: usize = 50;
 
@@ -1035,6 +1092,18 @@ mod tests {
         assert_eq!(count_text(0), "No places");
         assert_eq!(count_text(1), "1 place");
         assert_eq!(count_text(5), "5 places");
+    }
+
+    #[test]
+    fn command_keys_are_stable_and_unique() {
+        for (i, command) in COMMANDS.iter().enumerate() {
+            assert_eq!(CommandId::from_key(command.id.key()), Some(command.id), "round trip for {}", command.id.key());
+            assert!(
+                !COMMANDS[..i].iter().any(|other| other.id.key() == command.id.key()),
+                "duplicate key {}",
+                command.id.key()
+            );
+        }
     }
 
     #[test]

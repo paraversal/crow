@@ -572,7 +572,8 @@ mod tests {
         let mut matcher = FuzzyMatcher::new("git");
         let (_, ranges) = matcher.indices(haystack).expect("a match");
         let start = haystack.len() - 3;
-        assert_eq!(ranges, [start..start + 3], "the last three bytes, merged into one range");
+        assert_eq!(ranges.len(), 1, "one merged range");
+        assert_eq!(ranges[0], start..start + 3, "the last three bytes");
     }
 
     #[test]

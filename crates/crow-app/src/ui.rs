@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crow_core::{Exclude, Recent, Settings, SidebarConfig, Views, load_settings, load_sidebar, load_views};
+use crow_core::{
+    Exclude, Recent, RecentCommands, Settings, SidebarConfig, Views, load_settings, load_sidebar, load_views,
+};
 use crow_theme::Theme;
 use gpui::{App, AppContext, Global, SharedString};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -35,6 +37,8 @@ pub struct Ui {
     /// Counts `exclude.toml` reloads that changed it, so a running search can restart.
     pub exclude_generation: u64,
     pub recent: Recent,
+    /// Commands run from the palette, newest first (state, not config).
+    pub recent_commands: RecentCommands,
     zoxide: Vec<(f64, PathBuf)>,
     /// The folders Recent shows, best first (computed off the main thread).
     pub recent_list: Vec<PathBuf>,
@@ -58,6 +62,7 @@ const EXCLUDE: usize = 3;
 impl Ui {
     fn new(config_dir: PathBuf, state_dir: PathBuf, home: PathBuf, theme: Theme, fade_enabled: bool) -> Ui {
         let recent = Recent::load(&state_dir.join("recent.json"));
+        let recent_commands = RecentCommands::load(&state_dir.join("palette-commands.json"));
         let mut ui = Ui {
             settings: Settings::default(),
             target: theme.clone(),
@@ -71,6 +76,7 @@ impl Ui {
             exclude: Exclude::default(),
             exclude_generation: 0,
             recent,
+            recent_commands,
             zoxide: Vec::new(),
             recent_list: Vec::new(),
             palette_recents: Vec::new(),
@@ -385,6 +391,36 @@ pub fn record_visit(dir: &Path, cx: &mut App) {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     cx.global_mut::<Ui>().recent.visit(dir, now);
     refresh_recent(cx);
+}
+
+/// Remember a command run from the palette and save it to the state dir in the
+/// background (the in-memory list updates at once). Does nothing when
+/// `palette_recent_commands` is off.
+pub fn record_command(id: crate::palette::CommandId, cx: &mut App) {
+    let ui = cx.global::<Ui>();
+    if !ui.settings.palette_recent_commands {
+        return;
+    }
+    let mut recent = ui.recent_commands.clone();
+    // Commands this build no longer has leave the list for good on the next save.
+    recent.retain(|key| crate::palette::CommandId::from_key(key).is_some());
+    recent.push(id.key(), crate::palette::RECENT_COMMANDS);
+    let file = ui.state_dir.join("palette-commands.json");
+    cx.global_mut::<Ui>().recent_commands = recent.clone();
+    let task = cx.background_spawn(async move {
+        if let Err(e) = recent.save(&file) {
+            tracing::warn!("{}: {e}", file.display());
+        }
+    });
+    task.detach();
+    cx.refresh_windows();
+}
+
+/// Re-read `palette-commands.json` into `Ui`, as a relaunch would (tests only).
+#[cfg(test)]
+pub fn reload_state_for_tests(cx: &mut App) {
+    let file = cx.global::<Ui>().state_dir.join("palette-commands.json");
+    cx.global_mut::<Ui>().recent_commands = RecentCommands::load(&file);
 }
 
 /// Recompute Recent's list off the main thread (it checks each folder still exists)

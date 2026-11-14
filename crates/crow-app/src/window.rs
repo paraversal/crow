@@ -1894,7 +1894,7 @@ impl CrowWindow {
         };
         let listing = match mode {
             PaletteMode::Folders => palette::folder_listing(&text, &folders, &here),
-            PaletteMode::Commands => palette::command_listing(&text, &[], false),
+            PaletteMode::Commands => self.palette_command_listing(&text, cx),
         };
         let input = cx.new(|cx| {
             TextInput::new(text.clone(), mode.placeholder(), cx)
@@ -1962,13 +1962,24 @@ impl CrowWindow {
         });
     }
 
+    /// Command rows with "Recently used" from the state file, unless the setting is off.
+    fn palette_command_listing(&self, query: &str, cx: &App) -> palette::Listing {
+        let ui = cx.global::<Ui>();
+        let recent: Vec<palette::CommandId> =
+            ui.recent_commands.ids().iter().filter_map(|key| palette::CommandId::from_key(key)).collect();
+        palette::command_listing(query, &recent, ui.settings.palette_recent_commands)
+    }
+
     fn refresh_palette(&mut self, query: &str, cx: &mut Context<Self>) {
+        let started = std::time::Instant::now();
         if self.palette.is_none() {
             return;
         }
         let cwd = self.pane().read(cx).current_dir(cx);
         let home = cx.global::<Ui>().home.clone();
         let show_hidden = self.show_hidden;
+        let command_listing = (self.palette.as_ref().map(|palette| palette.mode) == Some(PaletteMode::Commands))
+            .then(|| self.palette_command_listing(query, cx));
         let mut spawn: Option<(PathBuf, bool, u64)> = None;
         {
             let palette = self.palette.as_mut().expect("checked above");
@@ -1976,7 +1987,9 @@ impl CrowWindow {
             palette.scroll.set_offset(point(px(0.), px(0.)));
             if palette.mode == PaletteMode::Commands {
                 palette.path = None;
-                palette.listing = palette::command_listing(query, &[], false);
+                if let Some(listing) = command_listing {
+                    palette.listing = listing;
+                }
             } else if let Some((parent, partial)) = palette::path_query(query, &cwd, &home) {
                 let hidden = show_hidden || partial.starts_with('.');
                 let relist = match &mut palette.path {
@@ -2017,6 +2030,12 @@ impl CrowWindow {
         if let Some((parent, hidden, generation)) = spawn {
             self.spawn_path_listing(parent, hidden, generation, cx);
         }
+        // Budget (U7): under 4 ms with 10 000 subfolders per keystroke.
+        tracing::debug!(
+            "palette refresh: {:?} for {} items",
+            started.elapsed(),
+            self.palette.as_ref().map_or(0, |palette| palette.listing.items.len())
+        );
         cx.notify();
     }
 
@@ -2148,7 +2167,10 @@ impl CrowWindow {
         let item = palette.listing.items.get(palette.cursor).cloned();
         self.focus_center(window, cx);
         match item {
-            Some(Item::Command { command, .. }) => self.run_command(command.id, window, cx),
+            Some(Item::Command { command, .. }) => {
+                self.run_command(command.id, window, cx);
+                ui::record_command(command.id, cx);
+            }
             Some(Item::Folder { path, .. }) if new_tab => self.open_tab_at(path, window, cx),
             Some(Item::Folder { path, .. }) => self.pane().update(cx, |pane, cx| pane.navigate(path, cx)),
             None => {}
@@ -5325,6 +5347,119 @@ mod tests {
         settle_palette(&view, &mut cx);
         let rows = view.read_with(&cx, |w, _| w.palette_rows());
         assert!(rows.iter().any(|row| row.ends_with("/.hidden")), "a dot partial shows hidden folders: {rows:?}");
+    }
+
+    #[gpui::test]
+    fn palette_lists_recently_used_commands(cx: &mut TestAppContext) {
+        let root = fixture("palette-recent-commands");
+        let (view, mut cx) = open(cx, &root);
+        for query in ["columns", "why this"] {
+            cx.simulate_keystrokes("cmd-k");
+            cx.simulate_input(&format!(">{query}"));
+            settle(&view, &mut cx);
+            cx.simulate_keystrokes("enter");
+            settle(&view, &mut cx);
+            cx.simulate_keystrokes("escape");
+            settle(&view, &mut cx);
+        }
+
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">");
+        settle(&view, &mut cx);
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        let recent = rows.iter().position(|row| row == "# Recently used").expect("a Recently used header");
+        let all = rows.iter().position(|row| row == "# All commands").expect("an All commands header");
+        assert!(recent < all, "{rows:?}");
+        assert_eq!(&rows[recent + 1..all], ["Why This View?", "View as Columns"], "newest first: {rows:?}");
+        let repeated = rows[all + 1..].iter().filter(|row| *row == "Why This View?" || *row == "View as Columns");
+        assert_eq!(repeated.count(), 0, "recent commands are not listed again: {rows:?}");
+    }
+
+    #[gpui::test]
+    fn palette_recent_commands_survive_relaunch(cx: &mut TestAppContext) {
+        let root = fixture("palette-commands-relaunch");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">columns");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+
+        let key = crate::palette::CommandId::ViewAsColumns.key();
+        let state = cx.update(|_, cx| cx.global::<Ui>().state_dir.clone());
+        let file = state.join("palette-commands.json");
+        let mut saved = String::new();
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                saved = text;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(saved.contains(key), "saved with its stable key: {saved:?}");
+
+        // Forget it in memory, then reload the state file as a relaunch would.
+        cx.update(|_, cx| cx.global_mut::<Ui>().recent_commands = Default::default());
+        cx.update(|_, cx| crate::ui::reload_state_for_tests(cx));
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">");
+        settle(&view, &mut cx);
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        assert_eq!(rows.first().map(String::as_str), Some("# Recently used"), "{rows:?}");
+        assert_eq!(rows.get(1).map(String::as_str), Some("View as Columns"), "{rows:?}");
+    }
+
+    #[gpui::test]
+    fn palette_recent_commands_setting_false_hides_and_stops_recording(cx: &mut TestAppContext) {
+        let root = fixture("palette-commands-setting");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">columns");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        let state = cx.update(|_, cx| cx.global::<Ui>().state_dir.clone());
+        let file = state.join("palette-commands.json");
+        let mut before = String::new();
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                before = text;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!before.is_empty(), "one command is remembered");
+
+        write_config(&view, &mut cx, "settings.toml", "palette_recent_commands = false\n");
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">why this");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        for _ in 0..20 {
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">");
+        settle(&view, &mut cx);
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        assert!(!rows.iter().any(|row| row == "# Recently used"), "the section is hidden: {rows:?}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "nothing new was recorded");
+
+        cx.simulate_keystrokes("escape");
+        write_config(&view, &mut cx, "settings.toml", "");
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">");
+        settle(&view, &mut cx);
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        assert_eq!(rows.first().map(String::as_str), Some("# Recently used"), "{rows:?}");
+        assert_eq!(rows.get(1).map(String::as_str), Some("View as Columns"), "only the earlier run: {rows:?}");
     }
 
     #[gpui::test]
