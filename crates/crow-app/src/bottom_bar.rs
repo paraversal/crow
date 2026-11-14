@@ -784,6 +784,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
 
     div()
         .id("path-bar")
+        .debug_selector(|| "path-bar".into())
         .role(Role::Group)
         .aria_label("Status bar")
         .relative()

@@ -151,3 +151,62 @@ pub fn contents(entry: &Entry, preview: Option<&Preview>, theme: &Theme) -> Div 
             None => div().text_color(muted).child("No tags"),
         })
 }
+
+/// A folder's summary in the preview column.
+pub struct FolderSummary<'a> {
+    pub path: &'a std::path::Path,
+    pub name: &'a str,
+    pub modified: Option<std::time::SystemTime>,
+    pub items: Option<usize>,
+}
+
+/// What VoiceOver reads for the folder summary.
+pub fn folder_spoken(name: &str, items: Option<usize>) -> String {
+    match items {
+        Some(n) => format!("{name}, Folder, {n} item{}", if n == 1 { "" } else { "s" }),
+        None => format!("{name}, Folder"),
+    }
+}
+
+/// The preview column when the cursor is a folder (or the focused folder has no
+/// rows): its icon, name, "Folder · n items" and the modified date.
+pub fn folder_summary(summary: FolderSummary<'_>, theme: &Theme) -> Div {
+    let muted = color(theme.role("fg-muted"));
+    let detail = match summary.items {
+        Some(1) => "Folder · 1 item".to_owned(),
+        Some(n) => format!("Folder · {n} items"),
+        None => "Folder".to_owned(),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(
+            div()
+                .h(px(220.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .children(icon(summary.path, true, 128).map(|i| img(i).size(px(128.)))),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(div().text_size(px(15.)).child(summary.name.to_owned()))
+                .child(div().text_color(muted).child(detail)),
+        )
+        .when(summary.modified.is_some(), |panel| {
+            panel.child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .gap_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(color(theme.role("border")))
+                    .child(div().flex_none().text_color(muted).child("Modified"))
+                    .child(div().text_right().child(format_time(summary.modified))),
+            )
+        })
+}

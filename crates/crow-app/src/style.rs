@@ -26,6 +26,10 @@ pub fn variant_of(appearance: WindowAppearance) -> Variant {
     }
 }
 
+/// The toolbar band's height. Sheets, the palette and the activity list start
+/// below it, so one number keeps them aligned.
+pub const BAND_HEIGHT: f32 = 52.;
+
 /// The dimming layer under a sheet. Dark themes darken with `bg`; light themes
 /// darken with `fg`, because a `bg` scrim would lighten a light window.
 pub fn scrim(theme: &Theme) -> Rgba {
@@ -90,6 +94,13 @@ pub fn effect_tint(look: crow_core::motion::Look, theme: &Theme) -> Option<Rgba>
 /// zero-blur shadow, so it never changes layout and list overflow can't clip it.
 pub fn cursor_ring(theme: &Theme) -> Vec<BoxShadow> {
     vec![BoxShadow::new(px(0.), px(0.), color_alpha(theme.role("accent"), 0x99).into()).spread_radius(px(1.5)).inset()]
+}
+
+/// A text field's focus ring: the accent at the boards' ring alpha, drawn 2 px
+/// wide on both text fields (`/` filter and search). Rows and the sidebar cursor
+/// use `cursor_ring` instead.
+pub fn field_ring(theme: &Theme) -> Rgba {
+    color_alpha(theme.role("accent"), 0x8c)
 }
 
 pub fn ui_font(family: &str) -> String {

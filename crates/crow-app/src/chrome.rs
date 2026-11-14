@@ -11,7 +11,7 @@ use gpui::{
 };
 
 use crate::keys::{self, KeyScope};
-use crate::style::{color, ui_font};
+use crate::style::{BAND_HEIGHT, color, ui_font};
 use crate::ui::Ui;
 
 /// How a keycap draws: an outlined chord, one filled cap per key, or plain text.
@@ -318,7 +318,7 @@ pub fn sheet(
         .flex()
         .flex_col()
         .items_center()
-        .pt(px(52.))
+        .pt(px(BAND_HEIGHT))
         .on_mouse_down(gpui::MouseButton::Left, on_dismiss)
         .child(panel)
 }

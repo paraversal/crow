@@ -263,6 +263,10 @@ pub struct Pane {
     mark_pending: Option<MarkPending>,
     /// The `/` filter field, while open.
     filtering: Option<Filtering>,
+    /// The filter count VoiceOver hears: the live count, but only once typing
+    /// stops, so fast typing does not queue one announcement per keystroke.
+    filter_announce: SharedString,
+    filter_announce_gen: u64,
     /// Focus the list after a render because a navigation closed the filter.
     focus_list_after_filter: bool,
     /// The sidebar cursor is walking this pane: later moves replace the history step.
@@ -322,6 +326,8 @@ impl Pane {
             drop_column: None,
             mark_pending: None,
             filtering: None,
+            filter_announce: SharedString::default(),
+            filter_announce_gen: 0,
             focus_list_after_filter: false,
             sidebar_walk: false,
         };
@@ -456,6 +462,108 @@ impl Pane {
     /// The item the preview and path bar describe: the focused folder's cursor.
     pub fn cursor_entry(&self, cx: &gpui::App) -> Option<Entry> {
         self.focused_folder().read(cx).cursor_entry().cloned()
+    }
+
+    /// Test-only: how many rows draw the accent fill and how many draw the
+    /// inactive fill, mirroring `render_column_rows`'s predicate.
+    #[cfg(test)]
+    pub fn selection_fills(&self, window: &gpui::Window, cx: &gpui::App) -> (usize, usize) {
+        let active = self.focus.is_focused(window) || self.filtering.is_some();
+        let mut accent = 0;
+        let mut inactive = 0;
+        for (k, folder) in self.folders.iter().enumerate() {
+            let folder = folder.read(cx);
+            let rows = folder.entries().iter().filter(|entry| folder.is_selected(&entry.path)).count();
+            if k == self.focused && active {
+                accent += rows;
+            } else {
+                inactive += rows;
+            }
+        }
+        (accent, inactive)
+    }
+
+    /// The filter count as the live field shows it ("2 of 9 shown").
+    fn filter_count_text(&self, cx: &gpui::App) -> String {
+        let folder = self.focused_folder().read(cx);
+        format!("{} of {} shown", folder.row_count(), folder.entries().len())
+    }
+
+    /// Queue the filter count for VoiceOver 300 ms after the last keystroke. The
+    /// visible count stays live; only the announced label waits, so a burst of
+    /// typing produces one announcement instead of one per letter.
+    fn schedule_filter_announce(&mut self, cx: &mut Context<Self>) {
+        self.filter_announce_gen += 1;
+        let generation = self.filter_announce_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+            this.update(cx, |this, cx| {
+                if this.filter_announce_gen != generation {
+                    return;
+                }
+                let text: SharedString = this.filter_count_text(cx).into();
+                if this.filter_announce != text {
+                    this.filter_announce = text;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Test-only: what VoiceOver would hear for the filter count.
+    #[cfg(test)]
+    pub fn filter_announcement(&self) -> &str {
+        &self.filter_announce
+    }
+
+    /// What the preview column shows: the cursor entry, or the focused folder
+    /// itself when the column has no rows (no matches yet, or still loading), so
+    /// the right-hand strip is never an empty quarter. The count is the child
+    /// column's for a cursor folder, and the focused folder's own for the fallback.
+    pub fn preview_parts(&self, cx: &gpui::App) -> Option<(Entry, Option<usize>)> {
+        if let Some(entry) = self.cursor_entry(cx) {
+            let items = (entry.is_dir && !entry.is_package()).then(|| self.child_count(&entry, cx)).flatten();
+            return Some((entry, items));
+        }
+        let focused = self.focused_folder().read(cx);
+        let dir = focused.dir();
+        // The folder's own row in the parent column carries its modified date; the
+        // root has no parent, so it shows the count alone.
+        let parent = self.focused.checked_sub(1).and_then(|k| self.folders.get(k)).map(|f| f.read(cx));
+        let entry = parent
+            .and_then(|parent| parent.entries().iter().find(|entry| entry.path == dir).cloned())
+            .unwrap_or_else(|| Entry {
+                name: crate::style::display_name(dir),
+                path: dir.to_path_buf(),
+                is_dir: true,
+                hidden: false,
+                size: 0,
+                modified: None,
+                created: None,
+                added: None,
+            });
+        // No count while it is still listing or could not be listed: "0 items" would be wrong.
+        let items = (!focused.is_loading() && focused.error().is_none()).then(|| focused.entries().len());
+        Some((entry, items))
+    }
+
+    /// The preview column's aria label: a folder's summary or a file's preview.
+    pub fn preview_label(&self, cx: &gpui::App) -> Option<String> {
+        let (entry, items) = self.preview_parts(cx)?;
+        if entry.is_dir && !entry.is_package() {
+            Some(preview::folder_spoken(&entry.name, items))
+        } else {
+            Some(preview::spoken(&entry, self.preview(cx)))
+        }
+    }
+
+    /// The child column's item count, when that column is loaded for `entry`.
+    /// The column is already on screen, so this costs no disk I/O.
+    fn child_count(&self, entry: &Entry, cx: &gpui::App) -> Option<usize> {
+        let child = self.folders.get(self.focused + 1)?.read(cx);
+        (!child.is_loading() && child.error().is_none() && child.dir() == entry.path).then(|| child.entries().len())
     }
 
     pub fn preview(&self, cx: &gpui::App) -> Option<&Preview> {
@@ -818,6 +926,7 @@ impl Pane {
         }
         crate::usage::record(&StartFilter, cx);
         crate::tips::key_used(TipId::Filter, cx);
+        self.filter_announce = self.filter_count_text(cx).into();
         let folder = crate::style::display_name(self.focused_folder().read(cx).dir());
         let input = cx.new(|cx| TextInput::new("", format!("Filter {folder}"), cx).bare());
         let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
@@ -825,6 +934,7 @@ impl Pane {
                 let query = input.read(cx).text().to_owned();
                 let folder = this.focused_folder().clone();
                 folder.update(cx, |folder, cx| folder.set_filter(Some(query), cx));
+                this.schedule_filter_announce(cx);
                 cx.notify();
             }
             TextInputEvent::Confirmed => {
@@ -871,6 +981,8 @@ impl Pane {
             return;
         }
         self.emit_filter_end(cx);
+        self.filter_announce = SharedString::default();
+        self.filter_announce_gen += 1;
         for folder in &self.folders {
             folder.update(cx, |folder, cx| folder.set_filter(None, cx));
         }
@@ -886,6 +998,8 @@ impl Pane {
             return;
         }
         self.emit_filter_end(cx);
+        self.filter_announce = SharedString::default();
+        self.filter_announce_gen += 1;
         for folder in &self.folders {
             folder.update(cx, |folder, cx| folder.set_filter(None, cx));
         }
@@ -1563,8 +1677,12 @@ impl Pane {
                             })
                             .child(row_icon(&entry, look, theme))
                             .child(
-                                div().relative().left(px(look.dx)).opacity(dim).child(
-                                    match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                                div()
+                                    .debug_selector(|| format!("row-name-{}", entry.name))
+                                    .relative()
+                                    .left(px(look.dx))
+                                    .opacity(dim)
+                                    .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
                                         Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
                                         None => match ranges {
                                             Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
@@ -1578,8 +1696,7 @@ impl Pane {
                                                 .into_any_element(),
                                             _ => div().whitespace_nowrap().child(name.text.clone()).into_any_element(),
                                         },
-                                    },
-                                ),
+                                    }),
                             ),
                     );
                 row.children(cells.into_iter().enumerate().filter(|(i, _)| widths[i + 1] > 0.0).map(
@@ -1829,8 +1946,13 @@ impl Pane {
                     }))
                     .child(row_icon(&entry, look, theme))
                     .child(
-                        div().relative().left(px(look.dx)).flex_1().opacity(dim).child(
-                            match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                        div()
+                            .debug_selector(|| format!("column-{k}-row-name-{}", entry.name))
+                            .relative()
+                            .left(px(look.dx))
+                            .flex_1()
+                            .opacity(dim)
+                            .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
                                 Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
                                 None => match ranges {
                                     Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
@@ -1846,8 +1968,7 @@ impl Pane {
                                         .child(name.text.clone())
                                         .into_any_element(),
                                 },
-                            },
-                        ),
+                            }),
                     )
                     .child(div().w(px(10.)).flex_none().text_color(subtle).child(if navigable { "›" } else { "" }))
             })
@@ -1863,7 +1984,13 @@ impl Pane {
         let now = Instant::now();
         let border = color(theme.role("border"));
         let focused = self.focused;
-        let mut strip = div().id("columns").size_full().flex().overflow_x_scroll().track_scroll(&self.strip_scroll);
+        let mut strip = div()
+            .id("columns")
+            .debug_selector(|| "columns".into())
+            .size_full()
+            .flex()
+            .overflow_x_scroll()
+            .track_scroll(&self.strip_scroll);
         for (k, folder) in self.folders.iter().enumerate() {
             let (count, shown, width, scroll, title, filtered) = {
                 let f = folder.read(cx);
@@ -1995,22 +2122,32 @@ impl Pane {
                         .children(footer),
                 );
         }
-        // The preview is the last column when the focused column's cursor is a file.
+        // The preview is the last column: a file's preview, or a folder's summary.
+        // It takes the rest of the strip when the columns leave room, and keeps
+        // PREVIEW_COLUMN_WIDTH when they don't (the strip scrolls instead).
         let show_preview = cx.global::<Ui>().settings.show_preview;
-        if show_preview && let Some(entry) = self.cursor_entry(cx).filter(|e| !e.is_dir || e.is_package()) {
-            let preview = self.preview(cx);
+        if show_preview && let Some((entry, items)) = self.preview_parts(cx) {
+            let folder = entry.is_dir && !entry.is_package();
+            let label = self.preview_label(cx).unwrap_or_default();
+            let body = if folder {
+                let summary =
+                    preview::FolderSummary { path: &entry.path, name: &entry.name, modified: entry.modified, items };
+                preview::folder_summary(summary, &theme).into_any_element()
+            } else {
+                preview::contents(&entry, self.preview(cx), &theme).into_any_element()
+            };
             strip = strip.child(
                 div()
                     .id("preview-column")
                     .debug_selector(|| "preview-column".into())
                     .role(Role::Group)
-                    .aria_label(preview::spoken(&entry, preview))
-                    .w(px(PREVIEW_COLUMN_WIDTH))
-                    .flex_none()
+                    .aria_label(label)
+                    .flex_1()
+                    .min_w(px(PREVIEW_COLUMN_WIDTH))
                     .h_full()
                     .p_4()
                     .overflow_hidden()
-                    .child(preview::contents(&entry, preview, &theme)),
+                    .child(body),
             );
         }
         strip

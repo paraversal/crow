@@ -32,8 +32,8 @@ use crate::keys::{self, KeyScope};
 use crate::pane::DraggedSelection;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, format_time, format_time_short, highlight_text, icon, inactive_selection,
-    map_range, truncate_middle_parts,
+    active_selection, color, color_alpha, field_ring, format_time, format_time_short, highlight_text, icon,
+    inactive_selection, map_range, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -1032,7 +1032,7 @@ impl SearchView {
     pub fn render_band(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
-        let ring = if focused { color_alpha(theme.role("accent"), 0x8c) } else { color(theme.role("surface")) };
+        let ring = if focused { field_ring(&theme) } else { color(theme.role("surface")) };
         let field = div()
             .id("search-field")
             .debug_selector(|| "search-field".into())

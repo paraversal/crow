@@ -9,7 +9,7 @@ use crate::chrome::{Keycap, KeycapWeight};
 use crate::icons::{Glyph, glyph};
 use crate::keys::{self, KeyScope};
 use crate::pane::Pane;
-use crate::style::{color, color_alpha, display_name};
+use crate::style::{color, color_alpha, display_name, field_ring};
 use crate::text_input::Cancel;
 use crate::ui::Ui;
 
@@ -39,8 +39,7 @@ impl Pane {
         let input = filtering.input.clone();
         let focused = input.read(cx).focus_handle(cx).is_focused(window);
         // Transparent when the list has focus, so only the place keys go is accented.
-        let border =
-            if focused { color_alpha(theme.role("accent"), 0x8c) } else { color_alpha(theme.role("accent"), 0) };
+        let border = if focused { field_ring(theme) } else { color_alpha(theme.role("accent"), 0) };
         let esc = Keycap::for_action(&Cancel, KeyScope::Filter, KeycapWeight::Outline, cx);
         let field = div()
             .id("filter-field")
@@ -57,7 +56,7 @@ impl Pane {
             .flex()
             .items_center()
             .gap(px(7.))
-            .border_1()
+            .border_2()
             .border_color(border)
             .when(place == FilterPlace::Column, |field| field.mx_1().mb_1())
             .when(place == FilterPlace::List, |field| field.mx_2().my_1())
@@ -84,7 +83,11 @@ impl Pane {
                 div()
                     .id("filter-count")
                     .role(Role::Status)
-                    .aria_label(format!("{shown} of {total} shown"))
+                    .aria_label(if self.filter_announce.is_empty() {
+                        format!("{shown} of {total} shown")
+                    } else {
+                        self.filter_announce.to_string()
+                    })
                     .flex_none()
                     .text_size(px(12.))
                     .text_color(color(theme.role("fg-muted")))
