@@ -64,7 +64,8 @@ switches list and columns; with `view_per_folder = false` in `settings.toml` a w
 view you give it, and Cmd-2/Cmd-3 save nothing. In the list, Right opens the selected folder inline (Right again goes into it); Left steps to the row that contains a nested one, closes an open folder, or goes up from the top level. In columns, Left and Right move between them, and Left in the leftmost column goes up a folder. Vim `h`/`l` follow the same keys.
 
 Sidebar: drag favorites to reorder them (or Cmd-Option-Up/Down), drop files on any row to move or
-copy them there, drop folders on a group's title to add them. Ctrl-Cmd-T adds the selected folder.
+copy them there, drop folders between two favorites (a line shows where) or on a group's title to add
+them. Ctrl-Cmd-T adds the selected folder.
 Same-named folders show their parent after the name (and "alias" for a symlink); with
 `keymap = "vim"`, favorites with a `key` show the letter on the right. Locations shows free space
 and a bar that warns near full. In the sidebar, Cmd-Delete removes a favorite or forgets a recent
