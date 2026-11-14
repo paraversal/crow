@@ -6,8 +6,8 @@ Branch: `ui-u6-fix` · PR: none yet · Last updated: 2026-11-14
 | --- | --- | --- |
 | F1 Selection on the first-arrived row | done (commit pending) | `user_moved`; two window tests (best row until the user moves, cursor follows the user's path) |
 | F2 Modified column wraps | done (commit pending) | `format_time_short(_at)`, 110 px, no-wrap cell; bucket test | |
-| F3 "1 folders skipped" | todo | |
-| F4 Regex errors four lines | todo | |
+| F3 "1 folders skipped" | done (commit pending) | `skipped_text`/`skipped_was_text`, unit-tested for 1 and 3 |
+| F4 Regex errors four lines | done (commit pending) | `pattern_error` in the engine, footer one-line guard; engine + app tests assert "Invalid pattern: unclosed group" |
 | F5 NFD name highlights | todo | |
 | F6 `insert_rows` per-batch rebuild | todo (measure first) | |
 | F7.1 Idle example keycap | todo | |
@@ -48,6 +48,7 @@ Branch: `ui-u6-fix` · PR: none yet · Last updated: 2026-11-14
 - 2026-11-14: read the plan, U6 plan, U6 progress, `search.rs`, `engine.rs`, `style.rs`, `bottom_bar.rs`, `chrome.rs`, window search tests. PR #14 merged; branched `ui-u6-fix` from `origin/main` (`50a4d17`). Probed nucleo scores for "config": contiguous names 166/159, scattered `gpui-stop-synthetic-drag-on-file-drag.patch` 109.
 - 2026-11-14: measured "4. Nov 2024" width for F2: 69.5 px at 12 px. Asked Q1-Q6; all answered (see Questions).
 - 2026-11-14: F1 and F2 implemented; both new window tests plus `search_name_hits_outrank_content_hits` and `format_time_short_buckets` pass.
+- 2026-11-14: F3 and F4 implemented; `skipped_text`, `footer_summary_copy`, `pattern_errors_are_one_line` and `search_invalid_regex_shows_the_error` pass.
 
 ## Next
 Implement F1.

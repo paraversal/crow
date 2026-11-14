@@ -3562,10 +3562,11 @@ mod tests {
         wait_for_search(&view, &mut cx);
         let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
         let error = search.read_with(&cx, |search, _| search.error_text()).expect("an error");
-        assert!(error.starts_with("invalid pattern"), "{error}");
+        assert_eq!(error, "Invalid pattern: unclosed group");
+        assert!(!error.contains('\n'), "{error}");
         assert!(search.read_with(&cx, |search, _| search.result_paths().is_empty()));
         let footer = search.read_with(&cx, |search, _| search.footer_summary_text());
-        assert!(footer.starts_with("invalid pattern"), "{footer}");
+        assert_eq!(footer, "Invalid pattern: unclosed group");
     }
 
     #[gpui::test]

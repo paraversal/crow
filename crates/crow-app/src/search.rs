@@ -1202,7 +1202,7 @@ impl SearchView {
                 .id("search-skipped-link")
                 .debug_selector(|| "search-skipped-link".into())
                 .role(Role::Button)
-                .aria_label(format!("{skipped} folders skipped, show list"))
+                .aria_label(format!("{}, show list", skipped_text(skipped)))
                 .aria_expanded(self.show_skipped)
                 .flex_none()
                 .text_color(accent)
@@ -1212,7 +1212,7 @@ impl SearchView {
                     this.show_skipped = !this.show_skipped;
                     cx.notify();
                 }))
-                .child(format!("{skipped} folders skipped {chevron}"))
+                .child(format!("{} {chevron}", skipped_text(skipped)))
         });
         let hint = (self.scope != Scope::ThisMac && self.skip_label.is_some()).then(|| {
             let hint = if self.everything { "Skip folders again" } else { "Search everything" };
@@ -1257,7 +1257,15 @@ impl SearchView {
             .border_t_1()
             .border_color(color(theme.role("border")))
             .text_size(px(12.))
-            .child(div().flex_none().text_color(text_color).child(summary))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(text_color)
+                    .child(summary),
+            )
             .children(link.map(|link| {
                 div().flex().items_center().gap(px(10.)).child(div().text_color(subtle).child("·")).child(link)
             }))
@@ -1460,7 +1468,7 @@ impl SearchView {
                     div()
                         .id("search-empty-everything")
                         .role(Role::Button)
-                        .aria_label(format!("{skipped} folders were skipped. {hint}"))
+                        .aria_label(format!("{}. {hint}", skipped_was_text(skipped)))
                         .flex()
                         .items_center()
                         .gap_1()
@@ -1468,7 +1476,7 @@ impl SearchView {
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.search_everything(&SearchEverything, window, cx);
                         }))
-                        .child(format!("{skipped} folders were skipped. {hint}"))
+                        .child(format!("{}. {hint}", skipped_was_text(skipped)))
                         .children(Keycap::for_action(&SearchEverything, KeyScope::Search, KeycapWeight::Outline, cx)),
                 )
             })
@@ -1479,7 +1487,7 @@ impl SearchView {
         let theme = cx.global::<Ui>().theme.clone();
         let (error, muted) = (color(theme.role("error")), color(theme.role("fg-muted")));
         let message = self.error.as_deref().unwrap_or("Search failed");
-        let hint = message.starts_with("invalid pattern").then(|| {
+        let hint = message.starts_with("Invalid pattern").then(|| {
             div()
                 .text_size(px(13.))
                 .text_color(muted)
@@ -1827,7 +1835,7 @@ struct FooterState<'a> {
 
 fn footer_summary(state: FooterState<'_>) -> String {
     if let Some(error) = state.error {
-        return error.to_owned();
+        return error.lines().next().unwrap_or(error).to_owned();
     }
     if state.capped {
         return format!("First {MAX_RESULTS} files · refine the search");
@@ -1843,6 +1851,16 @@ fn footer_summary(state: FooterState<'_>) -> String {
     } else {
         format!("{prefix}{results}")
     }
+}
+
+/// "1 folder skipped" / "3 folders skipped", for the footer link and its aria label.
+pub fn skipped_text(n: usize) -> String {
+    if n == 1 { "1 folder skipped".to_owned() } else { format!("{n} folders skipped") }
+}
+
+/// The same wording as a sentence: "1 folder was skipped" / "3 folders were skipped".
+pub fn skipped_was_text(n: usize) -> String {
+    if n == 1 { "1 folder was skipped".to_owned() } else { format!("{n} folders were skipped") }
 }
 
 /// "Skip dev folders" for the enabled sets, or None when none is enabled.
@@ -1995,7 +2013,15 @@ mod tests {
         assert_eq!(footer_summary(state(false, 2, 1, false, None)), "2 results in 1 file");
         assert_eq!(footer_summary(state(false, 0, 0, false, None)), "No results");
         assert_eq!(footer_summary(state(false, 20_000, 10, true, None)), "First 20000 files · refine the search");
-        assert_eq!(footer_summary(state(false, 0, 0, false, Some("invalid pattern"))), "invalid pattern");
+        assert_eq!(footer_summary(state(false, 0, 0, false, Some("Invalid pattern: unclosed group"))), "Invalid pattern: unclosed group");
+    }
+
+    #[test]
+    fn skipped_text_is_singular_for_one() {
+        assert_eq!(skipped_text(1), "1 folder skipped");
+        assert_eq!(skipped_text(3), "3 folders skipped");
+        assert_eq!(skipped_was_text(1), "1 folder was skipped");
+        assert_eq!(skipped_was_text(3), "3 folders were skipped");
     }
 
     #[test]

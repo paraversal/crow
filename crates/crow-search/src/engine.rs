@@ -261,9 +261,19 @@ impl ContentPattern {
         RegexMatcherBuilder::new()
             .case_insensitive(case_insensitive)
             .build(&pattern)
-            .map_err(|e| format!("invalid pattern: {e}"))?;
+            .map_err(pattern_error)?;
         Ok(ContentPattern { pattern, case_insensitive })
     }
+}
+
+/// The last line of a regex error, without the engine's multi-line rewrite:
+/// `"regex parse error:\n    (?:()\n    ^\nerror: unclosed group"` →
+/// `"Invalid pattern: unclosed group"`.
+fn pattern_error(e: impl std::fmt::Display) -> String {
+    let text = e.to_string();
+    let line = text.lines().map(str::trim).filter(|line| !line.is_empty()).next_back().unwrap_or("the pattern");
+    let line = line.strip_prefix("error: ").unwrap_or(line);
+    format!("Invalid pattern: {line}")
 }
 
 struct ContentSearch {
@@ -276,7 +286,7 @@ impl ContentSearch {
         let matcher = RegexMatcherBuilder::new()
             .case_insensitive(pattern.case_insensitive)
             .build(&pattern.pattern)
-            .map_err(|e| format!("invalid pattern: {e}"))?;
+            .map_err(pattern_error)?;
         let searcher = SearcherBuilder::new().line_number(true).binary_detection(BinaryDetection::quit(b'\0')).build();
         Ok(ContentSearch { matcher, searcher })
     }
@@ -528,6 +538,13 @@ mod tests {
         assert_eq!(content(&hits).len(), 2);
         assert_eq!(content(&hits)[0].2, ranges(0, 6));
         assert_eq!(content(&hits)[1].2, ranges(5, 11));
+    }
+
+    #[test]
+    fn pattern_errors_are_one_line() {
+        let error = ContentPattern::new("/(/").unwrap_err();
+        assert_eq!(error, "Invalid pattern: unclosed group");
+        assert!(!error.contains('\n'), "{error}");
     }
 
     #[test]
