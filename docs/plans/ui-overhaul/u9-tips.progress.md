@@ -1,5 +1,5 @@
 # u9-tips progress
-Branch: `ui-u9-tips` · PR: none · Last updated: 2026-11-14 · State: In critique
+Branch: `ui-u9-tips` · PR: https://github.com/paraversal/file-crow/pull/21 · Last updated: 2026-11-14 · State: PR open
 
 ## Status
 | Item | State | Notes |
