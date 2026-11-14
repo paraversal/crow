@@ -9,18 +9,18 @@ Branch: `ui-u6-fix` · PR: none yet · Last updated: 2026-11-14
 | F3 "1 folders skipped" | done (commit pending) | `skipped_text`/`skipped_was_text`, unit-tested for 1 and 3 |
 | F4 Regex errors four lines | done (commit pending) | `pattern_error` in the engine, footer one-line guard; engine + app tests assert "Invalid pattern: unclosed group" |
 | F5 NFD name highlights | done (commit pending) | mirrors `Utf32Str`: ASCII bytes, ASCII-first grapheme byte fallback (widened to the grapheme), else grapheme indices; `name_ranges_follow_nucleo_indexing` (NFC, NFD, CJK, combining) |
-| F6 `insert_rows` per-batch rebuild | todo (measure first) | |
-| F7.1 Idle example keycap | todo | |
-| F7.2 Example button alignment | todo | |
-| F7.3 Idle heading follows match mode | todo | |
-| F7.4 Hide example 3 without an enabled set | todo | |
-| F7.5 Folder label cap | todo | |
-| F7.6 `content_excerpt` once per row | todo | |
-| F7.7 Bottom bar "0 results" in idle | todo — answer: show nothing in idle | |
-| F8.1 Content line on name rows | todo — answer: name-only rows | |
-| F8.2 Weak fuzzy name hits | todo — answer: contiguous substring in name block; weak fuzzy after content | |
-| F8.3 Content line format | todo — answer: no colon, number right-aligned 28 px | |
-| F8.4 Skipped list paths | todo — answer: relative to scope root / ~ for Home | |
+| F6 `insert_rows` per-batch rebuild | done (commit pending) | measured; content-only batches extend + index only new rows, strong names merge and re-index the moved suffix, Spotlight indexes appended rows. Release probe, 20k rows / 313 batches: `add_hits` worst 55 µs (insert 9 µs); before the change the same probe measured 7.0 ms worst wall (≈2.5 ms inside `add_hits`; the rest is the test harness repainting synchronously). Probe removed. | |
+| F7.1 Idle example keycap | done | `KeycapWeight::Text`, `text_role("fg")` |
+| F7.2 Example button alignment | done | left-aligned, `px 12` |
+| F7.3 Idle heading follows match mode | done | All / Names / Contents headings; This Mac unchanged |
+| F7.4 Hide example 3 without an enabled set | done | `.when(self.skip_label.is_some())` |
+| F7.5 Folder label cap | done | 160 px max width, end ellipsis; aria keeps the full name |
+| F7.6 `content_excerpt` once per row | done | `Row.content_shown` filled by `Row::set_content` in `Row::new` and on merges |
+| F7.7 Bottom bar "0 results" in idle | done | `search_count(..., query_empty)` returns an empty count; the bar omits the slot; `search_count_hides_in_idle` | |
+| F8.1 Content line on name rows | done | name rows render one centered line; visibility gated on `!row.name_match` | |
+| F8.2 Weak fuzzy name hits | done | `Row.strong_name` from `name_has_query`; layout strong names \| content \| weak names; `search_contiguous_name_hits_come_before_contents_and_weak_names` | |
+| F8.3 Content line format | done | 28 px right-aligned line number, no colon | |
+| F8.4 Skipped list paths | done | `skipped_display` uses `strip_prefix(folder)` / `abbreviate_home` | |
 
 ## Questions
 - Q1 (asked 2026-11-14): Modified column width. Measured "4. Nov 2024" at 12 px SF system font = 69.5 px. → answer: widen to 110 px
@@ -49,7 +49,8 @@ Branch: `ui-u6-fix` · PR: none yet · Last updated: 2026-11-14
 - 2026-11-14: measured "4. Nov 2024" width for F2: 69.5 px at 12 px. Asked Q1-Q6; all answered (see Questions).
 - 2026-11-14: F1 and F2 implemented; both new window tests plus `search_name_hits_outrank_content_hits` and `format_time_short_buckets` pass.
 - 2026-11-14: F3 and F4 implemented; `skipped_text`, `footer_summary_copy`, `pattern_errors_are_one_line` and `search_invalid_regex_shows_the_error` pass.
+- 2026-11-14: F6 measured and optimised; F7.1–F7.7 and F8.1–F8.4 implemented per the answers. All `search_*` window tests (37), `search::tests` (8) and `bottom_bar::tests` (5) pass.
 - 2026-11-14: F5 implemented (`unicode-segmentation` added to crow-search). Bench `--bench-search target/fixture-search-200k`: first hit 5 ms, total 2491 ms, 200000 hits — no regression vs the 3.7–4.4 s in the U6 progress (names don't match "needle" in that fixture, so only the non-ASCII path is theoretically touched).
 
 ## Next
-Implement F1.
+Run fmt, clippy and the full workspace tests; bundle and hand-check.
