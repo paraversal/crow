@@ -3252,6 +3252,22 @@ mod tests {
     }
 
     #[gpui::test]
+    fn no_matches_show_the_folder_summary(cx: &mut TestAppContext) {
+        let root = fixture("no-match-summary");
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).expect("create fixture");
+        std::fs::write(src.join("a.txt"), "x").expect("create fixture");
+        let (view, mut cx) = open_sized(cx, &src, 1280., 800.);
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("zzz");
+        settle(&view, &mut cx);
+        let label = view.read_with(&cx, |w, cx| w.pane().read(cx).preview_label(cx));
+        assert_eq!(label.as_deref(), Some("src, Folder, 1 item"), "the strip is never an empty quarter");
+    }
+
+    #[gpui::test]
     fn folder_cursor_shows_summary(cx: &mut TestAppContext) {
         let root = fixture("folder-summary");
         let (view, mut cx) = open_sized(cx, &root, 1280., 800.);

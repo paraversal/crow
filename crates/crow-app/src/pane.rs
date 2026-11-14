@@ -518,11 +518,40 @@ impl Pane {
         &self.filter_announce
     }
 
+    /// What the preview column shows: the cursor entry, or the focused folder
+    /// itself when the column has no rows (no matches yet, or still loading), so
+    /// the right-hand strip is never an empty quarter. The count is the child
+    /// column's for a cursor folder, and the focused folder's own for the fallback.
+    pub fn preview_parts(&self, cx: &gpui::App) -> Option<(Entry, Option<usize>)> {
+        if let Some(entry) = self.cursor_entry(cx) {
+            let items = (entry.is_dir && !entry.is_package()).then(|| self.child_count(&entry, cx)).flatten();
+            return Some((entry, items));
+        }
+        let focused = self.focused_folder().read(cx);
+        let dir = focused.dir();
+        // The folder's own row in the parent column carries its modified date; the
+        // root has no parent, so it shows the count alone.
+        let parent = self.focused.checked_sub(1).and_then(|k| self.folders.get(k)).map(|f| f.read(cx));
+        let entry = parent
+            .and_then(|parent| parent.entries().iter().find(|entry| entry.path == dir).cloned())
+            .unwrap_or_else(|| Entry {
+                name: crate::style::display_name(dir),
+                path: dir.to_path_buf(),
+                is_dir: true,
+                hidden: false,
+                size: 0,
+                modified: None,
+                created: None,
+                added: None,
+            });
+        Some((entry, Some(focused.entries().len())))
+    }
+
     /// The preview column's aria label: a folder's summary or a file's preview.
     pub fn preview_label(&self, cx: &gpui::App) -> Option<String> {
-        let entry = self.cursor_entry(cx)?;
+        let (entry, items) = self.preview_parts(cx)?;
         if entry.is_dir && !entry.is_package() {
-            Some(preview::folder_spoken(&entry, self.child_count(&entry, cx)))
+            Some(preview::folder_spoken(&entry.name, items))
         } else {
             Some(preview::spoken(&entry, self.preview(cx)))
         }
@@ -2088,11 +2117,13 @@ impl Pane {
         // It takes the rest of the strip when the columns leave room, and keeps
         // PREVIEW_COLUMN_WIDTH when they don't (the strip scrolls instead).
         let show_preview = cx.global::<Ui>().settings.show_preview;
-        if show_preview && let Some(entry) = self.cursor_entry(cx) {
+        if show_preview && let Some((entry, items)) = self.preview_parts(cx) {
             let folder = entry.is_dir && !entry.is_package();
             let label = self.preview_label(cx).unwrap_or_default();
             let body = if folder {
-                preview::folder_summary(&entry, self.child_count(&entry, cx), &theme).into_any_element()
+                let summary =
+                    preview::FolderSummary { path: &entry.path, name: &entry.name, modified: entry.modified, items };
+                preview::folder_summary(summary, &theme).into_any_element()
             } else {
                 preview::contents(&entry, self.preview(cx), &theme).into_any_element()
             };
