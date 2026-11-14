@@ -1421,8 +1421,8 @@ impl Pane {
                     .items_center()
                     .when(shift != 0.0, |row| row.top(px(shift)))
                     .when(look.opacity < 1.0, |row| row.opacity(look.opacity))
-                    .when(ix % 2 == 1 && !(selected && glide), |row| row.bg(stripe))
-                    .when(selected && !glide, |row| row.bg(selection_bg))
+                    .when(ix % 2 == 1 && !(selected && glide && cursor == Some(ix)), |row| row.bg(stripe))
+                    .when(draws_selection_fill(selected, glide, cursor == Some(ix)), |row| row.bg(selection_bg))
                     .when_some(tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
                     .debug_selector(|| format!("row-{}", entry.name))
                     .on_drag(DraggedSelection { entries: drag_entries }, {
@@ -1725,7 +1725,7 @@ impl Pane {
                     .gap_2()
                     .when(shift != 0.0, |row| row.top(px(shift)))
                     .when(look.opacity < 1.0, |row| row.opacity(look.opacity))
-                    .when(selected && !glide, |row| row.bg(selection_bg))
+                    .when(draws_selection_fill(selected, glide, cursor == Some(ix)), |row| row.bg(selection_bg))
                     .when_some(tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
                     .debug_selector(|| format!("column-{k}-row-{}", entry.name))
                     .on_drag(DraggedSelection { entries: drag_entries }, {
@@ -2020,6 +2020,13 @@ fn chevron_glyph(expanded: bool, chevron: gpui::Rgba) -> impl IntoElement {
     )
     .w(px(14.))
     .h(px(14.))
+}
+
+/// Whether a row draws its own selection fill. While the cursor glides (Full motion,
+/// focused list), the cursor row leaves its fill to the gliding one under the rows;
+/// every other selected row keeps its own, so a multiple selection still shows.
+fn draws_selection_fill(selected: bool, glide: bool, is_cursor: bool) -> bool {
+    selected && !(glide && is_cursor)
 }
 
 /// The file icon with the trash glyph drawn over it while a row is swallowed.
@@ -2399,7 +2406,15 @@ impl Pane {
 
 #[cfg(test)]
 mod tests {
-    use super::drag_combo_left;
+    use super::{drag_combo_left, draws_selection_fill};
+
+    #[test]
+    fn gliding_hands_only_the_cursor_rows_fill_to_the_glide() {
+        assert!(!draws_selection_fill(true, true, true), "the cursor row: the glide draws its fill");
+        assert!(draws_selection_fill(true, true, false), "other selected rows keep theirs (⌘A in Full)");
+        assert!(draws_selection_fill(true, false, true), "no glide: the cursor row fills itself");
+        assert!(!draws_selection_fill(false, true, false), "unselected rows draw none");
+    }
 
     #[test]
     fn drag_combo_touches_the_cursor_only_when_it_has_to() {
