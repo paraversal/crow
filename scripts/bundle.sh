@@ -2,14 +2,20 @@
 # Build target/bundle/Crow.app. Running Crow as an app (not from a terminal) makes
 # macOS privacy prompts (Desktop, Downloads, Full Disk Access) name Crow itself.
 #
-#   scripts/bundle.sh             build and sign ad hoc
+#   scripts/bundle.sh             build and sign (see Signing below)
 #   scripts/bundle.sh --open      ...then launch it
 #   scripts/bundle.sh --install   ...then copy it to /Applications (replacing an older Crow)
 #
 # The options combine: `--install --open` launches the installed copy.
 # Set CROW_INSTALL_DIR to install somewhere else (e.g. ~/Applications).
 #
-# Set CROW_SIGN_IDENTITY to a Developer ID to sign for distribution instead.
+#
+# Signing: with a code-signing certificate named "Crow Dev" in the keychain, every build
+# is signed with it, so macOS keeps Crow's privacy permissions (Full Disk Access, folder
+# prompts) from one build to the next. Without it the build is signed ad hoc, and macOS
+# asks again after every build. Create it once in Keychain Access: Certificate Assistant >
+# Create a Certificate, name "Crow Dev", type "Code Signing" (it needn't be trusted).
+# Set CROW_SIGN_IDENTITY to use another identity (e.g. a Developer ID for distribution).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -57,8 +63,13 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --sign "${CROW_SIGN_IDENTITY:--}" --timestamp=none "$app"
-echo "built $app ($version)"
+identity="${CROW_SIGN_IDENTITY:-}"
+if [ -z "$identity" ] && security find-identity -p codesigning 2>/dev/null | grep -q '"Crow Dev"'; then
+  identity="Crow Dev"
+fi
+codesign --force --sign "${identity:--}" --timestamp=none "$app"
+[ "${identity:--}" = "-" ] && signer="ad hoc" || signer="$identity"
+echo "built $app ($version), signed $signer"
 
 if $install; then
   dest_dir="${CROW_INSTALL_DIR:-/Applications}"

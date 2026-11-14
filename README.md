@@ -14,7 +14,8 @@ cargo run --release -p crow-app  # opens your home folder
 ./scripts/bundle.sh --install    # ...and copies it to /Applications (CROW_INSTALL_DIR to change)
 ```
 
-Running as `Crow.app` makes macOS privacy prompts name Crow instead of your terminal.
+Running as `Crow.app` makes macOS privacy prompts name Crow instead of your terminal. With a code-signing certificate named
+"Crow Dev" in your keychain (see `scripts/bundle.sh`), macOS keeps those permissions from one build to the next.
 
 ## Layout
 
