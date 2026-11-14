@@ -567,6 +567,23 @@ mod tests {
     }
 
     #[test]
+    fn fuzzy_indices_are_byte_ranges() {
+        let haystack = "~/Files/Coding/git";
+        let mut matcher = FuzzyMatcher::new("git");
+        let (_, ranges) = matcher.indices(haystack).expect("a match");
+        let start = haystack.len() - 3;
+        assert_eq!(ranges, [start..start + 3], "the last three bytes, merged into one range");
+    }
+
+    #[test]
+    fn fuzzy_indices_score_matches_score() {
+        let haystack = "~/Files/notes.txt";
+        let mut matcher = FuzzyMatcher::new("notes");
+        let (score, _) = matcher.indices(haystack).expect("a match");
+        assert_eq!(Some(score), matcher.score(haystack));
+    }
+
+    #[test]
     fn content_hits_report_line_text_and_ranges() {
         let root = root("content");
         write(&root, "lines.txt", b"alpha\nNEEDLE here\nbeta needle\n");
