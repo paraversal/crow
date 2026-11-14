@@ -3,7 +3,7 @@
 Crow is a Finder-style file explorer for macOS in Rust on GPUI (vendored Zed, `vendor/`, fetched by `scripts/fetch-gpui.sh`). Read `README.md` (layout, config, keys) and `docs/testing.md` (tests, bench, hand checks).
 
 ## Working on a plan
-Milestones and fix lists live in `docs/plans/` (U plans in `docs/plans/ui-overhaul/`). Implement them with the `execute-plan` skill (`.claude/skills/execute-plan/SKILL.md`): keep `docs/plans/<plan>.progress.md` current after every step, and **ask the user about anything unclear or undecided instead of choosing yourself.**
+Milestones and fix lists live in `docs/plans/` (M7 pieces in `docs/plans/m7/`, the finished UI overhaul index in `docs/plans/ui-overhaul/`). Implement them with the `execute-plan` skill (`.claude/skills/execute-plan/SKILL.md`): keep `docs/plans/<plan>.progress.md` current after every step, and **ask the user about anything unclear or undecided instead of choosing yourself.**
 When the work is done, the executing agent commits locally and stops at "Ready for critique"; a second agent reviews the branch with the `critique` skill (`.claude/skills/critique/SKILL.md`), fixes what is clearly wrong, and opens the PR.
 Finished plans (merged, with their progress files) move to `docs/plans/done/`; things too big for a fix list wait in `docs/plans/after-ui-overhaul.md`.
 
