@@ -8058,7 +8058,15 @@ mod tests {
         cx.simulate_event(gpui::FileDropEvent::Pending { position: second });
         cx.run_until_parked();
         assert_eq!(target(&cx), Some((true, 1)), "the row under the pointer is highlighted");
-        assert!(sidebar_looks(&view, &mut cx)[1].drop, "the row's look carries the drop fill");
+        assert!(sidebar_looks(&view, &mut cx)[1].drop, "the row's look carries the drop mark");
+        let outlined = |cx: &mut VisualTestContext, selector: &'static str| {
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            let row = cx.debug_bounds(selector).expect("target");
+            cx.debug_bounds("drop-outline").is_some_and(|outline| outline == row)
+        };
+        assert!(outlined(&mut cx, "sidebar-1"), "the target row is outlined, like list and column targets");
         for _ in 0..8 {
             cx.simulate_event(gpui::FileDropEvent::Pending { position: second });
             cx.run_until_parked();
@@ -8070,10 +8078,11 @@ mod tests {
         cx.simulate_event(gpui::FileDropEvent::Pending { position: header });
         cx.run_until_parked();
         assert_eq!(target(&cx), Some((false, 0)), "a group title highlights as a drop target");
+        assert!(outlined(&mut cx, "sidebar-header-Favorites"), "…with the same outline");
         cx.simulate_event(gpui::FileDropEvent::Exited);
         cx.run_until_parked();
         assert_eq!(target(&cx), None, "leaving the window clears it");
-        assert!(sidebar_looks(&view, &mut cx).iter().all(|look| !look.drop), "…and every row's drop fill goes");
+        assert!(sidebar_looks(&view, &mut cx).iter().all(|look| !look.drop), "…and every row's drop mark goes");
     }
 
     #[gpui::test]

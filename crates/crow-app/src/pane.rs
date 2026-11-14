@@ -41,8 +41,8 @@ use crate::icons::{Glyph, glyph};
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, content_opacity, effect_tint, format_time, highlight_text, icon,
-    inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
+    active_selection, color, color_alpha, content_opacity, drop_outline, effect_tint, format_time, highlight_text,
+    icon, inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -2270,17 +2270,6 @@ fn chevron_glyph(turn: f32, chevron: gpui::Rgba) -> impl IntoElement {
 /// adds to the raw offset even past the ends (a short list cannot scroll at
 /// all); `uniform_list` clamps it only when it lays out, so overlays drawn over
 /// the rows (the glide fill, ghost rows) clamp it the same way or they drift.
-/// The mark for a drop target: an accent outline that leaves the selection fill
-/// underneath visible. Absolute, so it never shifts the rows; callers place it.
-fn drop_outline(theme: &Theme) -> gpui::Div {
-    div()
-        .absolute()
-        .rounded_md()
-        .border_1()
-        .border_color(color(theme.role("accent")))
-        .debug_selector(|| "drop-outline".into())
-}
-
 fn shown_offset(scroll: &UniformListScrollHandle) -> f32 {
     let state = scroll.0.borrow();
     let max = f32::from(state.base_handle.max_offset().y).max(0.0);

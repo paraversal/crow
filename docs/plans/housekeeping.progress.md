@@ -30,6 +30,7 @@ Branch: `housekeeping` · Last updated: 2026-11-14 · State: PR open · PR: http
 - Start a drag, bring another app/window forward without leaving Crow's bounds; the combo must become a native drag.
 - Escape during an in-window drag and during a native-promoted drag: both fly back.
 - Expand a folder in list view and drag one of its children: over its siblings nothing is outlined (no-op); over a sibling folder that row is outlined; over a top-level file or the empty space below, the whole list is outlined; over the expanded folder from outside, the folder's whole block is outlined. No target ever shows a fill.
+- Sidebar: drag a file over a favorite folder and over the Favorites title: both get the same outline, and the current-folder fill stays visible under it.
 - Same in column view (⌘3): over a folder row that row is outlined; over a file row or a column's empty space, that column is outlined; dragging an item over its own column outlines nothing.
 - Escape mid-drag, then let go of the mouse without pressing anything else: the combo flies back and disappears on its own (no second Escape).
 - Close every window, start a long copy first if you can (or drag a big folder to another volume, then ⌘W): ⌘Q opens a window at the launch folder with the Stop and Quit sheet; Esc keeps the copy running.
@@ -50,7 +51,7 @@ No plan document exists for this branch (only this progress file); the items abo
 | C6 | Folder-row drop fill read like the selection fill (bug 4) | `pane.rs` | UI | ask | Q3 → outline only, list and column (6d9cefd) |
 | C7 | ⌘Q with no window and a running operation cancelled it silently (agent decision) | `window.rs` quit | UX | ask | Q4 → open a window at the launch folder and ask (cc1a8b9) |
 | C8 | `deactivating_the_window_promotes_an_active_drag` builds its own probe view with its own observer, so it tests the GPUI patch, not `CrowWindow`'s subscription; a CrowWindow test can't see the handoff because the test platform's `start_external_drag` returns false and its setter is `pub(crate)` | `window.rs` tests | code | note | left: needs one more GPUI patch line; covered by a hand check |
-| C9 | The sidebar still marks drop targets with the old fill, now different from list and column | `sidebar.rs:805,864` | UI | note | left: outside what the user asked; candidate for a follow-up |
+| C9 | The sidebar still marked drop targets with the old fill, now different from list and column | `sidebar.rs` | UI | ask | user: same outline here too (see the commit after cc1a8b9); the fill helper is gone, `style::drop_outline` is shared |
 | C10 | ⌘N with no window opens `$HOME`, the Dock and ⌘Q open the launch folder; same folder unless Crow was started with a path argument | `menus.rs:89` | UX | note | left |
 
 User decisions (2026-11-14): Q1 outline the whole list or column for drops into the shown folder · Q2 mark a target only when the drop would act · Q3 one accent outline for every target, no fill · Q4 ⌘Q with no window opens one and asks.

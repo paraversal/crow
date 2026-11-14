@@ -59,9 +59,17 @@ pub fn error_soft(theme: &Theme) -> Rgba {
     color_alpha(theme.role("error"), 0x24)
 }
 
-/// A drag's target.
-pub fn drop_target(theme: &Theme) -> Rgba {
-    color_alpha(theme.role("accent"), 0x40)
+/// The mark for a drag's target: an accent outline that leaves the selection or
+/// current-folder fill underneath visible. Absolute, so it never shifts layout;
+/// callers place it inside a `relative()` parent.
+pub fn drop_outline(theme: &Theme) -> gpui::Div {
+    use gpui::{InteractiveElement, Styled, div};
+    div()
+        .absolute()
+        .rounded_md()
+        .border_1()
+        .border_color(color(theme.role("accent")))
+        .debug_selector(|| "drop-outline".into())
 }
 
 /// How much of its contrast a hidden item's icon and text keep (Finder dims them;
@@ -355,7 +363,6 @@ mod tests {
         assert_eq!(active_selection(&theme), color_alpha(theme.role("accent"), 0x55));
         assert_eq!(inactive_selection(&theme), color(theme.role("selection")));
         assert_eq!(current_location(&theme), color(theme.role("selection")));
-        assert_eq!(drop_target(&theme), color_alpha(theme.role("accent"), 0x40));
         let ring = cursor_ring(&theme);
         assert_eq!(ring.len(), 1);
         assert!(ring[0].inset);
