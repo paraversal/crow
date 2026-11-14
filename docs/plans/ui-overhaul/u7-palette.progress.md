@@ -1,5 +1,5 @@
 # u7-palette progress
-Branch: ui-u7-palette · PR: none · Last updated: 2026-11-14
+Branch: ui-u7-palette · PR: https://github.com/paraversal/file-crow/pull/16 · Last updated: 2026-11-14 · State: **PR open**
 
 ## Prerequisite check (on `main` @ 0b4fdaa)
 - U1 merged (#8): `chrome::{Keycap, KeycapWeight::{Outline, Key, Text}}`, `chrome::{sheet, sheet_panel, SheetWidth::{Compact, Narrow, Wide}}`, `keys::{binding_for, caps, chord_text, spoken, text}`, `style::{scrim, active_selection, inactive_selection}`, `icons`. `text_input::bare()` already exists (U1/U3), `with_aria_label` does not.
@@ -55,4 +55,4 @@ with the user.
 - 2026-11-14: I6 done (remembered commands + setting). Performance: `folder_listing` with 10 000 candidates, release, worst of 100 runs (empty, 1–2 letter, specific and no-match queries): **0.73 ms**, under the 4 ms budget. `refresh_palette` logs its elapsed time at `debug`. README and `docs/testing.md` updated.
 
 ## Next
-Finish: fmt/clippy/tests, `./scripts/bundle.sh`, hand checks, push, PR.
+PR open (#16). The reviewer runs the hand checks in `docs/testing.md`; nothing else is pending in this plan.
