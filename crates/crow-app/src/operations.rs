@@ -18,13 +18,22 @@ use gpui::{App, Global, SharedString, prelude::*};
 /// in `into`, and folders dropped onto themselves or into their own contents, are
 /// left out; `None` when nothing is left.
 pub fn drop_request(paths: &[PathBuf], into: PathBuf, copy: bool) -> Option<ops::Request> {
-    let paths: Vec<PathBuf> =
-        paths.iter().filter(|p| p.parent() != Some(into.as_path()) && !into.starts_with(p)).cloned().collect();
+    let paths: Vec<PathBuf> = paths.iter().filter(|p| drop_moves(p, &into)).cloned().collect();
     if paths.is_empty() {
         return None;
     }
     let same_volume = paths.iter().all(|p| same_volume(p, &into));
     Some(if same_volume && !copy { ops::Request::Move { paths, into } } else { ops::Request::Copy { paths, into } })
+}
+
+/// Whether dropping `paths` into `into` would do anything: not every item is already
+/// there, and none is `into` itself or a folder above it.
+pub fn drop_would_act(paths: &[PathBuf], into: &Path) -> bool {
+    paths.iter().any(|path| drop_moves(path, into))
+}
+
+fn drop_moves(path: &Path, into: &Path) -> bool {
+    path.parent() != Some(into) && !into.starts_with(path)
 }
 
 fn same_volume(a: &Path, b: &Path) -> bool {

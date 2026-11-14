@@ -27,7 +27,7 @@ use crate::actions::{
 use crate::chrome::with_tooltip;
 use crate::palette::CommandId;
 use crate::pane::DraggedSelection;
-use crate::style::{color, current_location, cursor_ring, drop_target, effect_tint, icon};
+use crate::style::{color, current_location, cursor_ring, drop_outline, effect_tint, icon};
 use crate::ui::{self, Ui};
 
 pub enum SidebarEvent {
@@ -758,7 +758,6 @@ impl Render for Sidebar {
         self.cursor = self.cursor.min(selectable_count.saturating_sub(1));
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
         let subtle = theme.role("fg-subtle");
-        let drop_bg = drop_target(&theme);
 
         // A drag's target comes from the pointer and the last layout, so the
         // highlight only changes when the pointer enters a different row.
@@ -794,6 +793,7 @@ impl Render for Sidebar {
                     .pt_3()
                     .pb_1()
                     .rounded_md()
+                    .relative()
                     .text_size(px(11.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(color(muted))
@@ -802,7 +802,7 @@ impl Render for Sidebar {
                     Some(g) => header
                         .when(
                             !self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Group(g)),
-                            |header| header.bg(drop_bg),
+                            |header| header.child(drop_outline(&theme).inset_0()),
                         )
                         .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                             let at = this.group_end(g, cx);
@@ -860,8 +860,8 @@ impl Render for Sidebar {
                 .flex()
                 .flex_col()
                 .relative()
-                .when(look.current && !look.drop, |row| row.bg(current_location(&theme)))
-                .when(look.drop, |row| row.bg(drop_bg))
+                .when(look.current, |row| row.bg(current_location(&theme)))
+                .when(look.drop, |row| row.child(drop_outline(&theme).inset_0()))
                 .when(look.ring, |row| row.shadow(cursor_ring(&theme)))
                 .when_some(receive_tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
                 .on_click(cx.listener(move |this, _, _, cx| {

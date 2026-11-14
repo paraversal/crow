@@ -1,0 +1,186 @@
+diff --git a/crates/gpui/src/app.rs b/crates/gpui/src/app.rs
+index f102819..42882e2 100644
+--- a/crates/gpui/src/app.rs
++++ b/crates/gpui/src/app.rs
+@@ -3108,6 +3108,11 @@ impl App {
+         self.active_drag.is_some()
+     }
+ 
++    /// The value being dragged, if there is an active drag of type `T`.
++    pub fn active_drag_value<T: 'static>(&self) -> Option<&T> {
++        self.active_drag.as_ref()?.value.downcast_ref::<T>()
++    }
++
+     /// Gets the cursor style of the currently active drag operation.
+     pub fn active_drag_cursor_style(&self) -> Option<CursorStyle> {
+         self.active_drag.as_ref().and_then(|drag| drag.cursor_style)
+@@ -3658,6 +3663,10 @@ pub struct AnyDrag {
+     /// Resolves the payload to offer the platform if the drag leaves the window.
+     /// Invoked at most once per drag gesture, at promotion time.
+     pub external_payload_source: Option<ExternalDragPayloadSource>,
++
++    /// The element's origin when the drag started, for the cancel animation.
++    /// `None` for a drag that came from outside the app (AppKit owns it).
++    pub origin: Option<Point<Pixels>>,
+ }
+ 
+ /// Lazily resolves the payload handed to the platform when an internal drag is
+diff --git a/crates/gpui/src/elements/div.rs b/crates/gpui/src/elements/div.rs
+index ce03804..03b7718 100644
+--- a/crates/gpui/src/elements/div.rs
++++ b/crates/gpui/src/elements/div.rs
+@@ -3104,12 +3104,14 @@ impl Interactivity {
+                                     })
+                                         as ExternalDragPayloadSource
+                                 });
++                            window.clear_drag_return();
+                             cx.active_drag = Some(AnyDrag {
+                                 view: drag,
+                                 value: listener.value,
+                                 cursor_offset,
+                                 cursor_style: drag_cursor_style,
+                                 external_payload_source,
++                                origin: Some(hitbox.origin),
+                             });
+                             pending_mouse_down.take();
+                             window.refresh();
+diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+index f408e9d..46ed3e8 100644
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -1225,6 +1225,16 @@ enum InputModality {
+     Touch,
+ }
+ 
++/// How long a cancelled drag's combo takes to fly back to where it started.
++const DRAG_RETURN_SECS: f32 = 0.2;
++
++struct DragReturn {
++    view: AnyView,
++    from: Point<Pixels>,
++    to: Point<Pixels>,
++    started: Instant,
++}
++
+ /// Holds the state for a specific window.
+ pub struct Window {
+     pub(crate) handle: AnyWindowHandle,
+@@ -1308,6 +1318,7 @@ pub struct Window {
+     pending_modifier: ModifierState,
+     pub(crate) pending_input_observers: SingleSubscriberSet<AnyObserver>,
+     prompt: Option<RenderablePromptHandle>,
++    drag_return: Option<DragReturn>,
+     pub(crate) client_inset: Option<Pixels>,
+     /// The hitbox that has captured the pointer, if any.
+     /// While captured, mouse events route to this hitbox regardless of hit testing.
+@@ -2438,6 +2449,7 @@ impl Window {
+             pending_modifier: ModifierState::default(),
+             pending_input_observers: SingleSubscriberSet::new(),
+             prompt: None,
++            drag_return: None,
+             client_inset: None,
+             image_cache_stack: Vec::new(),
+             captured_hitbox: None,
+@@ -4061,6 +4073,30 @@ impl Window {
+             element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
+             active_drag_element = Some(element);
+             cx.active_drag = Some(active_drag);
++        } else if let Some((returning, t)) = self
++            .drag_return
++            .take()
++            .map(|returning| {
++                let elapsed = cx
++                    .background_executor()
++                    .now()
++                    .saturating_duration_since(returning.started)
++                    .as_secs_f32();
++                (returning, elapsed / DRAG_RETURN_SECS)
++            })
++            // A finished flight draws nothing: no frame follows this one to clear it.
++            .filter(|(_, t)| *t < 1.0)
++        {
++            let eased = 1.0 - (1.0 - t).powi(5);
++            let offset = Point::new(
++                returning.from.x + (returning.to.x - returning.from.x) * eased,
++                returning.from.y + (returning.to.y - returning.from.y) * eased,
++            );
++            let mut element = returning.view.clone().into_any_element();
++            element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
++            active_drag_element = Some(element);
++            self.drag_return = Some(returning);
++            self.on_next_frame(|window, _| window.refresh());
+         } else {
+             tooltip_element = self.prepaint_tooltip(cx);
+         }
+@@ -6075,6 +6111,7 @@ impl Window {
+                             cursor_offset: position,
+                             cursor_style: None,
+                             external_payload_source: None,
++                            origin: None,
+                         });
+                     }
+                     PlatformInput::MouseMove(MouseMoveEvent {
+@@ -6183,26 +6220,60 @@ impl Window {
+         if Bounds::new(Point::default(), self.viewport_size).contains(&mouse_move.position) {
+             return;
+         }
++        self.promote_active_drag_to_platform(cx);
++    }
++
++    /// Hands the active in-window drag to the platform now, even when the pointer is
++    /// still inside the window. Used when another window comes to the front mid-drag.
++    pub fn promote_active_drag_to_platform(&mut self, cx: &mut App) -> bool {
+         if !self.platform_window.can_start_external_drag() {
+-            return;
++            return false;
+         }
+         let Some(payload_source) = cx
+             .active_drag
+             .as_mut()
+             .and_then(|drag| drag.external_payload_source.take())
+         else {
+-            return;
++            return false;
+         };
+         let Some(payload) = payload_source(self, cx) else {
+-            return;
++            return false;
+         };
+         if self.platform_window.start_external_drag(&payload)
+             && cx.hand_active_drag_to_platform(self.handle.window_id())
+         {
+             self.refresh();
++            true
++        } else {
++            false
+         }
+     }
+ 
++    /// Ends an in-window drag and animates its view back to where it started.
++    /// Returns false for a drag that came from outside the app (AppKit owns it).
++    pub fn cancel_active_drag(&mut self, cx: &mut App) -> bool {
++        let Some(drag) = cx.active_drag.take() else {
++            return false;
++        };
++        let Some(to) = drag.origin else {
++            cx.active_drag = Some(drag);
++            return false;
++        };
++        let from = self.mouse_position() - drag.cursor_offset;
++        self.drag_return = Some(DragReturn {
++            view: drag.view,
++            from,
++            to,
++            started: cx.background_executor().now(),
++        });
++        self.refresh();
++        true
++    }
++
++    pub(crate) fn clear_drag_return(&mut self) {
++        self.drag_return = None;
++    }
++
+     /// Whether recognized touch pans may use the platform's predicted touch
+     /// positions ([`TouchEvent::predicted_position`]) to compensate for input
+     /// latency. Defaults to true.
