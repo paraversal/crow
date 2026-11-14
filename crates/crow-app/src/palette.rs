@@ -16,7 +16,7 @@ use crate::actions::{
     MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection,
     PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView, SearchEverything,
     SearchReveal, SelectAll, ShowCommandPalette, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity,
-    ToggleHiddenFiles, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
+    ToggleHiddenFiles, TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -73,6 +73,7 @@ pub enum CommandId {
     NewWindow,
     SwitchFocus,
     ToggleHiddenFiles,
+    TogglePreview,
     OpenParent,
     GoBack,
     GoForward,
@@ -138,6 +139,7 @@ impl CommandId {
             CommandId::NewWindow => "new-window",
             CommandId::SwitchFocus => "switch-focus",
             CommandId::ToggleHiddenFiles => "toggle-hidden-files",
+            CommandId::TogglePreview => "toggle-preview",
             CommandId::OpenParent => "open-parent",
             CommandId::GoBack => "go-back",
             CommandId::GoForward => "go-forward",
@@ -420,6 +422,15 @@ pub const COMMANDS: &[Command] = &[
         action: &ToggleHiddenFiles,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Hidden Files" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::TogglePreview,
+        label: "Show or Hide Preview",
+        action: &TogglePreview,
+        scope: KeyScope::Window,
+        // menus::app_menus turns this into "Hide Preview" while the preview shows.
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Preview" }),
         palette: true,
     },
     Command {

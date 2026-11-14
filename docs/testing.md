@@ -19,7 +19,9 @@ footer counts and skipped list, idle examples, best-row selection while results 
 row after they move, contiguous name hits before content and weak fuzzy names after, one-line regex
 errors, singular skipped wording, preview in list and column view at the hit line, match cycling), the top band
 (search field click, Cmd-F refocus and select-all, Done/Esc, Go to, All/Names/Contents, switching
-tabs closing search, the Tab cycle while searching, focus never left on an element that is gone), the bottom bar
+tabs closing search, the Tab cycle while searching, ↓ into the results and ↑ back, focus never left on an element that is gone), the preview toggle
+(⇧⌘P in list and column view, `show_preview` live reload, the palette chip), the blinking caret,
+the bottom bar
 (hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
 path folding and hint dropping, messages that retire), closing or quitting during an operation, ⌥ word moves in
 text fields, the list's Name column following the window width, the menu bar

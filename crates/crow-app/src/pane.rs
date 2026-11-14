@@ -1776,11 +1776,13 @@ impl Pane {
                 );
         }
         // The preview is the last column when the focused column's cursor is a file.
-        if let Some(entry) = self.cursor_entry(cx).filter(|e| !e.is_dir || e.is_package()) {
+        let show_preview = cx.global::<Ui>().settings.show_preview;
+        if show_preview && let Some(entry) = self.cursor_entry(cx).filter(|e| !e.is_dir || e.is_package()) {
             let preview = self.preview(cx);
             strip = strip.child(
                 div()
                     .id("preview-column")
+                    .debug_selector(|| "preview-column".into())
                     .role(Role::Group)
                     .aria_label(preview::spoken(&entry, preview))
                     .w(px(PREVIEW_COLUMN_WIDTH))

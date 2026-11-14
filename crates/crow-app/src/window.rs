@@ -12,7 +12,7 @@ use gpui::{
 use crate::actions::{
     AddToSidebar, ApplyThemeEverywhere, CloseTab, GoBack, GoForward, GoToFolder, KeyboardShortcuts, Minimize, MoveDown,
     MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView,
-    SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
+    SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, TogglePreview,
     UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
@@ -426,6 +426,12 @@ impl CrowWindow {
         if let Some(search) = &self.search {
             search.update(cx, |search, cx| search.set_show_hidden(show, cx));
         }
+    }
+
+    fn toggle_preview(&mut self, _: &TogglePreview, _: &mut Window, cx: &mut Context<Self>) {
+        let show = !cx.global::<Ui>().settings.show_preview;
+        crate::ui::set_show_preview(show, cx);
+        cx.notify();
     }
 
     fn go_to_folder(&mut self, _: &GoToFolder, window: &mut Window, cx: &mut Context<Self>) {
@@ -2165,10 +2171,11 @@ impl CrowWindow {
     }
 
     /// Whether palette command `id` is a toggle, and its current state.
-    fn toggle_state(&self, id: palette::CommandId) -> Option<bool> {
+    fn toggle_state(&self, id: palette::CommandId, cx: &App) -> Option<bool> {
         match id {
             palette::CommandId::ToggleHiddenFiles => Some(self.show_hidden),
             palette::CommandId::ToggleActivity => Some(self.show_activity),
+            palette::CommandId::TogglePreview => Some(cx.global::<Ui>().settings.show_preview),
             _ => None,
         }
     }
@@ -2202,6 +2209,7 @@ impl CrowWindow {
             }
             CommandId::SwitchFocus => self.switch_focus(&SwitchFocus, window, cx),
             CommandId::ToggleHiddenFiles => self.toggle_hidden(&ToggleHiddenFiles, window, cx),
+            CommandId::TogglePreview => self.toggle_preview(&TogglePreview, window, cx),
             CommandId::OpenParent => self.open_parent(&OpenParent, window, cx),
             CommandId::GoBack => self.go_back(&GoBack, window, cx),
             CommandId::GoForward => self.go_forward(&GoForward, window, cx),
@@ -2572,7 +2580,7 @@ impl CrowWindow {
     ) -> gpui::AnyElement {
         let Item::Command { command, matched } = &listing.items[i] else { return div().into_any_element() };
         let binding = keys::binding_for(command.action, command.scope, cx);
-        let toggle = self.toggle_state(command.id);
+        let toggle = self.toggle_state(command.id, cx);
         let mut aria = command.label.to_owned();
         if let Some(slot) = command.menu {
             aria.push_str(&format!(", {} menu", slot.menu.title()));
@@ -2778,6 +2786,7 @@ impl Render for CrowWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
+        let show_preview = ui.settings.show_preview;
         let (font, font_size) = (ui_font(&ui.settings.font_family), ui.settings.font_size);
         let title = crate::style::display_name(&self.pane().read(cx).current_dir(cx));
         let list_view = self.pane().read(cx).mode() == ViewMode::List;
@@ -2789,7 +2798,9 @@ impl Render for CrowWindow {
         let sidebar = self.sidebar.clone();
         let search_preview = self.search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);
-        let preview: Option<gpui::AnyElement> = if self.search.is_some() {
+        let preview: Option<gpui::AnyElement> = if !show_preview {
+            None
+        } else if self.search.is_some() {
             if narrow { None } else { search_preview }.map(|(entry, preview)| {
                 self.render_preview_pane(Some(&entry), preview.as_ref(), &theme).into_any_element()
             })
@@ -2830,6 +2841,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::switch_focus))
             .on_action(cx.listener(Self::toggle_hidden))
+            .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::open_parent))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
@@ -5419,10 +5431,10 @@ mod tests {
         let root = fixture("palette-toggle");
         let (view, mut cx) = open(cx, &root);
         let state = |cx: &VisualTestContext| {
-            view.read_with(cx, |w, _| {
+            view.read_with(cx, |w, cx| {
                 let palette = w.palette.as_ref()?;
                 palette.listing.items.iter().find_map(|item| match item {
-                    Item::Command { command, .. } => w.toggle_state(command.id),
+                    Item::Command { command, .. } => w.toggle_state(command.id, cx),
                     Item::Folder { .. } => None,
                 })
             })
@@ -6576,6 +6588,48 @@ mod tests {
         settle(&view, &mut cx);
         let rows = view.read_with(&cx, |w, _| w.palette_rows());
         assert!(rows.first().is_some_and(|row| row.contains("New File")), "{rows:?}");
+    }
+
+    #[gpui::test]
+    fn preview_toggle_hides_it_in_list_and_columns(cx: &mut TestAppContext) {
+        let root = fixture("preview-toggle");
+        let (view, mut cx) = open(cx, &root);
+        assert!(cx.debug_bounds("preview").is_some(), "list view shows the preview");
+        cx.simulate_keystrokes("cmd-shift-p");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("preview").is_none(), "hiding removes the list preview");
+        assert!(!cx.read(|cx| cx.global::<Ui>().settings.show_preview), "the setting is off");
+        assert_eq!(
+            view.read_with(&cx, |w, cx| w.toggle_state(crate::palette::CommandId::TogglePreview, cx)),
+            Some(false),
+            "the palette chip follows"
+        );
+
+        cx.simulate_keystrokes("cmd-shift-p");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("preview").is_some(), "showing it again");
+
+        cx.simulate_keystrokes("cmd-3");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("down down");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("preview-column").is_some(), "a file's preview is the last column");
+        cx.simulate_keystrokes("cmd-shift-p");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("preview-column").is_none(), "hiding removes the preview column");
+        assert_eq!(view.read_with(&cx, |w, cx| w.pane().read(cx).mode()), ViewMode::Columns);
+    }
+
+    #[gpui::test]
+    fn show_preview_false_in_settings_hides_it(cx: &mut TestAppContext) {
+        let root = fixture("preview-setting");
+        let (view, mut cx) = open(cx, &root);
+        let text = std::fs::read_to_string(config_dir(&cx).join("settings.toml")).expect("settings file");
+        assert!(text.contains("show_preview = true"), "the documented default: {text}");
+        write_config(&view, &mut cx, "settings.toml", &text.replace("show_preview = true", "show_preview = false"));
+        assert!(cx.debug_bounds("preview").is_none(), "live reload hides the preview");
+        let focus = cx.update(|_, cx| cx.global::<Ui>().settings.show_preview);
+        assert!(!focus);
     }
 
     #[gpui::test]
