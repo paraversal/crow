@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use crow_core::{SidebarEdit, Tabs, ViewMode};
 use gpui::{
     AnyWindowHandle, App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
-    Render, Role, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
-    img, point, prelude::*, px, size, transparent_black,
+    Render, Role, ScrollHandle, SharedString, Subscription, TitlebarOptions, Toggled, Window, WindowBounds,
+    WindowOptions, div, img, point, prelude::*, px, size, transparent_black,
 };
 
 use crate::actions::{
@@ -28,7 +28,7 @@ use crate::pane::PaneEvent;
 use crate::preview;
 use crate::search::{SearchEvent, SearchView};
 use crate::sidebar::{Sidebar, SidebarEvent};
-use crate::style::{active_selection, color, highlight_text, icon, truncate_middle_with_ranges, ui_font};
+use crate::style::{active_selection, color, color_alpha, highlight_text, icon, truncate_middle_with_ranges, ui_font};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::{self, Ui, reload_theme};
 use crow_fs::Entry;
@@ -106,9 +106,34 @@ impl ThemePicker {
     }
 }
 
+/// Which half of the palette is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaletteMode {
+    Folders,
+    Commands,
+}
+
+impl PaletteMode {
+    fn placeholder(self) -> &'static str {
+        match self {
+            PaletteMode::Folders => "Go to a folder, or > for commands",
+            PaletteMode::Commands => "Run a command",
+        }
+    }
+
+    /// The field's spoken name; the placeholder says where `>` leads.
+    fn aria_label(self) -> &'static str {
+        match self {
+            PaletteMode::Folders => "Go to folder",
+            PaletteMode::Commands => "Search commands",
+        }
+    }
+}
+
 /// Cmd-K: folders (favorites, Recent, subfolders) or, after `>`, commands.
 struct Palette {
     input: Entity<TextInput>,
+    mode: PaletteMode,
     listing: palette::Listing,
     /// The focused folder's name, for the "In <name>" header.
     here: String,
@@ -118,12 +143,12 @@ struct Palette {
     _subscription: Subscription,
 }
 
+#[cfg(test)]
 impl Palette {
-    /// The shortcut shown on row `i`, from the live keymap. Shared by
-    /// `render_palette_rows` and the layer test.
+    /// The shortcut shown on row `i`, from the live keymap; the layer test reads it.
     fn row_keys(&self, i: usize, cx: &App) -> Option<SharedString> {
         match self.listing.items.get(i)? {
-            Item::Command(command) => keys::text(command.action, command.scope, cx),
+            Item::Command { command, .. } => keys::text(command.action, command.scope, cx),
             Item::Folder { .. } => None,
         }
     }
@@ -149,7 +174,7 @@ const PALETTE_PATH_WIDTH: f32 = PALETTE_WIDTH - 2. * PALETTE_LIST_PAD - 20. - 22
 
 fn palette_item_height(item: &Item) -> f32 {
     match item {
-        Item::Command(_) => PALETTE_COMMAND_ROW,
+        Item::Command { .. } => PALETTE_COMMAND_ROW,
         Item::Folder { .. } => PALETTE_FOLDER_ROW,
     }
 }
@@ -393,6 +418,7 @@ impl CrowWindow {
                     }
                 }
                 TextInputEvent::Cancelled => this.close_go_to(window, cx),
+                TextInputEvent::BackspaceAtStart => {}
                 TextInputEvent::Confirmed => {
                     let target = crow_core::resolve_typed(&typed, &cwd, &home);
                     if target.is_dir() {
@@ -1844,14 +1870,49 @@ impl CrowWindow {
             let ui = cx.global::<Ui>();
             palette::folder_candidates(favorites, recents, subfolders, &home, |path| ui.recent.last_visit(path))
         };
-        let listing = palette::listing(query, &folders, &here);
+        let (mode, text) = match query.strip_prefix('>') {
+            Some(rest) => (PaletteMode::Commands, rest.to_owned()),
+            None => (PaletteMode::Folders, query.to_owned()),
+        };
+        let listing = match mode {
+            PaletteMode::Folders => palette::folder_listing(&text, &folders, &here),
+            PaletteMode::Commands => palette::command_listing(&text, &[], false),
+        };
         let input = cx.new(|cx| {
-            TextInput::new(query, "Go to a folder, or > for commands", cx).bare().with_aria_label("Go to folder")
+            TextInput::new(text.clone(), mode.placeholder(), cx)
+                .bare()
+                .with_aria_label(mode.aria_label())
+                .report_backspace_at_start()
         });
         let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
             TextInputEvent::Changed => {
-                let query = input.read(cx).text().to_owned();
-                this.refresh_palette(&query, cx);
+                let text = input.read(cx).text().to_owned();
+                if this.palette.as_ref().is_some_and(|palette| palette.mode == PaletteMode::Folders)
+                    && let Some(rest) = text.strip_prefix('>')
+                {
+                    let rest = rest.to_owned();
+                    if let Some(palette) = &mut this.palette {
+                        palette.mode = PaletteMode::Commands;
+                    }
+                    // Emits Changed once more, after this handler: mode is already
+                    // Commands then, so the nested pass only refreshes.
+                    input.update(cx, |input, cx| input.set_text(rest, window, cx));
+                }
+                let text = input.read(cx).text().to_owned();
+                this.refresh_palette(&text, cx);
+                this.update_palette_field(cx);
+            }
+            TextInputEvent::BackspaceAtStart => {
+                let empty = input.read(cx).text().is_empty();
+                if empty && this.palette.as_ref().is_some_and(|palette| palette.mode == PaletteMode::Commands) {
+                    if let Some(palette) = &mut this.palette {
+                        palette.mode = PaletteMode::Folders;
+                    }
+                    this.refresh_palette("", cx);
+                    this.update_palette_field(cx);
+                } else {
+                    window.play_system_bell();
+                }
             }
             TextInputEvent::Confirmed => this.confirm_palette(false, window, cx),
             TextInputEvent::Cancelled => this.close_palette(window, cx),
@@ -1861,6 +1922,7 @@ impl CrowWindow {
         window.focus(&focus, cx);
         self.palette = Some(Palette {
             input,
+            mode,
             listing,
             here,
             cursor: 0,
@@ -1871,9 +1933,22 @@ impl CrowWindow {
         cx.notify();
     }
 
+    /// Keep the field's placeholder and spoken name in step with the mode.
+    fn update_palette_field(&self, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_ref() else { return };
+        let (mode, input) = (palette.mode, palette.input.clone());
+        input.update(cx, |input, cx| {
+            input.set_placeholder(mode.placeholder(), cx);
+            input.set_aria_label(mode.aria_label(), cx);
+        });
+    }
+
     fn refresh_palette(&mut self, query: &str, cx: &mut Context<Self>) {
         let Some(palette) = &mut self.palette else { return };
-        palette.listing = palette::listing(query, &palette.folders, &palette.here);
+        palette.listing = match palette.mode {
+            PaletteMode::Folders => palette::folder_listing(query, &palette.folders, &palette.here),
+            PaletteMode::Commands => palette::command_listing(query, &[], false),
+        };
         palette.cursor = 0;
         palette.scroll.set_offset(point(px(0.), px(0.)));
         cx.notify();
@@ -1913,12 +1988,21 @@ impl CrowWindow {
         self.confirm_palette(true, window, cx);
     }
 
+    /// Whether palette command `id` is a toggle, and its current state.
+    fn toggle_state(&self, id: palette::CommandId) -> Option<bool> {
+        match id {
+            palette::CommandId::ToggleHiddenFiles => Some(self.show_hidden),
+            palette::CommandId::ToggleActivity => Some(self.show_activity),
+            _ => None,
+        }
+    }
+
     fn confirm_palette(&mut self, new_tab: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(palette) = self.palette.take() else { return };
         let item = palette.listing.items.get(palette.cursor).cloned();
         self.focus_center(window, cx);
         match item {
-            Some(Item::Command(command)) => self.run_command(command.id, window, cx),
+            Some(Item::Command { command, .. }) => self.run_command(command.id, window, cx),
             Some(Item::Folder { path, .. }) if new_tab => self.open_tab_at(path, window, cx),
             Some(Item::Folder { path, .. }) => self.pane().update(cx, |pane, cx| pane.navigate(path, cx)),
             None => {}
@@ -1976,8 +2060,7 @@ impl CrowWindow {
         let input = palette.input.clone();
         let scroll = palette.scroll.clone();
         let count = palette.listing.count.clone();
-        let query = input.read(cx).text().to_owned();
-        let commands = query.starts_with('>');
+        let commands = palette.mode == PaletteMode::Commands;
         let content = palette_content_height(&palette.listing);
         let height = palette_list_height(window, content);
         let width = (f32::from(window.viewport_size().width) - 2. * PALETTE_MARGIN).min(PALETTE_WIDTH);
@@ -2038,6 +2121,19 @@ impl CrowWindow {
                 .child(div().text_size(px(12.)).text_color(muted).child("> commands"))
                 .into_any_element()
         };
+        let token = div()
+            .id("palette-commands-token")
+            .debug_selector(|| "palette-commands-token".into())
+            .h(px(24.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .bg(color_alpha(theme.role("accent"), 0x29))
+            .text_size(px(12.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(color(theme.role("accent")))
+            .child("Commands");
         let input_row = div()
             .h(px(PALETTE_INPUT))
             .px(px(16.))
@@ -2046,7 +2142,8 @@ impl CrowWindow {
             .gap(px(12.))
             .border_b_1()
             .border_color(border)
-            .child(icons::glyph(Glyph::GoTo, 16., "fg-muted", &theme))
+            .when(commands, |row| row.child(token))
+            .when(!commands, |row| row.child(icons::glyph(Glyph::GoTo, 16., "fg-muted", &theme)))
             .child(div().flex_1().min_w_0().text_size(px(15.)).child(input))
             .child(
                 div()
@@ -2093,12 +2190,10 @@ impl CrowWindow {
         let muted = color(theme.role("fg-muted"));
         if palette.listing.items.is_empty() {
             let query = palette.input.read(cx).text().to_owned();
-            let text: SharedString = if query.starts_with('>') {
-                format!("No commands match \"{}\"", query.trim_start_matches('>')).into()
-            } else if query.is_empty() {
-                "Type a folder name, or > for commands".into()
-            } else {
-                format!("No folders match \"{query}\"").into()
+            let text: SharedString = match palette.mode {
+                PaletteMode::Commands => format!("No commands match \"{query}\"").into(),
+                PaletteMode::Folders if query.is_empty() => "Type a folder name, or > for commands".into(),
+                PaletteMode::Folders => format!("No folders match \"{query}\"").into(),
             };
             return vec![
                 div()
@@ -2141,7 +2236,9 @@ impl CrowWindow {
                 Row::Item(i) => {
                     let selected = *i == palette.cursor;
                     let row = match &palette.listing.items[*i] {
-                        Item::Command(_) => self.render_palette_command_row(&palette.listing, *i, selected, &theme, cx),
+                        Item::Command { .. } => {
+                            self.render_palette_command_row(&palette.listing, *i, selected, &theme, cx)
+                        }
                         Item::Folder { .. } => self.render_palette_folder_row(
                             &palette.listing,
                             *i,
@@ -2265,20 +2362,40 @@ impl CrowWindow {
         theme: &crow_theme::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let Item::Command(command) = &listing.items[i] else { return div().into_any_element() };
+        let Item::Command { command, matched } = &listing.items[i] else { return div().into_any_element() };
         let binding = keys::binding_for(command.action, command.scope, cx);
+        let toggle = self.toggle_state(command.id);
         let mut aria = command.label.to_owned();
         if let Some(slot) = command.menu {
             aria.push_str(&format!(", {} menu", slot.menu.title()));
         }
+        if let Some(on) = toggle {
+            aria.push_str(if on { ", on" } else { ", off" });
+        }
+        let fg = color(theme.role("fg"));
         let muted = color(theme.role("fg-muted"));
+        let border = color(theme.role("surface-raised"));
         let hover = color(theme.role("surface-raised"));
+        let chip = toggle.map(|on| {
+            div()
+                .h(px(18.))
+                .px(px(7.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(border)
+                .flex()
+                .items_center()
+                .text_size(px(12.))
+                .text_color(if on { fg } else { muted })
+                .child(if on { "on" } else { "off" })
+        });
         div()
             .id(("palette-row", i))
             .debug_selector(|| format!("palette-row-{i}"))
             .role(Role::ListBoxOption)
             .aria_label(aria)
             .when_some(binding.as_ref().map(keys::chord_text), |row, shortcut| row.aria_keyshortcuts(shortcut))
+            .when_some(toggle, |row, on| row.aria_toggled(if on { Toggled::True } else { Toggled::False }))
             .aria_position_in_set(i + 1)
             .aria_size_of_set(listing.items.len())
             .aria_selected(selected)
@@ -2298,14 +2415,26 @@ impl CrowWindow {
                 this.confirm_palette(false, window, cx);
             }))
             .child(
-                div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_size(px(14.)).child(command.label),
+                div()
+                    .w(px(64.))
+                    .flex_none()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .children(command.menu.map(|slot| slot.menu.title())),
             )
             .child(
                 div()
-                    .text_size(px(12.))
-                    .text_color(muted)
-                    .children(self.palette.as_ref().and_then(|palette| palette.row_keys(i, cx))),
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(14.))
+                    .child(highlight_text(command.label, matched, theme, selected)),
             )
+            .children(chip)
+            .children(binding.map(|binding| Keycap::from_binding(&binding, KeycapWeight::Key)))
             .into_any_element()
     }
 
@@ -2564,7 +2693,7 @@ impl CrowWindow {
                 Row::Header(text) => format!("# {text}"),
                 Row::Item(i) => match &palette.listing.items[*i] {
                     Item::Folder { label, .. } => label.clone(),
-                    Item::Command(command) => command.label.to_owned(),
+                    Item::Command { command, .. } => command.label.to_owned(),
                 },
             })
             .collect()
@@ -4579,9 +4708,13 @@ mod tests {
         })
         .expect("dispatch Help item");
         cx.run_until_parked();
-        let text =
-            view.read_with(&cx, |w, cx| w.palette.as_ref().expect("palette opens").input.read(cx).text().to_owned());
-        assert_eq!(text, ">", "the palette starts in command mode");
+        let (mode, text, rows) = view.read_with(&cx, |w, cx| {
+            let palette = w.palette.as_ref().expect("palette opens");
+            (palette.mode, palette.input.read(cx).text().to_owned(), w.palette_rows())
+        });
+        assert_eq!(mode, PaletteMode::Commands, "the palette starts in command mode");
+        assert_eq!(text, "", "the > lives in the token, not the field");
+        assert!(rows.iter().any(|row| row == "Quit Crow"), "command rows: {rows:?}");
     }
 
     #[gpui::test]
@@ -4707,9 +4840,7 @@ mod tests {
                     .listing
                     .items
                     .iter()
-                    .position(
-                        |item| matches!(item, Item::Command(command) if command.id == crate::palette::CommandId::Copy),
-                    )
+                    .position(|item| matches!(item, Item::Command { command, .. } if command.id == crate::palette::CommandId::Copy))
                     .expect("the Copy row is listed");
                 palette.row_keys(i, cx).map(|keys| keys.to_string())
             })
@@ -4826,12 +4957,103 @@ mod tests {
             let palette = w.palette.as_ref()?;
             match palette.listing.items.get(palette.cursor)? {
                 Item::Folder { label, .. } => Some(label.clone()),
-                Item::Command(_) => None,
+                Item::Command { .. } => None,
             }
         });
         assert!(cursor.as_deref().is_some_and(|label| label.ends_with("/beta")), "down crossed the header: {cursor:?}");
         cx.simulate_keystrokes("up up up");
         assert_eq!(view.read_with(&cx, |w, _| w.palette.as_ref().map(|p| p.cursor)), Some(0), "up at the top stays");
+    }
+
+    #[gpui::test]
+    fn palette_gt_becomes_commands_token(cx: &mut TestAppContext) {
+        let root = fixture("palette-token");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">");
+        settle(&view, &mut cx);
+        let (mode, text, count) = view.read_with(&cx, |w, cx| {
+            let palette = w.palette.as_ref().expect("palette is open");
+            (palette.mode, palette.input.read(cx).text().to_owned(), palette.listing.count.to_string())
+        });
+        assert_eq!(mode, PaletteMode::Commands, "> switches to commands");
+        assert_eq!(text, "", "the > is the token, not text");
+        assert!(count.ends_with("commands"), "a command count: {count}");
+
+        cx.simulate_input("hid");
+        settle(&view, &mut cx);
+        let (first, count) = view.read_with(&cx, |w, _| {
+            let palette = w.palette.as_ref().expect("palette is open");
+            let first = match &palette.listing.items[0] {
+                Item::Command { command, .. } => command.label,
+                Item::Folder { .. } => "",
+            };
+            (first, palette.listing.count.to_string())
+        });
+        assert!(first.contains("Hidden"), "the hidden-files command comes first: {first}");
+        let (matches, total) = count.split_once(" of ").expect("m of n");
+        assert!(matches.parse::<usize>().is_ok() && total.parse::<usize>().is_ok(), "m of n: {count}");
+    }
+
+    #[gpui::test]
+    fn palette_backspace_on_empty_query_removes_token(cx: &mut TestAppContext) {
+        let root = fixture("palette-token-back");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("backspace");
+        settle(&view, &mut cx);
+        let (mode, text, rows) = view.read_with(&cx, |w, cx| {
+            let palette = w.palette.as_ref().expect("palette is open");
+            (palette.mode, palette.input.read(cx).text().to_owned(), w.palette_rows())
+        });
+        assert_eq!(mode, PaletteMode::Folders);
+        assert_eq!(text, "");
+        assert!(rows.first().is_some_and(|row| row.starts_with("# ")), "folders are back: {rows:?}");
+    }
+
+    #[gpui::test]
+    fn palette_backspace_with_text_keeps_token(cx: &mut TestAppContext) {
+        let root = fixture("palette-token-text");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">ab");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("left left backspace");
+        settle(&view, &mut cx);
+        let (mode, text) = view.read_with(&cx, |w, cx| {
+            let palette = w.palette.as_ref().expect("palette is open");
+            (palette.mode, palette.input.read(cx).text().to_owned())
+        });
+        assert_eq!(mode, PaletteMode::Commands, "text keeps the token");
+        assert_eq!(text, "ab");
+    }
+
+    #[gpui::test]
+    fn palette_toggle_chip_shows_state(cx: &mut TestAppContext) {
+        let root = fixture("palette-toggle");
+        let (view, mut cx) = open(cx, &root);
+        let state = |cx: &VisualTestContext| {
+            view.read_with(cx, |w, _| {
+                let palette = w.palette.as_ref()?;
+                palette.listing.items.iter().find_map(|item| match item {
+                    Item::Command { command, .. } => w.toggle_state(command.id),
+                    Item::Folder { .. } => None,
+                })
+            })
+        };
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">hidden");
+        settle(&view, &mut cx);
+        assert_eq!(state(&cx), Some(false), "hidden files are off");
+
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">hidden");
+        settle(&view, &mut cx);
+        assert_eq!(state(&cx), Some(true), "the command turned them on");
     }
 
     #[gpui::test]

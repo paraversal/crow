@@ -503,7 +503,11 @@ pub struct FolderCandidate {
 
 #[derive(Clone, Debug)]
 pub enum Item {
-    Command(Command),
+    Command {
+        command: Command,
+        /// Matched letters as byte ranges in `command.label`.
+        matched: Vec<Range<usize>>,
+    },
     // The U7 I3/I4 render reads the folder fields; the model lands first.
     #[allow(dead_code)]
     Folder {
@@ -553,6 +557,8 @@ pub struct Listing {
 /// Empty query: at most this many Recent rows, and this many "In" rows.
 const RECENT_LIMIT: usize = 8;
 const HERE_LIMIT: usize = 20;
+/// The "Recently used" section's cap.
+const RECENT_COMMANDS: usize = 5;
 /// The list never holds more than this many items, headers aside.
 const TOTAL_LIMIT: usize = 50;
 
@@ -715,33 +721,63 @@ fn folder_item(folder: &FolderCandidate, matched: Vec<Range<usize>>) -> Item {
     }
 }
 
-/// Items for `query`: a leading `>` switches to commands, everything else is a
-/// folder query.
-pub fn listing(query: &str, folders: &[FolderCandidate], here: &str) -> Listing {
-    match query.strip_prefix('>') {
-        Some(commands) => command_listing(commands),
-        None => folder_listing(query, folders, here),
-    }
-}
-
-/// Commands matching `query`, best first; an empty query lists every command
-/// in registry order.
-fn command_listing(query: &str) -> Listing {
-    let query = query.trim();
-    let listed = || COMMANDS.iter().filter(|command| command.palette);
-    let total = listed().count();
-    let mut matched: Vec<(u32, &Command)> = match (!query.is_empty()).then(|| FuzzyMatcher::new(query)) {
-        Some(mut fuzzy) => {
-            let mut matched: Vec<(u32, &Command)> =
-                listed().filter_map(|command| fuzzy.score(command.label).map(|score| (score, command))).collect();
-            matched.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-            matched
-        }
-        None => listed().map(|command| (0, command)).collect(),
+/// Command rows for `query`. An empty query lists every command in registry
+/// order; with `show_recent`, up to five remembered commands come first under a
+/// "Recently used" header and are not repeated below. A typed query is a flat
+/// list, best score first.
+pub fn command_listing(query: &str, recent_ids: &[CommandId], show_recent: bool) -> Listing {
+    let listed: Vec<&Command> = COMMANDS.iter().filter(|command| command.palette).collect();
+    let total = listed.len();
+    let mut items: Vec<Item> = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
+    let push = |items: &mut Vec<Item>, rows: &mut Vec<Row>, command: &Command, matched: Vec<Range<usize>>| {
+        rows.push(Row::Item(items.len()));
+        items.push(Item::Command { command: *command, matched });
     };
-    let count = if query.is_empty() { format!("{total} commands") } else { format!("{} of {total}", matched.len()) };
-    let items: Vec<Item> = matched.drain(..).map(|(_, command)| Item::Command(*command)).collect();
-    Listing { rows: (0..items.len()).map(Row::Item).collect(), items, count: count.into() }
+
+    let query = query.trim();
+    if query.is_empty() {
+        let mut recent: Vec<&Command> = Vec::new();
+        if show_recent {
+            for id in recent_ids {
+                if let Some(command) = listed.iter().find(|command| command.id == *id)
+                    && !recent.iter().any(|seen| seen.id == command.id)
+                {
+                    recent.push(command);
+                }
+                if recent.len() == RECENT_COMMANDS {
+                    break;
+                }
+            }
+        }
+        if !recent.is_empty() {
+            rows.push(Row::Header("Recently used".into()));
+            for command in &recent {
+                push(&mut items, &mut rows, command, Vec::new());
+            }
+            if recent.len() < total {
+                rows.push(Row::Header("All commands".into()));
+            }
+        }
+        for command in &listed {
+            if !recent.iter().any(|seen| seen.id == command.id) {
+                push(&mut items, &mut rows, command, Vec::new());
+            }
+        }
+        return Listing { rows, items, count: format!("{total} commands").into() };
+    }
+
+    let mut fuzzy = FuzzyMatcher::new(query);
+    let mut matched: Vec<(u32, &Command)> =
+        listed.iter().filter_map(|command| fuzzy.score(command.label).map(|score| (score, *command))).collect();
+    matched.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    matched.truncate(TOTAL_LIMIT);
+    let count = matched.len();
+    for (_, command) in matched {
+        let ranges = fuzzy.indices(command.label).map_or_else(Vec::new, |(_, ranges)| ranges);
+        push(&mut items, &mut rows, command, ranges);
+    }
+    Listing { rows, items, count: format!("{count} of {total}").into() }
 }
 
 #[cfg(test)]
@@ -765,18 +801,18 @@ mod tests {
                 Row::Header(text) => format!("# {text}"),
                 Row::Item(i) => match &listing.items[*i] {
                     Item::Folder { label, .. } => label.clone(),
-                    Item::Command(command) => command.label.to_owned(),
+                    Item::Command { command, .. } => command.label.to_owned(),
                 },
             })
             .collect()
     }
 
     fn command_ids(query: &str) -> Vec<CommandId> {
-        listing(query, &[], "")
+        command_listing(query, &[], false)
             .items
             .into_iter()
             .filter_map(|item| match item {
-                Item::Command(command) => Some(command.id),
+                Item::Command { command, .. } => Some(command.id),
                 Item::Folder { .. } => None,
             })
             .collect()
@@ -916,11 +952,11 @@ mod tests {
 
     #[test]
     fn palette_hides_menu_only_commands() {
-        let all = command_ids(">");
+        let all = command_ids("");
         assert!(!all.contains(&CommandId::ShowCommandPalette), "Go to… would reopen the palette");
         assert!(!all.contains(&CommandId::SearchReveal), "Reveal Result cannot run from the palette");
 
-        let find = command_ids(">find");
+        let find = command_ids("find");
         assert!(find.contains(&CommandId::ShowSearch), "Find… is listed");
         assert!(find.contains(&CommandId::SearchEverything), "Find Everything… is listed");
     }

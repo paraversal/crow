@@ -218,6 +218,7 @@ impl SearchView {
                 }
             }
             TextInputEvent::CompletionRequested => cx.emit(SearchEvent::FocusResults),
+            TextInputEvent::BackspaceAtStart => {}
         });
         let exclude_generation = cx.global::<Ui>().exclude_generation;
         let skip_label_value = skip_label(&cx.global::<Ui>().exclude);
