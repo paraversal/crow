@@ -880,7 +880,8 @@ impl CrowWindow {
             Primary::Hints(hints)
         };
 
-        let mut state = BarState { primary, error, count, path, transient_max: None };
+        let mut state =
+            BarState { primary, error, count, path, transient_max: None, message_id: ops.message_generation };
         // Narrow windows lose hints from the right and fold the path's middle (I7).
         bottom_bar::fit_to_window(&mut state, window);
         state
@@ -1149,7 +1150,13 @@ impl CrowWindow {
             Request::Move { paths, into } => Some((paths.clone(), into.clone())),
             _ => None,
         };
-        let failed_paths = trash_paths.clone().or_else(|| move_paths.as_ref().map(|(paths, _)| paths.clone()));
+        let failed_paths =
+            trash_paths.clone().or_else(|| move_paths.as_ref().map(|(paths, _)| paths.clone())).or_else(|| match &plan
+                .request
+            {
+                Request::Copy { paths, .. } | Request::Duplicate { paths } => Some(paths.clone()),
+                _ => None,
+            });
         let pane = self.pane().downgrade();
         // The effect starts with the operation, not the key press: a conflict or a
         // delete sheet may have come first, and a second operation is refused.
@@ -1564,7 +1571,7 @@ impl CrowWindow {
         match ui.sidebar.find_key(key, &ui.home) {
             Some(target) => self.pane().update(cx, |pane, cx| pane.navigate(target, cx)),
             None => {
-                window.play_system_bell();
+                crate::feedback::refuse(crate::feedback::RefuseTarget::None, window, cx);
                 // A typo, not a lasting problem: an info message that retires.
                 operations::message(format!("No mark {key}"), false, cx);
                 cx.notify();
@@ -2014,7 +2021,7 @@ impl CrowWindow {
                     this.refresh_palette("", cx);
                     this.update_palette_field(cx);
                 } else {
-                    window.play_system_bell();
+                    crate::feedback::refuse(crate::feedback::RefuseTarget::Field(input), window, cx);
                 }
             }
             TextInputEvent::Confirmed => this.confirm_palette(false, window, cx),
@@ -2183,7 +2190,7 @@ impl CrowWindow {
             return;
         }
         if palette.path.is_none() {
-            window.play_system_bell();
+            crate::feedback::refuse(crate::feedback::RefuseTarget::Field(&palette.input), window, cx);
             return;
         }
         let input = palette.input.clone();
@@ -2320,7 +2327,7 @@ impl CrowWindow {
                         cx.notify();
                     }
                     Some(_) => {}
-                    None => window.play_system_bell(),
+                    None => crate::feedback::refuse(crate::feedback::RefuseTarget::None, window, cx),
                 }
             })
             .ok();

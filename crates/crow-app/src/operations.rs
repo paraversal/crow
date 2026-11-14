@@ -81,8 +81,9 @@ pub struct Operations {
     pub clipboard: Option<Clipboard>,
     /// The latest result or error, for the status line.
     pub message: Option<(SharedString, bool)>,
-    /// Bumped by every message, so an old timer cannot clear a newer one.
-    message_generation: u64,
+    /// Bumped by every message, so an old timer cannot clear a newer one and the
+    /// bar can fade in a new one.
+    pub message_generation: u64,
 }
 
 /// Info messages clear after this long; errors stay until something replaces them.

@@ -64,6 +64,22 @@ pub fn event_for(request: &Request) -> Option<Event> {
     }
 }
 
+/// What a refused key should shake or tint, besides the beep.
+pub enum RefuseTarget<'a> {
+    /// No field or row: just the alert.
+    None,
+    /// A text field: Full shakes it, Low tints its ring red.
+    Field(&'a gpui::Entity<crate::text_input::TextInput>),
+}
+
+/// Refuse a key or command: exactly one alert beep, then the visual on `target`.
+pub fn refuse(target: RefuseTarget, _window: &mut gpui::Window, cx: &mut App) {
+    play(Event::Refuse, cx);
+    if let RefuseTarget::Field(input) = target {
+        input.update(cx, |input, cx| input.refuse_visual(cx));
+    }
+}
+
 /// Bumped per sound played, so an old clip's fade never cuts a newer sound.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 

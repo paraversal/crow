@@ -9,8 +9,8 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 | I3 Trash | done | R1 departure overlay: `Folder` keeps `RowEffect`s (max 20 visible rows), rows render the swallow, a ghost finishes it if the listing drops the row early, and rows below FLIP up in Full. Sound on success, Refuse on error. Tests: 1 item in off/low/full, 3, 500, columns. Bench: Full p99 9.60 ms, Off 9.07, Low 9.73 (warm 8 ms each). |
 | I4 Move into a folder | done | `Move` starts MoveOut on visible sources, Receive on the target folder row (list and columns) and a `Sidebar::pulse` on the target favorite. No flight or count (Q4). Purr on success through `operations::finish`. Tests: drop on a row in Full, source/target effects, favorite pulse. |
 | I5 Arrive | done | Results selected by `show_results` play Arrive when they appear; Full's open phase slides the rows below down from their old slot (`-ROW × (1 − ease_out(t))`). New folder/file, duplicate, paste/copy, undo/redo all go through it. Rename starts immediately. Sounds: Pop, Bottle, Glass (>1 s). Tests: new folder Arrive + typing, undo Arrive. |
-| I6 Refuse and errors | in progress | |
-| I7 Small entrances | todo | needs Q3 |
+| I6 Refuse and errors | done | Every bell site goes through `feedback::refuse` (or `TextInput::refuse`): one beep, then Full shakes the field / Low tints its ring red / Off just beeps. Operation errors Refuse the rows that remain (trash, move, copy). The bar's message/error transient fades in on change. |
+| I7 Small entrances | in progress | Q3 = yes; sheets/palette in the lab first |
 | I8 Cursor glide | todo | needs Q2 |
 | I9 Docs, tests, bench | todo | |
 
@@ -53,6 +53,7 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 - 2026-11-14: I1–I2 committed. I3: `RowEffect`/ghost/FLIP in `folder.rs` and `pane.rs`; trash sound and error beep through `operations::finish`; 10 trash tests pass; bench in all three modes within budget.
 - 2026-11-14: I4: a `Move` starts MoveOut on the visible sources and Receive on the target row; the sidebar pulses the target favorite. No flight or count (Q4). Purr on success. 3 new tests.
 - 2026-11-14: I5: Arrive starts when `select_when_present` results appear; `row_shift` also handles the open phase (rows below start one row up and slide down). Rename opens at once. Pop/Bottle/Glass wired in `operations`. 2 new tests.
+- 2026-11-14: I6: `feedback::refuse`/`TextInput::refuse` replace every `play_system_bell`; the field shakes (Full) or tints red (Low); operation errors refuse the remaining rows; the bar transient fades on a new message or error.
 
 ## Next
-I6: Refuse and errors — one `feedback::refuse` helper for every `play_system_bell` call site, field shake/tint, bottom-bar error token with the message fade.
+I7: small entrances — tip rise/fade (U9), progress bar fade, sheets/palette fade+scale in the lab first (Q3), then the app.
