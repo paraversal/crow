@@ -9193,6 +9193,42 @@ mod tests {
         assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
     }
 
+    #[gpui::test]
+    fn click_on_empty_space_commits_a_rename(cx: &mut TestAppContext) {
+        let root = fixture("rename-empty-click");
+        let (view, mut cx) = open(cx, &root);
+        click_selector(&mut cx, "row-notes.txt");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("renamed");
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "the rename closed");
+        assert!(root.join("renamed.txt").exists(), "and was applied");
+        assert!(!root.join("notes.txt").exists());
+    }
+
+    #[gpui::test]
+    fn click_inside_the_rename_field_keeps_it_open(cx: &mut TestAppContext) {
+        let root = fixture("rename-field-click");
+        let (view, mut cx) = open(cx, &root);
+        click_selector(&mut cx, "row-notes.txt");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("renamed");
+        // Render the field as focused so Escape reaches it.
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let field = cx.debug_bounds("row-name-notes.txt").expect("the rename field").center();
+        cx.simulate_click(field, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "clicking the field keeps the rename");
+        assert!(root.join("notes.txt").exists(), "and does not apply it");
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+        assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()));
+    }
+
     // ----- context menu -----
 
     use crate::palette::CommandId;

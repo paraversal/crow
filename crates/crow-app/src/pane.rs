@@ -290,6 +290,8 @@ pub struct Pane {
     /// A row took the current mouse-down; the list behind it must not treat it as a
     /// click on empty space. Rows handle the event before the list (deeper hitbox).
     row_pressed: bool,
+    /// The rename field took the current mouse-down: place the caret, don't commit.
+    rename_pressed: bool,
     /// The context menu on screen and what it was opened for, until it closes.
     context_menu: Option<MenuKind>,
 }
@@ -352,6 +354,7 @@ impl Pane {
             filter_announce_gen: 0,
             focus_list_after_filter: false,
             row_pressed: false,
+            rename_pressed: false,
             context_menu: None,
             sidebar_walk: false,
         };
@@ -1176,18 +1179,9 @@ impl Pane {
         let input = cx.new(|cx| TextInput::new(name.clone(), "Name", cx));
         input.update(cx, |input, cx| input.select_range(0..stem_end, window, cx));
         let subscription =
-            cx.subscribe_in(&input, window, move |this, input, event: &TextInputEvent, window, cx| match event {
+            cx.subscribe_in(&input, window, move |this, _input, event: &TextInputEvent, window, cx| match event {
                 TextInputEvent::Changed => {}
-                TextInputEvent::Confirmed => {
-                    let new_name = input.read(cx).text().trim().to_owned();
-                    let Some(renaming) = this.renaming.take() else { return };
-                    let old = renaming.path.file_name().map(|n| n.to_string_lossy().into_owned());
-                    if old.as_deref() != Some(new_name.as_str()) {
-                        cx.emit(PaneEvent::Run(Request::Rename { path: renaming.path, new_name }));
-                    }
-                    window.focus(&this.focus, cx);
-                    cx.notify();
-                }
+                TextInputEvent::Confirmed => this.commit_rename(window, cx),
                 TextInputEvent::Cancelled => {
                     this.renaming = None;
                     window.focus(&this.focus, cx);
@@ -1199,6 +1193,18 @@ impl Pane {
         let focus = input.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         self.renaming = Some(Renaming { path, input, _subscription: subscription });
+        cx.notify();
+    }
+
+    /// Apply the open rename and close the field; a no-op when nothing is being renamed.
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(renaming) = self.renaming.take() else { return };
+        let new_name = renaming.input.read(cx).text().trim().to_owned();
+        let old = renaming.path.file_name().map(|n| n.to_string_lossy().into_owned());
+        if old.as_deref() != Some(new_name.as_str()) {
+            cx.emit(PaneEvent::Run(Request::Rename { path: renaming.path, new_name }));
+        }
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
@@ -1352,6 +1358,15 @@ impl Pane {
 
     /// A press on row `ix` of folder `k`: Finder's click, Cmd-click and Shift-click.
     fn press(&mut self, k: usize, ix: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A click in the open rename field places the caret; it must not commit the rename
+        // or move focus. The row still took the press, so the list must not see empty space.
+        if std::mem::take(&mut self.rename_pressed) {
+            self.row_pressed = true;
+            return;
+        }
+        if self.renaming.is_some() {
+            self.commit_rename(window, cx);
+        }
         if event.modifiers.control {
             self.context_press(k, Some(ix), window, cx);
             return;
@@ -1391,6 +1406,9 @@ impl Pane {
             self.context_press(k, None, window, cx);
             return;
         }
+        if self.renaming.is_some() {
+            self.commit_rename(window, cx);
+        }
         window.focus(&self.focus, cx);
         if event.modifiers.platform || event.modifiers.shift {
             return;
@@ -1429,6 +1447,9 @@ impl Pane {
     fn context_press(&mut self, k: usize, row: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         if row.is_some() {
             self.row_pressed = true;
+        }
+        if self.renaming.is_some() {
+            self.commit_rename(window, cx);
         }
         window.focus(&self.focus, cx);
         if k != self.focused {
@@ -1923,7 +1944,14 @@ impl Pane {
                                     .left(px(look.dx))
                                     .opacity(dim)
                                     .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
-                                        Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
+                                        Some(r) => div()
+                                            .flex_1()
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, _| this.rename_pressed = true),
+                                            )
+                                            .child(r.input.clone())
+                                            .into_any_element(),
                                         None => match ranges {
                                             Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
                                                 .whitespace_nowrap()
@@ -2201,7 +2229,14 @@ impl Pane {
                             .flex_1()
                             .opacity(dim)
                             .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
-                                Some(r) => div().flex_1().child(r.input.clone()).into_any_element(),
+                                Some(r) => div()
+                                    .flex_1()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, _| this.rename_pressed = true),
+                                    )
+                                    .child(r.input.clone())
+                                    .into_any_element(),
                                 None => match ranges {
                                     Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
                                         .flex_1()

@@ -381,7 +381,7 @@ pub const COMMANDS: &[Command] = &[
         palette: true,
     },
     // After Find…: both score the same for "find", and ties keep this order. Its menu
-    // place is set by the slot (File, under Add to Sidebar), not by this position.
+    // place is set by the slot (File, after Eject), not by this position.
     Command {
         id: CommandId::ShowInFinder,
         label: "Show in Finder",
