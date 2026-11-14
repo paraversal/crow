@@ -3,11 +3,13 @@
 //! merged) and the current folder's subfolders; ties break by frecency.
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use chrono::{Datelike as _, Local, TimeZone as _};
 use crow_core::abbreviate_home;
 use crow_search::FuzzyMatcher;
-use gpui::Action;
+use gpui::{Action, SharedString};
 
 use crate::actions::{
     AddToSidebar, CloseTab, CopyFiles, CutFiles, DeletePermanently, Duplicate, Eject, GoBack, GoForward, GoToFolder,
@@ -478,33 +480,118 @@ pub const COMMANDS: &[Command] = &[
     },
 ];
 
+/// Where a folder row comes from. Declaration order is the section order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Recent,
+    Favorite,
+    Here,
+}
+
 #[derive(Clone, Debug)]
 pub struct FolderCandidate {
     pub path: PathBuf,
     pub label: String,
+    /// Byte offset of the folder's name inside `label`.
+    pub name_start: usize,
+    pub source: Source,
     /// Higher is more recent/frequent; 0 for favorites and subfolders not in Recent.
     pub frecency: f64,
+    /// Seconds since the epoch, from Recent's own visits. A zoxide-only entry has none.
+    pub last_visit: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
 pub enum Item {
     Command(Command),
-    Folder { path: PathBuf, label: String },
+    // The U7 I3/I4 render reads the folder fields; the model lands first.
+    #[allow(dead_code)]
+    Folder {
+        path: PathBuf,
+        label: String,
+        name_start: usize,
+        source: Source,
+        last_visit: Option<u64>,
+        /// Matched letters as byte ranges in `label`.
+        matched: Vec<Range<usize>>,
+    },
+}
+
+impl Item {
+    /// The matches inside the folder's name, shifted to name-relative bytes; a
+    /// range that straddles the name's start is clipped.
+    #[allow(dead_code)] // U7 I3 renders the name line.
+    pub fn name_ranges(&self) -> Vec<Range<usize>> {
+        let Item::Folder { name_start, matched, .. } = self else { return Vec::new() };
+        let name_start = *name_start;
+        matched
+            .iter()
+            .filter(|range| range.end > name_start)
+            .map(|range| range.start.max(name_start) - name_start..range.end - name_start)
+            .collect()
+    }
+}
+
+/// One line of the list: a section header or an item, by index into `items`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Row {
+    Header(SharedString),
+    Item(usize),
+}
+
+#[derive(Clone, Debug)]
+pub struct Listing {
+    // U7 I3 renders headers and the count; the model lands first.
+    #[allow(dead_code)]
+    pub rows: Vec<Row>,
+    pub items: Vec<Item>,
+    /// The input row's count: "5 places", "2 of 34".
+    #[allow(dead_code)]
+    pub count: SharedString,
+}
+
+/// Empty query: at most this many Recent rows, and this many "In" rows.
+const RECENT_LIMIT: usize = 8;
+const HERE_LIMIT: usize = 20;
+/// The list never holds more than this many items, headers aside.
+const TOTAL_LIMIT: usize = 50;
+
+/// The byte offset of the last component of an abbreviated path. `~` and `/`
+/// are their own names.
+fn name_start(label: &str) -> usize {
+    match label.rfind('/') {
+        Some(i) if i + 1 < label.len() => i + 1,
+        _ => 0,
+    }
 }
 
 /// Favorites first, then Recent's frecency list, then the current folder's
-/// subfolders. Paths appear once; a favorite that is also recent takes its frecency.
+/// subfolders. Paths appear once, under the first source that has them
+/// (Favorites > Recent > Here); a favorite that is also recent takes its
+/// frecency for tie-breaks.
 pub fn folder_candidates(
     favorites: impl IntoIterator<Item = PathBuf>,
     recents: impl IntoIterator<Item = PathBuf>,
     subfolders: impl IntoIterator<Item = PathBuf>,
     home: &Path,
+    last_visit: impl Fn(&Path) -> Option<u64>,
 ) -> Vec<FolderCandidate> {
     let mut seen = HashSet::new();
     let mut out: Vec<FolderCandidate> = Vec::new();
+    let push = |path: PathBuf, source: Source, frecency: f64, out: &mut Vec<FolderCandidate>| {
+        let label = abbreviate_home(&path, home);
+        out.push(FolderCandidate {
+            name_start: name_start(&label),
+            label,
+            source,
+            frecency,
+            last_visit: last_visit(&path),
+            path,
+        });
+    };
     for path in favorites {
         if seen.insert(path.clone()) {
-            out.push(FolderCandidate { label: abbreviate_home(&path, home), frecency: 0.0, path });
+            push(path, Source::Favorite, 0.0, &mut out);
         }
     }
     let recents: Vec<PathBuf> = recents.into_iter().collect();
@@ -512,67 +599,281 @@ pub fn folder_candidates(
     for (i, path) in recents.into_iter().enumerate() {
         let frecency = (count - i) as f64;
         if seen.insert(path.clone()) {
-            out.push(FolderCandidate { label: abbreviate_home(&path, home), frecency, path });
+            push(path, Source::Recent, frecency, &mut out);
         } else if let Some(existing) = out.iter_mut().find(|candidate| candidate.path == path) {
             existing.frecency = frecency;
         }
     }
     for path in subfolders {
         if seen.insert(path.clone()) {
-            out.push(FolderCandidate { label: abbreviate_home(&path, home), frecency: 0.0, path });
+            push(path, Source::Here, 0.0, &mut out);
         }
     }
     out
 }
 
-/// Items for `query`. A leading `>` switches to commands; an empty query lists
-/// folders in candidate order, or every command after `>`.
-pub fn items(query: &str, folders: &[FolderCandidate]) -> Vec<Item> {
-    if let Some(commands) = query.strip_prefix('>') {
-        let mut fuzzy = (!commands.trim().is_empty()).then(|| FuzzyMatcher::new(commands.trim()));
-        let mut matched: Vec<(u32, &Command)> = COMMANDS
-            .iter()
-            .filter(|command| command.palette)
-            .filter_map(|command| match fuzzy.as_mut() {
-                Some(fuzzy) => fuzzy.score(command.label).map(|score| (score, command)),
-                None => Some((0, command)),
-            })
-            .collect();
-        matched.sort_by_key(|a| std::cmp::Reverse(a.0));
-        return matched.into_iter().map(|(_, command)| Item::Command(*command)).collect();
+/// The input row's count for folders.
+pub fn count_text(count: usize) -> SharedString {
+    match count {
+        0 => "No places".into(),
+        1 => "1 place".into(),
+        n => format!("{n} places").into(),
     }
-    let mut fuzzy = (!query.is_empty()).then(|| FuzzyMatcher::new(query));
-    let mut matched: Vec<(u32, &FolderCandidate)> = folders
-        .iter()
-        .filter_map(|folder| match fuzzy.as_mut() {
-            Some(fuzzy) => fuzzy.score(&folder.label).map(|score| (score, folder)),
-            None => Some((0, folder)),
-        })
-        .collect();
-    if fuzzy.is_some() {
-        matched.sort_by(|a, b| {
-            b.0.cmp(&a.0).then_with(|| b.1.frecency.total_cmp(&a.1.frecency)).then_with(|| a.1.label.cmp(&b.1.label))
-        });
+}
+
+/// "just now", "5 min ago", "2 h ago", "yesterday", "3 days ago", then "12 Oct".
+#[allow(dead_code)] // U7 I3 renders it on Recent rows.
+pub fn relative_age(now: u64, then: u64) -> String {
+    let age = now.saturating_sub(then);
+    if then >= now || age < 60 {
+        "just now".into()
+    } else if age < 3_600 {
+        format!("{} min ago", age / 60)
+    } else if age < 86_400 {
+        format!("{} h ago", age / 3_600)
+    } else if age < 2 * 86_400 {
+        "yesterday".into()
+    } else if age < 7 * 86_400 {
+        format!("{} days ago", age / 86_400)
+    } else {
+        match Local.timestamp_opt(then as i64, 0).single() {
+            Some(date) => format!("{} {}", date.day(), date.format("%b")),
+            None => String::new(),
+        }
     }
-    matched
-        .into_iter()
-        .take(50)
-        .map(|(_, folder)| Item::Folder { path: folder.path.clone(), label: folder.label.clone() })
-        .collect()
+}
+
+fn header(source: Source, here: &str) -> SharedString {
+    match source {
+        Source::Recent => "Recent".into(),
+        Source::Favorite => "Favorites".into(),
+        Source::Here => format!("In {here}").into(),
+    }
+}
+
+/// Folder rows for `query`. An empty query groups matches into Recent /
+/// Favorites / In `<here>`; a typed query is one flat list, best score first
+/// (sections would let a weak match in an earlier section outrank the name you
+/// typed). Every candidate is scored; match ranges are computed only for kept rows.
+pub fn folder_listing(query: &str, folders: &[FolderCandidate], here: &str) -> Listing {
+    let mut items: Vec<Item> = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
+    match (!query.is_empty()).then(|| FuzzyMatcher::new(query)) {
+        Some(mut fuzzy) => {
+            let mut matched: Vec<(u32, &FolderCandidate)> =
+                folders.iter().filter_map(|folder| fuzzy.score(&folder.label).map(|score| (score, folder))).collect();
+            matched.sort_by(|a, b| {
+                b.0.cmp(&a.0)
+                    .then_with(|| b.1.frecency.total_cmp(&a.1.frecency))
+                    .then_with(|| a.1.label.cmp(&b.1.label))
+            });
+            matched.truncate(TOTAL_LIMIT);
+            for (_, folder) in matched {
+                let ranges = fuzzy.indices(&folder.label).map_or_else(Vec::new, |(_, ranges)| ranges);
+                items.push(folder_item(folder, ranges));
+            }
+            rows = (0..items.len()).map(Row::Item).collect();
+        }
+        None => {
+            for source in [Source::Recent, Source::Favorite, Source::Here] {
+                let mut group: Vec<&FolderCandidate> =
+                    folders.iter().filter(|folder| folder.source == source).collect();
+                // Recent ranks by frecency; Favorites keep sidebar order and In keeps listing order.
+                if source == Source::Recent {
+                    group.sort_by(|a, b| b.frecency.total_cmp(&a.frecency));
+                }
+                let cap = match source {
+                    Source::Recent => RECENT_LIMIT,
+                    Source::Favorite => usize::MAX,
+                    Source::Here => HERE_LIMIT,
+                };
+                group.truncate(cap.min(TOTAL_LIMIT.saturating_sub(items.len())));
+                if group.is_empty() {
+                    continue;
+                }
+                rows.push(Row::Header(header(source, here)));
+                for folder in group {
+                    rows.push(Row::Item(items.len()));
+                    items.push(folder_item(folder, Vec::new()));
+                }
+            }
+        }
+    }
+    let count = count_text(items.len());
+    Listing { rows, items, count }
+}
+
+fn folder_item(folder: &FolderCandidate, matched: Vec<Range<usize>>) -> Item {
+    Item::Folder {
+        path: folder.path.clone(),
+        label: folder.label.clone(),
+        name_start: folder.name_start,
+        source: folder.source,
+        last_visit: folder.last_visit,
+        matched,
+    }
+}
+
+/// Items for `query`: a leading `>` switches to commands, everything else is a
+/// folder query.
+pub fn listing(query: &str, folders: &[FolderCandidate], here: &str) -> Listing {
+    match query.strip_prefix('>') {
+        Some(commands) => command_listing(commands),
+        None => folder_listing(query, folders, here),
+    }
+}
+
+/// Commands matching `query`, best first; an empty query lists every command
+/// in registry order.
+fn command_listing(query: &str) -> Listing {
+    let query = query.trim();
+    let listed = || COMMANDS.iter().filter(|command| command.palette);
+    let total = listed().count();
+    let mut matched: Vec<(u32, &Command)> = match (!query.is_empty()).then(|| FuzzyMatcher::new(query)) {
+        Some(mut fuzzy) => {
+            let mut matched: Vec<(u32, &Command)> =
+                listed().filter_map(|command| fuzzy.score(command.label).map(|score| (score, command))).collect();
+            matched.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+            matched
+        }
+        None => listed().map(|command| (0, command)).collect(),
+    };
+    let count = if query.is_empty() { format!("{total} commands") } else { format!("{} of {total}", matched.len()) };
+    let items: Vec<Item> = matched.drain(..).map(|(_, command)| Item::Command(*command)).collect();
+    Listing { rows: (0..items.len()).map(Row::Item).collect(), items, count: count.into() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn p(path: &str) -> PathBuf {
+        PathBuf::from(path)
+    }
+
+    fn folders(favorites: &[PathBuf], recents: &[PathBuf], here: &[PathBuf]) -> Vec<FolderCandidate> {
+        folder_candidates(favorites.to_vec(), recents.to_vec(), here.to_vec(), Path::new("/home/me"), |_| None)
+    }
+
+    /// Rows as `"# Header"` and labels, for order assertions.
+    fn row_text(listing: &Listing) -> Vec<String> {
+        listing
+            .rows
+            .iter()
+            .map(|row| match row {
+                Row::Header(text) => format!("# {text}"),
+                Row::Item(i) => match &listing.items[*i] {
+                    Item::Folder { label, .. } => label.clone(),
+                    Item::Command(command) => command.label.to_owned(),
+                },
+            })
+            .collect()
+    }
+
     fn command_ids(query: &str) -> Vec<CommandId> {
-        items(query, &[])
+        listing(query, &[], "")
+            .items
             .into_iter()
             .filter_map(|item| match item {
                 Item::Command(command) => Some(command.id),
                 Item::Folder { .. } => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn sections_follow_source_order_and_skip_empty() {
+        let candidates = folders(&[p("/home/me/Files/fav")], &[p("/home/me/Files/rec")], &[p("/home/me/Files/here")]);
+        let listing = folder_listing("", &candidates, "Files");
+        assert_eq!(
+            row_text(&listing),
+            ["# Recent", "~/Files/rec", "# Favorites", "~/Files/fav", "# In Files", "~/Files/here"],
+        );
+
+        let no_here = folders(&[p("/home/me/Files/fav")], &[p("/home/me/Files/rec")], &[]);
+        assert_eq!(
+            row_text(&folder_listing("", &no_here, "Files")),
+            ["# Recent", "~/Files/rec", "# Favorites", "~/Files/fav"]
+        );
+    }
+
+    #[test]
+    fn a_favorite_that_is_recent_shows_once_under_favorites() {
+        let candidates =
+            folders(&[p("/home/me/Files/beta")], &[p("/home/me/Files/beta"), p("/home/me/Files/alpha")], &[]);
+        let listing = folder_listing("", &candidates, "Files");
+        assert_eq!(row_text(&listing), ["# Recent", "~/Files/alpha", "# Favorites", "~/Files/beta"]);
+        let beta = candidates.iter().find(|c| c.path == p("/home/me/Files/beta")).expect("beta");
+        assert_eq!(beta.source, Source::Favorite);
+        assert_eq!(beta.frecency, 2.0, "a favorite that is recent keeps its frecency");
+    }
+
+    #[test]
+    fn section_caps_apply() {
+        let recents: Vec<PathBuf> = (0..10).map(|i| p(&format!("/home/me/Files/rec{i}"))).collect();
+        let here: Vec<PathBuf> = (0..30).map(|i| p(&format!("/home/me/Files/here{i}"))).collect();
+        let candidates = folders(&[p("/home/me/Files/fav")], &recents, &here);
+
+        let listing = folder_listing("", &candidates, "Files");
+        let count = |source: Source| {
+            listing.items.iter().filter(|item| matches!(item, Item::Folder { source: s, .. } if *s == source)).count()
+        };
+        assert_eq!(count(Source::Recent), RECENT_LIMIT);
+        assert_eq!(count(Source::Favorite), 1, "every favorite is listed");
+        assert_eq!(count(Source::Here), HERE_LIMIT);
+        assert_eq!(listing.count, "29 places");
+
+        // With a query, 20 per section and 50 in all.
+        let recents: Vec<PathBuf> = (0..30).map(|i| p(&format!("/home/me/Files/rec{i}"))).collect();
+        let favorites: Vec<PathBuf> = (0..30).map(|i| p(&format!("/home/me/Files/fav{i}"))).collect();
+        let candidates = folders(&favorites, &recents, &here);
+        let matched = folder_listing("Files", &candidates, "Files");
+        assert_eq!(matched.items.len(), TOTAL_LIMIT);
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // The matched list is the point of the test.
+    fn name_ranges_are_the_part_inside_the_name() {
+        let candidates = folders(&[], &[p("/home/me/Files/Coding/git")], &[]);
+        let listing = folder_listing("git", &candidates, "Coding");
+        let Item::Folder { label, matched, .. } = &listing.items[0] else { panic!("a folder row") };
+        assert_eq!(label, "~/Files/Coding/git");
+        assert_eq!(matched.first(), Some(&(15..18)), "the path line highlights the name in place");
+        assert_eq!(listing.items[0].name_ranges().first(), Some(&(0..3)), "the name line gets it shifted");
+
+        let straddling = Item::Folder {
+            path: PathBuf::new(),
+            label: "~/ab/cd".into(),
+            name_start: 5,
+            source: Source::Recent,
+            last_visit: None,
+            matched: vec![3..7],
+        };
+        assert_eq!(straddling.name_ranges().first(), Some(&(0..2)), "a range across the name's start is clipped");
+    }
+
+    #[test]
+    fn relative_age_strings() {
+        use chrono::TimeZone as _;
+        let at = |y, m, d, hour, minute| -> u64 {
+            chrono::Local.with_ymd_and_hms(y, m, d, hour, minute, 0).unwrap().timestamp() as u64
+        };
+        let now = at(2026, 11, 14, 18, 0);
+        assert_eq!(relative_age(now, now - 59), "just now");
+        assert_eq!(relative_age(now, now - 60), "1 min ago");
+        assert_eq!(relative_age(now, now - 3_600), "1 h ago");
+        assert_eq!(relative_age(now, now - (24 * 3_600 - 60)), "23 h ago");
+        assert_eq!(relative_age(now, now - 24 * 3_600), "yesterday");
+        assert_eq!(relative_age(now, now - 6 * 24 * 3_600), "6 days ago");
+        assert_eq!(relative_age(now, now - 8 * 24 * 3_600), "6 Nov");
+        assert_eq!(relative_age(now, now + 60), "just now", "clock skew");
+    }
+
+    #[test]
+    fn count_text_strings() {
+        assert_eq!(count_text(0), "No places");
+        assert_eq!(count_text(1), "1 place");
+        assert_eq!(count_text(5), "5 places");
     }
 
     #[test]

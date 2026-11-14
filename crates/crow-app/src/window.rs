@@ -109,7 +109,9 @@ impl ThemePicker {
 /// Cmd-K: folders (favorites, Recent, subfolders) or, after `>`, commands.
 struct Palette {
     input: Entity<TextInput>,
-    items: Vec<Item>,
+    listing: palette::Listing,
+    /// The focused folder's name, for the "In <name>" header.
+    here: String,
     cursor: usize,
     folders: Vec<palette::FolderCandidate>,
     scroll: UniformListScrollHandle,
@@ -120,7 +122,7 @@ impl Palette {
     /// The shortcut shown on row `i`, from the live keymap. Shared by
     /// `render_palette_rows` and the layer test.
     fn row_keys(&self, i: usize, cx: &App) -> Option<SharedString> {
-        match self.items.get(i)? {
+        match self.listing.items.get(i)? {
             Item::Command(command) => keys::text(command.action, command.scope, cx),
             Item::Folder { .. } => None,
         }
@@ -1759,15 +1761,21 @@ impl CrowWindow {
         {
             return;
         }
+        let (here, subfolders) = {
+            let pane = self.pane().read(cx);
+            (crate::style::display_name(&pane.current_dir(cx)), pane.subfolders(cx))
+        };
         let (home, favorites, recents) = {
             let ui = cx.global::<Ui>();
             let favorites: Vec<PathBuf> =
                 ui.favorites().into_iter().flat_map(|(_, group)| group).map(|f| f.path).collect();
             (ui.home.clone(), favorites, ui.palette_recents.clone())
         };
-        let subfolders = self.pane().read(cx).subfolders(cx);
-        let folders = palette::folder_candidates(favorites, recents, subfolders, &home);
-        let items = palette::items(query, &folders);
+        let folders = {
+            let ui = cx.global::<Ui>();
+            palette::folder_candidates(favorites, recents, subfolders, &home, |path| ui.recent.last_visit(path))
+        };
+        let listing = palette::listing(query, &folders, &here);
         let input = cx.new(|cx| TextInput::new(query, "Go to Folder or > for Commands", cx));
         let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
             TextInputEvent::Changed => {
@@ -1782,7 +1790,8 @@ impl CrowWindow {
         window.focus(&focus, cx);
         self.palette = Some(Palette {
             input,
-            items,
+            listing,
+            here,
             cursor: 0,
             folders,
             scroll: UniformListScrollHandle::new(),
@@ -1793,8 +1802,7 @@ impl CrowWindow {
 
     fn refresh_palette(&mut self, query: &str, cx: &mut Context<Self>) {
         let Some(palette) = &mut self.palette else { return };
-        let items = palette::items(query, &palette.folders);
-        palette.items = items;
+        palette.listing = palette::listing(query, &palette.folders, &palette.here);
         palette.cursor = 0;
         palette.scroll.scroll_to_item(0, ScrollStrategy::Center);
         cx.notify();
@@ -1802,7 +1810,7 @@ impl CrowWindow {
 
     fn move_palette(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(palette) = &mut self.palette else { return };
-        let last = palette.items.len().saturating_sub(1);
+        let last = palette.listing.items.len().saturating_sub(1);
         palette.cursor = palette.cursor.saturating_add_signed(delta).min(last);
         palette.scroll.scroll_to_item(palette.cursor, ScrollStrategy::Center);
         cx.notify();
@@ -1822,7 +1830,7 @@ impl CrowWindow {
 
     fn confirm_palette(&mut self, new_tab: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(palette) = self.palette.take() else { return };
-        let item = palette.items.get(palette.cursor).cloned();
+        let item = palette.listing.items.get(palette.cursor).cloned();
         self.focus_center(window, cx);
         match item {
             Some(Item::Command(command)) => self.run_command(command.id, window, cx),
@@ -1881,7 +1889,7 @@ impl CrowWindow {
     fn render_palette(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let (input, scroll, count) = {
             let palette = self.palette.as_ref()?;
-            (palette.input.clone(), palette.scroll.clone(), palette.items.len())
+            (palette.input.clone(), palette.scroll.clone(), palette.listing.items.len())
         };
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
@@ -1950,15 +1958,15 @@ impl CrowWindow {
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
         let (fg, muted) = (color(theme.role("fg")), color(theme.role("fg-muted")));
-        let (cursor, count) = (palette.cursor, palette.items.len());
+        let (cursor, count) = (palette.cursor, palette.listing.items.len());
         range
             .filter_map(|i| {
-                let item = palette.items.get(i)?;
+                let item = palette.listing.items.get(i)?;
                 let selected = i == cursor;
                 let keys = palette.row_keys(i, cx);
                 let (icon_path, label) = match item {
                     Item::Command(command) => (None, command.label.to_owned()),
-                    Item::Folder { path, label } => (Some(path.clone()), label.clone()),
+                    Item::Folder { path, label, .. } => (Some(path.clone()), label.clone()),
                 };
                 let row = div()
                     .id(("palette-row", i))
@@ -4374,6 +4382,7 @@ mod tests {
             view.read_with(cx, |w, cx| {
                 let palette = w.palette.as_ref().expect("palette is open");
                 let i = palette
+                    .listing
                     .items
                     .iter()
                     .position(
