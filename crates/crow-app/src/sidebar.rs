@@ -18,7 +18,10 @@ use gpui::{
     Render, Role, SharedString, Window, div, img, prelude::*, px,
 };
 
-use crate::actions::{Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, OpenSelection, RemoveFromSidebar};
+use crate::actions::{
+    Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, NextGroup, OpenSelection, PreviousGroup,
+    RemoveFromSidebar,
+};
 use crate::chrome::with_tooltip;
 use crate::palette::CommandId;
 use crate::pane::DraggedSelection;
@@ -26,6 +29,8 @@ use crate::style::{color, current_location, cursor_ring, drop_target, icon};
 use crate::ui::{self, Ui};
 
 pub enum SidebarEvent {
+    /// The cursor moved onto a folder: show it in the center, keep focus here.
+    Show(PathBuf),
     Open(PathBuf),
     /// Files dropped on a row.
     Run(Request),
@@ -511,13 +516,68 @@ impl Sidebar {
     }
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.cursor = self.cursor.saturating_sub(1);
+        let next = self.cursor.saturating_sub(1);
+        if next == self.cursor {
+            return;
+        }
+        self.cursor = next;
+        self.show_cursor(cx);
         cx.notify();
     }
 
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.cursor = (self.cursor + 1).min(Self::selectable(cx).len().saturating_sub(1));
+        let next = (self.cursor + 1).min(Self::selectable(cx).len().saturating_sub(1));
+        if next == self.cursor {
+            return;
+        }
+        self.cursor = next;
+        self.show_cursor(cx);
         cx.notify();
+    }
+
+    /// The selectable indices of each non-empty group, in sidebar order.
+    fn group_rows(cx: &gpui::App) -> Vec<Vec<usize>> {
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut index = 0;
+        for row in rows(cx.global::<Ui>()) {
+            if matches!(row, Row::Header(..)) {
+                groups.push(Vec::new());
+            } else {
+                if let Some(group) = groups.last_mut() {
+                    group.push(index);
+                }
+                index += 1;
+            }
+        }
+        groups.retain(|group| !group.is_empty());
+        groups
+    }
+
+    /// Move to the first row of the previous or next group.
+    fn jump_group(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let groups = Self::group_rows(cx);
+        let Some(current) = groups.iter().position(|group| group.contains(&self.cursor)) else { return };
+        let Some(target) = current.checked_add_signed(delta).filter(|target| *target < groups.len()) else {
+            return;
+        };
+        self.cursor = groups[target][0];
+        self.show_cursor(cx);
+        cx.notify();
+    }
+
+    fn previous_group(&mut self, _: &PreviousGroup, _: &mut Window, cx: &mut Context<Self>) {
+        self.jump_group(-1, cx);
+    }
+
+    fn next_group(&mut self, _: &NextGroup, _: &mut Window, cx: &mut Context<Self>) {
+        self.jump_group(1, cx);
+    }
+
+    /// Ask the window to show the cursor's folder without leaving the sidebar.
+    fn show_cursor(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.cursor_row(cx).and_then(|row| row.path().map(Path::to_path_buf)) {
+            cx.emit(SidebarEvent::Show(path));
+        }
     }
 
     fn open(&mut self, _: &OpenSelection, _: &mut Window, cx: &mut Context<Self>) {
@@ -893,6 +953,8 @@ impl Render for Sidebar {
             .on_action(cx.listener(Self::remove))
             .on_action(cx.listener(Self::favorite_up))
             .on_action(cx.listener(Self::favorite_down))
+            .on_action(cx.listener(Self::previous_group))
+            .on_action(cx.listener(Self::next_group))
             .on_action(cx.listener(Self::eject_cursor))
             .w(px(210.))
             .flex_none()

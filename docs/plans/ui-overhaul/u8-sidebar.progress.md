@@ -1,5 +1,5 @@
 # u8-sidebar progress
-Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in progress
+Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: Ready for critique
 
 ## Status
 | Item | State | Notes |
@@ -9,10 +9,10 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 | I3 One fill per meaning | done | current folder `selection`, cursor an inset accent ring; drop replaces the fill; tests |
 | I4 Disk row | done | neutral `fg-subtle` bar, warning at 90 %, "182 GB free" right-aligned, aria ", almost full"; volumes refresh after operations |
 | I5 Mark letters | done | Vim layer shows the key in the right slot; live `m x` test |
-| I6 Alias marker | todo | Q3 = yes |
+| I6 Alias marker | done | `Ui.aliases` from the Recent background task; " · alias" on twin hints and spoken labels; symlink test |
 | I7 Favorites header hint | skipped | Q7 = no |
-| I8 Center follows the sidebar cursor | todo | Q11 = yes, Q12 = replace, Q13 = yes |
-| I9 ⌥↑/⌥↓ jump between groups | todo | User request from the U5 review |
+| I8 Center follows the sidebar cursor | done | `SidebarEvent::Show`, `History::replace_current`, `Pane::show_from_sidebar`, `right` binding; 6 tests |
+| I9 ⌥↑/⌥↓ jump between groups | done | `PreviousGroup`/`NextGroup`, `alt-up`/`alt-down` in `Sidebar`; test |
 
 ## Questions
 - Q1 (asked 2026-11-14): twin rules → answer: yes as written (all favorites groups + Recent, shown label, case-insensitive, same path twice is not a twin).
@@ -36,6 +36,9 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 - Q10 = yes: the current row gets `aria_description("current folder")`.
 - Q6 = yes: `operations::finish` calls `ui::refresh_volumes`.
 - I9 action names: `PreviousGroup` / `NextGroup`, bound to `alt-up` / `alt-down` in the `Sidebar` context (both layers).
+- I4 test isolation: `refresh_volumes` returns early when the app has no `Watchers` global. `init_for_tests` installs none, so tests keep `volumes` empty (the plan's invariant); production always has watchers by the time it refreshes.
+- I8 test contract: `same_keys_mean_different_things_in_sidebar_and_list` now asserts that Down in the sidebar *shows* beta and the list follows; the old "leaves the list alone" assertion was the behavior I8 replaces. `sidebar_cursor_is_a_ring...` now expects the fill to move with the pane after a cursor move.
+- Finish: the plan says push and open the PR; the `execute-plan` skill (and AGENTS.md) says the executing agent commits locally and stops at Ready for critique, and the critic opens the PR. Followed the skill; no push, no PR.
 
 ## Hand checks
 - [ ] Sidebar twins: visit two folders with the same name (`~/a/git`, `~/b/git`): Recent shows "git a" and "git b" with the hint dimmer; a narrow window truncates the hint before the name. VoiceOver reads "git, in a".
@@ -63,5 +66,11 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 
 - 2026-11-14: I6 done. The existing `refresh_recent` background task now also stats favorites + the Recent list and stores symlinks in `Ui.aliases` on the main thread; `load_sidebar` itself stays I/O-free (every sidebar reload calls `refresh_recent`). Alias text only on twins, as the plan says: "link · alias", spoken "git, in link, alias". Test creates a real symlink. Workspace green.
 
+- 2026-11-14: I8 done. `SidebarEvent::Show` after a real cursor move; the window closes search, navigates the active pane via `Pane::show_from_sidebar`, and refocuses the sidebar. `History::replace_current` keeps the walk to one Back step (first move is a normal visit, so Back returns to the folder you were in). Return/→/Cmd-Down/click use `open_from_sidebar`, which ends the walk and navigates only if the pane isn't already there. `right` is bound to `OpenSelection` in `Sidebar`. Updated `same_keys_mean_different_things_in_sidebar_and_list` (its old assertion encoded "the sidebar leaves the list alone", which I8 changes) and `sidebar_cursor_is_a_ring...` (the fill now follows the pane). New tests: arrows show/keep focus, Return/→ focus, search closes, Tab-in does not navigate, one-step history. Workspace green.
+- 2026-11-14: I9 done. `PreviousGroup`/`NextGroup` on `alt-up`/`alt-down` in the `Sidebar` context, skipping empty groups; the jump emits `Show` too. Test with two favorite groups + Recent.
+- 2026-11-14: Finish docs. README sidebar paragraph now mentions twin parents/alias, Vim mark letters, Locations free space + bar, group jumps and the center following the cursor. `docs/testing.md`: automated summary and five hand rows (twins, follows cursor, fills, disk row, mark letters) plus a group-jump row; the Locations row now says "with free space and a bar".
+- 2026-11-14: Bench (Q9), once: `cold_first_paint=149ms cold_load=802ms frames=599 avg=8.35ms p50=8.33ms p95=8.54ms p99=8.61ms max=16.47ms warm_first_paint=9ms warm_load=262ms`. No comparison run; the pane rows did not change.
+- 2026-11-14: `./scripts/bundle.sh` builds `target/bundle/Crow.app`. Hand checks not run (need a human at the screen); listed above.
+
 ## Next
-I8: `SidebarEvent::Show`, `History::replace_current`, `Pane::show`, `right` binding; then I9 group jumps.
+Ready for critique. The critic should hand-check the ring/shadow and light/dark contrast, plus the I8 feel in list and column view; the plan's `Finish` push/PR step is left to the critic (execute-plan skill).

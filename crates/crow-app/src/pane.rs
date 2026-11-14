@@ -244,6 +244,8 @@ pub struct Pane {
     filtering: Option<Filtering>,
     /// Focus the list after a render because a navigation closed the filter.
     focus_list_after_filter: bool,
+    /// The sidebar cursor is walking this pane: later moves replace the history step.
+    sidebar_walk: bool,
 }
 
 struct Bench {
@@ -300,6 +302,7 @@ impl Pane {
             mark_pending: None,
             filtering: None,
             focus_list_after_filter: false,
+            sidebar_walk: false,
         };
         pane.enter(dir, cx);
         if let Some(mode) = start_mode.filter(|_| !cx.global::<Ui>().settings.view_per_folder) {
@@ -419,8 +422,34 @@ impl Pane {
 
     /// Go to `dir` as a new history step.
     pub fn navigate(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        self.sidebar_walk = false;
         self.history.visit(dir.clone());
         self.enter(dir, cx);
+    }
+
+    /// Show `dir` while the sidebar cursor moves. The first move is a normal history
+    /// step (Back returns to where the walk began); later moves replace it, so a walk
+    /// past five favorites is one Cmd-[.
+    pub fn show_from_sidebar(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        if dir == self.history.current() {
+            return;
+        }
+        if self.sidebar_walk {
+            self.history.replace_current(dir.clone());
+        } else {
+            self.history.visit(dir.clone());
+            self.sidebar_walk = true;
+        }
+        self.enter(dir, cx);
+    }
+
+    /// Return, Cmd-Down, → or a click in the sidebar: end the walk and go there if
+    /// the pane isn't showing it already.
+    pub fn open_from_sidebar(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        self.sidebar_walk = false;
+        if dir != self.history.current() {
+            self.navigate(dir, cx);
+        }
     }
 
     /// Show `path` selected in its folder (Go to Folder with a file, Finder's "Reveal").
@@ -432,6 +461,7 @@ impl Pane {
     }
 
     pub fn go_back(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_walk = false;
         let from = self.dir().to_path_buf();
         if let Some(dir) = self.history.back().map(Path::to_path_buf) {
             self.enter(dir, cx);
@@ -440,6 +470,7 @@ impl Pane {
     }
 
     pub fn go_forward(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_walk = false;
         if let Some(dir) = self.history.forward().map(Path::to_path_buf) {
             self.enter(dir, cx);
         }

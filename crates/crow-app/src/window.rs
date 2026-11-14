@@ -1419,9 +1419,23 @@ impl CrowWindow {
 impl CrowWindow {
     fn on_sidebar_event(&mut self, event: &SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
+            SidebarEvent::Show(dir) => {
+                let dir = dir.clone();
+                if self.search.is_some() {
+                    self.close_search(window, cx);
+                }
+                self.pane().update(cx, |pane, cx| pane.show_from_sidebar(dir, cx));
+                // close_search focuses the center; the cursor walk stays in the sidebar.
+                let sidebar = self.sidebar.read(cx).focus_handle(cx);
+                window.focus(&sidebar, cx);
+                cx.notify();
+            }
             SidebarEvent::Open(dir) => {
                 let dir = dir.clone();
-                self.pane().update(cx, |pane, cx| pane.navigate(dir, cx));
+                if self.search.is_some() {
+                    self.close_search(window, cx);
+                }
+                self.pane().update(cx, |pane, cx| pane.open_from_sidebar(dir, cx));
                 self.focus_center(window, cx);
             }
             SidebarEvent::Run(request) => self.run_request(request.clone(), window, cx),
@@ -3147,14 +3161,15 @@ mod tests {
         assert!(!looks[1].ring);
 
         cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
         let looks = sidebar_looks(&view, &mut cx);
-        assert!(looks[0].current && !looks[0].ring, "the fill stays on the current folder");
-        assert!(looks[1].ring && !looks[1].current, "the cursor is a ring, not a second fill");
+        assert!(!looks[0].current && !looks[0].ring, "the fill left alpha with the pane");
+        assert!(looks[1].current && looks[1].ring, "beta is current and carries the cursor ring");
 
         cx.simulate_keystrokes("tab");
         let looks = sidebar_looks(&view, &mut cx);
         assert!(looks.iter().all(|look| !look.ring), "no ring while the list has focus");
-        assert!(looks[0].current, "the current folder stays filled");
+        assert!(looks[1].current, "the current folder stays filled");
     }
 
     #[gpui::test]
@@ -3269,9 +3284,11 @@ mod tests {
         assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "Down in the list moves the selection");
 
         cx.simulate_keystrokes("tab down");
+        settle(&view, &mut cx);
         let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
         assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1, "Down in the sidebar moves its cursor");
-        assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "…and leaves the list alone");
+        assert_eq!(dir(&view, &cx), root.join("beta"), "…and shows beta in the center");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("b.txt"), "the list follows the sidebar cursor");
 
         cx.simulate_keystrokes("enter");
         settle(&view, &mut cx);
@@ -3281,6 +3298,133 @@ mod tests {
 
         cx.simulate_keystrokes("enter");
         assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "Return in the list means rename");
+    }
+
+    #[gpui::test]
+    fn sidebar_arrows_show_the_folder_and_keep_focus(cx: &mut TestAppContext) {
+        let root = fixture("sidebar-show");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        assert_eq!(dir(&view, &cx), root);
+
+        cx.simulate_keystrokes("tab");
+        assert_eq!(dir(&view, &cx), root, "tabbing into the sidebar does not navigate");
+        cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("beta"), "Down shows the cursor's folder");
+        assert!(sidebar_focused(&view, &mut cx), "…and focus stays in the sidebar");
+
+        cx.simulate_keystrokes("up");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        assert!(sidebar_focused(&view, &mut cx));
+
+        cx.simulate_keystrokes("tab");
+        assert!(!sidebar_focused(&view, &mut cx), "Tab moves to the center");
+        assert_eq!(dir(&view, &cx), root.join("alpha"), "…which already shows the cursor's folder");
+    }
+
+    #[gpui::test]
+    fn sidebar_return_and_right_focus_the_center(cx: &mut TestAppContext) {
+        let root = fixture("sidebar-open");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+
+        cx.simulate_keystrokes("tab down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert!(!sidebar_focused(&view, &mut cx), "Return focuses the center");
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+
+        cx.simulate_keystrokes("tab");
+        assert!(sidebar_focused(&view, &mut cx));
+        cx.simulate_keystrokes("right");
+        assert!(!sidebar_focused(&view, &mut cx), "→ focuses the center too");
+        assert_eq!(dir(&view, &cx), root.join("beta"), "…without navigating again");
+    }
+
+    #[gpui::test]
+    fn sidebar_arrow_closes_search(cx: &mut TestAppContext) {
+        let root = fixture("sidebar-search");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        cx.simulate_keystrokes("tab tab");
+        assert!(sidebar_focused(&view, &mut cx));
+
+        cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "a sidebar move closes search");
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+        assert!(sidebar_focused(&view, &mut cx), "focus stays in the sidebar");
+    }
+
+    #[gpui::test]
+    fn sidebar_tab_in_does_not_navigate(cx: &mut TestAppContext) {
+        let root = fixture("sidebar-tab");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        let before = dir(&view, &cx);
+        cx.simulate_keystrokes("tab");
+        assert_eq!(dir(&view, &cx), before);
+    }
+
+    #[gpui::test]
+    fn option_arrows_jump_between_sidebar_groups(cx: &mut TestAppContext) {
+        let root = fixture("groups");
+        let (view, mut cx) = open(cx, &root);
+        let toml = format!(
+            "[[group]]\nname = \"One\"\nitems = [ {{ path = \"{}\" }} ]\n[[group]]\nname = \"Two\"\nitems = [ {{ path = \"{}\" }} ]\n[recent]\nshow = true\ncount = 6\n[locations]\nshow = false\n",
+            root.join("alpha").display(),
+            root.join("beta").display()
+        );
+        write_config(&view, &mut cx, "sidebar.toml", &toml);
+        assert_eq!(
+            sidebar_paths(&cx),
+            [root.join("alpha"), root.join("beta"), root.clone()],
+            "two groups, then Recent"
+        );
+
+        cx.simulate_keystrokes("tab alt-down");
+        settle(&view, &mut cx);
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1, "the first row of the next group");
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+
+        cx.simulate_keystrokes("alt-down");
+        settle(&view, &mut cx);
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 2, "Recent is a group too");
+        assert_eq!(dir(&view, &cx), root);
+
+        cx.simulate_keystrokes("alt-up");
+        settle(&view, &mut cx);
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1);
+        cx.simulate_keystrokes("alt-up");
+        settle(&view, &mut cx);
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 0);
+    }
+
+    #[gpui::test]
+    fn sidebar_arrow_walk_is_one_history_step(cx: &mut TestAppContext) {
+        let root = fixture("sidebar-history");
+        std::fs::create_dir_all(root.join("gamma")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        write_config(
+            &view,
+            &mut cx,
+            "sidebar.toml",
+            &favorites_toml(&[&root.join("alpha"), &root.join("beta"), &root.join("gamma")]),
+        );
+        cx.simulate_keystrokes("tab down down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("gamma"));
+        cx.simulate_keystrokes("cmd-[");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root, "Back returns to where the walk began");
     }
 
     #[gpui::test]

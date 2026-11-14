@@ -12,7 +12,9 @@ The keystroke tests (`crates/crow-app/src/window.rs`) drive a real window throug
 GPUI's test platform: key contexts, history, tabs, hidden files, multiple
 selection, type-to-select, sorting, Go to Folder (Shift-Cmd-G into the palette), views kept per window, the column view's focus rules, file operations
 (new folder and new file with inline rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete),
-drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent),
+drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent,
+twin hints across Favorites and Recent, the current-folder fill and cursor ring, mark letters, the disk
+row's free space and warning tone, arrows showing the folder in the center, Option-Up/Down group jumps),
 live change batches (a late batch cannot bring back a deleted file, watcher paths through a
 symlinked ancestor still match),
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
@@ -103,7 +105,13 @@ Run `scripts/bundle.sh --open` so macOS treats Crow as an app.
 | Theme picker | Cmd-Option-T, arrow through themes (each shows at once), Esc returns; Return keeps one and writes it to `settings.toml`. Apply to All Apps changes `~/.local/state/themes/current.json`. |
 | Favorites | Drag a favorite up and down: one insertion line shows the exact target (under a group title for that group's start), the line never shifts rows, and the end of a group is reachable; dropping on a group title still moves the favorite to its start. Drag a folder from the list onto a group title; drop a file onto a favorite. Check `sidebar.toml` keeps your comments. Add `icon = "🚀"` and `color = "blue"` to one. |
 | Recent | Visit a few folders (and `cd` around with zoxide): they appear under Recent, favorites excluded. |
-| Locations | Mount a disk image: it appears without a restart, with a free-space bar; ⏏ ejects it. |
+| Locations | Mount a disk image: it appears without a restart, with free space and a bar; ⏏ ejects it. |
+| Sidebar twins | Visit two folders with the same name (e.g. `~/a/git`, `~/b/git`): Recent shows "git a" and "git b" with the hint dimmer; a narrow window truncates the hint before the name. VoiceOver reads "git, in a". |
+| Sidebar follows the cursor | Tab into the sidebar: nothing navigates. Arrow down through favorites: each shows in the center, focus stays in the sidebar (ring moves, the list has no focus). Tab or → (or Return): the list has focus on that folder. With a search open, Tab to the sidebar and arrow: search closes, the folder shows. Back after an arrow walk returns to the folder you were in before the walk. List and column view. |
+| Sidebar fills | Open a favorite: only it is filled. Tab into the sidebar and arrow: an accent ring moves, no second fill; Tab out: the ring goes. Drag a file over the current row: the drop highlight shows. Check in a light and a dark theme. |
+| Disk row | Locations shows "<n> GB free" right-aligned and a grey bar; fill a disk image past 90 %: the bar turns to the warning color. VoiceOver still reads free and total. |
+| Mark letters | With `keymap = "vim"`, favorites with a `key` show the letter on the right; `m x` on another folder moves it; Finder layer shows none. |
+| Sidebar groups | Tab into the sidebar: Option-Up/Down jump to the first row of the previous/next group (Favorites groups, Recent, Locations); the center follows. |
 | Top band | Hover Back, Forward, both view buttons, Go to and the search field: each shows a tooltip with its key ("Back to <folder> ⌘["). At the start of history Back is the same icon, faded. Traffic lights sit centred on the band. Light and dark themes. |
 | Search field | Click the field: search opens with the cursor in the field; the field spans the band with an accent ring; Done esc on the right. Tab to the results: the ring goes; Tab again to the sidebar, again back to the field (with nothing typed, Tab goes straight to the sidebar). From any of them Cmd-F brings the field back with the query selected, and Esc closes. Esc or Done returns to the folder with keys going to the list. |
 | All / Names / Contents | Search a word that's in file names and inside files: Names drops the content lines, Contents drops the name-only rows. Names in Home is fast (no file reads). Switch to This Mac: the control shows Names, faded. Cmd-Shift-M in the field and in the results cycles All → Names → Contents. |
