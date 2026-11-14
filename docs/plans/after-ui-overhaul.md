@@ -1,6 +1,6 @@
 # After the UI overhaul
 
-Work that is too big for a fix list and belongs after U10, with or after M7 (hardening). This is an inbox, not a plan: before any item is built, it gets its own plan in `docs/plans/` (with questions to ASK), carried out with the `execute-plan` skill.
+Work that is too big for a fix list and belongs after U11 (the finish pass), with or after M7 (hardening). This is an inbox, not a plan: before any item is built, it gets its own plan in `docs/plans/` (with questions to ASK), carried out with the `execute-plan` skill.
 
 Items move here from fix lists when they turn out larger than the list can hold. Say where each one came from.
 

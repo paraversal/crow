@@ -2,7 +2,7 @@
 
 Every M6 feature works, but nothing on screen mentions `/`, ⌘F or ⌘K. The menu bar has no Go or Find menu, the toolbar has no search field, there are no tooltips, and the overlays and status line each grew separately. The canvas board "Today, annotated" lists twelve findings; these plans fix them.
 
-Source of scope: the user's pick of the **recommended** variants on the Crow storyboards canvas (https://claude.ai/artifact/EbZ7gFCy24MaccdpbSsFtE, section "UI overhaul: proposal"), 2026-11-12. Not a Phase 1 milestone: the overhaul runs after M6 (PR #7) and before M7 (hardening). Animations are out of scope (a later plan).
+Source of scope: the user's pick of the **recommended** variants on the Crow storyboards canvas (https://claude.ai/artifact/EbZ7gFCy24MaccdpbSsFtE, section "UI overhaul: proposal"), 2026-11-12. Not a Phase 1 milestone: the overhaul runs after M6 (PR #7) and before M7 (hardening). Animations were out of scope at first; U10 adds them (2026-11-14).
 
 ## Where we start, where we end
 
@@ -28,11 +28,12 @@ Each plan is self-contained: its own branch, progress file and PR, carried out w
 | [U7](../done/u7-palette.md)      | Palette sections, two-line rows, Commands token, ⇥ completion, recent commands              | U1, U2 | `ui-u7-palette`      |
 | [U8](../done/u8-sidebar.md) | Sidebar twins, neutral disk bar, one fill per meaning, mark letters                         | U1     | `ui-u8-sidebar`      |
 | [U9](../done/u9-tips.md) | One-time contextual tips                                                                    | U5     | `ui-u9-tips`         |
-| [U10](u10-finish.md)     | Whole-window check against the assembled boards, docs pass, bench                           | all    | `ui-u10-finish`      |
+| [U10](u10-feedback.md)   | Motion and sound feedback: `motion` off/low/full, `sound` sets, `--motion-lab`              | U9     | `ui-u10-feedback`    |
+| [U11](u11-finish.md)     | Whole-window check against the assembled boards, docs pass, bench                           | all    | `ui-u11-finish`      |
 
-Later, after U10 (not a U plan yet): a **motion pass**. Moving and trashing give feedback: an inline animation (for example a small trash in the row that swallows the entry) and an optional sound. User request, 2026-11-13.
+The **motion pass** (user request, 2026-11-13: moving and trashing give feedback, an inline animation such as a small trash in the row that swallows the entry, and an optional sound) became U10 on 2026-11-14, before the finish pass, which moved to U11. Its look was settled in the motion lab (`crow --motion-lab`, branch `motion-trial`).
 
-Suggested order: U1 → U2 → U3 → U6 → U4 → U5 → U7 → U8 → U9 → U10. U1 and U2 need only PR #7 and can run side by side; U3, U4, U5 and U8 only need U1 and can go in any order.
+Suggested order: U1 → U2 → U3 → U6 → U4 → U5 → U7 → U8 → U9 → U10 → U11. U1 and U2 need only PR #7 and can run side by side; U3, U4, U5 and U8 only need U1 and can go in any order.
 
 ## Shared names and who builds them
 Plans refer to each other by these names. Whichever plan lands first builds the shared piece with exactly this shape; the later one reuses it. If merged code differs, use the merged name and record the mapping in the progress file.
@@ -52,8 +53,8 @@ Plans refer to each other by these names. Whichever plan lands first builds the 
 | Hints setting and use counts | `crow_core::HintsMode`, `Settings.hints`; `usage::{uses, record, record_key, count_key}` | U5 (U9 reuses) |
 
 Known gaps the plans raise for the user:
-- Finding 6 ("dead quarter", empty space right of the last column) has no owner in U1–U9. U10 proposes building it (its Q2).
-- Board-only details (line icons in the sidebar, a 220 px sidebar, syntax-coloured preview, 196 px columns) are deferred unless the user asks (U10 Q3, U8 Q8).
+- Finding 6 ("dead quarter", empty space right of the last column) has no owner in U1–U9. U11 proposes building it (its Q2).
+- Board-only details (line icons in the sidebar, a 220 px sidebar, syntax-coloured preview, 196 px columns) are deferred unless the user asks (U11 Q3, U8 Q8).
 
 ## Questions
 Every plan ends with "Questions to ASK", each with a recommended answer. The implementing agent asks them in one batch when it starts that plan (per `execute-plan`), so answers can use what earlier plans revealed. Don't answer them all up front.

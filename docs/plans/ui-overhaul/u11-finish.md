@@ -1,21 +1,21 @@
-# U10 Finish: whole-window pass, docs, bench
+# U11 Finish: whole-window pass, docs, bench
 
 Audience: an implementing agent. Follow `.claude/skills/execute-plan/SKILL.md`; read `AGENTS.md` and `docs/plans/ui-overhaul/README.md` first.
-Needs: U1–U9 **merged to `main`** (check `git log main` for each U PR; ASK before stacking on an unmerged branch).
-Branch: `ui-u10-finish` from `main`. Progress file: `docs/plans/ui-overhaul/u10-finish.progress.md`.
-PR title: "UI U10: Whole-window pass, docs and bench". Don't merge.
+Needs: U1–U10 **merged to `main`** (check `git log main` for each U PR; ASK before stacking on an unmerged branch).
+Branch: `ui-u11-finish` from `main`. Progress file: `docs/plans/ui-overhaul/u11-finish.progress.md`.
+PR title: "UI U11: Whole-window pass, docs and bench". Don't merge.
 Design reference: canvas boards "Overhaul" and "OverhaulSearch" (the two assembled 1280×800 windows), "Today, annotated" (Current), and every picked variant: Top band B, D · Filter B, D · Bottom bar B, C, D, E · Search panel B, D · Palette B, C · Discovery kit §1–§4. https://claude.ai/artifact/EbZ7gFCy24MaccdpbSsFtE
 
 This plan builds almost nothing new. It checks that nine PRs built by different sessions add up to the two assembled boards, fixes the drift between them, closes the twelve findings, writes the docs once for the whole overhaul, measures, and records what is left for later.
 
 ## Why
-"Today, annotated" lists eight findings on screen and four "not on screen, from the code". U1–U9 each fix part of them, in separate PRs, against separate boards. Nobody has yet looked at the whole window: band heights, keycap weights, focus rings and selection fills were each chosen in a different PR, and README/testing.md were each edited in pieces. Finding 6 ("Dead quarter") is not owned by any U plan (see Questions, Q2).
+"Today, annotated" lists eight findings on screen and four "not on screen, from the code". U1–U10 each fix part of them, in separate PRs, against separate boards. Nobody has yet looked at the whole window: band heights, keycap weights, focus rings and selection fills were each chosen in a different PR, and README/testing.md were each edited in pieces. Finding 6 ("Dead quarter") is not owned by any U plan (see Questions, Q2).
 
 ![Today, annotated: the app after M6 with eight numbered findings](img/today-annotated.png)
 The as-built window (column view of ~, FireBox): toolbar with only back/forward/title (1), glyph view switch (2), three fills (3), twin "git" (4), orange disk bar (5), empty right quarter (6), one status slot (7), good path bar (8).
 
 ## Decided
-From the index (`docs/plans/ui-overhaul/README.md`, answers 2026-11-12), the ones U10 checks:
+From the index (`docs/plans/ui-overhaul/README.md`, answers 2026-11-12), the ones U11 checks:
 - Q2 "Icons: embedded SVGs (an `AssetSource` with `include_bytes!`, rendered with GPUI `svg()`, tinted by theme role)."
 - Q3 "Search field gets **All / Names / Contents**, default All (= M6 behavior)."
 - Q4 "`hints = "auto" | "always" | "off"` in `settings.toml`, default `auto`: each idle hint retires after its key has been used 3 times (counts in `~/.local/state/crow/`)."
@@ -23,12 +23,12 @@ From the index (`docs/plans/ui-overhaul/README.md`, answers 2026-11-12), the one
 - Q7 "Palette: add **⇥ completion**; **remember recent commands across launches** (state dir), hidable with `palette_recent_commands` in `settings.toml`. The user wants an in-app **settings page** eventually (not in these plans): keep new options flat, typed and documented so a page can list them."
 - Q8 Find Everything… (⇧⌘A) with no search open opens search in the current folder with every rule off. Q9 Contextual tips included (U9).
 - Q10 "Path editing stays with the bottom path bar and is decided in M7."
-- Index ground rules: "When a board and the plan disagree, the plan wins; when the plan is silent, ASK." So copy and sizes come from the U plans as merged; boards settle only what no plan says. "Animations are out of scope (a later plan)."
+- Index ground rules: "When a board and the plan disagree, the plan wins; when the plan is silent, ASK." So copy and sizes come from the U plans as merged; boards settle only what no plan says. "Animations are out of scope (a later plan)." That plan is now U10 (motion and sound, inserted 2026-11-14): U11 checks the window with motion on but does not tune it (durations live in the motion lab).
 - AGENTS.md: theme roles only; every interactive element has a role and an aria label; every new key behavior gets a keystroke test; bench must not regress vs `main`.
-- Inherited from U1–U9: the shared parts by U1's names (`Keycap` Outline/Key/Text, `with_tooltip`, Sheet, SVG icons, `active_selection` / `inactive_selection` / `current_location` / `cursor_ring`), keys from the live keymap (U1 I1). U10 uses them and does not add parallel versions.
+- Inherited from U1–U10: the shared parts by U1's names (`Keycap` Outline/Key/Text, `with_tooltip`, Sheet, SVG icons, `active_selection` / `inactive_selection` / `current_location` / `cursor_ring`), keys from the live keymap (U1 I1). U11 uses them and does not add parallel versions.
 
 ## Current state
-Read on `m6-filter-palette-search` (= PR #7). U1–U9 will have changed most of this; re-read the merged code at I1 and update this section's facts in the progress file.
+Read on `m6-filter-palette-search` (= PR #7). U1–U10 will have changed most of this; re-read the merged code at I1 and update this section's facts in the progress file.
 - Window: `crates/crow-app/src/window.rs:32-50` `open()` sizes every new window from `settings.window` (`crates/crow-core/src/settings.rs:29-32`, default 1200×760), transparent title bar, traffic lights at (14,16). `CrowWindow::render` (`window.rs:1723-1802`) stacks title bar, tab bar (only with >1 tab), `sidebar | center | preview`, path bar, then the overlays. The list-view preview pane is hidden while searching (`window.rs:1735`).
 - Measures today vs boards: title bar 44 px (`window.rs:322`; board 52), sidebar 210 px (`sidebar.rs:631`; board 220), path bar 28 px (`window.rs:473`; board 30), row 24 px (`pane.rs:43`; board 24), column width 220–360 by longest name (`pane.rs:50-51`, `pane.rs:1722`; board 196, filtered column 250), preview column 300 px fixed (`pane.rs:52`, `pane.rs:1616-1630`; board: the rest of the window), focused column tint `surface` at 0x40 (`pane.rs:1594`).
 - Status: one slot by priority (`window.rs:459-467`: Vim hint > progress > op message > error > loading > counts), `Role::Status` with the status text as label (`window.rs:532-533`).
@@ -119,14 +119,14 @@ Sidebar B: one fill for the current folder, accent ring for the keyboard cursor,
 The board's 196 px columns, 220 px sidebar, 17 px bottom-bar caps, line icons per favorite and the syntax-colored code preview are not in any plan: don't build them here (Q3).
 
 ### Accessibility target
-Every control added by U1–U9 has an id, a role and an aria label; tooltips never replace labels; keyed controls carry `aria_keyshortcuts` or the key in words. VoiceOver announces, once per change: the filter count ("2 of 9 shown"), the search result count when a search settles ("44 results in 15 files, 38 folders skipped"), and a tip when it appears. Mechanism: Q7.
+Every control added by U1–U10 has an id, a role and an aria label; tooltips never replace labels; keyed controls carry `aria_keyshortcuts` or the key in words. VoiceOver announces, once per change: the filter count ("2 of 9 shown"), the search result count when a search settles ("44 results in 15 files, 38 folders skipped"), and a tip when it appears. Mechanism: Q7.
 
 ## Items
 
 ### I1 Start: baseline, inherited list, bench on `main`
 - *Where*: progress file; `git log main`; every `docs/plans/ui-overhaul/u*.progress.md`.
-- *Change*: create the branch and progress file. Confirm U1–U9 are merged (list each PR/commit). Copy into the progress file, as an "Inherited" table, every item another U plan marked "needs hand check", deferred, or left as an open question. Re-read the merged code and correct the "Current state" facts above in the progress file (heights, names of U1's helpers, the actual hint copy).
-- Bench before any U10 change: on `main` (U9 merged) and on the M6 merge commit (PR #7), each three runs, with the same temp config (I2's `[window] width = 1280, height = 800`, theme `firebox`) so window size doesn't skew rows per frame: `cargo run --release -p crow-app -- --make-fixture target/fixture-100k 100000` once, then `CROW_CONFIG_DIR=… CROW_STATE_DIR=… cargo run --release -p crow-app -- --bench target/fixture-100k`. Use a worktree for the M6 commit (`git worktree add target/m6-wt <sha>`, run `./scripts/fetch-gpui.sh` there if `vendor/` is missing). Record all `BENCH` lines.
+- *Change*: create the branch and progress file. Confirm U1–U10 are merged (list each PR/commit). Copy into the progress file, as an "Inherited" table, every item another U plan marked "needs hand check", deferred, or left as an open question. Re-read the merged code and correct the "Current state" facts above in the progress file (heights, names of U1's helpers, the actual hint copy).
+- Bench before any U11 change: on `main` (U9 merged) and on the M6 merge commit (PR #7), each three runs, with the same temp config (I2's `[window] width = 1280, height = 800`, theme `firebox`) so window size doesn't skew rows per frame: `cargo run --release -p crow-app -- --make-fixture target/fixture-100k 100000` once, then `CROW_CONFIG_DIR=… CROW_STATE_DIR=… cargo run --release -p crow-app -- --bench target/fixture-100k`. Use a worktree for the M6 commit (`git worktree add target/m6-wt <sha>`, run `./scripts/fetch-gpui.sh` there if `vendor/` is missing). Record all `BENCH` lines.
 - *Done when*: progress file lists merged PRs, inherited items and six bench lines.
 
 ### I2 Reproducible window screenshots (ASK first: Q1)
@@ -142,7 +142,7 @@ Every control added by U1–U9 has an id, a role and an aria label; tooltips nev
 ### I3 Findings checklist: every finding fixed or deferred
 ![Today, annotated](img/today-annotated.png)
 - *Where*: the table below, copied into the progress file and filled with what was seen (screenshot name) and the test that covers it.
-- *Change*: walk each row in the bundled app. If a row fails and the owning U plan clearly specified it, fix it here as a small commit ("U10: <finding> — <fix>"). If the fix would change behavior a plan didn't specify, ASK.
+- *Change*: walk each row in the bundled app. If a row fails and the owning U plan clearly specified it, fix it here as a small commit ("U11: <finding> — <fix>"). If the fix would change behavior a plan didn't specify, ASK.
 
 | # | Finding | Fixed by | Verify |
 | --- | --- | --- | --- |
@@ -174,7 +174,7 @@ Every control added by U1–U9 has an id, a role and an aria label; tooltips nev
   - light theme: repeat every shot in `solarized-light`; scrim, selection fills, accent text on `surface`, the error token and the disk bar warning must stay readable (check with Digital Color Meter: body text ≥ 4.5:1 against its background, hints ≥ 3:1). Record any role that fails; fixing a role's color belongs to the theme index, not Crow (note it, don't hex-patch);
   - Vim layer: with `keymap = "vim"`, hints, tooltips, palette keycaps and tips show the same key for the same action as the menus do, and Vim-only states (mark pending) still show their text in the transient slot. Verify which binding GPUI's menus show for actions bound in both layers (Undo: `cmd-z` and `u`): the menu must show ⌘Z. If it shows `u`, ASK (fix belongs to U1 I1's lookup or U2's menu builder);
   - narrow window (700 px) and multiple tabs (tab bar present): band, filter field and bottom bar don't overlap or clip;
-  - edge-case content (user, 2026-11-14: "edge cases like long names or huge directories … could also be tackled with tests"): a 255-byte file name, an NFD name next to its NFC twin, an emoji/RTL name, a path 20 levels deep, and the 100k fixture. Shown in list and column view, the sidebar (as a favorite), the bottom path bar, search results, the palette (two-line row) and the Why/rename sheets. Nothing overflows its row or pushes a neighbour off screen; middle or end truncation applies where the plans say. The random-input fuzzer for the same edge cases is `docs/plans/after-ui-overhaul.md` D1, not U10.
+  - edge-case content (user, 2026-11-14: "edge cases like long names or huge directories … could also be tackled with tests"): a 255-byte file name, an NFD name next to its NFC twin, an emoji/RTL name, a path 20 levels deep, and the 100k fixture. Shown in list and column view, the sidebar (as a favorite), the bottom path bar, search results, the palette (two-line row) and the Why/rename sheets. Nothing overflows its row or pushes a neighbour off screen; middle or end truncation applies where the plans say. The random-input fuzzer for the same edge cases is `docs/plans/after-ui-overhaul.md` D1, not U11.
 - *Tests* (`window.rs` `mod tests`):
   - `assembled_layout_matches_boards`: open a window at 1280×800 (explicit `WindowBounds`), column view on a temp tree; `debug_bounds` for the band, sidebar, a column row, the bottom bar; start a filter (`simulate_keystrokes("/ v i")`) and check the filter field height; ⌘F and check the scope bar height. Assert the table's values (±1 px). Add `.debug_selector` ids where missing (`"top-band"`, `"bottom-bar"`, `"filter-field"`, `"scope-bar"`).
   - `same_key_everywhere`: for ShowSearch, ShowCommandPalette, StartFilter, GoToFolder, SearchReveal: the palette row's keys, the hint for that action and U1's key lookup return the same string, in Finder and in Vim layer (switch via `settings.toml` write and reload, as existing Vim tests do).
@@ -191,7 +191,7 @@ Every control added by U1–U9 has an id, a role and an aria label; tooltips nev
 - *Bench*: required (row rendering's neighbor). *Done when*: tests pass; bench within noise of I1.
 
 ### I6 Accessibility sweep
-- *Where*: every element added by U1–U9.
+- *Where*: every element added by U1–U10.
 - *Change*: list each new control in the progress file with its expected role and label, then check it: band buttons (Back, Forward, "as List", "as Columns" in a `RadioGroup` "View", "Go to, Command K", search field `TextInput` "Search <folder>", All/Names/Contents radiogroup "Match", "Done"), filter field and its footer button and zero-match button, bottom bar hints (decorative inside a `Status`) and the error "Open" button, Cancel, scope segmented control, rules switch (`Switch` with `aria_toggled`), skipped-folders link, idle example chips, palette input, section headers, rows, Commands token, toggle chip, tips and "Got it", sidebar twins and disk row, every Sheet (dialog role, label = title). Method:
   1. Verify first whether `debug_a11y_tree_json` can be made active in the test platform. If yes, add `every_control_has_role_and_label`: render idle, filtering, search, palette and a tip; walk the JSON; every node with a click/key handler has a role other than generic and a non-empty label.
   2. Otherwise (and in addition): hand sweep with VoiceOver (⌘F5) and Accessibility Inspector on the bundle; watch `~/Library/Logs/Crow/crow.log` for GPUI's "has no accessibility node" line while tabbing through every state.
@@ -207,9 +207,9 @@ Every control added by U1–U9 has an id, a role and an aria label; tooltips nev
   - Configuration table: `settings.toml` row gains `hints` and `palette_recent_commands`; the state-dir sentence lists recent folders, key-use counts, tips seen and recent commands.
   - Keys section: replace "Everywhere" with "This Mac"; remove sentences now covered by the new sections so nothing is said twice.
 - testing.md:
-  - "Automated" paragraph: add what U1–U10 test (keymap lookup, Sheet scrim, menu builder, band, filter in column, bottom-bar slots and hints, search scope bar and examples, palette sections/token/completion/recent, sidebar twins, tips, layout and key-consistency tests).
+  - "Automated" paragraph: add what U1–U11 test (keymap lookup, Sheet scrim, menu builder, band, filter in column, bottom-bar slots and hints, search scope bar and examples, palette sections/token/completion/recent, sidebar twins, tips, layout and key-consistency tests).
   - "By hand": one consolidated table (see Hand checks): merge the rows each U PR added, drop duplicates, order by window region (band, sidebar, pane, filter, search, palette, sheets, bottom bar, tips, themes, VoiceOver), fix stale wording ("Everywhere", "This Folder", the old Filter and Search rows).
-  - Performance table: append the U10 numbers (I8).
+  - Performance table: append the U11 numbers (I8).
 - *Done when*: every README sentence about the UI matches the app (read it next to the shots); no "Everywhere" left (`grep -rn Everywhere README.md docs/testing.md`).
 
 ### I8 Bench vs `main`
@@ -231,9 +231,9 @@ Every control added by U1–U9 has an id, a role and an aria label; tooltips nev
 - PR body: the findings table (I3) with status; per item what changed and how it was verified; the bench table (main, M6, head); screenshots side by side with the boards: for each of `filter` and `search`, a two-column Markdown table "Board | Crow" with `img/assembled-filter.png` / `assembled-search.png` and the shot, both at 1280×800 (2×), FireBox, then the Solarized Light and Vim shots below. How images get into the PR: Q8. Follow-ups list. End with the attribution line the environment requires.
 
 ## Seams with other U plans
-- Assumes merged: U1 (Keycap, `with_tooltip`, Sheet, SVG icons, tint helpers, live-keymap lookup), U2 (menu builder), U3 (band, field, All/Names/Contents), U4 (filter in column), U5 (bottom-bar slots, `hints`, key-use counts), U6 (scope bar, footer, idle, preview in search), U7 (palette sections, token, ⇥, recent commands), U8 (sidebar B), U9 (tips). If one isn't merged, stop and ASK; U10 doesn't build another plan's scope.
-- Leaves alone: anything a U plan decided differently from the boards (the plan wins); M7's path editing; animations.
-- Fixes it may make in other plans' code: drift only (constants, helpers, wrong role, missing label), each as its own commit naming the plan ("U10 (U5): …"), never a redesign.
+- Assumes merged: U1 (Keycap, `with_tooltip`, Sheet, SVG icons, tint helpers, live-keymap lookup), U2 (menu builder), U3 (band, field, All/Names/Contents), U4 (filter in column), U5 (bottom-bar slots, `hints`, key-use counts), U6 (scope bar, footer, idle, preview in search), U7 (palette sections, token, ⇥, recent commands), U8 (sidebar B), U9 (tips), U10 (motion modes, sounds, `--motion-lab`). If one isn't merged, stop and ASK; U11 doesn't build another plan's scope.
+- Leaves alone: anything a U plan decided differently from the boards (the plan wins); M7's path editing; motion durations and sounds (U10 and its lab).
+- Fixes it may make in other plans' code: drift only (constants, helpers, wrong role, missing label), each as its own commit naming the plan ("U11 (U5): …"), never a redesign.
 
 ## Risks and things to measure first
 - GPUI menus and dual bindings: which key a menu shows for an action bound in both layers is unknown (verify first; I4).
@@ -245,14 +245,14 @@ Every control added by U1–U9 has an id, a role and an aria label; tooltips nev
 
 ## Questions to ASK
 1. **May I add `scripts/shot.sh` and `scripts/window-id.swift`?** Recommended: yes. Screenshots at a fixed size from a clean config are the only way to compare against the boards and to repeat the comparison later (M7, theme changes); `screencapture -l` with an id from `CGWindowListCopyWindowInfo` is the reproducible way to capture only Crow's window.
-2. **Finding 6 (Dead quarter) is not in any U plan. Build it in U10 (I5: preview takes the rest of the window, folder summary when the cursor is a folder) or defer?** Recommended: build in U10. The assembled board and Filter B/D show the preview filling the rest, it is the only finding without an owner, and it is small; the bench guards it. Defer if you'd rather keep U10 to checks only.
+2. **Finding 6 (Dead quarter) is not in any U plan. Build it in U11 (I5: preview takes the rest of the window, folder summary when the cursor is a folder) or defer?** Recommended: build in U11. The assembled board and Filter B/D show the preview filling the rest, it is the only finding without an owner, and it is small; the bench guards it. Defer if you'd rather keep U11 to checks only.
 3. **Board details no plan owns (line icons per favorite and clock icons in Recent, syntax-colored preview with line numbers, 196 px columns, a darker focused-column tint): build or defer?** Recommended: defer all to follow-ups; each is a design change of its own and the U plans didn't take them.
 4. **Copy conflicts between boards and plans** (bottom bar "clear filter" vs "clear", palette menu column "Search" vs U2's "Edit"): the index says the plan wins; no question unless the user wants otherwise. Listed so the user sees them in the PR.
 5. **Focus ring widths: boards use 1 px for the filter field, 2 px for the search field, U1 uses 1.5 px for the row cursor. Unify text fields on one ring?** Recommended: one `field_ring` (2 px, accent at the ring alpha) for both text fields, `cursor_ring` (1.5 px) for rows and sidebar. Two fields that do the same job should look the same when focused.
 6. **Chord order: boards write ⌘⇧A, macOS menus write ⇧⌘A.** Recommended: macOS order (⌃⌥⇧⌘) everywhere, since GPUI's menus already print it and hints should match the menu. Only ask if U1 didn't settle it (check its progress file).
-7. **VoiceOver announcements: GPUI has no live-region setter.** Options: (a) a small patch under `patches/` exposing `aria_live(Live::Polite)` on `div` (accesskit 0.25 supports it); (b) rely on the `Status` role's label changing; (c) an `NSAccessibilityPostNotification` announcement in `crow-macos` (U9's fallback, its Risks). Recommended: try (b) by hand first; if VoiceOver doesn't speak it, (c), since it keeps `vendor/` unpatched and AppKit code already lives in `crow-macos`. Use whatever U5/U6/U9 already shipped if one of them settled this; U10 then only extends it to the counts.
+7. **VoiceOver announcements: GPUI has no live-region setter.** Options: (a) a small patch under `patches/` exposing `aria_live(Live::Polite)` on `div` (accesskit 0.25 supports it); (b) rely on the `Status` role's label changing; (c) an `NSAccessibilityPostNotification` announcement in `crow-macos` (U9's fallback, its Risks). Recommended: try (b) by hand first; if VoiceOver doesn't speak it, (c), since it keeps `vendor/` unpatched and AppKit code already lives in `crow-macos`. Use whatever U5/U6/U9 already shipped if one of them settled this; U11 then only extends it to the counts.
 8. **How do the screenshots reach the PR?** Options: commit them as `docs/plans/ui-overhaul/img/built-*.png` and link them at the branch commit, or the user drags them into the PR. Recommended: commit them (about 0.5–1 MB each, ten files), so the comparison stays with the plans; skip if you'd rather keep binaries out of the repo.
-9. **Bench baseline: compare with `main` only (AGENTS.md) or also with the M6 merge commit?** Recommended: both; `main` checks U10, M6 shows what the whole overhaul cost.
+9. **Bench baseline: compare with `main` only (AGENTS.md) or also with the M6 merge commit?** Recommended: both; `main` checks U11, M6 shows what the whole overhaul cost.
 10. **May I add a "Later" list to `docs/plans/ui-overhaul/README.md`?** Recommended: yes, five lines, so the follow-ups live where the overhaul is indexed.
 11. **README status line.** Recommended: "Status: Phase 1 (the "daily driver" MVP): M6 and the UI overhaul are done; next is M7 (hardening)."
 
@@ -277,4 +277,4 @@ The consolidated `docs/testing.md` "By hand" table replaces the per-plan rows wi
 - README and `docs/testing.md` per I7; bench numbers per I8.
 - `cargo fmt --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace`.
 - `./scripts/bundle.sh`; retake the shots from the bundle; hand checks above, recorded in the progress file (what was checked by hand, what wasn't).
-- Push `ui-u10-finish`, open the PR (I10), progress file state "PR open". Don't merge.
+- Push `ui-u11-finish`, open the PR (I10), progress file state "PR open". Don't merge.
