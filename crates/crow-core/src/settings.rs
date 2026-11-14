@@ -41,7 +41,8 @@ sound = "crow"
 font_family = ""
 font_size = 13.0
 
-show_hidden_files = false
+# List dotfiles and other hidden items. View ▸ Show Hidden Files (Shift-Cmd-.) toggles it.
+show_hidden_files = true
 
 # The preview pane on the right in list view and the preview column in column view.
 # View ▸ Hide Preview (Shift-Cmd-P) toggles it; Quick Look still works.
@@ -132,7 +133,7 @@ impl Default for Settings {
             sound: SoundSet::Crow,
             font_family: String::new(),
             font_size: 13.0,
-            show_hidden_files: false,
+            show_hidden_files: true,
             show_preview: true,
             palette_recent_commands: true,
             view_per_folder: true,

@@ -3747,11 +3747,67 @@ mod tests {
         settle(&view, &mut cx);
         assert!(root.join("beta/notes.txt").exists());
 
+        assert_eq!(sidebar_paths(&cx), [root.join("beta")], "the middle of a row is not an insertion point");
+
         // Folders dropped on a group's title become favorites.
         drop_on(&mut cx, "sidebar-header-Favorites", vec![root.join("alpha")]);
         settle(&view, &mut cx);
         assert_eq!(sidebar_paths(&cx), [root.join("beta"), root.join("alpha")]);
         assert!(root.join("alpha").is_dir(), "added, not moved");
+    }
+
+    #[gpui::test]
+    fn dropping_between_favorites_adds_a_favorite_there(cx: &mut TestAppContext) {
+        let root = fixture("drop-between");
+        for name in ["gamma", "delta"] {
+            std::fs::create_dir_all(root.join(name)).expect("create fixture");
+        }
+        let (view, mut cx) = open(cx, &root);
+        let (alpha, beta, gamma, delta) =
+            (root.join("alpha"), root.join("beta"), root.join("gamma"), root.join("delta"));
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha, &beta]));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+
+        // A folder from another app over the lower edge of the first favorite: the line
+        // marks the boundary before the second, and no row takes the drop fill.
+        let first = cx.debug_bounds("sidebar-0").expect("first favorite row");
+        let edge = gpui::point(first.left() + gpui::px(20.), first.bottom() - gpui::px(2.));
+        let paths = gpui::ExternalPaths(vec![gamma.clone()].into());
+        cx.simulate_event(gpui::FileDropEvent::Entered { position: edge, paths });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position: edge });
+        cx.run_until_parked();
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.insert_slot()), Some((0, 1)), "between alpha and beta");
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.drop_target()), None, "no row is the target");
+        assert!(sidebar_looks(&view, &mut cx).iter().all(|look| !look.drop));
+        cx.simulate_event(gpui::FileDropEvent::Submit { position: edge });
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), [alpha.clone(), gamma.clone(), beta.clone()], "added at that place");
+        assert!(gamma.is_dir() && !alpha.join("gamma").exists(), "added, not moved");
+
+        // A folder dragged from the list onto the upper edge of the first favorite goes first.
+        let from = cx.debug_bounds("row-delta").expect("delta row").center();
+        let first = cx.debug_bounds("sidebar-0").expect("first favorite row");
+        let edge = gpui::point(first.left() + gpui::px(20.), first.top() + gpui::px(2.));
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(edge, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.insert_slot()), Some((0, 0)), "above alpha");
+        cx.simulate_mouse_up(edge, gpui::MouseButton::Left, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx), [delta.clone(), alpha.clone(), gamma, beta]);
+        assert!(delta.is_dir(), "added, not moved");
+
+        // A file can't be a favorite: dropped between rows it is left where it is.
+        let last = cx.debug_bounds("sidebar-3").expect("last favorite row");
+        drop_at(
+            &mut cx,
+            gpui::point(last.left() + gpui::px(20.), last.bottom() - gpui::px(2.)),
+            vec![root.join("notes.txt")],
+        );
+        settle(&view, &mut cx);
+        assert_eq!(sidebar_paths(&cx).len(), 4);
+        assert!(root.join("notes.txt").exists(), "not moved into the folder next to the line");
     }
 
     #[gpui::test]
@@ -5742,7 +5798,7 @@ mod tests {
         std::fs::write(root.join(".secret"), "").expect("create fixture");
         let (view, mut cx) = open(cx, &root);
         let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.item_count(cx));
-        assert_eq!(count(&cx), 3);
+        assert_eq!(count(&cx), 4, "hidden files show by default");
 
         cx.simulate_keystrokes("cmd-k");
         settle(&view, &mut cx);
@@ -5753,7 +5809,7 @@ mod tests {
         settle(&view, &mut cx);
 
         assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "Return closes the palette");
-        assert_eq!(count(&cx), 4, "the command ran");
+        assert_eq!(count(&cx), 3, "the command ran");
     }
 
     #[gpui::test]
@@ -6068,14 +6124,14 @@ mod tests {
         cx.simulate_keystrokes("cmd-k");
         cx.simulate_input(">hidden");
         settle(&view, &mut cx);
-        assert_eq!(state(&cx), Some(false), "hidden files are off");
+        assert_eq!(state(&cx), Some(true), "hidden files are on by default");
 
         cx.simulate_keystrokes("enter");
         settle(&view, &mut cx);
         cx.simulate_keystrokes("cmd-k");
         cx.simulate_input(">hidden");
         settle(&view, &mut cx);
-        assert_eq!(state(&cx), Some(true), "the command turned them on");
+        assert_eq!(state(&cx), Some(false), "the command turned them off");
     }
 
     #[gpui::test]
@@ -6144,6 +6200,8 @@ mod tests {
         let root = fixture("palette-path-hidden");
         std::fs::create_dir_all(root.join(".hidden")).expect("create fixture");
         let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-shift-.");
+        settle(&view, &mut cx);
         cx.simulate_keystrokes("cmd-k");
         cx.simulate_input(&format!("{}/", root.display()));
         settle_palette(&view, &mut cx);
@@ -6448,13 +6506,13 @@ mod tests {
         std::fs::write(root.join(".secret"), "").expect("create fixture");
         let (view, mut cx) = open(cx, &root);
         let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.item_count(cx));
-        assert_eq!(count(&cx), 3);
+        assert_eq!(count(&cx), 4, "hidden files show by default");
 
         cx.simulate_keystrokes("cmd-t cmd-shift-.");
         settle(&view, &mut cx);
-        assert_eq!(count(&cx), 4);
+        assert_eq!(count(&cx), 3);
         cx.simulate_keystrokes("cmd-shift-[");
-        assert_eq!(count(&cx), 4, "The other tab shows hidden files too");
+        assert_eq!(count(&cx), 3, "The other tab hides hidden files too");
     }
 
     fn selected_names(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Vec<String> {
@@ -7650,6 +7708,11 @@ mod tests {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("no element {selector}")).center();
+        drop_at(cx, at, paths);
+    }
+
+    /// Drop `paths` from another app at `at`.
+    fn drop_at(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>, paths: Vec<PathBuf>) {
         cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
         cx.run_until_parked();
         cx.simulate_event(gpui::FileDropEvent::Entered { position: at, paths: gpui::ExternalPaths(paths.into()) });

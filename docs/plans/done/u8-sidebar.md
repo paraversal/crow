@@ -23,7 +23,7 @@ Also: Vim marks (`key` in `sidebar.toml`) are invisible; you have to remember wh
 
 ## Current state
 ![Today, annotated: findings 3 (three fills), 4 (two "git" in Recent), 5 (accent disk bar)](../ui-overhaul/img/today-annotated.png)
-Take from it: the Recent list with two bare "git" rows (one with Finder's alias badge in its icon), the orange disk bar, and the sidebar "jules" fill competing with two column fills.
+Take from it: the Recent list with two bare "git" rows (one with Finder's alias badge in its icon), the orange disk bar, and the sidebar "me" fill competing with two column fills.
 
 All in `crates/crow-app/src/sidebar.rs` unless noted.
 - **Model.** `enum Row { Header(String, Option<usize>), Favorite(Slot, Favorite), Recent(PathBuf), Volume(crow_macos::Volume) }` (:67-74). `rows(ui)` (:87-102) builds, in order: each favorites group (header with `Some(g)` + its favorites), then "Recent" if `ui.sidebar.recent.show` and `ui.recent_list` is non-empty, then "Locations" if shown and `ui.volumes` non-empty. It is rebuilt on every render.
@@ -42,7 +42,7 @@ All in `crates/crow-app/src/sidebar.rs` unless noted.
 
 ## Target
 ![Discovery kit §4: A as built, B proposed (sidebar focused, cursor on the first "git")](../ui-overhaul/img/discovery-4.png)
-Take from B: "jules" (current folder) is the only fill; the cursor on "git" is an accent ring with no fill; twins carry "Coding" / "~ · alias" in `fg-subtle` right after the name; marks "j", "d" sit at the right edge; the disk row shows "182 GB free" right-aligned and a neutral bar. "⌃⌘T adds" in the Favorites header is a question (Q7), not scope.
+Take from B: "me" (current folder) is the only fill; the cursor on "git" is an accent ring with no fill; twins carry "Coding" / "~ · alias" in `fg-subtle` right after the name; marks "j", "d" sit at the right edge; the disk row shows "182 GB free" right-aligned and a neutral bar. "⌃⌘T adds" in the Favorites header is a question (Q7), not scope.
 
 ![Assembled, filtering: sidebar with marks f/d, Recent twins "src crow-core" (current, filled) and "src crow-app", disk row](../ui-overhaul/img/assembled-filter.png)
 Take from it: the sidebar in context; one fill (the current folder) next to the column views' own selections; twin hints after the name. Its line icons (clock, home, download) are not U8 scope (Q8).
@@ -68,9 +68,9 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 - Comparison is case-insensitive (`to_lowercase`), since APFS and the eye both treat "Git" and "git" as the same.
 - The same path twice (a favorite in two groups) is not a twin of itself; it gets a hint only if a different path shares the label.
 - The **hint** for a twin is the display name of its nearest ancestor that differs from every other twin's ancestor at the same distance: compare parents (distance 1); for each twin whose parent name is unique among the twins' parents, show it; for the rest, go up one more level and repeat. A path that runs out of ancestors uses its volume name ("Macintosh HD"). If no level separates two rows (e.g. two volumes with the same name), fall back to the abbreviated parent path (`crow_core::abbreviate_home`).
-- Shown ancestor that is the home folder: "~" (as on the board). Spoken: the home folder's display name ("jules").
+- Shown ancestor that is the home folder: "~" (as on the board). Spoken: the home folder's display name ("me").
 - Spoken label of a twin: "`{label}, in {ancestor}`", e.g. "git, in Coding". With a mark and the Vim layer: "`git, in Coding, mark g`".
-- Alias marker: depends on Q3. If yes: a twin row whose path is a symlink shows "`{hint} · alias`" ("~ · alias") and speaks "`git, in jules, alias`".
+- Alias marker: depends on Q3. If yes: a twin row whose path is a symlink shows "`{hint} · alias`" ("~ · alias") and speaks "`git, in me, alias`".
 
 ### Fills and ring (one fill per meaning)
 - **Current folder** (`path == self.current`): `style::current_location(theme)` fill (the `selection` role). Whether or not the sidebar has focus.
@@ -128,7 +128,7 @@ A **twin** is a Favorites or Recent row whose shown label equals another Favorit
 - *Done when*: tests green; hand check with two real "git" folders in Recent.
 
 ### I3 One fill per meaning: current folder filled, cursor as a ring
-![Discovery kit §4 B: "jules" filled, cursor ring on "git"](../ui-overhaul/img/discovery-4.png)
+![Discovery kit §4 B: "me" filled, cursor ring on "git"](../ui-overhaul/img/discovery-4.png)
 - *Where*: `sidebar.rs` `looks` and the row element (:490-494).
 - *Change*: `current = path == self.current`; `ring = focused && i == self.cursor`; `drop` as today. Element: `.when(current && !drop, bg(current_location))`, `.when(drop, bg(drop_highlight))`, `.when(ring, cursor_ring)`. Remove the `accent` 0x55 cursor fill and any temporary I1 field.
 - *Edge cases*: cursor on the current row (fill + ring); sidebar loses focus by Tab, by clicking the list, by opening an overlay (ring disappears: `focused` is read every render; the window re-renders on focus change — verify, else `cx.notify()` the sidebar from `switch_focus`/focus-out with `on_focus_out`); file drag over the current row (drop fill replaces current fill); favorite reordering (only the insertion line); a click on a row sets the cursor and opens it (focus moves to the list, so no ring afterwards — as today).

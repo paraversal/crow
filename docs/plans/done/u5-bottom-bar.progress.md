@@ -73,7 +73,7 @@ Within run-to-run noise. `./scripts/bundle.sh` builds `target/bundle/Crow.app` (
 - [ ] Bottom bar error: break `views.toml` while an operation runs: progress and the red token show together, hints are gone; Open opens `views.toml`; fixing it removes the token.
 - [ ] Bottom bar counts: column view: hover the count, the tooltip names the focused column's folder. Filter: "n of N shown". Select several files: "n selected · size".
 - [ ] Narrow window: shrink the window: hints disappear right to left before the path is cut.
-- [ ] VoiceOver: Cmd-F5: the count reads "18 items in jules"; an error reads "Error: …" once; Open and Cancel read as buttons.
+- [ ] VoiceOver: Cmd-F5: the count reads "18 items in me"; an error reads "Error: …" once; Open and Cancel read as buttons.
 
 ## Found along the way
 - `copy_paths` wrote `Operations.message` directly, so "Copied n items" never expired; it now goes through `operations::message` (review, 2026-11-13).

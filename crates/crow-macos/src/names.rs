@@ -4,7 +4,7 @@ use objc2_foundation::NSFileManager;
 
 use crate::{main_thread, ns_string};
 
-/// Finder's path components for `path`: `Macintosh HD › Users › jules › …`,
+/// Finder's path components for `path`: `Macintosh HD › Users › me › …`,
 /// localized the way Finder shows them. Paths on other volumes start at the volume.
 pub fn display_components(path: &Path) -> Vec<(String, PathBuf)> {
     let on_volume = path.starts_with("/Volumes");

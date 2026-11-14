@@ -25,7 +25,7 @@ Build each part once, here, and move today's surfaces onto them **without redesi
 
 ## Current state
 ![Today, annotated: glyph buttons (2), three fills at once (3), no tooltips (1)](../ui-overhaul/img/today-annotated.png)
-Take from it: ‹ › and ☰ ▥ are text glyphs; sidebar "jules", the inactive column and the active row all carry a fill.
+Take from it: ‹ › and ☰ ▥ are text glyphs; sidebar "me", the inactive column and the active row all carry a fill.
 
 **Keymap.** `actions.rs:86` `finder_keymap()` and `:174` `vim_keymap()`; both are always bound (`main.rs:172-174`, tests `window.rs:1830-1832`), plus `text_input::keymap()` (`text_input.rs:48`, context `TextInput`: enter Confirm, escape Cancel, tab Complete). The layer is chosen by context only: views append `vim` when `settings.keymap == KeymapLayer::Vim` (`pane.rs:1772-1775`, `sidebar.rs:606`, palette `window.rs:1473-1476`, picker `:1638-1641`). Context nesting: `Crow` (`window.rs:1756`) > `FileList [ColumnView] [vim|VimPending] [Filtered]` (`pane.rs:1768-1778,1824`), `Sidebar [vim]` (`sidebar.rs:622`), `Search` (`search.rs:981`) > `SearchResults` (`search.rs:720`, never gets `vim`, so the `SearchResults && vim` bindings at `actions.rs:206-207` can't fire today; out of scope, see Q8), `Filter` (`pane.rs:1649`, a sibling of the list, not inside `FileList`: `pane.rs:1876`), `Sheet` (`window.rs:876,1123`), `Sheet Palette [vim]`, `Sheet ThemePicker [vim]`. Go to Folder has no context of its own; its `TextInput` handles keys.
 
