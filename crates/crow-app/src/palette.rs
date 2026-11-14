@@ -536,10 +536,12 @@ impl Item {
     }
 }
 
-/// One line of the list: a section header or an item, by index into `items`.
+/// One line of the list: a section header, a status line ("Loading…", a missing
+/// folder) or an item, by index into `items`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Row {
     Header(SharedString),
+    Status(SharedString),
     Item(usize),
 }
 
@@ -780,6 +782,95 @@ pub fn command_listing(query: &str, recent_ids: &[CommandId], show_recent: bool)
     Listing { rows, items, count: format!("{count} of {total}").into() }
 }
 
+/// The path mode's parent and partial, when `query` looks like a path: `/…`,
+/// `~/…` or exactly `~`. The text before the last `/` is the parent.
+pub fn path_query(query: &str, cwd: &Path, home: &Path) -> Option<(PathBuf, String)> {
+    if !(query.starts_with('/') || query.starts_with("~/") || query == "~") {
+        return None;
+    }
+    let (parent, partial) = match query.rfind('/') {
+        Some(i) => (&query[..=i], &query[i + 1..]),
+        None => (query, ""),
+    };
+    Some((crow_core::resolve_typed(parent, cwd, home), partial.to_owned()))
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// The children of `parent` matching `partial` by name. With an empty partial the
+/// parent itself comes first ("this folder"), so Return goes there.
+pub fn path_listing(parent: &Path, partial: &str, children: &[PathBuf], home: &Path) -> Listing {
+    let mut rows = vec![Row::Header(section_header(Source::Here, &crate::style::display_name(parent)))];
+    let mut items: Vec<Item> = Vec::new();
+    if partial.is_empty() {
+        let label = abbreviate_home(parent, home);
+        items.push(Item::Folder {
+            path: parent.to_path_buf(),
+            label: label.clone(),
+            name_start: name_start(&label),
+            source: Source::Here,
+            last_visit: None,
+            matched: Vec::new(),
+        });
+        rows.push(Row::Item(0));
+    }
+    let mut fuzzy = (!partial.is_empty()).then(|| FuzzyMatcher::new(partial));
+    let mut matched: Vec<(u32, &PathBuf)> = children
+        .iter()
+        .filter_map(|path| match fuzzy.as_mut() {
+            Some(fuzzy) => fuzzy.score(&file_name(path)).map(|score| (score, path)),
+            None => Some((0, path)),
+        })
+        .collect();
+    let by_name = fuzzy.is_none();
+    matched.sort_by(|a, b| {
+        if by_name {
+            file_name(a.1).to_lowercase().cmp(&file_name(b.1).to_lowercase())
+        } else {
+            b.0.cmp(&a.0).then_with(|| file_name(a.1).to_lowercase().cmp(&file_name(b.1).to_lowercase()))
+        }
+    });
+    matched.truncate(TOTAL_LIMIT.saturating_sub(items.len()));
+    for (_, path) in matched {
+        let label = abbreviate_home(path, home);
+        let start = name_start(&label);
+        let matched = match fuzzy.as_mut() {
+            Some(fuzzy) => fuzzy.indices(&file_name(path)).map_or_else(Vec::new, |(_, ranges)| {
+                ranges.into_iter().map(|range| (range.start + start)..(range.end + start)).collect()
+            }),
+            None => Vec::new(),
+        };
+        rows.push(Row::Item(items.len()));
+        items.push(Item::Folder {
+            path: path.clone(),
+            label,
+            name_start: start,
+            source: Source::Here,
+            last_visit: None,
+            matched,
+        });
+    }
+    let count = count_text(items.len());
+    Listing { rows, items, count }
+}
+
+/// Path mode while the parent is being listed.
+pub fn loading_path_listing(parent: &Path) -> Listing {
+    status_path_listing(parent, "Loading…".into())
+}
+
+/// Path mode when the parent is not a folder.
+pub fn missing_path_listing(parent: &Path, home: &Path) -> Listing {
+    status_path_listing(parent, format!("No folder at \"{}\"", abbreviate_home(parent, home)).into())
+}
+
+fn status_path_listing(parent: &Path, text: SharedString) -> Listing {
+    let rows = vec![Row::Header(section_header(Source::Here, &crate::style::display_name(parent))), Row::Status(text)];
+    Listing { rows, items: Vec::new(), count: count_text(0) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,12 +890,45 @@ mod tests {
             .iter()
             .map(|row| match row {
                 Row::Header(text) => format!("# {text}"),
+                Row::Status(text) => text.to_string(),
                 Row::Item(i) => match &listing.items[*i] {
                     Item::Folder { label, .. } => label.clone(),
                     Item::Command { command, .. } => command.label.to_owned(),
                 },
             })
             .collect()
+    }
+
+    #[test]
+    fn path_query_splits_parent_and_partial() {
+        let (cwd, home) = (Path::new("/home/me/Files"), Path::new("/home/me"));
+        assert_eq!(path_query("~/Doc", cwd, home), Some((PathBuf::from("/home/me"), "Doc".into())));
+        assert_eq!(path_query("~", cwd, home), Some((PathBuf::from("/home/me"), "".into())));
+        assert_eq!(path_query("/", cwd, home), Some((PathBuf::from("/"), "".into())));
+        assert_eq!(path_query("/home/me/x/", cwd, home), Some((PathBuf::from("/home/me/x"), "".into())));
+        assert_eq!(path_query("alpha", cwd, home), None, "a plain query is not a path");
+        assert_eq!(path_query("a/b", cwd, home), None);
+    }
+
+    #[test]
+    fn path_listing_puts_this_folder_first() {
+        let children = [p("/home/me/Files/beta"), p("/home/me/Files/alpha")];
+        let parent = Path::new("/home/me/Files");
+        let listing = path_listing(parent, "", &children, Path::new("/home/me"));
+        assert_eq!(row_text(&listing), ["# In Files", "~/Files", "~/Files/alpha", "~/Files/beta"]);
+        assert_eq!(listing.items.len(), 3);
+        assert_eq!(listing.count, "3 places");
+
+        let listing = path_listing(parent, "alp", &children, Path::new("/home/me"));
+        assert_eq!(row_text(&listing), ["# In Files", "~/Files/alpha"]);
+        assert_eq!(listing.items[0].name_ranges().first(), Some(&(0..3)), "the match is highlighted in the name");
+    }
+
+    #[test]
+    fn missing_parent_says_so() {
+        let listing = missing_path_listing(Path::new("/home/me/nope"), Path::new("/home/me"));
+        assert_eq!(row_text(&listing), ["# In nope", "No folder at \"~/nope\""]);
+        assert!(listing.items.is_empty());
     }
 
     fn command_ids(query: &str) -> Vec<CommandId> {

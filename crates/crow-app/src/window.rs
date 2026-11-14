@@ -137,6 +137,8 @@ struct Palette {
     listing: palette::Listing,
     /// The focused folder's name, for the "In <name>" header.
     here: String,
+    /// Path mode's parent listing, while the query is a path.
+    path: Option<PathState>,
     cursor: usize,
     folders: Vec<palette::FolderCandidate>,
     scroll: ScrollHandle,
@@ -179,9 +181,23 @@ fn palette_item_height(item: &Item) -> f32 {
     }
 }
 
+/// Path mode's listing of one parent, cached while the query stays under it.
+struct PathState {
+    parent: PathBuf,
+    partial: String,
+    /// `None` while the background listing runs.
+    children: Option<Vec<PathBuf>>,
+    /// The parent is not a folder, or cannot be read.
+    missing: bool,
+    /// Whether the listing includes hidden entries.
+    hidden: bool,
+    /// Dropped listings (an older hidden setting) carry an older number.
+    generation: u64,
+}
+
 /// The list's content height, padding included.
 fn palette_content_height(listing: &palette::Listing) -> f32 {
-    if listing.items.is_empty() {
+    if listing.rows.is_empty() {
         return PALETTE_EMPTY_ROW;
     }
     let rows: f32 = listing
@@ -189,6 +205,7 @@ fn palette_content_height(listing: &palette::Listing) -> f32 {
         .iter()
         .map(|row| match row {
             Row::Header(_) => PALETTE_HEADER_ROW,
+            Row::Status(_) => PALETTE_EMPTY_ROW,
             Row::Item(i) => palette_item_height(&listing.items[*i]),
         })
         .sum();
@@ -211,6 +228,7 @@ fn palette_row_y(listing: &palette::Listing, cursor: usize) -> (f32, f32) {
     for row in &listing.rows {
         match row {
             Row::Header(_) => y += PALETTE_HEADER_ROW,
+            Row::Status(_) => y += PALETTE_EMPTY_ROW,
             Row::Item(i) => {
                 let height = palette_item_height(&listing.items[*i]);
                 if *i == cursor {
@@ -1916,7 +1934,7 @@ impl CrowWindow {
             }
             TextInputEvent::Confirmed => this.confirm_palette(false, window, cx),
             TextInputEvent::Cancelled => this.close_palette(window, cx),
-            TextInputEvent::CompletionRequested => {}
+            TextInputEvent::CompletionRequested => this.complete_palette(window, cx),
         });
         let focus = input.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
@@ -1925,6 +1943,7 @@ impl CrowWindow {
             mode,
             listing,
             here,
+            path: None,
             cursor: 0,
             folders,
             scroll: ScrollHandle::new(),
@@ -1944,14 +1963,141 @@ impl CrowWindow {
     }
 
     fn refresh_palette(&mut self, query: &str, cx: &mut Context<Self>) {
-        let Some(palette) = &mut self.palette else { return };
-        palette.listing = match palette.mode {
-            PaletteMode::Folders => palette::folder_listing(query, &palette.folders, &palette.here),
-            PaletteMode::Commands => palette::command_listing(query, &[], false),
-        };
-        palette.cursor = 0;
-        palette.scroll.set_offset(point(px(0.), px(0.)));
+        if self.palette.is_none() {
+            return;
+        }
+        let cwd = self.pane().read(cx).current_dir(cx);
+        let home = cx.global::<Ui>().home.clone();
+        let show_hidden = self.show_hidden;
+        let mut spawn: Option<(PathBuf, bool, u64)> = None;
+        {
+            let palette = self.palette.as_mut().expect("checked above");
+            palette.cursor = 0;
+            palette.scroll.set_offset(point(px(0.), px(0.)));
+            if palette.mode == PaletteMode::Commands {
+                palette.path = None;
+                palette.listing = palette::command_listing(query, &[], false);
+            } else if let Some((parent, partial)) = palette::path_query(query, &cwd, &home) {
+                let hidden = show_hidden || partial.starts_with('.');
+                let relist = match &mut palette.path {
+                    Some(state) if state.parent == parent => {
+                        state.partial.clone_from(&partial);
+                        let relist = state.hidden != hidden;
+                        state.hidden = hidden;
+                        relist
+                    }
+                    slot => {
+                        *slot = Some(PathState {
+                            parent: parent.clone(),
+                            partial,
+                            children: None,
+                            missing: false,
+                            hidden,
+                            generation: 0,
+                        });
+                        true
+                    }
+                };
+                let state = palette.path.as_mut().expect("set above");
+                if relist {
+                    state.generation += 1;
+                    spawn = Some((parent.clone(), hidden, state.generation));
+                }
+                let state = palette.path.as_ref().expect("set above");
+                palette.listing = match (&state.children, state.missing) {
+                    (None, _) => palette::loading_path_listing(&state.parent),
+                    (Some(_), true) => palette::missing_path_listing(&state.parent, &home),
+                    (Some(children), false) => palette::path_listing(&state.parent, &state.partial, children, &home),
+                };
+            } else {
+                palette.path = None;
+                palette.listing = palette::folder_listing(query, &palette.folders, &palette.here);
+            }
+        }
+        if let Some((parent, hidden, generation)) = spawn {
+            self.spawn_path_listing(parent, hidden, generation, cx);
+        }
         cx.notify();
+    }
+
+    /// List a path-mode parent off the main thread; drop the result if the palette
+    /// has moved to another parent (or another hidden setting) meanwhile.
+    fn spawn_path_listing(&mut self, parent: PathBuf, hidden: bool, generation: u64, cx: &mut Context<Self>) {
+        let target = parent.clone();
+        let task = cx.background_spawn(async move {
+            let mut children = Vec::new();
+            let listed = crow_fs::list_dir(&target, hidden, |batch| {
+                children.extend(
+                    batch.into_iter().filter(|entry| entry.is_dir && !entry.is_package()).map(|entry| entry.path),
+                );
+            });
+            (children, listed.is_err())
+        });
+        cx.spawn(async move |this, cx| {
+            let (children, missing) = task.await;
+            this.update(cx, |this, cx| {
+                let applied = match &mut this.palette {
+                    Some(palette) => match &mut palette.path {
+                        Some(state) if state.parent == parent && state.generation == generation => {
+                            state.children = Some(children);
+                            state.missing = missing;
+                            true
+                        }
+                        _ => false,
+                    },
+                    None => false,
+                };
+                if applied {
+                    let query = this.palette.as_ref().map(|p| p.input.read(cx).text().to_owned()).unwrap_or_default();
+                    this.refresh_palette(&query, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Tab: put the highlighted folder (and a `/`) in the field, or complete the
+    /// typed path like Go to Folder. Command mode ignores Tab.
+    fn complete_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_ref() else { return };
+        if palette.mode == PaletteMode::Commands {
+            return;
+        }
+        if let Some(Item::Folder { label, .. }) = palette.listing.items.get(palette.cursor) {
+            let text = match label.as_str() {
+                "/" => "/".to_owned(),
+                "~" => "~/".to_owned(),
+                _ => format!("{label}/"),
+            };
+            let input = palette.input.clone();
+            input.update(cx, |input, cx| input.set_text(text, window, cx));
+            return;
+        }
+        if palette.path.is_none() {
+            window.play_system_bell();
+            return;
+        }
+        let input = palette.input.clone();
+        let query = palette.input.read(cx).text().to_owned();
+        let typed = query.clone();
+        let cwd = self.pane().read(cx).current_dir(cx);
+        let home = cx.global::<Ui>().home.clone();
+        let task = cx.background_spawn(async move { crow_core::complete_typed(&typed, &cwd, &home) });
+        cx.spawn_in(window, async move |this, cx| {
+            let completed = task.await;
+            this.update_in(cx, |this, window, cx| {
+                let Some(palette) = this.palette.as_ref() else { return };
+                if palette.input.read(cx).text() != query {
+                    return;
+                }
+                if let Some(completed) = completed {
+                    input.update(cx, |input, cx| input.set_text(completed, window, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn move_palette(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -2188,7 +2334,7 @@ impl CrowWindow {
         let Some(palette) = self.palette.as_ref() else { return Vec::new() };
         let theme = cx.global::<Ui>().theme.clone();
         let muted = color(theme.role("fg-muted"));
-        if palette.listing.items.is_empty() {
+        if palette.listing.rows.is_empty() {
             let query = palette.input.read(cx).text().to_owned();
             let text: SharedString = match palette.mode {
                 PaletteMode::Commands => format!("No commands match \"{query}\"").into(),
@@ -2233,8 +2379,30 @@ impl CrowWindow {
                     headers += 1;
                     sections.push((label, vec![header]));
                 }
+                Row::Status(text) => {
+                    let k = headers;
+                    let row = div()
+                        .id(("palette-status", k))
+                        .debug_selector(|| format!("palette-status-{k}"))
+                        .h(px(PALETTE_EMPTY_ROW))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .role(Role::Label)
+                        .aria_label(text.clone())
+                        .text_size(px(13.))
+                        .text_color(muted)
+                        .child(text.clone())
+                        .into_any_element();
+                    headers += 1;
+                    match sections.last_mut() {
+                        Some((_, rows)) => rows.push(row),
+                        None => sections.push(("Places".into(), vec![row])),
+                    }
+                }
                 Row::Item(i) => {
                     let selected = *i == palette.cursor;
+                    let this_folder = *i == 0 && palette.path.as_ref().is_some_and(|state| state.partial.is_empty());
                     let row = match &palette.listing.items[*i] {
                         Item::Command { .. } => {
                             self.render_palette_command_row(&palette.listing, *i, selected, &theme, cx)
@@ -2246,6 +2414,7 @@ impl CrowWindow {
                             selected,
                             &theme,
                             now,
+                            this_folder.then_some("this folder"),
                             window,
                             cx,
                         ),
@@ -2282,6 +2451,7 @@ impl CrowWindow {
         selected: bool,
         theme: &crow_theme::Theme,
         now: u64,
+        note: Option<&'static str>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -2302,6 +2472,7 @@ impl CrowWindow {
             Some(age) => format!("{name}, {label}, {section}, visited {age}"),
             None => format!("{name}, {label}, {section}"),
         };
+        let right = note.map(str::to_owned).or(age);
         let muted = color(theme.role("fg-muted"));
         let hover = color(theme.role("surface-raised"));
         div()
@@ -2350,7 +2521,7 @@ impl CrowWindow {
                             .child(highlight_text(path_text, &path_ranges, theme, selected)),
                     ),
             )
-            .children(age.map(|age| div().text_size(px(12.)).text_color(muted).child(age)))
+            .children(right.map(|right| div().text_size(px(12.)).text_color(muted).child(right)))
             .into_any_element()
     }
 
@@ -2691,6 +2862,7 @@ impl CrowWindow {
             .iter()
             .map(|row| match row {
                 Row::Header(text) => format!("# {text}"),
+                Row::Status(text) => text.to_string(),
                 Row::Item(i) => match &palette.listing.items[*i] {
                     Item::Folder { label, .. } => label.clone(),
                     Item::Command { command, .. } => command.label.to_owned(),
@@ -2777,6 +2949,27 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("folders never finished loading");
+    }
+
+    /// Wait until the palette is not waiting on a background parent listing.
+    fn settle_palette(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+        for _ in 0..400 {
+            cx.run_until_parked();
+            let loading = view.read_with(cx, |w, _| {
+                w.palette.as_ref().is_some_and(|palette| {
+                    palette
+                        .listing
+                        .rows
+                        .iter()
+                        .any(|row| matches!(row, Row::Status(text) if text.as_ref() == "Loading…"))
+                })
+            });
+            if !loading {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the palette never finished listing");
     }
 
     fn pane(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Entity<Pane> {
@@ -5054,6 +5247,84 @@ mod tests {
         cx.simulate_input(">hidden");
         settle(&view, &mut cx);
         assert_eq!(state(&cx), Some(true), "the command turned them on");
+    }
+
+    #[gpui::test]
+    fn palette_tab_completes_highlighted_folder(cx: &mut TestAppContext) {
+        let root = fixture("palette-tab-complete");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-down");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-up");
+        settle(&view, &mut cx);
+
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input("alpha");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("tab");
+        settle_palette(&view, &mut cx);
+        let text = view.read_with(&cx, |w, cx| w.palette.as_ref().unwrap().input.read(cx).text().to_owned());
+        assert_eq!(text, format!("{}/alpha/", root.display()), "the highlighted folder and a slash");
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        assert!(rows.iter().any(|row| row.ends_with("/alpha/inner")), "its subfolders: {rows:?}");
+
+        cx.simulate_input("inn");
+        settle_palette(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha/inner"));
+    }
+
+    #[gpui::test]
+    fn palette_tab_does_nothing_in_command_mode(cx: &mut TestAppContext) {
+        let root = fixture("palette-tab-commands");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        let (mode, text, open) = view.read_with(&cx, |w, cx| {
+            (
+                w.palette.as_ref().map(|p| p.mode),
+                w.palette.as_ref().map(|p| p.input.read(cx).text().to_owned()),
+                w.palette.is_some(),
+            )
+        });
+        assert_eq!(mode, Some(PaletteMode::Commands));
+        assert_eq!(text.as_deref(), Some(""), "Tab did not type anything");
+        assert!(open, "the palette stays open");
+    }
+
+    #[gpui::test]
+    fn palette_path_mode_lists_children_off_main_thread(cx: &mut TestAppContext) {
+        let root = fixture("palette-path");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(&format!("{}/", root.display()));
+        settle_palette(&view, &mut cx);
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        assert_eq!(rows.len(), 4, "this folder, alpha, beta — no notes.txt: {rows:?}");
+        assert!(rows[0].starts_with("# In "), "{rows:?}");
+        assert_eq!(rows[1], root.display().to_string(), "the parent itself comes first");
+        assert!(rows[2].ends_with("/alpha") && rows[3].ends_with("/beta"), "{rows:?}");
+    }
+
+    #[gpui::test]
+    fn palette_path_mode_hides_dot_folders_until_typed(cx: &mut TestAppContext) {
+        let root = fixture("palette-path-hidden");
+        std::fs::create_dir_all(root.join(".hidden")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(&format!("{}/", root.display()));
+        settle_palette(&view, &mut cx);
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        assert!(!rows.iter().any(|row| row.ends_with("/.hidden")), "hidden until asked: {rows:?}");
+
+        cx.simulate_input(".h");
+        settle_palette(&view, &mut cx);
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        assert!(rows.iter().any(|row| row.ends_with("/.hidden")), "a dot partial shows hidden folders: {rows:?}");
     }
 
     #[gpui::test]
