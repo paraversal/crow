@@ -156,12 +156,20 @@ pub fn config_dir() -> PathBuf {
 
 /// Set one top-level key in `settings.toml`, keeping the rest of the file and its comments.
 pub fn save_setting(dir: &Path, key: &str, value: &str) -> Result<(), String> {
+    save_value(dir, key, toml_edit::Value::from(value))
+}
+
+/// Set a boolean top-level key, keeping the rest of the file and its comments.
+pub fn save_bool_setting(dir: &Path, key: &str, value: bool) -> Result<(), String> {
+    save_value(dir, key, toml_edit::Value::from(value))
+}
+
+fn save_value(dir: &Path, key: &str, mut value: toml_edit::Value) -> Result<(), String> {
     crate::config::edit_toml(&dir.join("settings.toml"), DEFAULT_SETTINGS, |doc| {
-        let mut new = toml_edit::Value::from(value);
         if let Some(old) = doc.get(key).and_then(toml_edit::Item::as_value) {
-            *new.decor_mut() = old.decor().clone();
+            *value.decor_mut() = old.decor().clone();
         }
-        doc[key] = toml_edit::Item::Value(new);
+        doc[key] = toml_edit::Item::Value(value);
         Ok(())
     })
 }
@@ -226,6 +234,20 @@ mod tests {
         assert!(text.contains("\ntheme = \"gruvbox-dark-hard\"\n"), "{text}");
         assert_eq!(load_settings(&dir).unwrap().theme_id(), Some("gruvbox-dark-hard"));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn saving_a_bool_setting_writes_a_bool() {
+        let dir = temp_dir("save-bool");
+        load_settings(&dir).unwrap();
+        save_bool_setting(&dir, "show_preview", false).unwrap();
+        let text = fs::read_to_string(dir.join("settings.toml")).unwrap();
+        assert!(text.contains("\nshow_preview = false\n"), "{text}");
+        assert!(!text.contains("show_preview = \"false\""), "a string would fail to reload: {text}");
+        assert!(!load_settings(&dir).unwrap().show_preview, "reloads as off");
+        save_bool_setting(&dir, "show_preview", true).unwrap();
+        assert!(load_settings(&dir).unwrap().show_preview);
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]

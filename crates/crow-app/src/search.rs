@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crow_core::{Exclude, KeymapLayer, Selection, SetName, abbreviate_home};
 use crow_fs::Entry;
@@ -387,6 +387,10 @@ impl SearchView {
         }
 
         cx.spawn(async move |this, cx| {
+            // A fast walk can queue thousands of batches. Applying them all in one
+            // turn would block drawing for seconds, so give the window a frame every
+            // few milliseconds. Tests keep draining in one go (their clock is manual).
+            let mut slice = std::time::Instant::now();
             while let Some(update) = rx.next().await {
                 let keep = this.update(cx, |this, cx| {
                     if this.generation == generation {
@@ -396,6 +400,10 @@ impl SearchView {
                 if keep.is_err() {
                     break;
                 }
+                if !cx.background_executor().is_test() && slice.elapsed().as_millis() >= 8 {
+                    cx.background_executor().timer(Duration::from_millis(1)).await;
+                    slice = std::time::Instant::now();
+                }
             }
         })
         .detach();
@@ -404,6 +412,9 @@ impl SearchView {
 
     fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
         match update {
+            // Once the result cap is hit the walk is cancelled; queued batches are
+            // dropped rather than merged, so the UI is never busy draining them.
+            Update::Hits(_) if self.capped => {}
             Update::Hits(hits) => self.add_hits(hits, cx),
             Update::Done(summary) => {
                 self.skipped = summary.skipped;
@@ -437,13 +448,18 @@ impl SearchView {
                 self.cancel.store(true, Ordering::Relaxed);
                 break;
             }
-            self.hit_count += 1;
+            // A content hit carries the file's other matching lines as a count.
+            let more = match &hit.kind {
+                HitKind::Content { more, .. } => *more,
+                HitKind::Name { .. } => 0,
+            };
+            self.hit_count += 1 + more as usize;
             if let Some(&index) = self.by_path.get(&hit.path) {
                 let row = &mut self.results[index];
                 if hit.score > row.score {
                     row.score = hit.score;
                 }
-                if let HitKind::Content { line, text, ranges } = hit.kind
+                if let HitKind::Content { line, text, ranges, .. } = hit.kind
                     && row.content.as_ref().is_none_or(|(best, _, _)| line < *best)
                 {
                     row.set_content((line, text, ranges));
@@ -454,7 +470,7 @@ impl SearchView {
                 if hit.score > row.score {
                     row.score = hit.score;
                 }
-                if let HitKind::Content { line, text, ranges } = hit.kind
+                if let HitKind::Content { line, text, ranges, .. } = hit.kind
                     && row.content.as_ref().is_none_or(|(best, _, _)| line < *best)
                 {
                     row.set_content((line, text, ranges));
@@ -2007,7 +2023,7 @@ impl Row {
 
     fn from_hit(hit: Hit, home: &Path, folder_root: Option<&Path>, query: &str) -> Row {
         let (content, name_match, name_ranges) = match hit.kind {
-            HitKind::Content { line, text, ranges } => (Some((line, text, ranges)), false, Vec::new()),
+            HitKind::Content { line, text, ranges, .. } => (Some((line, text, ranges)), false, Vec::new()),
             HitKind::Name { ranges } => (None, true, ranges),
         };
         let strong_name = name_match && is_strong_name(&hit.path, &name_ranges, query);

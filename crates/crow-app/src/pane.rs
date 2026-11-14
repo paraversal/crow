@@ -2037,8 +2037,15 @@ impl Pane {
         (0..folder.row_count()).map(|ix| folder.row_match(ix)).collect()
     }
 
+    #[cfg(test)]
     pub fn folder_count(&self) -> usize {
         self.folders.len()
+    }
+
+    /// The focused folder entity, for tests that drive the watcher directly.
+    #[cfg(test)]
+    pub(crate) fn test_folder(&self) -> Entity<Folder> {
+        self.focused_folder().clone()
     }
 
     pub fn focused_index(&self) -> usize {

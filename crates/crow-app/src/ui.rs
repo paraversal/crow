@@ -306,11 +306,7 @@ pub fn set_show_preview(show: bool, cx: &mut App) {
         return;
     }
     cx.global_mut::<Ui>().settings.show_preview = show;
-    write_config(
-        SETTINGS,
-        move |config, _| crow_core::save_setting(config, "show_preview", if show { "true" } else { "false" }),
-        cx,
-    );
+    write_config(SETTINGS, move |config, _| crow_core::save_bool_setting(config, "show_preview", show), cx);
     crate::menus::refresh(cx);
     cx.refresh_windows();
 }

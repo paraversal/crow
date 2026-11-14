@@ -4182,7 +4182,7 @@ mod tests {
         // The walker found a content hit first; the name hit arrives in a later batch.
         let content = hit(
             root.join("notes.txt"),
-            HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: test_ranges(0, 4) },
+            HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: test_ranges(0, 4), more: 0 },
             0,
         );
         search.update(&mut cx, |search, cx| search.add_test_hits(vec![content], cx));
@@ -4218,7 +4218,7 @@ mod tests {
         let first = hit(first_path, HitKind::Name { ranges: test_ranges(0, 4) }, 100);
         let content = hit(
             root.join("notes.txt"),
-            HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: test_ranges(0, 4) },
+            HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: test_ranges(0, 4), more: 0 },
             0,
         );
         search.update(&mut cx, |search, cx| search.add_test_hits(vec![content, first], cx));
@@ -4262,7 +4262,12 @@ mod tests {
                 vec![
                     hit(
                         content.clone(),
-                        HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: test_ranges(0, 4) },
+                        HitKind::Content {
+                            line: 1,
+                            text: "qqzz lives here".to_owned(),
+                            ranges: test_ranges(0, 4),
+                            more: 0,
+                        },
                         0,
                     ),
                     hit(weak.clone(), HitKind::Name { ranges: vec![0..1, 2..3, 4..6, 7..8] }, 80),
@@ -6591,6 +6596,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_late_change_batch_does_not_bring_back_a_deleted_file(cx: &mut TestAppContext) {
+        let root = fixture("change-race");
+        let (view, mut cx) = open(cx, &root);
+        settle(&view, &mut cx);
+        let folder = pane(&view, &cx).read_with(&cx, |p, _| p.test_folder());
+        folder.update(&mut cx, |folder, _| folder.set_apply_delay(std::time::Duration::from_millis(300)));
+        let executor = cx.executor();
+
+        // Delete notes.txt and queue it; the poll picks the batch up but the apply
+        // lands 300 ms later, so it is still in flight for the next batch.
+        std::fs::remove_file(root.join("notes.txt")).expect("delete");
+        folder.update(&mut cx, |folder, _| folder.queue_changes(vec![root.join("notes.txt")]));
+        executor.advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+
+        // A second batch whose stat predates the first apply used to carry the old
+        // listing (with notes.txt) and put the deleted file back.
+        std::fs::write(root.join("later.txt"), "x").expect("create");
+        folder.update(&mut cx, |folder, _| folder.queue_changes(vec![root.join("later.txt")]));
+        executor.advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        executor.advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+
+        let names = folder.read_with(&cx, |folder, _| folder.names());
+        assert!(!names.contains(&"notes.txt".to_owned()), "the deleted file stays gone: {names:?}");
+        assert!(names.contains(&"later.txt".to_owned()), "the second batch still lands: {names:?}");
+    }
+
+    #[gpui::test]
     fn preview_toggle_hides_it_in_list_and_columns(cx: &mut TestAppContext) {
         let root = fixture("preview-toggle");
         let (view, mut cx) = open(cx, &root);
@@ -6599,6 +6634,8 @@ mod tests {
         settle(&view, &mut cx);
         assert!(cx.debug_bounds("preview").is_none(), "hiding removes the list preview");
         assert!(!cx.read(|cx| cx.global::<Ui>().settings.show_preview), "the setting is off");
+        let text = std::fs::read_to_string(config_dir(&cx).join("settings.toml")).expect("settings file");
+        assert!(text.contains("\nshow_preview = false\n"), "the choice is saved as a bool: {text}");
         assert_eq!(
             view.read_with(&cx, |w, cx| w.toggle_state(crate::palette::CommandId::TogglePreview, cx)),
             Some(false),

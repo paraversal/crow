@@ -13,6 +13,8 @@ GPUI's test platform: key contexts, history, tabs, hidden files, multiple
 selection, type-to-select, sorting, Go to Folder, the column view's focus rules, file operations
 (new folder and new file with inline rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete),
 drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent),
+live change batches (a late batch cannot bring back a deleted file, watcher paths through a
+symlinked ancestor still match),
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
 (preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette (sections, two-line rows and match ranges, the Commands token and chips, path mode and Tab completion, recently used commands), the search panel (scope bar and switch,
 footer counts and skipped list, idle examples, best-row selection while results stream and the user's
@@ -38,7 +40,8 @@ round trip, and a broken file starting empty.
 
 `crates/crow-search` tests the engine on temp trees: dev rules and sentinels skip and are counted,
 Search everything walks them, hidden files follow the setting, fuzzy names score, literal and
-`/regex/` contents report the line, text and ranges, binary files are not read, and cancelling stops
+`/regex/` contents report the first matching line, text and ranges with the rest counted, batches
+stay bounded (one excerpt per file, 256 hits at most), binary files are not read, and cancelling stops
 the stream. The search panel adds keystroke tests for names and contents, Search everything and its switch,
 scope buttons, Cmd-Shift-M cycling, idle examples, footer counts and errors, the skipped list,
 name-before-contents order, preview loading and the hit line, navigating and revealing results,

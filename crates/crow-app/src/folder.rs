@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
+#[cfg(test)]
+use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use crow_core::{Selection, TypeSelect};
@@ -104,6 +106,12 @@ pub struct Folder {
     selection_bytes: SelectionBytes,
     scroll: UniformListScrollHandle,
     changes_rx: Receiver<FolderChange>,
+    /// A sender kept only for tests, which queue watcher batches without the disk.
+    #[cfg(test)]
+    changes_tx: Sender<FolderChange>,
+    /// Tests hold an apply in flight to reproduce out-of-order batches.
+    #[cfg(test)]
+    apply_delay: Duration,
     _watcher: Option<FolderWatcher>,
     error: Option<SharedString>,
     _poll: Task<()>,
@@ -113,7 +121,9 @@ impl EventEmitter<FolderEvent> for Folder {}
 
 impl Folder {
     pub fn new(dir: PathBuf, show_hidden: bool, sort: Sort, auto_select: bool, cx: &mut Context<Self>) -> Self {
-        let (changes_tx, changes_rx) = mpsc::channel();
+        let (changes_tx, changes_rx) = std::sync::mpsc::channel();
+        #[cfg(test)]
+        let test_tx = changes_tx.clone();
         // 100 ms between checks doubles as the debounce for bursts of file changes.
         let poll = cx.spawn(async move |this, cx| {
             loop {
@@ -151,6 +161,10 @@ impl Folder {
             selection_bytes: RefCell::new(None),
             scroll: UniformListScrollHandle::new(),
             changes_rx,
+            #[cfg(test)]
+            changes_tx: test_tx,
+            #[cfg(test)]
+            apply_delay: Duration::ZERO,
             _watcher: watcher,
             error: None,
             _poll: poll,
@@ -670,14 +684,21 @@ impl Folder {
             self.load(cx);
             return;
         }
-        let (entries, dir, hidden, sort, generation) =
-            (self.entries.clone(), self.dir.clone(), self.show_hidden, self.sort, self.generation);
+        let (dir, hidden, sort, generation) = (self.dir.clone(), self.show_hidden, self.sort, self.generation);
+        #[cfg(test)]
+        let delay = self.apply_delay;
         cx.spawn(async move |this, cx| {
-            let updated = cx
-                .background_spawn(async move { crow_fs::apply_changes(&entries, &dir, &paths, hidden, &sort, &kind) })
-                .await;
+            // Stat off the main thread; merge into the listing *as it is when the
+            // results land*. A batch that lands late therefore cannot replay the
+            // older listing it was computed from (which is how deleted files came back).
+            let stats = cx.background_spawn(async move { crow_fs::stat_changes(&dir, &paths, hidden) }).await;
+            #[cfg(test)]
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
             this.update(cx, |this, cx| {
                 if this.generation == generation && this.sort == sort {
+                    let updated = crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind);
                     this.replace_entries(updated, cx);
                 }
             })
@@ -798,6 +819,18 @@ impl Folder {
     /// Bench helper: jump the view without touching the selection.
     pub fn scroll_strict(&self, ix: usize) {
         self.scroll.scroll_to_item_strict(ix, ScrollStrategy::Top);
+    }
+
+    /// Feed a watcher batch without touching the disk (tests).
+    #[cfg(test)]
+    pub(crate) fn queue_changes(&self, paths: Vec<PathBuf>) {
+        self.changes_tx.send(FolderChange::Paths(paths)).ok();
+    }
+
+    /// Hold apply results in flight for `delay` (tests reproduce out-of-order batches).
+    #[cfg(test)]
+    pub(crate) fn set_apply_delay(&mut self, delay: Duration) {
+        self.apply_delay = delay;
     }
 
     #[cfg(test)]
