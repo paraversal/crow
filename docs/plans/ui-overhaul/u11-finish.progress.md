@@ -108,8 +108,13 @@ Settled by plan/code, not asked: Q4 (plan wins on copy conflicts), Q6 (macOS cho
 | head 1 | 8 ms | 8.33 | 8.59 | 9.54 | 20.13 |
 | head 2 | 8 ms | 8.33 | 8.51 | 8.66 | 19.18 |
 | head 3 | 8 ms | 8.33 | 8.52 | 9.53 | 18.23 |
+| head 4 (after the name selectors) | 10 ms | 8.33 | 8.54 | 9.86 | 18.80 |
+| head 5 | 8 ms | 8.33 | 8.55 | 9.70 | 22.50 |
+| head 6 | 9 ms | 8.33 | 8.52 | 9.35 | 17.04 |
 
-Head is within noise of `main` (9.64–9.77) and ~1 ms above M6, the same gap `main` already had from U10's Full motion. Budget p99 < 12.5 ms; warm paint 8 ms < 50 ms. No regression.
+Two runs taken while the machine stalled (a 33 ms p95/p99 frame) were discarded, as in U9/U10.
+
+Head is within noise of `main` (9.64–9.77; head 8.66–9.86) and ~1 ms above M6, the same gap `main` already had from U10's Full motion. Budget p99 < 12.5 ms; warm paint 8 ms < 50 ms. No regression.
 
 ## I3 Findings checklist
 | # | Finding | Status | Evidence |

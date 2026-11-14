@@ -1676,10 +1676,7 @@ impl Pane {
                             .child(row_icon(&entry, look, theme))
                             .child(
                                 div()
-                                    .debug_selector({
-                                        let name = entry.name.clone();
-                                        move || format!("row-name-{name}")
-                                    })
+                                    .debug_selector(|| format!("row-name-{}", entry.name))
                                     .relative()
                                     .left(px(look.dx))
                                     .opacity(dim)
@@ -1948,10 +1945,7 @@ impl Pane {
                     .child(row_icon(&entry, look, theme))
                     .child(
                         div()
-                            .debug_selector({
-                                let name = entry.name.clone();
-                                move || format!("column-{k}-row-name-{name}")
-                            })
+                            .debug_selector(|| format!("column-{k}-row-name-{}", entry.name))
                             .relative()
                             .left(px(look.dx))
                             .flex_1()
