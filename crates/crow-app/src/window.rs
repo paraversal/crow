@@ -9105,4 +9105,98 @@ mod tests {
         assert_eq!(tip.bottom(), viewport.height - px(crate::bottom_bar::HEIGHT + 8.), "8 px above the bottom bar");
         assert!(tip.size.width >= px(280.) && tip.size.width <= px(440.), "{:?}", tip.size);
     }
+
+    // ----- click on empty space -----
+
+    fn list_focused(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> bool {
+        let focus = pane(view, cx).read_with(cx, |p, _| p.focus_handle().clone());
+        cx.update(|window, _| focus.is_focused(window))
+    }
+
+    /// A point in the list body below the last row.
+    fn below_rows(cx: &mut VisualTestContext, last_row: &'static str) -> gpui::Point<gpui::Pixels> {
+        let row = cx.debug_bounds(last_row).unwrap_or_else(|| panic!("{last_row} is on screen"));
+        point(row.center().x, row.bottom() + px(40.))
+    }
+
+    #[gpui::test]
+    fn click_below_rows_clears_the_selection(cx: &mut TestAppContext) {
+        let root = fixture("empty-click-list");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down shift-down");
+        assert_eq!(selected_names(&view, &cx), ["beta", "notes.txt"]);
+
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        assert!(selected_names(&view, &cx).is_empty(), "a click on empty space deselects");
+        assert_eq!(selected(&view, &cx), None, "…and leaves no cursor");
+        assert!(list_focused(&view, &mut cx), "focus stays on the list");
+
+        cx.simulate_keystrokes("down");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "↓ starts again from the first row");
+    }
+
+    #[gpui::test]
+    fn click_in_the_row_gutter_clears_the_selection(cx: &mut TestAppContext) {
+        let root = fixture("empty-click-gutter");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down");
+        let row = cx.debug_bounds("row-beta").expect("beta row");
+        cx.simulate_click(point(row.left() - px(4.), row.center().y), gpui::Modifiers::default());
+        assert!(selected_names(&view, &cx).is_empty(), "the gutter beside a row is empty space");
+    }
+
+    #[gpui::test]
+    fn click_on_a_row_still_selects_it(cx: &mut TestAppContext) {
+        let root = fixture("empty-click-row");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down");
+        click_selector(&mut cx, "row-notes.txt");
+        assert_eq!(selected_names(&view, &cx), ["notes.txt"]);
+        // The row's press must not leave the next empty-space click ignored.
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        assert!(selected_names(&view, &cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn cmd_or_shift_click_on_empty_space_keeps_the_selection(cx: &mut TestAppContext) {
+        let root = fixture("empty-click-modifiers");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down shift-down");
+        let empty = below_rows(&mut cx, "row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::command());
+        assert_eq!(selected_names(&view, &cx), ["beta", "notes.txt"], "Cmd-click on empty space");
+        cx.simulate_click(empty, gpui::Modifiers::shift());
+        assert_eq!(selected_names(&view, &cx), ["beta", "notes.txt"], "Shift-click on empty space");
+    }
+
+    #[gpui::test]
+    fn click_on_empty_space_in_a_column_closes_the_columns_right_of_it(cx: &mut TestAppContext) {
+        let root = fixture("empty-click-columns");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-3 right");
+        settle(&view, &mut cx);
+        // alpha is selected in column 0 and its contents are column 1, with focus there and
+        // its first item (the folder inner) selected, so inner's contents are column 2.
+        let count = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.folder_count());
+        let focused = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.focused_index());
+        assert_eq!((count(&cx), focused(&cx)), (3, 1));
+
+        let empty = below_rows(&mut cx, "column-1-row-inner");
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!((count(&cx), focused(&cx)), (2, 1), "inner's column closes; alpha's stays focused");
+        assert!(selected_names(&view, &cx).is_empty());
+
+        let empty = below_rows(&mut cx, "column-0-row-notes.txt");
+        cx.simulate_click(empty, gpui::Modifiers::default());
+        settle(&view, &mut cx);
+        assert_eq!(focused(&cx), 0, "the clicked column takes focus");
+        assert_eq!(count(&cx), 1, "the columns to its right close");
+        assert!(selected_names(&view, &cx).is_empty(), "nothing is selected in it");
+        assert!(list_focused(&view, &mut cx));
+        cx.simulate_keystrokes("down");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    }
 }

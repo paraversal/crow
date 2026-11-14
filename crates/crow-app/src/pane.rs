@@ -285,6 +285,9 @@ pub struct Pane {
     focus_list_after_filter: bool,
     /// The sidebar cursor is walking this pane: later moves replace the history step.
     sidebar_walk: bool,
+    /// A row took the current mouse-down; the list behind it must not treat it as a
+    /// click on empty space. Rows handle the event before the list (deeper hitbox).
+    row_pressed: bool,
 }
 
 struct Bench {
@@ -344,6 +347,7 @@ impl Pane {
             filter_announce: SharedString::default(),
             filter_announce_gen: 0,
             focus_list_after_filter: false,
+            row_pressed: false,
             sidebar_walk: false,
         };
         pane.enter(dir, cx);
@@ -1343,6 +1347,7 @@ impl Pane {
 
     /// A press on row `ix` of folder `k`: Finder's click, Cmd-click and Shift-click.
     fn press(&mut self, k: usize, ix: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.row_pressed = true;
         // AppKit wants the mouse-down event when a GPUI drag later leaves the window.
         crow_macos::remember_mouse_down();
         window.focus(&self.focus, cx);
@@ -1361,6 +1366,34 @@ impl Pane {
                 f.click(ix, cx);
             }
         });
+        self.load_preview(cx);
+        cx.notify();
+    }
+
+    /// A press in folder `k`'s list that no row took: Finder's click on empty space.
+    /// A plain click clears the selection and keeps focus on the list; in column view
+    /// the column becomes the focused one and the columns to its right close.
+    /// Cmd- and Shift-clicks keep the selection.
+    fn press_empty(&mut self, k: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.row_pressed) {
+            return;
+        }
+        // A column also holds the filter field and its footer: only its list counts.
+        if self.mode == ViewMode::Columns
+            && !self.column_bounds.borrow().get(&k).is_some_and(|bounds| bounds.contains(&event.position))
+        {
+            return;
+        }
+        window.focus(&self.focus, cx);
+        if event.modifiers.platform || event.modifiers.shift {
+            return;
+        }
+        if k != self.focused {
+            self.drop_filter(cx);
+            self.focused = k;
+        }
+        // Clearing emits CursorMoved, which closes the columns right of `k`.
+        self.with_focused(cx, |f, cx| f.clear_selection(cx));
         self.load_preview(cx);
         cx.notify();
     }
@@ -2194,6 +2227,12 @@ impl Pane {
                             this.drop_files(k, &selection.external(), window, cx)
                         }))
                         .on_scroll(cx.listener(move |this, _, _, cx| this.on_list_scroll(k, cx)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                this.press_empty(k, event, window, cx)
+                            }),
+                        )
                         .children(field)
                         .child(body)
                         .children(footer),
@@ -2554,6 +2593,12 @@ impl Render for Pane {
                             // The list's own scroll handler runs first (deeper hitbox), so
                             // the offset read here is this event's.
                             .on_scroll(cx.listener(|this, _, _, cx| this.on_list_scroll(0, cx)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                    this.press_empty(0, event, window, cx)
+                                }),
+                            )
                             .child(body)
                     })
                     // Dropped on the list but not on a folder row: into the folder shown.
