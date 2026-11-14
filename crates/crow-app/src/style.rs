@@ -60,6 +60,22 @@ pub fn drop_target(theme: &Theme) -> Rgba {
     color_alpha(theme.role("accent"), 0x40)
 }
 
+/// The fill a feedback effect puts over a row: accent for a receive, error for a
+/// refuse. `None` when the effect has no tint at this moment.
+pub fn effect_tint(look: crow_core::motion::Look, theme: &Theme) -> Option<Rgba> {
+    if look.tint <= 0.0 {
+        return None;
+    }
+    Some(match look.tint_kind {
+        crow_core::motion::Tint::Accent => color_alpha(theme.role("accent"), (look.tint * 0x50 as f32) as u8),
+        crow_core::motion::Tint::Error => {
+            let mut color = error_soft(theme);
+            color.a *= look.tint * 2.0;
+            color
+        }
+    })
+}
+
 /// A keyboard cursor ring, for a focused item drawn without a fill. An inset
 /// zero-blur shadow, so it never changes layout and list overflow can't clip it.
 pub fn cursor_ring(theme: &Theme) -> Vec<BoxShadow> {

@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crow_core::motion::{Effective, Fx, Look, Tint};
+use crow_core::motion::{Effective, Fx, Look};
 use crow_core::{
     Align, Column, ColumnContext, ColumnWidth, History, KeymapLayer, ResizeDrag, TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS,
     TableLayout, TipId, ViewChange, ViewMode,
@@ -40,7 +40,7 @@ use crate::icons::{Glyph, glyph};
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, drop_target, error_soft, format_time, highlight_text, icon,
+    active_selection, color, color_alpha, drop_target, effect_tint, format_time, highlight_text, icon,
     inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
@@ -405,6 +405,12 @@ impl Pane {
     pub fn rows(&self, cx: &gpui::App) -> Vec<(String, usize)> {
         let folder = self.focused_folder().read(cx);
         (0..folder.row_count()).filter_map(|ix| folder.row(ix).map(|(e, d)| (e.name.clone(), d))).collect()
+    }
+
+    /// The feedback effects running on the focused folder's rows, for tests.
+    #[cfg(test)]
+    pub fn effects(&self, cx: &gpui::App) -> Vec<(String, Fx)> {
+        self.focused_folder().read(cx).effects().iter().map(|effect| (effect.entry.name.clone(), effect.fx)).collect()
     }
 
     pub fn error(&self, cx: &gpui::App) -> Option<SharedString> {
@@ -1394,7 +1400,7 @@ impl Pane {
                 let handoff = DragHandoff::new();
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
-                let tint = row_tint(look, theme);
+                let tint = effect_tint(look, theme);
                 let row = div()
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
@@ -1696,7 +1702,7 @@ impl Pane {
                 let handoff = DragHandoff::new();
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
-                let tint = row_tint(look, theme);
+                let tint = effect_tint(look, theme);
                 div()
                     .id(ix)
                     .role(Role::ListBoxOption)
@@ -2005,21 +2011,6 @@ fn row_icon(entry: &Entry, look: Look, theme: &Theme) -> Div {
                 )),
             )
         })
-}
-
-/// The fill an effect puts over a row: accent for a receive, error for a refuse.
-fn row_tint(look: Look, theme: &Theme) -> Option<gpui::Rgba> {
-    if look.tint <= 0.0 {
-        return None;
-    }
-    Some(match look.tint_kind {
-        Tint::Accent => color_alpha(theme.role("accent"), (look.tint * 0x50 as f32) as u8),
-        Tint::Error => {
-            let mut color = error_soft(theme);
-            color.a *= look.tint * 2.0;
-            color
-        }
-    })
 }
 
 /// A row drawn over the list while its swallow finishes after the listing dropped it.

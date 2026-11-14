@@ -2,7 +2,7 @@
 //! moment, and which sound an event plays. UI-free, so the app and the motion
 //! lab (`crow --motion-lab`) share one source of truth.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -295,6 +295,22 @@ pub fn look(mode: Effective, fx: Fx, phase: usize, t: f32) -> Look {
         }
     }
     look
+}
+
+/// How `fx` looks `now - started` into `phases` (the effect's durations).
+pub fn look_in(phases: &[Duration], mode: Effective, fx: Fx, started: Instant, now: Instant) -> Look {
+    if phases.is_empty() {
+        return Look::default();
+    }
+    let mut remaining = now.saturating_duration_since(started);
+    for (phase, duration) in phases.iter().enumerate() {
+        if remaining < *duration || phase == phases.len() - 1 {
+            let t = if duration.is_zero() { 1.0 } else { (remaining.as_secs_f32() / duration.as_secs_f32()).min(1.0) };
+            return look(mode, fx, phase, t);
+        }
+        remaining -= *duration;
+    }
+    look(mode, fx, phases.len() - 1, 1.0)
 }
 
 /// The phases of `fx` in `mode`, in order. `off` and `Idle` have none.

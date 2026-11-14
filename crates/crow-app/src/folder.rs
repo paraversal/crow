@@ -92,19 +92,7 @@ impl RowEffect {
 
     /// How the row looks at `now`: each phase in turn, then the last one at its end.
     pub fn look(&self, mode: Effective, now: Instant) -> Look {
-        if self.phases.is_empty() {
-            return Look::default();
-        }
-        let mut remaining = now.saturating_duration_since(self.started);
-        for (phase, duration) in self.phases.iter().enumerate() {
-            if remaining < *duration || phase == self.phases.len() - 1 {
-                let t =
-                    if duration.is_zero() { 1.0 } else { (remaining.as_secs_f32() / duration.as_secs_f32()).min(1.0) };
-                return motion::look(mode, self.fx, phase, t);
-            }
-            remaining -= *duration;
-        }
-        motion::look(mode, self.fx, self.phases.len() - 1, 1.0)
+        motion::look_in(&self.phases, mode, self.fx, self.started, now)
     }
 
     /// Still in the first phase: the row is drawn where it is, not closing yet.

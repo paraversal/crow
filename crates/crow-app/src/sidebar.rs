@@ -10,7 +10,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
+use crow_core::motion::{self, Fx};
 use crow_core::{Favorite, SidebarEdit, Slot};
 use crow_fs::ops::Request;
 use gpui::{
@@ -25,7 +27,7 @@ use crate::actions::{
 use crate::chrome::with_tooltip;
 use crate::palette::CommandId;
 use crate::pane::DraggedSelection;
-use crate::style::{color, current_location, cursor_ring, drop_target, icon};
+use crate::style::{color, current_location, cursor_ring, drop_target, effect_tint, icon};
 use crate::ui::{self, Ui};
 
 pub enum SidebarEvent {
@@ -214,6 +216,10 @@ pub struct Sidebar {
     names: RefCell<HashMap<PathBuf, Rc<[String]>>>,
     /// The paths in `names`, in row order, so a changed sidebar prunes stale entries.
     name_paths: RefCell<Vec<PathBuf>>,
+    /// A row pulsing because a move landed in its folder, and when it started.
+    receive: Option<(PathBuf, Instant)>,
+    /// Bumped per pulse, so an older timer cannot clear a newer one.
+    receive_generation: u64,
 }
 
 impl Focusable for Sidebar {
@@ -234,7 +240,40 @@ impl Sidebar {
             insert_slot: None,
             names: RefCell::new(HashMap::new()),
             name_paths: RefCell::new(Vec::new()),
+            receive: None,
+            receive_generation: 0,
         }
+    }
+
+    /// Pulse the row for `path` after a move lands in its folder. Full waits out the
+    /// fly phase; Low tints at once; Off does nothing.
+    pub fn pulse(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let mode = cx.global::<Ui>().feedback.mode;
+        let total: Duration = motion::phases(mode, Fx::Receive).iter().sum();
+        if total.is_zero() {
+            return;
+        }
+        self.receive = Some((path, Instant::now()));
+        self.receive_generation += 1;
+        let generation = self.receive_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(total).await;
+            this.update(cx, |this, cx| {
+                if this.receive_generation == generation {
+                    this.receive = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Whether the row for `path` is pulsing, for tests.
+    #[cfg(test)]
+    pub fn receiving(&self, path: &Path) -> bool {
+        self.receive.as_ref().is_some_and(|(target, _)| target == path)
     }
 
     pub fn set_current(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
@@ -678,6 +717,8 @@ impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
+        let mode = ui.feedback.mode;
+        let now = Instant::now();
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
         let rows = rows(ui);
         let focused = self.focus.is_focused(window);
@@ -759,6 +800,10 @@ impl Render for Sidebar {
                 _ => None,
             };
             let target = path.clone();
+            let receive_tint = self.receive.as_ref().filter(|(target, _)| target == &path).and_then(|(_, started)| {
+                let phases = motion::phases(mode, Fx::Receive);
+                effect_tint(motion::look_in(&phases, mode, Fx::Receive, *started, now), &theme)
+            });
             let mut item = div()
                 .id(SharedString::from(format!("sidebar-{i}")))
                 .debug_selector(move || format!("sidebar-{i}"))
@@ -778,6 +823,7 @@ impl Render for Sidebar {
                 .when(look.current && !look.drop, |row| row.bg(current_location(&theme)))
                 .when(look.drop, |row| row.bg(drop_bg))
                 .when(look.ring, |row| row.shadow(cursor_ring(&theme)))
+                .when_some(receive_tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.cursor = i;
                     cx.emit(SidebarEvent::Open(target.clone()));

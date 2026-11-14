@@ -1145,17 +1145,28 @@ impl CrowWindow {
             Request::Trash { paths } => Some(paths.clone()),
             _ => None,
         };
+        let move_paths = match &plan.request {
+            Request::Move { paths, into } => Some((paths.clone(), into.clone())),
+            _ => None,
+        };
+        let failed_paths = trash_paths.clone().or_else(|| move_paths.as_ref().map(|(paths, _)| paths.clone()));
         let pane = self.pane().downgrade();
         // The effect starts with the operation, not the key press: a conflict or a
         // delete sheet may have come first, and a second operation is refused.
-        if cx.global::<Operations>().running.is_none()
-            && let Some(paths) = &trash_paths
-        {
-            pane.update(cx, |pane, cx| pane.start_effect(paths.clone(), Fx::Trash, cx)).ok();
+        if cx.global::<Operations>().running.is_none() {
+            if let Some(paths) = &trash_paths {
+                pane.update(cx, |pane, cx| pane.start_effect(paths.clone(), Fx::Trash, cx)).ok();
+            }
+            if let Some((paths, into)) = &move_paths {
+                pane.update(cx, |pane, cx| pane.start_effect(paths.clone(), Fx::MoveOut, cx)).ok();
+                // The folder the items land in pulses, in the list and in the sidebar.
+                pane.update(cx, |pane, cx| pane.start_effect(vec![into.clone()], Fx::Receive, cx)).ok();
+                self.sidebar.update(cx, |sidebar, cx| sidebar.pulse(into.clone(), cx));
+            }
         }
         operations::execute(plan, resolutions, cx, move |outcome, cx| {
             if outcome.error.is_some()
-                && let Some(paths) = &trash_paths
+                && let Some(paths) = &failed_paths
             {
                 // Whatever is still there refuses.
                 pane.update(cx, |pane, cx| pane.start_effect(paths.clone(), Fx::Refuse, cx)).ok();
@@ -3684,6 +3695,26 @@ mod tests {
         cx.simulate_mouse_up(top, gpui::MouseButton::Left, gpui::Modifiers::default());
         settle(&view, &mut cx);
         assert_eq!(sidebar_paths(&cx), [alpha, beta], "…and dropping there moves it back");
+    }
+
+    #[gpui::test]
+    fn dropping_on_a_favorite_in_full_motion_pulses_it(cx: &mut TestAppContext) {
+        let root = fixture("drop-favorite-full");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("beta")]));
+        let sidebar = view.read_with(&cx, |window, _| window.sidebar.clone());
+        drop_on(&mut cx, "sidebar-0", vec![root.join("notes.txt")]);
+        for _ in 0..200 {
+            if sidebar.read_with(&cx, |sidebar, _| sidebar.receiving(&root.join("beta"))) {
+                break;
+            }
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(sidebar.read_with(&cx, |sidebar, _| sidebar.receiving(&root.join("beta"))), "the favorite pulses");
+        settle(&view, &mut cx);
+        assert!(root.join("beta/notes.txt").exists());
     }
 
     #[gpui::test]
@@ -7689,6 +7720,35 @@ mod tests {
         settle(&view, &mut cx);
         assert!(root.join("alpha/notes.txt").exists(), "the dragged file moved into the folder under the pointer");
         assert!(!root.join("notes.txt").exists(), "…and left its old place");
+    }
+
+    #[gpui::test]
+    fn dropping_on_a_folder_row_in_full_motion_moves_and_leaves_the_listing(cx: &mut TestAppContext) {
+        let root = fixture("drop-row-full");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        drop_on(&mut cx, "row-alpha", vec![root.join("notes.txt")]);
+        settle(&view, &mut cx);
+        assert!(root.join("alpha/notes.txt").exists(), "dropped onto alpha: moved into it");
+        assert!(!root.join("notes.txt").exists(), "…and left its old place");
+        assert!(!names(&view, &cx).contains(&"notes.txt".to_owned()), "the source row left the list");
+    }
+
+    #[gpui::test]
+    fn a_move_starts_effects_on_the_source_and_the_target(cx: &mut TestAppContext) {
+        let root = fixture("move-effects");
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        let pane = pane(&view, &cx);
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.start_effect(vec![root.join("notes.txt")], Fx::MoveOut, cx);
+                pane.start_effect(vec![root.join("alpha")], Fx::Receive, cx);
+            });
+        });
+        let effects = pane.read_with(&cx, |pane, cx| pane.effects(cx));
+        assert!(effects.iter().any(|(name, fx)| name == "notes.txt" && *fx == Fx::MoveOut), "{effects:?}");
+        assert!(effects.iter().any(|(name, fx)| name == "alpha" && *fx == Fx::Receive), "{effects:?}");
     }
 
     #[gpui::test]

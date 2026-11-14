@@ -7,8 +7,8 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 | I1 Bring the lab and the sound module over | done (2e6c76d + next) | lab cherry-picked; pure parts in `crow-core::motion` with 6 tests; `feedback::sound` maps `SoundId` → `NSSound`; README documents `--motion-lab`. Lab smoke-runs (window opens, no panic); look/sound hand check pending. |
 | I2 Settings and the effective mode | done | `motion`/`sound` settings + docs, `Ui.feedback`, poll + reload, `set_reduce_motion` in Off, theme fade by mode; parse and fade tests. R3 open (see Decisions). |
 | I3 Trash | done | R1 departure overlay: `Folder` keeps `RowEffect`s (max 20 visible rows), rows render the swallow, a ghost finishes it if the listing drops the row early, and rows below FLIP up in Full. Sound on success, Refuse on error. Tests: 1 item in off/low/full, 3, 500, columns. Bench: Full p99 9.60 ms, Off 9.07, Low 9.73 (warm 8 ms each). |
-| I4 Move into a folder | in progress | Q4 = pulse only |
-| I5 Arrive | todo | |
+| I4 Move into a folder | done | `Move` starts MoveOut on visible sources, Receive on the target folder row (list and columns) and a `Sidebar::pulse` on the target favorite. No flight or count (Q4). Purr on success through `operations::finish`. Tests: drop on a row in Full, source/target effects, favorite pulse. |
+| I5 Arrive | in progress | |
 | I6 Refuse and errors | todo | |
 | I7 Small entrances | todo | needs Q3 |
 | I8 Cursor glide | todo | needs Q2 |
@@ -51,6 +51,7 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: in p
 ## Log
 - 2026-11-14: branch created from `main`; progress file started. Read the plan, `AGENTS.md`, the overhaul index, the lab on `motion-trial` (`7d6f32a`), and the current operation/row/folder code on `main`.
 - 2026-11-14: I1–I2 committed. I3: `RowEffect`/ghost/FLIP in `folder.rs` and `pane.rs`; trash sound and error beep through `operations::finish`; 10 trash tests pass; bench in all three modes within budget.
+- 2026-11-14: I4: a `Move` starts MoveOut on the visible sources and Receive on the target row; the sidebar pulses the target favorite. No flight or count (Q4). Purr on success. 3 new tests.
 
 ## Next
-I4: move into a folder (drop on a row, sidebar drop, ⌘V of a cut) with MoveOut/Receive looks and the Purr after the flight.
+I5: Arrive for new folder/file, paste/copy results, duplicate, undo/redo; open phase as the FLIP inverse; sounds Pop/Bottle/Glass.
