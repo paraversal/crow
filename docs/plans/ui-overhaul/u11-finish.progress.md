@@ -40,7 +40,7 @@ Settled by plan/code, not asked: Q4 (plan wins on copy conflicts), Q6 (macOS cho
 - `BAND_HEIGHT = 52` in `style.rs`, used by the band, the sheet's top offset, the activity list and `PALETTE_TOP`.
 - I6: `debug_a11y_tree_json()` returns `None` in the test platform (spike printed `A11Y none`, reverted), so the a11y sweep is by hand. The filter count's aria label is throttled 300 ms past the last keystroke (visible count stays live); the search footer already announces once when it settles ("Searching" → summary).
 - I5: the preview column is `flex_1().min_w(PREVIEW_COLUMN_WIDTH)`; a folder cursor shows `preview::folder_summary` with the child column's count (no I/O) and aria "name, Folder, n items". With no cursor (no matches, still loading) it shows the focused folder's own summary, so the strip is never empty.
-- I4 edge cases: APFS is normalization-insensitive, so an NFC name and its NFD twin are one entry; the test uses the names the listing reports. Row and name elements carry `row-name-*` / `column-{k}-row-name-*` selectors so the test measures the text, not just the row.
+- I4 edge cases: APFS is normalization-insensitive, so an NFC name and an NFD twin are one entry; the test uses an NFD-only name (`Cafe\u{301}.txt`, verified to stay NFD on this filesystem) and the names the listing reports. Row and name elements carry `row-name-*` / `column-{k}-row-name-*` selectors so the test measures the text, not just the row.
 
 ## Merged plans (I1)
 | Plan | PR | Merge commit |

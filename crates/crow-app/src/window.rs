@@ -3228,8 +3228,9 @@ mod tests {
             format!("{}.txt", "a".repeat(200)),
             "🙂 ملف عربي.txt".to_owned(),
             "Résumé.txt".to_owned(),
-            // APFS is normalization-insensitive: this and the NFC name are one entry.
-            "Re\u{301}sume\u{301}.txt".to_owned(),
+            // NFD only (no NFC twin): APFS is normalization-insensitive, so a twin
+            // would be the same entry; this name keeps its combining marks.
+            "Cafe\u{301}.txt".to_owned(),
         ] {
             std::fs::write(root.join(name), "x").expect("create fixture");
         }
