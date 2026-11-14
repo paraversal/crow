@@ -487,6 +487,11 @@ fn load_zoxide(cx: &mut App) {
 }
 
 pub fn refresh_volumes(cx: &mut App) {
+    // `init_for_tests` installs no watchers; tests keep `volumes` empty so their
+    // sidebar paths are only the ones they configure.
+    if cx.try_global::<Watchers>().is_none() {
+        return;
+    }
     let task = cx.background_spawn(async { crow_macos::volumes() });
     cx.spawn(async move |cx| {
         let volumes = task.await;

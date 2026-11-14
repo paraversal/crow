@@ -209,6 +209,8 @@ fn finish(outcome: &Outcome, cx: &mut App) {
         (None, true) => message(format!("{label}: cancelled"), false, cx),
         (None, false) => clear_message(cx),
     }
+    // Copying or trashing changes free space; the sidebar shouldn't wait for the minute poll.
+    crate::ui::refresh_volumes(cx);
 }
 
 /// Undo log entry `index` (the newest by default). Undo checks the disk first and

@@ -7,7 +7,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 | I1 Row model and name cache | done | `RowLook`/`BarTone`, `looks`, `looks_for_test`, per-path name cache; `sidebar_looks_follow_rows`; no visible change intended |
 | I2 Twin hints | done | `crow_core::twin_hints` + 8 unit tests; hints/spoken in `looks`; hint rendered after the name; 4 window tests |
 | I3 One fill per meaning | done | current folder `selection`, cursor an inset accent ring; drop replaces the fill; tests |
-| I4 Disk row | todo | |
+| I4 Disk row | done | neutral `fg-subtle` bar, warning at 90 %, "182 GB free" right-aligned, aria ", almost full"; volumes refresh after operations |
 | I5 Mark letters | todo | |
 | I6 Alias marker | todo | Q3 = yes |
 | I7 Favorites header hint | skipped | Q7 = no |
@@ -57,5 +57,7 @@ Branch: `ui-u8-sidebar` · PR: none · Last updated: 2026-11-14 · State: in pro
 
 - 2026-11-14: I3 done. Removed the temporary cursor fill; `ring = focused && cursor` draws `style::cursor_ring` as an inset shadow. Current fill is skipped while a drop highlight covers the row. Tests: ring moves with Tab/Down and Vim j, no ring when unfocused, drop look clears. Not yet hand-checked on screen (ring contrast/light-dark) — listed under Hand checks.
 
+- 2026-11-14: I4 done. `short_bytes`, `bar_tone` (`>= 0.9`), free text in the right slot, track `surface-raised`, fill `fg-subtle`/`warning`, spoken ", almost full". `operations::finish` now calls `refresh_volumes`; `refresh_volumes` returns early when the app has no watchers, so `init_for_tests` keeps `volumes` empty (the plan's invariant; otherwise real volumes appeared in every sidebar test). Unit tests for sizes/tone; window test for the disk row and warning. Workspace green.
+
 ## Next
-I4: `DISK_WARNING_USED`, `bar_tone`, `short_bytes`, free text in the right slot, neutral bar; unit + window tests.
+I5: mark letters in the Vim layer (`right = Some(k)`), window test.

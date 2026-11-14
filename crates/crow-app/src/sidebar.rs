@@ -162,6 +162,32 @@ fn human_bytes(bytes: u64) -> String {
     if unit == 0 { format!("{bytes} bytes") } else { format!("{value:.1} {}", units[unit]) }
 }
 
+/// The sidebar's short free-space text: no decimal from 10 up ("182 GB"), one below
+/// ("4.2 GB"), powers of 1000 like Finder.
+fn short_bytes(bytes: u64) -> String {
+    let units = ["bytes", "KB", "MB", "GB", "TB", "PB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit + 1 < units.len() {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} bytes")
+    } else if value >= 10.0 {
+        format!("{value:.0} {}", units[unit])
+    } else {
+        format!("{value:.1} {}", units[unit])
+    }
+}
+
+/// At or above this share of the disk, the bar warns.
+const DISK_WARNING_USED: f32 = 0.9;
+
+fn bar_tone(used: f32) -> BarTone {
+    if used >= DISK_WARNING_USED { BarTone::Warning } else { BarTone::Neutral }
+}
+
 pub struct Sidebar {
     focus: FocusHandle,
     /// Index into the selectable rows (favorites, recents, volumes).
@@ -309,6 +335,17 @@ impl Sidebar {
         let mut looks = Vec::with_capacity(selectable.len());
         for (i, row) in selectable.into_iter().enumerate() {
             let label = labels[i].clone();
+            let bar = match row {
+                Row::Volume(v) if v.total_bytes > 0 => {
+                    let used = (1.0 - v.free_bytes as f32 / v.total_bytes as f32).clamp(0.0, 1.0);
+                    Some((used, bar_tone(used)))
+                }
+                _ => None,
+            };
+            let right = match row {
+                Row::Volume(v) if v.total_bytes > 0 => Some(format!("{} free", short_bytes(v.free_bytes))),
+                _ => None,
+            };
             let (hint, spoken) = match &hint_by_row[i] {
                 Some((shown, name)) => {
                     let spoken = match row {
@@ -323,10 +360,11 @@ impl Sidebar {
                 None => {
                     let spoken = match row {
                         Row::Volume(v) => format!(
-                            "{label}, {} free of {}{}",
+                            "{label}, {} free of {}{}{}",
                             human_bytes(v.free_bytes),
                             human_bytes(v.total_bytes),
-                            if v.ejectable { ", ejectable" } else { "" }
+                            if v.ejectable { ", ejectable" } else { "" },
+                            if bar.is_some_and(|(_, tone)| tone == BarTone::Warning) { ", almost full" } else { "" }
                         ),
                         Row::Favorite(_, f) => match f.key {
                             Some(k) if vim => format!("{label}, mark {k}"),
@@ -337,17 +375,10 @@ impl Sidebar {
                     (None, spoken)
                 }
             };
-            let bar = match row {
-                Row::Volume(v) if v.total_bytes > 0 => {
-                    let used = (1.0 - v.free_bytes as f32 / v.total_bytes as f32).clamp(0.0, 1.0);
-                    Some((used, if used > 0.9 { BarTone::Warning } else { BarTone::Neutral }))
-                }
-                _ => None,
-            };
             looks.push(RowLook {
                 label,
                 hint,
-                right: None,
+                right,
                 spoken,
                 current: row.path().is_some_and(|path| path == self.current),
                 ring: focused && i == self.cursor,
@@ -812,10 +843,9 @@ impl Render for Sidebar {
             }
             item = item.child(line);
             if let Some((used, tone)) = look.bar {
-                // Nearly full disks show in the warning color, as in Finder's storage bar.
                 let fill = match tone {
                     BarTone::Warning => theme.role("warning"),
-                    BarTone::Neutral => accent,
+                    BarTone::Neutral => subtle,
                 };
                 item = item.child(
                     div()
@@ -823,7 +853,7 @@ impl Render for Sidebar {
                         .mt(px(2.))
                         .h(px(3.))
                         .rounded_full()
-                        .bg(color(theme.role("border")))
+                        .bg(color(theme.role("surface-raised")))
                         .child(div().h_full().rounded_full().w(gpui::relative(used)).bg(color(fill))),
                 );
             }
@@ -885,6 +915,21 @@ mod tests {
         assert_eq!(human_bytes(512), "512 bytes");
         assert_eq!(human_bytes(1_500_000), "1.5 MB");
         assert_eq!(human_bytes(494_384_795_648), "494.4 GB");
+    }
+
+    #[test]
+    fn short_sizes_for_the_sidebar() {
+        assert_eq!(short_bytes(182_400_000_000), "182 GB");
+        assert_eq!(short_bytes(4_200_000_000), "4.2 GB");
+        assert_eq!(short_bytes(980_000_000), "980 MB");
+        assert_eq!(short_bytes(1_000_000_000_000), "1.0 TB");
+        assert_eq!(short_bytes(0), "0 bytes");
+    }
+
+    #[test]
+    fn disk_turns_warning_at_ninety_percent() {
+        assert_eq!(bar_tone(0.899), BarTone::Neutral);
+        assert_eq!(bar_tone(0.9), BarTone::Warning);
     }
 
     #[test]

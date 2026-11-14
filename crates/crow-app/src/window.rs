@@ -3169,6 +3169,41 @@ mod tests {
     }
 
     #[gpui::test]
+    fn disk_row_shows_free_space_and_keeps_its_aria_label(cx: &mut TestAppContext) {
+        let root = fixture("disk");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]));
+        cx.update(|_, cx| {
+            cx.global_mut::<Ui>().volumes = vec![crow_macos::Volume {
+                name: "Test HD".into(),
+                path: root.clone(),
+                total_bytes: 494_384_795_648,
+                free_bytes: 182_400_000_000,
+                ejectable: true,
+            }];
+            cx.refresh_windows();
+        });
+        cx.run_until_parked();
+        let looks = sidebar_looks(&view, &mut cx);
+        let disk = looks.iter().find(|look| look.label == "Test HD").expect("volume row");
+        assert_eq!(disk.right.as_deref(), Some("182 GB free"));
+        let (used, tone) = disk.bar.expect("a bar for a known total");
+        assert!((used - 0.631).abs() < 0.001, "used fraction {used}");
+        assert_eq!(tone, crate::sidebar::BarTone::Neutral);
+        assert_eq!(disk.spoken, "Test HD, 182.4 GB free of 494.4 GB, ejectable");
+
+        cx.update(|_, cx| {
+            cx.global_mut::<Ui>().volumes[0].free_bytes = 24_719_239_782;
+            cx.refresh_windows();
+        });
+        cx.run_until_parked();
+        let looks = sidebar_looks(&view, &mut cx);
+        let disk = looks.iter().find(|look| look.label == "Test HD").expect("volume row");
+        assert_eq!(disk.bar.expect("a bar").1, crate::sidebar::BarTone::Warning);
+        assert!(disk.spoken.ends_with(", ejectable, almost full"), "{}", disk.spoken);
+    }
+
+    #[gpui::test]
     fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) {
         let root = fixture("contexts");
         std::fs::write(root.join("beta/b.txt"), "").expect("create fixture");
