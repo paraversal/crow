@@ -167,7 +167,7 @@ const PALETTE_DIVIDER: f32 = 1.;
 const PALETTE_LIST_PAD: f32 = 6.;
 const PALETTE_FOLDER_ROW: f32 = 44.;
 const PALETTE_COMMAND_ROW: f32 = 40.;
-const PALETTE_HEADER_ROW: f32 = 26.;
+const PALETTE_HEADER_ROW: f32 = 34.;
 const PALETTE_EMPTY_ROW: f32 = 44.;
 const PALETTE_MAX_LIST: f32 = 440.;
 /// The sheet's width: Wide, narrowed to keep the margins in a small window.
@@ -2399,11 +2399,19 @@ impl CrowWindow {
                         .debug_selector(|| format!("palette-header-{k}"))
                         .h(px(PALETTE_HEADER_ROW))
                         .px(px(10.))
-                        .pt(px(8.))
+                        .pt(px(10.))
+                        .pb(px(8.))
                         .text_size(px(12.))
+                        .line_height(px(16.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(muted)
-                        .child(div().id(("palette-header-label", k)).role(Role::Label).child(text.clone()))
+                        .child(
+                            div()
+                                .id(("palette-header-label", k))
+                                .debug_selector(|| format!("palette-header-label-{k}"))
+                                .role(Role::Label)
+                                .child(text.clone()),
+                        )
                         .into_any_element();
                     headers += 1;
                     sections.push((label, vec![header]));
@@ -5191,6 +5199,18 @@ mod tests {
         let row = cx.debug_bounds("palette-row-0").expect("the first row");
         assert_eq!(row.left() - sheet.left(), px(PALETTE_LIST_PAD + 1.), "list padding plus the sheet's border");
         assert_eq!(sheet.right() - row.right(), px(PALETTE_LIST_PAD + 1.), "the same on the right");
+    }
+
+    #[gpui::test]
+    fn palette_header_leaves_room_above_the_first_row(cx: &mut TestAppContext) {
+        let root = fixture("palette-header-gap");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        let label = cx.debug_bounds("palette-header-label-0").expect("the first header");
+        let row = cx.debug_bounds("palette-row-0").expect("the first row");
+        assert!(label.bottom() <= row.top(), "the header label sits above the row: {label:?} {row:?}");
+        assert!(row.top() - label.bottom() >= px(6.), "room between the label and the row: {label:?} {row:?}");
     }
 
     #[gpui::test]
