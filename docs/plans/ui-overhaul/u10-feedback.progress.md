@@ -1,5 +1,5 @@
 # u10-feedback progress
-Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: Ready for critique
+Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -66,3 +66,19 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: Read
 
 ## Next
 Critique the branch (`critique` skill), then open the PR. Hand checks in `docs/testing.md` (Motion and sound) are for the user in the bundled app.
+
+## Critique
+Critic session: 2026-11-14 · Base: main @ 5818fb3 (branch from 92d671e) · Head reviewed: 135797d
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | After trashing or moving the selected item (list and columns) the cursor jumped to the first row; Finder leaves nothing selected. Cause: `auto_select` reselected the first row on every reload that emptied the selection, not only on first load. Pre-existing on `main`, reported by the user; the U10 trash tests pinned the jump ("where it does today"). | `crates/crow-app/src/folder.rs` `replace_entries` | UX | fix | fixed (2a283c4): fires once on first full load; tests now expect no selection, ↓ starts at the top; new column move test. All fail without the fix. |
+| C2 | In Full with the list focused, every selected row dropped its own fill and only the glide fill under the cursor showed: ⌘A highlighted one row. | `crates/crow-app/src/pane.rs` `render_table_rows`, `render_column_rows` | code / UI | fix | fixed (c0ed0a3): only the cursor row hands its fill to the glide; unit test. |
+| C3 | The default `settings.toml` says "a move flies"; there is no flight (Q4, plan I4). | `crates/crow-core/src/settings.rs:31` | rules (docs) | fix | fixed (14ad807) |
+| C4 | No expand/collapse motion for inline folders (list view). Not in the plan; user asked. | `folder.rs` `sync_children`, `pane.rs` `chevron_glyph` | UX | ask | Q9 |
+| C5 | The sidebar's current-location fill jumps rather than glides. Not in the plan; user asked. | `sidebar.rs` render | UX | ask | Q10 |
+| C6 | `refresh_feedback` reads Reduce Motion and the UI-sounds default on every 100 ms poll. In-memory defaults reads; cheap, no change. | `crates/crow-app/src/ui.rs` `poll` | code sense | note | left |
+
+Checks re-run: fmt ✓ · clippy ✓ · tests ✓ (437 after fixes) · bench inconclusive: the display alternated 120/30 Hz during the runs. Under the same 30 Hz state, branch p99 35.7–35.9 ms vs main 35.2–35.5; one clean branch run p99 9.75 ms, warm paint 7 ms (agent: 9.73–9.83).
+Looked at in the app: not driven (no screen control in this session). Visual and sound checks stay with the user's Hand checks, plus: ⌘A in Full shows every row selected (C2); trash/move the selection in columns leaves no highlight, ↓ selects the first item (C1).
+Verdict: pending Q9/Q10.
