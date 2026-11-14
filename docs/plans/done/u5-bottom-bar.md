@@ -20,7 +20,7 @@ Finding 7 of "Today, annotated": one status slot shows "18 items", Vim hints, pr
 - Board conflicts, plan wins: board E shows a "/ filter" hint beside the error token; the scope says drop hints, so no hints while an error shows. Board C-filter's labels "clear filter" / "search subfolders" are superseded by the scope's "clear" / "search deeper" (as in the assembled board). The assembled boards draw the path without folder icons; "unchanged look" keeps today's icons.
 
 ## Current state
-![Bottom bar A, as built: path with folder icons, one status string "18 items"](img/bottom-bar-a.png)
+![Bottom bar A, as built: path with folder icons, one status string "18 items"](../ui-overhaul/img/bottom-bar-a.png)
 Today: path segments with icons on the left, a single status string on the right.
 
 - Render: `CrowWindow::render_path_bar` `crates/crow-app/src/window.rs:438`, called from `render` at `window.rs:1736` and placed last in the column at `window.rs:1803`. Root `div` id `path-bar` (`window.rs:470`), `Role::Navigation`, aria "Path: a, b, c", height 28 px, `px_3`, `border_t_1` `border`, 12 px text `fg-muted`.
@@ -39,25 +39,25 @@ Today: path segments with icons on the left, a single status string on the right
 - Tests touching the bar: only `path_bar_segments_navigate_as_history_steps` (`window.rs:2046`) and the mark test reading `pending_hint` (`window.rs:2130`). Helpers: `open` `:1821`, `settle` `:1847` (waits for `Operations.running` to clear), `write_config` `:1885`, `use_vim` `:2093`. Nothing checks status text, progress or errors on screen.
 
 ## Target
-![Bottom bar B: idle hints / filter, ⌘F search, ⌘K go to in dim outline caps before "18 items"](img/bottom-bar-b.png)
+![Bottom bar B: idle hints / filter, ⌘F search, ⌘K go to in dim outline caps before "18 items"](../ui-overhaul/img/bottom-bar-b.png)
 Idle: three dim hints right of the path, then a divider and the count.
 
-![Bottom bar C, filtering: ↵ open, esc clear filter, ⌘F search subfolders, "1 of 2 shown"](img/bottom-bar-c-filter.png)
+![Bottom bar C, filtering: ↵ open, esc clear filter, ⌘F search subfolders, "1 of 2 shown"](../ui-overhaul/img/bottom-bar-c-filter.png)
 Focus hints are brighter than idle ones; while filtering the count says "1 of 2 shown" (labels per the scope: "clear", "search deeper").
 
-![Bottom bar C, sidebar focused: ⌘⌥↑↓ reorder, ⌘⌫ remove, ⇥ to list, "Favorites · 6"](img/bottom-bar-c-sidebar.png)
+![Bottom bar C, sidebar focused: ⌘⌥↑↓ reorder, ⌘⌫ remove, ⇥ to list, "Favorites · 6"](../ui-overhaul/img/bottom-bar-c-sidebar.png)
 Sidebar focus: reorder shows one merged cap ⌘⌥↑↓; the count names the sidebar group.
 
-![Bottom bar D: 2 px accent line over the left quarter, "Copying 3 items to Backup 1.2 of 4.8 GB · 26 %" and a Cancel esc button](img/bottom-bar-d.png)
+![Bottom bar D: 2 px accent line over the left quarter, "Copying 3 items to Backup 1.2 of 4.8 GB · 26 %" and a Cancel esc button](../ui-overhaul/img/bottom-bar-d.png)
 Progress replaces the hints; the path stays; the line along the top edge is the percentage.
 
-![Bottom bar E: error pill "views.toml line 12: unknown key sortt" with an Open button](img/bottom-bar-e.png)
+![Bottom bar E: error pill "views.toml line 12: unknown key sortt" with an Open button](../ui-overhaul/img/bottom-bar-e.png)
 Error pill with icon, short message and a filled Open button. (Its "/ filter" hint is dropped in this plan.)
 
-![Assembled, filtering in column view: hints ↵ open, esc clear, ⌘F search deeper; count "1 of 2 shown · 1.2 KB"](img/assembled-filter.png)
+![Assembled, filtering in column view: hints ↵ open, esc clear, ⌘F search deeper; count "1 of 2 shown · 1.2 KB"](../ui-overhaul/img/assembled-filter.png)
 Whole-window fit: the bar is one 30 px strip under sidebar, columns and preview.
 
-![Assembled, search mode: hints ↵ open, ⌘R reveal, Space Quick Look; count "1 of 44 selected"; path of the selected result](img/assembled-search.png)
+![Assembled, search mode: hints ↵ open, ⌘R reveal, Space Quick Look; count "1 of 44 selected"; path of the selected result](../ui-overhaul/img/assembled-search.png)
 Search mode: result hints and a result count; the path shows the selected result.
 
 ### Layout (left to right, one row)
@@ -164,7 +164,7 @@ The bar renders with the window. Per frame it may: look up ≤ 4 bindings (dispa
 - *Done when*: the old priority match is gone, the bar shows three slots, existing path-bar test passes unchanged.
 
 ### I4 Hints that follow focus and retire
-![Bottom bar B: idle hints](img/bottom-bar-b.png)
+![Bottom bar B: idle hints](../ui-overhaul/img/bottom-bar-b.png)
 Idle hints at `fg-subtle`; focus hints (C) brighter.
 - *Where*: `bottom_bar.rs` (`BarFocus`, `hint_set`, `render_hints`), `window.rs` `bar_state`.
 - *Change*: `pub enum BarFocus { List, FilterField, ListFiltered, Sidebar, SearchResults, SearchField, Overlay }` from: any overlay open (`go_to`, `sheet`, `why`, `picker`, `palette`) → `Overlay`; `search` open → `SearchField` if its input is focused else `SearchResults`; sidebar focus handle `is_focused` → `Sidebar`; pane filtering → `FilterField` if the filter input is focused else `ListFiltered`; else `List`. `fn hint_set(focus) -> &'static [(HintAction, &'static str, bool /*idle*/)]` per the Target table. `Hint { keys: SharedString /*from U1 I1*/, spoken: SharedString, label: &'static str, idle: bool }`; omitted when unbound in context; idle ones filtered by `idle_hint_visible(settings.hints, usage::uses(..))`; all dropped when `hints = off` or an error token shows. Merged reorder cap: format both bindings, keep the shared modifier prefix once (`⌘⌥` + `↑` + `↓`). Render with U1's `Keycap::Outline`.
@@ -173,7 +173,7 @@ Idle hints at `fg-subtle`; focus hints (C) brighter.
 - *Done when*: all above pass in both layers.
 
 ### I5 Progress and Cancel
-![Bottom bar D: operation running](img/bottom-bar-d.png)
+![Bottom bar D: operation running](../ui-overhaul/img/bottom-bar-d.png)
 Accent line on the top edge, progress text, Cancel with esc.
 - *Where*: `bottom_bar.rs` `render_running`, `operations.rs` (`running_label`), `crow-fs/src/lib.rs` (`human_size_pair`).
 - *Change*: `RunningView { label, detail, fraction: f32, percent: u8 }` built from `Running`; render line, text and Cancel per Target; Cancel click → `operations::cancel_running`. Remove the old `cancel-operation` element.
@@ -182,7 +182,7 @@ Accent line on the top edge, progress text, Cancel with esc.
 - *Done when*: hand check "Progress and cancel" passes with the new look.
 
 ### I6 Error token with Open
-![Bottom bar E: config error](img/bottom-bar-e.png)
+![Bottom bar E: config error](../ui-overhaul/img/bottom-bar-e.png)
 Error pill with Open; stays until the file is fixed.
 - *Where*: `bottom_bar.rs` `render_error`; `ui.rs` (`config_error_file`); `crates/crow-macos/src/files.rs` (new `open_path`); `style.rs` (`error_soft`); `assets/icons/alert-circle.svg`.
 - *Change*: `crow_macos::open_path(path: &Path, as_text: bool) -> io::Result<()>` that runs `/usr/bin/open [-t] <path>` and waits for its status (call it inside `background_spawn`; report failure as `Operations.message` error "Can't open views.toml: …"). Open uses the default app for `.toml`, falling back to `-t` (default text editor) when `open` exits non-zero (Q10). In tests, `bottom_bar::open_config` records the path in a test-only global instead of spawning.

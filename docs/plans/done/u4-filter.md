@@ -7,7 +7,7 @@ PR title: "UI U4: Filter inside the focused column".
 Design reference: canvas boards "Filter" variants **B** (in the column) and **D** (B with no matches), plus "Overhaul" (assembled, column view while filtering). https://claude.ai/artifact/EbZ7gFCy24MaccdpbSsFtE
 
 ## Why
-"Today, annotated" (`img/today-annotated.png`), notes under "Not on screen, from the code": the filter is a 34 px bar across the whole pane, labelled "Filter". It pushes every column down and says nothing about which column it narrows. Finding 1 applies too: nothing hints that ⌘F can carry the same text deeper. Matches are not marked in the rows, and a filter with no matches is a dead end: an empty column and "0 of N".
+"Today, annotated" (`../ui-overhaul/img/today-annotated.png`), notes under "Not on screen, from the code": the filter is a 34 px bar across the whole pane, labelled "Filter". It pushes every column down and says nothing about which column it narrows. Finding 1 applies too: nothing hints that ⌘F can carry the same text deeper. Matches are not marked in the rows, and a filter with no matches is a dead end: an empty column and "0 of N".
 
 ## Decided
 - Picked variants (index, "Picked variants"): Filter **B** and **D**.
@@ -19,7 +19,7 @@ Design reference: canvas boards "Filter" variants **B** (in the column) and **D*
 
 ## Current state
 
-![Filter A: today's 34 px "Filter" bar over every column](img/filter-a.png)
+![Filter A: today's 34 px "Filter" bar over every column](../ui-overhaul/img/filter-a.png)
 As built: a full-width bar with a "Filter" label, plain query field and "2 of 9". The columns move down and matches are not marked.
 
 **State** (`crates/crow-app/src/pane.rs`)
@@ -55,13 +55,13 @@ As built: a full-width bar with a "Filter" label, plain query field and "2 of 9"
 
 ## Target
 
-![Filter B: the field is the first row of the focused column, matches highlighted, footer offers ⌘F](img/filter-b.png)
+![Filter B: the field is the first row of the focused column, matches highlighted, footer offers ⌘F](../ui-overhaul/img/filter-b.png)
 B: an accent-ringed field (`/ vi`, "2 of 9", `esc`) inside the middle column only. The left column stays at the top. "vi" is accent and semibold in `views` and `view_settings.rs`. The footer reads `“vi” in all of crow-core ⌘F`.
 
-![Filter D: zero matches](img/filter-d.png)
+![Filter D: zero matches](../ui-overhaul/img/filter-d.png)
 D: the same field with "0 of 9". Below it: `Nothing in src matches “vfs”`, a raised "Search subfolders too ⌘F" button and the muted line "Hidden files are off · Esc clears". There is no footer.
 
-![Assembled: column view while filtering](img/assembled-filter.png)
+![Assembled: column view while filtering](../ui-overhaul/img/assembled-filter.png)
 The whole window. Only the focused (third) column holds the field and the footer. The columns to its left are untouched. The bottom-bar hints come from U5.
 
 ### Layout, column view (focused column `k`, filter open)
@@ -171,7 +171,7 @@ Focus order: ⇥ in the field is TextInput `Complete` (ignored, as today). ⇥ f
 
 ### I4 The field inside the focused column and the list frame
 
-![Filter B](img/filter-b.png)
+![Filter B](../ui-overhaul/img/filter-b.png)
 The field is a 28 px row inside the focused column only; the left column does not move.
 
 - *Where:* `pane.rs`: `Render for Pane`, `render_columns`, the list-view body, `render_filter` (replaced), `column_row_at`. A new module `crates/crow-app/src/pane_filter.rs` with `impl Pane { fn render_filter_field, fn render_filter_footer, fn render_no_matches }` keeps `pane.rs` from growing; it is `mod pane_filter;` in `main.rs`, the same pattern as other modules.
@@ -196,7 +196,7 @@ The field is a 28 px row inside the focused column only; the left column does no
 
 ### I5 Highlighted names
 
-![Assembled filter](img/assembled-filter.png)
+![Assembled filter](../ui-overhaul/img/assembled-filter.png)
 "vi" is accent and semibold in `views` and `view_settings.rs`, including on the selected row.
 
 - *Where:* `style.rs` (`truncate_middle`), `pane.rs` `render_table_rows` and `render_column_rows`.
@@ -207,7 +207,7 @@ The field is a 28 px row inside the focused column only; the left column does no
 
 ### I6 Footer and ⌘F escalation
 
-![Filter B](img/filter-b.png)
+![Filter B](../ui-overhaul/img/filter-b.png)
 Footer: search icon, `“vi” in all of crow-core`, ⌘F. Q1 settles which folder name goes there.
 
 - *Where:* `pane_filter.rs` (`render_filter_footer`), `pane.rs` (new `take_filter`), `window.rs` (`show_search`, `open_search`), `search.rs`.
@@ -228,7 +228,7 @@ Footer: search icon, `“vi” in all of crow-core`, ⌘F. Q1 settles which fold
 
 ### I7 No-matches state (D)
 
-![Filter D](img/filter-d.png)
+![Filter D](../ui-overhaul/img/filter-d.png)
 "Nothing in src matches “vfs”", the raised button with ⌘F, and the hidden-files note.
 
 - *Where:* `pane_filter.rs` `render_no_matches`; `render_columns` and the list-view body pick it instead of `uniform_list`.
@@ -244,7 +244,7 @@ Footer: search icon, `“vi” in all of crow-core`, ⌘F. Q1 settles which fold
 - **U1 (required):** `Keycap::Outline`, live-keymap key text for `ClearFilter` ("esc") and `ShowSearch` ("⌘F"), `glyph("search")`, `active_selection`/`inactive_selection`. If U1 is not merged, stop and ask; don't build stand-ins. U1's key lookup test (`/` for `StartFilter` in `FileList`) must still pass after I3 changes the predicates.
 - **U3 (optional):** ⌘F → search must work with or without it. The entry point is U3's `CrowWindow::open_search(SearchStart { folder, query, everything })`. If U3 is merged, call it. If not, U4 adds it with that exact signature (I6) and U3 reuses it. Either way the query goes into the `TextInput` owned by `SearchView`. Today that input is drawn in `SearchView::render_header`; with U3 it is drawn in the toolbar band D, so the same call fills the toolbar field. Because the footer and the D button dispatch `ShowSearch`, U3's field click path and U4's escalation meet in `show_search`. The I6 tests assert on `SearchView::query()`, not on where the field is drawn.
 - **U6 (optional):** `style::highlight_text(text, ranges, theme, on_selection)` is shared. If U6 is merged, use it. If not, U4 adds it with that signature and behavior (I5) and U6 reuses it; U6 keeps it general.
-- **U5:** owns the bottom bar. It shows "n of N shown" and the filtering hints (`↵ open · esc clear · ⌘F search deeper`), as in `img/bottom-bar-c-filter.png`. U4 provides `Pane::filter_query(cx) -> Option<String>` and leaves `render_path_bar` alone. Today it says "N items" while filtering; that stays until U5.
+- **U5:** owns the bottom bar. It shows "n of N shown" and the filtering hints (`↵ open · esc clear · ⌘F search deeper`), as in `../ui-overhaul/img/bottom-bar-c-filter.png`. U4 provides `Pane::filter_query(cx) -> Option<String>` and leaves `render_path_bar` alone. Today it says "N items" while filtering; that stays until U5.
 - **U6:** its scope bar names the current folder. The folder passed by `open_search` is the focused column's, so U6 shows that name.
 - **U7:** the palette's `StartFilter` command keeps working (`pane.rs:432`).
 - **U9:** the tip "two zero-match filters in a row → ⌘F" needs a signal. If U9 is planned, add a `PaneEvent::FilterNoMatches` emitted once per transition into D. Ask before adding it here (Q6).

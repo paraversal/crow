@@ -23,7 +23,7 @@ From the index (`docs/plans/ui-overhaul/README.md`, answers 2026-11-12):
 ## Current state
 Images: `today-annotated.png` is the whole window; this crop is the band as built.
 
-![Top band A, as built: glyph Back/Forward, title, two-glyph view switch, nothing else](img/top-band-a.png)
+![Top band A, as built: glyph Back/Forward, title, two-glyph view switch, nothing else](../ui-overhaul/img/top-band-a.png)
 Take from it: what exists today. Grey traffic lights stand in for the window's own; ‹ › and ☰ ▥ are text.
 
 **Window and band.** `window.rs:32` `open` creates the window with `appears_transparent: true` and `traffic_light_position: point(px(14.), px(16.))` (`window.rs:42`). No `window_min_size` is set, so the window can get arbitrarily narrow. `render_title_bar(&self, title, cx)` (`window.rs:301`) draws a 44 px row, `pl(px(86.))` (traffic-light inset), `pr_3`, `gap_1`, bottom border `border`:
@@ -52,16 +52,16 @@ Take from it: what exists today. Grey traffic lights stand in for the window's o
 
 ## Target
 
-![Top band B: drawn icons, title, view switch, Go to ⌘K, search field with ⌘F, and a tooltip](img/top-band-b.png)
+![Top band B: drawn icons, title, view switch, Go to ⌘K, search field with ⌘F, and a tooltip](../ui-overhaul/img/top-band-b.png)
 Take from it: the order (lights · back/forward · title · view switch · Go to · field), the 32×26 view targets, the Outline ⌘K/⌘F keycaps, the tooltip "Back to Desktop ⌘[" under the hovered Back button.
 
-![Top band D: the field grows over the title, accent ring, All/Names/Contents, Done esc](img/top-band-d.png)
+![Top band D: the field grows over the title, accent ring, All/Names/Contents, Done esc](../ui-overhaul/img/top-band-d.png)
 Take from it: the field spans from Forward to Done; view switch and Go to are gone; All is selected. **Ignore** the "in file-crow ⌄" scope token and the "names + contents" caption: the agreed scope (and the assembled board) puts scope in U6's scope bar.
 
-![Assembled: column view while filtering, band B with "Search src"](img/assembled-filter.png)
+![Assembled: column view while filtering, band B with "Search src"](../ui-overhaul/img/assembled-filter.png)
 Take from it: in column view the title and placeholder are the focused column's folder ("src"); the field is ~220 px.
 
-![Assembled: search mode, band D over U6's scope bar and results](img/assembled-search.png)
+![Assembled: search mode, band D over U6's scope bar and results](../ui-overhaul/img/assembled-search.png)
 Take from it: band D in place, the U6 scope bar ("Search · file-crow / Home / This Mac · Skip dev folders") directly under it. Everything under the band is U6.
 
 ### Band (both states)
@@ -110,7 +110,7 @@ The band renders with the window; it adds a few divs, one `viewport_size` read a
 ## Items
 
 ### I1 History peeks and band layout B (icons, title, view switch)
-![Top band B](img/top-band-b.png)
+![Top band B](../ui-overhaul/img/top-band-b.png)
 - *Where*: `crates/crow-core/src/history.rs`; `crates/crow-app/src/pane.rs` (read access next to `can_go_back`, `pane.rs:329`); `window.rs` `open` (`:42`), `render_title_bar` (`:301`), `view_button` (`:555`), `Render` (`:1723`).
 - *Change*: add `History::peek_back(&self) -> Option<&Path>` and `peek_forward`. Add `Pane::back_target()`/`forward_target()` returning those paths. Change `render_title_bar` to take `window` (needed by I3/I5) and rebuild it per Target ▸ Band and B items 1–3: 52 px, `Role::Toolbar`, drawn icons via U1, disabled = 0.4 opacity of `fg-muted`, title flexes with ellipsis, view switch 32×26. Move the traffic lights to the measured y. Tooltips via `with_tooltip` on Back, Forward, both view buttons (Back/Forward labels "Back to <folder_name(target)>").
 - *Edge cases*: history at its start/end (disabled, tooltip without "to"); root folder `/` as target (use `folder_name`, gives the volume name); very long folder names (ellipsis); the tooltip on a disabled button still shows.
@@ -138,8 +138,8 @@ The band renders with the window; it adds a few divs, one `viewport_size` read a
 - *Done when*: tests pass; no UI change yet beyond the input's look inside the old header.
 
 ### I4 Band D: the query field moves into the band
-![Top band D](img/top-band-d.png)
-![Assembled search](img/assembled-search.png)
+![Top band D](../ui-overhaul/img/top-band-d.png)
+![Assembled search](../ui-overhaul/img/assembled-search.png)
 - *Where*: `search.rs` `render_header` (`:553`), new `pub fn render_band(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement`; `window.rs` `render_title_bar`.
 - *Change*: **Ownership: SearchView keeps owning the `TextInput` and renders the band's field; the window places it.** `render_title_bar` checks `self.search`: if `Some(search)`, it renders Back/Forward, then `search.update(cx, |s, cx| s.render_band(window, cx))`, then nothing else (Done is part of `render_band`). `render_band` returns the field (`key_context("Search")`, `on_action` `SearchEverything` and `CloseSearch`, ring by `input.focus_handle.is_focused(window)`, search icon, `self.input.clone()`, match control) and the Done button, with listeners from `cx.listener` on the SearchView. Remove `.child(self.input.clone())` from `render_header`; the scope row and help sentence stay for U6.
   - Why SearchView owns it: the input's subscription is what drives `start_search`, its query is read by `query()`, `set_show_hidden`, `set_scope`, the exclude reload observer (`search.rs:119`) and the tests; `generation`/`cancel` live there; dropping the SearchView on close drops the input and its subscription, so nothing stale survives; and the window already re-renders on SearchView notifications (`window.rs:1278`). A window-owned input would need the window to forward every event into SearchView and keep a second copy of the search lifecycle in sync.
@@ -154,7 +154,7 @@ The band renders with the window; it adds a few divs, one `viewport_size` read a
 - *Done when*: D matches the board in both themes; all search tests pass.
 
 ### I5 Go to button and B search field
-![Assembled filter](img/assembled-filter.png)
+![Assembled filter](../ui-overhaul/img/assembled-filter.png)
 - *Where*: `window.rs` `render_title_bar`.
 - *Change*: Target ▸ B items 4–5: Go to dispatches `ShowCommandPalette`; the field dispatches `ShowSearch` via `window.dispatch_action`. U1 `Keycap` Outline from the live keymap for both. Tooltips. Narrow-window rules from `window.viewport_size()`.
 - *Edge cases*: palette, sheet, Go to Folder or picker already open → the dispatch does nothing (existing guards); Vim layer shows the same keys (⌘K/⌘F are Finder-layer bindings in both); the B field shows the active tab's folder.
@@ -221,5 +221,5 @@ Rows to add to `docs/testing.md` ▸ By hand:
 - `docs/testing.md`: the hand rows above; mention the new keystroke tests in the Automated paragraph (toolbar field and Go to button, match modes).
 - Bench not required (no rows touched); note that in the PR.
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
-- `./scripts/bundle.sh`; hand-check the rows above; screenshots of B and D next to `img/top-band-b.png` and `img/top-band-d.png` in the PR.
+- `./scripts/bundle.sh`; hand-check the rows above; screenshots of B and D next to `../ui-overhaul/img/top-band-b.png` and `../ui-overhaul/img/top-band-d.png` in the PR.
 - Push `ui-u3-top-band`, open the PR "UI U3: Top band with search field, Go to and match modes" (don't merge), set the progress file to "PR open".

@@ -1,6 +1,6 @@
 ---
 name: execute-plan
-description: Work through a technical plan document (docs/plans/**/*.md, e.g. ui-overhaul/u7-fix.md) over a long, multi-session loop, keeping a progress file so work can resume, and asking the user about anything unclear instead of deciding alone. Use when told to implement, continue or resume a plan or milestone document.
+description: Work through a technical plan document (docs/plans/**/*.md, e.g. ui-overhaul/u8-sidebar.md) over a long, multi-session loop, keeping a progress file so work can resume, and asking the user about anything unclear instead of deciding alone. Use when told to implement, continue or resume a plan or milestone document.
 ---
 
 # Executing a plan document

@@ -25,7 +25,7 @@ Design reference: canvas board "Discovery kit" §2 "The menu bar is the manual" 
 
 ## Current state
 
-![Today, annotated: the app after M6; the note on the right lists what the menu bar lacks](img/today-annotated.png)
+![Today, annotated: the app after M6; the note on the right lists what the menu bar lacks](../ui-overhaul/img/today-annotated.png)
 Take from it: the right-hand note "Menu bar: Crow, File, Edit (Undo/Redo only), View. No Go or Find menu".
 
 **Menus.** `crates/crow-app/src/main.rs:180-215` calls `cx.set_menus([...])` inline inside `application().run`, after `cx.bind_keys` for the Finder, Vim and text-input keymaps (`main.rs:172-174`) and two global handlers, `Quit` and `NewWindow` (`main.rs:175-179`; NewWindow opens the home folder). Menus today:
@@ -85,7 +85,7 @@ No Go, Window or Help menu. The imports are `main.rs:29-34`.
 
 ## Target
 
-![Discovery kit §2: proposed Edit, Go and File menus with keys; accent marks M6 features](img/discovery-2.png)
+![Discovery kit §2: proposed Edit, Go and File menus with keys; accent marks M6 features](../ui-overhaul/img/discovery-2.png)
 Take from it: item names, order, separators and keys. Not taken: "Reveal Result ⌘R" under Go (not in the agreed scope; Question 1). The board omits Delete Permanently…, which the scope adds after Move to Trash. Accent color in the board is only a marker for the reader; real menus are native AppKit menus (no theme roles, no custom drawing).
 
 Menu bar order (macOS convention): **Crow · File · Edit · View · Go** (+ Window, Help if Questions 3-4 say yes). Native menus follow the system light/dark appearance and font; no styling work.
@@ -161,7 +161,7 @@ Menu item order = `COMMANDS` order filtered by menu, grouped by `section`; separ
 *Done when*: each answer is recorded with "seen by hand on <date>, macOS version". Then ask Question 2 with the facts.
 
 ### I2 One command registry with menu slots
-![Discovery kit §2](img/discovery-2.png)
+![Discovery kit §2](../ui-overhaul/img/discovery-2.png)
 *Where*: `crates/crow-app/src/palette.rs`, `window.rs` `run_command` and palette row rendering.
 *Change*:
 - Add `MenuName`, `MenuSlot`, `Command.menu`, `Command.palette` as in Target.
@@ -180,7 +180,7 @@ Menu item order = `COMMANDS` order filtered by menu, grouped by `section`; separ
 *Done when*: tests pass; existing `command_palette_runs_a_command` still passes unchanged.
 
 ### I3 Menu builder from the registry
-![Discovery kit §2](img/discovery-2.png)
+![Discovery kit §2](../ui-overhaul/img/discovery-2.png)
 *Where*: new `crates/crow-app/src/menus.rs` (`mod menus;` in `main.rs`); `main.rs:29-34, 175-215`.
 *Change*:
 - `pub fn action(id: CommandId) -> Box<dyn gpui::Action>`: exhaustive `match` from every `CommandId` to its action (`Open → OpenSelection`, `Copy → CopyFiles`, `Cut → CutFiles`, `Paste → PasteFiles`, `PasteMove → PasteMoveFiles`, `ShowSearch → ShowSearch`, …). Exhaustiveness makes a new command without an action a compile error.
