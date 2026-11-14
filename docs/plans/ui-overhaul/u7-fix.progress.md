@@ -1,5 +1,5 @@
 # u7-fix progress
-Branch: `ui-u7-fix` · PR: none (critic opens it) · Last updated: 2026-11-14 · State: Ready for critique
+Branch: `ui-u7-fix` · PR: none (critic opens it) · Last updated: 2026-11-14 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -44,6 +44,9 @@ Branch: `ui-u7-fix` · PR: none (critic opens it) · Last updated: 2026-11-14 ·
 - [x] Preview: ⇧⌘P removed the right pane in list view and wrote `show_preview = false`; toggling back restored it. Column view covered by the test.
 - [x] Freezes: measured with a release bundle and temp config: `f` in ~ + opening /Applications; no heartbeat block ≥100 ms after the fix, `add_hits` max 5 ms.
 - [ ] Delete: covered by the new late-batch test; not repeated by hand in the bundle.
+- [ ] Go to Folder: ⇧⌘G opens ⌘K with this folder's path and `/`; letters, Tab, Return go there; a file's full path selects it; a missing path beeps and stays open; typing `Docs` doesn't crash.
+- [ ] View lock: `view_per_folder = false`, ⌘3, visit a folder with its own list view and go Back: stays in columns; ⌘T opens columns; ⌘J says "this window"; `views.toml` unchanged.
+- [ ] Copying many files into a large folder (e.g. 500 into `target/fixture-100k`): no visible stall while the rows arrive.
 
 ## Found along the way
 - The working tree had user changes before this branch began (`.gitignore`, `AGENTS.md`, `u2-menu-bar.md`, `u5-bottom-bar.md`, untracked `package.json`/`package-lock.json`). Left alone; commits touch only this plan's files.
@@ -61,6 +64,22 @@ Branch: `ui-u7-fix` · PR: none (critic opens it) · Last updated: 2026-11-14 ·
 - 2026-11-14 `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` green (236 app, 62 core, 29 fs, 4 macos, 17 search).
 - 2026-11-14 Bench (release bundle, `target/fixture-100k`): warm first paint 7 ms, cold 55 ms, scroll p99 8.86 ms (119 fps), max 27.76 ms. The changed paths (preview hidden by default, text input, search, watcher merges) are not on the scroll path; no regression claim vs `main` was needed. Budgets met.
 - 2026-11-14 Follow-ups from the user's hand test: (1) Cmd-F scope kept on the focused column (user's choice; README now says Right first searches the previewed subfolder). (2) Shift-Cmd-G opens Cmd-K with the current path typed; the Go to Folder sheet is gone; Return on a path with no folder row reveals a file or beeps. (3) `view_per_folder` setting (default true): false keeps each window's view, Cmd-2/3 save nothing, new windows start in `[defaults]`, new tabs copy their window, Cmd-J says "this window". Found along the way: `FuzzyMatcher` passed an uppercase needle to nucleo with `ignore_case`, which asserts ("should have been caught by prefilter") — typing e.g. `Docs` in Cmd-K could crash Crow. Needle is now lowercased; regression test in crow-search. fmt, clippy, tests green (237 app, 63 core, 29 fs, 4 macos, 18 search).
+
+## Critique
+Critic session: 2026-11-14 · Base: main @ a3a8e96 · Head reviewed: 1bce797 (fixes on top: 68254bc, f1beb7d)
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | X7 moved the batch merge onto the main thread, but `apply_stats` compared every listed entry with every changed path and inserted changes one `Vec::insert` at a time. 100k folder, release: 10 changes 23 ms, 100 changes 171 ms, 1000 changes 1.6 s on the main thread (spec principle 2; X6's own goal). | `crates/crow-fs/src/snapshot.rs` `apply_stats` | code | fix | fixed (68254bc): hash set + one merge pass, ~5 ms for any burst size; ordering test added |
+| C2 | Stale doc line from the removed Go to Folder sheet sat on the `sheet` field; `text_input` module doc still named Go to Folder. | `window.rs:76`, `text_input.rs:3` | code | fix | fixed (f1beb7d) |
+| C3 | `FuzzyMatcher` handed nucleo an uppercase needle with `ignore_case`; nucleo asserts ("should have been caught by prefilter"), so ⌘K or a name search with e.g. `Docs` could crash Crow. Pre-existing on `main`, found while building ⇧⌘G. | `crow-search/src/engine.rs` `FuzzyMatcher::new` | code | fix | fixed in 1bce797 (lowercased needle + regression test) |
+| C4 | ⇧⌘G while search is open now does nothing: it opens ⌘K, which U7 blocks over search. Before, the Go to Folder sheet opened over search. | `window.rs` `open_palette` guard | UX | note | left: it matches ⌘K, as the user asked ("⇧⌘G opens ⌘K"); revisit if it bothers in use |
+| C5 | Return on a typed file path reveals it only when no folder row matches; if the file name fuzzy-matches a sibling folder, Return goes to that folder. | `window.rs` `confirm_palette` | UX | note | left: rows win, as in the rest of the palette |
+| C6 | The caret blink loop runs for each text field's whole life (one 500 ms timer per field, notifying only while focused). | `text_input.rs` `start_blink_loop` | code sense | note | left: cheap, and the plan's epoch design would need focus listeners that don't fire in tests (Decision on record) |
+
+Checks re-run: fmt ✓ · clippy ✓ · tests ✓ (237 app, 63 core, 30 fs, 4 macos, 18 search) · bench vs main, alternating runs on `target/fixture-100k`: p99 8.61/8.66 ms (main) vs 8.61/8.67 ms (branch), warm first paint 8 ms on both; cold first paint noisy on both (33-65 ms). A third pair hit a multi-second machine stall on both and is discarded.
+Looked at in the app: not driven: this session has no computer-use tools. Visual items (caret, palette headers, preview toggle) rest on the executing agent's bundle checks and the rendered-bounds tests; the new behaviors are in Hand checks above.
+Verdict: better. Every item does what the plan asks with a test that fails without it; the one real regression (C1, main-thread merge cost) is fixed, and the crash in C3 was on `main` before this branch.
 
 ## Next
 Ready for critique: run the `critique` skill on this branch, fix what is clearly wrong, open the PR titled "UI U7 fix: palette spacing, caret, search ↓, New File, hide preview, freezes, stale delete", and hand the reviewed branch to the user.
