@@ -1025,6 +1025,10 @@ impl Element for TextElement {
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_blink_loop(window, cx);
+        // The refuse shake is drawn from the clock: keep frames coming while it runs.
+        if self.refuse.is_some() {
+            window.request_animation_frame();
+        }
         let theme = cx.global::<Ui>().theme.clone();
         let chrome = self.chrome;
         let mode = cx.global::<Ui>().feedback.mode;

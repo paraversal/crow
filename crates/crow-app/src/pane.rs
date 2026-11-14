@@ -408,6 +408,24 @@ impl Pane {
         (0..folder.row_count()).filter_map(|ix| folder.row(ix).map(|(e, d)| (e.name.clone(), d))).collect()
     }
 
+    /// The focused folder's disclosure probe (see `Folder::disclosure_probe`), for tests.
+    #[cfg(test)]
+    pub fn disclosure_probe(
+        &self,
+        path: &std::path::Path,
+        ix: usize,
+        after: std::time::Duration,
+        cx: &gpui::App,
+    ) -> Option<(f32, f32, Option<f32>)> {
+        self.focused_folder().read(cx).disclosure_probe(path, ix, after)
+    }
+
+    /// Whether the focused folder has motion running, for tests.
+    #[cfg(test)]
+    pub fn animating(&self, cx: &gpui::App) -> bool {
+        self.focused_folder().read(cx).animating(Instant::now())
+    }
+
     /// The feedback effects running on the focused folder's rows, for tests.
     #[cfg(test)]
     pub fn effects(&self, cx: &gpui::App) -> Vec<(String, Fx)> {
@@ -1404,6 +1422,8 @@ impl Pane {
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
                 let tint = effect_tint(look, theme);
+                let reveal = folder.disclosure_opacity(ix, now);
+                let turn = folder.chevron_turn(&entry.path, now).unwrap_or(if expanded { 1.0 } else { 0.0 });
                 let row = div()
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
@@ -1420,7 +1440,7 @@ impl Pane {
                     .flex()
                     .items_center()
                     .when(shift != 0.0, |row| row.top(px(shift)))
-                    .when(look.opacity < 1.0, |row| row.opacity(look.opacity))
+                    .when(look.opacity * reveal < 1.0, |row| row.opacity(look.opacity * reveal))
                     .when(ix % 2 == 1 && !(selected && glide && cursor == Some(ix)), |row| row.bg(stripe))
                     .when(draws_selection_fill(selected, glide, cursor == Some(ix)), |row| row.bg(selection_bg))
                     .when_some(tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
@@ -1532,7 +1552,7 @@ impl Pane {
                                         cx.stop_propagation();
                                         pane.update(cx, |folder, cx| folder.toggle_expansion(path.clone(), cx));
                                     }))
-                                    .child(chevron_glyph(expanded, muted))
+                                    .child(chevron_glyph(turn, muted))
                                     .into_any_element()
                             } else {
                                 div().w(px(TRIANGLE_WIDTH)).flex_none().into_any_element()
@@ -1880,7 +1900,7 @@ impl Pane {
                     let glide_fill = if glide {
                         let f = folder.read(cx);
                         f.cursor_ix().map(|ix| {
-                            let offset = f32::from(scroll.0.borrow().base_handle.offset().y);
+                            let offset = shown_offset(&scroll);
                             let y = ix as f32 * ROW_HEIGHT;
                             div()
                                 .absolute()
@@ -1996,23 +2016,24 @@ fn drag_combo_left(cursor_x: f32, width: f32) -> f32 {
 
 /// A chevron drawn as a path: expanding rotates the same glyph instead of swapping in a
 /// different one that sits lower in its box.
-fn chevron_glyph(expanded: bool, chevron: gpui::Rgba) -> impl IntoElement {
+/// The disclosure chevron, turned `turn` of the way from closed (0, pointing
+/// right) to open (1, pointing down); Full motion turns it in between.
+fn chevron_glyph(turn: f32, chevron: gpui::Rgba) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
             let (width, height) = (bounds.size.width, bounds.size.height);
             let origin = bounds.origin;
-            let p = |x: f32, y: f32| point(origin.x + width * x, origin.y + height * y);
+            let (sin, cos) = (turn * std::f32::consts::FRAC_PI_2).sin_cos();
+            // The closed chevron's points, turned clockwise about the center.
+            let p = |x: f32, y: f32| {
+                let (dx, dy) = (x - 0.5, y - 0.5);
+                point(origin.x + width * (0.5 + dx * cos - dy * sin), origin.y + height * (0.5 + dx * sin + dy * cos))
+            };
             let mut builder = PathBuilder::stroke(px(2.));
-            if expanded {
-                builder.move_to(p(0.2, 0.35));
-                builder.line_to(p(0.5, 0.65));
-                builder.line_to(p(0.8, 0.35));
-            } else {
-                builder.move_to(p(0.35, 0.2));
-                builder.line_to(p(0.65, 0.5));
-                builder.line_to(p(0.35, 0.8));
-            }
+            builder.move_to(p(0.35, 0.2));
+            builder.line_to(p(0.65, 0.5));
+            builder.line_to(p(0.35, 0.8));
             if let Ok(path) = builder.build() {
                 window.paint_path(path, chevron);
             }
@@ -2020,6 +2041,16 @@ fn chevron_glyph(expanded: bool, chevron: gpui::Rgba) -> impl IntoElement {
     )
     .w(px(14.))
     .h(px(14.))
+}
+
+/// The vertical scroll offset the list's rows are drawn at. A trackpad scroll
+/// adds to the raw offset even past the ends (a short list cannot scroll at
+/// all); `uniform_list` clamps it only when it lays out, so overlays drawn over
+/// the rows (the glide fill, ghost rows) clamp it the same way or they drift.
+fn shown_offset(scroll: &UniformListScrollHandle) -> f32 {
+    let state = scroll.0.borrow();
+    let max = f32::from(state.base_handle.max_offset().y).max(0.0);
+    f32::from(state.base_handle.offset().y).clamp(-max, 0.0)
 }
 
 /// Whether a row draws its own selection fill. While the cursor glides (Full motion,
@@ -2081,7 +2112,7 @@ impl Ghosts<'_> {
         if self.mode != Effective::Full {
             return Vec::new();
         }
-        let offset = f32::from(self.scroll.0.borrow().base_handle.offset().y);
+        let offset = shown_offset(self.scroll);
         self.folder
             .effects()
             .iter()
@@ -2124,6 +2155,12 @@ fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.bench_step(window, cx);
+        // Row effects and disclosures are drawn from the clock: keep frames coming
+        // while one runs (GPUI only redraws on its own for its animation elements).
+        let frame_now = Instant::now();
+        if self.folders.iter().any(|folder| folder.read(cx).animating(frame_now)) {
+            window.request_animation_frame();
+        }
         // A drag inside the list highlights the row under the pointer from this state; the
         // style-based drag-over highlight flickers on the platform drag path used when a
         // drag leaves the window and comes back.
@@ -2213,7 +2250,7 @@ impl Render for Pane {
                                 let glide_fill = if glide {
                                     let folder = self.folders[0].read(cx);
                                     folder.cursor_ix().map(|ix| {
-                                        let offset = f32::from(scroll.0.borrow().base_handle.offset().y);
+                                        let offset = shown_offset(&scroll);
                                         let y = ix as f32 * ROW_HEIGHT;
                                         div()
                                             .absolute()

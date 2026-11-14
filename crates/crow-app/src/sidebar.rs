@@ -715,6 +715,10 @@ impl Sidebar {
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The receive pulse is drawn from the clock: keep frames coming while it runs.
+        if self.receive.is_some() {
+            window.request_animation_frame();
+        }
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let mode = ui.feedback.mode;

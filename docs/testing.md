@@ -171,7 +171,7 @@ In the bundled app (`./scripts/bundle.sh`), FireBox dark and Solarized Light, ea
 
 | Check | How |
 | --- | --- |
-| Trash | ⌘⌫ one file, three files, and a folder of 500 files, in list and column view: the row fades (Low) or its icon becomes a trash and swallows the name while the gap closes (Full); Off removes it in one frame. One sound per operation; the cursor lands where it does today. |
+| Trash | ⌘⌫ one file, three files, and a folder of 500 files, in list and column view: the row fades (Low) or its icon becomes a trash and swallows the name while the gap closes (Full); Off removes it in one frame. One sound per operation; afterwards nothing is selected (as in Finder), and ↓ starts at the first row. The animation runs smoothly to its end without moving the mouse. |
 | Move | Drag a file onto a folder row and onto a sidebar favorite: the source fades, the target row pulses (Full after the fly phase, Low at once), the favorite pulses; Purr in `crow`. |
 | New folder | ⇧⌘N: the new folder arrives (rows below slide down in Full), then the rename field opens and takes typing at once. Pop in `crow`. |
 | Undo | ⌘Z after a trash: the file arrives; Bottle in `crow`. |
@@ -180,5 +180,6 @@ In the bundled app (`./scripts/bundle.sh`), FireBox dark and Solarized Light, ea
 | Reduce Motion | With `motion = "auto"`, toggle System Settings ▸ Accessibility ▸ Reduce Motion: Full ↔ Low without a relaunch. |
 | Sounds off | System Settings ▸ Sound: "Play user interface sound effects" off → no sounds except the alert. Alert volume low → Crow's sounds are as quiet as Finder's (NSSound follows the output volume; Q7). |
 | Sheets and tips | Cmd-K, Cmd-J, ⇧⌘G and the theme picker fade in (140 ms Full, 120 Low); a tip rises 8 px and fades in Full, fades in Low. Tooltips still appear without motion. |
-| Glide | Full, hold ↓: the selection fill follows within one row and settles; scroll: it stays on the cursor row. |
+| Expand and collapse | List view, a folder with a few items: → or the triangle. Full: the triangle turns, the rows below slide down and the new rows show from the top as the gap opens; ← slides the rows below back up. Low: the new rows fade in, nothing moves. Off: one frame. A folder with hundreds of items opens without a long slide. |
+| Glide | Full, hold ↓: the selection fill follows within one row and settles; ⌘A shows every row selected. Trackpad scroll a long list and a short one that fits: the fill stays on the cursor row and never drifts; the cursor never moves. |
 | Lab | `crow --motion-lab` still runs, matches the app, and its sheet (`p`) fades like the app's. |

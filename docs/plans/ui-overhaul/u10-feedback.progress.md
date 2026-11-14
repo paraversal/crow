@@ -50,6 +50,9 @@ Branch: `ui-u10-feedback` · PR: none · Last updated: 2026-11-14 · State: In c
 - [ ] Reduce Motion with `motion = "auto"` → Full ↔ Low live.
 - [ ] "Play user interface sound effects" off → only the alert; alert volume low → Crow's sounds as quiet as Finder's (R3).
 - [ ] `crow --motion-lab` still runs and matches the app.
+- [ ] Expand/collapse in list view in each mode (see `docs/testing.md`).
+- [ ] Trackpad scroll a long and a short list in Full: the glide fill never leaves the cursor row.
+- [ ] Trash/move the selection (list and columns): nothing selected afterwards; the effect plays to its end without touching the mouse.
 
 ## Found along the way
 - (none yet)
@@ -75,8 +78,10 @@ Critic session: 2026-11-14 · Base: main @ 5818fb3 (branch from 92d671e) · Head
 | C1 | After trashing or moving the selected item (list and columns) the cursor jumped to the first row; Finder leaves nothing selected. Cause: `auto_select` reselected the first row on every reload that emptied the selection, not only on first load. Pre-existing on `main`, reported by the user; the U10 trash tests pinned the jump ("where it does today"). | `crates/crow-app/src/folder.rs` `replace_entries` | UX | fix | fixed (2a283c4): fires once on first full load; tests now expect no selection, ↓ starts at the top; new column move test. All fail without the fix. |
 | C2 | In Full with the list focused, every selected row dropped its own fill and only the glide fill under the cursor showed: ⌘A highlighted one row. | `crates/crow-app/src/pane.rs` `render_table_rows`, `render_column_rows` | code / UI | fix | fixed (c0ed0a3): only the cursor row hands its fill to the glide; unit test. |
 | C3 | The default `settings.toml` says "a move flies"; there is no flight (Q4, plan I4). | `crates/crow-core/src/settings.rs:31` | rules (docs) | fix | fixed (14ad807) |
-| C4 | No expand/collapse motion for inline folders (list view). Not in the plan; user asked. | `folder.rs` `sync_children`, `pane.rs` `chevron_glyph` | UX | ask | Q9 |
+| C4 | No expand/collapse motion for inline folders (list view). Not in the plan; user asked for it. | `folder.rs` `sync_children`, `pane.rs` `chevron_glyph` | UX | ask | Q9 → user wants it: built. Full: chevron turns, rows below slide (≤ 30 rows), children reveal as the gap opens; collapse slides the rows below up. Low: children fade. Off: none. `crow_core::motion::disclose_*` + 4 app tests. |
 | C5 | The sidebar's current-location fill jumps rather than glides. Not in the plan; user asked. | `sidebar.rs` render | UX | ask | Q10 |
+| C7 | Row effects (trash, move, arrive), the sidebar pulse and the field shake are drawn from the clock, but nothing asked for frames while they ran: they only advanced when something else redrew (the cursor jump's glide spring did, by accident). | `pane.rs` Render, `sidebar.rs`, `text_input.rs` | code | fix | fixed: `request_animation_frame` while any runs (`Folder::animating`) |
+| C8 | Trackpad scroll moved the glide fill off its row: a scroll past the ends (or on a list that fits) adds to the raw offset, which `uniform_list` clamps only at layout; the fill read it unclamped. User report. | `pane.rs` glide and ghosts | code / UX | fix | fixed: `shown_offset` clamps like the list; 2 tests (short list fails without it) |
 | C6 | `refresh_feedback` reads Reduce Motion and the UI-sounds default on every 100 ms poll. In-memory defaults reads; cheap, no change. | `crates/crow-app/src/ui.rs` `poll` | code sense | note | left |
 
 Checks re-run: fmt ✓ · clippy ✓ · tests ✓ (437 after fixes) · bench inconclusive: the display alternated 120/30 Hz during the runs. Under the same 30 Hz state, branch p99 35.7–35.9 ms vs main 35.2–35.5; one clean branch run p99 9.75 ms, warm paint 7 ms (agent: 9.73–9.83).

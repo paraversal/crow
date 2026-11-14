@@ -8287,6 +8287,153 @@ mod tests {
     }
 
     #[gpui::test]
+    fn cursor_glide_stays_on_its_row_while_the_trackpad_scrolls(cx: &mut TestAppContext) {
+        let root = long_fixture("glide-scroll", 80);
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("down down down down down");
+        settle(&view, &mut cx);
+        let frames = |cx: &mut VisualTestContext, n: usize| {
+            for _ in 0..n {
+                cx.executor().advance_clock(std::time::Duration::from_millis(16));
+                cx.update(|window, cx| {
+                    window.simulate_next_frame(cx);
+                });
+                cx.run_until_parked();
+            }
+        };
+        frames(&mut cx, 30);
+        let before = selected(&view, &cx);
+        assert_eq!(before.as_deref(), Some("f005.txt"));
+        let row = cx.debug_bounds("row-f005.txt").expect("the cursor row");
+        // A trackpad scroll: precise pixel deltas, a few frames apart.
+        for _ in 0..4 {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: row.center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-10.))),
+                touch_phase: gpui::TouchPhase::Moved,
+                ..Default::default()
+            });
+            frames(&mut cx, 1);
+            let glide = cx.debug_bounds("glide").expect("the glide fill");
+            let row = cx.debug_bounds("row-f005.txt").expect("the cursor row");
+            assert!((glide.top() - row.top()).abs() <= px(1.), "mid-scroll: glide {glide:?} vs row {row:?}");
+        }
+        assert_eq!(selected(&view, &cx), before, "scrolling never moves the cursor");
+        let moved = cx.debug_bounds("row-f005.txt").expect("the cursor row");
+        assert!(moved.top() < row.top(), "the view scrolled: {moved:?} vs {row:?}");
+    }
+
+    #[gpui::test]
+    fn cursor_glide_stays_put_when_a_short_list_cannot_scroll(cx: &mut TestAppContext) {
+        let root = long_fixture("glide-short", 6);
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, "full");
+        cx.simulate_keystrokes("down down");
+        settle(&view, &mut cx);
+        let frames = |cx: &mut VisualTestContext, n: usize| {
+            for _ in 0..n {
+                cx.executor().advance_clock(std::time::Duration::from_millis(16));
+                cx.update(|window, cx| {
+                    window.simulate_next_frame(cx);
+                });
+                cx.run_until_parked();
+            }
+        };
+        frames(&mut cx, 30);
+        let row = cx.debug_bounds("row-f002.txt").expect("the cursor row");
+        // Trackpad scrolls both ways on a list that fits: nothing may move.
+        for dy in [-15., -15., 40., 40.] {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: row.center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(dy))),
+                touch_phase: gpui::TouchPhase::Moved,
+                ..Default::default()
+            });
+            frames(&mut cx, 1);
+            let glide = cx.debug_bounds("glide").expect("the glide fill");
+            let now = cx.debug_bounds("row-f002.txt").expect("the cursor row");
+            assert_eq!(now.top(), row.top(), "the list cannot scroll");
+            assert!((glide.top() - now.top()).abs() <= px(1.), "after {dy}: glide {glide:?} vs row {now:?}");
+        }
+    }
+
+    fn disclose(mode: &str, cx: &mut TestAppContext) -> (Entity<CrowWindow>, VisualTestContext, PathBuf) {
+        let root = fixture(&format!("disclose-{mode}"));
+        let (view, mut cx) = open(cx, &root);
+        set_motion(&mut cx, mode);
+        assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+        cx.simulate_keystrokes("right");
+        settle(&view, &mut cx);
+        assert_eq!(names(&view, &cx), ["alpha", "inner", "beta", "notes.txt"], "{mode}: alpha is open");
+        (view, cx, root)
+    }
+
+    #[gpui::test]
+    fn opening_a_folder_in_full_reveals_its_rows_and_slides_the_rest_down(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        let (view, cx, root) = disclose("full", cx);
+        let alpha = root.join("alpha");
+        let probe = |ix, ms| {
+            pane(&view, &cx).read_with(&cx, |p, cx| p.disclosure_probe(&alpha, ix, Duration::from_millis(ms), cx))
+        };
+        let (beta_shift, _, turn) = probe(2, 0).expect("a disclosure for alpha");
+        assert_eq!(beta_shift, -1.0, "beta starts where inner lands");
+        assert_eq!(turn, Some(0.0), "the chevron starts closed");
+        let (_, inner_opacity, _) = probe(1, 0).expect("disclosure");
+        assert_eq!(inner_opacity, 0.0, "inner shows as the gap opens");
+        let (beta_mid, _, turn_mid) = probe(2, 60).expect("disclosure");
+        assert!(beta_mid > -1.0 && beta_mid < 0.0, "beta slides down: {beta_mid}");
+        let inner_mid = probe(1, 60).expect("disclosure").1;
+        assert!(inner_mid > 0.0, "inner has started to show: {inner_mid}");
+        assert!(turn_mid.is_some_and(|t| t > 0.0 && t < 1.0), "the chevron turns: {turn_mid:?}");
+        assert_eq!(probe(2, 400).expect("disclosure"), (0.0, 1.0, None), "settled");
+        assert!(pane(&view, &cx).read_with(&cx, |p, cx| p.animating(cx)), "frames keep coming while it moves");
+    }
+
+    #[gpui::test]
+    fn closing_a_folder_in_full_slides_the_rows_below_up(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        let (view, mut cx, root) = disclose("full", cx);
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert_eq!(names(&view, &cx), ["alpha", "beta", "notes.txt"], "alpha is closed");
+        let alpha = root.join("alpha");
+        let probe = |ix, ms| {
+            pane(&view, &cx).read_with(&cx, |p, cx| p.disclosure_probe(&alpha, ix, Duration::from_millis(ms), cx))
+        };
+        let (beta_shift, _, turn) = probe(1, 0).expect("a disclosure for alpha");
+        assert_eq!(beta_shift, 1.0, "beta starts where it was");
+        assert_eq!(turn, Some(1.0), "the chevron starts open");
+        assert_eq!(probe(0, 0).expect("disclosure").0, 0.0, "alpha itself stays");
+        assert_eq!(probe(1, 400).expect("disclosure"), (0.0, 1.0, None), "settled");
+    }
+
+    #[gpui::test]
+    fn opening_a_folder_in_low_fades_without_moving(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        let (view, cx, root) = disclose("low", cx);
+        let alpha = root.join("alpha");
+        let probe = |ix, ms| {
+            pane(&view, &cx).read_with(&cx, |p, cx| p.disclosure_probe(&alpha, ix, Duration::from_millis(ms), cx))
+        };
+        let (_, inner_opacity, turn) = probe(1, 40).expect("a disclosure for alpha");
+        assert!(inner_opacity > 0.0 && inner_opacity < 1.0, "inner fades in: {inner_opacity}");
+        assert_eq!(turn, None, "Low turns the chevron at once");
+        assert_eq!(probe(2, 0).expect("disclosure").0, 0.0, "Low moves nothing");
+    }
+
+    #[gpui::test]
+    fn opening_a_folder_with_motion_off_changes_in_one_frame(cx: &mut TestAppContext) {
+        let (view, cx, root) = disclose("off", cx);
+        let alpha = root.join("alpha");
+        let probe =
+            pane(&view, &cx).read_with(&cx, |p, cx| p.disclosure_probe(&alpha, 1, std::time::Duration::ZERO, cx));
+        assert_eq!(probe, None, "off records nothing");
+        assert!(!pane(&view, &cx).read_with(&cx, |p, cx| p.animating(cx)), "and asks for no frames");
+    }
+
+    #[gpui::test]
     fn cursor_glide_lags_at_most_one_row(cx: &mut TestAppContext) {
         let root = long_fixture("glide-lag", 50);
         let (_view, mut cx) = open(cx, &root);

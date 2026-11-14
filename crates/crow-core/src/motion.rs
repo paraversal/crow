@@ -215,6 +215,7 @@ pub mod ms {
     pub const STATUS: u64 = 140;
     pub const COPY: u64 = 1600;
     pub const COPY_FADE: u64 = 320;
+    pub const DISCLOSE: u64 = 180;
 }
 
 pub fn ease_in(t: f32) -> f32 {
@@ -328,9 +329,67 @@ pub fn phases(mode: Effective, fx: Fx) -> Vec<Duration> {
     }
 }
 
+// ----- disclosure: a folder opening or closing inline (list view) -----
+
+/// At most this many rows slide when a folder opens or closes; the rest are off
+/// screen anyway, and a 500-row slide would only blur past.
+pub const DISCLOSE_MAX_ROWS: usize = 30;
+
+/// How long a folder's rows take to open or close: Full slides, Low fades the
+/// new rows in, Off changes in one frame.
+pub fn disclose_duration(mode: Effective) -> Duration {
+    match mode {
+        Effective::Off => Duration::ZERO,
+        Effective::Low => Duration::from_millis(ms::LOW_IN),
+        Effective::Full => Duration::from_millis(ms::DISCLOSE),
+    }
+}
+
+/// Full: how far, in rows, the rows below a disclosure sit from their place at
+/// progress `t`. Opening: they start `rows` up (where the children now are) and
+/// slide down; closing: they start `rows` down (where they were) and slide up.
+pub fn disclose_shift(opening: bool, rows: usize, t: f32) -> f32 {
+    let distance = rows.min(DISCLOSE_MAX_ROWS) as f32 * (1.0 - ease_out(t.clamp(0.0, 1.0)));
+    if opening { -distance } else { distance }
+}
+
+/// The opacity of an opening folder's `k`th child row (1 = right under the
+/// folder) at progress `t`. Full: each row shows as the gap opens past it, so
+/// the rows below never slide over a visible child. Low: all fade in together.
+pub fn disclose_opacity(mode: Effective, k: usize, rows: usize, t: f32) -> f32 {
+    let e = ease_out(t.clamp(0.0, 1.0));
+    let sliding = rows.min(DISCLOSE_MAX_ROWS);
+    match mode {
+        Effective::Off => 1.0,
+        Effective::Full if k <= sliding => (sliding as f32 * e - (k as f32 - 1.0)).clamp(0.0, 1.0),
+        _ => e,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disclosure_slides_in_full_and_fades_in_low() {
+        assert_eq!(disclose_duration(Effective::Off), Duration::ZERO);
+        assert_eq!(disclose_duration(Effective::Low), Duration::from_millis(ms::LOW_IN));
+        assert_eq!(disclose_duration(Effective::Full), Duration::from_millis(ms::DISCLOSE));
+
+        assert_eq!(disclose_shift(true, 3, 0.0), -3.0, "opening: rows below start where the children land");
+        assert_eq!(disclose_shift(true, 3, 1.0), 0.0);
+        assert_eq!(disclose_shift(false, 3, 0.0), 3.0, "closing: rows below start where they were");
+        assert_eq!(disclose_shift(false, 3, 1.0), 0.0);
+        assert_eq!(disclose_shift(true, 500, 0.0), -(DISCLOSE_MAX_ROWS as f32), "a huge folder slides at most 30 rows");
+
+        assert_eq!(disclose_opacity(Effective::Full, 1, 3, 0.0), 0.0, "nothing shows before the gap opens");
+        assert_eq!(disclose_opacity(Effective::Full, 3, 3, 1.0), 1.0);
+        let early = disclose_opacity(Effective::Full, 1, 3, 0.2);
+        let late = disclose_opacity(Effective::Full, 3, 3, 0.2);
+        assert!(early > late, "the row under the folder shows first: {early} vs {late}");
+        assert_eq!(disclose_opacity(Effective::Low, 3, 3, 0.5), ease_out(0.5), "Low fades every row together");
+        assert_eq!(disclose_opacity(Effective::Off, 1, 3, 0.0), 1.0);
+    }
 
     const MODES: [Effective; 3] = [Effective::Off, Effective::Low, Effective::Full];
     const FX: [Fx; 6] = [Fx::Idle, Fx::Trash, Fx::MoveOut, Fx::Receive, Fx::Arrive, Fx::Refuse];
