@@ -209,6 +209,8 @@ fn finish(outcome: &Outcome, cx: &mut App) {
         (None, true) => message(format!("{label}: cancelled"), false, cx),
         (None, false) => clear_message(cx),
     }
+    // Copying or trashing changes free space; the sidebar shouldn't wait for the minute poll.
+    crate::ui::refresh_volumes(cx);
 }
 
 /// Undo log entry `index` (the newest by default). Undo checks the disk first and
@@ -232,6 +234,7 @@ pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf
                     let restored = reversed.results();
                     ops.redo_stack.push(reversed);
                     message(label, false, cx);
+                    crate::ui::refresh_volumes(cx);
                     on_done(restored, cx);
                 }
                 Err(e) => message(e.to_string(), true, cx),
@@ -264,6 +267,7 @@ pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static
                     });
                     ops.undo_stack.push(ops.log.len() - 1);
                     message(format!("Redo {label}"), false, cx);
+                    crate::ui::refresh_volumes(cx);
                     on_done(results, cx);
                 }
                 Err(e) => message(e.to_string(), true, cx),

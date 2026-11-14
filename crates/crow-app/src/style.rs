@@ -62,7 +62,6 @@ pub fn drop_target(theme: &Theme) -> Rgba {
 
 /// A keyboard cursor ring, for a focused item drawn without a fill. An inset
 /// zero-blur shadow, so it never changes layout and list overflow can't clip it.
-#[allow(dead_code)] // U8 draws it.
 pub fn cursor_ring(theme: &Theme) -> Vec<BoxShadow> {
     vec![BoxShadow::new(px(0.), px(0.), color_alpha(theme.role("accent"), 0x99).into()).spread_radius(px(1.5)).inset()]
 }

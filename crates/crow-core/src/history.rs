@@ -27,6 +27,16 @@ impl History {
         self.forward.clear();
     }
 
+    /// Show `dir` in place of the current folder, without adding a Back step.
+    /// A sidebar walk is one step in history: later cursor moves replace it.
+    pub fn replace_current(&mut self, dir: PathBuf) {
+        if dir == self.current {
+            return;
+        }
+        self.current = dir;
+        self.forward.clear();
+    }
+
     pub fn can_go_back(&self) -> bool {
         !self.back.is_empty()
     }
@@ -87,6 +97,15 @@ mod tests {
         assert_eq!(h.back(), Some(Path::new("/b")));
         assert_eq!(h.forward_target(), Some(Path::new("/c")));
         assert_eq!(h.current(), Path::new("/b"));
+    }
+
+    #[test]
+    fn replace_current_keeps_the_back_step() {
+        let mut h = History::new("/a".into());
+        h.visit("/b".into());
+        h.replace_current("/c".into());
+        assert_eq!(h.current(), Path::new("/c"));
+        assert_eq!(h.back(), Some(Path::new("/a")), "the walk did not add a step");
     }
 
     #[test]

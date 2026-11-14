@@ -11,6 +11,7 @@ Status: Phase 1 (the "daily driver" MVP), milestone M6.
 ./scripts/fetch-gpui.sh          # once: Zed's GPUI at a pinned commit, into vendor/, with patches/gpui-*.patch applied
 cargo run --release -p crow-app  # opens your home folder
 ./scripts/bundle.sh --open       # builds and opens target/bundle/Crow.app
+./scripts/bundle.sh --install    # ...and copies it to /Applications (CROW_INSTALL_DIR to change)
 ```
 
 Running as `Crow.app` makes macOS privacy prompts name Crow instead of your terminal.
@@ -63,7 +64,11 @@ view you give it, and Cmd-2/Cmd-3 save nothing. In the list, Right opens the sel
 
 Sidebar: drag favorites to reorder them (or Cmd-Option-Up/Down), drop files on any row to move or
 copy them there, drop folders on a group's title to add them. Ctrl-Cmd-T adds the selected folder.
-In the sidebar, Cmd-Delete removes a favorite or forgets a recent folder, and Cmd-E ejects a disk.
+Same-named folders show their parent after the name (and "alias" for a symlink); with
+`keymap = "vim"`, favorites with a `key` show the letter on the right. Locations shows free space
+and a bar that warns near full. In the sidebar, Cmd-Delete removes a favorite or forgets a recent
+folder, Cmd-E ejects a disk, and Option-Up/Down jump between groups. Tab into the sidebar and arrow:
+the folder shows in the center while focus stays in the sidebar.
 
 With `keymap = "vim"`: j/k, h/l (parent and open, or columns), gg/G, yy/dd/p (copy, cut, paste),
 u and Ctrl-R, cw renames, `-` goes up, `m x` marks the folder as favorite x and `'x` jumps there.

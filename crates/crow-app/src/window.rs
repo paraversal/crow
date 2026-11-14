@@ -83,6 +83,9 @@ pub struct CrowWindow {
     palette: Option<Palette>,
     /// Cmd-F, while its results replace the pane.
     search: Option<Entity<SearchView>>,
+    /// The folder a sidebar arrow walk is showing. Walking records no Recent visits
+    /// (they would re-rank Recent under the cursor); leaving the sidebar records this one.
+    walk_visit: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -298,6 +301,7 @@ impl CrowWindow {
             picker: None,
             palette: None,
             search: None,
+            walk_visit: None,
             _subscriptions: subscriptions,
         }
     }
@@ -410,6 +414,7 @@ impl CrowWindow {
     fn switch_focus(&mut self, _: &SwitchFocus, window: &mut Window, cx: &mut Context<Self>) {
         let sidebar = self.sidebar.read(cx).focus_handle(cx);
         if sidebar.is_focused(window) {
+            self.record_walk_visit(cx);
             self.focus_center(window, cx);
         } else {
             window.focus(&sidebar, cx);
@@ -1011,8 +1016,11 @@ impl CrowWindow {
                 if self.search.is_some() {
                     self.close_search(window, cx);
                 }
-                if !self.bench {
-                    ui::record_visit(dir, cx);
+                if self.walk_visit.as_ref() != Some(dir) {
+                    self.walk_visit = None;
+                    if !self.bench {
+                        ui::record_visit(dir, cx);
+                    }
                 }
                 let dir = dir.clone();
                 self.sidebar.update(cx, |s, cx| s.set_current(dir, cx));
@@ -1417,11 +1425,36 @@ impl CrowWindow {
 }
 
 impl CrowWindow {
+    /// Tab, Return, → or a click out of the sidebar: if an arrow walk left the pane on
+    /// its folder, that folder is a visit.
+    fn record_walk_visit(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.walk_visit.take() else { return };
+        if !self.bench && self.pane().read(cx).current_dir(cx) == dir {
+            ui::record_visit(&dir, cx);
+        }
+    }
+
     fn on_sidebar_event(&mut self, event: &SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
+            SidebarEvent::Show(dir) => {
+                let dir = dir.clone();
+                if self.search.is_some() {
+                    self.close_search(window, cx);
+                }
+                self.walk_visit = Some(dir.clone());
+                self.pane().update(cx, |pane, cx| pane.show_from_sidebar(dir, cx));
+                // close_search focuses the center; the cursor walk stays in the sidebar.
+                let sidebar = self.sidebar.read(cx).focus_handle(cx);
+                window.focus(&sidebar, cx);
+                cx.notify();
+            }
             SidebarEvent::Open(dir) => {
                 let dir = dir.clone();
-                self.pane().update(cx, |pane, cx| pane.navigate(dir, cx));
+                if self.search.is_some() {
+                    self.close_search(window, cx);
+                }
+                self.pane().update(cx, |pane, cx| pane.open_from_sidebar(dir, cx));
+                self.record_walk_visit(cx);
                 self.focus_center(window, cx);
             }
             SidebarEvent::Run(request) => self.run_request(request.clone(), window, cx),
@@ -3053,6 +3086,211 @@ mod tests {
         cx.read(Sidebar::paths)
     }
 
+    /// What each selectable sidebar row shows, as the window renders it.
+    fn sidebar_looks(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> Vec<crate::sidebar::RowLook> {
+        let sidebar = view.read_with(cx, |w, _| w.sidebar.clone());
+        cx.update(|window, cx| sidebar.read_with(cx, |s, cx| s.looks_for_test(window, cx)))
+    }
+
+    #[gpui::test]
+    fn sidebar_looks_follow_rows(cx: &mut TestAppContext) {
+        let root = fixture("looks");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        let looks = sidebar_looks(&view, &mut cx);
+        let labels: Vec<&str> = looks.iter().map(|look| look.label.as_str()).collect();
+        assert_eq!(labels, ["alpha", "beta"]);
+        assert!(looks.iter().all(|look| look.spoken == look.label), "no hint or mark yet: {looks:?}");
+    }
+
+    #[gpui::test]
+    fn sidebar_twins_get_their_parent_in_label_and_aria(cx: &mut TestAppContext) {
+        let root = fixture("twins");
+        std::fs::create_dir_all(root.join("one/git")).expect("create fixture");
+        std::fs::create_dir_all(root.join("two/git")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("one/git"), &root.join("two/git")]));
+        let looks = sidebar_looks(&view, &mut cx);
+        let hints: Vec<Option<&str>> = looks.iter().map(|look| look.hint.as_deref()).collect();
+        assert_eq!(hints, [Some("one"), Some("two")]);
+        assert_eq!(looks[0].spoken, "git, in one");
+        assert_eq!(looks[1].spoken, "git, in two");
+    }
+
+    #[gpui::test]
+    fn sidebar_twins_span_favorites_and_recent(cx: &mut TestAppContext) {
+        let root = fixture("twins-recent");
+        std::fs::create_dir_all(root.join("one/git")).expect("create fixture");
+        std::fs::create_dir_all(root.join("two/git")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        write_config(
+            &view,
+            &mut cx,
+            "sidebar.toml",
+            &favorites_toml(&[&root.join("one/git")]).replace("show = false", "show = true"),
+        );
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.join("two/git"), cx));
+        settle(&view, &mut cx);
+        let looks = sidebar_looks(&view, &mut cx);
+        let git: Vec<&crate::sidebar::RowLook> = looks.iter().filter(|look| look.label == "git").collect();
+        assert_eq!(git.len(), 2, "one favorite, one recent: {looks:?}");
+        assert_eq!(git[0].hint.as_deref(), Some("one"));
+        assert_eq!(git[1].hint.as_deref(), Some("two"));
+    }
+
+    #[gpui::test]
+    fn sidebar_twins_walk_up(cx: &mut TestAppContext) {
+        let root = fixture("twins-walk");
+        std::fs::create_dir_all(root.join("x/a/git")).expect("create fixture");
+        std::fs::create_dir_all(root.join("y/a/git")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("x/a/git"), &root.join("y/a/git")]));
+        let looks = sidebar_looks(&view, &mut cx);
+        let hints: Vec<Option<&str>> = looks.iter().map(|look| look.hint.as_deref()).collect();
+        assert_eq!(hints, [Some("x"), Some("y")]);
+    }
+
+    #[gpui::test]
+    fn sidebar_twin_in_home_shows_a_tilde(cx: &mut TestAppContext) {
+        let root = fixture("twins-home");
+        std::fs::create_dir_all(root.join("git")).expect("create fixture");
+        std::fs::create_dir_all(root.join("other/git")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<Ui>().home = root.clone());
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("git"), &root.join("other/git")]));
+        let looks = sidebar_looks(&view, &mut cx);
+        assert_eq!(looks[0].hint.as_deref(), Some("~"));
+        assert_eq!(looks[1].hint.as_deref(), Some("other"));
+        assert_eq!(looks[0].spoken, format!("git, in {}", root.file_name().unwrap().to_string_lossy()));
+    }
+
+    #[gpui::test]
+    fn sidebar_cursor_is_a_ring_and_only_the_current_folder_is_filled(cx: &mut TestAppContext) {
+        let root = fixture("ring");
+        let (view, mut cx) = open(cx, &root.join("alpha"));
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks[0].current && !looks[0].ring, "unfocused: the current folder is filled: {looks:?}");
+        assert!(!looks[1].current && !looks[1].ring);
+
+        cx.simulate_keystrokes("tab");
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks[0].current && looks[0].ring, "cursor 0 on the current folder: fill and ring");
+        assert!(!looks[1].ring);
+
+        cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(!looks[0].current && !looks[0].ring, "the fill left alpha with the pane");
+        assert!(looks[1].current && looks[1].ring, "beta is current and carries the cursor ring");
+
+        cx.simulate_keystrokes("tab");
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks.iter().all(|look| !look.ring), "no ring while the list has focus");
+        assert!(looks[1].current, "the current folder stays filled");
+    }
+
+    #[gpui::test]
+    fn sidebar_vim_j_moves_the_ring(cx: &mut TestAppContext) {
+        let root = fixture("ring-vim");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        use_vim(&view, &mut cx);
+        cx.simulate_keystrokes("tab j");
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks[1].ring && !looks[0].ring, "j moves the ring: {looks:?}");
+    }
+
+    #[gpui::test]
+    fn disk_row_shows_free_space_and_keeps_its_aria_label(cx: &mut TestAppContext) {
+        let root = fixture("disk");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]));
+        cx.update(|_, cx| {
+            cx.global_mut::<Ui>().volumes = vec![crow_macos::Volume {
+                name: "Test HD".into(),
+                path: root.clone(),
+                total_bytes: 494_384_795_648,
+                free_bytes: 182_400_000_000,
+                ejectable: true,
+            }];
+            cx.refresh_windows();
+        });
+        cx.run_until_parked();
+        let looks = sidebar_looks(&view, &mut cx);
+        let disk = looks.iter().find(|look| look.label == "Test HD").expect("volume row");
+        assert_eq!(disk.right.as_deref(), Some("182 GB free"));
+        let (used, tone) = disk.bar.expect("a bar for a known total");
+        assert!((used - 0.631).abs() < 0.001, "used fraction {used}");
+        assert_eq!(tone, crate::sidebar::BarTone::Neutral);
+        assert_eq!(disk.spoken, "Test HD, 182.4 GB free of 494.4 GB, ejectable");
+
+        cx.update(|_, cx| {
+            cx.global_mut::<Ui>().volumes[0].free_bytes = 24_719_239_782;
+            cx.refresh_windows();
+        });
+        cx.run_until_parked();
+        let looks = sidebar_looks(&view, &mut cx);
+        let disk = looks.iter().find(|look| look.label == "Test HD").expect("volume row");
+        assert_eq!(disk.bar.expect("a bar").1, crate::sidebar::BarTone::Warning);
+        assert!(disk.spoken.ends_with(", ejectable, almost full"), "{}", disk.spoken);
+    }
+
+    #[gpui::test]
+    fn vim_marks_show_as_letters_in_the_sidebar(cx: &mut TestAppContext) {
+        let root = fixture("marks-letters");
+        let (view, mut cx) = open(cx, &root);
+        let toml = format!(
+            "[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\", key = \"a\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n",
+            root.join("alpha").display(),
+            root.join("beta").display()
+        );
+        write_config(&view, &mut cx, "sidebar.toml", &toml);
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks.iter().all(|look| look.right.is_none()), "the Finder layer shows no letters: {looks:?}");
+
+        use_vim(&view, &mut cx);
+        let looks = sidebar_looks(&view, &mut cx);
+        assert_eq!(looks[0].right.as_deref(), Some("a"));
+        assert!(looks[1].right.is_none(), "only the marked favorite shows a letter");
+
+        cx.simulate_keystrokes("down cmd-down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+        cx.simulate_keystrokes("m a");
+        settle(&view, &mut cx);
+        let looks = sidebar_looks(&view, &mut cx);
+        assert!(looks[0].right.is_none(), "the mark moved away from alpha");
+        assert_eq!(looks[1].right.as_deref(), Some("a"), "beta now shows the mark");
+    }
+
+    #[gpui::test]
+    fn symlinked_twin_says_alias(cx: &mut TestAppContext) {
+        let root = fixture("alias");
+        std::fs::create_dir_all(root.join("real/git")).expect("create fixture");
+        std::fs::create_dir_all(root.join("link")).expect("create fixture");
+        std::os::unix::fs::symlink(root.join("real/git"), root.join("link/git")).expect("create symlink");
+        let (view, mut cx) = open(cx, &root);
+        write_config(
+            &view,
+            &mut cx,
+            "sidebar.toml",
+            &favorites_toml(&[&root.join("real/git"), &root.join("link/git")]),
+        );
+        for _ in 0..400 {
+            cx.run_until_parked();
+            if cx.update(|_, cx| cx.global::<Ui>().aliases.contains(&root.join("link/git"))) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let looks = sidebar_looks(&view, &mut cx);
+        assert_eq!(looks[0].hint.as_deref(), Some("real"));
+        assert_eq!(looks[1].hint.as_deref(), Some("link · alias"));
+        assert_eq!(looks[1].spoken, "git, in link, alias");
+    }
+
     #[gpui::test]
     fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) {
         let root = fixture("contexts");
@@ -3065,9 +3303,11 @@ mod tests {
         assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "Down in the list moves the selection");
 
         cx.simulate_keystrokes("tab down");
+        settle(&view, &mut cx);
         let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
         assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1, "Down in the sidebar moves its cursor");
-        assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "…and leaves the list alone");
+        assert_eq!(dir(&view, &cx), root.join("beta"), "…and shows beta in the center");
+        assert_eq!(selected(&view, &cx).as_deref(), Some("b.txt"), "the list follows the sidebar cursor");
 
         cx.simulate_keystrokes("enter");
         settle(&view, &mut cx);
@@ -3077,6 +3317,187 @@ mod tests {
 
         cx.simulate_keystrokes("enter");
         assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "Return in the list means rename");
+    }
+
+    #[gpui::test]
+    fn sidebar_arrows_show_the_folder_and_keep_focus(cx: &mut TestAppContext) {
+        let root = fixture("sidebar-show");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        assert_eq!(dir(&view, &cx), root);
+
+        cx.simulate_keystrokes("tab");
+        assert_eq!(dir(&view, &cx), root, "tabbing into the sidebar does not navigate");
+        cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("beta"), "Down shows the cursor's folder");
+        assert!(sidebar_focused(&view, &mut cx), "…and focus stays in the sidebar");
+
+        cx.simulate_keystrokes("up");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("alpha"));
+        assert!(sidebar_focused(&view, &mut cx));
+
+        cx.simulate_keystrokes("tab");
+        assert!(!sidebar_focused(&view, &mut cx), "Tab moves to the center");
+        assert_eq!(dir(&view, &cx), root.join("alpha"), "…which already shows the cursor's folder");
+    }
+
+    #[gpui::test]
+    fn sidebar_return_and_right_focus_the_center(cx: &mut TestAppContext) {
+        let root = fixture("sidebar-open");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+
+        cx.simulate_keystrokes("tab down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert!(!sidebar_focused(&view, &mut cx), "Return focuses the center");
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+
+        cx.simulate_keystrokes("tab");
+        assert!(sidebar_focused(&view, &mut cx));
+        cx.simulate_keystrokes("right");
+        assert!(!sidebar_focused(&view, &mut cx), "→ focuses the center too");
+        assert_eq!(dir(&view, &cx), root.join("beta"), "…without navigating again");
+    }
+
+    #[gpui::test]
+    fn sidebar_arrow_closes_search(cx: &mut TestAppContext) {
+        let root = fixture("sidebar-search");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
+        cx.simulate_keystrokes("tab tab");
+        assert!(sidebar_focused(&view, &mut cx));
+
+        cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
+        assert!(view.read_with(&cx, |w, _| w.search.is_none()), "a sidebar move closes search");
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+        assert!(sidebar_focused(&view, &mut cx), "focus stays in the sidebar");
+    }
+
+    #[gpui::test]
+    fn sidebar_tab_in_does_not_navigate(cx: &mut TestAppContext) {
+        let root = fixture("sidebar-tab");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+        let before = dir(&view, &cx);
+        cx.simulate_keystrokes("tab");
+        assert_eq!(dir(&view, &cx), before);
+    }
+
+    #[gpui::test]
+    fn option_arrows_jump_between_sidebar_groups(cx: &mut TestAppContext) {
+        let root = fixture("groups");
+        let (view, mut cx) = open(cx, &root);
+        let toml = format!(
+            "[[group]]\nname = \"One\"\nitems = [ {{ path = \"{}\" }} ]\n[[group]]\nname = \"Two\"\nitems = [ {{ path = \"{}\" }} ]\n[recent]\nshow = true\ncount = 6\n[locations]\nshow = false\n",
+            root.join("alpha").display(),
+            root.join("beta").display()
+        );
+        write_config(&view, &mut cx, "sidebar.toml", &toml);
+        assert_eq!(
+            sidebar_paths(&cx),
+            [root.join("alpha"), root.join("beta"), root.clone()],
+            "two groups, then Recent"
+        );
+
+        cx.simulate_keystrokes("tab alt-down");
+        settle(&view, &mut cx);
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1, "the first row of the next group");
+        assert_eq!(dir(&view, &cx), root.join("beta"));
+
+        cx.simulate_keystrokes("alt-down");
+        settle(&view, &mut cx);
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 2, "Recent is a group too");
+        assert_eq!(dir(&view, &cx), root);
+
+        cx.simulate_keystrokes("alt-up");
+        settle(&view, &mut cx);
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1);
+        cx.simulate_keystrokes("alt-up");
+        settle(&view, &mut cx);
+        assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 0);
+    }
+
+    #[gpui::test]
+    fn walking_recent_keeps_the_cursor_on_the_shown_folder(cx: &mut TestAppContext) {
+        let root = fixture("recent-walk");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]).replace("show = false", "show = true"));
+        // beta ranks above alpha, which ranks above root: a visit to alpha would tie it with beta.
+        for d in ["alpha", "beta", "alpha", "beta", "beta"] {
+            pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.join(d), cx));
+            settle(&view, &mut cx);
+        }
+        assert_eq!(sidebar_paths(&cx), [root.join("beta"), root.join("alpha"), root.clone()]);
+        cx.simulate_keystrokes("tab");
+        for (step, want) in [root.join("alpha"), root.clone()].into_iter().enumerate() {
+            cx.simulate_keystrokes("down");
+            settle(&view, &mut cx);
+            assert_eq!(dir(&view, &cx), want);
+            let looks = sidebar_looks(&view, &mut cx);
+            assert!(
+                looks[step + 1].ring && looks[step + 1].current,
+                "Recent kept its order under the cursor: {looks:?}"
+            );
+        }
+        assert_eq!(
+            sidebar_paths(&cx),
+            [root.join("beta"), root.join("alpha"), root.clone()],
+            "the walk re-ranked nothing"
+        );
+    }
+
+    #[gpui::test]
+    fn a_sidebar_walk_counts_only_the_folder_you_leave_on(cx: &mut TestAppContext) {
+        let root = fixture("walk-visits");
+        std::fs::create_dir_all(root.join("gamma")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        write_config(
+            &view,
+            &mut cx,
+            "sidebar.toml",
+            &favorites_toml(&[&root.join("alpha"), &root.join("beta"), &root.join("gamma")]),
+        );
+        let visited = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.global::<Ui>().palette_recents.clone());
+        cx.simulate_keystrokes("tab down down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("gamma"));
+        let during = visited(&mut cx);
+        assert!(!during.contains(&root.join("beta")) && !during.contains(&root.join("gamma")), "{during:?}");
+
+        cx.simulate_keystrokes("tab");
+        settle(&view, &mut cx);
+        let after = visited(&mut cx);
+        assert!(after.contains(&root.join("gamma")), "leaving the sidebar counts gamma: {after:?}");
+        assert!(!after.contains(&root.join("beta")), "beta was only passed: {after:?}");
+    }
+
+    #[gpui::test]
+    fn sidebar_arrow_walk_is_one_history_step(cx: &mut TestAppContext) {
+        let root = fixture("sidebar-history");
+        std::fs::create_dir_all(root.join("gamma")).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        write_config(
+            &view,
+            &mut cx,
+            "sidebar.toml",
+            &favorites_toml(&[&root.join("alpha"), &root.join("beta"), &root.join("gamma")]),
+        );
+        cx.simulate_keystrokes("tab down down");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root.join("gamma"));
+        cx.simulate_keystrokes("cmd-[");
+        settle(&view, &mut cx);
+        assert_eq!(dir(&view, &cx), root, "Back returns to where the walk began");
     }
 
     #[gpui::test]
@@ -7012,6 +7433,7 @@ mod tests {
         cx.simulate_event(gpui::FileDropEvent::Pending { position: second });
         cx.run_until_parked();
         assert_eq!(target(&cx), Some((true, 1)), "the row under the pointer is highlighted");
+        assert!(sidebar_looks(&view, &mut cx)[1].drop, "the row's look carries the drop fill");
         for _ in 0..8 {
             cx.simulate_event(gpui::FileDropEvent::Pending { position: second });
             cx.run_until_parked();
@@ -7026,6 +7448,7 @@ mod tests {
         cx.simulate_event(gpui::FileDropEvent::Exited);
         cx.run_until_parked();
         assert_eq!(target(&cx), None, "leaving the window clears it");
+        assert!(sidebar_looks(&view, &mut cx).iter().all(|look| !look.drop), "…and every row's drop fill goes");
     }
 
     #[gpui::test]

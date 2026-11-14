@@ -7,6 +7,7 @@
 //! title become favorites.
 
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -17,14 +18,19 @@ use gpui::{
     Render, Role, SharedString, Window, div, img, prelude::*, px,
 };
 
-use crate::actions::{Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, OpenSelection, RemoveFromSidebar};
+use crate::actions::{
+    Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, NextGroup, OpenSelection, PreviousGroup,
+    RemoveFromSidebar,
+};
 use crate::chrome::with_tooltip;
 use crate::palette::CommandId;
 use crate::pane::DraggedSelection;
-use crate::style::{active_selection, color, current_location, drop_target, icon};
+use crate::style::{color, current_location, cursor_ring, drop_target, icon};
 use crate::ui::{self, Ui};
 
 pub enum SidebarEvent {
+    /// The cursor moved onto a folder: show it in the center, keep focus here.
+    Show(PathBuf),
     Open(PathBuf),
     /// Files dropped on a row.
     Run(Request),
@@ -110,9 +116,23 @@ fn rows(ui: &Ui) -> Vec<Row> {
     rows
 }
 
-/// Finder's name for a folder ("Macintosh HD" for `/`).
-fn display_name(path: &Path) -> String {
-    crow_macos::display_components(path).pop().map_or_else(|| path.display().to_string(), |(name, _)| name)
+/// What a selectable row shows, separate from how it is drawn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowLook {
+    pub label: String,
+    pub hint: Option<String>,
+    pub right: Option<String>,
+    pub spoken: String,
+    pub current: bool,
+    pub ring: bool,
+    pub drop: bool,
+    pub bar: Option<(f32, BarTone)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarTone {
+    Neutral,
+    Warning,
 }
 
 /// A favorite's `color`: a theme role, a color name or `#rrggbb`.
@@ -147,6 +167,32 @@ fn human_bytes(bytes: u64) -> String {
     if unit == 0 { format!("{bytes} bytes") } else { format!("{value:.1} {}", units[unit]) }
 }
 
+/// The sidebar's short free-space text: no decimal from 10 up ("182 GB"), one below
+/// ("4.2 GB"), powers of 1000 like Finder.
+fn short_bytes(bytes: u64) -> String {
+    let units = ["bytes", "KB", "MB", "GB", "TB", "PB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit + 1 < units.len() {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} bytes")
+    } else if value >= 10.0 {
+        format!("{value:.0} {}", units[unit])
+    } else {
+        format!("{value:.1} {}", units[unit])
+    }
+}
+
+/// At or above this share of the disk, the bar warns.
+const DISK_WARNING_USED: f32 = 0.9;
+
+fn bar_tone(used: f32) -> BarTone {
+    if used >= DISK_WARNING_USED { BarTone::Warning } else { BarTone::Neutral }
+}
+
 pub struct Sidebar {
     focus: FocusHandle,
     /// Index into the selectable rows (favorites, recents, volumes).
@@ -163,6 +209,11 @@ pub struct Sidebar {
     dragging_favorite: Rc<Cell<bool>>,
     /// Where a dragged favorite would be inserted: group and index before the move.
     insert_slot: Option<Slot>,
+    /// Finder's display names per path, volume first. Filled on demand; `displayNameAtPath`
+    /// runs once per path instead of once per row per render.
+    names: RefCell<HashMap<PathBuf, Rc<[String]>>>,
+    /// The paths in `names`, in row order, so a changed sidebar prunes stale entries.
+    name_paths: RefCell<Vec<PathBuf>>,
 }
 
 impl Focusable for Sidebar {
@@ -181,6 +232,8 @@ impl Sidebar {
             drop_target: None,
             dragging_favorite: Rc::new(Cell::new(false)),
             insert_slot: None,
+            names: RefCell::new(HashMap::new()),
+            name_paths: RefCell::new(Vec::new()),
         }
     }
 
@@ -193,6 +246,164 @@ impl Sidebar {
 
     fn selectable(cx: &gpui::App) -> Vec<Row> {
         rows(cx.global::<Ui>()).into_iter().filter(|r| !matches!(r, Row::Header(..))).collect()
+    }
+
+    /// Finder's display names for `path`, volume first. Cached: the ancestors are
+    /// filesystem calls on the main thread, so each path is asked once.
+    fn components(&self, path: &Path) -> Rc<[String]> {
+        if let Some(names) = self.names.borrow().get(path) {
+            return names.clone();
+        }
+        let names: Rc<[String]> =
+            crow_macos::display_components(path).into_iter().map(|(name, _)| name).collect::<Vec<_>>().into();
+        self.names.borrow_mut().insert(path.to_path_buf(), names.clone());
+        names
+    }
+
+    /// Finder's name for a folder ("Macintosh HD" for `/`).
+    fn display_name(&self, path: &Path) -> String {
+        self.components(path).last().cloned().unwrap_or_else(|| path.display().to_string())
+    }
+
+    /// Drop cached names for paths that left the sidebar.
+    fn prune_names(&self, rows: &[Row]) {
+        let paths: Vec<PathBuf> = rows.iter().filter_map(|r| r.path().map(Path::to_path_buf)).collect();
+        if *self.name_paths.borrow() == paths {
+            return;
+        }
+        let keep: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        self.names.borrow_mut().retain(|path, _| keep.contains(path.as_path()));
+        *self.name_paths.borrow_mut() = paths;
+    }
+
+    /// What every selectable row shows, in row order. Headers get no look.
+    fn looks(&self, rows: &[Row], focused: bool, ui: &Ui) -> Vec<RowLook> {
+        self.prune_names(rows);
+        let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
+        let selectable: Vec<&Row> = rows.iter().filter(|row| !matches!(row, Row::Header(..))).collect();
+        let labels: Vec<String> = selectable
+            .iter()
+            .map(|row| match row {
+                Row::Favorite(_, f) => f.name.clone().unwrap_or_else(|| self.display_name(&f.path)),
+                Row::Recent(path) => self.display_name(path),
+                Row::Volume(v) => v.name.clone(),
+                Row::Header(..) => unreachable!(),
+            })
+            .collect();
+
+        // Twins are compared across Favorites and Recent, never volumes.
+        let mut ancestors_for: Vec<Option<Vec<String>>> = Vec::with_capacity(selectable.len());
+        for row in &selectable {
+            let ancestors = match row {
+                Row::Favorite(..) | Row::Recent(..) => {
+                    let mut names = self.components(row.path().expect("a row with a path")).to_vec();
+                    names.reverse();
+                    Some(names)
+                }
+                _ => None,
+            };
+            ancestors_for.push(ancestors);
+        }
+        let mut inputs = Vec::new();
+        let mut input_rows = Vec::new();
+        for (i, row) in selectable.iter().enumerate() {
+            if let Some(ancestors) = &ancestors_for[i] {
+                inputs.push(crow_core::TwinInput {
+                    label: &labels[i],
+                    path: row.path().expect("a row with a path"),
+                    ancestors,
+                });
+                input_rows.push(i);
+            }
+        }
+        let mut hint_by_row: Vec<Option<(String, String, bool)>> = vec![None; selectable.len()];
+        for (n, hint) in crow_core::twin_hints(&inputs).into_iter().enumerate() {
+            let Some(distance) = hint else { continue };
+            let input = &inputs[n];
+            let alias = ui.aliases.contains(input.path);
+            let (shown, name) = if distance == usize::MAX {
+                let parent = input.path.parent().unwrap_or(input.path);
+                let text = crow_core::abbreviate_home(parent, &ui.home);
+                (text.clone(), text)
+            } else {
+                let name =
+                    input.ancestors.get(distance).or_else(|| input.ancestors.last()).cloned().unwrap_or_default();
+                let shown = if input.path.ancestors().nth(distance) == Some(ui.home.as_path()) {
+                    "~".to_owned()
+                } else {
+                    name.clone()
+                };
+                (shown, name)
+            };
+            let shown = if alias { format!("{shown} · alias") } else { shown };
+            hint_by_row[input_rows[n]] = Some((shown, name, alias));
+        }
+
+        let mut looks = Vec::with_capacity(selectable.len());
+        for (i, row) in selectable.into_iter().enumerate() {
+            let label = labels[i].clone();
+            let bar = match row {
+                Row::Volume(v) if v.total_bytes > 0 => {
+                    let used = (1.0 - v.free_bytes as f32 / v.total_bytes as f32).clamp(0.0, 1.0);
+                    Some((used, bar_tone(used)))
+                }
+                _ => None,
+            };
+            let right = match row {
+                Row::Volume(v) if v.total_bytes > 0 => Some(format!("{} free", short_bytes(v.free_bytes))),
+                Row::Favorite(_, f) => f.key.filter(|_| vim).map(|key| key.to_string()),
+                _ => None,
+            };
+            let (hint, spoken) = match &hint_by_row[i] {
+                Some((shown, name, alias)) => {
+                    let alias = if *alias { ", alias" } else { "" };
+                    let spoken = match row {
+                        Row::Favorite(_, f) => match f.key {
+                            Some(k) if vim => format!("{label}, in {name}{alias}, mark {k}"),
+                            _ => format!("{label}, in {name}{alias}"),
+                        },
+                        _ => format!("{label}, in {name}{alias}"),
+                    };
+                    (Some(shown.clone()), spoken)
+                }
+                None => {
+                    let spoken = match row {
+                        Row::Volume(v) => format!(
+                            "{label}, {} free of {}{}{}",
+                            human_bytes(v.free_bytes),
+                            human_bytes(v.total_bytes),
+                            if v.ejectable { ", ejectable" } else { "" },
+                            if bar.is_some_and(|(_, tone)| tone == BarTone::Warning) { ", almost full" } else { "" }
+                        ),
+                        Row::Favorite(_, f) => match f.key {
+                            Some(k) if vim => format!("{label}, mark {k}"),
+                            _ => label.clone(),
+                        },
+                        _ => label.clone(),
+                    };
+                    (None, spoken)
+                }
+            };
+            looks.push(RowLook {
+                label,
+                hint,
+                right,
+                spoken,
+                current: row.path().is_some_and(|path| path == self.current),
+                ring: focused && i == self.cursor,
+                drop: !self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Row(i)),
+                bar,
+            });
+        }
+        looks
+    }
+
+    /// The looks of the rows as the window shows them, for tests.
+    #[cfg(test)]
+    pub fn looks_for_test(&self, window: &Window, cx: &gpui::App) -> Vec<RowLook> {
+        let ui = cx.global::<Ui>();
+        let rows = rows(ui);
+        self.looks(&rows, self.focus.is_focused(window), ui)
     }
 
     fn cursor_row(&self, cx: &gpui::App) -> Option<Row> {
@@ -305,13 +516,68 @@ impl Sidebar {
     }
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.cursor = self.cursor.saturating_sub(1);
+        let next = self.cursor.saturating_sub(1);
+        if next == self.cursor {
+            return;
+        }
+        self.cursor = next;
+        self.show_cursor(cx);
         cx.notify();
     }
 
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.cursor = (self.cursor + 1).min(Self::selectable(cx).len().saturating_sub(1));
+        let next = (self.cursor + 1).min(Self::selectable(cx).len().saturating_sub(1));
+        if next == self.cursor {
+            return;
+        }
+        self.cursor = next;
+        self.show_cursor(cx);
         cx.notify();
+    }
+
+    /// The selectable indices of each non-empty group, in sidebar order.
+    fn group_rows(cx: &gpui::App) -> Vec<Vec<usize>> {
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut index = 0;
+        for row in rows(cx.global::<Ui>()) {
+            if matches!(row, Row::Header(..)) {
+                groups.push(Vec::new());
+            } else {
+                if let Some(group) = groups.last_mut() {
+                    group.push(index);
+                }
+                index += 1;
+            }
+        }
+        groups.retain(|group| !group.is_empty());
+        groups
+    }
+
+    /// Move to the first row of the previous or next group.
+    fn jump_group(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let groups = Self::group_rows(cx);
+        let Some(current) = groups.iter().position(|group| group.contains(&self.cursor)) else { return };
+        let Some(target) = current.checked_add_signed(delta).filter(|target| *target < groups.len()) else {
+            return;
+        };
+        self.cursor = groups[target][0];
+        self.show_cursor(cx);
+        cx.notify();
+    }
+
+    fn previous_group(&mut self, _: &PreviousGroup, _: &mut Window, cx: &mut Context<Self>) {
+        self.jump_group(-1, cx);
+    }
+
+    fn next_group(&mut self, _: &NextGroup, _: &mut Window, cx: &mut Context<Self>) {
+        self.jump_group(1, cx);
+    }
+
+    /// Ask the window to show the cursor's folder without leaving the sidebar.
+    fn show_cursor(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.cursor_row(cx).and_then(|row| row.path().map(Path::to_path_buf)) {
+            cx.emit(SidebarEvent::Show(path));
+        }
     }
 
     fn open(&mut self, _: &OpenSelection, _: &mut Window, cx: &mut Context<Self>) {
@@ -418,6 +684,7 @@ impl Render for Sidebar {
         let selectable_count = rows.iter().filter(|r| !matches!(r, Row::Header(..))).count();
         self.cursor = self.cursor.min(selectable_count.saturating_sub(1));
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
+        let subtle = theme.role("fg-subtle");
         let drop_bg = drop_target(&theme);
 
         // A drag's target comes from the pointer and the last layout, so the
@@ -432,6 +699,7 @@ impl Render for Sidebar {
             self.dragging_favorite.set(false);
         }
         let mut kinds: Vec<(Option<DropTarget>, Option<Slot>)> = Vec::with_capacity(rows.len());
+        let mut looks = self.looks(&rows, focused, ui).into_iter();
         let mut index = 0;
         let mut children = Vec::with_capacity(rows.len());
         for row in rows {
@@ -480,43 +748,26 @@ impl Render for Sidebar {
             };
             kinds.push((Some(DropTarget::Row(i)), favorite_slot));
             let path = row.path().map(Path::to_path_buf).unwrap_or_default();
-            let here = path == self.current;
             let cursor = i == self.cursor;
-            let (label, glyph, tint) = match &row {
-                Row::Favorite(_, f) => (
-                    f.name.clone().unwrap_or_else(|| display_name(&f.path)),
-                    f.icon.clone(),
-                    f.color.as_deref().and_then(|c| favorite_color(c, &theme)),
-                ),
-                Row::Volume(v) => (v.name.clone(), None, None),
-                _ => (display_name(&path), None, None),
+            let look = looks.next().expect("one look per selectable row");
+            let (glyph, tint) = match &row {
+                Row::Favorite(_, f) => (f.icon.clone(), f.color.as_deref().and_then(|c| favorite_color(c, &theme))),
+                _ => (None, None),
             };
             let volume_label = match &row {
                 Row::Volume(v) => Some(format!("{} free of {}", human_bytes(v.free_bytes), human_bytes(v.total_bytes))),
                 _ => None,
-            };
-            let spoken = match &row {
-                Row::Volume(v) => format!(
-                    "{label}, {} free of {}{}",
-                    human_bytes(v.free_bytes),
-                    human_bytes(v.total_bytes),
-                    if v.ejectable { ", ejectable" } else { "" }
-                ),
-                Row::Favorite(_, f) => match f.key {
-                    Some(k) if vim => format!("{label}, mark {k}"),
-                    _ => label.clone(),
-                },
-                _ => label.clone(),
             };
             let target = path.clone();
             let mut item = div()
                 .id(SharedString::from(format!("sidebar-{i}")))
                 .debug_selector(move || format!("sidebar-{i}"))
                 .role(Role::ListBoxOption)
-                .aria_label(spoken)
+                .aria_label(look.spoken.clone())
                 .aria_position_in_set(i + 1)
                 .aria_size_of_set(selectable_count)
                 .aria_selected(cursor)
+                .when(look.current, |row| row.aria_description("current folder"))
                 .when(cursor, |row| row.aria_active_descendant())
                 .px_2()
                 .py(px(3.))
@@ -524,11 +775,9 @@ impl Render for Sidebar {
                 .flex()
                 .flex_col()
                 .relative()
-                .when(here, |row| row.bg(current_location(&theme)))
-                .when(focused && cursor, |row| row.bg(active_selection(&theme)))
-                .when(!self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Row(i)), |row| {
-                    row.bg(drop_bg)
-                })
+                .when(look.current && !look.drop, |row| row.bg(current_location(&theme)))
+                .when(look.drop, |row| row.bg(drop_bg))
+                .when(look.ring, |row| row.shadow(cursor_ring(&theme)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.cursor = i;
                     cx.emit(SidebarEvent::Open(target.clone()));
@@ -548,10 +797,13 @@ impl Render for Sidebar {
             if let Row::Favorite(slot, _) = &row {
                 let slot = *slot;
                 let dragging = self.dragging_favorite.clone();
-                item = item.on_drag(DraggedFavorite { slot, label: label.clone().into() }, move |dragged, _, _, cx| {
-                    dragging.set(true);
-                    cx.new(|_| dragged.clone())
-                });
+                item = item.on_drag(
+                    DraggedFavorite { slot, label: look.label.clone().into() },
+                    move |dragged, _, _, cx| {
+                        dragging.set(true);
+                        cx.new(|_| dragged.clone())
+                    },
+                );
                 // The one insertion line: above the first favorite of a group for slot 0,
                 // below a favorite for the boundary after it. No row changes height.
                 let line = self.insert_slot.and_then(|target| {
@@ -596,11 +848,42 @@ impl Render for Sidebar {
                     div().w(px(16.)).children(icon(&path, true, 16).map(|i| img(i).size(px(16.)))).into_any_element()
                 }
             };
-            let mut line = div().flex().items_center().gap_2().h(px(20.)).child(icon_element).child(
-                div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_color(color(fg)).child(label),
+            let mut line = div().flex().items_center().h(px(20.)).child(div().mr(px(8.)).child(icon_element)).child(
+                div()
+                    .flex_shrink_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(13.))
+                    .text_color(color(fg))
+                    .child(look.label.clone()),
             );
+            match &look.hint {
+                Some(hint) => {
+                    line = line.child(
+                        div()
+                            .flex_1()
+                            .flex_basis(px(0.))
+                            .min_w_0()
+                            .ml(px(6.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(12.))
+                            .text_color(color(subtle))
+                            .child(hint.clone()),
+                    );
+                }
+                None => line = line.child(div().flex_1()),
+            }
             if let (Some(tint), Row::Favorite(_, Favorite { icon: None, .. })) = (tint, &row) {
-                line = line.child(div().size(px(7.)).rounded_full().bg(color(tint)));
+                line = line.child(div().ml(px(8.)).size(px(7.)).rounded_full().bg(color(tint)));
+            }
+            if let Some(right) = &look.right {
+                line = line.child(
+                    div().flex_shrink_0().ml(px(6.)).text_size(px(11.)).text_color(color(subtle)).child(right.clone()),
+                );
             }
             if let Row::Volume(v) = &row
                 && v.ejectable
@@ -609,6 +892,8 @@ impl Render for Sidebar {
                 line = line.child(
                     div()
                         .id(SharedString::from(format!("eject-{i}")))
+                        .ml(px(8.))
+                        .flex_shrink_0()
                         .role(Role::Button)
                         .aria_label(format!("Eject {}", v.name))
                         .px_1()
@@ -623,18 +908,20 @@ impl Render for Sidebar {
                 );
             }
             item = item.child(line);
-            if let Row::Volume(v) = &row
-                && v.total_bytes > 0
-            {
-                let used = 1.0 - v.free_bytes as f32 / v.total_bytes as f32;
-                // Nearly full disks show in the warning color, as in Finder's storage bar.
-                let fill = if used > 0.9 { theme.role("warning") } else { accent };
-                item =
-                    item.child(
-                        div().ml(px(24.)).mt(px(2.)).h(px(3.)).rounded_full().bg(color(theme.role("border"))).child(
-                            div().h_full().rounded_full().w(gpui::relative(used.clamp(0.0, 1.0))).bg(color(fill)),
-                        ),
-                    );
+            if let Some((used, tone)) = look.bar {
+                let fill = match tone {
+                    BarTone::Warning => theme.role("warning"),
+                    BarTone::Neutral => subtle,
+                };
+                item = item.child(
+                    div()
+                        .ml(px(24.))
+                        .mt(px(2.))
+                        .h(px(3.))
+                        .rounded_full()
+                        .bg(color(theme.role("surface-raised")))
+                        .child(div().h_full().rounded_full().w(gpui::relative(used)).bg(color(fill))),
+                );
             }
             if let Some(label) = volume_label {
                 item = with_tooltip(item, label, None);
@@ -668,6 +955,8 @@ impl Render for Sidebar {
             .on_action(cx.listener(Self::remove))
             .on_action(cx.listener(Self::favorite_up))
             .on_action(cx.listener(Self::favorite_down))
+            .on_action(cx.listener(Self::previous_group))
+            .on_action(cx.listener(Self::next_group))
             .on_action(cx.listener(Self::eject_cursor))
             .w(px(210.))
             .flex_none()
@@ -694,6 +983,21 @@ mod tests {
         assert_eq!(human_bytes(512), "512 bytes");
         assert_eq!(human_bytes(1_500_000), "1.5 MB");
         assert_eq!(human_bytes(494_384_795_648), "494.4 GB");
+    }
+
+    #[test]
+    fn short_sizes_for_the_sidebar() {
+        assert_eq!(short_bytes(182_400_000_000), "182 GB");
+        assert_eq!(short_bytes(4_200_000_000), "4.2 GB");
+        assert_eq!(short_bytes(980_000_000), "980 MB");
+        assert_eq!(short_bytes(1_000_000_000_000), "1.0 TB");
+        assert_eq!(short_bytes(0), "0 bytes");
+    }
+
+    #[test]
+    fn disk_turns_warning_at_ninety_percent() {
+        assert_eq!(bar_tone(0.899), BarTone::Neutral);
+        assert_eq!(bar_tone(0.9), BarTone::Warning);
     }
 
     #[test]
