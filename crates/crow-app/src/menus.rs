@@ -178,6 +178,7 @@ mod tests {
                 "New Window",
                 "New Tab",
                 "New Folder",
+                "New File",
                 "Open",
                 "—",
                 "Rename",

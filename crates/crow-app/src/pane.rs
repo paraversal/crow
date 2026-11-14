@@ -28,8 +28,8 @@ use gpui::{
 
 use crate::actions::{
     BeginJump, BeginMark, ClearFilter, CopyFiles, CutFiles, DeletePermanently, Duplicate, ExtendDown, ExtendUp,
-    MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFolder, OpenSelection, PasteFiles,
-    PasteMoveFiles, QuickLook, Rename, SelectAll, StartFilter,
+    MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection,
+    PasteFiles, PasteMoveFiles, QuickLook, Rename, SelectAll, StartFilter,
 };
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
@@ -486,6 +486,7 @@ impl Pane {
             CommandId::QuickLook => self.quick_look(&QuickLook, window, cx),
             CommandId::Rename => self.rename(&Rename, window, cx),
             CommandId::NewFolder => self.new_folder(&NewFolder, window, cx),
+            CommandId::NewFile => self.new_file(&NewFile, window, cx),
             CommandId::Duplicate => self.duplicate(&Duplicate, window, cx),
             CommandId::MoveToTrash => self.move_to_trash(&MoveToTrash, window, cx),
             CommandId::DeletePermanently => self.delete_permanently(&DeletePermanently, window, cx),
@@ -957,6 +958,10 @@ impl Pane {
 
     fn new_folder(&mut self, _: &NewFolder, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(PaneEvent::Run(Request::NewFolder { parent: self.current_dir(cx) }));
+    }
+
+    fn new_file(&mut self, _: &NewFile, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(PaneEvent::Run(Request::NewFile { parent: self.current_dir(cx) }));
     }
 
     fn duplicate(&mut self, _: &Duplicate, _: &mut Window, cx: &mut Context<Self>) {
@@ -1972,6 +1977,7 @@ impl Render for Pane {
                     .on_action(cx.listener(Self::rename))
                     .on_action(cx.listener(Self::quick_look))
                     .on_action(cx.listener(Self::new_folder))
+                    .on_action(cx.listener(Self::new_file))
                     .on_action(cx.listener(Self::duplicate))
                     .on_action(cx.listener(Self::move_to_trash))
                     .on_action(cx.listener(Self::delete_permanently))

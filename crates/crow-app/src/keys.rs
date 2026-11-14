@@ -346,6 +346,7 @@ mod tests {
                 (CommandId::QuickLook, "Space"),
                 (CommandId::Rename, "↩"),
                 (CommandId::NewFolder, "⇧⌘N"),
+                (CommandId::NewFile, "⌥⌘N"),
                 (CommandId::Duplicate, "⌘D"),
                 (CommandId::MoveToTrash, "⌘⌫"),
                 (CommandId::DeletePermanently, "⌥⌘⌫"),

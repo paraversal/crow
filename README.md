@@ -96,8 +96,8 @@ Toolbar icons are [Lucide](https://lucide.dev) 1.72.0, ISC-licensed; the notice 
 `crates/crow-app/assets/icons/LICENSE` (also copied into `Crow.app/Contents/Resources/`).
 Letters no longer select by name in this layer.
 
-File operations use Finder's keys: Return renames, Cmd-Shift-N new folder, Cmd-D duplicate,
-Cmd-Delete moves to the Trash, Cmd-Option-Delete deletes permanently (after asking),
+File operations use Finder's keys: Return renames, Cmd-Shift-N new folder, Cmd-Option-N new file,
+Cmd-D duplicate, Cmd-Delete moves to the Trash, Cmd-Option-Delete deletes permanently (after asking),
 Cmd-C / Cmd-X / Cmd-V copy, cut and paste (also to and from Finder), Cmd-Option-V moves,
 Cmd-Z / Cmd-Shift-Z undo and redo, Esc cancels a running operation, Cmd-Option-L shows activity.
 Nothing is ever overwritten: name clashes ask first, and Replace moves the old item to the Trash.

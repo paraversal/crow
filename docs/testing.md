@@ -11,7 +11,7 @@ cargo fmt --check
 The keystroke tests (`crates/crow-app/src/window.rs`) drive a real window through
 GPUI's test platform: key contexts, history, tabs, hidden files, multiple
 selection, type-to-select, sorting, Go to Folder, the column view's focus rules, file operations
-(new folder and rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete),
+(new folder and new file with inline rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete),
 drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent),
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
 (preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette (sections, two-line rows and match ranges, the Commands token and chips, path mode and Tab completion, recently used commands), the search panel (scope bar and switch,

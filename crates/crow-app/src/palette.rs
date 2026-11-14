@@ -13,9 +13,9 @@ use gpui::{Action, SharedString};
 
 use crate::actions::{
     AddToSidebar, CloseTab, CopyFiles, CutFiles, DeletePermanently, Duplicate, Eject, GoBack, GoForward, GoToFolder,
-    MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, PasteFiles,
-    PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView, SearchEverything, SearchReveal,
-    SelectAll, ShowCommandPalette, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity,
+    MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection,
+    PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView, SearchEverything,
+    SearchReveal, SelectAll, ShowCommandPalette, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity,
     ToggleHiddenFiles, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
@@ -83,6 +83,7 @@ pub enum CommandId {
     QuickLook,
     Rename,
     NewFolder,
+    NewFile,
     Duplicate,
     MoveToTrash,
     DeletePermanently,
@@ -147,6 +148,7 @@ impl CommandId {
             CommandId::QuickLook => "quick-look",
             CommandId::Rename => "rename",
             CommandId::NewFolder => "new-folder",
+            CommandId::NewFile => "new-file",
             CommandId::Duplicate => "duplicate",
             CommandId::MoveToTrash => "move-to-trash",
             CommandId::DeletePermanently => "delete-permanently",
@@ -216,6 +218,14 @@ pub const COMMANDS: &[Command] = &[
         action: &NewFolder,
         scope: KeyScope::List,
         menu: Some(MenuSlot { menu: MenuName::File, section: 0, title: "New Folder" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::NewFile,
+        label: "New File",
+        action: &NewFile,
+        scope: KeyScope::List,
+        menu: Some(MenuSlot { menu: MenuName::File, section: 0, title: "New File" }),
         palette: true,
     },
     Command {

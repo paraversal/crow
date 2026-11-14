@@ -21,6 +21,7 @@ actions!(
         QuickLook,
         // File operations
         NewFolder,
+        NewFile,
         Duplicate,
         MoveToTrash,
         DeletePermanently,
@@ -123,6 +124,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("enter", Rename, Some(LIST)),
         KeyBinding::new("space", QuickLook, Some(LIST)),
         KeyBinding::new("cmd-shift-n", NewFolder, Some(LIST)),
+        KeyBinding::new("cmd-alt-n", NewFile, Some(LIST)),
         KeyBinding::new("cmd-d", Duplicate, Some(LIST)),
         KeyBinding::new("cmd-backspace", MoveToTrash, Some(LIST)),
         KeyBinding::new("cmd-alt-backspace", DeletePermanently, Some(LIST)),

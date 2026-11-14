@@ -1123,7 +1123,7 @@ impl CrowWindow {
     }
 
     fn start(&mut self, plan: Plan, resolutions: HashMap<PathBuf, Resolution>, cx: &mut Context<Self>) {
-        let rename_result = matches!(plan.request, Request::NewFolder { .. });
+        let rename_result = matches!(plan.request, Request::NewFolder { .. } | Request::NewFile { .. });
         let pane = self.pane().downgrade();
         operations::execute(plan, resolutions, cx, move |outcome, cx| {
             let results = outcome.record.results();
@@ -6551,6 +6551,31 @@ mod tests {
         assert!(root.join("Projects").is_dir(), "renamed on Return; folder now has {entries:?}");
         assert!(!root.join("untitled folder").exists());
         assert_eq!(selected(&view, &cx).as_deref(), Some("Projects"));
+    }
+
+    #[gpui::test]
+    fn new_file_creates_and_renames(cx: &mut TestAppContext) {
+        let root = fixture("newfile");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-alt-n");
+        settle(&view, &mut cx);
+        cx.run_until_parked();
+        let renaming = pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx));
+        assert_eq!(renaming.as_deref(), Some("untitled"), "the new file is created and its rename starts");
+        assert!(root.join("untitled").is_file(), "an empty file, not a folder");
+        cx.simulate_input("Notes");
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        assert!(root.join("Notes").is_file(), "renamed on Return");
+        assert!(!root.join("untitled").exists());
+        assert_eq!(selected(&view, &cx).as_deref(), Some("Notes"));
+
+        // The palette lists it too.
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">new file");
+        settle(&view, &mut cx);
+        let rows = view.read_with(&cx, |w, _| w.palette_rows());
+        assert!(rows.first().is_some_and(|row| row.contains("New File")), "{rows:?}");
     }
 
     #[gpui::test]

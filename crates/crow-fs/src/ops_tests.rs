@@ -311,6 +311,24 @@ fn new_folder_trash_and_permanent_delete() {
 }
 
 #[test]
+fn new_file_creates_an_empty_file_with_a_free_name() {
+    let f = Fixture::new("new-file");
+    let out = f.run(Request::NewFile { parent: f.root.clone() });
+    ok(&out);
+    assert_eq!(f.snapshot()["untitled"], "");
+    ok(&f.run(Request::NewFile { parent: f.root.clone() }));
+    assert!(f.snapshot().contains_key("untitled 2"), "a taken name gets the next number");
+    assert!(!f.path("untitled 2").is_dir(), "a file, not a folder");
+
+    // Undo moves the new file to the Trash and can be redone.
+    let undone = undo(&out.record, &f.trash).expect("undo");
+    assert!(!f.path("untitled").exists(), "undo removes the new file");
+    assert!(f.snapshot().contains_key("untitled 2"), "and leaves the other one");
+    undo(&undone, &f.trash).expect("redo");
+    assert!(f.path("untitled").exists(), "undoing the undo puts it back");
+}
+
+#[test]
 fn progress_counts_items_and_bytes() {
     let f = Fixture::new("progress");
     f.file("src/a", &"x".repeat(3000));
