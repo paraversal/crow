@@ -33,7 +33,7 @@ index ce03804..03b7718 100644
                              pending_mouse_down.take();
                              window.refresh();
 diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
-index f408e9d..ae15323 100644
+index f408e9d..46ed3e8 100644
 --- a/crates/gpui/src/window.rs
 +++ b/crates/gpui/src/window.rs
 @@ -1225,6 +1225,16 @@ enum InputModality {
@@ -69,17 +69,24 @@ index f408e9d..ae15323 100644
              client_inset: None,
              image_cache_stack: Vec::new(),
              captured_hitbox: None,
-@@ -4061,6 +4073,25 @@ impl Window {
+@@ -4061,6 +4073,30 @@ impl Window {
              element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
              active_drag_element = Some(element);
              cx.active_drag = Some(active_drag);
-+        } else if let Some(returning) = self.drag_return.take() {
-+            let elapsed = cx
-+                .background_executor()
-+                .now()
-+                .saturating_duration_since(returning.started)
-+                .as_secs_f32();
-+            let t = (elapsed / DRAG_RETURN_SECS).min(1.0);
++        } else if let Some((returning, t)) = self
++            .drag_return
++            .take()
++            .map(|returning| {
++                let elapsed = cx
++                    .background_executor()
++                    .now()
++                    .saturating_duration_since(returning.started)
++                    .as_secs_f32();
++                (returning, elapsed / DRAG_RETURN_SECS)
++            })
++            // A finished flight draws nothing: no frame follows this one to clear it.
++            .filter(|(_, t)| *t < 1.0)
++        {
 +            let eased = 1.0 - (1.0 - t).powi(5);
 +            let offset = Point::new(
 +                returning.from.x + (returning.to.x - returning.from.x) * eased,
@@ -88,14 +95,12 @@ index f408e9d..ae15323 100644
 +            let mut element = returning.view.clone().into_any_element();
 +            element.prepaint_as_root(offset, AvailableSpace::min_size(), self, cx);
 +            active_drag_element = Some(element);
-+            if t < 1.0 {
-+                self.drag_return = Some(returning);
-+                self.on_next_frame(|window, _| window.refresh());
-+            }
++            self.drag_return = Some(returning);
++            self.on_next_frame(|window, _| window.refresh());
          } else {
              tooltip_element = self.prepaint_tooltip(cx);
          }
-@@ -6075,6 +6106,7 @@ impl Window {
+@@ -6075,6 +6111,7 @@ impl Window {
                              cursor_offset: position,
                              cursor_style: None,
                              external_payload_source: None,
@@ -103,7 +108,7 @@ index f408e9d..ae15323 100644
                          });
                      }
                      PlatformInput::MouseMove(MouseMoveEvent {
-@@ -6183,26 +6215,60 @@ impl Window {
+@@ -6183,26 +6220,60 @@ impl Window {
          if Bounds::new(Point::default(), self.viewport_size).contains(&mouse_move.position) {
              return;
          }

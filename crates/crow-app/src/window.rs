@@ -8130,13 +8130,13 @@ mod tests {
         });
         assert!(cx.debug_bounds("drag-combo").is_some(), "the combo is still flying back");
 
-        for _ in 0..20 {
-            cx.executor().advance_clock(std::time::Duration::from_millis(16));
-            cx.update(|window, cx| {
-                window.simulate_next_frame(cx);
-            });
-            cx.run_until_parked();
-        }
+        // The frame that sees the flight finished must not draw the combo: nothing asks
+        // for another frame after it, so whatever it paints stays on screen.
+        cx.executor().advance_clock(std::time::Duration::from_millis(300));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
         assert!(cx.debug_bounds("drag-combo").is_none(), "the combo landed and disappeared");
     }
 
