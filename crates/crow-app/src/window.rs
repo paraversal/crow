@@ -170,9 +170,16 @@ const PALETTE_COMMAND_ROW: f32 = 40.;
 const PALETTE_HEADER_ROW: f32 = 26.;
 const PALETTE_EMPTY_ROW: f32 = 44.;
 const PALETTE_MAX_LIST: f32 = 440.;
+/// The sheet's width: Wide, narrowed to keep the margins in a small window.
+fn palette_width(window: &Window) -> f32 {
+    (f32::from(window.viewport_size().width) - 2. * PALETTE_MARGIN).min(PALETTE_WIDTH)
+}
+
 /// The path line's width inside a folder row: the sheet minus list padding, row
 /// padding, the icon, its gap, the age column and one more gap.
-const PALETTE_PATH_WIDTH: f32 = PALETTE_WIDTH - 2. * PALETTE_LIST_PAD - 20. - 22. - 12. - 70. - 12.;
+fn palette_path_width(window: &Window) -> f32 {
+    palette_width(window) - 2. * PALETTE_LIST_PAD - 20. - 22. - 12. - 70. - 12.
+}
 
 fn palette_item_height(item: &Item) -> f32 {
     match item {
@@ -2231,7 +2238,7 @@ impl CrowWindow {
         let commands = palette.mode == PaletteMode::Commands;
         let content = palette_content_height(&palette.listing);
         let height = palette_list_height(window, content);
-        let width = (f32::from(window.viewport_size().width) - 2. * PALETTE_MARGIN).min(PALETTE_WIDTH);
+        let width = palette_width(window);
         let rows = self.render_palette_rows(window, cx);
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
@@ -2286,7 +2293,7 @@ impl CrowWindow {
                     "complete",
                 ))
                 .child(div().flex_1())
-                .child(div().text_size(px(12.)).text_color(muted).child("> commands"))
+                .child(pair(Some(Keycap::text(">", KeycapWeight::Outline)), "commands"))
                 .into_any_element()
         };
         let token = div()
@@ -2331,7 +2338,7 @@ impl CrowWindow {
             .flex_col()
             .overflow_y_scroll()
             .track_scroll(&scroll)
-            .py(px(PALETTE_LIST_PAD))
+            .p(px(PALETTE_LIST_PAD))
             .children(rows);
         Some(chrome::sheet(
             chrome::sheet_panel("palette", SheetWidth::Wide, &theme)
@@ -2483,7 +2490,7 @@ impl CrowWindow {
         let name = label[*name_start..].to_owned();
         let (name_text, name_ranges) = (name.clone(), listing.items[i].name_ranges());
         let (path_text, path_ranges) =
-            truncate_middle_with_ranges(label, matched, px(PALETTE_PATH_WIDTH), px(12.), window);
+            truncate_middle_with_ranges(label, matched, px(palette_path_width(window)), px(12.), window);
         let section = palette::section_header(*source, here);
         let age = if *source == Source::Recent {
             last_visit.as_ref().map(|then| palette::relative_age(now, *then))
@@ -5137,6 +5144,18 @@ mod tests {
         let rows = view.read_with(&cx, |w, _| w.palette_rows());
         assert_eq!(rows.len(), 2, "two folders named twin: {rows:?}");
         assert!(rows[0].ends_with("/a/twin") && rows[1].ends_with("/b/twin"), "the paths tell them apart: {rows:?}");
+    }
+
+    #[gpui::test]
+    fn palette_rows_are_inset_from_the_sheet(cx: &mut TestAppContext) {
+        let root = fixture("palette-inset");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        let sheet = cx.debug_bounds("sheet-panel").expect("the palette sheet");
+        let row = cx.debug_bounds("palette-row-0").expect("the first row");
+        assert_eq!(row.left() - sheet.left(), px(PALETTE_LIST_PAD + 1.), "list padding plus the sheet's border");
+        assert_eq!(sheet.right() - row.right(), px(PALETTE_LIST_PAD + 1.), "the same on the right");
     }
 
     #[gpui::test]
