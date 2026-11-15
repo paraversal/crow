@@ -44,7 +44,9 @@ actions!(
         Left,
         /// → on the focused control.
         Right,
-        /// Escape or ⌘W.
+        /// Escape: closes an open drop-down, otherwise the window.
+        Cancel,
+        /// ⌘W.
         CloseSettings
     ]
 );
@@ -64,7 +66,7 @@ pub fn keymap() -> Vec<KeyBinding> {
         KeyBinding::new("shift-down", DecrementTen, settings),
         KeyBinding::new("tab", FocusNext, settings),
         KeyBinding::new("shift-tab", FocusPrev, settings),
-        KeyBinding::new("escape", CloseSettings, settings),
+        KeyBinding::new("escape", Cancel, settings),
         KeyBinding::new("cmd-w", CloseSettings, settings),
         KeyBinding::new("cmd-,", OpenSettings, settings),
     ]
@@ -215,7 +217,7 @@ impl ControlId {
     #[allow(dead_code)] // the accessibility test and M7 H7's fuzzer walk it
     fn role(self) -> Role {
         match self {
-            ControlId::Theme | ControlId::FontFamily => Role::ListBox,
+            ControlId::Theme | ControlId::FontFamily => Role::ComboBox,
             ControlId::AppIcon | ControlId::Keymap | ControlId::Hints | ControlId::Motion | ControlId::Sound => {
                 Role::RadioGroup
             }
@@ -235,12 +237,10 @@ impl ControlId {
 
     fn description(self, cx: &App) -> Option<SharedString> {
         let text = match self {
-            ControlId::Theme => {
-                "The theme index in ~/.config/themes. Moving through the list previews it; leaving keeps it."
-            }
+            ControlId::Theme => "Themes from ~/.config/themes.",
             ControlId::AppIcon => "The Dock switches now; Finder after the next scripts/bundle.sh.",
             ControlId::FontFamily => "Installed families; System follows macOS.",
-            ControlId::FontSize => "10 to 24 points. ↑↓ changes it.",
+            ControlId::FontSize => "10 to 24 points.",
             ControlId::Keymap => "Vim adds hjkl, gg/G, yy/p and marks on top of the Finder keys.",
             ControlId::Hints => "Auto retires idle hints after you use their key three times.",
             ControlId::ShowHidden => "List dotfiles and other hidden items.",
@@ -269,7 +269,7 @@ impl ControlId {
             }
             ControlId::Sound => "Crow adds soft ticks to Finder's sounds; Off is silent.",
             ControlId::PlaySound => "Play the trash sound in the chosen set.",
-            ControlId::WindowWidth | ControlId::WindowHeight => "600 to 4000 points. ↑↓ changes it.",
+            ControlId::WindowWidth | ControlId::WindowHeight => "600 to 4000 points.",
             ControlId::EditSettings => "Open settings.toml in its default app.",
             ControlId::ShowConfig => "Open ~/.config/crow in Finder.",
             ControlId::OpenSidebarToml
@@ -312,6 +312,11 @@ pub struct SettingsWindow {
     fonts: Vec<String>,
     font_cursor: usize,
     font_scroll: ScrollHandle,
+    /// The drop-down whose menu is open (Theme or FontFamily).
+    menu: Option<ControlId>,
+    /// The menu a mouse-down outside it just closed, so the click that lands on
+    /// its own button doesn't open it again. Cleared on every mouse-down.
+    dismissed_by_mouse: Option<ControlId>,
     theme_type_ahead: TypeAhead,
     font_type_ahead: TypeAhead,
     page_scroll: ScrollHandle,
@@ -383,6 +388,13 @@ impl SettingsWindow {
             }));
         }
 
+        // The title-bar close button skips `close`; drop a pending preview there too.
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            weak.update(cx, |this, cx| this.close_menu(window, cx)).ok();
+            true
+        });
+
         let mut fonts = vec!["System".to_owned()];
         fonts.extend(crow_macos::available_font_families());
         if !settings.font_family.is_empty() && !fonts.iter().any(|name| name == &settings.font_family) {
@@ -413,6 +425,8 @@ impl SettingsWindow {
             fonts,
             font_cursor,
             font_scroll: ScrollHandle::new(),
+            menu: None,
+            dismissed_by_mouse: None,
             theme_type_ahead: TypeAhead::default(),
             font_type_ahead: TypeAhead::default(),
             page_scroll: ScrollHandle::new(),
@@ -551,8 +565,11 @@ impl SettingsWindow {
 
     fn on_focus_lost(&mut self, id: ControlId, window: &mut Window, cx: &mut Context<Self>) {
         match id {
-            ControlId::Theme => self.commit_theme(window, cx),
-            ControlId::FontFamily => self.commit_font(window, cx),
+            ControlId::Theme | ControlId::FontFamily => {
+                if self.menu == Some(id) {
+                    self.close_menu(window, cx);
+                }
+            }
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => {
                 self.commit_stepper(id, window, cx);
             }
@@ -566,8 +583,13 @@ impl SettingsWindow {
             return;
         }
         match id {
-            ControlId::Theme => self.commit_theme(window, cx),
-            ControlId::FontFamily => self.commit_font(window, cx),
+            ControlId::Theme | ControlId::FontFamily => {
+                if self.menu == Some(id) {
+                    self.keep_menu(window, cx);
+                } else {
+                    self.open_menu(id, cx);
+                }
+            }
             ControlId::ShowHidden | ControlId::ShowPreview | ControlId::ViewPerFolder | ControlId::PaletteRecent => {
                 self.toggle_bool(id, cx)
             }
@@ -587,8 +609,6 @@ impl SettingsWindow {
     fn move_horizontal(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.focused_control(window) else { return };
         match id {
-            ControlId::Theme => self.move_theme(delta, cx),
-            ControlId::FontFamily => self.move_font(delta, window, cx),
             ControlId::AppIcon => self.move_app_icon(delta, window, cx),
             ControlId::Keymap | ControlId::Hints | ControlId::Motion | ControlId::Sound => {
                 self.move_segment(id, delta, window, cx);
@@ -600,8 +620,13 @@ impl SettingsWindow {
     fn move_vertical(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.focused_control(window) else { return };
         match id {
-            ControlId::Theme => self.move_theme(delta, cx),
-            ControlId::FontFamily => self.move_font(delta, window, cx),
+            ControlId::Theme | ControlId::FontFamily if id.enabled(cx) => {
+                if self.menu == Some(id) {
+                    self.move_menu(delta, cx);
+                } else {
+                    self.open_menu(id, cx);
+                }
+            }
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => {
                 // ↑ is -1 in reading order but +1 for a stepper.
                 self.adjust_stepper(id, -(delta as f64), window, cx);
@@ -688,76 +713,161 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    fn move_theme(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if self.theme.move_cursor(delta) {
-            theme_choice::preview(&self.theme.current_id(), cx);
-            self.theme_scroll.scroll_to_item(self.theme.cursor);
-            cx.notify();
+    /// Open `id`'s menu with the cursor on the saved value.
+    fn open_menu(&mut self, id: ControlId, cx: &mut Context<Self>) {
+        let settings = &cx.global::<Ui>().settings;
+        match id {
+            ControlId::Theme => {
+                self.theme.sync_to(&settings.theme);
+                self.theme_scroll.scroll_to_item(self.theme.cursor);
+            }
+            ControlId::FontFamily => {
+                self.font_cursor = font_index(&self.fonts, &settings.font_family);
+                self.font_scroll.scroll_to_item(self.font_cursor);
+            }
+            _ => return,
+        }
+        self.menu = Some(id);
+        cx.notify();
+    }
+
+    /// Close the open menu without keeping its cursor: the theme preview goes
+    /// away and both drop-downs show the saved value again.
+    fn close_menu(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.menu.take() else { return };
+        let settings = &cx.global::<Ui>().settings;
+        match id {
+            ControlId::Theme => {
+                self.theme.sync_to(&settings.theme);
+                if cx.global::<Ui>().preview_theme.is_some() {
+                    theme_choice::clear_preview(cx);
+                }
+            }
+            ControlId::FontFamily => self.font_cursor = font_index(&self.fonts, &settings.font_family),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// Keep the menu's highlighted entry and close it.
+    fn keep_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.menu {
+            Some(ControlId::Theme) => self.commit_theme(window, cx),
+            Some(ControlId::FontFamily) => self.commit_font(window, cx),
+            _ => {}
+        }
+        self.menu = None;
+        cx.notify();
+    }
+
+    fn toggle_menu(&mut self, id: ControlId, window: &mut Window, cx: &mut Context<Self>) {
+        if !id.enabled(cx) {
+            return;
+        }
+        if self.dismissed_by_mouse.take() == Some(id) {
+            return;
+        }
+        if self.menu == Some(id) {
+            self.close_menu(window, cx);
+        } else {
+            self.close_menu(window, cx);
+            window.focus(&self.handle(id), cx);
+            self.open_menu(id, cx);
         }
     }
 
-    fn select_theme(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.theme.select(index) {
-            self.commit_theme(window, cx);
-            self.theme_scroll.scroll_to_item(self.theme.cursor);
-            cx.notify();
+    fn move_menu(&mut self, delta: isize, cx: &mut Context<Self>) {
+        match self.menu {
+            Some(ControlId::Theme) => {
+                if self.theme.move_cursor(delta) {
+                    theme_choice::preview(&self.theme.current_id(), cx);
+                    self.theme_scroll.scroll_to_item(self.theme.cursor);
+                }
+            }
+            Some(ControlId::FontFamily) => {
+                let last = self.fonts.len().saturating_sub(1);
+                self.font_cursor = self.font_cursor.saturating_add_signed(delta).min(last);
+                self.font_scroll.scroll_to_item(self.font_cursor);
+            }
+            _ => return,
         }
+        cx.notify();
+    }
+
+    /// A click on a menu entry keeps it.
+    fn pick(&mut self, id: ControlId, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu != Some(id) {
+            return;
+        }
+        match id {
+            ControlId::Theme => {
+                self.theme.select(index);
+            }
+            ControlId::FontFamily if index < self.fonts.len() => self.font_cursor = index,
+            _ => return,
+        }
+        self.keep_menu(window, cx);
     }
 
     fn commit_theme(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let id = self.theme.current_id();
         if cx.global::<Ui>().settings.theme == id {
-            cx.global_mut::<Ui>().preview_theme = None;
+            if cx.global::<Ui>().preview_theme.is_some() {
+                theme_choice::clear_preview(cx);
+            }
         } else {
             ui::choose_theme(&id, cx);
         }
     }
 
-    fn theme_type_ahead(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let labels: Vec<String> = (0..self.theme.entries.len()).map(|i| self.theme.label(i)).collect();
-        if let Some(index) = type_ahead(&mut self.theme_type_ahead, &event.keystroke, &labels)
-            && self.theme.select(index)
-        {
-            theme_choice::preview(&self.theme.current_id(), cx);
-            self.theme_scroll.scroll_to_item(self.theme.cursor);
-            cx.notify();
-        }
-    }
-
-    fn move_font(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let last = self.fonts.len().saturating_sub(1);
-        let next = self.font_cursor.saturating_add_signed(delta).min(last);
-        if next != self.font_cursor {
-            self.select_font(next, window, cx);
-        }
-    }
-
-    fn select_font(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self.fonts.get(index).cloned() else { return };
-        self.font_cursor = index;
+    fn commit_font(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.fonts.get(self.font_cursor).cloned() else { return };
         let family = if name == "System" { String::new() } else { name };
-        ui::set_setting(SettingChange::FontFamily(family), cx);
-        self.font_scroll.scroll_to_item(index);
+        if cx.global::<Ui>().settings.font_family != family {
+            ui::set_setting(SettingChange::FontFamily(family), cx);
+        }
+    }
+
+    /// Typing on a drop-down opens it at the first entry starting with what was
+    /// typed; the theme previews like an arrow key would.
+    fn menu_type_ahead(&mut self, id: ControlId, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if !id.enabled(cx) {
+            return;
+        }
+        let found = match id {
+            ControlId::Theme => {
+                let labels: Vec<String> = (0..self.theme.entries.len()).map(|i| self.theme.label(i)).collect();
+                type_ahead(&mut self.theme_type_ahead, &event.keystroke, &labels)
+            }
+            ControlId::FontFamily => type_ahead(&mut self.font_type_ahead, &event.keystroke, &self.fonts),
+            _ => None,
+        };
+        let Some(index) = found else { return };
+        if self.menu != Some(id) {
+            self.open_menu(id, cx);
+        }
+        match id {
+            ControlId::Theme => {
+                if self.theme.select(index) {
+                    theme_choice::preview(&self.theme.current_id(), cx);
+                }
+                self.theme_scroll.scroll_to_item(self.theme.cursor);
+            }
+            _ => {
+                self.font_cursor = index;
+                self.font_scroll.scroll_to_item(index);
+            }
+        }
+        cx.stop_propagation();
         cx.notify();
     }
 
-    fn commit_font(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let family = &cx.global::<Ui>().settings.font_family;
-        self.font_cursor = font_index(&self.fonts, family);
-    }
-
-    fn font_type_ahead(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(index) = type_ahead(&mut self.font_type_ahead, &event.keystroke, &self.fonts) {
-            self.select_font(index, window, cx);
-        }
-    }
-
-    /// Commit a typed stepper value or a previewed theme before focus leaves
-    /// it. Tab and Shift-Tab call this explicitly; the focus-out listeners cover
-    /// a click elsewhere.
+    /// Commit a typed stepper value and close an open menu before focus leaves
+    /// a control. Tab and Shift-Tab call this explicitly; the focus-out
+    /// listeners cover a click elsewhere.
     fn commit_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(window, cx);
         match self.focused_control(window) {
-            Some(ControlId::Theme) => self.commit_theme(window, cx),
             Some(ControlId::FontSize) => self.commit_stepper(ControlId::FontSize, window, cx),
             Some(ControlId::WindowWidth) => self.commit_stepper(ControlId::WindowWidth, window, cx),
             Some(ControlId::WindowHeight) => self.commit_stepper(ControlId::WindowHeight, window, cx),
@@ -765,9 +875,52 @@ impl SettingsWindow {
         }
     }
 
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu.is_some() {
+            self.close_menu(window, cx);
+        } else {
+            self.close(window, cx);
+        }
+    }
+
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_focused(window, cx);
         window.remove_window();
+    }
+}
+
+impl SettingsWindow {
+    /// A drop-down row. The closed button shows the saved value; the open menu
+    /// highlights `cursor`.
+    #[allow(clippy::too_many_arguments)]
+    fn dropdown(
+        &self,
+        id: ControlId,
+        options: &[String],
+        cursor: usize,
+        scroll: &ScrollHandle,
+        window: &Window,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let settings = &cx.global::<Ui>().settings;
+        let saved = match id {
+            ControlId::Theme => {
+                (0..self.theme.entries.len()).find(|i| self.theme.id(*i) == settings.theme).unwrap_or(0)
+            }
+            _ => font_index(&self.fonts, &settings.font_family),
+        };
+        let menu = (self.menu == Some(id)).then(|| controls::Menu {
+            cursor,
+            scroll,
+            dismiss: callback(cx, move |this, window, cx| {
+                this.close_menu(window, cx);
+                this.dismissed_by_mouse = Some(id);
+            }),
+        });
+        let toggle = callback(cx, move |this, window, cx| this.toggle_menu(id, window, cx));
+        let pick = select_callback(cx, move |this, index, window, cx| this.pick(id, index, window, cx));
+        controls::dropdown(self.meta(id, cx), options, saved, menu, self.style(id, window, theme), toggle, pick)
     }
 }
 
@@ -837,10 +990,13 @@ impl Render for SettingsWindow {
         let settings = ui.settings.clone();
         let broken = ui.settings_error();
 
-        if !self.is_focused(ControlId::Theme, window) {
+        if self.menu.is_some() && self.focused_control(window) != self.menu {
+            self.close_menu(window, cx);
+        }
+        if self.menu != Some(ControlId::Theme) {
             self.theme.sync_to(&settings.theme);
         }
-        if !self.is_focused(ControlId::FontFamily, window) {
+        if self.menu != Some(ControlId::FontFamily) {
             self.font_cursor = font_index(&self.fonts, &settings.font_family);
         }
         for id in [ControlId::FontSize, ControlId::WindowWidth, ControlId::WindowHeight] {
@@ -852,16 +1008,9 @@ impl Render for SettingsWindow {
         }
 
         let theme_labels: Vec<String> = (0..self.theme.entries.len()).map(|i| self.theme.label(i)).collect();
-        let theme_select = select_callback(cx, |this, index, window, cx| this.select_theme(index, window, cx));
-        let theme_row = controls::choice_list(
-            self.meta(ControlId::Theme, cx),
-            &theme_labels,
-            self.theme.cursor,
-            self.style(ControlId::Theme, window, &theme),
-            &self.theme_scroll,
-            theme_select,
-        )
-        .on_key_down(cx.listener(|this, event, _, cx| this.theme_type_ahead(event, cx)));
+        let theme_row = self
+            .dropdown(ControlId::Theme, &theme_labels, self.theme.cursor, &self.theme_scroll, window, &theme, cx)
+            .on_key_down(cx.listener(|this, event, _, cx| this.menu_type_ahead(ControlId::Theme, event, cx)));
 
         let tiles = [AppIcon::Refined, AppIcon::Sun, AppIcon::Graphite, AppIcon::Bone]
             .map(|icon| controls::Tile { label: app_icon_label(icon), image: app_icon_image(icon) });
@@ -874,16 +1023,9 @@ impl Render for SettingsWindow {
             app_icon_select,
         );
 
-        let font_select = select_callback(cx, |this, index, window, cx| this.select_font(index, window, cx));
-        let font_row = controls::choice_list(
-            self.meta(ControlId::FontFamily, cx),
-            &self.fonts,
-            self.font_cursor,
-            self.style(ControlId::FontFamily, window, &theme),
-            &self.font_scroll,
-            font_select,
-        )
-        .on_key_down(cx.listener(|this, event, window, cx| this.font_type_ahead(event, window, cx)));
+        let font_row = self
+            .dropdown(ControlId::FontFamily, &self.fonts, self.font_cursor, &self.font_scroll, window, &theme, cx)
+            .on_key_down(cx.listener(|this, event, _, cx| this.menu_type_ahead(ControlId::FontFamily, event, cx)));
 
         let font_size_row = controls::stepper(
             self.meta(ControlId::FontSize, cx),
@@ -1094,6 +1236,7 @@ impl Render for SettingsWindow {
             .aria_label("Settings")
             .key_context("Settings")
             .track_focus(&self.focus)
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.dismissed_by_mouse = None))
             .on_action(cx.listener(|this, _: &Activate, window, cx| this.activate(window, cx)))
             .on_action(cx.listener(|this, _: &Left, window, cx| this.move_horizontal(-1, window, cx)))
             .on_action(cx.listener(|this, _: &Right, window, cx| this.move_horizontal(1, window, cx)))
@@ -1113,6 +1256,7 @@ impl Render for SettingsWindow {
                 this.scroll_to_focused(window);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))
             .on_action(cx.listener(|this, _: &CloseSettings, window, cx| this.close(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 window.activate_window();
@@ -1512,10 +1656,8 @@ mod tests {
         wait_for(&vcx, "font_size = 20.0");
     }
 
-    #[gpui::test]
-    fn theme_list_previews_and_commits_on_leaving(cx: &mut TestAppContext) {
-        let (view, mut vcx) = open_settings(cx);
-        view.update(&mut vcx, |view, cx| {
+    fn set_two_themes(view: &Entity<SettingsWindow>, vcx: &mut VisualTestContext) {
+        view.update(vcx, |view, cx| {
             view.set_theme_entries_for_tests(
                 vec![
                     ThemeInfo { id: "dark-one".into(), name: "Dark One".into(), variant: Variant::Dark },
@@ -1526,38 +1668,143 @@ mod tests {
             cx.notify();
         });
         vcx.run_until_parked();
+    }
+
+    fn menu(view: &Entity<SettingsWindow>, vcx: &VisualTestContext) -> Option<ControlId> {
+        view.read_with(vcx, |view, _| view.menu)
+    }
+
+    fn preview(vcx: &VisualTestContext) -> Option<String> {
+        vcx.read_global::<Ui, _>(|ui, _| ui.preview_theme.clone())
+    }
+
+    fn saved_theme(vcx: &VisualTestContext) -> String {
+        vcx.read_global::<Ui, _>(|ui, _| ui.settings.theme.clone())
+    }
+
+    #[gpui::test]
+    fn theme_dropdown_previews_keeps_on_return_and_reverts_on_escape(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        set_two_themes(&view, &mut vcx);
         focus_control(&view, &mut vcx, ControlId::Theme);
+
+        vcx.simulate_keystrokes("down");
+        assert_eq!(menu(&view, &vcx), Some(ControlId::Theme), "↓ opens the menu");
+        assert_eq!(state(&view, &vcx, ControlId::Theme).selected, Some(0), "opening does not move");
+        assert_eq!(preview(&vcx), None);
+
         vcx.simulate_keystrokes("down");
         assert_eq!(state(&view, &vcx, ControlId::Theme).selected, Some(1), "the cursor moved");
-        assert_eq!(
-            vcx.read_global::<Ui, _>(|ui, _| ui.preview_theme.clone()),
-            Some("dark-one".to_owned()),
-            "moving previews"
-        );
-        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.theme.clone()), "system", "not committed yet");
-        vcx.simulate_keystrokes("tab");
-        draw(&mut vcx);
-        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.theme.clone()), "dark-one", "leaving commits");
+        assert_eq!(preview(&vcx), Some("dark-one".to_owned()), "moving previews");
+        assert_eq!(saved_theme(&vcx), "system", "not kept yet");
+
+        vcx.simulate_keystrokes("escape");
+        assert_eq!(menu(&view, &vcx), None, "Esc closes the menu");
+        assert_eq!(preview(&vcx), None, "Esc reverts the preview");
+        assert_eq!(state(&view, &vcx, ControlId::Theme).selected, Some(0));
+        assert_eq!(saved_theme(&vcx), "system");
+        let open = cx.update(|cx| cx.windows().iter().any(|handle| handle.downcast::<SettingsWindow>().is_some()));
+        assert!(open, "the first Esc only closes the menu");
+
+        vcx.simulate_keystrokes("space down enter");
+        assert_eq!(menu(&view, &vcx), None, "Return closes the menu");
+        assert_eq!(saved_theme(&vcx), "dark-one", "Return keeps the entry");
+        assert_eq!(preview(&vcx), None);
         wait_for(&vcx, "theme = \"dark-one\"");
     }
 
     #[gpui::test]
-    fn font_list_selects_and_types(cx: &mut TestAppContext) {
+    fn leaving_an_open_theme_menu_reverts_it(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        set_two_themes(&view, &mut vcx);
+        focus_control(&view, &mut vcx, ControlId::Theme);
+        vcx.simulate_keystrokes("enter down");
+        assert_eq!(preview(&vcx), Some("dark-one".to_owned()));
+        vcx.simulate_keystrokes("tab");
+        draw(&mut vcx);
+        assert_eq!(menu(&view, &vcx), None);
+        assert_eq!(preview(&vcx), None, "Tab away drops the preview");
+        assert_eq!(saved_theme(&vcx), "system");
+
+        focus_control(&view, &mut vcx, ControlId::Theme);
+        vcx.simulate_keystrokes("enter down cmd-w");
+        cx.run_until_parked();
+        assert_eq!(preview(&vcx), None, "closing the window drops the preview");
+        assert_eq!(saved_theme(&vcx), "system");
+    }
+
+    #[gpui::test]
+    fn font_dropdown_writes_only_when_kept(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
         view.update(&mut vcx, |view, cx| {
             view.set_fonts_for_tests(vec!["System".into(), "Menlo".into(), "Zed Mono".into()], "");
             cx.notify();
         });
         vcx.run_until_parked();
+        let font = |vcx: &VisualTestContext| vcx.read_global::<Ui, _>(|ui, _| ui.settings.font_family.clone());
         focus_control(&view, &mut vcx, ControlId::FontFamily);
-        vcx.simulate_keystrokes("down");
+
+        vcx.simulate_keystrokes("enter down");
+        assert_eq!(menu(&view, &vcx), Some(ControlId::FontFamily));
         assert_eq!(state(&view, &vcx, ControlId::FontFamily).selected, Some(1));
-        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.font_family.clone()), "Menlo");
+        assert_eq!(font(&vcx), "", "moving in the menu does not write");
+        vcx.simulate_keystrokes("enter");
+        assert_eq!(font(&vcx), "Menlo");
         wait_for(&vcx, "font_family = \"Menlo\"");
+
         vcx.simulate_input("zed");
+        assert_eq!(menu(&view, &vcx), Some(ControlId::FontFamily), "typing opens the menu");
         assert_eq!(state(&view, &vcx, ControlId::FontFamily).selected, Some(2));
-        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.font_family.clone()), "Zed Mono");
+        assert_eq!(font(&vcx), "Menlo", "typing does not write");
+        vcx.simulate_keystrokes("enter");
+        assert_eq!(font(&vcx), "Zed Mono");
         wait_for(&vcx, "font_family = \"Zed Mono\"");
+    }
+
+    #[gpui::test]
+    fn theme_dropdown_by_mouse(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        set_two_themes(&view, &mut vcx);
+        let button = vcx.debug_bounds("settings-theme-control").expect("theme button").center();
+        let click = |vcx: &mut VisualTestContext, at| {
+            vcx.simulate_click(at, gpui::Modifiers::none());
+            draw(vcx);
+        };
+
+        click(&mut vcx, button);
+        assert_eq!(menu(&view, &vcx), Some(ControlId::Theme), "a click opens the menu");
+        click(&mut vcx, button);
+        assert_eq!(menu(&view, &vcx), None, "a second click on the button closes it");
+
+        click(&mut vcx, button);
+        let elsewhere = vcx.debug_bounds("settings-keymap-control").expect("keymap").center();
+        click(&mut vcx, elsewhere);
+        assert_eq!(menu(&view, &vcx), None, "a click outside closes it");
+        assert_eq!(saved_theme(&vcx), "system");
+
+        click(&mut vcx, button);
+        let menu_bounds = vcx.debug_bounds("settings-theme-menu").expect("menu");
+        // Three equal rows: System, Dark One, Light One.
+        let row = menu_bounds.size.height / 3.;
+        let second = gpui::point(menu_bounds.center().x, menu_bounds.top() + row * 1.5);
+        click(&mut vcx, second);
+        assert_eq!(menu(&view, &vcx), None);
+        assert_eq!(saved_theme(&vcx), "dark-one", "a click on an entry keeps it");
+    }
+
+    #[gpui::test]
+    fn an_open_menu_floats_over_the_page(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        set_two_themes(&view, &mut vcx);
+        draw(&mut vcx);
+        let below = vcx.debug_bounds("settings-app-icon-row").expect("app icon row");
+        focus_control(&view, &mut vcx, ControlId::Theme);
+        vcx.simulate_keystrokes("space");
+        draw(&mut vcx);
+        let menu = vcx.debug_bounds("settings-theme-menu").expect("the open menu draws");
+        let button = vcx.debug_bounds("settings-theme-control").expect("theme button");
+        assert!(menu.top() >= button.bottom(), "the menu opens under its button");
+        assert_eq!(vcx.debug_bounds("settings-app-icon-row"), Some(below), "opening it moves nothing on the page");
     }
 
     #[gpui::test]

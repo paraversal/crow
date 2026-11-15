@@ -1,5 +1,5 @@
 //! Shared settings controls: a switch, segmented choices, image tiles, a numeric
-//! stepper and a type-to-select list. Every control draws with theme roles only,
+//! stepper and a type-to-select drop-down. Every control draws with theme roles only,
 //! carries a visible label that is also its aria label, and draws the sidebar's
 //! inset cursor ring when focused (so focus never resizes it).
 
@@ -8,9 +8,10 @@ use std::rc::Rc;
 use crow_theme::Theme;
 use gpui::{
     App, Div, Entity, FocusHandle, FontWeight, Image, IntoElement, Role, ScrollHandle, SharedString, Toggled, Window,
-    div, img, prelude::*, px,
+    anchored, deferred, div, img, prelude::*, px,
 };
 
+use crate::icons::{Glyph, glyph};
 use crate::style::{active_selection, color, cursor_ring, inactive_selection};
 use crate::text_input::TextInput;
 
@@ -224,61 +225,109 @@ pub fn stepper(meta: ControlMeta, input: &Entity<TextInput>, style: ControlStyle
     row(meta, theme, field)
 }
 
-/// A scrollable list of named choices. ↑ ↓ move; typing selects by prefix. The
-/// caller binds the keys, owns the cursor and decides when to preview or commit.
-pub fn choice_list(
+/// An open drop-down's menu: the highlighted entry, its scroll position and
+/// what a click outside the menu does.
+pub struct Menu<'a> {
+    pub cursor: usize,
+    pub scroll: &'a ScrollHandle,
+    pub dismiss: Activate,
+}
+
+/// A pop-up button showing the current choice; when `menu` is given, its list
+/// opens under it. The caller binds the keys (Space, Return, ↑ ↓ open it; ↑ ↓
+/// move; Return keeps; Esc reverts) and owns the value and the cursor.
+pub fn dropdown(
     meta: ControlMeta,
     options: &[String],
     selected: usize,
+    menu: Option<Menu>,
     style: ControlStyle,
-    scroll: &ScrollHandle,
+    toggle: Activate,
     select: Select,
 ) -> gpui::Stateful<Div> {
     let ControlStyle { focus, focused, theme } = style;
     let control_id = meta.id;
-    let list = div()
+    let value = options.get(selected).cloned().unwrap_or_default();
+    let mut button = div()
         .id(control_id)
         .debug_selector(move || format!("{control_id}-control"))
-        .role(Role::ListBox)
+        .role(Role::ComboBox)
         .aria_label(meta.label)
+        .aria_value(value.clone())
+        .aria_expanded(menu.is_some())
         .track_focus(focus)
-        .track_scroll(scroll)
-        .max_h(px(160.))
-        .overflow_y_scroll()
+        .w(px(DROPDOWN_WIDTH))
+        .h(px(26.))
+        .px(px(10.))
         .flex()
-        .flex_col()
-        .gap(px(1.))
-        .p(px(2.))
-        .rounded_md()
+        .items_center()
+        .justify_between()
+        .gap(px(8.))
+        .rounded(px(6.))
         .border_1()
         .border_color(color(theme.role("border")))
-        .when(focused, |list| list.shadow(cursor_ring(theme)))
-        .when(!meta.enabled, |list| list.opacity(0.45))
-        .children(options.iter().enumerate().map(|(index, label)| {
-            let select = select.clone();
-            let mut option = div()
-                .id((meta.id, index))
-                .role(Role::ListBoxOption)
-                .aria_label(label.clone())
-                .aria_selected(index == selected)
-                .aria_position_in_set(index + 1)
-                .aria_size_of_set(options.len())
-                .px_2()
-                .py(px(3.))
-                .rounded_md()
-                .text_size(px(12.))
-                .text_color(color(theme.role("fg")))
-                .when(index == selected, |option| {
-                    option.bg(if focused { active_selection(theme) } else { inactive_selection(theme) })
-                })
-                .child(label.clone());
-            if meta.enabled {
-                option = option.cursor_pointer().on_click(move |_, window, cx| select(index, window, cx));
-            }
-            option
-        }));
-    row(meta, theme, list)
+        .bg(color(theme.role("surface")))
+        .text_size(px(12.))
+        .text_color(color(theme.role("fg")))
+        .when(focused, |button| button.shadow(cursor_ring(theme)))
+        .when(!meta.enabled, |button| button.opacity(0.45))
+        .child(div().flex_1().min_w_0().truncate().child(value))
+        .child(glyph(Glyph::ChevronDown, 12., "fg-muted", theme));
+    if meta.enabled {
+        button = button
+            .cursor_pointer()
+            .hover(|style| style.bg(color(theme.role("surface-raised"))))
+            .on_click(move |_, window, cx| toggle(window, cx));
+    }
+    let popup = menu.filter(|_| meta.enabled).map(|menu| {
+        let Menu { cursor, scroll, dismiss } = menu;
+        let list = div()
+            .id((control_id, u64::MAX))
+            .debug_selector(move || format!("{control_id}-menu"))
+            .role(Role::ListBox)
+            .aria_label(meta.label)
+            .occlude()
+            .track_scroll(scroll)
+            .overflow_y_scroll()
+            .w(px(DROPDOWN_WIDTH))
+            .max_h(px(280.))
+            .mt(px(4.))
+            .p(px(4.))
+            .flex()
+            .flex_col()
+            .rounded(px(6.))
+            .bg(color(theme.role("surface-raised")))
+            .shadow_lg()
+            .on_mouse_down_out(move |_, window, cx| dismiss(window, cx))
+            .children(options.iter().enumerate().map(|(index, label)| {
+                let select = select.clone();
+                div()
+                    .id((control_id, index))
+                    .role(Role::ListBoxOption)
+                    .aria_label(label.clone())
+                    .aria_selected(index == cursor)
+                    .aria_position_in_set(index + 1)
+                    .aria_size_of_set(options.len())
+                    .px_2()
+                    .py(px(3.))
+                    .rounded(px(4.))
+                    .text_size(px(12.))
+                    .text_color(color(theme.role("fg")))
+                    .truncate()
+                    .cursor_pointer()
+                    .when(index == cursor, |option| option.bg(active_selection(theme)))
+                    .when(index != cursor, |option| option.hover(|style| style.bg(inactive_selection(theme))))
+                    .on_click(move |_, window, cx| select(index, window, cx))
+                    .child(label.clone())
+            }));
+        // An absolute element sits at its parent's origin, so the anchor is an
+        // empty in-flow div right under the button.
+        div().h_0().child(deferred(anchored().snap_to_window_with_margin(px(8.)).child(list)).with_priority(1))
+    });
+    row(meta, theme, div().flex().flex_col().child(button).children(popup))
 }
+
+const DROPDOWN_WIDTH: f32 = 260.;
 
 /// A standard button with a focus ring. Space/Return activate it through the
 /// caller's key handler; a click does the same.
