@@ -129,11 +129,12 @@ enum ControlId {
     OpenSidebarToml,
     OpenViewsToml,
     OpenExcludeToml,
+    EditSettingsBanner,
 }
 
 impl ControlId {
     /// Reading order: the order Tab visits and the order the page draws.
-    const ALL: [ControlId; 20] = [
+    const ALL: [ControlId; 21] = [
         ControlId::Theme,
         ControlId::AppIcon,
         ControlId::FontFamily,
@@ -154,6 +155,7 @@ impl ControlId {
         ControlId::OpenSidebarToml,
         ControlId::OpenViewsToml,
         ControlId::OpenExcludeToml,
+        ControlId::EditSettingsBanner,
     ];
 
     fn key(self) -> &'static str {
@@ -178,6 +180,7 @@ impl ControlId {
             ControlId::OpenSidebarToml => "settings-open-sidebar",
             ControlId::OpenViewsToml => "settings-open-views",
             ControlId::OpenExcludeToml => "settings-open-exclude",
+            ControlId::EditSettingsBanner => "settings-edit-file-banner",
         }
     }
 
@@ -203,6 +206,7 @@ impl ControlId {
             ControlId::OpenSidebarToml => "sidebar.toml",
             ControlId::OpenViewsToml => "views.toml",
             ControlId::OpenExcludeToml => "exclude.toml",
+            ControlId::EditSettingsBanner => "Edit settings.toml…",
         }
     }
 
@@ -222,7 +226,8 @@ impl ControlId {
             | ControlId::ShowConfig
             | ControlId::OpenSidebarToml
             | ControlId::OpenViewsToml
-            | ControlId::OpenExcludeToml => Role::Button,
+            | ControlId::OpenExcludeToml
+            | ControlId::EditSettingsBanner => Role::Button,
         }
     }
 
@@ -265,7 +270,10 @@ impl ControlId {
             ControlId::WindowWidth | ControlId::WindowHeight => "600 to 4000 points. ↑↓ changes it.",
             ControlId::EditSettings => "Open settings.toml in its default app.",
             ControlId::ShowConfig => "Open ~/.config/crow in Finder.",
-            ControlId::OpenSidebarToml | ControlId::OpenViewsToml | ControlId::OpenExcludeToml => return None,
+            ControlId::OpenSidebarToml
+            | ControlId::OpenViewsToml
+            | ControlId::OpenExcludeToml
+            | ControlId::EditSettingsBanner => return None,
         };
         Some(text.into())
     }
@@ -275,6 +283,7 @@ impl ControlId {
     fn enabled(self, cx: &App) -> bool {
         match self {
             ControlId::EditSettings
+            | ControlId::EditSettingsBanner
             | ControlId::ShowConfig
             | ControlId::OpenSidebarToml
             | ControlId::OpenViewsToml
@@ -353,7 +362,8 @@ impl SettingsWindow {
                 ControlId::WindowHeight => window_height.read(cx).focus_handle(cx),
                 _ => cx.focus_handle(),
             };
-            handles.insert(id, handle.tab_stop(true).tab_index(index as isize));
+            let tab_index = if id == ControlId::EditSettingsBanner { -1 } else { index as isize };
+            handles.insert(id, handle.tab_stop(true).tab_index(tab_index));
         }
 
         let entity = cx.entity();
@@ -434,7 +444,7 @@ impl SettingsWindow {
     }
 
     fn first_focus(&self, cx: &App) -> FocusHandle {
-        let id = if ControlId::Theme.enabled(cx) { ControlId::Theme } else { ControlId::EditSettings };
+        let id = if ControlId::Theme.enabled(cx) { ControlId::Theme } else { ControlId::EditSettingsBanner };
         self.handle(id)
     }
 
@@ -553,7 +563,7 @@ impl SettingsWindow {
                 self.toggle_bool(id, cx)
             }
             ControlId::PlaySound => crate::feedback::play(Event::Trash, cx),
-            ControlId::EditSettings => ui::edit_settings_file(cx),
+            ControlId::EditSettings | ControlId::EditSettingsBanner => ui::edit_settings_file(cx),
             ControlId::ShowConfig => ui::open_config_folder(cx),
             ControlId::OpenSidebarToml => ui::open_config_file("sidebar.toml", cx),
             ControlId::OpenViewsToml => ui::open_config_file("views.toml", cx),
@@ -828,7 +838,8 @@ impl Render for SettingsWindow {
             self.sync_stepper(id, window, cx);
         }
         for id in ControlId::ALL {
-            self.handle(id).tab_stop(id.enabled(cx));
+            let tab_stop = if id == ControlId::EditSettingsBanner { broken.is_some() } else { id.enabled(cx) };
+            self.handle(id).tab_stop(tab_stop);
         }
 
         let theme_labels: Vec<String> = (0..self.theme.entries.len()).map(|i| self.theme.label(i)).collect();
@@ -974,7 +985,7 @@ impl Render for SettingsWindow {
                 "Edit settings.toml…",
                 false,
                 true,
-                self.style(ControlId::EditSettings, window, &theme),
+                self.style(ControlId::EditSettingsBanner, window, &theme),
                 callback(cx, |_, _, cx| ui::edit_settings_file(cx)),
             );
             div()
@@ -1575,6 +1586,12 @@ mod tests {
         assert!(vcx.read_global::<Ui, _>(|ui, _| ui.settings_error().is_some()));
         assert!(!state(&view, &vcx, ControlId::Theme).enabled, "writing controls are disabled");
         assert!(state(&view, &vcx, ControlId::EditSettings).enabled, "the file button stays usable");
+        assert!(state(&view, &vcx, ControlId::EditSettingsBanner).enabled, "the banner button is usable");
+        assert_eq!(
+            view.read_with(&vcx, |view, cx| view.first_focus(cx)),
+            view.read_with(&vcx, |view, _| view.handle(ControlId::EditSettingsBanner)),
+            "focus starts at the banner's Edit button while the file is broken"
+        );
         std::fs::write(dir.join("settings.toml"), "motion = \"auto\"\n").expect("fix file");
         vcx.update(|_, cx| ui::reload_config(cx));
         vcx.run_until_parked();
