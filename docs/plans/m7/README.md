@@ -18,6 +18,8 @@ Each piece is self-contained: its own branch from `main`, progress file next to 
 | [H7](h7-accessibility.md) | Real disabled state for VoiceOver (GPUI patch for AccessKit `Disabled`), fuzzer a11y invariant, VoiceOver pass | H1 for the invariant | `m7-h7-a11y` |
 | [H8](h8-leftovers.md) | Small leftovers from earlier critiques (hint text, rounding, palette `~`, shortcut mismatch) | — | `m7-h8-leftovers` |
 
+**Before M7:** M6.5, the settings window ([`../m6.5-settings.md`](../m6.5-settings.md)), lands first; every M7 piece branches from a `main` that has it.
+
 **Suggested order:** H1 → H2 → H4 (first batch) → H3 → H4 (second batch) → H5 → H7 → H6 → H8.
 H5, H6 and H8 don't need the fuzzer and can run any time, one at a time (they all touch `window.rs`/`pane.rs`; never two writers at once). H1 comes first because its stubs and invariants make every later piece safer to test.
 
@@ -37,7 +39,8 @@ Later pieces use these names. Whichever piece lands first builds the shared part
 | Findings list | [`findings.md`](findings.md) (table; H1–H3 append, H4 fixes) | this plan (empty) |
 
 ## Not in M7 (and where it goes)
-- In-app settings page, icon packs, public Rhai plugin API, git plugin / Projects: Phase 2 (spec "MVP scope", "Later").
+- The in-app settings window: M6.5 ([`../m6.5-settings.md`](../m6.5-settings.md)), merged before M7 starts so H1 and H7 cover it.
+- Icon packs, public Rhai plugin API, git plugin / Projects: Phase 2 (spec "MVP scope", "Later").
 - Folder sizes: already planned, `docs/plans/folder-sizes.md` (D2); after M7 unless the user says otherwise.
 - Context menu for search results and the sidebar (`done/context-menu.progress.md` Q3): a feature; separate plan if wanted.
 - Splitting `window.rs` (9.4k lines, about 6k of tests; palette view still inside, U7 Q13): ask in H1 Q5 whether the fuzzer's module is the moment to move tests out.
