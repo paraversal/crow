@@ -1,5 +1,5 @@
 # H1 action fuzzer progress
-Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: Ready for critique
+Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -11,6 +11,9 @@ Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: Ready f
 | I5 First run | done | `fuzz_smoke` seeds 1–3 × 30 steps on a 40-file tree: 3.56 s. Findings #1–#3 fixed in H1 (user approved), #4 open for H4. First long run: 36.8 min, 6 seeds × 3000 steps, no violation (the shell backend killed the process at its 40-min cap, not the fuzzer). A second run added 5 seeds × 1000 steps, no violation, before the shell backend timed out. |
 
 ## Questions
+- Q9 (critique, asked 2026-11-15): should fuzzed right-clicks pick a random menu item (so Trash, Duplicate, Open… get fuzzed) instead of always dismissing? → pending
+- Q10 (critique, asked 2026-11-15): keep the 25-key `NoAction` list in `Sheet`, add a guard test, or replace it with one root fix? → pending
+- Q11 (critique, asked 2026-11-15): the M7 index says H1 covers the Settings window; do it in H1 or move it to H2/H7? → pending
 - Q8 (asked 2026-11-15): `fuzz_smoke` seed 1 finds a real focus bug (theme picker stays open, Tab moves focus behind it). Fix in H1 or record for H4 and ignore seed 1? → answer: **fix now**. Fixed in H1 with `tab_stays_in_the_theme_picker`; the same modal-focus bug in the Why sheet (arrows/Tab) got `why_sheet_keeps_focus_on_arrows_and_tab`.
 - Q1 (asked 2026-11-15): shrinker hand-rolled or `proptest`? → answer: **hand-rolled** delta debugging; `rand` + `rand_chacha`.
 - Q2 (asked 2026-11-15): `#[cfg(test)]` only or a `fuzz` cargo feature? → answer: **`fuzz` feature**; code under `#[cfg(any(test, feature = "fuzz"))]`.
@@ -44,6 +47,7 @@ Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: Ready f
 
 ## Hand checks
 - [ ] Effects, in the bundle: Return on a file opens it; Space Quick Looks; Show in Finder reveals; Copy Path pastes; the context menu opens and its items work; sounds play (if on). Same as before H1.
+- [ ] Sheets (critique): with the theme picker (⌥⌘T), the Why sheet (⌘J) and a conflict sheet open, Tab, the arrows, ⌘K, ⌘T, ⌘W and ⌘[ do nothing behind the sheet; Return/Esc still confirm/cancel; the picker's ↑/↓ still move.
 - [ ] Fuzzer: `CROW_FUZZ_MINUTES=2 cargo test -p crow-app fuzz_long -- --ignored --nocapture` launches no app, plays no sound, leaves the user's Trash and pasteboard alone.
 
 ## Found along the way
@@ -54,6 +58,29 @@ Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: Ready f
 - `bottom_bar::open_config` had a `#[cfg(test)]` recorder (`OPENED`); replaced by the global seam.
 - The Why sheet's buttons had ids but no debug selectors; added them.
 - The Settings window is a separate `SettingsWindow` entity; the fuzzer opens it with ⌘, but does not drive or check it. Its own tests cover it; H1 leaves it there.
+
+## Critique
+Critic session: 2026-11-15 · Base: main @ 50dd5a5 · Head reviewed: 7fa42be
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | The `fuzz` feature (Q2, for H3's `crow --fuzz`) did not compile outside tests: the widened `Pane` impl called test-only `Folder::names`/`selected_names`, the focus invariant called test-only search focus handles | `pane.rs:3087`, `search.rs:781` | rules / code | fix | fixed (`34b6b39`); dead code allowed under the feature until H3 adds the entry point |
+| C2 | The shrinker counted any failure or panic as "still fails", so a shrink could slip to a different bug | `window/tests.rs` `shrink` | code | fix | fixed (`25bf5a6`): same check only |
+| C3 | Under the fuzzer a right-click never closed its menu: `RecordingEffects` answers only when scripted, the runner never scripted, so `Pane::context_menu`/`Sidebar::menu` stayed set (the sidebar row keeps its outline) — a state the app can't reach | `effects.rs` `show_context_menu`, `sidebar.rs:992` | code | fix | fixed (`25bf5a6`): runner answers "dismissed". Fuzzing the menu's items is Q9 |
+| C4 | Rename invariant compared `is_renaming()` with `rename_text().is_some()`, both reads of `self.renaming`; it could never fire | `window.rs` `check_invariants` | code | fix | fixed (`25bf5a6`): removed, documented as structural |
+| C5 | A failure printed only after shrinking (up to 300 replays of up to 3000 steps); the CI job's 45-min timeout could kill it before the summary got the failing step | `fuzz_run` | code | fix | fixed (`25bf5a6`): printed before shrinking |
+| C6 | findings #4's shrunk script names `sidebar-5`, which the fuzz sidebar (2 favorites) doesn't have; replaying it finds nothing | `findings.md` | record | fix | row annotated (`25bf5a6`) |
+| C7 | 25 `NoAction` bindings in `Sheet` mirror every `Crow`-context key; complete today (only `cmd-m` and Esc differ) but any new `Crow` binding leaks behind sheets again, and it also blocks ⌘N/⌘, while a sheet is open. Found and fixed beyond Q8's scope (Q8 approved the picker Tab fix) | `actions.rs:149-156, 227-254` | code sense / UX | ask | Q10 |
+| C8 | The M7 index says H1 "covers the browser windows and the Settings window"; H1 doesn't drive or check the Settings window | `m7/README.md` table, Found along the way | plan | ask | Q11 |
+| C9 | `cmd-n` opens a second window on `$HOME`; the runner only drives the first window (`VisualTestContext` targets it), so the second is opened and checked but never fuzzed. Documented in `testing.md` | runner | plan | note | left: Q3 met literally; H2/H3 can drive both |
+| C10 | `fuzz::logs` and `fuzz::settle` are `cfg(test)`; H3's binary will need its own settle and log hook, and `listing_violations` reads disk on the calling thread (main thread in H3) | `fuzz.rs`, `pane.rs` | code | note | left for H3 |
+| C11 | Overlay exclusivity (palette + picker) has no deliberate-break test, unlike the other checks (plan I3 asks for one per check) | `window/tests.rs` | plan | note | left: needs a test-only way to open both; small H4 item |
+| C12 | `check_all_windows` retries a listing mismatch with real `sleep`s (25 × 20 ms); bounded, so a stuck listing still fires, but not recorded as a workaround | `window/tests.rs` | rules | note | left: FSEvents runs on real time |
+| C13 | `fuzz_smoke` runs 3 × 30 steps, not the plan's 300 (33 s vs ~10 s budget); recorded as a Decision without asking | Decisions | plan | note | left; the suite now takes ~20 s for crow-app, so 300 steps would double it |
+
+Checks re-run: fmt ✓ · clippy ✓ (also `--features fuzz` ✓ after C1) · tests ✓ (crow-app 392 + 1 ignored; workspace all green) · bench not needed: no render or listing path changed (effects calls only)
+Looked at in the app: not driven. The user-visible changes are the sheet key blocks (covered by `tab_stays_in_the_theme_picker`, `why_sheet_keeps_focus_on_arrows_and_tab`) and the effects seam (unchanged behavior, needs a human: Quick Look, open, sounds, Finder). Both are in Hand checks.
+Verdict: pending answers to Q9–Q11.
 
 ## Log
 - 2026-11-15: read the plan, M7 index, testing docs, repo skill; surveyed every `Command::new`/`crow_macos::` call site; created the branch and this file.
