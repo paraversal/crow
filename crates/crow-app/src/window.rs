@@ -3211,6 +3211,11 @@ impl CrowWindow {
     ) -> Vec<crate::fuzz::Violation> {
         use crate::fuzz::Violation;
         let mut out = Vec::new();
+        // First: the runner reports only the first violation, and a refused
+        // operation outside the fuzz tree matters more than what follows from it.
+        for path in &cx.global::<crate::operations::Operations>().refused {
+            out.push(Violation::new("jail", format!("an operation tried to touch {}", path.display())));
+        }
         // A listing is only expected to match disk once loading and operations
         // have finished; the runner's Settle step waits for that.
         let busy = self.is_busy(cx);
@@ -3264,9 +3269,6 @@ impl CrowWindow {
             out.push(Violation::new("focus", format!("focus is outside the {surface} surface")));
         }
 
-        for path in &cx.global::<crate::operations::Operations>().refused {
-            out.push(Violation::new("jail", format!("an operation tried to touch {}", path.display())));
-        }
         if self.palette.is_some() && self.picker.is_some() {
             out.push(Violation::new("overlay", "the palette and the theme picker are both open"));
         }
