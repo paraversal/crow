@@ -26,6 +26,16 @@ pub enum Effective {
 }
 
 impl MotionMode {
+    /// The value in `settings.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            MotionMode::Auto => "auto",
+            MotionMode::Off => "off",
+            MotionMode::Low => "low",
+            MotionMode::Full => "full",
+        }
+    }
+
     pub fn resolve(self, reduce_motion: bool) -> Effective {
         match self {
             MotionMode::Auto if reduce_motion => Effective::Low,
@@ -53,6 +63,17 @@ pub enum SoundSet {
     /// Finder's sounds plus soft system ticks for move, new folder, undo, copy.
     #[default]
     Crow,
+}
+
+impl SoundSet {
+    /// The value in `settings.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            SoundSet::Off => "off",
+            SoundSet::Finder => "finder",
+            SoundSet::Crow => "crow",
+        }
+    }
 }
 
 /// What happened, for the sound table.
