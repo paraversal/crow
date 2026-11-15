@@ -79,6 +79,16 @@ pub enum KeymapLayer {
     Vim,
 }
 
+impl KeymapLayer {
+    /// The value in `settings.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            KeymapLayer::Finder => "finder",
+            KeymapLayer::Vim => "vim",
+        }
+    }
+}
+
 /// How a pane shows folders.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -97,6 +107,17 @@ pub enum HintsMode {
     Auto,
     Always,
     Off,
+}
+
+impl HintsMode {
+    /// The value in `settings.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            HintsMode::Auto => "auto",
+            HintsMode::Always => "always",
+            HintsMode::Off => "off",
+        }
+    }
 }
 
 /// Which of Crow's icons the Dock shows.
@@ -220,6 +241,30 @@ pub fn save_bool_setting(dir: &Path, key: &str, value: bool) -> Result<(), Strin
     save_value(dir, key, toml_edit::Value::from(value))
 }
 
+/// Set a numeric top-level key, keeping the rest of the file and its comments.
+/// Writes a float, so `font_size` keeps its `.0`.
+pub fn save_number_setting(dir: &Path, key: &str, value: f64) -> Result<(), String> {
+    save_value(dir, key, toml_edit::Value::from(value))
+}
+
+/// Set a numeric key in a table such as `[window]`, keeping the rest of the file
+/// and its comments. Writes an integer, so `width = 900` stays an integer.
+pub fn save_table_number(dir: &Path, table: &str, key: &str, value: i64) -> Result<(), String> {
+    crate::config::edit_toml(&dir.join("settings.toml"), DEFAULT_SETTINGS, |doc| {
+        let mut value = toml_edit::Value::from(value);
+        let table = doc
+            .entry(table)
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| format!("settings.toml: `{table}` is not a table"))?;
+        if let Some(old) = table.get(key).and_then(toml_edit::Item::as_value) {
+            *value.decor_mut() = old.decor().clone();
+        }
+        table[key] = toml_edit::Item::Value(value);
+        Ok(())
+    })
+}
+
 fn save_value(dir: &Path, key: &str, mut value: toml_edit::Value) -> Result<(), String> {
     crate::config::edit_toml(&dir.join("settings.toml"), DEFAULT_SETTINGS, |doc| {
         if let Some(old) = doc.get(key).and_then(toml_edit::Item::as_value) {
@@ -303,6 +348,51 @@ mod tests {
         assert!(!load_settings(&dir).unwrap().show_preview, "reloads as off");
         save_bool_setting(&dir, "show_preview", true).unwrap();
         assert!(load_settings(&dir).unwrap().show_preview);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saving_a_number_setting_keeps_comments_and_writes_a_float() {
+        let dir = temp_dir("save-number");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.toml"), "# mine\nfont_size = 13.0 # readable\nkeymap = \"vim\"\n").unwrap();
+        save_number_setting(&dir, "font_size", 15.0).unwrap();
+        let text = fs::read_to_string(dir.join("settings.toml")).unwrap();
+        assert!(text.starts_with("# mine\n"), "{text}");
+        assert!(text.contains("\nfont_size = 15.0 # readable\n"), "{text}");
+        assert!(text.contains("\nkeymap = \"vim\"\n"), "{text}");
+        assert_eq!(load_settings(&dir).unwrap().font_size, 15.0);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saving_a_table_number_keeps_comments_and_writes_an_integer() {
+        let dir = temp_dir("save-table-number");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("settings.toml"),
+            "# mine\n\n[window]\n# new windows\nwidth = 1200 # points\nheight = 760\n",
+        )
+        .unwrap();
+        save_table_number(&dir, "window", "width", 900).unwrap();
+        let text = fs::read_to_string(dir.join("settings.toml")).unwrap();
+        assert!(text.starts_with("# mine\n"), "{text}");
+        assert!(text.contains("\n[window]\n# new windows\nwidth = 900 # points\n"), "{text}");
+        assert!(text.contains("\nheight = 760\n"), "{text}");
+        assert!(!text.contains("width = 900.0"), "an integer stays an integer: {text}");
+        assert_eq!(load_settings(&dir).unwrap().window.width, 900);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saving_a_table_number_creates_the_table() {
+        let dir = temp_dir("save-table-new");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.toml"), "keymap = \"vim\"\n").unwrap();
+        save_table_number(&dir, "window", "height", 640).unwrap();
+        let text = fs::read_to_string(dir.join("settings.toml")).unwrap();
+        assert!(text.contains("\n[window]\nheight = 640\n"), "{text}");
+        assert_eq!(load_settings(&dir).unwrap().window.height, 640);
         fs::remove_dir_all(dir).ok();
     }
 

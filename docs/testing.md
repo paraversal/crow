@@ -40,7 +40,11 @@ strip's remaining width, the folder summary for a folder cursor and with no matc
 and search counts as announced. Shared chrome has its own tests: key text from the live keymap (including the
 Vim layer and the palette's old strings), keycap weights, tooltip text and a hover, the sheet scrim
 (closing outside, staying open inside), and the selection tint roles. Each test gets its own temp
-config folder.
+config folder. The settings window has its own tests: ⌘, opens one window and a second ⌘, focuses
+it, ⌘W/Esc close it, each control's keys and aria state, every setting writes only its line, the
+the theme drop-down previews while open, keeps on Return and reverts on Esc, Tab or ⌘W; the font drop-down writes only when kept; a click opens, closes and picks; the open menu floats over the page; a broken file disables
+the writing controls and fixing it clears them, external edits update the controls, the focus ring
+never resizes a control, Tab scrolls the page, and every control has a role and label.
 
 `crates/crow-core` tests the config models on their own: view layers and glob rules, `exclude.toml`
 defaults and validation, editing `views.toml` and `sidebar.toml` without losing comments, and
@@ -210,6 +214,23 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Live theme | Switch macOS light/dark, or edit a scheme in the theme index: colors fade over about half a second (faster with Reduce Motion). |
 | VoiceOver | Cmd-F5: the band reads as a toolbar; the field announces "Search <folder>, Command F"; Done reads "Done, close search, Escape"; rows read name, details and "n of N"; the count reads "18 items in <folder>"; the filter count is announced once typing pauses; the search footer reads once when a search settles; a tip is read once and "Got it" is a button; an error reads "Error: …" once and Open and Cancel read as buttons; every sheet reads its title. |
 | Privacy prompts | Open Desktop, Documents, Downloads: the prompt names Crow. |
+
+### Settings window (M6.5)
+
+| Check | How |
+| --- | --- |
+| Window | ⌘, (or Crow ▸ Settings…) opens one titled Settings window; a second ⌘, brings it forward instead of opening another. ⌘W and Esc close it. With it open, a browser window's ⌘, still works. It is not a tab and reopening Crow does not reopen it. |
+| Appearance, dark and light | FireBox and Solarized Light: the Theme drop-down opens (click, Space, Return or ↓) a menu over the page, with no scroll box on the page itself: System then the index's themes, dark before light; ↓/↑ previews each in every window, Return or a click keeps it, Esc or a click outside reverts. The menu sits under its button and stays inside the window. The four app-icon tiles show at 64 px; the Dock switches when one is chosen. The Font drop-down starts with System and lists installed families (the menu scrolls); typing opens it at the match; nothing changes until Return or a click. The font-size stepper goes 10–24 with ↑↓ and typed digits. |
+| Behaviour | Keymap Finder/Vim, key hints Auto/Always/Off, Show hidden files, Show preview, Folders keep their own view, Remember recent commands: each changes at once and writes only its line. |
+| Motion & sound | Motion Auto/Off/Low/Full; Auto's line says which mode it resolves to now and whether Reduce Motion is on. Sounds Crow/Finder/Off; Play plays the trash sound in the chosen set. |
+| New windows | Width and height steppers, 600–4000; a new window (⌘N) opens at the chosen size. |
+| Files | Edit settings.toml… opens the file (with the old failure message when no app owns `.toml`); Show config folder in Finder opens `~/.config/crow`; the `sidebar.toml`, `views.toml` and `exclude.toml` links open their files. |
+| Comments survive | Hand-edit `settings.toml` with comments and a value next to one, then change that value from the window: every other line, comment and blank line is unchanged. If the change is the default, the line is still written. |
+| Broken file | Set `motion = "slow"`: a banner at the top names the file and line, the writing controls are visibly disabled, and Edit settings.toml… still works. Fix the file: the banner clears and the controls re-enable. |
+| External edit | With the window open, change `keymap = "vim"` in a text editor: the segmented control shows Vim without a restart. Delete the line: it shows Finder. |
+| VoiceOver | The window reads "Settings"; each section heading is a heading. One of each kind: the Show preview switch reads its label and on/off; Motion reads "Motion, Auto, 1 of 4, selected"; an app-icon tile reads its name and selected; the font-size stepper reads its value and 10–24; the Theme drop-down reads as a pop-up button with its value, and its open menu reads its options and the highlighted one; Play and the Files buttons read as buttons. |
+| Palette | ⌘K, type `settings`: Settings opens/focuses the window. Type `edit settings`: Edit settings.toml opens the file. |
+| Tab and focus | Tab and ⇧Tab walk the controls in reading order and scroll the page to the focused control; the focus ring is the sidebar's inset ring and never moves the layout. |
 
 ## Motion and sound (U10)
 

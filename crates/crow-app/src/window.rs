@@ -100,6 +100,29 @@ pub fn open_path(path: PathBuf, is_dir: bool, cx: &mut App) {
     });
 }
 
+/// Apply the global `show_hidden_files` setting to every open browser window.
+/// Idempotent, so a settings write and its reload can both call it.
+pub fn apply_show_hidden(show: bool, cx: &mut App) {
+    for handle in cx.windows() {
+        let Some(handle) = handle.downcast::<CrowWindow>() else { continue };
+        handle
+            .update(cx, |window, _, cx| {
+                if window.show_hidden == show {
+                    return;
+                }
+                window.show_hidden = show;
+                for (_, pane) in window.tabs.iter() {
+                    pane.update(cx, |pane, cx| pane.set_show_hidden(show, cx));
+                }
+                if let Some(search) = &window.search {
+                    search.update(cx, |search, cx| search.set_show_hidden(show, cx));
+                }
+                cx.notify();
+            })
+            .ok();
+    }
+}
+
 /// What `CrowWindow::open_search` starts from. U3 reuses it with a query.
 pub struct SearchStart {
     pub folder: PathBuf,
@@ -137,18 +160,7 @@ pub struct CrowWindow {
 /// cursor shows a theme at once; Return keeps it, Escape goes back.
 struct ThemePicker {
     focus: FocusHandle,
-    /// `None` is "System".
-    entries: Vec<Option<crow_theme::ThemeInfo>>,
-    cursor: usize,
-}
-
-impl ThemePicker {
-    fn id(&self, i: usize) -> String {
-        match self.entries.get(i) {
-            Some(Some(info)) => info.id.clone(),
-            _ => "system".into(),
-        }
-    }
+    choice: crate::theme_choice::ThemeChoice,
 }
 
 /// Which half of the palette is showing.
@@ -466,14 +478,17 @@ impl CrowWindow {
     }
 
     fn toggle_hidden(&mut self, _: &ToggleHiddenFiles, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_hidden = !self.show_hidden;
-        let show = self.show_hidden;
+        let show = !cx.global::<Ui>().settings.show_hidden_files;
+        // This window is already borrowed: update it directly, then let the
+        // setting update the other windows (its own handle update fails safely).
+        self.show_hidden = show;
         for (_, pane) in self.tabs.iter() {
             pane.update(cx, |pane, cx| pane.set_show_hidden(show, cx));
         }
         if let Some(search) = &self.search {
             search.update(cx, |search, cx| search.set_show_hidden(show, cx));
         }
+        crate::ui::set_setting(crate::ui::SettingChange::ShowHiddenFiles(show), cx);
     }
 
     fn toggle_preview(&mut self, _: &TogglePreview, _: &mut Window, cx: &mut Context<Self>) {
@@ -1793,47 +1808,40 @@ impl CrowWindow {
     }
 
     fn open_picker(&mut self, infos: Vec<crow_theme::ThemeInfo>, window: &mut Window, cx: &mut Context<Self>) {
-        // Grouped like the theme index's own split: dark themes, then light.
-        let mut infos = infos;
-        infos.sort_by_key(|i| (i.variant == crow_theme::Variant::Light, i.name.to_lowercase()));
-        let mut entries: Vec<Option<crow_theme::ThemeInfo>> = vec![None];
-        entries.extend(infos.into_iter().map(Some));
         let current = cx.global::<Ui>().settings.theme.clone();
-        let cursor = entries.iter().position(|e| e.as_ref().is_some_and(|i| i.id == current)).unwrap_or(0);
+        let choice = crate::theme_choice::ThemeChoice::new(infos, &current);
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.picker = Some(ThemePicker { focus, entries, cursor });
+        self.picker = Some(ThemePicker { focus, choice });
         cx.notify();
     }
 
     fn move_picker(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(picker) = &mut self.picker else { return };
-        let last = picker.entries.len().saturating_sub(1);
-        picker.cursor = picker.cursor.saturating_add_signed(delta).min(last);
-        let id = picker.id(picker.cursor);
-        cx.global_mut::<Ui>().preview_theme = Some(id);
-        reload_theme(cx);
-        cx.notify();
+        if picker.choice.move_cursor(delta) {
+            crate::theme_choice::preview(&picker.choice.current_id(), cx);
+            cx.notify();
+        }
     }
 
     fn select_picker(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(picker) = &self.picker {
-            let delta = index as isize - picker.cursor as isize;
-            self.move_picker(delta, cx);
+        let Some(picker) = &mut self.picker else { return };
+        if picker.choice.select(index) {
+            crate::theme_choice::preview(&picker.choice.current_id(), cx);
+            cx.notify();
         }
     }
 
     fn confirm_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(picker) = self.picker.take() else { return };
-        ui::choose_theme(&picker.id(picker.cursor), cx);
+        ui::choose_theme(&picker.choice.current_id(), cx);
         self.focus_center(window, cx);
         cx.notify();
     }
 
     fn cancel_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.picker = None;
-        cx.global_mut::<Ui>().preview_theme = None;
-        reload_theme(cx);
+        crate::theme_choice::clear_preview(cx);
         self.focus_center(window, cx);
         cx.notify();
     }
@@ -1842,7 +1850,7 @@ impl CrowWindow {
     /// and Crow follows "System" from then on.
     fn apply_everywhere(&mut self, _: &ApplyThemeEverywhere, window: &mut Window, cx: &mut Context<Self>) {
         let Some(picker) = self.picker.take() else { return };
-        match picker.entries.get(picker.cursor) {
+        match picker.choice.entries.get(picker.choice.cursor) {
             Some(Some(info)) => match crow_theme::load_theme(&crow_theme::themes_dir(), &info.id) {
                 Ok(theme) => ui::apply_theme_everywhere(&theme, cx),
                 Err(e) => operations::message(e, true, cx),
@@ -2413,6 +2421,8 @@ impl CrowWindow {
             CommandId::UseViewAsDefaults => self.use_view_as_defaults(&UseViewAsDefaults, window, cx),
             CommandId::ResetFolderView => self.reset_folder_view(&ResetFolderView, window, cx),
             CommandId::ShowThemePicker => self.show_theme_picker(&ShowThemePicker, window, cx),
+            CommandId::OpenSettings => crate::settings_window::open(cx),
+            CommandId::EditSettings => crate::ui::edit_settings_file(cx),
             CommandId::ShowSearch => self.show_search(&ShowSearch, window, cx),
             CommandId::SearchEverything => self.search_everything(&SearchEverything, window, cx),
             // Reached from the palette? No: ShowCommandPalette is menu-only and SearchReveal needs results.
@@ -2859,10 +2869,10 @@ impl CrowWindow {
         let theme = ui.theme.clone();
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
-        let count = picker.entries.len();
+        let count = picker.choice.entries.len();
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut last_variant = None;
-        for (i, entry) in picker.entries.iter().enumerate() {
+        for (i, entry) in picker.choice.entries.iter().enumerate() {
             let variant = entry.as_ref().map(|e| e.variant);
             if variant.is_some() && variant != last_variant {
                 let title = if variant == Some(crow_theme::Variant::Light) { "Light" } else { "Dark" };
@@ -2878,8 +2888,8 @@ impl CrowWindow {
                 );
                 last_variant = variant;
             }
-            let label = entry.as_ref().map_or_else(|| "System (follows macOS)".to_owned(), |e| e.name.clone());
-            let selected = i == picker.cursor;
+            let label = picker.choice.label(i);
+            let selected = i == picker.choice.cursor;
             rows.push(
                 div()
                     .id(("theme", i))
@@ -3445,6 +3455,7 @@ mod tests {
             cx.bind_keys(crate::actions::finder_keymap());
             cx.bind_keys(crate::actions::vim_keymap());
             cx.bind_keys(crate::text_input::keymap());
+            cx.bind_keys(crate::settings_window::keymap());
         });
         let dir = dir.to_path_buf();
         let window: WindowHandle<CrowWindow> = cx

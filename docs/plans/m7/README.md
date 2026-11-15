@@ -9,16 +9,16 @@ Each piece is self-contained: its own branch from `main`, progress file next to 
 
 | Piece | What | Needs | Branch |
 | --- | --- | --- | --- |
-| [H1](h1-fuzzer.md) | Seeded action fuzzer in the GPUI test platform: side-effect stubs, action generator from the live keymap, invariants, shrinking, replay | — | `m7-h1-fuzzer` |
+| [H1](h1-fuzzer.md) | Seeded action fuzzer in the GPUI test platform: side-effect stubs, action generator from the live keymap, invariants, shrinking, replay. Covers the browser windows and the Settings window | — | `m7-h1-fuzzer` |
 | [H2](h2-edge-trees-and-churn.md) | Edge-case trees (long, NFD/NFC, emoji/RTL, deep, loops, unreadable, 100k) and a churn thread changing the shown folder while the fuzzer acts | H1 | `m7-h2-churn` |
 | [H3](h3-slowness-finder.md) | `crow --fuzz`: the same generator in the real app with a frame-time budget; slow steps reported with their seed and step | H1 | `m7-h3-slowness` |
 | [H4](h4-findings.md) | The living fix list: every failure H1–H3 find, each fixed with a named regression test | H1 (grows with H2, H3) | one branch per batch, `m7-h4-<n>` |
 | [H5](h5-main-thread-io.md) | No disk I/O on the main thread: fix the remaining `stat` calls, add a debug-build guard | — | `m7-h5-main-thread-io` |
 | [H6](h6-editable-path-bar.md) | Editable path bar in the bottom bar (UI overhaul Q10) | — | `m7-h6-path-bar` |
-| [H7](h7-accessibility.md) | Real disabled state for VoiceOver (GPUI patch for AccessKit `Disabled`), fuzzer a11y invariant, VoiceOver pass | H1 for the invariant | `m7-h7-a11y` |
+| [H7](h7-accessibility.md) | Real disabled state for VoiceOver (GPUI patch for AccessKit `Disabled`), fuzzer a11y invariant, VoiceOver pass. The Settings window is one of the surfaces | H1 for the invariant | `m7-h7-a11y` |
 | [H8](h8-leftovers.md) | Small leftovers from earlier critiques (hint text, rounding, palette `~`, shortcut mismatch) | — | `m7-h8-leftovers` |
 
-**Before M7:** M6.5, the settings window ([`../m6.5-settings.md`](../m6.5-settings.md)), lands first; every M7 piece branches from a `main` that has it.
+**Before M7:** M6.5, the settings window ([`../m6.5-settings.md`](../m6.5-settings.md)), lands first; every M7 piece branches from a `main` that has it. H1 and H7 treat the Settings window as a surface to cover.
 
 **Suggested order:** H1 → H2 → H4 (first batch) → H3 → H4 (second batch) → H5 → H7 → H6 → H8.
 H5, H6 and H8 don't need the fuzzer and can run any time, one at a time (they all touch `window.rs`/`pane.rs`; never two writers at once). H1 comes first because its stubs and invariants make every later piece safer to test.
@@ -39,7 +39,6 @@ Later pieces use these names. Whichever piece lands first builds the shared part
 | Findings list | [`findings.md`](findings.md) (table; H1–H3 append, H4 fixes) | this plan (empty) |
 
 ## Not in M7 (and where it goes)
-- The in-app settings window: M6.5 ([`../m6.5-settings.md`](../m6.5-settings.md)), merged before M7 starts so H1 and H7 cover it.
 - Icon packs, public Rhai plugin API, git plugin / Projects: Phase 2 (spec "MVP scope", "Later").
 - Folder sizes: already planned, `docs/plans/folder-sizes.md` (D2); after M7 unless the user says otherwise.
 - Context menu for search results and the sidebar (`done/context-menu.progress.md` Q3): a feature; separate plan if wanted.

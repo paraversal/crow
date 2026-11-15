@@ -14,6 +14,7 @@ mod actions;
 mod bottom_bar;
 mod chrome;
 mod context_menu;
+mod controls;
 mod extensions;
 mod feedback;
 mod folder;
@@ -27,9 +28,11 @@ mod palette;
 mod pane;
 mod preview;
 mod search;
+mod settings_window;
 mod sidebar;
 mod style;
 mod text_input;
+mod theme_choice;
 mod tips;
 mod ui;
 mod usage;
@@ -260,6 +263,7 @@ fn main() -> ExitCode {
         cx.bind_keys(actions::finder_keymap());
         cx.bind_keys(actions::vim_keymap());
         cx.bind_keys(text_input::keymap());
+        cx.bind_keys(settings_window::keymap());
         menus::init(cx);
         let initial = {
             let mut pending = pending_urls.lock().unwrap();
