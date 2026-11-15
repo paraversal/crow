@@ -2958,12 +2958,17 @@ impl Pane {
         self.renaming.as_ref().map(|r| r.input.read(cx).text().to_owned())
     }
 
-    /// The filter or rename field's focus handle, when one is open.
-    pub fn text_focus_handle(&self, cx: &gpui::App) -> Option<gpui::FocusHandle> {
-        self.filtering
-            .as_ref()
-            .map(|f| f.input.read(cx).focus_handle(cx))
-            .or_else(|| self.renaming.as_ref().map(|r| r.input.read(cx).focus_handle(cx)))
+    /// The filter and rename fields' focus handles, when open. Both can exist at
+    /// once (create a folder while a filter is showing), and either may hold focus.
+    pub fn text_focus_handles(&self, cx: &gpui::App) -> Vec<gpui::FocusHandle> {
+        let mut handles = Vec::new();
+        if let Some(filtering) = &self.filtering {
+            handles.push(filtering.input.read(cx).focus_handle(cx));
+        }
+        if let Some(renaming) = &self.renaming {
+            handles.push(renaming.input.read(cx).focus_handle(cx));
+        }
+        handles
     }
 
     /// Bounds for a generated row selector, from the pane's own layout state.

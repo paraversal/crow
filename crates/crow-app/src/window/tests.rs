@@ -436,6 +436,38 @@ fn focus_outside_the_surface_fires(cx: &mut TestAppContext) {
     assert!(found.iter().any(|violation| violation.check == "focus"), "{found:?}");
 }
 
+/// H4 #8: ⌘N's second window must not fire the focus invariant.
+#[gpui::test]
+fn a_second_window_keeps_the_focus_invariant(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-inactive-focus");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let found = check_all_windows(&mut cx, false, None);
+    let windows = cx.update(|_, cx| cx.windows().len());
+    assert_eq!(windows, 2, "cmd-n opened a second window");
+    assert!(found.is_empty(), "windows={windows} {found:?}");
+    drop(view);
+}
+
+#[gpui::test]
+fn filter_and_rename_keep_focus_in_the_pane(cx: &mut TestAppContext) {
+    use crate::fuzz::Step;
+    let tree = fuzz_tree("fuzz-filter-rename", 40);
+    let found = replay(
+        cx,
+        &tree,
+        40,
+        crate::script![
+            Step::Keys("/".into()),
+            Step::Keys("enter".into()),
+            Step::Keys("cmd-shift-n".into()),
+            Step::Settle
+        ],
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
 #[gpui::test]
 fn focus_outside_an_open_overlay_fires(cx: &mut TestAppContext) {
     let root = fixture("fuzz-overlay-focus");

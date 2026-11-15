@@ -3265,7 +3265,7 @@ impl CrowWindow {
         } else {
             allowed.push(("pane", pane.focus_handle().clone()));
             allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
-            if let Some(text) = pane.text_focus_handle(cx) {
+            for text in pane.text_focus_handles(cx) {
                 allowed.push(("pane text field", text));
             }
         }
