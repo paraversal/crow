@@ -80,6 +80,7 @@ pub fn open(cx: &mut App) {
                 this.focus_first(window, cx);
             })
             .ok();
+        cx.activate(true);
         return;
     }
     let bounds = Bounds::centered(None, size(px(560.), px(760.)), cx);
@@ -102,6 +103,7 @@ pub fn open(cx: &mut App) {
     }) {
         Ok(handle) => {
             handle.update(cx, |_, window, _| window.activate_window()).ok();
+            cx.activate(true);
         }
         Err(e) => tracing::error!("open settings window: {e}"),
     }
@@ -492,10 +494,10 @@ impl SettingsWindow {
             .unwrap_or_else(|| self.setting_value(id, cx))
     }
 
-    fn sync_stepper(&self, id: ControlId, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_focused(id, window) {
-            return;
-        }
+    /// Put the setting's value into the field. The render-time sync skips a
+    /// focused field so external edits never overwrite typing; an arrow or a
+    /// commit calls this unconditionally.
+    fn write_stepper_text(&self, id: ControlId, window: &mut Window, cx: &mut Context<Self>) {
         let value = self.setting_value(id, cx);
         let text = number_text(value);
         let input = self.input(id);
@@ -503,6 +505,13 @@ impl SettingsWindow {
             input.update(cx, |input, cx| input.set_text(text, window, cx));
         }
         input.update(cx, |input, cx| input.set_numeric_value(value, cx));
+    }
+
+    fn sync_stepper(&self, id: ControlId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_focused(id, window) {
+            return;
+        }
+        self.write_stepper_text(id, window, cx);
     }
 
     fn set_stepper(&mut self, id: ControlId, value: f64, window: &mut Window, cx: &mut Context<Self>) {
@@ -514,7 +523,7 @@ impl SettingsWindow {
             ControlId::WindowHeight => ui::set_setting(SettingChange::WindowHeight(value as u32), cx),
             _ => return,
         }
-        self.sync_stepper(id, window, cx);
+        self.write_stepper_text(id, window, cx);
         cx.notify();
     }
 
@@ -1378,6 +1387,10 @@ mod tests {
         view.read_with(vcx, |view, cx| view.control_state(id, cx))
     }
 
+    fn stepper_text(view: &Entity<SettingsWindow>, vcx: &VisualTestContext, id: ControlId) -> String {
+        view.read_with(vcx, |view, cx| view.input(id).read(cx).text().to_owned())
+    }
+
     fn settings_text(vcx: &VisualTestContext) -> String {
         let dir = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
         std::fs::read_to_string(dir.join("settings.toml")).expect("settings file")
@@ -1485,14 +1498,17 @@ mod tests {
         focus_control(&view, &mut vcx, ControlId::FontSize);
         vcx.simulate_keystrokes("up");
         assert_eq!(state(&view, &vcx, ControlId::FontSize).value, Some(14.0));
+        assert_eq!(stepper_text(&view, &vcx, ControlId::FontSize), "14", "the field follows the arrow");
         wait_for(&vcx, "font_size = 14.0");
         vcx.simulate_keystrokes("shift-down");
         assert_eq!(state(&view, &vcx, ControlId::FontSize).value, Some(10.0), "14 - 10 clamps to 10");
+        assert_eq!(stepper_text(&view, &vcx, ControlId::FontSize), "10");
         wait_for(&vcx, "font_size = 10.0");
         vcx.simulate_keystrokes("cmd-a");
         vcx.simulate_input("20");
         vcx.simulate_keystrokes("enter");
         assert_eq!(state(&view, &vcx, ControlId::FontSize).value, Some(20.0));
+        assert_eq!(stepper_text(&view, &vcx, ControlId::FontSize), "20");
         wait_for(&vcx, "font_size = 20.0");
     }
 
