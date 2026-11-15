@@ -4651,6 +4651,28 @@ fn sorting_while_a_folder_loads_keeps_its_listing(cx: &mut TestAppContext) {
     assert_eq!(names(&view, &cx), ["inner"], "the load that finished during the sort survives");
 }
 
+/// H4 #9: a re-sort computed from an old listing must not overwrite a newer one.
+/// The guard re-sorts the listing that replaced it instead of applying its result.
+#[gpui::test]
+fn a_stale_resort_keeps_a_newer_listing(cx: &mut TestAppContext) {
+    let root = fixture("stale-resort");
+    std::fs::write(root.join(".hidden"), "x").expect("write hidden");
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    folder.update(&mut cx, |folder, _| folder.set_sort_delay(Duration::from_millis(100)));
+    // A sort on the loaded folder captures the listing with hidden files.
+    pane(&view, &cx)
+        .update(&mut cx, |pane, cx| pane.set_sort(crow_fs::Sort::default().toggled(crow_fs::SortKey::Size), cx));
+    // Hiding files loads a listing without them while the sort is in flight.
+    folder.update(&mut cx, |folder, cx| folder.set_show_hidden(false, cx));
+    settle(&view, &mut cx);
+    folder.update(&mut cx, |folder, _| folder.set_sort_delay(Duration::ZERO));
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+    let names = names(&view, &cx);
+    assert!(!names.contains(&".hidden".to_owned()), "the newer listing survives: {names:?}");
+}
+
 #[gpui::test]
 fn exclude_config_reloads_live_and_keeps_the_last_good_rules(cx: &mut TestAppContext) {
     let root = fixture("exclude-reload");
@@ -7597,6 +7619,27 @@ fn newline_in_a_name_does_not_panic_the_sheet_or_the_bar(cx: &mut TestAppContext
         cx.global::<crate::operations::Operations>().message.as_ref().map(|(text, _)| text.to_string())
     });
     assert_eq!(message.as_deref(), Some("“line break.txt” no longer exists"));
+}
+
+/// H4 #6 follow-up: a folder that fails to open names itself in the bar's error.
+#[gpui::test]
+fn newline_in_a_folder_error_does_not_panic_the_bar(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("newline-folder-error");
+    let unreadable = root.join("no\nread");
+    std::fs::create_dir(&unreadable).expect("mkdir");
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let (view, mut cx) = open(cx, &root);
+    // Rows: alpha, beta, no\nread, notes.txt.
+    cx.simulate_keystrokes("down down cmd-down");
+    settle(&view, &mut cx);
+    let error = bar_state(&view, &mut cx).error.map(|error| error.text.to_string());
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).ok();
+    let error = error.expect("the bar shows the load error");
+    assert!(error.contains("no read"), "{error:?}");
+    assert!(!error.contains('\n'), "{error:?}");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
 /// H4 #6 follow-up: the activity sheet draws a rename's old and new names.

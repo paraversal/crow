@@ -865,6 +865,11 @@ impl CrowWindow {
                 .filter(|(_, is_error)| *is_error)
                 .map(|(message, _)| BarError { text: message.clone(), file: None })
         };
+        // A pane's load error names its folder; a newline there reaches GPUI's shaping.
+        let error = error.map(|error| BarError {
+            text: crate::style::display_text(&error.text).into_owned().into(),
+            file: error.file,
+        });
         let focus = self.bar_focus(window, pane, cx);
 
         let sidebar_focused = focus == BarFocus::Sidebar;
