@@ -778,12 +778,12 @@ impl SearchView {
         self.query(cx)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzz"))]
     pub fn input_focus_handle(&self, cx: &App) -> FocusHandle {
         self.input.read(cx).focus_handle(cx)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzz"))]
     pub fn results_focus_handle(&self) -> FocusHandle {
         self.focus.clone()
     }

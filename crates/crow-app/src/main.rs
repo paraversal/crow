@@ -10,6 +10,10 @@
 //! crow --motion-lab                a fake folder to try motion modes and feedback sounds
 //! ```
 
+// The `fuzz` feature builds the generator and invariants into the binary for
+// H3's `crow --fuzz`; until that entry point exists nothing outside tests calls them.
+#![cfg_attr(all(feature = "fuzz", not(test)), allow(dead_code))]
+
 mod actions;
 mod bottom_bar;
 mod chrome;

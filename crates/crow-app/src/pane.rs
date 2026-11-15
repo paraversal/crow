@@ -3083,10 +3083,12 @@ impl Pane {
         self.folders.get(k).and_then(|f| f.read(cx).cursor_entry().map(|e| e.name.clone()))
     }
 
+    #[cfg(test)]
     pub fn names(&self, cx: &gpui::App) -> Vec<String> {
         self.focused_folder().read(cx).names()
     }
 
+    #[cfg(test)]
     pub fn selected_names(&self, cx: &gpui::App) -> Vec<String> {
         self.focused_folder().read(cx).selected_names()
     }
