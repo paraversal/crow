@@ -934,7 +934,7 @@ impl Pane {
     /// Open `path` in the app that owns it, as a double-click on that row would.
     pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
+        if let Err(e) = crate::effects::effects(cx).open_path(&path) {
             self.status = Some(format!("Can't open “{name}”: {e}").into());
             cx.notify();
         }
@@ -1300,9 +1300,10 @@ impl Pane {
         let Some(entry) = self.cursor_entry(cx) else { return };
         // The panel is key while it is open, so the arrows come back through its
         // delegate instead of the window. Run them as the arrows those keys are bound to.
+        let effects = crate::effects::effects(cx);
         let handle = window.window_handle();
         let async_cx = cx.to_async();
-        crow_macos::set_quick_look_key_handler(move |key| {
+        effects.set_quick_look_key_handler(Box::new(move |key| {
             async_cx.update(|cx| {
                 let action: Box<dyn Action> = match key {
                     crow_macos::QuickLookKey::Up => Box::new(MoveUp),
@@ -1312,8 +1313,8 @@ impl Pane {
                 };
                 let _ = handle.update(cx, |_, window, cx| window.dispatch_action(action, cx));
             });
-        });
-        crow_macos::toggle_quick_look(&entry.path);
+        }));
+        effects.toggle_quick_look(&entry.path);
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1509,10 +1510,15 @@ impl Pane {
         let entries = crate::context_menu::entries(kind, state, scope, cx);
         self.context_menu = Some(kind);
         let (sender, receiver) = futures::channel::oneshot::channel();
-        // Off the main thread (tests) nothing opens; `choose_context_item` stands in for the click.
-        if !crow_macos::show_context_menu(window, entries, move |chosen| {
-            sender.send(chosen).ok();
-        }) {
+        // Off the main thread (tests) the recorder answers at once; in the app the
+        // native menu calls back when it closes.
+        if !crate::effects::effects(cx).show_context_menu(
+            window,
+            entries,
+            Box::new(move |chosen| {
+                sender.send(chosen).ok();
+            }),
+        ) {
             return;
         }
         cx.spawn_in(window, async move |this, cx| {
@@ -1557,10 +1563,11 @@ impl Pane {
 
     fn show_in_finder(&mut self, _: &ShowInFinder, _: &mut Window, cx: &mut Context<Self>) {
         let paths = self.selected_paths(cx);
+        let effects = crate::effects::effects(cx);
         if paths.is_empty() {
-            crow_macos::open_folder_in_finder(&self.current_dir(cx));
+            effects.open_folder_in_finder(&self.current_dir(cx));
         } else {
-            crow_macos::reveal_in_finder(&paths);
+            effects.reveal_in_finder(&paths);
         }
     }
 
@@ -1860,7 +1867,7 @@ impl Pane {
                         let entries = selection.entries.as_slice();
                         if let Some((path, is_dir)) = entries.first()
                             && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
-                            && crow_macos::begin_drag(
+                            && crate::effects::effects(cx).begin_drag(
                                 window,
                                 &crow_macos::ComboDrag {
                                     paths: entries,
@@ -2185,7 +2192,7 @@ impl Pane {
                         let entries = selection.entries.as_slice();
                         if let Some((path, is_dir)) = entries.first()
                             && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
-                            && crow_macos::begin_drag(
+                            && crate::effects::effects(cx).begin_drag(
                                 window,
                                 &crow_macos::ComboDrag {
                                     paths: entries,

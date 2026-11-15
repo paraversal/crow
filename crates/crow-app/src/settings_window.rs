@@ -1847,6 +1847,30 @@ mod tests {
     }
 
     #[gpui::test]
+    fn file_buttons_record_their_effects(cx: &mut TestAppContext) {
+        use crate::effects::Call;
+        let (view, mut vcx) = open_settings(cx);
+        let config = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+        let click =
+            |view: &Entity<SettingsWindow>, vcx: &mut VisualTestContext, id: ControlId, selector: &'static str| {
+                focus_control(view, vcx, id);
+                view.update(vcx, |view, cx| {
+                    view.page_scroll.scroll_to_bottom();
+                    cx.notify();
+                });
+                draw(vcx);
+                let at = vcx.debug_bounds(selector).expect("control on screen").center();
+                vcx.simulate_click(at, gpui::Modifiers::default());
+                vcx.run_until_parked();
+            };
+        click(&view, &mut vcx, ControlId::EditSettings, "settings-edit-file");
+        click(&view, &mut vcx, ControlId::ShowConfig, "settings-show-config");
+        let calls = vcx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").take_calls());
+        assert!(calls.contains(&Call::OpenInDefaultApp(config.join("settings.toml"))), "{calls:?}");
+        assert!(calls.contains(&Call::OpenFolderInFinder(config)), "{calls:?}");
+    }
+
+    #[gpui::test]
     fn every_control_has_a_role_and_label(cx: &mut TestAppContext) {
         let (view, vcx) = open_settings(cx);
         for id in ControlId::ALL {

@@ -713,10 +713,15 @@ impl Sidebar {
         self.menu = Some((i, kind));
         cx.notify();
         let (sender, receiver) = futures::channel::oneshot::channel();
-        // Off the main thread (tests) nothing opens; `choose_menu_item` stands in for the click.
-        if !crow_macos::show_context_menu(window, entries, move |chosen| {
-            sender.send(chosen).ok();
-        }) {
+        // Off the main thread (tests) the recorder answers at once; in the app the
+        // native menu calls back when it closes.
+        if !crate::effects::effects(cx).show_context_menu(
+            window,
+            entries,
+            Box::new(move |chosen| {
+                sender.send(chosen).ok();
+            }),
+        ) {
             return;
         }
         cx.spawn_in(window, async move |this, cx| {
@@ -748,7 +753,7 @@ impl Sidebar {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.to_string_lossy().into_owned()));
                 crate::operations::message("Copied path", false, cx);
             }
-            CommandId::ShowInFinder => crow_macos::reveal_in_finder(&[path]),
+            CommandId::ShowInFinder => crate::effects::effects(cx).reveal_in_finder(&[path]),
             CommandId::AddToSidebar => {
                 let at = self.group_end(0, cx);
                 self.add_folders(at, vec![path], cx);
@@ -781,7 +786,8 @@ impl Sidebar {
         }
         cx.emit(SidebarEvent::Message(format!("Ejecting “{}”…", volume.name).into(), false));
         let path = volume.path.clone();
-        let task = cx.background_spawn(async move { crow_macos::eject(&path) });
+        let effects = crate::effects::effects(cx);
+        let task = cx.background_spawn(async move { effects.eject(&path) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |_, cx| {

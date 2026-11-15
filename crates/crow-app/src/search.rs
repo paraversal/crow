@@ -343,13 +343,14 @@ impl SearchView {
         let (tx, mut rx) = unbounded();
         if self.scope == Scope::ThisMac {
             let query = query.to_owned();
+            let effects = crate::effects::effects(cx);
             cx.background_spawn(async move {
-                let tx = tx;
-                let result = crow_macos::spotlight_names(
+                let hits = tx.clone();
+                let result = effects.spotlight_names(
                     &query,
-                    |batch| {
-                        let _ = tx.unbounded_send(Update::Spotlight(batch));
-                    },
+                    Box::new(move |batch| {
+                        let _ = hits.unbounded_send(Update::Spotlight(batch));
+                    }),
                     &cancel,
                 );
                 let _ = tx.unbounded_send(Update::SpotlightDone(result));
@@ -870,8 +871,7 @@ impl SearchView {
 
     fn quick_look_selected(&mut self, cx: &App) {
         if let Some(row) = self.results.get(self.cursor) {
-            crow_macos::toggle_quick_look(&row.path);
-            let _ = cx;
+            crate::effects::effects(cx).toggle_quick_look(&row.path);
         }
     }
 
@@ -1771,7 +1771,7 @@ impl SearchView {
                             let entries = selection.entries.as_slice();
                             if let Some((path, is_dir)) = entries.first()
                                 && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
-                                && crow_macos::begin_drag(
+                                && crate::effects::effects(cx).begin_drag(
                                     window,
                                     &crow_macos::ComboDrag {
                                         paths: entries,

@@ -48,9 +48,9 @@ pub fn sound(id: SoundId) -> Sound {
 
 /// Load `set`'s sounds now, so the first play does no disk I/O. Main thread only;
 /// a no-op elsewhere (tests, a background task by mistake).
-pub fn preload(set: SoundSet) {
+pub fn preload(set: SoundSet, cx: &App) {
     let sounds: Vec<Sound> = motion::sounds(set).into_iter().map(sound).collect();
-    crow_macos::preload(&sounds);
+    crate::effects::effects(cx).preload_sounds(&sounds);
 }
 
 /// The sound an operation's success plays, if any.
@@ -87,24 +87,25 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 pub fn play(event: Event, cx: &mut App) {
     let feedback = cx.global::<Ui>().feedback;
     let cue = motion::cue(feedback.sound, event);
+    let effects = crate::effects::effects(cx);
     // macOS's UI-sounds switch silences everything but the alert, which macOS
     // itself decides about (and still plays).
     if !feedback.ui_sounds {
         if matches!(cue, Some(Cue::Beep)) {
-            crow_macos::beep();
+            effects.beep();
         }
         return;
     }
     match cue {
         Some(Cue::Play { sound: id, volume, clip }) => {
             let sound = sound(id);
-            crow_macos::play(&sound, volume);
+            effects.play_sound(&sound, volume);
             let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(clip) = clip {
                 clip_after(sound, volume, clip, generation, cx);
             }
         }
-        Some(Cue::Beep) => crow_macos::beep(),
+        Some(Cue::Beep) => effects.beep(),
         None => {}
     }
 }
@@ -112,6 +113,7 @@ pub fn play(event: Event, cx: &mut App) {
 /// After `clip.keep`, ramp the volume to zero over `clip.fade` and stop, unless a
 /// newer sound started meanwhile (it owns the volume then).
 fn clip_after(sound: Sound, volume: f32, clip: Clip, generation: u64, cx: &mut App) {
+    let effects = crate::effects::effects(cx);
     cx.spawn(async move |cx| {
         cx.background_executor().timer(clip.keep).await;
         const STEPS: u32 = 8;
@@ -120,9 +122,9 @@ fn clip_after(sound: Sound, volume: f32, clip: Clip, generation: u64, cx: &mut A
                 return;
             }
             if step == STEPS {
-                crow_macos::stop(&sound);
+                effects.stop_sound(&sound);
             } else {
-                crow_macos::set_volume(&sound, volume * (1.0 - step as f32 / STEPS as f32));
+                effects.set_sound_volume(&sound, volume * (1.0 - step as f32 / STEPS as f32));
             }
             cx.background_executor().timer(clip.fade / STEPS).await;
         }

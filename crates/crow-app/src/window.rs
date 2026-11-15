@@ -1722,6 +1722,7 @@ impl CrowWindow {
         let button = |id: &'static str, label: &'static str| {
             div()
                 .id(id)
+                .debug_selector(move || id.into())
                 .role(Role::Button)
                 .aria_label(label)
                 .px_3()
@@ -1760,8 +1761,8 @@ impl CrowWindow {
                         .flex()
                         .gap_2()
                         .pt_2()
-                        .child(button("why-open-file", "Edit views.toml").on_click(move |_, _, _| {
-                            if let Err(e) = std::process::Command::new("open").arg("-t").arg(&views_file).spawn() {
+                        .child(button("why-open-file", "Edit views.toml").on_click(move |_, _, cx| {
+                            if let Err(e) = crate::effects::effects(cx).open_text(&views_file) {
                                 tracing::warn!("open views.toml: {e}");
                             }
                         }))
@@ -1970,7 +1971,7 @@ impl CrowWindow {
     }
 
     fn copy_paths(&mut self, paths: Vec<PathBuf>, cut: bool, cx: &mut Context<Self>) {
-        let change_count = crow_macos::write_file_urls(&paths);
+        let change_count = crate::effects::effects(cx).write_file_urls(&paths);
         let n = paths.len();
         cx.global_mut::<Operations>().clipboard = Some(Clipboard { paths, cut, change_count });
         let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
@@ -3534,6 +3535,11 @@ mod tests {
         cx.read(|cx| cx.global::<Ui>().config_dir.clone())
     }
 
+    /// The escaping effects recorded since the last call, clearing them.
+    fn effect_calls(cx: &mut VisualTestContext) -> Vec<crate::effects::Call> {
+        cx.update(|_, cx| crate::effects::recording(cx).expect("tests install recording effects").take_calls())
+    }
+
     /// Replace a config file and reload, as the file watcher would.
     fn write_config(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, name: &str, text: &str) {
         let dir = config_dir(cx);
@@ -3551,6 +3557,11 @@ mod tests {
         let applied = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.global::<Ui>().applied_icon);
         write_config(&view, &mut cx, "settings.toml", "app_icon = \"sun\"\n");
         assert_eq!(applied(&mut cx), Some(AppIcon::Sun));
+        let calls = effect_calls(&mut cx);
+        assert!(
+            calls.contains(&crate::effects::Call::AppIcon(crate::ui::app_icon_png(AppIcon::Sun).len())),
+            "{calls:?}"
+        );
         write_config(&view, &mut cx, "settings.toml", "app_icon = \"moon\"\n");
         assert_eq!(applied(&mut cx), Some(AppIcon::Sun), "a bad value keeps the last good icon");
         write_config(&view, &mut cx, "settings.toml", "theme = \"system\"\n");
@@ -4604,7 +4615,7 @@ mod tests {
     fn config_error_token_opens_the_broken_file(cx: &mut TestAppContext) {
         let root = fixture("bar-error-open");
         let (view, mut cx) = open(cx, &root);
-        crate::bottom_bar::take_opened();
+        effect_calls(&mut cx);
         write_config(&view, &mut cx, "sidebar.toml", "[[group]\n");
 
         let state = bar_state(&view, &mut cx);
@@ -4616,7 +4627,118 @@ mod tests {
 
         let bounds = cx.debug_bounds("bar-error-open").expect("the Open button is laid out");
         cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-        assert_eq!(crate::bottom_bar::take_opened(), [file]);
+        cx.run_until_parked();
+        let opened: Vec<_> = effect_calls(&mut cx)
+            .into_iter()
+            .filter(|call| matches!(call, crate::effects::Call::OpenConfig(_)))
+            .collect();
+        assert_eq!(opened, [crate::effects::Call::OpenConfig(file)]);
+    }
+
+    #[gpui::test]
+    fn file_effects_are_recorded_not_run(cx: &mut TestAppContext) {
+        use crate::effects::Call;
+        let root = fixture("effects-file");
+        let (view, mut cx) = open(cx, &root);
+        click_selector(&mut cx, "row-notes.txt");
+        effect_calls(&mut cx);
+
+        cx.simulate_keystrokes("cmd-down");
+        let calls = effect_calls(&mut cx);
+        assert!(calls.contains(&Call::OpenPath(root.join("notes.txt"))), "{calls:?}");
+
+        cx.simulate_keystrokes("space");
+        let calls = effect_calls(&mut cx);
+        assert!(calls.contains(&Call::SetQuickLookKeyHandler), "{calls:?}");
+        assert!(calls.contains(&Call::ToggleQuickLook(root.join("notes.txt"))), "{calls:?}");
+
+        // Moving the cursor follows it in an open panel; the recorder sees that too.
+        click_selector(&mut cx, "row-notes.txt");
+        let calls = effect_calls(&mut cx);
+        assert!(calls.contains(&Call::UpdateQuickLook(root.join("notes.txt"))), "{calls:?}");
+
+        // Show in Finder is a menu/palette command, not a key.
+        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_input(">show in finder");
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("enter");
+        settle(&view, &mut cx);
+        let calls = effect_calls(&mut cx);
+        assert!(calls.contains(&Call::RevealInFinder(vec![root.join("notes.txt")])), "{calls:?}");
+    }
+
+    #[gpui::test]
+    fn copy_records_the_pasteboard_write(cx: &mut TestAppContext) {
+        use crate::effects::Call;
+        let root = fixture("effects-copy");
+        let (_view, mut cx) = open(cx, &root);
+        click_selector(&mut cx, "row-notes.txt");
+        effect_calls(&mut cx);
+        cx.simulate_keystrokes("cmd-c");
+        let calls = effect_calls(&mut cx);
+        assert!(calls.contains(&Call::WriteFileUrls(vec![root.join("notes.txt")])), "{calls:?}");
+    }
+
+    #[gpui::test]
+    fn trash_records_its_sound(cx: &mut TestAppContext) {
+        use crate::effects::Call;
+        let root = fixture("effects-sound");
+        let (view, mut cx) = open(cx, &root);
+        click_selector(&mut cx, "row-notes.txt");
+        effect_calls(&mut cx);
+        cx.simulate_keystrokes("cmd-backspace");
+        settle(&view, &mut cx);
+        let calls = effect_calls(&mut cx);
+        assert!(calls.iter().any(|call| matches!(call, Call::PlaySound(..))), "{calls:?}");
+    }
+
+    #[gpui::test]
+    fn context_menu_records_entries_and_runs_a_scripted_choice(cx: &mut TestAppContext) {
+        use crate::context_menu::{MenuKind, slots};
+        use crate::effects::Call;
+        use crate::palette::CommandId;
+        let root = fixture("effects-menu");
+        let (view, mut cx) = open(cx, &root);
+        click_selector(&mut cx, "row-notes.txt");
+        let ix = slots(MenuKind::Items)
+            .iter()
+            .position(|slot| *slot == Some(CommandId::MoveToTrash))
+            .expect("the trash line is in the menu");
+        cx.update(|_, cx| {
+            crate::effects::recording(cx).expect("recording effects").set_context_menu_choice(Some(ix));
+        });
+        effect_calls(&mut cx);
+        let at = row_center(&mut cx, "row-notes.txt");
+        right_click(&mut cx, at);
+        cx.run_until_parked();
+        settle(&view, &mut cx);
+        assert!(!root.join("notes.txt").exists(), "the scripted menu choice ran");
+        let calls = effect_calls(&mut cx);
+        assert!(
+            calls.iter().any(|call| matches!(call, Call::ContextMenu(entries) if entries.iter().any(|entry| {
+                matches!(entry, crow_macos::ContextMenuEntry::Item { title, .. } if title == "Move to Trash")
+            }))),
+            "{calls:?}"
+        );
+        cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").clear_context_menu_choice());
+    }
+
+    #[gpui::test]
+    fn why_sheet_edits_views_toml_through_effects(cx: &mut TestAppContext) {
+        use crate::effects::Call;
+        let root = fixture("effects-why");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_keystrokes("cmd-j");
+        assert!(view.read_with(&cx, |w, _| w.why.is_some()), "cmd-j opens Why");
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        click_selector(&mut cx, "why-open-file");
+        let calls = effect_calls(&mut cx);
+        assert!(calls.contains(&Call::OpenText(config_dir(&cx).join("views.toml"))), "{calls:?}");
     }
 
     #[gpui::test]
@@ -5738,16 +5860,22 @@ mod tests {
 
     #[gpui::test]
     fn spotlight_scope_disables_the_match_control(cx: &mut TestAppContext) {
+        use crate::effects::Call;
         let root = fixture("search-match-spotlight");
         let (view, mut cx) = open(cx, &root);
         cx.simulate_keystrokes("cmd-f");
-        settle(&view, &mut cx);
+        cx.simulate_input("notes");
+        wait_for_search(&view, &mut cx);
         let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
         click_selector(&mut cx, "search-match-contents");
+        wait_for_search(&view, &mut cx);
         assert_eq!(search.read_with(&cx, |search, _| search.effective_match()), crate::search::Match::Contents);
 
+        effect_calls(&mut cx);
         click_selector(&mut cx, "search-scope-this-mac");
-        settle(&view, &mut cx);
+        wait_for_search(&view, &mut cx);
+        let calls = effect_calls(&mut cx);
+        assert!(calls.iter().any(|call| matches!(call, Call::Spotlight(query) if query == "notes")), "{calls:?}");
         assert_eq!(
             search.read_with(&cx, |search, _| search.effective_match()),
             crate::search::Match::Names,

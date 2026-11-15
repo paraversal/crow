@@ -1146,7 +1146,7 @@ impl Folder {
         // Non-strict: scrolls only when the row is out of view, like Finder.
         self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
         if let Some(path) = self.row(ix).map(|(entry, _)| entry.path.clone()) {
-            crow_macos::update_quick_look(&path);
+            crate::effects::effects(cx).update_quick_look(&path);
         }
         if moved {
             cx.emit(FolderEvent::CursorMoved);

@@ -10,6 +10,11 @@ description = "Crow, a Finder-style file explorer"
 name = "crow"
 path = "src/main.rs"
 
+[features]
+# The fuzzer, its generator and invariants. Never enabled in the bundle; H3
+# builds `crow --fuzz` with it, tests get it through `cfg(test)`.
+fuzz = []
+
 [dependencies]
 crow-core.workspace = true
 crow-fs.workspace = true

@@ -15,6 +15,7 @@ mod bottom_bar;
 mod chrome;
 mod context_menu;
 mod controls;
+mod effects;
 mod extensions;
 mod feedback;
 mod folder;
@@ -202,6 +203,7 @@ fn main() -> ExitCode {
 
     if args.first().map(String::as_str) == Some("--motion-lab") {
         gpui_platform::application().with_assets(icons::Assets).run(|cx: &mut App| {
+            effects::install(cx, Arc::new(effects::SystemEffects));
             ui::init(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
@@ -256,6 +258,7 @@ fn main() -> ExitCode {
         }
     });
     app.run(move |cx: &mut App| {
+        effects::install(cx, Arc::new(effects::SystemEffects));
         ui::init(cx);
         cx.set_global(window::LaunchFolder(start.clone()));
         extensions::init(cx);
