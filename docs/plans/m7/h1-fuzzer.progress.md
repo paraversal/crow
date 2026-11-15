@@ -78,7 +78,7 @@ Critic session: 2026-11-15 · Base: main @ 50dd5a5 · Head reviewed: 7fa42be
 | C12 | `check_all_windows` retries a listing mismatch with real `sleep`s (25 × 20 ms); bounded, so a stuck listing still fires, but not recorded as a workaround | `window/tests.rs` | rules | note | left: FSEvents runs on real time |
 | C13 | `fuzz_smoke` runs 3 × 30 steps, not the plan's 300 (33 s vs ~10 s budget); recorded as a Decision without asking | Decisions | plan | note | left; the suite now takes ~20 s for crow-app, so 300 steps would double it |
 
-Checks re-run: fmt ✓ · clippy ✓ (also `--features fuzz` ✓ after C1) · tests ✓ (crow-app 392 + 1 ignored; workspace all green) · bench not needed: no render or listing path changed (effects calls only)
+Checks re-run: fmt ✓ · clippy ✓ (also `--features fuzz` ✓ after C1) · tests ✓ (crow-app 392 + 1 ignored; workspace all green) · `fuzz_long` after the fixes: 2 min, 2 seeds × 1000 steps, no violation · no render or listing path changed (effects calls only)
 Looked at in the app: not driven. The user-visible changes are the sheet key blocks (covered by `tab_stays_in_the_theme_picker`, `why_sheet_keeps_focus_on_arrows_and_tab`) and the effects seam (unchanged behavior, needs a human: Quick Look, open, sounds, Finder). Both are in Hand checks.
 Verdict: pending answers to Q9–Q11.
 
