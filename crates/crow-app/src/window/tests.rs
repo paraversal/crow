@@ -7151,7 +7151,9 @@ fn fuzz_run(
 /// Delta debugging: drop halves, then single steps, then shorten `Type` strings.
 /// Each candidate runs in a fresh window; the trial cap keeps a finding bounded.
 /// A candidate counts only when it fails the same check as `target`, so the
-/// shrink cannot slip to a different bug.
+/// shrink cannot slip to a different bug. A trial replays the whole candidate,
+/// so long scripts are slow: the shrink stops after `CROW_FUZZ_SHRINK_SECS`
+/// (default 600) and returns the shortest failing script found so far.
 fn shrink(
     script: &[crate::fuzz::Step],
     target: &crate::fuzz::Violation,
@@ -7162,8 +7164,17 @@ fn shrink(
     use crate::fuzz::{Script, Step};
     let mut best = script.to_vec();
     let trials = std::cell::Cell::new(0usize);
+    let budget = std::env::var("CROW_FUZZ_SHRINK_SECS").ok().and_then(|value| value.parse().ok()).unwrap_or(600);
+    let deadline = Instant::now() + Duration::from_secs(budget);
+    let best_len = std::cell::Cell::new(best.len());
     let fails = |candidate: &[Step], cx: &mut TestAppContext| {
         if candidate.is_empty() || trials.get() >= 300 {
+            return false;
+        }
+        if Instant::now() >= deadline {
+            // Out of time: stop every loop below and keep the best so far.
+            trials.set(300);
+            println!("shrink stopped after {budget} s at {} steps", best_len.get());
             return false;
         }
         trials.set(trials.get() + 1);
@@ -7184,6 +7195,7 @@ fn shrink(
                 candidate.drain(i..(i + chunk).min(best.len()));
                 if fails(&candidate, cx) {
                     best = candidate;
+                    best_len.set(best.len());
                     changed = true;
                 } else {
                     i += chunk;
@@ -7197,6 +7209,7 @@ fn shrink(
             candidate.remove(i);
             if fails(&candidate, cx) {
                 best = candidate;
+                best_len.set(best.len());
                 changed = true;
             } else {
                 i += 1;

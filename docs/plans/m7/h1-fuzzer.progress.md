@@ -1,5 +1,5 @@
 # H1 action fuzzer progress
-Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: In critique
+Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -78,11 +78,13 @@ Critic session: 2026-11-15 · Base: main @ 50dd5a5 · Head reviewed: 7fa42be
 | C11 | Overlay exclusivity (palette + picker) has no deliberate-break test, unlike the other checks (plan I3 asks for one per check) | `window/tests.rs` | plan | note | left: needs a test-only way to open both; small H4 item |
 | C12 | `check_all_windows` retries a listing mismatch with real `sleep`s (25 × 20 ms); bounded, so a stuck listing still fires, but not recorded as a workaround | `window/tests.rs` | rules | note | left: FSEvents runs on real time |
 | C14 | Nothing confines the fuzzer's file operations to its tree. Today they stay there because `keep_in_tree` pulls the pane back after each step and search's Home scope segment has no fuzz selector. But `Ui.home` is the real home, so a future selector (`search-scope-home`) would let ⌘⌫ / ⌘⌥⌫ on a search result move or delete a real home file | `ui.rs` `init_for_tests`, `search.rs:372`, `keep_in_tree` | code / safety | ask | Q12 → jail added (see Questions) |
+| C15 | The shrinker had no time limit: 300 trials that each replay the whole candidate (~85 ms a step) ran past 10 min on an 829-step failure, and would past the CI job's 45 min | `window/tests.rs` `shrink` | code | fix | fixed: `CROW_FUZZ_SHRINK_SECS` (default 600), prints the best script so far. Still slow for long failures: shrinking by replaying is O(steps) per trial; H4 or H3 could add a "replay only the last N steps" first pass |
+| C16 | A 3-min run after the fixes found a new listing violation (findings #5) | `findings.md` | record | note | recorded for H4 with the replay command |
 | C13 | `fuzz_smoke` runs 3 × 30 steps, not the plan's 300 (33 s vs ~10 s budget); recorded as a Decision without asking | Decisions | plan | note | left; the suite now takes ~20 s for crow-app, so 300 steps would double it |
 
-Checks re-run: fmt ✓ · clippy ✓ (also `--features fuzz` ✓ after C1) · tests ✓ (crow-app 392 + 1 ignored; workspace all green) · `fuzz_long` after the fixes: 2 min, 2 seeds × 1000 steps, no violation · no render or listing path changed (effects calls only)
+Checks re-run: fmt ✓ · clippy ✓ (also `--features fuzz` ✓ after C1) · tests ✓ (crow-app 392 + 1 ignored; workspace all green) · `fuzz_long` after the fixes: 2 min, 2 seeds × 1000 steps, no violation; after Q9 (menu items): 3 seeds × 1000, no violation; after the jail: findings #5 at seed 1794761100463163000 step 828 · no render or listing path changed (effects calls only)
 Looked at in the app: not driven. The user-visible changes are the sheet key blocks (covered by `tab_stays_in_the_theme_picker`, `why_sheet_keeps_focus_on_arrows_and_tab`) and the effects seam (unchanged behavior, needs a human: Quick Look, open, sounds, Finder). Both are in Hand checks.
-Verdict: pending answers to Q9–Q11.
+Verdict: better. The fuzzer works, is now confined to its tree, replays exactly, and keeps finding real-looking problems (findings #5 in a 3-minute run). Shrinking long failures is slow; the seed is the reliable reproduction for now.
 
 ## Log
 - 2026-11-15: read the plan, M7 index, testing docs, repo skill; surveyed every `Command::new`/`crow_macos::` call site; created the branch and this file.
