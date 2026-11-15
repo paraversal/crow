@@ -1,5 +1,5 @@
 # H2 edge trees and churn progress
-Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: Ready for critique
+Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -43,3 +43,21 @@ Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: Ready fo
 
 ## Next
 Ready for critique. The critic reviews the branch and opens the PR; the user hand-tests #6/#7 and the disk-image check.
+
+## Critique
+Critic session: 2026-11-15 · Base: main @ cf85599 · Head reviewed: ec3c3a7
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | The #7 record says the root replace is deterministic and the ignored test fails. Run alone it failed 3 of 6, then needed 4 tries to catch once; a failing run kept 2 old rows (`dir-12`, `file-037.txt`), a subset, which the "watcher on the old inode" cause doesn't explain by itself. A flaky regression test can make H4 call it fixed on a lucky pass. | `window/tests.rs` `replacing_the_shown_folder_reloads`; `findings.md` #7 | rules (honesty) / code | fix | fixed: findings row and ignore reason say intermittent, cause unconfirmed, loop it ~20× |
+| C2 | I1 "listing each returns the expected count": the test compared `list_dir` to `read_dir`, so a kind that built nothing (or one file short) passed. "Doesn't error the whole folder for one bad child" was only checked per kind, never with all bad children in one folder. | `crow-fs/src/testing.rs` `each_kind_builds_and_lists` | plan / code | fix | fixed: per-kind expected counts; new `every_small_kind_lists_in_one_folder` |
+| C3 | `--make-fixture` printed `tree.entries()` (every entry in the folder) instead of the count it wrote: a folder with one existing file reported 21 for `--make-fixture DIR 20`. | `crow-app/src/main.rs:165` | code | fix | fixed: prints `count` again, as on `main` |
+| C4 | `delete_shown_folder_shows_an_error` asserts no error-ish thing; it checks the invariants pass and the folder is gone. | `window/tests.rs` | code sense | fix | fixed: renamed `deleting_the_shown_folder_keeps_the_invariants` |
+| C5 | Dead public API: `ChurnHandle::stop` (Drop already stops and joins, as the plan says) and `Tree::root`, both unused. | `crow-fs/src/testing.rs` | code sense | fix | fixed: removed |
+| C6 | `crow-app` now always enables `crow-fs/testing`, so `rand`/`rand_chacha` (and `make_tree`'s shuffle) are linked into the shipped binary, where H1 kept them behind the never-bundled `fuzz` feature. The M7 index does say the edge trees are "also used by `--make-fixture`", so this follows the plan. A leaner shape: keep `make_wide` ungated and gate only the rest. | `crow-app/Cargo.toml:21` | code sense | note | left: plan-consistent, small cost; worth a line in H8 if binary size ever matters |
+| C7 | The 10 churn-run listing failures are attributed to #7 by the agent's reading of the logs; I didn't re-run 36 minutes of fuzzing to confirm each. Given C1, some may be a different race. | `findings.md` #7 | rules (honesty) | note | left for H4 triage |
+| C8 | #6 re-verified: `fuzz_smoke_edge_trees` panics with `text argument should not contain newlines` at `text_system.rs:679`, as recorded. | `window/tests.rs` | code | note | confirmed |
+
+Checks re-run: fmt ✓ · clippy ✓ (workspace, `crow-app --features fuzz`, `crow-fs`) · tests ✓ (401 app + 92 core + 43 fs + 5 macos + 18 search + 6 theme; 3 ignored) · new shown-folder/churn tests 12/12 runs · bench not re-run: the fixture writer moved byte-for-byte and no listing, scroll or paint code changed
+Looked at in the app: nothing to look at — the branch changes no UI, keys or app behavior, only test infrastructure and `--make-fixture` (checked from the command line). The Hand checks list covers the edge names, shown-folder replace, churn and disk-image flows the user should see.
+Verdict: better. The edge trees and churn already found two real bugs (#6 panic, #7 stale rows) at low maintenance cost; the record overstated #7's determinism, now corrected.
