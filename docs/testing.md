@@ -81,7 +81,7 @@ config and state live in a temp folder, and the sidebar lists only the tree.
 
 ```bash
 cargo test -p crow-app fuzz_smoke                 # 3 seeds x 30 steps on a 40-file tree, in the normal suite
-cargo test -p crow-app fuzz_smoke_edge_trees -- --ignored --nocapture  # every small edge kind (H4 #6)
+cargo test -p crow-app fuzz_smoke_edge_trees -- --nocapture  # every small edge kind
 CROW_FUZZ_MINUTES=2 cargo test -p crow-app fuzz_long -- --ignored --nocapture
 CROW_FUZZ_SEED=42 CROW_FUZZ_STEPS=5000 cargo test -p crow-app fuzz_long -- --ignored --nocapture
 ```
@@ -109,8 +109,7 @@ CROW_FUZZ_TREE=wide-100000 CROW_FUZZ_MINUTES=2 cargo test -p crow-app fuzz_long 
 comma-separated list: `long-name`, `nfc-nfd-twins`, `emoji`, `rtl`,
 `leading-dot`, `spaces`, `newline`, `deep-<n>`, `wide-<n>`, `symlink-loop`,
 `dangling-symlink`, `unreadable`, `package`, `hardlinks`, `empty-folder`,
-`huge-file` (sparse 10 GiB). `fuzz_smoke_edge_trees` covers every small kind; it
-is ignored until H4 #6 fixes the newline-name panic.
+`huge-file` (sparse 10 GiB). `fuzz_smoke_edge_trees` covers every small kind.
 
 `CROW_FUZZ_CHURN=1` starts a thread that creates, renames, deletes, rewrites,
 chmods and moves entries in the shown folder and one level down every 1–50 ms.

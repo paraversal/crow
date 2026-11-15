@@ -888,7 +888,10 @@ impl CrowWindow {
                 .cursor_entry(cx)
                 .map_or_else(|| (pane.current_dir(cx), true), |entry| (entry.path.clone(), entry.is_dir)),
         };
-        let parts = crow_macos::display_components(&target);
+        let parts: Vec<(String, std::path::PathBuf)> = crow_macos::display_components(&target)
+            .into_iter()
+            .map(|(name, path)| (crate::style::display_text(&name).into_owned(), path))
+            .collect();
         let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
         let path = BarPath { parts, last_is_dir, spoken, hidden: None };
 
@@ -1381,7 +1384,9 @@ impl CrowWindow {
                     .map(|(i, (item, choice))| {
                         (
                             i,
-                            item.target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                            item.target.file_name().map_or_else(String::new, |name| {
+                                crate::style::display_text(&name.to_string_lossy()).into_owned()
+                            }),
                             choice,
                         )
                     })
@@ -1675,7 +1680,7 @@ impl CrowWindow {
         let resolved = ui.views.resolve(&dir);
         let has_override = ui.views.has_folder_override(&dir);
         let views_file = ui.config_dir.join("views.toml");
-        let folder = crow_core::abbreviate_home(&dir, &ui.home);
+        let folder = crate::style::display_path(&dir, &ui.home);
         let (fg, muted) = (theme.role("fg"), theme.role("fg-muted"));
         // With `view_per_folder = false` the window's own view is what shows.
         let (view, view_source) = if ui.settings.view_per_folder {

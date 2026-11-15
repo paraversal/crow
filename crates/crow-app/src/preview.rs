@@ -9,7 +9,7 @@ use crow_fs::Entry;
 use crow_theme::Theme;
 use gpui::{Div, FontWeight, Image, ImageFormat, div, img, prelude::*, px};
 
-use crate::style::{color, color_alpha, format_time, icon, kind};
+use crate::style::{color, color_alpha, display_text, format_time, icon, kind};
 
 /// What the preview shows for one item, loaded off the main thread.
 #[derive(Clone)]
@@ -47,7 +47,7 @@ pub fn spoken(entry: &Entry, preview: Option<&Preview>) -> String {
     let tags = preview.map(|p| p.tags.join(", ")).filter(|t| !t.is_empty());
     format!(
         "Preview: {}, {}{size}, created {}, modified {}{}",
-        entry.name,
+        display_text(&entry.name),
         kind(entry),
         format_time(entry.created),
         format_time(entry.modified),
@@ -138,7 +138,7 @@ pub fn contents(entry: &Entry, preview: Option<&Preview>, theme: &Theme) -> Div 
             div()
                 .flex()
                 .flex_col()
-                .child(div().text_size(px(15.)).child(entry.name.clone()))
+                .child(div().text_size(px(15.)).child(display_text(&entry.name).into_owned()))
                 .child(div().text_color(muted).child(format!("{kind} · {size}"))),
         )
         .child(div().pt_2().font_weight(FontWeight::SEMIBOLD).child("Information"))
@@ -162,6 +162,7 @@ pub struct FolderSummary<'a> {
 
 /// What VoiceOver reads for the folder summary.
 pub fn folder_spoken(name: &str, items: Option<usize>) -> String {
+    let name = display_text(name);
     match items {
         Some(n) => format!("{name}, Folder, {n} item{}", if n == 1 { "" } else { "s" }),
         None => format!("{name}, Folder"),
@@ -193,7 +194,7 @@ pub fn folder_summary(summary: FolderSummary<'_>, theme: &Theme) -> Div {
             div()
                 .flex()
                 .flex_col()
-                .child(div().text_size(px(15.)).child(summary.name.to_owned()))
+                .child(div().text_size(px(15.)).child(display_text(summary.name).into_owned()))
                 .child(div().text_color(muted).child(detail)),
         )
         .when(summary.modified.is_some(), |panel| {

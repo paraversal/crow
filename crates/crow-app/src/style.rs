@@ -1,5 +1,6 @@
 //! Theme helpers. Views style themselves with theme-index roles only.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
@@ -167,10 +168,27 @@ pub fn format_time_short_at(t: Option<std::time::SystemTime>, now: std::time::Sy
     }
 }
 
+/// A name as the UI draws it: ASCII control characters (newlines, tabs) become
+/// spaces. GPUI's text shaping asserts that no newline reaches it, and a space
+/// keeps the name readable. The byte length is unchanged, so match ranges and
+/// text-field cursors still line up with the original name.
+pub fn display_text(text: &str) -> Cow<'_, str> {
+    if !text.bytes().any(|byte| byte.is_ascii_control()) {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(text.chars().map(|c| if c.is_ascii_control() { ' ' } else { c }).collect())
+}
+
 /// A folder's own name for labels: the volume name at the root, else the last
 /// component as Finder writes it.
 pub fn display_name(dir: &Path) -> String {
-    crow_macos::display_components(dir).pop().map_or_else(|| dir.display().to_string(), |(name, _)| name)
+    let name = crow_macos::display_components(dir).pop().map_or_else(|| dir.display().to_string(), |(name, _)| name);
+    display_text(&name).into_owned()
+}
+
+/// An abbreviated path (`~/Pictures`) as the UI draws it.
+pub fn display_path(path: &Path, home: &Path) -> String {
+    display_text(&crow_core::abbreviate_home(path, home)).into_owned()
 }
 
 /// Finder's kind for an entry, from the system's type descriptions (cached per extension).
@@ -189,6 +207,8 @@ pub struct Truncated {
 /// Shorten `text` in the middle to fit `max` (Finder keeps both the start and the
 /// extension visible: `8b184f2a-90…app_icon.png`). Only long names are measured twice or more.
 pub fn truncate_middle_parts(text: &str, max: Pixels, font_size: Pixels, window: &Window) -> Truncated {
+    let clean = display_text(text);
+    let text = clean.as_ref();
     let font = window.text_style().font();
     let measure = |s: &str| {
         let run = TextRun {

@@ -7500,6 +7500,25 @@ fn replacing_the_shown_folder_reloads(cx: &mut TestAppContext) {
     assert!(found.is_empty(), "{found:?}");
 }
 
+/// H4 #6: a name with a newline used to panic GPUI's text shaping when its row
+/// was drawn. The tall window draws every row; `alt-down` forces a frame.
+#[gpui::test]
+fn newline_in_a_name_does_not_panic_the_list(cx: &mut TestAppContext) {
+    use crate::fuzz::Step;
+    let tree = fuzz_tree("fuzz-newline-name", 40);
+    let edge = EdgeTree::single(crow_fs::testing::EdgeKind::Newline);
+    let found = replay_with(
+        cx,
+        &tree,
+        0,
+        &edge,
+        1,
+        false,
+        crate::script![Step::Resize(1280.0, 1000.0), Step::Keys("alt-down".into())],
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
 #[gpui::test]
 fn fuzz_smoke(cx: &mut TestAppContext) {
     let tree = fuzz_tree("fuzz-smoke", 40);
@@ -7514,10 +7533,8 @@ fn fuzz_smoke(cx: &mut TestAppContext) {
 }
 
 /// Q1: every small edge kind, including unreadable children and symlink loops;
-/// `Wide` and `HugeFile` stay in `fuzz_long`. Ignored until H4 #6 fixes the
-/// newline-name panic (the first run shrank to `alt-down`).
+/// `Wide` and `HugeFile` stay in `fuzz_long`.
 #[gpui::test]
-#[ignore = "H4 #6: a newline name panics GPUI text shaping"]
 fn fuzz_smoke_edge_trees(cx: &mut TestAppContext) {
     let edge_tree = fuzz_tree("fuzz-smoke-edge", 40);
     let options = FuzzOptions::new(40, EdgeTree::small(), false);

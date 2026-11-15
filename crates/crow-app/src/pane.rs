@@ -43,8 +43,8 @@ use crate::keys::KeyScope;
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, content_opacity, drop_outline, effect_tint, format_time, highlight_text,
-    icon, inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
+    active_selection, color, color_alpha, content_opacity, display_text, drop_outline, effect_tint, format_time,
+    highlight_text, icon, inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -1852,8 +1852,11 @@ impl Pane {
                 };
                 let drag_icon = icon(&entry.path, entry.is_dir, 22);
                 let drag_count = drag_entries.len();
-                let drag_label: SharedString =
-                    if drag_count > 1 { format!("{drag_count} items").into() } else { entry.name.clone().into() };
+                let drag_label: SharedString = if drag_count > 1 {
+                    format!("{drag_count} items").into()
+                } else {
+                    display_text(&entry.name).into_owned().into()
+                };
                 let handoff = DragHandoff::new();
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
@@ -1868,7 +1871,7 @@ impl Pane {
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
                     .role(Role::ListBoxOption)
-                    .aria_label(format!("{}, {spoken}", entry.name))
+                    .aria_label(format!("{}, {spoken}", display_text(&entry.name)))
                     .aria_position_in_set(ix + 1)
                     .aria_size_of_set(total)
                     .aria_selected(selected)
@@ -1980,9 +1983,9 @@ impl Pane {
                                     })
                                     .role(Role::Button)
                                     .aria_label(if expanded {
-                                        format!("Collapse {}", entry.name)
+                                        format!("Collapse {}", display_text(&entry.name))
                                     } else {
-                                        format!("Expand {}", entry.name)
+                                        format!("Expand {}", display_text(&entry.name))
                                     })
                                     .w(px(TRIANGLE_WIDTH))
                                     .h(px(ROW_HEIGHT))
@@ -2179,8 +2182,11 @@ impl Pane {
                 };
                 let drag_icon = icon(&entry.path, entry.is_dir, 22);
                 let drag_count = drag_entries.len();
-                let drag_label: SharedString =
-                    if drag_count > 1 { format!("{drag_count} items").into() } else { entry.name.clone().into() };
+                let drag_label: SharedString = if drag_count > 1 {
+                    format!("{drag_count} items").into()
+                } else {
+                    display_text(&entry.name).into_owned().into()
+                };
                 let handoff = DragHandoff::new();
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
@@ -2192,7 +2198,7 @@ impl Pane {
                 div()
                     .id(ix)
                     .role(Role::ListBoxOption)
-                    .aria_label(format!("{}, {}", entry.name, kind(&entry)))
+                    .aria_label(format!("{}, {}", display_text(&entry.name), kind(&entry)))
                     .aria_position_in_set(ix + 1)
                     .aria_size_of_set(total)
                     .aria_selected(selected)
@@ -2498,8 +2504,9 @@ impl Pane {
             let folder = entry.is_dir && !entry.is_package();
             let label = self.preview_label(cx).unwrap_or_default();
             let body = if folder {
+                let name = display_text(&entry.name);
                 let summary =
-                    preview::FolderSummary { path: &entry.path, name: &entry.name, modified: entry.modified, items };
+                    preview::FolderSummary { path: &entry.path, name: &name, modified: entry.modified, items };
                 preview::folder_summary(summary, &theme).into_any_element()
             } else {
                 preview::contents(&entry, self.preview(cx), &theme).into_any_element()
@@ -2615,7 +2622,7 @@ fn ghost_row(entry: &Entry, look: Look, theme: &Theme, font_size: Pixels) -> Div
                 .opacity(content_opacity(entry.hidden, false))
                 .text_size(font_size)
                 .whitespace_nowrap()
-                .child(entry.name.clone()),
+                .child(display_text(&entry.name).into_owned()),
         )
 }
 
