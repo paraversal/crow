@@ -6,10 +6,12 @@ mod listing;
 pub mod ops;
 mod snapshot;
 mod sort;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 mod watch;
 
 pub use listing::{Entry, list_dir, stat_entry};
-pub use snapshot::{KindOf, Snapshot, apply_changes, apply_stats, make_fixture, read_dir, stat_changes};
+pub use snapshot::{KindOf, Snapshot, apply_changes, apply_stats, read_dir, stat_changes};
 pub use sort::{Sort, SortKey, compare, natural_cmp, sort_entries};
 pub use watch::{FolderChange, FolderWatcher, watch_folder};
 

@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn large_folder_arrives_in_several_batches() {
         let dir = temp_dir("batches");
-        crate::make_fixture(&dir, 5000).unwrap();
+        crate::testing::make_wide(&dir, 5000).unwrap();
         let (mut batches, mut total) = (0, 0);
         list_dir(&dir, false, |b| {
             batches += 1;

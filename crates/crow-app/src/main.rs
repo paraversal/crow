@@ -162,9 +162,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         };
         let count = args.get(2).and_then(|n| n.parse().ok()).unwrap_or(100_000);
-        return match crow_fs::make_fixture(&dir, count) {
-            Ok(()) => {
-                println!("created {count} files in {}", dir.display());
+        return match crow_fs::testing::make_tree(&dir, &crow_fs::testing::EdgeTree::wide(count), 0) {
+            Ok(tree) => {
+                println!("created {} files in {}", tree.entries(), dir.display());
                 ExitCode::SUCCESS
             }
             Err(e) => {

@@ -4,8 +4,8 @@ Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: in progr
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| I1 `crow_fs::testing` | todo | |
-| I2 Churn | todo | |
+| I1 `crow_fs::testing` | done | `testing.rs`: `EdgeKind` (16 kinds), `EdgeTree` (`small`/`all`/`parse`/`label`), `make_tree`, `Tree::remove` (permission-restoring), `Churn`/`ChurnHandle`. `--make-fixture` now calls `EdgeTree::wide`; old `snapshot::make_fixture` removed. `crow-fs` 42 tests pass; clippy with and without `testing`; `cargo check -p crow-app`. |
+| I2 Churn | in progress | Churn core is in I1; fuzzer option, steps and tests next. |
 | I3 Runs | todo | |
 | Finish | todo | |
 
@@ -33,6 +33,7 @@ Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: in progr
 
 ## Log
 - 2026-11-15: read the plan, M7 index, H1 plan/progress, findings, testing docs and the code H2 touches; created the branch and this file; asked Q1–Q3.
+- 2026-11-15: I1. Added `crow-fs/src/testing.rs` (edge kinds, seeded `make_tree`, permission-restoring `remove_tree`, `Churn`), the `testing` feature, and moved `--make-fixture` onto `EdgeTree::wide`. `cargo test -p crow-fs` 42 passed (0.37 s); clippy clean with and without `testing`; `cargo check -p crow-app` clean.
 
 ## Next
-Record the answers to Q1–Q3, spike the filesystem assumptions (255-byte names, NFC/NFD twins, trailing spaces, newline, sparse 10 GB), then start I1.
+I2: add `Step::DeleteShownFolder`/`ReplaceShownFolder`, thread `EdgeTree` + `churn` through the fuzz runner, add the churn settle test and the edge smoke run.

@@ -6,9 +6,20 @@ license.workspace = true
 publish = false
 description = "Folder snapshots, watching and (from M4) the file operation engine"
 
+[features]
+# Edge-case trees and churn. Enabled by `crow-app` for `--make-fixture` and the
+# fuzzer; other dependents can leave it off.
+testing = ["dep:rand", "dep:rand_chacha"]
+
 [dependencies]
 notify.workspace = true
+rand = { version = "0.9", optional = true }
+rand_chacha = { version = "0.9", optional = true }
 rayon = "1"
+
+[dev-dependencies]
+rand = "0.9"
+rand_chacha = "0.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
