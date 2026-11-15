@@ -1,5 +1,5 @@
 # M7 H3 — Slowness finder progress
-Branch: `m7-h3-slowness` · PR: none · Last updated: 2026-11-16 · State: Ready for critique
+Branch: `m7-h3-slowness` · PR: none · Last updated: 2026-11-16 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -12,6 +12,9 @@ Branch: `m7-h3-slowness` · PR: none · Last updated: 2026-11-16 · State: Ready
 - Q1 (asked 2026-11-15): budget numbers — report over 50 ms, fail over 250 ms? → **yes, 50/250** (user).
 - Q2 (asked 2026-11-15): run `crow --fuzz` nightly in CI? → **no, local only**; the nightly workflow keeps H1's `fuzz_long` (user).
 - Q3 (asked 2026-11-15): does H3 drive mouse clicks? → **keys and typing only** for the first version; clicks later (user).
+- Q4 (critique, 2026-11-16): a seed does not replay a run (C1) → **save each run's steps and replay them with `--script`** (user).
+- Q5 (critique, 2026-11-16): the fuzz run writes the user's clipboard (C4) → **route text clipboard through `Effects`** so the recorder keeps it (user).
+- Q6 (critique, 2026-11-16): the fuzz log goes to `~/Library/Logs/Crow` (C5) → **log into the run's support folder** (user).
 
 ## Decisions
 - Branch from `main` @ c5698a6 (H1 #30, H2 #31 and H4 batch 1 #32 merged). The plan's base condition (H1 merged, H2 too if it is) is met. — plan.
@@ -36,7 +39,9 @@ Branch: `m7-h3-slowness` · PR: none · Last updated: 2026-11-16 · State: Ready
 - [ ] `cargo run --release -p crow-app --features fuzz -- --fuzz --minutes 1` opens a real window on a temp edge tree, never launches an app, never plays a sound, leaves the user's Trash and pasteboard alone, and exits 0 when no heartbeat is over 250 ms.
 - [ ] `--fuzz <dir>` without `--dir-is-scratch` refuses to run (never a user folder). Verified from the command line: it prints the refusal and exits 1.
 - [ ] `--fuzz --seed N --until M` stops before step M with the window still open, and `xcrun xctrace record --template 'Time Profiler' --attach crow` can attach. Verified that it pauses and prints the tree + attach command; the actual `xctrace` attach is a hand check.
-- [ ] Run a clean 1-minute `--fuzz --tree none` and confirm the user's `~/.config/crow`, `~/.local/state/crow`, `~/Library/Logs/Crow` history and Trash are unchanged except the expected log lines.
+- [ ] Run a clean 1-minute `--fuzz --tree none` and confirm the user's `~/.config/crow`, `~/.local/state/crow`, `~/Library/Logs/Crow`, Trash and clipboard are unchanged (copy something first, then `pbpaste` after).
+- [ ] Take a `--until` line from a run's report (it includes `--script …/script.txt`), run it with the same tree options, and check the window pauses with that step next; attach `xctrace`.
+- [ ] Copy Path (⌥⌘C) and copy/paste in the filter field still use the real clipboard in a normal `scripts/bundle.sh` build (paste the path into another app).
 
 ## Found along the way
 - Seed 101 on the 100k fixture, step 38: invariant `focus — focus is outside the why surface`. It did not recur after the 16 ms check delay on a fresh fixture; likely the deferred-focus timing H1's `run_until_parked` avoids. No findings row yet.
@@ -59,5 +64,22 @@ Branch: `m7-h3-slowness` · PR: none · Last updated: 2026-11-16 · State: Ready
 - 2026-11-16: Final checks: `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo clippy -p crow-app --features fuzz --all-targets -- -D warnings`; `cargo test --workspace` (crow-app 411 passed, 1 ignored; other crates green); `cargo test -p crow-app --features fuzz` (416 passed, 1 ignored). Bench on the 100k fixture: branch warm first paint 8 ms, p99 8.68/8.73 ms, avg 8.40 ms; `main` @ c5698a6 warm 8 ms, p99 8.69/8.78 ms, avg 8.41/8.44 ms. No regression from the debug spans.
 - 2026-11-16 (critique pass): settle the window (churn paused) before step 0, as H1's runner does, so startup is not attributed to the first step. `cargo test -p crow-app --features fuzz fuzz_live` and a short (0.02-minute) temp-tree smoke pass; the smoke exited 0 with one 101 ms `cmd-,` slow step.
 
+## Critique
+Critic session: 2026-11-16 · Base: main @ c5698a6 · Head reviewed: f5db52a
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | `--seed N --until M` does not replay the same steps. The generator draws from the live keymap/focus state, which depends on real timing. Two runs of `--fuzz --seed 42 --until 250` on the small tree, no churn, generated different steps from step 118 on. So I2's "replays to just before the slow step" holds only by luck, and the replay commands in findings #11–#18 may not lead to the step that was slow. | `fuzz_live.rs` `run_steps` (`generator_state` per step) | plan / code | ask | Q4 → saved script: fixed (a3b8726). `script.txt` per run, written by a thread before each step; `--script FILE --until N` replays it; checked by a 340-step run and a replay that paused at 300 and reproduced the slowest step (`cmd-,` at 142); findings.md notes rows 11–18 predate it |
+| C2 | The HANG check ran inside the main-thread heartbeat, so it could fire only after the stalled step returned. A step that never returns hung the run forever, which contradicts the Decision "so a truly wedged step cannot swallow the run". | `fuzz_live.rs` `install_heartbeat` | code | fix | fixed (be31477): a watchdog thread; checked with a temporary 600 s stall at step 20 and a 2 s threshold, which printed `HANG` and exited 1 after 4 s |
+| C3 | The `icon fetch` span wrapped the embedded SVG asset lookup (a static slice search), not the AppKit icon render that can be slow. | `icons.rs` `Assets::load` | code | fix | fixed (be31477): the span is on the `icon_png` cache miss in crow-macos (`tracing` from the workspace), and fuzz logging enables `crow_macos=debug` |
+| C4 | The run writes to the user's real clipboard. Copy Path (`alt-cmd-c`, `pane.rs:1601`), the sidebar's copy path and text-field copy/cut use `cx.write_to_clipboard`, and text-field paste reads the user's clipboard. After my replay run, `pbpaste` showed a fuzz-tree path. The module doc and hand check say the pasteboard is left alone. | `pane.rs:1601`, `sidebar.rs:790`, `text_input.rs:472-484` | rules / honesty | ask | Q5 → Effects: fixed (654cff3). `effects::write_text`/`read_text`; the copy-path tests read the recorder (they fail without the change); a 12 s run with copy keys left a sentinel clipboard intact |
+| C5 | Fuzz runs write `crow=debug` lines into the real `~/Library/Logs/Crow/crow.log`, though config, state and Trash are all isolated. | `logging.rs` `init_fuzz` | code | ask | Q6 → support folder: fixed (a3b8726); the user's log mtime was unchanged after a run |
+| C6 | Paused, hung and killed runs leave `crow-fuzz-*` folders in the temp folder, and the edge tree's unreadable folder defeats a plain `rm -rf`. 27 were left from I3. The doc said the tree stays "until Crow quits". | `docs/testing.md` | honesty | fix (doc) | fixed (be31477): the doc says what is left and how to remove it |
+| C7 | The SLOW line prints `seed-step <index>` without the seed; FREEZE and HANG print `seed=`. | `fuzz_live.rs` heartbeat | code sense | note | left (cosmetic) |
+
+Checks re-run on a3b8726: fmt ✓ · clippy ✓ (workspace and `--features fuzz`) · tests ✓ (crow-app 411 + 1 ignored, 418 with `--features fuzz`; other crates green) · bench not re-run: the only new span in normal runs is on an icon cache miss, and it is disabled at `info`.
+Looked at in the app: two `--until 250` seed replays (drift at 118), a watchdog smoke with a forced stall, a 12 s generated run (clipboard, log, script) and a `--script --until 300` replay. No UI changed, so no visual pass was needed. No fuzz run over 30 s; the I3 10-minute runs predate these fixes and were not re-run.
+Verdict: better. H3 found real freezes (#12, #16, #18) and is worth having; with the critique fixes its replays are exact, a real hang ends the run, and it no longer touches the user's clipboard or log.
+
 ## Next
-Ready for critique. The critic should look at the heartbeat/freeze/hang semantics, the `--until` pause, and whether the hidden-window and 100k SIGKILL findings are app or harness.
+PR open; waiting on the user's hand checks and merge.
