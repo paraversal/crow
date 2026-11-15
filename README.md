@@ -3,7 +3,7 @@
 A Finder-style file explorer for macOS, written in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 It keeps Finder's directness and aims to be faster, more predictable and keyboard-first.
 
-Status: Phase 1 (the "daily driver" MVP): M6 and the UI overhaul are done; next is M6.5 (a settings window), then M7 (hardening).
+Status: Phase 1 (the "daily driver" MVP): M6, the UI overhaul and M6.5 (the settings window) are done; next is M7 (hardening).
 
 ## Build and run
 
@@ -56,10 +56,12 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, hidden files (shown by default), the preview (`show_preview`), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, hidden files (shown by default), the preview (`show_preview`), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
+
+⌘, (or Crow ▸ Settings…) opens one Settings window. It edits `settings.toml` only: the file stays the single source of truth, every change writes just that key (comments survive), and edits made in a text editor appear in the window. Its Files section opens `settings.toml`, the config folder, and the other three files. ⌘K's "Settings" opens the window and "Edit settings.toml" opens the file directly.
 
 Themes come from the global index in `~/.config/themes`. View ▸ Theme… (Cmd-Option-T)
 previews each theme as you move through the list; Apply to All Apps (Cmd-Return) sets it for every app that reads the index.
@@ -155,9 +157,10 @@ first result; results open with Return, reveal with Cmd-R, Quick Look with Space
 Finder's keys work as in Finder: arrows (Shift extends), Option-Up/Down, Cmd-Up/Down,
 Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (opens Cmd-K on this folder's
 path: type a name, Tab completes, Return goes there or selects a file; a pasted path may be quoted,
-shell-escaped or a `file://` URL),
-Cmd-Shift-. and Space. Cmd-Shift-P shows or hides the preview pane on the right (in list and
-column view, search included; Quick Look still works). Typing a name selects it. Tab moves focus between the sidebar and the list.
+shell-escaped or a `file://` URL), Cmd-, (Settings), Cmd-Shift-. and Space. Cmd-K's
+"Settings" opens the window and "Edit settings.toml" opens the file directly. Cmd-Shift-P shows
+or hides the preview pane on the right (in list and column view, search included; Quick Look still
+works). Typing a name selects it. Tab moves focus between the sidebar and the list.
 Column headers sort (click again to reverse) and their dividers resize.
 Type `/` to filter the focused folder: the field opens as the first row of the focused column
 (or under the list header), showing the query and "n of N", and matching letters are highlighted.
