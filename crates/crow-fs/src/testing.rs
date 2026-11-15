@@ -610,11 +610,7 @@ fn collect(dir: &Path, depth: usize, files: &mut Vec<PathBuf>, folders: &mut Vec
 }
 
 fn pick<'a>(rng: &mut ChaCha8Rng, items: &'a [PathBuf]) -> Option<&'a Path> {
-    if items.is_empty() {
-        None
-    } else {
-        Some(items[rng.random_range(0..items.len())].as_path())
-    }
+    if items.is_empty() { None } else { Some(items[rng.random_range(0..items.len())].as_path()) }
 }
 
 fn rename(path: &Path, n: u64) -> io::Result<()> {
@@ -631,11 +627,7 @@ fn toggle_mode(path: &Path) {
             return;
         }
         let mode = meta.permissions().mode() & 0o777;
-        let next = if mode == 0 {
-            if meta.is_dir() { 0o755 } else { 0o644 }
-        } else {
-            0o000
-        };
+        let next = if mode == 0 { if meta.is_dir() { 0o755 } else { 0o644 } } else { 0o000 };
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(next));
     }
     #[cfg(not(unix))]
