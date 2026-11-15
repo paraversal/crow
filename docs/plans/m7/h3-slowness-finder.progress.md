@@ -1,5 +1,5 @@
 # M7 H3 — Slowness finder progress
-Branch: `m7-h3-slowness` · PR: none · Last updated: 2026-11-16 · State: PR open
+Branch: `m7-h3-slowness` · PR: https://github.com/paraversal/file-crow/pull/33 · Last updated: 2026-11-16 · State: PR open
 
 ## Status
 | Item | State | Notes |
