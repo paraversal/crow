@@ -6951,11 +6951,18 @@ fn apply_step(
                 cx.simulate_click(bounds.center(), gpui::Modifiers::default());
             }
         }
-        Step::RightClick(selector) => {
+        Step::RightClick(selector, choice) => {
             if let Some(bounds) = selector_bounds(view, selector, cx) {
                 let at = bounds.center();
+                let menu = |choice: Option<usize>, cx: &mut VisualTestContext| {
+                    cx.update(|_, cx| {
+                        crate::effects::recording(cx).expect("recording effects").set_context_menu_choice(choice)
+                    })
+                };
+                menu(*choice, cx);
                 cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::default());
                 cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::default());
+                menu(None, cx);
             }
         }
         Step::Resize(width, height) => cx.simulate_resize(gpui::size(gpui::px(*width), gpui::px(*height))),
@@ -7182,6 +7189,27 @@ fn replay(
     script: crate::fuzz::Script,
 ) -> Vec<crate::fuzz::Violation> {
     replay_script(&script.0, tree, files, cx).err().into_iter().collect()
+}
+
+#[gpui::test]
+fn fuzzed_right_click_runs_the_chosen_item(cx: &mut TestAppContext) {
+    use crate::context_menu::{MenuKind, slots};
+    use crate::fuzz::Step;
+    use crate::palette::CommandId;
+    let tree = fuzz_tree("fuzz-menu", 40);
+    let trash = slots(MenuKind::Items).iter().position(|slot| *slot == Some(CommandId::MoveToTrash));
+    let found = replay(
+        cx,
+        &tree,
+        40,
+        crate::script![
+            Step::RightClick("row-file-000.txt".into(), trash),
+            Step::RightClick("row-file-001.txt".into(), None)
+        ],
+    );
+    assert!(found.is_empty(), "{found:?}");
+    assert!(!tree.join("file-000.txt").exists(), "the chosen item ran");
+    assert!(tree.join("file-001.txt").exists(), "a dismissed menu does nothing");
 }
 
 #[gpui::test]

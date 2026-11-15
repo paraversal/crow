@@ -102,9 +102,12 @@ fn regression(cx: &mut TestAppContext) {
 The runner prints the row for `docs/plans/m7/findings.md`. Deduplicate by violation
 and place, not by seed; H4 fixes rows and adds the named regression test.
 
-What the fuzzer does not drive: the Settings window (its own tests cover it), the
-native context menu's items (the recorder answers a scripted choice), and the
-accessibility tree (GPUI's test platform disables it). The second window is opened
+A right-click step carries the menu item it picks (`RightClick(selector, Some(slot))`;
+`None` dismisses the menu): the native menu never opens, the recorder answers with
+that slot and the item runs as if clicked.
+
+What the fuzzer does not drive: the Settings window (H7 adds it; its own tests cover
+it until then) and the accessibility tree (GPUI's test platform disables it). The second window is opened
 and checked by the invariants but only the first is driven. `cmd-m` is excluded
 because the test platform has no minimize implementation.
 

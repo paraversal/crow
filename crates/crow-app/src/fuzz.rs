@@ -7,13 +7,15 @@
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-/// One action the runner applies. `Click`/`RightClick` name a `debug_selector`.
+/// One action the runner applies. `Click`/`RightClick` name a `debug_selector`;
+/// `RightClick`'s second field is the menu slot chosen (`None` dismisses it,
+/// as does a slot past the end of that menu).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
     Keys(String),
     Type(String),
     Click(String),
-    RightClick(String),
+    RightClick(String, Option<usize>),
     Resize(f32, f32),
     Settle,
     AdvanceClock(u64),
@@ -44,6 +46,10 @@ const VIM_KEYS: &[&str] = &["h", "j", "k", "l", "g g", "shift-g", "m a", "' a"];
 /// Short strings that exercise paths, text edges and the caret.
 const TYPE_ALPHABET: &[&str] =
     &["a", "Z", "0", "9", "/", "~", ".", " ", "-", "_", "'", "\"", "🙂", "e\u{301}", "ש", "م"];
+
+/// One more than the longest context menu (the sidebar favorite's, 17 slots),
+/// so every item can be drawn.
+const MENU_SLOTS: usize = 18;
 
 const SIZES: &[(f32, f32)] = &[(700., 500.), (1280., 800.), (1920., 1100.)];
 
@@ -106,7 +112,11 @@ impl StepGen {
 
     fn click(&mut self, state: &GenState, right: bool) -> Step {
         let selector = state.selectors[self.rng.random_range(0..state.selectors.len())].clone();
-        if right { Step::RightClick(selector) } else { Step::Click(selector) }
+        if !right {
+            return Step::Click(selector);
+        }
+        let choice = if self.rng.random_bool(0.25) { None } else { Some(self.rng.random_range(0..MENU_SLOTS)) };
+        Step::RightClick(selector, choice)
     }
 }
 
@@ -174,7 +184,7 @@ fn step_source(step: &Step) -> String {
         Step::Keys(keys) => format!("Step::Keys({keys:?}.into())"),
         Step::Type(text) => format!("Step::Type({text:?}.into())"),
         Step::Click(selector) => format!("Step::Click({selector:?}.into())"),
-        Step::RightClick(selector) => format!("Step::RightClick({selector:?}.into())"),
+        Step::RightClick(selector, choice) => format!("Step::RightClick({selector:?}.into(), {choice:?})"),
         Step::Resize(width, height) => format!("Step::Resize({width:?}, {height:?})"),
         Step::Settle => "Step::Settle".to_owned(),
         Step::AdvanceClock(ms) => format!("Step::AdvanceClock({ms})"),

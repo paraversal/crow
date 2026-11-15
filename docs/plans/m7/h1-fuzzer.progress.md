@@ -51,7 +51,7 @@ Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: In crit
 - [ ] Fuzzer: `CROW_FUZZ_MINUTES=2 cargo test -p crow-app fuzz_long -- --ignored --nocapture` launches no app, plays no sound, leaves the user's Trash and pasteboard alone.
 
 ## Found along the way
-- **H4 #4** (open): `cmd-shift-a` opens search; right-clicking a sidebar row moves focus to the sidebar while search stays open. Shrunk: `crate::script![Step::Keys("cmd-shift-a".into()), Step::RightClick("sidebar-5".into())]`. Not fixed in H1; needs a product decision (close search on sidebar click vs keep focus in the field).
+- **H4 #4** (open): `cmd-shift-a` opens search; right-clicking a sidebar row moves focus to the sidebar while search stays open. Shrunk: `crate::script![Step::Keys("cmd-shift-a".into()), Step::RightClick("sidebar-5".into(), None)]`. Not fixed in H1; needs a product decision (close search on sidebar click vs keep focus in the field).
 - **H1 finding #1** (fixed here, user approved): `alt-cmd-t` opens the theme picker; `tab` (`SwitchFocus` in the `Crow` context) moved focus behind it. `ThemePicker` now binds Tab/Shift-Tab to `NoAction`; test `tab_stays_in_the_theme_picker`.
 - **H1 finding #2** (fixed here): the Why sheet let arrows/Tab move focus behind it. `Sheet` now binds Tab/Shift-Tab/arrows to `NoAction`; the picker's later up/down bindings still win. Test `why_sheet_keeps_focus_on_arrows_and_tab`.
 - The first shrink of finding #2 was invalid (`right`, `down`) because `close_all_windows` left the old window alive; it now loops until `cx.windows()` is empty. The corrected script is `cmd-j`, `right`.
