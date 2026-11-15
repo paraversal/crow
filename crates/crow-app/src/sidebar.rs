@@ -28,7 +28,7 @@ use crate::chrome::with_tooltip;
 use crate::context_menu::{SidebarMenuKind, SidebarMenuState};
 use crate::palette::CommandId;
 use crate::pane::DraggedSelection;
-use crate::style::{color, current_location, cursor_ring, drop_outline, effect_tint, icon};
+use crate::style::{color, current_location, cursor_ring, display_text, drop_outline, effect_tint, icon};
 use crate::ui::{self, Ui};
 
 pub enum SidebarEvent {
@@ -329,15 +329,18 @@ impl Sidebar {
         if let Some(names) = self.names.borrow().get(path) {
             return names.clone();
         }
-        let names: Rc<[String]> =
-            crow_macos::display_components(path).into_iter().map(|(name, _)| name).collect::<Vec<_>>().into();
+        let names: Rc<[String]> = crow_macos::display_components(path)
+            .into_iter()
+            .map(|(name, _)| display_text(&name).into_owned())
+            .collect::<Vec<_>>()
+            .into();
         self.names.borrow_mut().insert(path.to_path_buf(), names.clone());
         names
     }
 
     /// Finder's name for a folder ("Macintosh HD" for `/`).
     fn display_name(&self, path: &Path) -> String {
-        self.components(path).last().cloned().unwrap_or_else(|| path.display().to_string())
+        self.components(path).last().cloned().unwrap_or_else(|| display_text(&path.display().to_string()).into_owned())
     }
 
     /// Drop cached names for paths that left the sidebar.
@@ -359,9 +362,11 @@ impl Sidebar {
         let labels: Vec<String> = selectable
             .iter()
             .map(|row| match row {
-                Row::Favorite(_, f) => f.name.clone().unwrap_or_else(|| self.display_name(&f.path)),
+                Row::Favorite(_, f) => {
+                    f.name.as_deref().map_or_else(|| self.display_name(&f.path), |name| display_text(name).into_owned())
+                }
                 Row::Recent(path) => self.display_name(path),
-                Row::Volume(v) => v.name.clone(),
+                Row::Volume(v) => display_text(&v.name).into_owned(),
                 Row::Header(..) => unreachable!(),
             })
             .collect();
@@ -398,7 +403,7 @@ impl Sidebar {
             let alias = ui.aliases.contains(input.path);
             let (shown, name) = if distance == usize::MAX {
                 let parent = input.path.parent().unwrap_or(input.path);
-                let text = crow_core::abbreviate_home(parent, &ui.home);
+                let text = crate::style::display_path(parent, &ui.home);
                 (text.clone(), text)
             } else {
                 let name =
@@ -411,6 +416,8 @@ impl Sidebar {
                 (shown, name)
             };
             let shown = if alias { format!("{shown} · alias") } else { shown };
+            let shown = display_text(&shown).into_owned();
+            let name = display_text(&name).into_owned();
             hint_by_row[input_rows[n]] = Some((shown, name, alias));
         }
 
@@ -1118,7 +1125,7 @@ impl Render for Sidebar {
                         .ml(px(8.))
                         .flex_shrink_0()
                         .role(Role::Button)
-                        .aria_label(format!("Eject {}", v.name))
+                        .aria_label(format!("Eject {}", display_text(&v.name)))
                         .px_1()
                         .rounded_sm()
                         .text_color(color(muted))

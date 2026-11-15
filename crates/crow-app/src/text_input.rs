@@ -848,7 +848,8 @@ impl EntityInputHandler for TextInput {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
-        if last_layout.text != self.content {
+        let shown = crate::style::display_text(&self.content);
+        if last_layout.text.as_ref() != shown.as_ref() {
             return None;
         }
         let range = self.range_from_utf16(&range_utf16);
@@ -877,7 +878,8 @@ impl EntityInputHandler for TextInput {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
 
-        if last_layout.text != self.content {
+        let shown = crate::style::display_text(&self.content);
+        if last_layout.text.as_ref() != shown.as_ref() {
             return None;
         }
         let utf8_index = last_layout.closest_index_for_x(line_point.x + self.scroll_x - px(TEXT_INSET));
@@ -945,7 +947,7 @@ impl Element for TextElement {
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.clone(), gpui::Hsla::from(placeholder_color))
         } else {
-            (content, style.color)
+            (crate::style::display_text(&content).into_owned().into(), style.color)
         };
 
         let run = TextRun {

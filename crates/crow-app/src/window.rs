@@ -865,6 +865,11 @@ impl CrowWindow {
                 .filter(|(_, is_error)| *is_error)
                 .map(|(message, _)| BarError { text: message.clone(), file: None })
         };
+        // A pane's load error names its folder; a newline there reaches GPUI's shaping.
+        let error = error.map(|error| BarError {
+            text: crate::style::display_text(&error.text).into_owned().into(),
+            file: error.file,
+        });
         let focus = self.bar_focus(window, pane, cx);
 
         let sidebar_focused = focus == BarFocus::Sidebar;
@@ -888,7 +893,10 @@ impl CrowWindow {
                 .cursor_entry(cx)
                 .map_or_else(|| (pane.current_dir(cx), true), |entry| (entry.path.clone(), entry.is_dir)),
         };
-        let parts = crow_macos::display_components(&target);
+        let parts: Vec<(String, std::path::PathBuf)> = crow_macos::display_components(&target)
+            .into_iter()
+            .map(|(name, path)| (crate::style::display_text(&name).into_owned(), path))
+            .collect();
         let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
         let path = BarPath { parts, last_is_dir, spoken, hidden: None };
 
@@ -1307,7 +1315,10 @@ impl CrowWindow {
         let (title, body): (String, gpui::AnyElement) = match sheet {
             Sheet::ConfirmDelete { paths, .. } => {
                 let what = match paths.as_slice() {
-                    [one] => format!("“{}”", one.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()),
+                    [one] => {
+                        let name = one.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                        format!("“{}”", crate::style::display_text(&name))
+                    }
                     many => format!("{} items", many.len()),
                 };
                 (
@@ -1381,7 +1392,9 @@ impl CrowWindow {
                     .map(|(i, (item, choice))| {
                         (
                             i,
-                            item.target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                            item.target.file_name().map_or_else(String::new, |name| {
+                                crate::style::display_text(&name.to_string_lossy()).into_owned()
+                            }),
                             choice,
                         )
                     })
@@ -1496,12 +1509,10 @@ impl CrowWindow {
                     (None, true, _) => "cancelled".to_owned(),
                     _ => String::new(),
                 };
-                (
-                    i,
-                    e.record.label.clone(),
-                    format!("{} {state}", when.format("%H:%M")),
-                    e.record.is_undoable() && !e.undone,
-                )
+                // Rename labels carry both names; errors carry the path at fault.
+                let label = crate::style::display_text(&e.record.label).into_owned();
+                let state = crate::style::display_text(&state).into_owned();
+                (i, label, format!("{} {state}", when.format("%H:%M")), e.record.is_undoable() && !e.undone)
             })
             .collect();
         div()
@@ -1675,7 +1686,7 @@ impl CrowWindow {
         let resolved = ui.views.resolve(&dir);
         let has_override = ui.views.has_folder_override(&dir);
         let views_file = ui.config_dir.join("views.toml");
-        let folder = crow_core::abbreviate_home(&dir, &ui.home);
+        let folder = crate::style::display_path(&dir, &ui.home);
         let (fg, muted) = (theme.role("fg"), theme.role("fg-muted"));
         // With `view_per_folder = false` the window's own view is what shows.
         let (view, view_source) = if ui.settings.view_per_folder {
@@ -3260,7 +3271,7 @@ impl CrowWindow {
         } else {
             allowed.push(("pane", pane.focus_handle().clone()));
             allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
-            if let Some(text) = pane.text_focus_handle(cx) {
+            for text in pane.text_focus_handles(cx) {
                 allowed.push(("pane text field", text));
             }
         }

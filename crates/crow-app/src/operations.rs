@@ -70,7 +70,9 @@ pub fn running_label(label: &str) -> String {
         "Delete" => "Deleting",
         _ => verb,
     };
-    if rest.is_empty() { ing.to_owned() } else { format!("{ing} {rest}") }
+    let label = if rest.is_empty() { ing.to_owned() } else { format!("{ing} {rest}") };
+    // A rename label names its files; a newline there reaches GPUI's text shaping.
+    crate::style::display_text(&label).into_owned()
 }
 
 /// What Cmd-C / Cmd-X put on the clipboard. The paths also go on the system
@@ -124,10 +126,13 @@ impl Global for Operations {}
 /// Show a message in the bar. Info messages retire after five seconds (Q2); errors
 /// stay until the next operation, navigation or a fixed config file.
 pub fn message(text: impl Into<SharedString>, is_error: bool, cx: &mut App) {
+    // Errors name the file at fault; GPUI's text shaping rejects a newline in a name.
+    let text: SharedString = text.into();
+    let text: SharedString = crate::style::display_text(&text).into_owned().into();
     let generation = {
         let ops = cx.global_mut::<Operations>();
         ops.message_generation += 1;
-        ops.message = Some((text.into(), is_error));
+        ops.message = Some((text, is_error));
         ops.message_generation
     };
     if is_error {
@@ -449,6 +454,7 @@ mod tests {
             ("Delete 2 items permanently", "Deleting 2 items permanently"),
             ("New Folder", "New Folder"),
             ("Rename “a” to “b”", "Rename “a” to “b”"),
+            ("Rename “line\nbreak.txt” to “b”", "Rename “line break.txt” to “b”"),
         ];
         for (label, expected) in cases {
             assert_eq!(running_label(label), expected, "{label}");

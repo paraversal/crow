@@ -436,6 +436,38 @@ fn focus_outside_the_surface_fires(cx: &mut TestAppContext) {
     assert!(found.iter().any(|violation| violation.check == "focus"), "{found:?}");
 }
 
+/// H4 #8: ⌘N's second window must not fire the focus invariant.
+#[gpui::test]
+fn a_second_window_keeps_the_focus_invariant(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-inactive-focus");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let found = check_all_windows(&mut cx, false, None);
+    let windows = cx.update(|_, cx| cx.windows().len());
+    assert_eq!(windows, 2, "cmd-n opened a second window");
+    assert!(found.is_empty(), "windows={windows} {found:?}");
+    drop(view);
+}
+
+#[gpui::test]
+fn filter_and_rename_keep_focus_in_the_pane(cx: &mut TestAppContext) {
+    use crate::fuzz::Step;
+    let tree = fuzz_tree("fuzz-filter-rename", 40);
+    let found = replay(
+        cx,
+        &tree,
+        40,
+        crate::script![
+            Step::Keys("/".into()),
+            Step::Keys("enter".into()),
+            Step::Keys("cmd-shift-n".into()),
+            Step::Settle
+        ],
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
 #[gpui::test]
 fn focus_outside_an_open_overlay_fires(cx: &mut TestAppContext) {
     let root = fixture("fuzz-overlay-focus");
@@ -4597,6 +4629,51 @@ fn sorting_keeps_folders_first_and_the_selection(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn sorting_while_a_folder_loads_keeps_its_listing(cx: &mut TestAppContext) {
+    let root = fixture("sort-while-loading");
+    let (view, mut cx) = open(cx, &root);
+    // Enter alpha: its new Folder starts loading with no rows yet.
+    view.update(&mut cx, |window, cx| {
+        let dir = window.pane().read(cx).current_dir(cx).join("alpha");
+        window.pane().update(cx, |pane, cx| pane.navigate(dir, cx));
+    });
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    assert!(folder.read_with(&cx, |folder, _| folder.is_loading()), "the new folder is still loading");
+    assert!(names(&view, &cx).is_empty(), "no rows before the load");
+    // Hold the re-sort in flight until after the load has landed. Before the fix,
+    // the sort applied the empty listing captured before the load and wiped it.
+    folder.update(&mut cx, |folder, _| folder.set_sort_delay(Duration::from_millis(100)));
+    pane(&view, &cx)
+        .update(&mut cx, |pane, cx| pane.set_sort(crow_fs::Sort::default().toggled(crow_fs::SortKey::Size), cx));
+    settle(&view, &mut cx);
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+    assert_eq!(names(&view, &cx), ["inner"], "the load that finished during the sort survives");
+}
+
+/// H4 #9: a re-sort computed from an old listing must not overwrite a newer one.
+/// The guard re-sorts the listing that replaced it instead of applying its result.
+#[gpui::test]
+fn a_stale_resort_keeps_a_newer_listing(cx: &mut TestAppContext) {
+    let root = fixture("stale-resort");
+    std::fs::write(root.join(".hidden"), "x").expect("write hidden");
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    folder.update(&mut cx, |folder, _| folder.set_sort_delay(Duration::from_millis(100)));
+    // A sort on the loaded folder captures the listing with hidden files.
+    pane(&view, &cx)
+        .update(&mut cx, |pane, cx| pane.set_sort(crow_fs::Sort::default().toggled(crow_fs::SortKey::Size), cx));
+    // Hiding files loads a listing without them while the sort is in flight.
+    folder.update(&mut cx, |folder, cx| folder.set_show_hidden(false, cx));
+    settle(&view, &mut cx);
+    folder.update(&mut cx, |folder, _| folder.set_sort_delay(Duration::ZERO));
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+    let names = names(&view, &cx);
+    assert!(!names.contains(&".hidden".to_owned()), "the newer listing survives: {names:?}");
+}
+
+#[gpui::test]
 fn exclude_config_reloads_live_and_keeps_the_last_good_rules(cx: &mut TestAppContext) {
     let root = fixture("exclude-reload");
     let (view, mut cx) = open(cx, &root);
@@ -7488,16 +7565,100 @@ fn edge_tree_replay_lists_a_long_name(cx: &mut TestAppContext) {
     assert!(tree.join(format!("{}.txt", "a".repeat(251))).exists(), "the edge tree was built");
 }
 
-/// H4 #7: replacing the shown root sometimes leaves some old rows. Intermittent
-/// (about half the runs fail; critique: 3 of 6, then 1 of 4 needed to catch one),
-/// so a single pass proves nothing: loop it when fixing.
+/// H4 #7: replacing the shown root left some old rows, because a watcher event
+/// naming the root is not a child change. FSEvents delivers that event on its
+/// own schedule: the bug failed 2 of 17 runs before the fix, so loop to make the
+/// guard reliable rather than depending on one lucky run.
 #[gpui::test]
-#[ignore = "H4 #7: replacing the shown root intermittently leaves stale rows"]
 fn replacing_the_shown_folder_reloads(cx: &mut TestAppContext) {
     use crate::fuzz::Step;
     let tree = fuzz_tree("fuzz-replace-root", 40);
-    let found = replay(cx, &tree, 40, crate::script![Step::ReplaceShownFolder, Step::Settle]);
+    for run in 0..20 {
+        let found = replay(cx, &tree, 40, crate::script![Step::ReplaceShownFolder, Step::Settle]);
+        assert!(found.is_empty(), "run {run}: {found:?}");
+    }
+}
+
+/// H4 #6: a name with a newline used to panic GPUI's text shaping when its row
+/// was drawn. The tall window draws every row; `alt-down` forces a frame.
+#[gpui::test]
+fn newline_in_a_name_does_not_panic_the_list(cx: &mut TestAppContext) {
+    use crate::fuzz::Step;
+    let tree = fuzz_tree("fuzz-newline-name", 40);
+    let edge = EdgeTree::single(crow_fs::testing::EdgeKind::Newline);
+    let found = replay_with(
+        cx,
+        &tree,
+        0,
+        &edge,
+        1,
+        false,
+        crate::script![Step::Resize(1280.0, 1000.0), Step::Keys("alt-down".into())],
+    );
     assert!(found.is_empty(), "{found:?}");
+}
+
+/// H4 #6 follow-up: the delete sheet names the file, and the bar draws operation
+/// errors that name it. Both used to reach GPUI's text shaping raw.
+#[gpui::test]
+fn newline_in_a_name_does_not_panic_the_sheet_or_the_bar(cx: &mut TestAppContext) {
+    let root = fixture("newline-sheet-bar");
+    std::fs::write(root.join("line\nbreak.txt"), "x").expect("write");
+    let (view, mut cx) = open(cx, &root);
+    // Rows: alpha, beta, line\nbreak.txt, notes.txt.
+    cx.simulate_keystrokes("down down cmd-alt-backspace");
+    settle(&view, &mut cx);
+    assert!(sheet_open(&view, &cx), "the delete sheet is open");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    cx.update(|_, cx| crate::operations::message("“line\nbreak.txt” no longer exists", true, cx));
+    settle(&view, &mut cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let message = cx.update(|_, cx| {
+        cx.global::<crate::operations::Operations>().message.as_ref().map(|(text, _)| text.to_string())
+    });
+    assert_eq!(message.as_deref(), Some("“line break.txt” no longer exists"));
+}
+
+/// H4 #6 follow-up: a folder that fails to open names itself in the bar's error.
+#[gpui::test]
+fn newline_in_a_folder_error_does_not_panic_the_bar(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("newline-folder-error");
+    let unreadable = root.join("no\nread");
+    std::fs::create_dir(&unreadable).expect("mkdir");
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let (view, mut cx) = open(cx, &root);
+    // Rows: alpha, beta, no\nread, notes.txt.
+    cx.simulate_keystrokes("down down cmd-down");
+    settle(&view, &mut cx);
+    let error = bar_state(&view, &mut cx).error.map(|error| error.text.to_string());
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).ok();
+    let error = error.expect("the bar shows the load error");
+    assert!(error.contains("no read"), "{error:?}");
+    assert!(!error.contains('\n'), "{error:?}");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+/// H4 #6 follow-up: the activity sheet draws a rename's old and new names.
+#[gpui::test]
+fn newline_in_a_rename_label_does_not_panic_the_activity(cx: &mut TestAppContext) {
+    let root = fixture("newline-activity");
+    std::fs::write(root.join("line\nbreak.txt"), "x").expect("write");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("down down enter");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("renamed.txt");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(!root.join("line\nbreak.txt").exists(), "the rename applied");
+    cx.simulate_keystrokes("alt-cmd-l");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.show_activity), "the activity sheet is open");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
 #[gpui::test]
@@ -7514,10 +7675,8 @@ fn fuzz_smoke(cx: &mut TestAppContext) {
 }
 
 /// Q1: every small edge kind, including unreadable children and symlink loops;
-/// `Wide` and `HugeFile` stay in `fuzz_long`. Ignored until H4 #6 fixes the
-/// newline-name panic (the first run shrank to `alt-down`).
+/// `Wide` and `HugeFile` stay in `fuzz_long`.
 #[gpui::test]
-#[ignore = "H4 #6: a newline name panics GPUI text shaping"]
 fn fuzz_smoke_edge_trees(cx: &mut TestAppContext) {
     let edge_tree = fuzz_tree("fuzz-smoke-edge", 40);
     let options = FuzzOptions::new(40, EdgeTree::small(), false);

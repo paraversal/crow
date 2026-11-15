@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
-use crow_core::{Exclude, KeymapLayer, Selection, SetName, abbreviate_home};
+use crow_core::{Exclude, KeymapLayer, Selection, SetName};
 use crow_fs::Entry;
 use crow_fs::ops::Request;
 use crow_search::{Hit, HitKind, Query, RuleSet, Summary};
@@ -32,8 +32,8 @@ use crate::keys::{self, KeyScope};
 use crate::pane::DraggedSelection;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, field_ring, format_time, format_time_short, highlight_text, icon,
-    inactive_selection, map_range, truncate_middle_parts,
+    active_selection, color, color_alpha, display_text, field_ring, format_time, format_time_short, highlight_text,
+    icon, inactive_selection, map_range, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -1746,8 +1746,11 @@ impl SearchView {
                 } else {
                     Arc::new(vec![(row.path.clone(), row.is_dir)])
                 };
-                let label: SharedString =
-                    if entries.len() > 1 { format!("{} items", entries.len()).into() } else { row.name.clone().into() };
+                let label: SharedString = if entries.len() > 1 {
+                    format!("{} items", entries.len()).into()
+                } else {
+                    display_text(&row.name).into_owned().into()
+                };
                 let drag_icon = icon(&row.path, row.is_dir, 22);
                 div()
                     .id(("search-row", i))
@@ -1881,11 +1884,11 @@ impl SearchView {
                     if relative.as_os_str().is_empty() {
                         ".".to_owned()
                     } else {
-                        relative.to_string_lossy().into_owned()
+                        display_text(&relative.to_string_lossy()).into_owned()
                     }
                 })
-                .unwrap_or_else(|| abbreviate_home(path, &self.home)),
-            Scope::Home | Scope::ThisMac => abbreviate_home(path, &self.home),
+                .unwrap_or_else(|| crate::style::display_path(path, &self.home)),
+            Scope::Home | Scope::ThisMac => crate::style::display_path(path, &self.home),
         }
     }
 
@@ -2034,7 +2037,8 @@ pub fn skip_label(exclude: &Exclude) -> Option<String> {
 
 impl Row {
     fn label(&self) -> String {
-        let mut label = format!("{}, in {}, modified {}", self.name, self.folder, format_time(self.modified));
+        let mut label =
+            format!("{}, in {}, modified {}", display_text(&self.name), self.folder, format_time(self.modified));
         if let Some((line, text, _)) = &self.content {
             label.push_str(&format!(", line {line}: {text}"));
         }
@@ -2084,8 +2088,9 @@ impl Row {
         let folder = match folder_root.and_then(|root| path.parent()?.strip_prefix(root).ok()) {
             Some(relative) if relative.as_os_str().is_empty() => ".".to_owned(),
             Some(relative) => relative.to_string_lossy().into_owned(),
-            None => path.parent().map_or_else(String::new, |parent| abbreviate_home(parent, home)),
+            None => path.parent().map_or_else(String::new, |parent| crate::style::display_path(parent, home)),
         };
+        let folder = display_text(&folder).into_owned();
         let ext = Path::new(&name).extension().and_then(|ext| ext.to_str()).unwrap_or("");
         let is_package = is_dir && matches!(ext, "app" | "bundle" | "framework" | "photoslibrary");
         let mut row = Row {

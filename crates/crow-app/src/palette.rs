@@ -7,7 +7,6 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use chrono::{Datelike as _, Local, TimeZone as _};
-use crow_core::abbreviate_home;
 use crow_search::FuzzyMatcher;
 use gpui::{Action, SharedString};
 
@@ -704,7 +703,7 @@ pub fn folder_candidates(
     let mut seen = HashSet::new();
     let mut out: Vec<FolderCandidate> = Vec::new();
     let push = |path: PathBuf, source: Source, frecency: f64, out: &mut Vec<FolderCandidate>| {
-        let label = abbreviate_home(&path, home);
+        let label = crate::style::display_path(&path, home);
         out.push(FolderCandidate {
             name_start: name_start(&label),
             label,
@@ -939,7 +938,7 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathBuf], files: &
     file_rows.truncate(FILE_LIMIT);
     let exact = file_rows.first().is_some_and(|path| file_name(path).to_lowercase() == typed);
     let file_item = |path: &PathBuf| {
-        let label = abbreviate_home(path, home);
+        let label = crate::style::display_path(path, home);
         let start = name_start(&label);
         Item::Folder {
             path: path.clone(),
@@ -963,7 +962,7 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathBuf], files: &
         items.push(file_item(file_rows[0]));
     }
     if partial.is_empty() {
-        let label = abbreviate_home(parent, home);
+        let label = crate::style::display_path(parent, home);
         items.push(Item::Folder {
             path: parent.to_path_buf(),
             label: label.clone(),
@@ -992,7 +991,7 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathBuf], files: &
     });
     matched.truncate(TOTAL_LIMIT.saturating_sub(items.len()));
     for (_, path) in matched {
-        let label = abbreviate_home(path, home);
+        let label = crate::style::display_path(path, home);
         let start = name_start(&label);
         let matched = match fuzzy.as_mut() {
             Some(fuzzy) => fuzzy.indices(&file_name(path)).map_or_else(Vec::new, |(_, ranges)| {
@@ -1028,7 +1027,7 @@ pub fn loading_path_listing(parent: &Path) -> Listing {
 
 /// Path mode when the parent is not a folder.
 pub fn missing_path_listing(parent: &Path, home: &Path) -> Listing {
-    status_path_listing(parent, format!("No folder at \"{}\"", abbreviate_home(parent, home)).into())
+    status_path_listing(parent, format!("No folder at \"{}\"", crate::style::display_path(parent, home)).into())
 }
 
 fn status_path_listing(parent: &Path, text: SharedString) -> Listing {
