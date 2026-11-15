@@ -403,6 +403,16 @@ fn selection_outside_the_listing_fires(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn inline_child_selection_is_in_the_listing(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-inline-selection");
+    let (view, mut cx) = open(cx, &root);
+    // Right expands alpha inline; down selects its child row.
+    cx.simulate_keystrokes("right down");
+    let found = violations(&view, &mut cx);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[gpui::test]
 fn listing_mismatch_fires(cx: &mut TestAppContext) {
     let root = fixture("fuzz-listing");
     let (view, mut cx) = open(cx, &root);

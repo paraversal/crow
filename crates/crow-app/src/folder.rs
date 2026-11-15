@@ -1297,6 +1297,18 @@ impl Folder {
         self.selection.iter().cloned().collect()
     }
 
+    /// Every row's path, including inline child rows; the selection may name one.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn row_paths(&self) -> Vec<PathBuf> {
+        self.rows
+            .iter()
+            .map(|row| match row {
+                FlatRow::Own(i) => self.entries[*i].path.clone(),
+                FlatRow::Child(entry, _) => entry.path.clone(),
+            })
+            .collect()
+    }
+
     /// Break the cursor on purpose, to prove the invariant fires.
     #[cfg(any(test, feature = "fuzz"))]
     pub fn set_cursor_ix_for_test(&mut self, ix: Option<usize>) {

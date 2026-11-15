@@ -3001,8 +3001,9 @@ impl Pane {
                     format!("pane {k}: cursor {ix} is past {} rows", folder.row_count()),
                 ));
             }
+            let row_paths = folder.row_paths();
             let listed: std::collections::HashSet<&std::path::Path> =
-                folder.entries().iter().map(|entry| entry.path.as_path()).collect();
+                row_paths.iter().map(|path| path.as_path()).collect();
             for path in folder.selection_paths() {
                 if !listed.contains(path.as_path()) {
                     out.push(Violation::new(

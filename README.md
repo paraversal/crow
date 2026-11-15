@@ -211,6 +211,7 @@ first, a row in the selection keeps it); on empty space, New Folder, New File, P
 Finder (opens the folder itself in Finder).
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).
+Fuzzing: `cargo test -p crow-app fuzz_smoke`; long runs and replay: [docs/testing.md#fuzzing](docs/testing.md#fuzzing).
 
 Dev tools: `crow --motion-lab` opens a fake folder where every feedback event (trash, move,
 undo, new folder, refuse, copy, tip, empty Trash) can be fired in the three motion modes and
