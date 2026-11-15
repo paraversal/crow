@@ -3132,6 +3132,58 @@ impl Render for CrowWindow {
     }
 }
 
+#[cfg(any(test, feature = "fuzz"))]
+impl CrowWindow {
+    /// The selectors a fuzzer can click in this window, in render order. Views
+    /// cap their row lists; the runner drops selectors that are not laid out.
+    pub fn debug_selectors(&self, cx: &App) -> Vec<String> {
+        let mut out =
+            vec!["toolbar".to_owned(), "toolbar-go-to".to_owned(), "toolbar-search".to_owned(), "path-bar".to_owned()];
+        out.extend((0..self.tabs.len()).map(|i| format!("tab-{i}")));
+        out.extend(self.pane().read(cx).debug_selectors(cx));
+        out.extend(self.sidebar.read(cx).debug_selectors(cx));
+        if cx.global::<Ui>().settings.show_preview {
+            out.push("preview".to_owned());
+        }
+        if let Some(search) = &self.search {
+            out.extend(search.read(cx).debug_selectors(cx));
+        }
+        if let Some(palette) = &self.palette {
+            out.push("palette-commands-token".to_owned());
+            out.push("palette-empty".to_owned());
+            out.extend((0..palette.listing.rows.len().min(60)).map(|i| format!("palette-row-{i}")));
+        }
+        if self.why.is_some() {
+            out.extend(["why-open-file", "why-reset", "why-defaults", "why-close"].map(str::to_owned));
+        }
+        if self.sheet.is_some() {
+            out.extend(["sheet-panel", "sheet-scrim", "sheet-confirm", "sheet-cancel"].map(str::to_owned));
+        }
+        if self.picker.is_some() {
+            out.push("theme-list".to_owned());
+        }
+        if self.tip.is_some() {
+            out.extend(["tip", "tip-got-it"].map(str::to_owned));
+        }
+        out
+    }
+
+    /// Whether a text field has focus, so the fuzzer types instead of pressing keys.
+    pub fn text_focused(&self, window: &Window, cx: &App) -> bool {
+        if let Some(palette) = &self.palette {
+            return palette.input.read(cx).focus_handle(cx).is_focused(window);
+        }
+        if let Some(search) = &self.search {
+            return search.read(cx).input_focused(window, cx);
+        }
+        self.pane().read(cx).text_focused(window, cx)
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+}
+
 #[cfg(test)]
 impl CrowWindow {
     /// The palette's rows for tests: "# Header", a folder's abbreviated path or a

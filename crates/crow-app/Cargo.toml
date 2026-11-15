@@ -13,7 +13,7 @@ path = "src/main.rs"
 [features]
 # The fuzzer, its generator and invariants. Never enabled in the bundle; H3
 # builds `crow --fuzz` with it, tests get it through `cfg(test)`.
-fuzz = []
+fuzz = ["dep:rand", "dep:rand_chacha"]
 
 [dependencies]
 crow-core.workspace = true
@@ -26,6 +26,8 @@ gpui_platform.workspace = true
 chrono.workspace = true
 futures = "0.3"
 notify.workspace = true
+rand = { version = "0.9", optional = true }
+rand_chacha = { version = "0.9", optional = true }
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
@@ -34,3 +36,5 @@ url = "2"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+rand = "0.9"
+rand_chacha = "0.9"

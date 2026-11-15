@@ -1410,6 +1410,26 @@ fn escape_cancels_from_the_list(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn fuzz_generator_uses_the_live_keymap_and_screen(cx: &mut TestAppContext) {
+    use crate::fuzz::{Step, StepGen, state};
+    let root = fixture("fuzz-generator");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let state = state(&view, &mut cx);
+    assert!(!state.all_keys.is_empty(), "the live keymap has bindings");
+    assert!(state.all_keys.iter().any(|key| key == "cmd-k" || key == "space"), "{:?}", state.all_keys);
+    assert!(state.selectors.iter().any(|selector| selector == "row-notes.txt"), "{:?}", state.selectors);
+    assert!(!state.active_keys.is_empty(), "the list's context resolves bindings");
+
+    let mut generator = StepGen::new(1);
+    let steps: Vec<_> = (0..200).map(|_| generator.next(&state)).collect();
+    assert!(steps.iter().any(|step| matches!(step, Step::Click(_))), "the generator clicks rows");
+    assert!(steps.iter().any(|step| matches!(step, Step::Keys(_))), "and presses keys");
+}
+
+#[gpui::test]
 fn config_error_token_opens_the_broken_file(cx: &mut TestAppContext) {
     let root = fixture("bar-error-open");
     let (view, mut cx) = open(cx, &root);

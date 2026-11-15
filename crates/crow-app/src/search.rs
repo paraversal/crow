@@ -702,6 +702,28 @@ impl SearchView {
         self.input.read(cx).focus_handle(cx).is_focused(window)
     }
 
+    /// The selectors a fuzzer can click while search covers the pane.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn debug_selectors(&self, cx: &App) -> Vec<String> {
+        let mut out = vec![
+            "search-field".to_owned(),
+            "search-done".to_owned(),
+            "search-scope-bar".to_owned(),
+            "search-skip-switch".to_owned(),
+            "search-footer".to_owned(),
+        ];
+        out.extend((0..self.results.len().min(200)).map(|i| format!("search-row-{i}")));
+        if !self.skipped.is_empty() {
+            out.push("search-skipped-link".to_owned());
+            out.extend((0..self.skipped.len().min(50)).map(|i| format!("search-skipped-row-{i}")));
+        }
+        if self.input.read(cx).text().is_empty() && !self.searching {
+            out.push("search-idle".to_owned());
+            out.extend((0..4).map(|i| format!("search-example-{i}")));
+        }
+        out
+    }
+
     #[cfg(test)]
     pub fn skipped_count(&self) -> usize {
         self.skipped.len()

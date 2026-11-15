@@ -293,6 +293,14 @@ impl Sidebar {
         rows(cx.global::<Ui>()).into_iter().filter(|r| !matches!(r, Row::Header(..))).collect()
     }
 
+    /// The selectors a fuzzer can click in the sidebar.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn debug_selectors(&self, cx: &gpui::App) -> Vec<String> {
+        let mut out = vec!["sidebar".to_owned()];
+        out.extend((0..Self::selectable(cx).len()).map(|i| format!("sidebar-{i}")));
+        out
+    }
+
     /// Finder's display names for `path`, volume first. Cached: the ancestors are
     /// filesystem calls on the main thread, so each path is asked once.
     fn components(&self, path: &Path) -> Rc<[String]> {

@@ -1067,6 +1067,8 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "notify",
+ "rand 0.9.5",
+ "rand_chacha 0.9.0",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

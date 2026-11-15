@@ -19,6 +19,8 @@ mod effects;
 mod extensions;
 mod feedback;
 mod folder;
+#[cfg(any(test, feature = "fuzz"))]
+mod fuzz;
 mod icons;
 mod keys;
 mod logging;

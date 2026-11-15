@@ -441,6 +441,50 @@ impl Pane {
         (0..folder.row_count()).filter_map(|ix| folder.row(ix).map(|(e, d)| (e.name.clone(), d))).collect()
     }
 
+    /// The selectors a fuzzer can click in this pane, in render order. Rows are
+    /// capped so a 100k folder does not turn one step into a huge list; the
+    /// runner still drops selectors that are not laid out.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn debug_selectors(&self, cx: &gpui::App) -> Vec<String> {
+        let mut out = Vec::new();
+        match self.mode {
+            ViewMode::List => {
+                out.push("file-list".to_owned());
+                out.push("table-header".to_owned());
+                if let Some(folder) = self.folders.first() {
+                    let folder = folder.read(cx);
+                    out.extend(
+                        (0..folder.row_count().min(200))
+                            .filter_map(|ix| folder.row(ix).map(|(entry, _)| format!("row-{}", entry.name))),
+                    );
+                }
+            }
+            ViewMode::Columns => {
+                out.push("columns".to_owned());
+                for (k, folder) in self.folders.iter().enumerate().take(8) {
+                    out.push(format!("column-{k}"));
+                    let folder = folder.read(cx);
+                    out.extend(
+                        (0..folder.row_count().min(80))
+                            .filter_map(|ix| folder.row(ix).map(|(entry, _)| format!("column-{k}-row-{}", entry.name))),
+                    );
+                }
+            }
+        }
+        if self.filtering.is_some() {
+            out.push("filter-field".to_owned());
+            out.push("filter-search-footer".to_owned());
+        }
+        out
+    }
+
+    /// Whether a text field inside this pane (the filter or a rename) has focus.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn text_focused(&self, window: &gpui::Window, cx: &gpui::App) -> bool {
+        self.filtering.as_ref().is_some_and(|f| f.input.read(cx).focus_handle(cx).is_focused(window))
+            || self.renaming.as_ref().is_some_and(|r| r.input.read(cx).focus_handle(cx).is_focused(window))
+    }
+
     /// The focused folder's disclosure probe (see `Folder::disclosure_probe`), for tests.
     #[cfg(test)]
     pub fn disclosure_probe(
