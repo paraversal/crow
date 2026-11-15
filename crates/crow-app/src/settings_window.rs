@@ -1793,6 +1793,23 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_long_menu_scrolls_instead_of_squashing_its_rows(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        let fonts: Vec<String> =
+            std::iter::once("System".to_owned()).chain((0..300).map(|i| format!("Font {i:03}"))).collect();
+        view.update(&mut vcx, |view, cx| {
+            view.set_fonts_for_tests(fonts, "");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        focus_control(&view, &mut vcx, ControlId::FontFamily);
+        vcx.simulate_keystrokes("space");
+        draw(&mut vcx);
+        let row = vcx.debug_bounds("settings-font-family-option-0").expect("first entry");
+        assert!(row.size.height >= px(16.), "rows keep their height: {:?}", row.size);
+    }
+
+    #[gpui::test]
     fn an_open_menu_floats_over_the_page(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
         set_two_themes(&view, &mut vcx);

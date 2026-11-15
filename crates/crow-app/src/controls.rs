@@ -303,11 +303,15 @@ pub fn dropdown(
                 let select = select.clone();
                 div()
                     .id((control_id, index))
+                    .debug_selector(move || format!("{control_id}-option-{index}"))
                     .role(Role::ListBoxOption)
                     .aria_label(label.clone())
                     .aria_selected(index == cursor)
                     .aria_position_in_set(index + 1)
                     .aria_size_of_set(options.len())
+                    // `truncate` drops the row's minimum height; without
+                    // `flex_none` a long menu squashes its rows instead of scrolling.
+                    .flex_none()
                     .px_2()
                     .py(px(3.))
                     .rounded(px(4.))
