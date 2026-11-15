@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use gpui::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle};
 
@@ -364,14 +365,18 @@ fn effect_calls(cx: &mut VisualTestContext) -> Vec<crate::effects::Call> {
 }
 
 fn violations(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> Vec<crate::fuzz::Violation> {
-    cx.update(|window, cx| view.read(cx).check_invariants(window, cx))
+    cx.update(|window, cx| view.read(cx).check_invariants(window, cx, false, None))
+}
+
+fn deep_violations(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> Vec<crate::fuzz::Violation> {
+    cx.update(|window, cx| view.read(cx).check_invariants(window, cx, true, None))
 }
 
 #[gpui::test]
 fn invariants_hold_after_open(cx: &mut TestAppContext) {
     let root = fixture("fuzz-invariants");
     let (view, mut cx) = open(cx, &root);
-    let found = violations(&view, &mut cx);
+    let found = deep_violations(&view, &mut cx);
     assert!(found.is_empty(), "{found:?}");
 }
 
@@ -404,7 +409,7 @@ fn listing_mismatch_fires(cx: &mut TestAppContext) {
     let pane = pane(&view, &cx);
     let folder = pane.read_with(&cx, |pane, _| pane.test_folder());
     folder.update(&mut cx, |folder, cx| folder.drop_entry_for_test("notes.txt", cx));
-    let found = violations(&view, &mut cx);
+    let found = deep_violations(&view, &mut cx);
     assert!(found.iter().any(|violation| violation.check == "listing"), "{found:?}");
 }
 
@@ -415,7 +420,7 @@ fn focus_outside_the_surface_fires(cx: &mut TestAppContext) {
     let stray = cx.update(|_, cx| cx.focus_handle());
     let found = cx.update(|window, cx| {
         window.focus(&stray, cx);
-        view.read(cx).check_invariants(window, cx)
+        view.read(cx).check_invariants(window, cx, false, None)
     });
     assert!(found.iter().any(|violation| violation.check == "focus"), "{found:?}");
 }
@@ -428,7 +433,7 @@ fn focus_outside_an_open_overlay_fires(cx: &mut TestAppContext) {
     let pane_focus = pane(&view, &cx).read_with(&cx, |pane, _| pane.focus_handle().clone());
     let found = cx.update(|window, cx| {
         window.focus(&pane_focus, cx);
-        view.read(cx).check_invariants(window, cx)
+        view.read(cx).check_invariants(window, cx, false, None)
     });
     assert!(found.iter().any(|violation| violation.check == "focus"), "{found:?}");
 }
@@ -3883,6 +3888,44 @@ fn theme_picker_previews_reverts_and_saves(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn why_sheet_keeps_focus_on_arrows_and_tab(cx: &mut TestAppContext) {
+    let root = fixture("why-focus");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-j");
+    let focus = view.read_with(&cx, |w, _| w.why.clone()).expect("Why opens");
+    cx.simulate_keystrokes("right down tab");
+    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "the sheet stays open");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(focus), "focus stays in the sheet");
+    let found = violations(&view, &mut cx);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[gpui::test]
+fn tab_stays_in_the_theme_picker(cx: &mut TestAppContext) {
+    theme_index();
+    let root = fixture("picker-tab");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-alt-t");
+    settle(&view, &mut cx);
+    let focus = view.read_with(&cx, |w, _| w.picker.as_ref().map(|p| p.focus.clone())).expect("picker open");
+
+    cx.simulate_keystrokes("tab");
+    assert!(view.read_with(&cx, |w, _| w.picker.is_some()), "Tab keeps the picker open");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(focus.clone()), "Tab stays in the picker");
+
+    cx.simulate_keystrokes("shift-tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(focus.clone()), "Shift-Tab stays in the picker");
+
+    // Window-level keys act on the window behind the sheet; they must not here.
+    cx.simulate_keystrokes("cmd-shift-[ cmd-t cmd-k");
+    assert!(view.read_with(&cx, |w, _| w.picker.is_some()), "the picker stays open");
+    assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "Cmd-K does not open the palette behind it");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(focus), "focus stays in the picker");
+    let found = violations(&view, &mut cx);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[gpui::test]
 fn parent_selects_where_you_came_from_and_history_works(cx: &mut TestAppContext) {
     let root = fixture("history");
     let (view, mut cx) = open(cx, &root.join("alpha"));
@@ -6771,4 +6814,380 @@ fn context_menu_lines_use_the_menu_bar_names_and_keys(cx: &mut TestAppContext) {
         line(&mut cx, "Copy"),
         ContextMenuEntry::Item { title: "Copy".into(), shortcut: shortcut("c", true, false), enabled: true }
     );
+}
+
+// ----- fuzzer runner -----
+
+/// Recreate the H1 tree from scratch: the usual fixture plus a few hundred files.
+/// Every seed and every shrink trial starts here, so one run's trash or rename
+/// cannot change the next one.
+fn reset_tree(root: &Path, files: usize) {
+    let _ = std::fs::remove_dir_all(root);
+    std::fs::create_dir_all(root.join("alpha/inner")).expect("fuzz tree");
+    std::fs::create_dir_all(root.join("beta")).expect("fuzz tree");
+    std::fs::write(root.join("notes.txt"), "hello\n").expect("fuzz tree");
+    for i in 0..files {
+        std::fs::write(root.join(format!("file-{i:03}.txt")), "x").expect("fuzz file");
+    }
+    for i in 0..20 {
+        std::fs::create_dir_all(root.join(format!("dir-{i:02}/inner"))).expect("fuzz dir");
+    }
+}
+
+fn fuzz_sidebar_toml(root: &Path) -> String {
+    format!(
+        "[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n[locations]\nshow = false\n",
+        root.join("alpha").display(),
+        root.join("beta").display()
+    )
+}
+
+fn fuzz_tree(name: &str, files: usize) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("crow-app-{name}-{}", std::process::id()));
+    reset_tree(&root, files);
+    root.canonicalize().expect("canonical fuzz tree")
+}
+
+fn close_all_windows(cx: &mut TestAppContext) {
+    for _ in 0..3 {
+        let handles = cx.update(|cx| cx.windows());
+        if handles.is_empty() {
+            return;
+        }
+        for handle in handles {
+            handle.update(cx, |_, window, _| window.remove_window()).ok();
+        }
+        cx.run_until_parked();
+    }
+    assert!(cx.update(|cx| cx.windows().is_empty()), "windows did not close");
+}
+
+/// `debug_bounds` wants `&'static str`; fixed chrome selectors are matched here.
+fn static_selector(selector: &str) -> Option<&'static str> {
+    Some(match selector {
+        "toolbar" => "toolbar",
+        "toolbar-go-to" => "toolbar-go-to",
+        "toolbar-search" => "toolbar-search",
+        "path-bar" => "path-bar",
+        "file-list" => "file-list",
+        "table-header" => "table-header",
+        "columns" => "columns",
+        "preview" => "preview",
+        "filter-field" => "filter-field",
+        "filter-search-footer" => "filter-search-footer",
+        "search-field" => "search-field",
+        "search-done" => "search-done",
+        "search-scope-bar" => "search-scope-bar",
+        "search-skip-switch" => "search-skip-switch",
+        "search-footer" => "search-footer",
+        "search-skipped-link" => "search-skipped-link",
+        "search-idle" => "search-idle",
+        "palette-commands-token" => "palette-commands-token",
+        "palette-empty" => "palette-empty",
+        "why-open-file" => "why-open-file",
+        "why-reset" => "why-reset",
+        "why-defaults" => "why-defaults",
+        "why-close" => "why-close",
+        "sheet-panel" => "sheet-panel",
+        "sheet-scrim" => "sheet-scrim",
+        "sheet-confirm" => "sheet-confirm",
+        "sheet-cancel" => "sheet-cancel",
+        "theme-list" => "theme-list",
+        "tip" => "tip",
+        "tip-got-it" => "tip-got-it",
+        _ => return None,
+    })
+}
+
+fn selector_bounds(
+    view: &Entity<CrowWindow>,
+    selector: &str,
+    cx: &mut VisualTestContext,
+) -> Option<gpui::Bounds<gpui::Pixels>> {
+    if let Some(bounds) = view.read_with(cx, |window, cx| window.debug_selector_bounds(selector, cx)) {
+        return Some(bounds);
+    }
+    let selector = static_selector(selector)?;
+    cx.debug_bounds(selector)
+}
+
+fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_owned()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "panic".to_owned()
+    }
+}
+
+fn apply_step(
+    view: &Entity<CrowWindow>,
+    step: &crate::fuzz::Step,
+    cx: &mut VisualTestContext,
+) -> Result<(), crate::fuzz::Violation> {
+    use crate::fuzz::Step;
+    if let Step::Keys(keys) = step
+        && keys == "cmd-w"
+        && view.read_with(cx, |window, _| window.tab_count()) <= 1
+    {
+        return Ok(());
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match step {
+        Step::Keys(keys) => cx.simulate_keystrokes(keys),
+        Step::Type(text) => cx.simulate_input(text),
+        Step::Click(selector) => {
+            if let Some(bounds) = selector_bounds(view, selector, cx) {
+                cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            }
+        }
+        Step::RightClick(selector) => {
+            if let Some(bounds) = selector_bounds(view, selector, cx) {
+                let at = bounds.center();
+                cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::default());
+                cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::default());
+            }
+        }
+        Step::Resize(width, height) => cx.simulate_resize(gpui::size(gpui::px(*width), gpui::px(*height))),
+        Step::Settle => crate::fuzz::settle(view, cx),
+        Step::AdvanceClock(ms) => cx.executor().advance_clock(Duration::from_millis(*ms)),
+    }));
+    match result {
+        Ok(()) => Ok(()),
+        Err(payload) => Err(crate::fuzz::Violation::new("panic", panic_text(payload))),
+    }
+}
+
+fn check_windows(cx: &mut VisualTestContext, deep: bool, root: Option<&Path>) -> Vec<crate::fuzz::Violation> {
+    let handles = cx.update(|_, cx| cx.windows());
+    let mut out = Vec::new();
+    for handle in handles {
+        let Some(view) = handle.downcast::<CrowWindow>() else { continue };
+        if let Ok(found) =
+            view.update(&mut cx.cx, |window_view, window, cx| window_view.check_invariants(window, cx, deep, root))
+        {
+            out.extend(found);
+        }
+    }
+    out
+}
+
+/// A deep listing mismatch gets a bounded retry: the trash watcher and the
+/// folder poll can land a few frames after the operation itself finishes.
+fn check_all_windows(cx: &mut VisualTestContext, deep: bool, root: Option<&Path>) -> Vec<crate::fuzz::Violation> {
+    let mut found = check_windows(cx, deep, root);
+    if deep && found.iter().any(|violation| violation.check == "listing") {
+        for _ in 0..25 {
+            std::thread::sleep(Duration::from_millis(20));
+            cx.executor().advance_clock(Duration::from_millis(50));
+            cx.run_until_parked();
+            found = check_windows(cx, deep, root);
+            if !found.iter().any(|violation| violation.check == "listing") {
+                break;
+            }
+        }
+    }
+    found
+}
+
+/// Typed paths and the palette can leave the temp tree; bring the pane back so
+/// the rest of the run (and the listing check) stays in H1's tree.
+fn keep_in_tree(view: &Entity<CrowWindow>, tree: &Path, cx: &mut VisualTestContext) {
+    let dir = view.read_with(cx, |window, cx| window.pane().read(cx).current_dir(cx));
+    if dir.starts_with(tree) {
+        return;
+    }
+    view.update(cx, |window, cx| {
+        let pane = window.pane().clone();
+        pane.update(cx, |pane, cx| pane.navigate(tree.to_path_buf(), cx));
+    });
+    crate::fuzz::settle(view, cx);
+}
+
+fn apply_and_check(
+    view: &Entity<CrowWindow>,
+    step: &crate::fuzz::Step,
+    tree: &Path,
+    cx: &mut VisualTestContext,
+) -> Result<(), crate::fuzz::Violation> {
+    crate::fuzz::logs::reset();
+    apply_step(view, step, cx)?;
+    keep_in_tree(view, tree, cx);
+    cx.run_until_parked();
+    let deep = matches!(step, crate::fuzz::Step::Settle);
+    if let Some(violation) = check_all_windows(cx, deep, Some(tree)).into_iter().next() {
+        return Err(violation);
+    }
+    if crate::fuzz::logs::errors() > 0 {
+        return Err(crate::fuzz::Violation::new("log", "an error was logged"));
+    }
+    Ok(())
+}
+
+fn replay_script(
+    script: &[crate::fuzz::Step],
+    tree: &Path,
+    files: usize,
+    cx: &mut TestAppContext,
+) -> Result<(), crate::fuzz::Violation> {
+    close_all_windows(cx);
+    reset_tree(tree, files);
+    let (view, mut cx) = open(cx, tree);
+    write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
+    crate::fuzz::logs::install();
+    for step in script {
+        apply_and_check(&view, step, tree, &mut cx)?;
+    }
+    crate::fuzz::settle(&view, &mut cx);
+    check_all_windows(&mut cx, true, Some(tree)).into_iter().next().map_or(Ok(()), Err)
+}
+
+fn fuzz_run(
+    seed: u64,
+    steps: usize,
+    tree: &Path,
+    files: usize,
+    cx: &mut TestAppContext,
+) -> Result<(), crate::fuzz::Failure> {
+    use crate::fuzz::{Failure, Script, StepGen, state};
+    close_all_windows(cx);
+    reset_tree(tree, files);
+    let (view, mut cx) = open(cx, tree);
+    write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
+    crate::fuzz::logs::install();
+    let mut generator = StepGen::new(seed);
+    let mut script = Vec::new();
+    for index in 0..steps {
+        let state = state(&view, &mut cx);
+        let step = generator.next(&state);
+        script.push(step.clone());
+        if let Err(violation) = apply_and_check(&view, &step, tree, &mut cx) {
+            let shrunk = shrink(&script, tree, files, &mut cx.cx);
+            return Err(Failure { seed, step: index, violation, script: shrunk, original: Script(script) });
+        }
+    }
+    crate::fuzz::settle(&view, &mut cx);
+    if let Some(violation) = check_all_windows(&mut cx, true, Some(tree)).into_iter().next() {
+        let shrunk = shrink(&script, tree, files, &mut cx.cx);
+        return Err(Failure { seed, step: steps, violation, script: shrunk, original: Script(script) });
+    }
+    Ok(())
+}
+
+/// Delta debugging: drop halves, then single steps, then shorten `Type` strings.
+/// Each candidate runs in a fresh window; the trial cap keeps a finding bounded.
+fn shrink(script: &[crate::fuzz::Step], tree: &Path, files: usize, cx: &mut TestAppContext) -> crate::fuzz::Script {
+    use crate::fuzz::{Script, Step};
+    let mut best = script.to_vec();
+    let trials = std::cell::Cell::new(0usize);
+    let fails = |candidate: &[Step], cx: &mut TestAppContext| {
+        if candidate.is_empty() || trials.get() >= 300 {
+            return false;
+        }
+        trials.set(trials.get() + 1);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| replay_script(candidate, tree, files, cx)))
+            .map_or(true, |result| result.is_err())
+    };
+    let mut changed = true;
+    while changed && trials.get() < 300 {
+        changed = false;
+        let mut chunk = best.len() / 2;
+        while chunk >= 1 && trials.get() < 300 {
+            let mut i = 0;
+            while i < best.len() && trials.get() < 300 {
+                let mut candidate = best.clone();
+                candidate.drain(i..(i + chunk).min(best.len()));
+                if fails(&candidate, cx) {
+                    best = candidate;
+                    changed = true;
+                } else {
+                    i += chunk;
+                }
+            }
+            chunk /= 2;
+        }
+        let mut i = 0;
+        while i < best.len() && trials.get() < 300 {
+            let mut candidate = best.clone();
+            candidate.remove(i);
+            if fails(&candidate, cx) {
+                best = candidate;
+                changed = true;
+            } else {
+                i += 1;
+            }
+        }
+        for i in 0..best.len() {
+            if trials.get() >= 300 {
+                break;
+            }
+            if let Step::Type(text) = &best[i] {
+                for shorter in [String::new(), text.chars().next().map(|c| c.to_string()).unwrap_or_default()] {
+                    if shorter == *text {
+                        continue;
+                    }
+                    let mut candidate = best.clone();
+                    candidate[i] = Step::Type(shorter);
+                    if fails(&candidate, cx) {
+                        best = candidate;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Script(best)
+}
+
+/// The replay entry point the printed scripts use.
+#[allow(dead_code)]
+fn replay(
+    cx: &mut TestAppContext,
+    tree: &Path,
+    files: usize,
+    script: crate::fuzz::Script,
+) -> Vec<crate::fuzz::Violation> {
+    replay_script(&script.0, tree, files, cx).err().into_iter().collect()
+}
+
+#[gpui::test]
+fn fuzz_smoke(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("fuzz-smoke", 40);
+    // 30 steps per seed on a 40-file tree keeps the normal suite near the 10 s
+    // budget; the long run uses 200 files and 3000 steps.
+    for seed in [1, 2, 3] {
+        if let Err(failure) = fuzz_run(seed, 30, &tree, 40, cx) {
+            panic!("{}\n{}", failure.print(), failure.finding_row());
+        }
+    }
+}
+
+#[gpui::test]
+#[ignore]
+fn fuzz_long(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("fuzz-long", 200);
+    let minutes = std::env::var("CROW_FUZZ_MINUTES").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(1);
+    let steps = std::env::var("CROW_FUZZ_STEPS").ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(3000);
+    let explicit = std::env::var("CROW_FUZZ_SEED").ok().and_then(|value| value.parse::<u64>().ok());
+    let run = |seed: u64, cx: &mut TestAppContext| {
+        println!("CROW_FUZZ_SEED={seed}");
+        if let Err(failure) = fuzz_run(seed, steps, &tree, 200, cx) {
+            println!("{}", failure.print());
+            println!("{}", failure.finding_row());
+            panic!("fuzz seed {seed} failed: {}", failure.violation.check);
+        }
+    };
+    if let Some(seed) = explicit {
+        run(seed, cx);
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(minutes * 60);
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |elapsed| elapsed.as_nanos() as u64);
+    while Instant::now() < deadline {
+        run(seed, cx);
+        seed = seed.wrapping_add(1);
+    }
 }

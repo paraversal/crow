@@ -462,7 +462,6 @@ impl Pane {
             ViewMode::Columns => {
                 out.push("columns".to_owned());
                 for (k, folder) in self.folders.iter().enumerate().take(8) {
-                    out.push(format!("column-{k}"));
                     let folder = folder.read(cx);
                     out.extend(
                         (0..folder.row_count().min(80))
@@ -2960,6 +2959,31 @@ impl Pane {
             .or_else(|| self.renaming.as_ref().map(|r| r.input.read(cx).focus_handle(cx)))
     }
 
+    /// Bounds for a generated row selector, from the pane's own layout state.
+    /// `debug_bounds` needs a `&'static str`; row names are dynamic.
+    pub fn debug_selector_bounds(&self, selector: &str, cx: &gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {
+        if let Some(name) = selector.strip_prefix("row-") {
+            let bounds = self.list_bounds.get()?;
+            let folder = self.focused_folder().read(cx);
+            let ix = (0..folder.row_count()).find(|ix| folder.row(*ix).is_some_and(|(entry, _)| entry.name == name))?;
+            let offset = folder.scroll().0.borrow().base_handle.offset().y;
+            let top = bounds.top() + px(LIST_TOP_INSET) - offset + px(ROW_HEIGHT * ix as f32);
+            return Some(gpui::Bounds::new(point(bounds.left(), top), gpui::size(bounds.size.width, px(ROW_HEIGHT))));
+        }
+        let rest = selector.strip_prefix("column-")?;
+        let (k, name) = rest.split_once("-row-")?;
+        let k: usize = k.parse().ok()?;
+        let column = *self.column_bounds.borrow().get(&k)?;
+        let folder = self.folders.get(k)?.read(cx);
+        let ix = (0..folder.row_count()).find(|ix| folder.row(*ix).is_some_and(|(entry, _)| entry.name == name))?;
+        let offset = folder.scroll().0.borrow().base_handle.offset().y;
+        let top = column.top() + px(ROW_HEIGHT * ix as f32) - offset;
+        Some(gpui::Bounds::new(
+            point(column.left() + px(4.), top),
+            gpui::size(column.size.width - px(8.), px(ROW_HEIGHT)),
+        ))
+    }
+
     /// Every shown folder's cursor and selection must name a listed row.
     pub fn invariant_violations(&self, cx: &gpui::App) -> Vec<crate::fuzz::Violation> {
         use crate::fuzz::Violation;
@@ -2992,8 +3016,9 @@ impl Pane {
     }
 
     /// Every shown folder's listing must equal `read_dir`, honoring hidden files.
-    /// The name filter is a view over `entries` and has its own tests.
-    pub fn listing_violations(&self, cx: &gpui::App) -> Vec<crate::fuzz::Violation> {
+    /// The name filter is a view over `entries` and has its own tests. `root`
+    /// limits the check to the fuzzer's temp tree.
+    pub fn listing_violations(&self, cx: &gpui::App, root: Option<&std::path::Path>) -> Vec<crate::fuzz::Violation> {
         use crate::fuzz::Violation;
         let hidden = cx.global::<Ui>().settings.show_hidden_files;
         let mut out = Vec::new();
@@ -3003,6 +3028,9 @@ impl Pane {
                 continue;
             }
             let dir = folder.dir();
+            if root.is_some_and(|root| !dir.starts_with(root)) {
+                continue;
+            }
             let Ok(read) = std::fs::read_dir(dir) else { continue };
             let mut disk: Vec<String> = read
                 .filter_map(|entry| entry.ok())

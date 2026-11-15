@@ -67,6 +67,47 @@ every operation and its undo, each conflict choice, cancelling midway, a read-on
 a source vanishing mid-operation, undo refusing to overwrite, a forced cross-volume move,
 and 40 randomized rounds of "do, undo, compare the tree".
 
+## Fuzzing
+
+`crates/crow-app/src/fuzz.rs` generates seeded steps from the live keymap and the
+elements on screen, applies them to a real GPUI window, and checks invariants after
+each one. Escaping effects go through `effects::RecordingEffects`, so a fuzz run
+never opens an app, plays a sound or touches the pasteboard or Trash.
+
+```bash
+cargo test -p crow-app fuzz_smoke                 # 3 seeds x 30 steps on a 40-file tree, in the normal suite
+CROW_FUZZ_MINUTES=2 cargo test -p crow-app fuzz_long -- --ignored --nocapture
+CROW_FUZZ_SEED=42 CROW_FUZZ_STEPS=5000 cargo test -p crow-app fuzz_long -- --ignored --nocapture
+```
+
+`fuzz_long` prints `CROW_FUZZ_SEED=<n>` for each seed. With no seed it picks one
+from the clock; `CROW_FUZZ_MINUTES` (default 1) stops after that many minutes,
+`CROW_FUZZ_STEPS` (default 3000) caps each seed, and the long tree has 200 files
+(the smoke uses 40 to stay near 10 s). The scheduled workflow
+(`.github/workflows/fuzz.yml`) runs 20 minutes every three days.
+
+A failure prints the seed, the failing step, the violation and a shrunk script:
+
+```rust
+// paste into crates/crow-app/src/window/tests.rs
+use crate::fuzz::Step;
+#[gpui::test]
+fn regression(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("regression", 200);
+    let found = replay(cx, &tree, 200, crate::script![Step::Keys("cmd-k".into()), Step::Settle]);
+    assert!(found.is_empty(), "{found:?}");
+}
+```
+
+The runner prints the row for `docs/plans/m7/findings.md`. Deduplicate by violation
+and place, not by seed; H4 fixes rows and adds the named regression test.
+
+What the fuzzer does not drive: the Settings window (its own tests cover it), the
+native context menu's items (the recorder answers a scripted choice), and the
+accessibility tree (GPUI's test platform disables it). The second window is opened
+and checked by the invariants but only the first is driven. `cmd-m` is excluded
+because the test platform has no minimize implementation.
+
 ## Performance
 
 ```bash

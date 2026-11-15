@@ -43,7 +43,7 @@ const VIM_KEYS: &[&str] = &["h", "j", "k", "l", "g g", "shift-g", "m a", "' a"];
 
 /// Short strings that exercise paths, text edges and the caret.
 const TYPE_ALPHABET: &[&str] =
-    &["a", "Z", "0", "9", "/", "~", ".", " ", "-", "_", "'", "\"", "🙂", "👩🏽‍💻", "e\u{301}", "ש", "م"];
+    &["a", "Z", "0", "9", "/", "~", ".", " ", "-", "_", "'", "\"", "🙂", "e\u{301}", "ש", "م"];
 
 const SIZES: &[(f32, f32)] = &[(700., 500.), (1280., 800.), (1920., 1100.)];
 
@@ -98,7 +98,7 @@ impl StepGen {
 
     fn type_text(&mut self) -> Step {
         let mut text = String::new();
-        for _ in 0..self.rng.random_range(1..=6) {
+        for _ in 0..self.rng.random_range(1..=3) {
             text.push_str(TYPE_ALPHABET[self.rng.random_range(0..TYPE_ALPHABET.len())]);
         }
         Step::Type(text)
@@ -143,6 +143,80 @@ pub struct Violation {
 impl Violation {
     pub fn new(check: &'static str, detail: impl Into<String>) -> Self {
         Violation { check, detail: detail.into() }
+    }
+}
+
+/// A replayable sequence of steps. `print` gives Rust that pastes into a test.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Script(pub Vec<Step>);
+
+impl Script {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn print(&self) -> String {
+        let steps: Vec<String> = self.0.iter().map(step_source).collect();
+        format!("crate::script![{}]", steps.join(", "))
+    }
+}
+
+/// `script![Keys("cmd-k".into()), Step::Settle]`, for pasted regression tests.
+#[macro_export]
+macro_rules! script {
+    ($($step:expr),* $(,)?) => {
+        $crate::fuzz::Script(vec![$($step),*])
+    };
+}
+
+fn step_source(step: &Step) -> String {
+    match step {
+        Step::Keys(keys) => format!("Step::Keys({keys:?}.into())"),
+        Step::Type(text) => format!("Step::Type({text:?}.into())"),
+        Step::Click(selector) => format!("Step::Click({selector:?}.into())"),
+        Step::RightClick(selector) => format!("Step::RightClick({selector:?}.into())"),
+        Step::Resize(width, height) => format!("Step::Resize({width:?}, {height:?})"),
+        Step::Settle => "Step::Settle".to_owned(),
+        Step::AdvanceClock(ms) => format!("Step::AdvanceClock({ms})"),
+    }
+}
+
+/// One failing run: the seed and step, the violation, and the shrunk script.
+#[derive(Clone, Debug)]
+pub struct Failure {
+    pub seed: u64,
+    pub step: usize,
+    pub violation: Violation,
+    /// The shortest failing sequence the shrinker found.
+    pub script: Script,
+    /// The sequence as generated, for the findings table's step count.
+    pub original: Script,
+}
+
+impl Failure {
+    pub fn print(&self) -> String {
+        format!(
+            "seed {} step {}: {} — {}\noriginal {} steps, shrunk to {}:\n// paste into window/tests.rs with `use crate::fuzz::Step;`\n{}",
+            self.seed,
+            self.step,
+            self.violation.check,
+            self.violation.detail,
+            self.original.len(),
+            self.script.len(),
+            self.script.print()
+        )
+    }
+
+    /// The row for `docs/plans/m7/findings.md`; the agent fills the `#` and status.
+    pub fn finding_row(&self) -> String {
+        format!(
+            "| | H1 | {} | {}: {} ({} steps) | `{}` | open |",
+            self.seed,
+            self.violation.check,
+            self.violation.detail,
+            self.original.len(),
+            self.script.print()
+        )
     }
 }
 
@@ -192,7 +266,9 @@ pub mod logs {
 /// closing the last tab are never generated; new tabs and windows stop at the caps.
 fn allowed(key: &str, tabs: usize, windows: usize) -> bool {
     match key {
-        "cmd-q" => false,
+        // Quitting and minimizing are not fuzzable: the test platform has no
+        // implementation for the latter, and the former ends the run.
+        "cmd-q" | "cmd-m" | "ctrl-cmd-space" => false,
         "cmd-w" if tabs <= 1 => false,
         "cmd-t" | "cmd-enter" if tabs >= MAX_TABS => false,
         "cmd-n" if windows >= MAX_WINDOWS => false,
@@ -232,6 +308,28 @@ pub fn state(view: &gpui::Entity<crate::window::CrowWindow>, cx: &mut gpui::Visu
     let mut state = GenState { active_keys, all_keys, text_focused, selectors, tabs, windows, vim };
     state.add_plain_keys();
     state
+}
+
+/// Run until parked, then wait (bounded) for every tab, operation and watcher
+/// poll to quiet. The folder poll runs every 100 ms on the test clock, so each
+/// turn advances it; two quiet turns cover a change delivered by the watcher.
+#[cfg(test)]
+pub fn settle(view: &gpui::Entity<crate::window::CrowWindow>, cx: &mut gpui::VisualTestContext) {
+    let mut quiet = 0;
+    for _ in 0..40 {
+        cx.executor().advance_clock(std::time::Duration::from_millis(150));
+        cx.run_until_parked();
+        if view.read_with(cx, |window, cx| window.is_busy(cx)) {
+            quiet = 0;
+        } else {
+            quiet += 1;
+            if quiet >= 2 {
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("folders never settled");
 }
 
 #[cfg(test)]

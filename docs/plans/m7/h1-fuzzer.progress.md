@@ -7,10 +7,11 @@ Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: in prog
 | I1 Side-effect seam (`effects`) | done (`4f8f83e`) | `crates/crow-app/src/effects.rs`: `Effects` (`Send + Sync`), `SystemEffects`, `RecordingEffects`, `EffectHost` global. Every escaping call site routed. `main.rs` installs `SystemEffects`; `ui::init_for_tests` installs `RecordingEffects`. Done-when grep hits only `effects.rs`. 10 effect assertions added/extended. |
 | I2 Steps and generator | done | `crates/crow-app/src/fuzz.rs`: `Step`, `StepGen`, `GenState`, `state()` (live keymap + context stack + selectors). `CrowWindow`/`Pane`/`Sidebar`/`SearchView` grew `cfg(any(test, feature = "fuzz"))` selector and text-focus accessors. Caps: 4 tabs, 2 windows; `cmd-q` and last-tab `cmd-w` never generated. Tests: same seed same steps, every generated keystroke parses, forbidden keys never generated, live window yields bindings/selectors. |
 | I3 Invariants | done | `CrowWindow::check_invariants(&self, window, cx)`: cursor/selection rows, focus inside the top overlay (or pane/sidebar/text field), palette/picker exclusivity, rename state, listing = `read_dir` honoring hidden files. `fuzz::Violation`; `fuzz::logs` counts error-level lines per thread. Deliberate-break tests for cursor, selection, listing, stray focus, overlay focus, and the log hook. |
-| I4 Runner, shrinking, replay | todo | Q1/Q3 answered. |
-| I5 First run | todo | Needs I1–I4. |
+| I4 Runner, shrinking, replay | done | Runner in `window/tests.rs` (needs the test helpers); `fuzz::{Script, Failure, script!}`, delta-debugging shrinker, `fuzz_smoke` / `fuzz_long`, `.github/workflows/fuzz.yml` every 3 days. Test-platform exclusions: `cmd-m` (no minimize) and `ctrl-cmd-space` (no character palette). Deep listing check only after `Settle`/at the end, only for the active tab and only under the fuzz tree; `fuzz::settle` advances the test clock and waits for two quiet turns. Each seed/shrink trial resets the tree, writes a tree-only sidebar, and closes every window before opening a fresh one. Replay skips `cmd-w` on a one-tab window. |
+| I5 First run | in progress | `fuzz_smoke` seeds 1–3 × 30 steps on a 40-file tree: 3.74 s. Findings #1–#3 fixed in H1 (user approved), #4 open for H4. 30-minute `fuzz_long` pending. |
 
 ## Questions
+- Q8 (asked 2026-11-15): `fuzz_smoke` seed 1 finds a real focus bug (theme picker stays open, Tab moves focus behind it). Fix in H1 or record for H4 and ignore seed 1? → answer: **fix now**. Fixed in H1 with `tab_stays_in_the_theme_picker`; the same modal-focus bug in the Why sheet (arrows/Tab) got `why_sheet_keeps_focus_on_arrows_and_tab`.
 - Q1 (asked 2026-11-15): shrinker hand-rolled or `proptest`? → answer: **hand-rolled** delta debugging; `rand` + `rand_chacha`.
 - Q2 (asked 2026-11-15): `#[cfg(test)]` only or a `fuzz` cargo feature? → answer: **`fuzz` feature**; code under `#[cfg(any(test, feature = "fuzz"))]`.
 - Q3 (asked 2026-11-15): multiple windows and tabs in the fuzzer? → answer: **tabs (cap 4) and a second window (cap 2)**, invariants per window.
@@ -28,6 +29,13 @@ Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: in prog
 - `rand`/`rand_chacha` are optional normal dependencies enabled by the `fuzz` feature, and also dev-dependencies for tests. Dev-only would not compile H3's `crow --fuzz` release binary. — Q2 requires the generator outside tests.
 - The generator filters forbidden keys again in `StepGen::keys`, not only in `state()`, so a caller cannot smuggle `cmd-q`/last-tab `cmd-w` in.
 - `cmd-enter` (palette "open in tab") is capped with `cmd-t` at 4 tabs.
+- `cmd-m` (Minimize) and `ctrl-cmd-space` (Show Character Palette) are excluded: GPUI's test platform panics with "not implemented". They are real app actions, covered by hand checks.
+- The deep listing check runs only after `Step::Settle` and once at the end of a run; checking it after every step false-positived on an in-flight trash whose watcher had not delivered yet. `fuzz::settle` advances the test clock (the folder poll is a 100 ms `background_executor` timer) and waits for two quiet turns.
+- The deep listing check only covers the active tab (only it is shown) and folders under the fuzz tree. Inactive tabs may lag by design; real directories outside the tree are out of H1's scope.
+- The fuzzer writes a tree-only `sidebar.toml` (favorites `alpha`/`beta`, no Recent/Locations) so a click cannot navigate to the user's real folders. Typed paths can still leave the tree; the listing check simply skips them.
+- Search open allows the sidebar focus: the documented Tab cycle is field → results → sidebar → field. This means H4 #4 (right-click on the sidebar while search is open) is not distinguishable by the invariant; it is recorded for H4.
+- `fuzz_smoke` uses 30 steps per seed on a 40-file tree, not the plan's 300 steps: 300 steps took 33 s (real rendering plus occasional 4–6 s undo/relayout steps), over the plan's ~10 s budget. The 3-seed smoke now takes 3.74 s; `fuzz_long` keeps 3000 steps on the 200-file tree.
+- `fuzz::settle` advances the test clock because the folder poll is a 100 ms `background_executor` timer, not real time. This was the cause of the early listing false positives.
 - Invariant 3 checks that the focused handle is one of the known focus-owning surfaces (pane, sidebar, pane text field, or the top overlay). GPUI's test platform disables the accessibility tree (`TestAppContext::new` sets `accessibility_force_disabled`; the test platform's `a11y_init` is a no-op), so role/aria-label presence cannot be read generically; the existing per-surface tests cover it. H7 can strengthen this when it enables a11y.
 - Invariant 5's "one overlay of each kind" is structural (`Option` fields); the meaningful checks are palette/picker exclusivity and rename state vs `rename_text`.
 - Invariant 6 compares the full `entries` listing to `read_dir` (hidden setting honored). The name filter is a view over `entries` and has its own tests; replicating its matcher here would duplicate it.
@@ -37,6 +45,10 @@ Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: in prog
 - [ ] Fuzzer: `CROW_FUZZ_MINUTES=2 cargo test -p crow-app fuzz_long -- --ignored --nocapture` launches no app, plays no sound, leaves the user's Trash and pasteboard alone.
 
 ## Found along the way
+- **H4 #4** (open): `cmd-shift-a` opens search; right-clicking a sidebar row moves focus to the sidebar while search stays open. Shrunk: `crate::script![Step::Keys("cmd-shift-a".into()), Step::RightClick("sidebar-5".into())]`. Not fixed in H1; needs a product decision (close search on sidebar click vs keep focus in the field).
+- **H1 finding #1** (fixed here, user approved): `alt-cmd-t` opens the theme picker; `tab` (`SwitchFocus` in the `Crow` context) moved focus behind it. `ThemePicker` now binds Tab/Shift-Tab to `NoAction`; test `tab_stays_in_the_theme_picker`.
+- **H1 finding #2** (fixed here): the Why sheet let arrows/Tab move focus behind it. `Sheet` now binds Tab/Shift-Tab/arrows to `NoAction`; the picker's later up/down bindings still win. Test `why_sheet_keeps_focus_on_arrows_and_tab`.
+- The first shrink of finding #2 was invalid (`right`, `down`) because `close_all_windows` left the old window alive; it now loops until `cx.windows()` is empty. The corrected script is `cmd-j`, `right`.
 - `bottom_bar::open_config` had a `#[cfg(test)]` recorder (`OPENED`); replaced by the global seam.
 - The Why sheet's buttons had ids but no debug selectors; added them.
 - The Settings window is a separate `SettingsWindow` entity; the `CrowWindow` fuzzer accessors cannot see it. I4 will decide whether to drive it as a second window or leave it to its own tests.

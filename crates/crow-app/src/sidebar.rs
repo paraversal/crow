@@ -307,6 +307,22 @@ impl Sidebar {
         self.focus_handle(cx)
     }
 
+    /// Bounds for selectable row `i`, from the prepaint layout.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn debug_row_bounds(&self, i: usize, cx: &gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {
+        let mut selectable = 0;
+        for (layout_index, row) in rows(cx.global::<Ui>()).iter().enumerate() {
+            if matches!(row, Row::Header(..)) {
+                continue;
+            }
+            if selectable == i {
+                return self.layout.borrow().get(layout_index).map(|(_, _, bounds)| *bounds);
+            }
+            selectable += 1;
+        }
+        None
+    }
+
     /// Finder's display names for `path`, volume first. Cached: the ancestors are
     /// filesystem calls on the main thread, so each path is asked once.
     fn components(&self, path: &Path) -> Rc<[String]> {

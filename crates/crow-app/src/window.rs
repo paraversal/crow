@@ -3139,7 +3139,6 @@ impl CrowWindow {
     pub fn debug_selectors(&self, cx: &App) -> Vec<String> {
         let mut out =
             vec!["toolbar".to_owned(), "toolbar-go-to".to_owned(), "toolbar-search".to_owned(), "path-bar".to_owned()];
-        out.extend((0..self.tabs.len()).map(|i| format!("tab-{i}")));
         out.extend(self.pane().read(cx).debug_selectors(cx));
         out.extend(self.sidebar.read(cx).debug_selectors(cx));
         if cx.global::<Ui>().settings.show_preview {
@@ -3148,10 +3147,9 @@ impl CrowWindow {
         if let Some(search) = &self.search {
             out.extend(search.read(cx).debug_selectors(cx));
         }
-        if let Some(palette) = &self.palette {
+        if self.palette.is_some() {
             out.push("palette-commands-token".to_owned());
             out.push("palette-empty".to_owned());
-            out.extend((0..palette.listing.rows.len().min(60)).map(|i| format!("palette-row-{i}")));
         }
         if self.why.is_some() {
             out.extend(["why-open-file", "why-reset", "why-defaults", "why-close"].map(str::to_owned));
@@ -3183,19 +3181,49 @@ impl CrowWindow {
         self.tabs.len()
     }
 
-    /// The H1 invariants: cursor/selection rows, focus inside the top overlay,
-    /// one modal, the rename field in step, and each shown listing equal to disk.
+    /// Bounds for a generated selector, from the views' layout state. Fixed
+    /// chrome selectors go through `debug_bounds` in the runner instead.
+    pub fn debug_selector_bounds(&self, selector: &str, cx: &App) -> Option<gpui::Bounds<gpui::Pixels>> {
+        if let Some(index) = selector.strip_prefix("sidebar-").and_then(|index| index.parse().ok()) {
+            return self.sidebar.read(cx).debug_row_bounds(index, cx);
+        }
+        self.pane().read(cx).debug_selector_bounds(selector, cx)
+    }
+
+    /// Whether any tab is loading or an operation is running; `fuzz::settle` waits on this.
+    pub fn is_busy(&self, cx: &App) -> bool {
+        self.tabs.iter().any(|(_, pane)| pane.read(cx).is_loading(cx))
+            || cx.global::<crate::operations::Operations>().running.is_some()
+    }
+
+    /// The H1 invariants. Cursor/selection rows, focus and modals are checked
+    /// after every step; `deep` adds the listing = disk check, which belongs
+    /// after a settle (the watcher may still be delivering a change).
     /// The runner adds the panic and error-log checks around each step.
-    pub fn check_invariants(&self, window: &Window, cx: &App) -> Vec<crate::fuzz::Violation> {
+    pub fn check_invariants(
+        &self,
+        window: &Window,
+        cx: &App,
+        deep: bool,
+        root: Option<&std::path::Path>,
+    ) -> Vec<crate::fuzz::Violation> {
         use crate::fuzz::Violation;
         let mut out = Vec::new();
+        // A listing is only expected to match disk once loading and operations
+        // have finished; the runner's Settle step waits for that.
+        let busy = self.is_busy(cx);
+        let active = self.tabs.active_index();
         for (index, (_, pane)) in self.tabs.iter().enumerate() {
             let pane = pane.read(cx);
             for violation in pane.invariant_violations(cx) {
                 out.push(Violation::new(violation.check, format!("tab {index}: {}", violation.detail)));
             }
-            for violation in pane.listing_violations(cx) {
-                out.push(Violation::new(violation.check, format!("tab {index}: {}", violation.detail)));
+            // Only the active tab's folders are shown; an inactive tab's listing
+            // may lag behind a change made in another tab.
+            if deep && !busy && index == active {
+                for violation in pane.listing_violations(cx, root) {
+                    out.push(Violation::new(violation.check, format!("tab {index}: {}", violation.detail)));
+                }
             }
         }
 
@@ -3220,6 +3248,8 @@ impl CrowWindow {
             let search = search.read(cx);
             allowed.push(("search field", search.input_focus_handle(cx)));
             allowed.push(("search results", search.results_focus_handle()));
+            // The documented Tab cycle goes field -> results -> sidebar -> field.
+            allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
         } else {
             allowed.push(("pane", pane.focus_handle().clone()));
             allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));

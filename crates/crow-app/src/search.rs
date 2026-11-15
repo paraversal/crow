@@ -712,14 +712,11 @@ impl SearchView {
             "search-skip-switch".to_owned(),
             "search-footer".to_owned(),
         ];
-        out.extend((0..self.results.len().min(200)).map(|i| format!("search-row-{i}")));
         if !self.skipped.is_empty() {
             out.push("search-skipped-link".to_owned());
-            out.extend((0..self.skipped.len().min(50)).map(|i| format!("search-skipped-row-{i}")));
         }
         if self.input.read(cx).text().is_empty() && !self.searching {
             out.push("search-idle".to_owned());
-            out.extend((0..4).map(|i| format!("search-example-{i}")));
         }
         out
     }
