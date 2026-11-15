@@ -19,6 +19,10 @@ pub enum Step {
     Resize(f32, f32),
     Settle,
     AdvanceClock(u64),
+    /// Delete the folder the active pane shows (inside the fuzz tree).
+    DeleteShownFolder,
+    /// Delete and recreate the folder the active pane shows with different contents.
+    ReplaceShownFolder,
 }
 
 /// What the generator knows about the window right now.
@@ -79,6 +83,8 @@ impl StepGen {
             75..=79 => self.keys(state),
             80..=84 => Step::Settle,
             85..=89 => Step::AdvanceClock(self.rng.random_range(50..=2000)),
+            90..=91 => Step::DeleteShownFolder,
+            92..=93 => Step::ReplaceShownFolder,
             _ => {
                 let (width, height) = SIZES[self.rng.random_range(0..SIZES.len())];
                 Step::Resize(width, height)
@@ -188,6 +194,8 @@ fn step_source(step: &Step) -> String {
         Step::Resize(width, height) => format!("Step::Resize({width:?}, {height:?})"),
         Step::Settle => "Step::Settle".to_owned(),
         Step::AdvanceClock(ms) => format!("Step::AdvanceClock({ms})"),
+        Step::DeleteShownFolder => "Step::DeleteShownFolder".to_owned(),
+        Step::ReplaceShownFolder => "Step::ReplaceShownFolder".to_owned(),
     }
 }
 
@@ -201,16 +209,25 @@ pub struct Failure {
     pub script: Script,
     /// The sequence as generated, for the findings table's step count.
     pub original: Script,
+    /// The edge tree's label (`none` for the ordinary fuzz tree).
+    pub tree: String,
+    /// Whether churn ran during the failing run.
+    pub churn: bool,
+    /// Whether the shrunk script still fails the same check with churn off.
+    pub reproduces_without_churn: bool,
 }
 
 impl Failure {
     pub fn print(&self) -> String {
         format!(
-            "seed {} step {}: {} — {}\noriginal {} steps, shrunk to {}:\n// paste into window/tests.rs with `use crate::fuzz::Step;`\n{}",
+            "seed {} step {}: {} — {}\ntree {}; churn {}; shrunk script reproduces without churn: {}\noriginal {} steps, shrunk to {}:\n// paste into window/tests.rs with `use crate::fuzz::Step;`\n{}",
             self.seed,
             self.step,
             self.violation.check,
             self.violation.detail,
+            self.tree,
+            if self.churn { "ran" } else { "off" },
+            if self.reproduces_without_churn { "yes" } else { "no" },
             self.original.len(),
             self.script.len(),
             self.script.print()
@@ -220,11 +237,14 @@ impl Failure {
     /// The row for `docs/plans/m7/findings.md`; the agent fills the `#` and status.
     pub fn finding_row(&self) -> String {
         format!(
-            "| | H1 | {} | {}: {} ({} steps) | `{}` | open |",
+            "| | H2 | {} / {} / {} | {}: {} ({} steps; without churn: {}) | `{}` | open |",
             self.seed,
+            self.tree,
+            if self.churn { "churn" } else { "still" },
             self.violation.check,
             self.violation.detail,
             self.original.len(),
+            if self.reproduces_without_churn { "yes" } else { "no" },
             self.script.print()
         )
     }
@@ -398,6 +418,28 @@ mod tests {
                 assert!(keys != "cmd-w", "never closes the last tab");
             }
         }
+    }
+
+    #[test]
+    fn shown_folder_steps_print() {
+        let script = Script(vec![Step::DeleteShownFolder, Step::ReplaceShownFolder]);
+        assert_eq!(script.print(), "crate::script![Step::DeleteShownFolder, Step::ReplaceShownFolder]");
+    }
+
+    #[test]
+    fn shown_folder_steps_are_rare() {
+        let state = state();
+        let mut generator = StepGen::new(9);
+        let (mut delete, mut replace) = (0, 0);
+        for _ in 0..10_000 {
+            match generator.next(&state) {
+                Step::DeleteShownFolder => delete += 1,
+                Step::ReplaceShownFolder => replace += 1,
+                _ => {}
+            }
+        }
+        assert!(delete > 0 && replace > 0, "{delete} {replace}");
+        assert!(delete + replace < 1_000, "low weight: {delete} {replace}");
     }
 
     #[test]

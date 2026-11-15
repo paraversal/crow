@@ -5,11 +5,12 @@ Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: in progr
 | Item | State | Notes |
 | --- | --- | --- |
 | I1 `crow_fs::testing` | done | `testing.rs`: `EdgeKind` (16 kinds), `EdgeTree` (`small`/`all`/`parse`/`label`), `make_tree`, `Tree::remove` (permission-restoring), `Churn`/`ChurnHandle`. `--make-fixture` now calls `EdgeTree::wide`; old `snapshot::make_fixture` removed. `crow-fs` 42 tests pass; clippy with and without `testing`; `cargo check -p crow-app`. |
-| I2 Churn | in progress | Churn core is in I1; fuzzer option, steps and tests next. |
+| I2 Churn | done | `Step::DeleteShownFolder`/`ReplaceShownFolder` (2% each), `FuzzOptions` (files/edge/churn), churn pauses around every `Settle` deep check, `fuzz_long` reads `CROW_FUZZ_TREE`/`CROW_FUZZ_CHURN` and alternates churn, `Failure` records tree/churn/without-churn. Tests: delete/replace shown folder, churn 2 s on 1k then listing = disk, edge replay. Full app suite 401 passed, 2 ignored. |
 | I3 Runs | todo | |
 | Finish | todo | |
 
 ## Questions
+- Q4 (asked 2026-11-15): the new edge smoke finds a real panic (H4 #6: a `\n` in a file name crashes GPUI text shaping when the row is drawn). Fix it in H2, or record it for H4 and keep the normal suite green? → answer: **record for H4**; `fuzz_smoke_edge_trees` is `#[ignore = "H4 #6"]`.
 - Q1 (asked 2026-11-15): Should `Unreadable` and `SymlinkLoop` trees also be in `fuzz_smoke` (every `cargo test`)? Recommended: yes for a 50-entry tree with every kind except `Wide` and `HugeFile`; those stay in `fuzz_long`. → answer: **yes**.
 - Q2 (asked 2026-11-15): Removable/slow volumes (D1 note): simulate with a slow FUSE-like layer, or leave to a hand check with a USB stick / `hdiutil` disk image? Recommended: hand check with a disk image, recorded in `docs/testing.md`; no simulation layer. → answer: **hand check with a disk image**.
 - Q3 (asked 2026-11-15): Churn in iCloud Drive / cloud placeholders? Recommended: no; out of scope for the test platform, noted as a hand check. → answer: **no**.
@@ -29,11 +30,12 @@ Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: in progr
 - [ ] Removable volume (Q2): `hdiutil create -size 200m -fs APFS -volname CrowTest /tmp/crow.dmg`, attach, browse, eject while shown; Crow shows the folder gone, no panic.
 
 ## Found along the way
-- (none yet)
+- **H4 #6** (open): a name containing `\n` panics GPUI text shaping. The edge smoke's seed 4 shrinks to `Step::Keys("alt-down")` (`MoveToLast`) on the `small` tree: the row for `line\nbreak.txt` draws its raw name. `vendor/zed/crates/gpui/src/text_system.rs:679` asserts no newlines; `pane.rs:1843,2172` pass `entry.name` through `truncate_middle_parts`. Recorded in `findings.md`; not fixed (H4). The edge smoke is blocked on Q4.
 
 ## Log
 - 2026-11-15: read the plan, M7 index, H1 plan/progress, findings, testing docs and the code H2 touches; created the branch and this file; asked Q1–Q3.
 - 2026-11-15: I1. Added `crow-fs/src/testing.rs` (edge kinds, seeded `make_tree`, permission-restoring `remove_tree`, `Churn`), the `testing` feature, and moved `--make-fixture` onto `EdgeTree::wide`. `cargo test -p crow-fs` 42 passed (0.37 s); clippy clean with and without `testing`; `cargo check -p crow-app` clean.
+- 2026-11-15: I2. Added the two shown-folder steps, `FuzzOptions`, churn pause/resume around deep checks, `CROW_FUZZ_TREE`/`CROW_FUZZ_CHURN`, and the new tests. The edge smoke found H4 #6 on its first run (newline name → GPUI panic); Q4 says H4, so `fuzz_smoke_edge_trees` is ignored. Full `cargo test -p crow-app`: 401 passed, 2 ignored (22.8 s); clippy clean, also with `--features fuzz`.
 
 ## Next
-I2: add `Step::DeleteShownFolder`/`ReplaceShownFolder`, thread `EdgeTree` + `churn` through the fuzz runner, add the churn settle test and the edge smoke run.
+I3: run `fuzz_long` with each edge kind and with churn, 30 minutes total; record findings (including #6's newline tree) in `findings.md`; don't fix app bugs.

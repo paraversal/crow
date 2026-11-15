@@ -190,6 +190,20 @@ impl EdgeTree {
         }
         self.kinds.iter().map(EdgeKind::label).collect::<Vec<_>>().join("+")
     }
+
+    /// The parseable form for `CROW_FUZZ_TREE`.
+    pub fn spec(&self) -> String {
+        if self.kinds.is_empty() {
+            return "none".into();
+        }
+        if self.kinds == Self::small().kinds {
+            return "small".into();
+        }
+        if self.kinds == Self::all().kinds {
+            return "all".into();
+        }
+        self.kinds.iter().map(EdgeKind::label).collect::<Vec<_>>().join(",")
+    }
 }
 
 /// A tree `make_tree` built. Dropping it deletes nothing: the bench fixture is
@@ -809,10 +823,9 @@ mod tests {
         }
         assert_eq!(EdgeTree::parse("small").unwrap(), EdgeTree::small());
         assert_eq!(EdgeTree::parse("all").unwrap(), EdgeTree::all());
-        assert_eq!(
-            EdgeTree::parse("long-name,deep-20").unwrap(),
-            EdgeTree::new([EdgeKind::LongName, EdgeKind::Deep(20)])
-        );
+        let mixed = EdgeTree::new([EdgeKind::LongName, EdgeKind::Deep(20)]);
+        assert_eq!(EdgeTree::parse("long-name,deep-20").unwrap(), mixed);
+        assert_eq!(EdgeTree::parse(&mixed.spec()).unwrap(), mixed);
         assert!(EdgeTree::parse("nope").is_err());
     }
 
