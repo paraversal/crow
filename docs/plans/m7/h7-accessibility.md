@@ -15,6 +15,8 @@ AGENTS.md: every interactive element has a role and an aria label. Disabled cont
 - Test: a GPUI test reading the accessibility tree (if the test platform exposes it; otherwise a unit test on the element builder) and a VoiceOver hand check: a disabled toolbar button reads "dimmed".
 ### I2 Fuzzer invariant
 Add to H1's invariant 3: every element with an `on_click` or focus handle on screen has a role and a non-empty aria label. If GPUI doesn't let us enumerate them in tests, add a `#[cfg(feature = "fuzz")]` registry filled where roles are set. ASK if neither is practical.
+### I2b Fuzz the Settings window (moved from H1, critique Q11)
+H1 opens the Settings window with ⌘, but neither drives nor checks it. Extend the runner to drive it as a second surface: steps from its keymap (`settings_window::keymap`) and its controls' selectors, invariants per window (focus inside the window on a control with a role and label, the shown values equal `settings.toml` after a settle). Same caps and recorder as H1.
 ### I3 VoiceOver pass
 With VoiceOver on, in the bundle: sidebar, list and column view, filter, search, palette, rename, conflict sheet, context menu, tips, bottom bar, path bar (H6 if merged). Record per area in the progress file: what VoiceOver says, what's wrong. Fix clear defects (missing/duplicate labels, wrong roles, focus not announced); bring anything larger to the user.
 

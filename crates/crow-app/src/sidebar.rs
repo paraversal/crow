@@ -293,6 +293,36 @@ impl Sidebar {
         rows(cx.global::<Ui>()).into_iter().filter(|r| !matches!(r, Row::Header(..))).collect()
     }
 
+    /// The selectors a fuzzer can click in the sidebar.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn debug_selectors(&self, cx: &gpui::App) -> Vec<String> {
+        let mut out = vec!["sidebar".to_owned()];
+        out.extend((0..Self::selectable(cx).len()).map(|i| format!("sidebar-{i}")));
+        out
+    }
+
+    /// The sidebar's focus handle, for the fuzzer's focus invariant.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn debug_focus_handle(&self, cx: &gpui::App) -> gpui::FocusHandle {
+        self.focus_handle(cx)
+    }
+
+    /// Bounds for selectable row `i`, from the prepaint layout.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn debug_row_bounds(&self, i: usize, cx: &gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {
+        let mut selectable = 0;
+        for (layout_index, row) in rows(cx.global::<Ui>()).iter().enumerate() {
+            if matches!(row, Row::Header(..)) {
+                continue;
+            }
+            if selectable == i {
+                return self.layout.borrow().get(layout_index).map(|(_, _, bounds)| *bounds);
+            }
+            selectable += 1;
+        }
+        None
+    }
+
     /// Finder's display names for `path`, volume first. Cached: the ancestors are
     /// filesystem calls on the main thread, so each path is asked once.
     fn components(&self, path: &Path) -> Rc<[String]> {
@@ -713,10 +743,15 @@ impl Sidebar {
         self.menu = Some((i, kind));
         cx.notify();
         let (sender, receiver) = futures::channel::oneshot::channel();
-        // Off the main thread (tests) nothing opens; `choose_menu_item` stands in for the click.
-        if !crow_macos::show_context_menu(window, entries, move |chosen| {
-            sender.send(chosen).ok();
-        }) {
+        // Off the main thread (tests) the recorder answers at once; in the app the
+        // native menu calls back when it closes.
+        if !crate::effects::effects(cx).show_context_menu(
+            window,
+            entries,
+            Box::new(move |chosen| {
+                sender.send(chosen).ok();
+            }),
+        ) {
             return;
         }
         cx.spawn_in(window, async move |this, cx| {
@@ -748,7 +783,7 @@ impl Sidebar {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.to_string_lossy().into_owned()));
                 crate::operations::message("Copied path", false, cx);
             }
-            CommandId::ShowInFinder => crow_macos::reveal_in_finder(&[path]),
+            CommandId::ShowInFinder => crate::effects::effects(cx).reveal_in_finder(&[path]),
             CommandId::AddToSidebar => {
                 let at = self.group_end(0, cx);
                 self.add_folders(at, vec![path], cx);
@@ -781,7 +816,8 @@ impl Sidebar {
         }
         cx.emit(SidebarEvent::Message(format!("Ejecting “{}”…", volume.name).into(), false));
         let path = volume.path.clone();
-        let task = cx.background_spawn(async move { crow_macos::eject(&path) });
+        let effects = crate::effects::effects(cx);
+        let task = cx.background_spawn(async move { effects.eject(&path) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |_, cx| {

@@ -3,7 +3,7 @@
 //! The Vim layer's bindings also need `vim` in the context, which views add only
 //! when `keymap = "vim"`, so switching layers needs no rebinding.
 
-use gpui::{KeyBinding, actions};
+use gpui::{KeyBinding, NoAction, actions};
 
 actions!(
     crow,
@@ -145,6 +145,14 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-alt-l", ToggleActivity, Some("Crow")),
         KeyBinding::new("enter", SheetConfirm, Some("Sheet")),
         KeyBinding::new("escape", SheetCancel, Some("Sheet")),
+        // A sheet owns focus; arrows and Tab must not move it behind the scrim.
+        // The theme picker's own up/down bindings come later and out-rank these.
+        KeyBinding::new("tab", NoAction {}, Some("Sheet")),
+        KeyBinding::new("shift-tab", NoAction {}, Some("Sheet")),
+        KeyBinding::new("up", NoAction {}, Some("Sheet")),
+        KeyBinding::new("down", NoAction {}, Some("Sheet")),
+        KeyBinding::new("left", NoAction {}, Some("Sheet")),
+        KeyBinding::new("right", NoAction {}, Some("Sheet")),
         KeyBinding::new("left", MoveLeft, Some(COLUMNS)),
         KeyBinding::new("right", MoveRight, Some(COLUMNS)),
         KeyBinding::new("left", MoveLeft, Some(LIST_NOT_COLUMNS)),
@@ -186,6 +194,9 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-alt-t", ShowThemePicker, Some("Crow")),
         KeyBinding::new("up", MoveUp, Some("ThemePicker")),
         KeyBinding::new("down", MoveDown, Some("ThemePicker")),
+        // A modal sheet owns Tab; it must not move focus to the window behind it.
+        KeyBinding::new("tab", NoAction {}, Some("ThemePicker")),
+        KeyBinding::new("shift-tab", NoAction {}, Some("ThemePicker")),
         KeyBinding::new("cmd-enter", ApplyThemeEverywhere, Some("ThemePicker")),
         KeyBinding::new("cmd-k", ShowCommandPalette, Some("Crow")),
         KeyBinding::new("cmd-f", ShowSearch, Some("Crow")),
@@ -213,6 +224,34 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("up", MoveUp, Some("Palette")),
         KeyBinding::new("down", MoveDown, Some("Palette")),
         KeyBinding::new("cmd-enter", PaletteOpenInTab, Some("Palette")),
+        // A sheet owns the keyboard: window-level keys must not act behind it.
+        // Enter/Escape are the sheet's own; the picker's up/down and cmd-enter
+        // are bound later and still win there.
+        KeyBinding::new("cmd-z", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-shift-z", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-alt-l", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-2", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-3", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-up", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-[", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-]", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-shift-g", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-t", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-w", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-shift-]", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-shift-[", NoAction {}, Some("Sheet")),
+        KeyBinding::new("ctrl-tab", NoAction {}, Some("Sheet")),
+        KeyBinding::new("ctrl-shift-tab", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-n", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-,", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-shift-.", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-shift-p", NoAction {}, Some("Sheet")),
+        KeyBinding::new("ctrl-cmd-t", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-j", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-alt-t", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-k", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-f", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-shift-a", NoAction {}, Some("Sheet")),
     ]
 }
 

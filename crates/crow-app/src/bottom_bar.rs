@@ -477,38 +477,19 @@ fn error_token(error: &BarError, theme: &crow_theme::Theme) -> AnyElement {
 }
 
 /// Open a config file at fault: its default app, then the text editor (Q10).
-/// Tests record the path instead of starting an app.
 pub fn open_config(path: PathBuf, cx: &mut App) {
-    #[cfg(test)]
-    {
-        let _ = cx;
-        OPENED.lock().expect("the test recorder is not poisoned").push(path);
-    }
-    #[cfg(not(test))]
-    {
-        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-        let task = cx.background_spawn(async move {
-            crow_macos::open_path(&path, false).or_else(|_| crow_macos::open_path(&path, true))
-        });
-        cx.spawn(async move |cx| {
-            if let Err(e) = task.await {
-                cx.update(|cx| {
-                    operations::message(format!("Can't open {name}: {e}"), true, cx);
-                    cx.refresh_windows();
-                });
-            }
-        })
-        .detach();
-    }
-}
-
-#[cfg(test)]
-static OPENED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
-
-/// The config files Open was clicked for, and clears the list.
-#[cfg(test)]
-pub fn take_opened() -> Vec<PathBuf> {
-    std::mem::take(&mut *OPENED.lock().expect("the test recorder is not poisoned"))
+    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let effects = crate::effects::effects(cx);
+    let task = cx.background_spawn(async move { effects.open_config(&path) });
+    cx.spawn(async move |cx| {
+        if let Err(e) = task.await {
+            cx.update(|cx| {
+                operations::message(format!("Can't open {name}: {e}"), true, cx);
+                cx.refresh_windows();
+            });
+        }
+    })
+    .detach();
 }
 
 /// Cancel for the running operation: "Cancel esc", mouse target only (Esc works anywhere).

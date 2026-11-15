@@ -90,7 +90,7 @@ pub fn init(cx: &mut App) {
         let home = std::env::var_os("HOME").map_or_else(|| std::path::PathBuf::from("/"), std::path::PathBuf::from);
         crate::window::open(home, false, None, cx);
     });
-    cx.on_action(|_: &act::About, _| crow_macos::show_about_panel());
+    cx.on_action(|_: &act::About, cx| crate::effects::effects(cx).show_about_panel());
     cx.on_action(|_: &act::OpenSettings, cx| crate::settings_window::open(cx));
     cx.on_action(|_: &act::EditSettings, cx| crate::ui::edit_settings_file(cx));
     cx.on_action(|_: &act::HideApp, cx| cx.hide());

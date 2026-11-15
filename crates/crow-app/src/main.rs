@@ -10,14 +10,21 @@
 //! crow --motion-lab                a fake folder to try motion modes and feedback sounds
 //! ```
 
+// The `fuzz` feature builds the generator and invariants into the binary for
+// H3's `crow --fuzz`; until that entry point exists nothing outside tests calls them.
+#![cfg_attr(all(feature = "fuzz", not(test)), allow(dead_code))]
+
 mod actions;
 mod bottom_bar;
 mod chrome;
 mod context_menu;
 mod controls;
+mod effects;
 mod extensions;
 mod feedback;
 mod folder;
+#[cfg(any(test, feature = "fuzz"))]
+mod fuzz;
 mod icons;
 mod keys;
 mod logging;
@@ -202,6 +209,7 @@ fn main() -> ExitCode {
 
     if args.first().map(String::as_str) == Some("--motion-lab") {
         gpui_platform::application().with_assets(icons::Assets).run(|cx: &mut App| {
+            effects::install(cx, Arc::new(effects::SystemEffects));
             ui::init(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
@@ -256,6 +264,7 @@ fn main() -> ExitCode {
         }
     });
     app.run(move |cx: &mut App| {
+        effects::install(cx, Arc::new(effects::SystemEffects));
         ui::init(cx);
         cx.set_global(window::LaunchFolder(start.clone()));
         extensions::init(cx);

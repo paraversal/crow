@@ -60,7 +60,8 @@ struct Undo {
 }
 
 pub fn open(cx: &mut App) {
-    crow_macos::preload(&motion::all_sounds().into_iter().map(feedback::sound).collect::<Vec<_>>());
+    let sounds: Vec<Sound> = motion::all_sounds().into_iter().map(feedback::sound).collect();
+    crate::effects::effects(cx).preload_sounds(&sounds);
     // The lab chooses motion itself; GPUI's own switch would freeze every animation.
     cx.set_reduce_motion(false);
     let bounds = Bounds::centered(None, size(px(720.), px(600.)), cx);
@@ -184,16 +185,17 @@ impl MotionLab {
     }
 
     fn play(&mut self, event: Event, cx: &mut Context<Self>) {
+        let effects = crate::effects::effects(cx);
         match motion::cue(self.sounds, event) {
             Some(Cue::Play { sound, volume, clip }) => {
                 let sound = feedback::sound(sound);
-                crow_macos::play(&sound, volume);
+                effects.play_sound(&sound, volume);
                 self.sound_generation += 1;
                 if let Some(clip) = clip {
                     self.clip(sound, volume, clip, self.sound_generation, cx);
                 }
             }
-            Some(Cue::Beep) => crow_macos::beep(),
+            Some(Cue::Beep) => effects.beep(),
             None => {}
         }
     }
@@ -201,6 +203,7 @@ impl MotionLab {
     /// After `clip.keep`, ramp the volume to zero over `clip.fade` and stop, unless
     /// a newer sound started meanwhile (it owns the volume then).
     fn clip(&self, sound: Sound, volume: f32, clip: Clip, generation: u64, cx: &mut Context<Self>) {
+        let effects = crate::effects::effects(cx);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(clip.keep).await;
             const STEPS: u32 = 8;
@@ -210,9 +213,9 @@ impl MotionLab {
                     return;
                 }
                 if step == STEPS {
-                    crow_macos::stop(&sound);
+                    effects.stop_sound(&sound);
                 } else {
-                    crow_macos::set_volume(&sound, volume * (1.0 - step as f32 / STEPS as f32));
+                    effects.set_sound_volume(&sound, volume * (1.0 - step as f32 / STEPS as f32));
                 }
                 cx.background_executor().timer(clip.fade / STEPS).await;
             }

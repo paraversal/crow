@@ -229,7 +229,7 @@ pub fn init(cx: &mut App) {
     cx.set_global(ui);
     let feedback = cx.global::<Ui>().feedback;
     cx.set_reduce_motion(feedback.mode == Effective::Off);
-    feedback::preload(feedback.sound);
+    feedback::preload(feedback.sound, cx);
     // After the first frame: decoding the icon is not worth delaying first paint for.
     cx.defer(refresh_app_icon);
     crate::usage::init(cx);
@@ -303,6 +303,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::remove_dir_all(&root).ok();
+    crate::effects::install(cx, std::sync::Arc::new(crate::effects::RecordingEffects::new()));
     let ui = Ui::new(root.join("config"), root.join("state"), crow_core::home(), crow_theme::fallback(), false);
     cx.set_global(ui);
     crate::extensions::init(cx);
@@ -346,7 +347,7 @@ pub fn refresh_feedback(cx: &mut App) {
         return;
     }
     cx.set_reduce_motion(feedback.mode == Effective::Off);
-    feedback::preload(feedback.sound);
+    feedback::preload(feedback.sound, cx);
     cx.refresh_windows();
 }
 
@@ -393,7 +394,7 @@ pub fn refresh_app_icon(cx: &mut App) {
         return;
     }
     ui.applied_icon = Some(icon);
-    crow_macos::set_app_icon(app_icon_png(icon));
+    crate::effects::effects(cx).set_app_icon(app_icon_png(icon));
 }
 
 /// One change from the settings window or a menu toggle. `set_setting` applies it
@@ -629,7 +630,7 @@ pub fn edit_settings_file(cx: &mut App) {
 /// Open `name` from the config folder in its default app.
 pub fn open_config_file(name: &str, cx: &mut App) {
     let path = cx.global::<Ui>().config_dir.join(name);
-    if !crow_macos::open_in_default_app(&path) {
+    if !crate::effects::effects(cx).open_in_default_app(&path) {
         let message = format!("Couldn't open {}: no app is set to open .toml files", path.display());
         crate::operations::message(message, true, cx);
         cx.refresh_windows();
@@ -639,7 +640,7 @@ pub fn open_config_file(name: &str, cx: &mut App) {
 /// Show the config folder in Finder.
 pub fn open_config_folder(cx: &mut App) {
     let dir = cx.global::<Ui>().config_dir.clone();
-    if !crow_macos::open_folder_in_finder(&dir) {
+    if !crate::effects::effects(cx).open_folder_in_finder(&dir) {
         crate::operations::message(format!("Couldn't open {} in Finder", dir.display()), true, cx);
         cx.refresh_windows();
     }

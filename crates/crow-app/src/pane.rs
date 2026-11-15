@@ -441,6 +441,49 @@ impl Pane {
         (0..folder.row_count()).filter_map(|ix| folder.row(ix).map(|(e, d)| (e.name.clone(), d))).collect()
     }
 
+    /// The selectors a fuzzer can click in this pane, in render order. Rows are
+    /// capped so a 100k folder does not turn one step into a huge list; the
+    /// runner still drops selectors that are not laid out.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn debug_selectors(&self, cx: &gpui::App) -> Vec<String> {
+        let mut out = Vec::new();
+        match self.mode {
+            ViewMode::List => {
+                out.push("file-list".to_owned());
+                out.push("table-header".to_owned());
+                if let Some(folder) = self.folders.first() {
+                    let folder = folder.read(cx);
+                    out.extend(
+                        (0..folder.row_count().min(200))
+                            .filter_map(|ix| folder.row(ix).map(|(entry, _)| format!("row-{}", entry.name))),
+                    );
+                }
+            }
+            ViewMode::Columns => {
+                out.push("columns".to_owned());
+                for (k, folder) in self.folders.iter().enumerate().take(8) {
+                    let folder = folder.read(cx);
+                    out.extend(
+                        (0..folder.row_count().min(80))
+                            .filter_map(|ix| folder.row(ix).map(|(entry, _)| format!("column-{k}-row-{}", entry.name))),
+                    );
+                }
+            }
+        }
+        if self.filtering.is_some() {
+            out.push("filter-field".to_owned());
+            out.push("filter-search-footer".to_owned());
+        }
+        out
+    }
+
+    /// Whether a text field inside this pane (the filter or a rename) has focus.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn text_focused(&self, window: &gpui::Window, cx: &gpui::App) -> bool {
+        self.filtering.as_ref().is_some_and(|f| f.input.read(cx).focus_handle(cx).is_focused(window))
+            || self.renaming.as_ref().is_some_and(|r| r.input.read(cx).focus_handle(cx).is_focused(window))
+    }
+
     /// The focused folder's disclosure probe (see `Folder::disclosure_probe`), for tests.
     #[cfg(test)]
     pub fn disclosure_probe(
@@ -934,7 +977,7 @@ impl Pane {
     /// Open `path` in the app that owns it, as a double-click on that row would.
     pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
+        if let Err(e) = crate::effects::effects(cx).open_path(&path) {
             self.status = Some(format!("Can't open “{name}”: {e}").into());
             cx.notify();
         }
@@ -1300,9 +1343,10 @@ impl Pane {
         let Some(entry) = self.cursor_entry(cx) else { return };
         // The panel is key while it is open, so the arrows come back through its
         // delegate instead of the window. Run them as the arrows those keys are bound to.
+        let effects = crate::effects::effects(cx);
         let handle = window.window_handle();
         let async_cx = cx.to_async();
-        crow_macos::set_quick_look_key_handler(move |key| {
+        effects.set_quick_look_key_handler(Box::new(move |key| {
             async_cx.update(|cx| {
                 let action: Box<dyn Action> = match key {
                     crow_macos::QuickLookKey::Up => Box::new(MoveUp),
@@ -1312,8 +1356,8 @@ impl Pane {
                 };
                 let _ = handle.update(cx, |_, window, cx| window.dispatch_action(action, cx));
             });
-        });
-        crow_macos::toggle_quick_look(&entry.path);
+        }));
+        effects.toggle_quick_look(&entry.path);
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1509,10 +1553,15 @@ impl Pane {
         let entries = crate::context_menu::entries(kind, state, scope, cx);
         self.context_menu = Some(kind);
         let (sender, receiver) = futures::channel::oneshot::channel();
-        // Off the main thread (tests) nothing opens; `choose_context_item` stands in for the click.
-        if !crow_macos::show_context_menu(window, entries, move |chosen| {
-            sender.send(chosen).ok();
-        }) {
+        // Off the main thread (tests) the recorder answers at once; in the app the
+        // native menu calls back when it closes.
+        if !crate::effects::effects(cx).show_context_menu(
+            window,
+            entries,
+            Box::new(move |chosen| {
+                sender.send(chosen).ok();
+            }),
+        ) {
             return;
         }
         cx.spawn_in(window, async move |this, cx| {
@@ -1557,10 +1606,11 @@ impl Pane {
 
     fn show_in_finder(&mut self, _: &ShowInFinder, _: &mut Window, cx: &mut Context<Self>) {
         let paths = self.selected_paths(cx);
+        let effects = crate::effects::effects(cx);
         if paths.is_empty() {
-            crow_macos::open_folder_in_finder(&self.current_dir(cx));
+            effects.open_folder_in_finder(&self.current_dir(cx));
         } else {
-            crow_macos::reveal_in_finder(&paths);
+            effects.reveal_in_finder(&paths);
         }
     }
 
@@ -1860,7 +1910,7 @@ impl Pane {
                         let entries = selection.entries.as_slice();
                         if let Some((path, is_dir)) = entries.first()
                             && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
-                            && crow_macos::begin_drag(
+                            && crate::effects::effects(cx).begin_drag(
                                 window,
                                 &crow_macos::ComboDrag {
                                     paths: entries,
@@ -2185,7 +2235,7 @@ impl Pane {
                         let entries = selection.entries.as_slice();
                         if let Some((path, is_dir)) = entries.first()
                             && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
-                            && crow_macos::begin_drag(
+                            && crate::effects::effects(cx).begin_drag(
                                 window,
                                 &crow_macos::ComboDrag {
                                     paths: entries,
@@ -2895,10 +2945,110 @@ impl Render for Pane {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 impl Pane {
     pub fn rename_text(&self, cx: &gpui::App) -> Option<String> {
         self.renaming.as_ref().map(|r| r.input.read(cx).text().to_owned())
+    }
+
+    /// The filter or rename field's focus handle, when one is open.
+    pub fn text_focus_handle(&self, cx: &gpui::App) -> Option<gpui::FocusHandle> {
+        self.filtering
+            .as_ref()
+            .map(|f| f.input.read(cx).focus_handle(cx))
+            .or_else(|| self.renaming.as_ref().map(|r| r.input.read(cx).focus_handle(cx)))
+    }
+
+    /// Bounds for a generated row selector, from the pane's own layout state.
+    /// `debug_bounds` needs a `&'static str`; row names are dynamic.
+    pub fn debug_selector_bounds(&self, selector: &str, cx: &gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {
+        if let Some(name) = selector.strip_prefix("row-") {
+            let bounds = self.list_bounds.get()?;
+            let folder = self.focused_folder().read(cx);
+            let ix = (0..folder.row_count()).find(|ix| folder.row(*ix).is_some_and(|(entry, _)| entry.name == name))?;
+            let offset = folder.scroll().0.borrow().base_handle.offset().y;
+            let top = bounds.top() + px(LIST_TOP_INSET) - offset + px(ROW_HEIGHT * ix as f32);
+            return Some(gpui::Bounds::new(point(bounds.left(), top), gpui::size(bounds.size.width, px(ROW_HEIGHT))));
+        }
+        let rest = selector.strip_prefix("column-")?;
+        let (k, name) = rest.split_once("-row-")?;
+        let k: usize = k.parse().ok()?;
+        let column = *self.column_bounds.borrow().get(&k)?;
+        let folder = self.folders.get(k)?.read(cx);
+        let ix = (0..folder.row_count()).find(|ix| folder.row(*ix).is_some_and(|(entry, _)| entry.name == name))?;
+        let offset = folder.scroll().0.borrow().base_handle.offset().y;
+        let top = column.top() + px(ROW_HEIGHT * ix as f32) - offset;
+        Some(gpui::Bounds::new(
+            point(column.left() + px(4.), top),
+            gpui::size(column.size.width - px(8.), px(ROW_HEIGHT)),
+        ))
+    }
+
+    /// Every shown folder's cursor and selection must name a listed row.
+    pub fn invariant_violations(&self, cx: &gpui::App) -> Vec<crate::fuzz::Violation> {
+        use crate::fuzz::Violation;
+        let mut out = Vec::new();
+        for (k, folder) in self.folders.iter().enumerate() {
+            let folder = folder.read(cx);
+            if folder.is_loading() {
+                continue;
+            }
+            if let Some(ix) = folder.cursor_ix()
+                && ix >= folder.row_count()
+            {
+                out.push(Violation::new(
+                    "cursor",
+                    format!("pane {k}: cursor {ix} is past {} rows", folder.row_count()),
+                ));
+            }
+            let row_paths = folder.row_paths();
+            let listed: std::collections::HashSet<&std::path::Path> =
+                row_paths.iter().map(|path| path.as_path()).collect();
+            for path in folder.selection_paths() {
+                if !listed.contains(path.as_path()) {
+                    out.push(Violation::new(
+                        "selection",
+                        format!("pane {k}: {} is selected but not in the listing", path.display()),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every shown folder's listing must equal `read_dir`, honoring hidden files.
+    /// The name filter is a view over `entries` and has its own tests. `root`
+    /// limits the check to the fuzzer's temp tree.
+    pub fn listing_violations(&self, cx: &gpui::App, root: Option<&std::path::Path>) -> Vec<crate::fuzz::Violation> {
+        use crate::fuzz::Violation;
+        let hidden = cx.global::<Ui>().settings.show_hidden_files;
+        let mut out = Vec::new();
+        for (k, folder) in self.folders.iter().enumerate() {
+            let folder = folder.read(cx);
+            if folder.is_loading() || folder.error().is_some() {
+                continue;
+            }
+            let dir = folder.dir();
+            if root.is_some_and(|root| !dir.starts_with(root)) {
+                continue;
+            }
+            let Ok(read) = std::fs::read_dir(dir) else { continue };
+            let mut disk: Vec<String> = read
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| hidden || !name.starts_with('.'))
+                .collect();
+            disk.sort();
+            let mut listed: Vec<String> = folder.entries().iter().map(|entry| entry.name.clone()).collect();
+            listed.sort();
+            if disk != listed {
+                out.push(Violation::new(
+                    "listing",
+                    format!("pane {k} {}: disk {disk:?}, listing {listed:?}", dir.display()),
+                ));
+            }
+        }
+        out
     }
 
     pub fn filter_text(&self, cx: &gpui::App) -> Option<String> {
@@ -2933,10 +3083,12 @@ impl Pane {
         self.folders.get(k).and_then(|f| f.read(cx).cursor_entry().map(|e| e.name.clone()))
     }
 
+    #[cfg(test)]
     pub fn names(&self, cx: &gpui::App) -> Vec<String> {
         self.focused_folder().read(cx).names()
     }
 
+    #[cfg(test)]
     pub fn selected_names(&self, cx: &gpui::App) -> Vec<String> {
         self.focused_folder().read(cx).selected_names()
     }

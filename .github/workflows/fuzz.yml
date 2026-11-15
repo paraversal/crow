@@ -1,0 +1,70 @@
+name: Fuzz
+
+# Every three days at 04:00 UTC. Change the cron to run more or less often;
+# `workflow_dispatch` runs one on demand with an optional seed.
+on:
+  schedule:
+    - cron: "0 4 */3 * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Seed (blank: a new one)"
+        required: false
+        type: string
+      minutes:
+        description: Minutes to fuzz
+        required: false
+        default: "20"
+        type: string
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Cache GPUI sources
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: vendor/zed
+          key: zed-${{ hashFiles('scripts/fetch-gpui.sh', 'patches/gpui-*.patch') }}
+
+      - name: Fetch GPUI
+        run: ./scripts/fetch-gpui.sh
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Fuzz
+        env:
+          CROW_FUZZ_MINUTES: ${{ inputs.minutes || '20' }}
+          CROW_FUZZ_SEED: ${{ inputs.seed }}
+        run: |
+          set -o pipefail
+          cargo test -p crow-app fuzz_long -- --ignored --nocapture 2>&1 | tee fuzz.log
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Fuzz run"
+            echo '```'
+            grep -E 'CROW_FUZZ_SEED=|seed [0-9]+ step|^\| \| H1' fuzz.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

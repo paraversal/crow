@@ -343,13 +343,14 @@ impl SearchView {
         let (tx, mut rx) = unbounded();
         if self.scope == Scope::ThisMac {
             let query = query.to_owned();
+            let effects = crate::effects::effects(cx);
             cx.background_spawn(async move {
-                let tx = tx;
-                let result = crow_macos::spotlight_names(
+                let hits = tx.clone();
+                let result = effects.spotlight_names(
                     &query,
-                    |batch| {
-                        let _ = tx.unbounded_send(Update::Spotlight(batch));
-                    },
+                    Box::new(move |batch| {
+                        let _ = hits.unbounded_send(Update::Spotlight(batch));
+                    }),
                     &cancel,
                 );
                 let _ = tx.unbounded_send(Update::SpotlightDone(result));
@@ -701,6 +702,25 @@ impl SearchView {
         self.input.read(cx).focus_handle(cx).is_focused(window)
     }
 
+    /// The selectors a fuzzer can click while search covers the pane.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn debug_selectors(&self, cx: &App) -> Vec<String> {
+        let mut out = vec![
+            "search-field".to_owned(),
+            "search-done".to_owned(),
+            "search-scope-bar".to_owned(),
+            "search-skip-switch".to_owned(),
+            "search-footer".to_owned(),
+        ];
+        if !self.skipped.is_empty() {
+            out.push("search-skipped-link".to_owned());
+        }
+        if self.input.read(cx).text().is_empty() && !self.searching {
+            out.push("search-idle".to_owned());
+        }
+        out
+    }
+
     #[cfg(test)]
     pub fn skipped_count(&self) -> usize {
         self.skipped.len()
@@ -758,12 +778,12 @@ impl SearchView {
         self.query(cx)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzz"))]
     pub fn input_focus_handle(&self, cx: &App) -> FocusHandle {
         self.input.read(cx).focus_handle(cx)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzz"))]
     pub fn results_focus_handle(&self) -> FocusHandle {
         self.focus.clone()
     }
@@ -870,8 +890,7 @@ impl SearchView {
 
     fn quick_look_selected(&mut self, cx: &App) {
         if let Some(row) = self.results.get(self.cursor) {
-            crow_macos::toggle_quick_look(&row.path);
-            let _ = cx;
+            crate::effects::effects(cx).toggle_quick_look(&row.path);
         }
     }
 
@@ -1771,7 +1790,7 @@ impl SearchView {
                             let entries = selection.entries.as_slice();
                             if let Some((path, is_dir)) = entries.first()
                                 && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
-                                && crow_macos::begin_drag(
+                                && crate::effects::effects(cx).begin_drag(
                                     window,
                                     &crow_macos::ComboDrag {
                                         paths: entries,
