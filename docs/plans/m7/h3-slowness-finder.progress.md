@@ -57,6 +57,7 @@ Branch: `m7-h3-slowness` · PR: none · Last updated: 2026-11-16 · State: Ready
 - 2026-11-15: 100k smoke with `on_next_frame` recorded only 3 callbacks/39 steps; switched to the heartbeat.
 - 2026-11-16: I3 complete: 100k seed 404 607.6 s (75 slow / 3 freezes, #18); edge + churn seed 304 650 s (146 slow / 4 freezes / 6 listing violations, then a 58.7 s HANG, #15/#16); repo copy seed 305 600.4 s (3 slow, one picker focus violation, #17). Seed 303's 542 s SIGKILL is #14; seed 404 met the 10-minute 100k requirement.
 - 2026-11-16: Final checks: `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo clippy -p crow-app --features fuzz --all-targets -- -D warnings`; `cargo test --workspace` (crow-app 411 passed, 1 ignored; other crates green); `cargo test -p crow-app --features fuzz` (416 passed, 1 ignored). Bench on the 100k fixture: branch warm first paint 8 ms, p99 8.68/8.73 ms, avg 8.40 ms; `main` @ c5698a6 warm 8 ms, p99 8.69/8.78 ms, avg 8.41/8.44 ms. No regression from the debug spans.
+- 2026-11-16 (critique pass): settle the window (churn paused) before step 0, as H1's runner does, so startup is not attributed to the first step. `cargo test -p crow-app --features fuzz fuzz_live` and a short (0.02-minute) temp-tree smoke pass; the smoke exited 0 with one 101 ms `cmd-,` slow step.
 
 ## Next
 Ready for critique. The critic should look at the heartbeat/freeze/hang semantics, the `--until` pause, and whether the hidden-window and 100k SIGKILL findings are app or harness.

@@ -572,6 +572,15 @@ async fn run_steps(
     let mut violations = Vec::new();
     let mut seen = HashSet::new();
     let mut executed = 0usize;
+    // The opening listing and first paint are startup, not step 0; H1's runner
+    // settles the window before its first step too.
+    if let Some(churn) = churn {
+        churn.pause();
+    }
+    wait_quiet(handle, cx).await;
+    if let Some(churn) = churn {
+        churn.resume();
+    }
     for index in 0.. {
         if options.until.is_some_and(|until| index >= until) {
             if let Some(churn) = churn {
