@@ -74,6 +74,11 @@ elements on screen, applies them to a real GPUI window, and checks invariants af
 each one. Escaping effects go through `effects::RecordingEffects`, so a fuzz run
 never opens an app, plays a sound or touches the pasteboard or Trash.
 
+A run is confined to its temp tree: every file operation outside it is refused
+(`Operations::jail`, reported as a `jail` violation), "home" is the tree (Go Home,
+`~` and search's Home scope stay inside), Trash goes to a folder next to the tree,
+config and state live in a temp folder, and the sidebar lists only the tree.
+
 ```bash
 cargo test -p crow-app fuzz_smoke                 # 3 seeds x 30 steps on a 40-file tree, in the normal suite
 CROW_FUZZ_MINUTES=2 cargo test -p crow-app fuzz_long -- --ignored --nocapture

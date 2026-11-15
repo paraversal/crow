@@ -3264,6 +3264,9 @@ impl CrowWindow {
             out.push(Violation::new("focus", format!("focus is outside the {surface} surface")));
         }
 
+        for path in &cx.global::<crate::operations::Operations>().refused {
+            out.push(Violation::new("jail", format!("an operation tried to touch {}", path.display())));
+        }
         if self.palette.is_some() && self.picker.is_some() {
             out.push(Violation::new("overlay", "the palette and the theme picker are both open"));
         }

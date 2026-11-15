@@ -7080,11 +7080,17 @@ fn apply_and_check(
     Ok(())
 }
 
-/// A right-click's native menu always closes in the app. Unanswered, the
-/// recorder would leave the pane or sidebar in a "menu open" state forever (the
-/// sidebar row keeps its outline), which the fuzzer would then explore.
-fn dismiss_context_menus(cx: &mut VisualTestContext) {
-    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").set_context_menu_choice(None));
+/// Confine a fuzz run to `tree`:
+/// - every file operation outside it is refused (and reported as `jail`);
+/// - "home" is the tree, so Go Home, `~` and search's Home scope stay inside;
+/// - a right-click's menu closes unless the step picks an item (the native
+///   menu always closes; unanswered, the pane or sidebar would stay "menu open").
+fn fuzz_confine(tree: &Path, cx: &mut VisualTestContext) {
+    cx.update(|_, cx| {
+        cx.global_mut::<crate::operations::Operations>().jail = Some(tree.to_path_buf());
+        cx.global_mut::<Ui>().home = tree.to_path_buf();
+        crate::effects::recording(cx).expect("recording effects").set_context_menu_choice(None);
+    });
 }
 
 fn replay_script(
@@ -7097,7 +7103,7 @@ fn replay_script(
     reset_tree(tree, files);
     let (view, mut cx) = open(cx, tree);
     write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
-    dismiss_context_menus(&mut cx);
+    fuzz_confine(tree, &mut cx);
     crate::fuzz::logs::install();
     for step in script {
         apply_and_check(&view, step, tree, &mut cx)?;
@@ -7118,7 +7124,7 @@ fn fuzz_run(
     reset_tree(tree, files);
     let (view, mut cx) = open(cx, tree);
     write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
-    dismiss_context_menus(&mut cx);
+    fuzz_confine(tree, &mut cx);
     crate::fuzz::logs::install();
     let mut generator = StepGen::new(seed);
     let mut script = Vec::new();
@@ -7228,6 +7234,20 @@ fn replay(
     script: crate::fuzz::Script,
 ) -> Vec<crate::fuzz::Violation> {
     replay_script(&script.0, tree, files, cx).err().into_iter().collect()
+}
+
+#[gpui::test]
+fn the_fuzz_jail_refuses_operations_outside_the_tree(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-jail");
+    let (view, mut cx) = open(cx, &root);
+    // Jail to alpha/: notes.txt, in the root, is outside it.
+    fuzz_confine(&root.join("alpha"), &mut cx);
+    click_selector(&mut cx, "row-notes.txt");
+    cx.simulate_keystrokes("cmd-backspace");
+    settle(&view, &mut cx);
+    assert!(root.join("notes.txt").exists(), "the trash was refused");
+    let found = violations(&view, &mut cx);
+    assert!(found.iter().any(|violation| violation.check == "jail"), "{found:?}");
 }
 
 #[gpui::test]

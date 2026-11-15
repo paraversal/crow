@@ -108,6 +108,12 @@ pub struct Operations {
     /// The fraction a finished operation's bar shows while it fades, and its id.
     pub progress_done: Option<(f32, u64)>,
     progress_generation: u64,
+    /// Fuzz runs only: every path an operation touches must be under this
+    /// folder. Anything else is refused and recorded in `refused`.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub jail: Option<PathBuf>,
+    #[cfg(any(test, feature = "fuzz"))]
+    pub refused: Vec<PathBuf>,
 }
 
 /// Info messages clear after this long; errors stay until something replaces them.
@@ -159,7 +165,37 @@ pub fn init(cx: &mut App, trash: Arc<dyn Trash>) {
         message_generation: 0,
         progress_done: None,
         progress_generation: 0,
+        #[cfg(any(test, feature = "fuzz"))]
+        jail: None,
+        #[cfg(any(test, feature = "fuzz"))]
+        refused: Vec::new(),
     });
+}
+
+/// Every path `plan` reads or writes: the request's own and each item's.
+#[cfg(any(test, feature = "fuzz"))]
+fn plan_paths(plan: &Plan) -> Vec<PathBuf> {
+    use ops::Request;
+    let mut out: Vec<PathBuf> = match &plan.request {
+        Request::NewFolder { parent } | Request::NewFile { parent } => vec![parent.clone()],
+        Request::Rename { path, .. } => vec![path.clone()],
+        Request::Duplicate { paths } | Request::Trash { paths } | Request::DeletePermanently { paths } => paths.clone(),
+        Request::Copy { paths, into } | Request::Move { paths, into } => {
+            paths.iter().cloned().chain(std::iter::once(into.clone())).collect()
+        }
+    };
+    for item in &plan.items {
+        out.extend(item.source.iter().cloned());
+        out.push(item.target.clone());
+    }
+    out
+}
+
+/// The paths of `plan` outside the fuzz jail, if one is set.
+#[cfg(any(test, feature = "fuzz"))]
+fn outside_jail(plan: &Plan, cx: &App) -> Vec<PathBuf> {
+    let Some(jail) = &cx.global::<Operations>().jail else { return Vec::new() };
+    plan_paths(plan).into_iter().filter(|path| !path.starts_with(jail)).collect()
 }
 
 /// Carry out `plan` in the background with the user's conflict choices.
@@ -174,6 +210,16 @@ pub fn execute(
         message("Another operation is still running", true, cx);
         cx.refresh_windows();
         return;
+    }
+    #[cfg(any(test, feature = "fuzz"))]
+    {
+        let outside = outside_jail(&plan, cx);
+        if !outside.is_empty() {
+            message(format!("Refused outside the fuzz tree: {}", outside[0].display()), true, cx);
+            cx.global_mut::<Operations>().refused.extend(outside);
+            cx.refresh_windows();
+            return;
+        }
     }
     let ops = cx.global_mut::<Operations>();
     let cancel = Arc::new(AtomicBool::new(false));
