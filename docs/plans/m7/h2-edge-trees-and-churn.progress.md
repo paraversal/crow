@@ -1,5 +1,5 @@
 # H2 edge trees and churn progress
-Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: In critique
+Branch: `m7-h2-churn` · PR: https://github.com/paraversal/file-crow/pull/31 · Last updated: 2026-11-15 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -42,7 +42,7 @@ Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: In criti
 - 2026-11-15: Finish. `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` (also `-p crow-app --features fuzz`) and `cargo test --workspace` pass: 401 app (3 ignored), 92 core, 42 fs, 5 macos, 18 search, 6 theme. `--make-fixture` writes the same 100k fixture (manifest hash `b659b9a8…`). `--bench`: warm first paint 7 ms, p99 8.70 ms, avg 8.42 ms, max 40.00 ms. `docs/testing.md` has the kinds, flags, edge replay, volume hand checks and the numbers.
 
 ## Next
-Ready for critique. The critic reviews the branch and opens the PR; the user hand-tests #6/#7 and the disk-image check.
+PR open (#31). Critique done; the user hand-tests #6/#7 and the disk-image check.
 
 ## Critique
 Critic session: 2026-11-15 · Base: main @ cf85599 · Head reviewed: ec3c3a7
