@@ -615,6 +615,8 @@ fn run_fade(cx: &mut App) {
 
 /// The theme to apply after the picker: write it to `settings.toml` and show it.
 pub fn choose_theme(id: &str, cx: &mut App) {
+    // Clear a stale preview even when the choice is already the saved theme.
+    cx.global_mut::<Ui>().preview_theme = None;
     set_setting(SettingChange::Theme(id.to_owned()), cx);
 }
 

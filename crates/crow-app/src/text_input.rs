@@ -99,6 +99,7 @@ const TEXT_INSET: f32 = 2.;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct TextInput {
+    id: ElementId,
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
@@ -176,6 +177,7 @@ impl TextInput {
         let content = content.into();
         let end = content.len();
         Self {
+            id: "text-input".into(),
             focus_handle: cx.focus_handle(),
             content,
             placeholder: placeholder.into(),
@@ -203,6 +205,12 @@ impl TextInput {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// A unique element id, for several fields in one window.
+    pub fn with_id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = id.into();
+        self
     }
 
     /// No fill, border or padding: the parent draws the field around it.
@@ -1075,7 +1083,7 @@ impl Render for TextInput {
             _ => color(theme.role("accent")),
         };
         div()
-            .id("text-input")
+            .id(self.id.clone())
             .role(self.role)
             .aria_label(self.aria_label.clone().unwrap_or_else(|| self.placeholder.clone()))
             .aria_placeholder(self.placeholder.clone())

@@ -1286,6 +1286,22 @@ mod tests {
     }
 
     #[test]
+    fn settings_commands_are_in_the_palette() {
+        let commands = |query: &str| -> Vec<CommandId> {
+            command_listing(query, &[], true)
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Command { command, .. } => Some(command.id),
+                    Item::Folder { .. } => None,
+                })
+                .collect()
+        };
+        assert!(commands("settings").contains(&CommandId::OpenSettings));
+        assert!(commands("edit settings").contains(&CommandId::EditSettings));
+    }
+
+    #[test]
     fn palette_hides_menu_only_commands() {
         let all = command_ids("");
         assert!(!all.contains(&CommandId::ShowCommandPalette), "Go to… would reopen the palette");

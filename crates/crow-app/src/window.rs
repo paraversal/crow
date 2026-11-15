@@ -479,6 +479,9 @@ impl CrowWindow {
 
     fn toggle_hidden(&mut self, _: &ToggleHiddenFiles, _: &mut Window, cx: &mut Context<Self>) {
         let show = !cx.global::<Ui>().settings.show_hidden_files;
+        // This window is already borrowed: update it directly, then let the
+        // setting update the other windows (its own handle update fails safely).
+        self.show_hidden = show;
         for (_, pane) in self.tabs.iter() {
             pane.update(cx, |pane, cx| pane.set_show_hidden(show, cx));
         }
