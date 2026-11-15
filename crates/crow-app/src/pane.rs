@@ -1598,7 +1598,7 @@ impl Pane {
             paths.push(self.current_dir(cx));
         }
         let text = paths.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>().join("\n");
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        crate::effects::write_text(text, cx);
         let what = if paths.len() == 1 { "path".to_owned() } else { format!("{} paths", paths.len()) };
         crate::operations::message(format!("Copied {what}"), false, cx);
         cx.notify();
