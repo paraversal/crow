@@ -15,15 +15,16 @@ pub fn init() -> Option<WorkerGuard> {
 }
 
 /// The fuzz runner installs `trace` as an extra layer, so slow steps can print
-/// the spans that were running; `RUST_LOG` still wins for the filter.
+/// the spans that were running; `RUST_LOG` still wins for the filter. The file
+/// goes to the run's own folder, not the user's `~/Library/Logs/Crow`.
 #[cfg(feature = "fuzz")]
-pub fn init_fuzz(trace: crate::fuzz_live::TraceLayer) -> Option<WorkerGuard> {
+pub fn init_fuzz(trace: crate::fuzz_live::TraceLayer, dir: &std::path::Path) -> Option<WorkerGuard> {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,crow=debug,crow_macos=debug"));
     let stderr = fmt::layer().with_writer(std::io::stderr).with_target(false);
-    match std::fs::create_dir_all(log_dir()) {
+    match std::fs::create_dir_all(dir) {
         Ok(()) => {
-            let (file, guard) = tracing_appender::non_blocking(tracing_appender::rolling::never(log_dir(), "crow.log"));
+            let (file, guard) = tracing_appender::non_blocking(tracing_appender::rolling::never(dir, "crow.log"));
             let file = fmt::layer().with_writer(file).with_ansi(false);
             tracing_subscriber::registry().with(filter).with(stderr).with(file).with(trace).init();
             Some(guard)

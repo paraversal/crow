@@ -163,8 +163,11 @@ cargo run --release -p crow-app --features fuzz -- --fuzz target/fixture-100k --
 ```
 
 With no folder it builds a temp H1 tree (`--tree small` by default: every edge kind
-except the 100k folder and the sparse 10 GiB file), with its own config, state and
-Trash under the system temp folder. A user folder is refused unless
+except the 100k folder and the sparse 10 GiB file). Config, state, Trash, the log
+(`logs/crow.log`) and the saved steps (`script.txt`) go to a support folder under the
+system temp folder, never `~/.config/crow` or `~/Library/Logs/Crow`; the first line
+printed names each. Copy Path and text-field copy, cut and paste use the recorded
+effects' own clipboard, so the user's clipboard is left alone. A user folder is refused unless
 `--dir-is-scratch` says it may be changed. `--tree none` is the ordinary 200-file
 tree; `--tree all` adds `wide-100000` and `huge-file`. Churn is off unless `--churn`
 is passed.
@@ -187,25 +190,34 @@ ones by step kind:
 
 ```
 step                  over      worst  replay
-Keys                     2    312.4 ms  --seed 42 --until 1234  Keys("cmd-k")
+Keys                     2    312.4 ms  --seed 42 --script …/script.txt --until 1234  Keys("cmd-k")
 ```
 
 Exit code is 0 unless an invariant fails or a heartbeat is over 250 ms (a freeze).
 A freeze prints `FREEZE` and the run keeps going; a stall over 30 s prints `HANG`
 and exits 1, so a wedged step cannot swallow the rest of the run. A watchdog thread
 watches the heartbeat, so this works even for a step that never returns; a 100k
-resize can take 5–6 s and still finish. To profile a slow step, replay to just
-before it:
+resize can take 5–6 s and still finish.
+
+Every run saves the steps it sends to `script.txt`, one per line, before sending
+each, so a `HANG` or a killed run keeps the step that stalled. The seed alone does
+not replay a run: the generator reads the live keymap and focus, which depend on
+timing, and two runs of one seed can split after a hundred steps. To profile a slow
+step, replay the saved script to just before it, with the same seed and tree
+options (the seed builds the tree and drives churn), as the report prints it:
 
 ```bash
-cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --until 1234
+cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --script /path/to/script.txt --until 1234
 xcrun xctrace record --template 'Time Profiler' --attach crow
 ```
 
-The window stays open until Crow quits. A paused run, a `HANG` and a killed run
-leave the temp tree and its support folder (`crow-fuzz-*` in the system temp folder)
-for inspection; remove them by hand, with `chmod -R u+rwx` first because the edge
-tree has an unreadable folder. Slow steps go into
+A replay of a `--dir-is-scratch` folder needs it in the same state as the original
+run (a fresh `--make-fixture` for the 100k fixture). The window stays open until
+Crow quits. A clean run removes its temp tree and support folder; a run with a slow
+step, a violation or a freeze removes the tree and keeps the support folder (`kept
+for replay:`). A paused run, a `HANG` and a killed run leave both (`crow-fuzz-*` in
+the system temp folder); remove them by hand, with `chmod -R u+rwx` first because
+the edge tree has an unreadable folder. Slow steps go into
 `docs/plans/m7/findings.md` with their replay command; `findings.md` is the input
 to the next H4 batch. This runner needs a real GUI session, so it is local only;
 the scheduled workflow runs H1's `fuzz_long`.

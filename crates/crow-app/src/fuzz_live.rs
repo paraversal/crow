@@ -44,6 +44,8 @@ struct Options {
     seed: u64,
     minutes: f64,
     until: Option<usize>,
+    /// Replay this saved script instead of generating steps.
+    script: Option<PathBuf>,
     tree: EdgeTree,
     churn: bool,
 }
@@ -55,6 +57,7 @@ impl Options {
         let mut seed = default_seed();
         let mut minutes: f64 = 10.0;
         let mut until = None;
+        let mut script = None;
         let mut tree = EdgeTree::small();
         let mut tree_given = false;
         let mut churn = false;
@@ -75,6 +78,10 @@ impl Options {
                 "--until" => {
                     let value = args.next().ok_or("--until needs a step index")?;
                     until = Some(value.parse().map_err(|_| format!("bad --until {value:?}"))?);
+                }
+                "--script" => {
+                    let value = args.next().ok_or("--script needs a file")?;
+                    script = Some(PathBuf::from(value));
                 }
                 "--tree" => {
                     let value = args.next().ok_or("--tree needs a kind list")?;
@@ -98,7 +105,7 @@ impl Options {
         if dir.is_some() && tree_given {
             return Err("--tree applies to the temp tree; the given folder is used as-is".into());
         }
-        Ok(Options { dir, seed, minutes, until, tree, churn })
+        Ok(Options { dir, seed, minutes, until, script, tree, churn })
     }
 }
 
@@ -107,19 +114,21 @@ fn default_seed() -> u64 {
 }
 
 fn usage() -> &'static str {
-    "crow --fuzz [DIR --dir-is-scratch] [--seed N] [--minutes M] [--churn] [--until INDEX] [--tree KINDS]
+    "crow --fuzz [DIR --dir-is-scratch] [--seed N] [--minutes M] [--churn] [--script FILE] [--until INDEX] [--tree KINDS]
 
   --fuzz              open a real window and drive it with H1's generator
   DIR                 a scratch folder to fuzz; needs --dir-is-scratch
   --seed N            the generator seed (default: from the clock; printed)
-  --minutes M         stop after M minutes (default 10; ignored with --until)
+  --minutes M         stop after M minutes (default 10; ignored with --until or --script)
+  --script FILE       replay the steps a run saved (its script.txt) instead of generating
   --until INDEX       dispatch steps 0..INDEX-1, then pause for `xctrace`
   --churn             change the tree while the fuzzer acts
   --tree KINDS        temp tree: small (default), all, none, or comma-separated
                       kinds (long-name,emoji,deep-20,wide-100000,huge-file, ...)
 
 A slow step is a 16 ms heartbeat over 50 ms; over 250 ms fails the run.
-Report and replay a step with --seed N --until INDEX."
+Every run saves its steps; replay a slow one with the same tree options and
+--seed N --script FILE --until INDEX (the report prints the command)."
 }
 
 pub fn run(args: &[String]) -> ExitCode {
@@ -134,8 +143,6 @@ pub fn run(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let trace = Trace::new();
-    let _log_guard = logging::init_fuzz(trace.layer());
     let setup = match prepare(&options) {
         Ok(setup) => setup,
         Err(error) => {
@@ -143,14 +150,41 @@ pub fn run(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let replay = match &options.script {
+        Some(path) => match read_script(path) {
+            Ok(steps) => Some(Arc::new(steps)),
+            Err(error) => {
+                eprintln!("crow --fuzz: {error}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+    // A replay keeps its file; a generated run saves the steps it sends.
+    let script_path = options.script.clone().unwrap_or_else(|| setup.support.join("script.txt"));
+    let script_log = match &replay {
+        Some(_) => None,
+        None => match ScriptLog::create(&script_path) {
+            Ok(log) => Some(log),
+            Err(error) => {
+                eprintln!("crow --fuzz: {error}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let replay_args = format!("--seed {} --script {}", options.seed, script_path.display());
+    let trace = Trace::new();
+    let _log_guard = logging::init_fuzz(trace.layer(), &setup.log_dir);
     println!(
-        "FUZZ seed={} tree={} churn={} minutes={} dir={} config={}",
+        "FUZZ seed={} tree={} churn={} minutes={} dir={} config={} log={} script={}",
         options.seed,
         setup.tree_label,
         options.churn,
         options.minutes,
         setup.root.display(),
-        setup.config_dir.display()
+        setup.config_dir.display(),
+        setup.log_dir.join("crow.log").display(),
+        script_path.display()
     );
     if let Some(until) = options.until {
         println!("PAUSE before step {until}; the window stays open for profiling");
@@ -207,17 +241,21 @@ pub fn run(args: &[String]) -> ExitCode {
         let options = app_options.clone();
         let setup = app_setup.clone();
         let trace = app_trace.clone();
+        let source = StepSource { replay: replay.clone(), log: script_log };
+        let replay_args = replay_args.clone();
         cx.spawn(async move |cx| {
             let churn = options.churn.then(|| Churn::start(&setup.root, options.seed));
             let result =
-                run_steps(handle, &setup.root, &options, &frames, &trace, churn.as_ref(), cx).await;
+                run_steps(handle, &setup.root, &options, source, &frames, &trace, churn.as_ref(), cx).await;
             frames.lock().expect("frames").active = false;
             if let Some(churn) = &churn {
                 churn.pause();
             }
             let steps = frames.lock().expect("frames").steps;
             let elapsed = frames.lock().expect("frames").elapsed();
-            let (report, freeze) = frames.lock().expect("frames").report(&options, &setup.tree_label, steps, elapsed);
+            let slow = !frames.lock().expect("frames").slow.is_empty();
+            let (report, freeze) =
+                frames.lock().expect("frames").report(&options, &setup.tree_label, &replay_args, steps, elapsed);
             print!("{report}");
             match result {
                 RunResult::Paused { index } => {
@@ -233,7 +271,7 @@ pub fn run(args: &[String]) -> ExitCode {
                         println!("{} invariant violation(s) (first at step {})", violations.len(), violations[0].0);
                     }
                     set_outcome(&app_outcome, Outcome { failed });
-                    cleanup(&setup.cleanup, cx).await;
+                    cleanup(&setup, failed || slow, cx).await;
                     if failed {
                         exit_failure();
                     }
@@ -241,15 +279,14 @@ pub fn run(args: &[String]) -> ExitCode {
                 }
                 RunResult::Failed { index, violation, script } => {
                     println!(
-                        "FAIL seed={} step={index}: {} — {}\nreplay: --seed {} --until {index}\nscript:\n{}",
+                        "FAIL seed={} step={index}: {} — {}\nreplay: {replay_args} --until {index}\nscript:\n{}",
                         options.seed,
                         violation.check,
                         violation.detail,
-                        options.seed,
                         crate::fuzz::Script(script).print()
                     );
                     set_outcome(&app_outcome, Outcome { failed: true });
-                    cleanup(&setup.cleanup, cx).await;
+                    cleanup(&setup, true, cx).await;
                     exit_failure();
                 }
             }
@@ -270,9 +307,13 @@ struct TreeSetup {
     config_dir: PathBuf,
     state_dir: PathBuf,
     trash_dir: PathBuf,
+    log_dir: PathBuf,
     tree_label: String,
-    /// Removed after a finished run; a paused run leaves the tree for profiling.
-    cleanup: Vec<PathBuf>,
+    /// Config, state, Trash, log and the saved script.
+    support: PathBuf,
+    /// The temp tree, removed after a finished run; a paused run leaves it for
+    /// profiling. `None` for a given folder.
+    tree: Option<PathBuf>,
 }
 
 fn prepare(options: &Options) -> Result<TreeSetup, String> {
@@ -280,7 +321,8 @@ fn prepare(options: &Options) -> Result<TreeSetup, String> {
     let config_dir = support.join("config");
     let state_dir = support.join("state");
     let trash_dir = support.join("trash");
-    for dir in [&config_dir, &state_dir, &trash_dir] {
+    let log_dir = support.join("logs");
+    for dir in [&config_dir, &state_dir, &trash_dir, &log_dir] {
         std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     }
 
@@ -304,11 +346,7 @@ fn prepare(options: &Options) -> Result<TreeSetup, String> {
     std::fs::write(config_dir.join("sidebar.toml"), sidebar)
         .map_err(|error| format!("{}: {error}", config_dir.join("sidebar.toml").display()))?;
 
-    let mut cleanup = vec![support.clone()];
-    if let Some(tree) = cleanup_tree {
-        cleanup.push(tree);
-    }
-    Ok(TreeSetup { root, config_dir, state_dir, trash_dir, tree_label, cleanup })
+    Ok(TreeSetup { root, config_dir, state_dir, trash_dir, log_dir, tree_label, support, tree: cleanup_tree })
 }
 
 /// The H1 tree: alpha/beta/notes, 200 files, 20 folders, then the edge kinds.
@@ -396,7 +434,14 @@ impl FrameLog {
         self.started.map_or(Duration::ZERO, |started| started.elapsed())
     }
 
-    fn report(&self, options: &Options, tree_label: &str, steps: usize, elapsed: Duration) -> (String, bool) {
+    fn report(
+        &self,
+        options: &Options,
+        tree_label: &str,
+        replay_args: &str,
+        steps: usize,
+        elapsed: Duration,
+    ) -> (String, bool) {
         let mut groups: BTreeMap<&'static str, (usize, f64, usize, Step)> = BTreeMap::new();
         for slow in &self.slow {
             let entry = groups.entry(slow.step.kind()).or_insert((0, 0.0, slow.index, slow.step.clone()));
@@ -429,8 +474,7 @@ impl FrameLog {
             out.push_str(&format!("{:<20} {:>5} {:>10}  replay\n", "step", "over", "worst"));
             for (kind, (count, worst, index, step)) in rows {
                 out.push_str(&format!(
-                    "{kind:<20} {count:>5} {worst:>8.1} ms  --seed {} --until {index}  {:?}\n",
-                    options.seed, step
+                    "{kind:<20} {count:>5} {worst:>8.1} ms  {replay_args} --until {index}  {step:?}\n"
                 ));
             }
         }
@@ -562,10 +606,12 @@ enum RunResult {
     Failed { index: usize, violation: Violation, script: Vec<Step> },
 }
 
+#[allow(clippy::too_many_arguments)] // the runner's whole context; a struct would only rename it
 async fn run_steps(
     handle: WindowHandle<CrowWindow>,
     tree: &Path,
     options: &Options,
+    source: StepSource,
     frames: &Arc<Mutex<FrameLog>>,
     trace: &Arc<Trace>,
     churn: Option<&ChurnHandle>,
@@ -595,28 +641,31 @@ async fn run_steps(
             wait_quiet(handle, cx).await;
             return RunResult::Paused { index };
         }
-        if options.until.is_none() && started.elapsed() >= deadline {
+        if options.until.is_none() && source.replay.is_none() && started.elapsed() >= deadline {
             break;
         }
-        let mut state = match generator_state(handle, cx) {
-            Some(state) => state,
-            None => {
-                return RunResult::Failed {
-                    index,
-                    violation: Violation::new("window", "the fuzz window closed"),
-                    script,
-                };
-            }
+        let step = match &source.replay {
+            // A replay sends the saved steps as they are: the generator reads the
+            // live keymap and focus, which depend on timing, so a seed alone can
+            // drift from the run it came from.
+            Some(steps) => match steps.get(index) {
+                Some(step) => step.clone(),
+                None => break,
+            },
+            None => match next_step(&mut generator, handle, cx) {
+                Some(step) => step,
+                None => {
+                    return RunResult::Failed {
+                        index,
+                        violation: Violation::new("window", "the fuzz window closed"),
+                        script,
+                    };
+                }
+            },
         };
-        // Q3: the first version drives keys and typing only. An empty selector
-        // list makes the generator fall back to keys for its click rolls.
-        state.selectors.clear();
-        // Hiding the app leaves the window hidden while the run keeps driving
-        // it; the 100k fixture then stalls on the next step. H1's test platform
-        // has no hide implementation, so this is H3-only.
-        state.active_keys.retain(|key| !matches!(key.as_str(), "cmd-h" | "alt-cmd-h" | "cmd-m" | "cmd-q"));
-        state.all_keys.retain(|key| !matches!(key.as_str(), "cmd-h" | "alt-cmd-h" | "cmd-m" | "cmd-q"));
-        let step = generator.next(&state);
+        if let Some(log) = &source.log {
+            log.push(&step);
+        }
         script.push(step.clone());
         {
             let mut log = frames.lock().expect("frames");
@@ -767,6 +816,20 @@ async fn bring_back(handle: WindowHandle<CrowWindow>, tree: &Path, cx: &mut Asyn
     Ok(())
 }
 
+/// The generator's next step for the window as it is now; `None` if it closed.
+fn next_step(generator: &mut StepGen, handle: WindowHandle<CrowWindow>, cx: &mut AsyncApp) -> Option<Step> {
+    let mut state = generator_state(handle, cx)?;
+    // Q3: the first version drives keys and typing only. An empty selector
+    // list makes the generator fall back to keys for its click rolls.
+    state.selectors.clear();
+    // Hiding the app leaves the window hidden while the run keeps driving
+    // it; the 100k fixture then stalls on the next step. H1's test platform
+    // has no hide implementation, so this is H3-only.
+    state.active_keys.retain(|key| !matches!(key.as_str(), "cmd-h" | "alt-cmd-h" | "cmd-m" | "cmd-q"));
+    state.all_keys.retain(|key| !matches!(key.as_str(), "cmd-h" | "alt-cmd-h" | "cmd-m" | "cmd-q"));
+    Some(generator.next(&state))
+}
+
 fn generator_state(handle: WindowHandle<CrowWindow>, cx: &mut AsyncApp) -> Option<crate::fuzz::GenState> {
     handle.update(cx, |view, window, cx| crate::fuzz::state_for(view, window, cx)).ok()
 }
@@ -869,8 +932,15 @@ fn compare_snapshots(snapshots: Vec<(PathBuf, Vec<String>, bool)>) -> Option<Vio
     None
 }
 
-async fn cleanup(paths: &[PathBuf], cx: &mut AsyncApp) {
-    let paths = paths.to_vec();
+/// Remove the temp tree. The support folder (script, log) is removed too unless
+/// the run has something to replay.
+async fn cleanup(setup: &TreeSetup, keep_support: bool, cx: &mut AsyncApp) {
+    let mut paths: Vec<PathBuf> = setup.tree.iter().cloned().collect();
+    if keep_support {
+        println!("kept for replay: {}", setup.support.display());
+    } else {
+        paths.push(setup.support.clone());
+    }
     cx.background_executor()
         .spawn(async move {
             for path in paths {
@@ -878,6 +948,111 @@ async fn cleanup(paths: &[PathBuf], cx: &mut AsyncApp) {
             }
         })
         .await;
+}
+
+/// Where a run's steps come from and where they are saved.
+struct StepSource {
+    replay: Option<Arc<Vec<Step>>>,
+    log: Option<ScriptLog>,
+}
+
+/// Saves each step before it is sent, one line per step, from a writer thread:
+/// no disk I/O on the main thread, and a `HANG` or a killed run still has the
+/// step that stalled.
+struct ScriptLog(std::sync::mpsc::Sender<String>);
+
+impl ScriptLog {
+    fn create(path: &Path) -> Result<ScriptLog, String> {
+        let file = std::fs::File::create(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let (send, receive) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let mut file = std::io::LineWriter::new(file);
+            for line in receive {
+                if writeln!(file, "{line}").is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(ScriptLog(send))
+    }
+
+    fn push(&self, step: &Step) {
+        let _ = self.0.send(encode_step(step));
+    }
+}
+
+/// One step per line: the variant, then its fields. Text is the rest of the
+/// line, with `\\`, `\n` and `\r` escaped, so spaces and any Unicode survive.
+fn encode_step(step: &Step) -> String {
+    match step {
+        Step::Keys(keys) => format!("Keys {}", escape(keys)),
+        Step::Type(text) => format!("Type {}", escape(text)),
+        Step::Click(selector) => format!("Click {}", escape(selector)),
+        Step::RightClick(selector, slot) => {
+            format!("RightClick {} {}", slot.map_or("-".to_owned(), |slot| slot.to_string()), escape(selector))
+        }
+        Step::Resize(width, height) => format!("Resize {width} {height}"),
+        Step::Settle => "Settle".to_owned(),
+        Step::AdvanceClock(ms) => format!("AdvanceClock {ms}"),
+        Step::DeleteShownFolder => "DeleteShownFolder".to_owned(),
+        Step::ReplaceShownFolder => "ReplaceShownFolder".to_owned(),
+    }
+}
+
+fn decode_step(line: &str) -> Result<Step, String> {
+    let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
+    let number = |value: &str| value.parse::<f64>().map_err(|_| format!("bad number {value:?} in {line:?}"));
+    Ok(match kind {
+        "Keys" => Step::Keys(unescape(rest)),
+        "Type" => Step::Type(unescape(rest)),
+        "Click" => Step::Click(unescape(rest)),
+        "RightClick" => {
+            let (slot, selector) = rest.split_once(' ').ok_or_else(|| format!("bad step {line:?}"))?;
+            let slot = if slot == "-" { None } else { Some(number(slot)? as usize) };
+            Step::RightClick(unescape(selector), slot)
+        }
+        "Resize" => {
+            let (width, height) = rest.split_once(' ').ok_or_else(|| format!("bad step {line:?}"))?;
+            Step::Resize(number(width)? as f32, number(height)? as f32)
+        }
+        "Settle" => Step::Settle,
+        "AdvanceClock" => Step::AdvanceClock(number(rest)? as u64),
+        "DeleteShownFolder" => Step::DeleteShownFolder,
+        "ReplaceShownFolder" => Step::ReplaceShownFolder,
+        _ => return Err(format!("bad step {line:?}")),
+    })
+}
+
+fn escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('\n', "\\n").replace('\r', "\\r")
+}
+
+fn unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// A saved script, read before the window opens.
+fn read_script(path: &Path) -> Result<Vec<Step>, String> {
+    let text = std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .map(decode_step)
+        .collect::<Result<_, _>>()
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// What the slow-step reporter saw: closed spans in a window, plus error logs.
@@ -1014,12 +1189,57 @@ mod tests {
             frames: 12,
             ..Default::default()
         };
-        let options = Options { dir: None, seed: 1, minutes: 1.0, until: None, tree: EdgeTree::small(), churn: false };
-        let (report, freeze) = log.report(&options, "small", 10, Duration::from_secs(1));
+        let options = Options {
+            dir: None,
+            seed: 1,
+            minutes: 1.0,
+            until: None,
+            script: None,
+            tree: EdgeTree::small(),
+            churn: false,
+        };
+        let (report, freeze) = log.report(&options, "small", "--seed 1 --script s.txt", 10, Duration::from_secs(1));
         assert!(!freeze);
         assert!(report.contains("Keys"), "{report}");
         assert!(report.contains("Settle"), "{report}");
-        assert!(report.contains("--seed 1 --until 8"), "{report}");
+        assert!(report.contains("--seed 1 --script s.txt --until 8"), "{report}");
+    }
+
+    #[test]
+    fn a_saved_script_reads_back_step_for_step() {
+        let steps = vec![
+            Step::Keys("cmd-shift-]".into()),
+            Step::Keys("space".into()),
+            Step::Type("e\u{301}9 \\n \n\r🙂 ש".into()),
+            Step::Click("row-a b".into()),
+            Step::RightClick("row-x".into(), Some(3)),
+            Step::RightClick("row-y".into(), None),
+            Step::Resize(1920.0, 1100.5),
+            Step::Settle,
+            Step::AdvanceClock(1082),
+            Step::DeleteShownFolder,
+            Step::ReplaceShownFolder,
+        ];
+        let text: String = steps.iter().map(|step| encode_step(step) + "\n").collect();
+        assert_eq!(text.lines().count(), steps.len(), "one line per step:\n{text}");
+        let read: Vec<Step> = text.lines().map(|line| decode_step(line).expect("decodes")).collect();
+        assert_eq!(read, steps);
+    }
+
+    #[test]
+    fn options_parse_a_script_replay() {
+        let options = Options::parse(&[
+            "--seed".into(),
+            "7".into(),
+            "--script".into(),
+            "/tmp/s.txt".into(),
+            "--until".into(),
+            "40".into(),
+        ])
+        .expect("options");
+        assert_eq!(options.script.as_deref(), Some(Path::new("/tmp/s.txt")));
+        assert_eq!(options.until, Some(40));
+        assert!(decode_step("Bogus 1").is_err());
     }
 
     #[test]
