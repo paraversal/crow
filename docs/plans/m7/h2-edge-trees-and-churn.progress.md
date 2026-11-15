@@ -1,13 +1,13 @@
 # H2 edge trees and churn progress
-Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: in progress
+Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: Ready for critique
 
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
 | I1 `crow_fs::testing` | done | `testing.rs`: `EdgeKind` (16 kinds), `EdgeTree` (`small`/`all`/`parse`/`label`), `make_tree`, `Tree::remove` (permission-restoring), `Churn`/`ChurnHandle`. `--make-fixture` now calls `EdgeTree::wide`; old `snapshot::make_fixture` removed. `crow-fs` 42 tests pass; clippy with and without `testing`; `cargo check -p crow-app`. |
 | I2 Churn | done | `Step::DeleteShownFolder`/`ReplaceShownFolder` (2% each), `FuzzOptions` (files/edge/churn), churn pauses around every `Settle` deep check, `fuzz_long` reads `CROW_FUZZ_TREE`/`CROW_FUZZ_CHURN` and alternates churn, `Failure` records tree/churn/without-churn. Tests: delete/replace shown folder, churn 2 s on 1k then listing = disk, edge replay. Full app suite 401 passed, 2 ignored. |
-| I3 Runs | todo | |
-| Finish | todo | |
+| I3 Runs | done | 35.8 min of fuzzing (3 parallel jobs, 15 kinds × 2 min, 600 steps/seed, churn on) plus the quick matrix. Findings: #6 (newline panic; edge smoke ignored), #7 (replacing the shown folder leaves stale rows; deterministic, ignored regression test), #8 (focus artifacts from separate windows). All 15 kinds pass otherwise. |
+| Finish | done | fmt ✓ · clippy workspace ✓ · clippy `--features fuzz` ✓ · `cargo test --workspace` 401 app + 92 core + 42 fs + 5 macos + 18 search + 6 theme, 3 ignored. New fixture hash `b659b9a8…` = main's; bench warm 7 ms, p99 8.70 ms. |
 
 ## Questions
 - Q4 (asked 2026-11-15): the new edge smoke finds a real panic (H4 #6: a `\n` in a file name crashes GPUI text shaping when the row is drawn). Fix it in H2, or record it for H4 and keep the normal suite green? → answer: **record for H4**; `fuzz_smoke_edge_trees` is `#[ignore = "H4 #6"]`.
@@ -25,7 +25,8 @@ Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: in progr
 - H1's `fuzz_smoke` is 3 seeds × 30 steps on 40 files (3.7 s); the edge smoke adds one 30-step run on `EdgeTree::small()` (Q1), no churn. — H1 progress + Q1.
 
 ## Hand checks
-- [ ] Edge names in the bundled app: open a tree with every kind and arrow through it; long, RTL, emoji, newline and unreadable rows draw and do not panic; Quick Look on the unreadable file shows an error; the package opens as a folder.
+- [ ] Edge names in the bundled app: open a tree with every kind and arrow through it; long, RTL, emoji and unreadable rows draw; Quick Look on the unreadable file shows an error; the package opens as a folder. A name with `\n` still panics GPUI text shaping (H4 #6), so skip it or expect the panic.
+- [ ] Shown folder replaced: with a folder shown, `rm -rf` it and recreate it with new files; Crow should show the new contents. Today it keeps the old rows (H4 #7).
 - [ ] Churn by hand: `Churn` is test-only; the equivalent is a Terminal loop creating/renaming/deleting files in a folder Crow shows. The list follows, the cursor does not jump to a different file, no error log.
 - [ ] Removable volume (Q2): `hdiutil create -size 200m -fs APFS -volname CrowTest /tmp/crow.dmg`, attach, browse, eject while shown; Crow shows the folder gone, no panic.
 
@@ -36,6 +37,9 @@ Branch: `m7-h2-churn` · PR: none · Last updated: 2026-11-15 · State: in progr
 - 2026-11-15: read the plan, M7 index, H1 plan/progress, findings, testing docs and the code H2 touches; created the branch and this file; asked Q1–Q3.
 - 2026-11-15: I1. Added `crow-fs/src/testing.rs` (edge kinds, seeded `make_tree`, permission-restoring `remove_tree`, `Churn`), the `testing` feature, and moved `--make-fixture` onto `EdgeTree::wide`. `cargo test -p crow-fs` 42 passed (0.37 s); clippy clean with and without `testing`; `cargo check -p crow-app` clean.
 - 2026-11-15: I2. Added the two shown-folder steps, `FuzzOptions`, churn pause/resume around deep checks, `CROW_FUZZ_TREE`/`CROW_FUZZ_CHURN`, and the new tests. The edge smoke found H4 #6 on its first run (newline name → GPUI panic); Q4 says H4, so `fuzz_smoke_edge_trees` is ignored. Full `cargo test -p crow-app`: 401 passed, 2 ignored (22.8 s); clippy clean, also with `--features fuzz`.
+- 2026-11-15: I3 quick matrix (16 kinds × 50 steps, churn on): all pass except `newline`, which panics at step 0 with #6 (`alt-cmd-n`); added that trigger to the findings row. Started 3 parallel 2-minute-per-kind jobs (600 steps/seed, shrink 60 s, churn on) for the 15 remaining kinds. `docs/testing.md` now documents the kinds, `CROW_FUZZ_TREE`/`CROW_FUZZ_CHURN`, the ignored edge smoke, edge replay and the volume hand checks. Baseline bench fixture hash: `b659b9a8…` (100k files, `target/fixture-100k`).
+- 2026-11-15: I3 runs. 3 jobs, 13.1 min wall, 35.8 min of fuzzing. 15 kinds pass with churn. `newline` is #6. All 10 listing mismatches involve `DeleteShownFolder`/`ReplaceShownFolder`; a deterministic spike showed replacing the shown root leaves the old rows (`replacing_the_shown_folder_reloads`, ignored for H4 #7); deleting the root alone is handled. A 10 s churn with no shown-folder step settled cleanly, so the listing class is not settle latency. The two focus failures end with a separate window (`alt-cmd-n` uncapped, `cmd-,` Settings) — recorded as #8, a fuzzer artifact. Removed the spikes; kept the ignored #7 test.
+- 2026-11-15: Finish. `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` (also `-p crow-app --features fuzz`) and `cargo test --workspace` pass: 401 app (3 ignored), 92 core, 42 fs, 5 macos, 18 search, 6 theme. `--make-fixture` writes the same 100k fixture (manifest hash `b659b9a8…`). `--bench`: warm first paint 7 ms, p99 8.70 ms, avg 8.42 ms, max 40.00 ms. `docs/testing.md` has the kinds, flags, edge replay, volume hand checks and the numbers.
 
 ## Next
-I3: run `fuzz_long` with each edge kind and with churn, 30 minutes total; record findings (including #6's newline tree) in `findings.md`; don't fix app bugs.
+Ready for critique. The critic reviews the branch and opens the PR; the user hand-tests #6/#7 and the disk-image check.

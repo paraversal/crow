@@ -7488,6 +7488,17 @@ fn edge_tree_replay_lists_a_long_name(cx: &mut TestAppContext) {
     assert!(tree.join(format!("{}.txt", "a".repeat(251))).exists(), "the edge tree was built");
 }
 
+/// H4 #7: replacing the shown folder leaves the old rows. Deterministic without
+/// churn; the churn runs show the same after delete/replace.
+#[gpui::test]
+#[ignore = "H4 #7: replacing the shown folder leaves stale rows"]
+fn replacing_the_shown_folder_reloads(cx: &mut TestAppContext) {
+    use crate::fuzz::Step;
+    let tree = fuzz_tree("fuzz-replace-root", 40);
+    let found = replay(cx, &tree, 40, crate::script![Step::ReplaceShownFolder, Step::Settle]);
+    assert!(found.is_empty(), "{found:?}");
+}
+
 #[gpui::test]
 fn fuzz_smoke(cx: &mut TestAppContext) {
     let tree = fuzz_tree("fuzz-smoke", 40);
