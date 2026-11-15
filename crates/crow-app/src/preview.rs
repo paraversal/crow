@@ -29,6 +29,7 @@ pub fn fetch(entry: &Entry, extensions: &Extensions) -> Preview {
 
 /// `fetch`, plus the lines around a content hit when the text previewer read it.
 pub fn fetch_at(entry: &Entry, extensions: &Extensions, line: Option<u64>) -> Preview {
+    let _span = tracing::debug_span!("preview load").entered();
     let content = extensions.preview(entry);
     let image = match &content {
         Some(PreviewContent::Image(png)) => Some(Arc::new(Image::from_bytes(ImageFormat::Png, png.to_vec()))),

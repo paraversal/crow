@@ -3013,17 +3013,55 @@ impl Pane {
                     format!("pane {k}: cursor {ix} is past {} rows", folder.row_count()),
                 ));
             }
-            let row_paths = folder.row_paths();
-            let listed: std::collections::HashSet<&std::path::Path> =
-                row_paths.iter().map(|path| path.as_path()).collect();
-            for path in folder.selection_paths() {
-                if !listed.contains(path.as_path()) {
-                    out.push(Violation::new(
-                        "selection",
-                        format!("pane {k}: {} is selected but not in the listing", path.display()),
-                    ));
+            let selection = folder.selection_paths();
+            if selection.len() > 16 {
+                // A select-all on 100k rows: one path set, not 100k scans.
+                let rows = folder.row_paths();
+                let listed: std::collections::HashSet<&std::path::Path> =
+                    rows.iter().map(|path| path.as_path()).collect();
+                for path in selection {
+                    if !listed.contains(path.as_path()) {
+                        out.push(Violation::new(
+                            "selection",
+                            format!("pane {k}: {} is selected but not in the listing", path.display()),
+                        ));
+                    }
+                }
+            } else {
+                for path in selection {
+                    if !folder.has_row_path(&path) {
+                        out.push(Violation::new(
+                            "selection",
+                            format!("pane {k}: {} is selected but not in the listing", path.display()),
+                        ));
+                    }
                 }
             }
+        }
+        out
+    }
+
+    /// Every shown folder's listing, without touching the disk. The fuzz runner
+    /// compares it to `read_dir` on a background thread; `listing_violations`
+    /// does the same comparison on the calling thread for the tests.
+    pub fn listing_snapshot(
+        &self,
+        cx: &gpui::App,
+        root: Option<&std::path::Path>,
+    ) -> Vec<(PathBuf, Vec<String>, bool)> {
+        let hidden = cx.global::<Ui>().settings.show_hidden_files;
+        let mut out = Vec::new();
+        for folder in &self.folders {
+            let folder = folder.read(cx);
+            if folder.is_loading() || folder.error().is_some() {
+                continue;
+            }
+            let dir = folder.dir();
+            if root.is_some_and(|root| !dir.starts_with(root)) {
+                continue;
+            }
+            let listed = folder.entries().iter().map(|entry| entry.name.clone()).collect();
+            out.push((dir.to_path_buf(), listed, hidden));
         }
         out
     }
@@ -3033,25 +3071,15 @@ impl Pane {
     /// limits the check to the fuzzer's temp tree.
     pub fn listing_violations(&self, cx: &gpui::App, root: Option<&std::path::Path>) -> Vec<crate::fuzz::Violation> {
         use crate::fuzz::Violation;
-        let hidden = cx.global::<Ui>().settings.show_hidden_files;
         let mut out = Vec::new();
-        for (k, folder) in self.folders.iter().enumerate() {
-            let folder = folder.read(cx);
-            if folder.is_loading() || folder.error().is_some() {
-                continue;
-            }
-            let dir = folder.dir();
-            if root.is_some_and(|root| !dir.starts_with(root)) {
-                continue;
-            }
-            let Ok(read) = std::fs::read_dir(dir) else { continue };
+        for (k, (dir, mut listed, hidden)) in self.listing_snapshot(cx, root).into_iter().enumerate() {
+            let Ok(read) = std::fs::read_dir(&dir) else { continue };
             let mut disk: Vec<String> = read
                 .filter_map(|entry| entry.ok())
                 .map(|entry| entry.file_name().to_string_lossy().into_owned())
                 .filter(|name| hidden || !name.starts_with('.'))
                 .collect();
             disk.sort();
-            let mut listed: Vec<String> = folder.entries().iter().map(|entry| entry.name.clone()).collect();
             listed.sort();
             if disk != listed {
                 out.push(Violation::new(

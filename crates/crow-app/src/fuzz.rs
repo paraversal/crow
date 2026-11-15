@@ -25,6 +25,24 @@ pub enum Step {
     ReplaceShownFolder,
 }
 
+impl Step {
+    /// The variant name, for the slowness report's table.
+    #[cfg(feature = "fuzz")]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Step::Keys(_) => "Keys",
+            Step::Type(_) => "Type",
+            Step::Click(_) => "Click",
+            Step::RightClick(..) => "RightClick",
+            Step::Resize(..) => "Resize",
+            Step::Settle => "Settle",
+            Step::AdvanceClock(_) => "AdvanceClock",
+            Step::DeleteShownFolder => "DeleteShownFolder",
+            Step::ReplaceShownFolder => "ReplaceShownFolder",
+        }
+    }
+}
+
 /// What the generator knows about the window right now.
 #[derive(Clone, Debug, Default)]
 pub struct GenState {
@@ -307,37 +325,39 @@ fn allowed(key: &str, tabs: usize, windows: usize) -> bool {
 }
 
 /// The generator's view of `view`: live bindings, focus, selectors and caps.
-#[cfg(test)]
-pub fn state(view: &gpui::Entity<crate::window::CrowWindow>, cx: &mut gpui::VisualTestContext) -> GenState {
-    let stack = cx.update(|window, _| window.context_stack());
-    let os = cx.update(|_, cx| cx.platform_info().os);
-    let text_focused = cx.update(|window, cx| view.read(cx).text_focused(window, cx));
-    let selectors = view.read_with(cx, |window, cx| window.debug_selectors(cx));
-    let (tabs, vim) = view.read_with(cx, |window, cx| {
-        (window.tab_count(), cx.global::<crate::ui::Ui>().settings.keymap == crow_core::KeymapLayer::Vim)
-    });
-    let windows = cx.update(|_, cx| cx.windows().len());
-    let (active_keys, all_keys) = cx.update(|_, cx| {
-        let keymap = cx.key_bindings();
-        let keymap = keymap.borrow();
-        let mut active = Vec::new();
-        let mut all = Vec::new();
-        for binding in keymap.bindings() {
-            let keys = binding.keystrokes().iter().map(|key| key.inner().unparse(os)).collect::<Vec<_>>().join(" ");
-            if !allowed(&keys, tabs, windows) {
-                continue;
-            }
-            all.push(keys.clone());
-            let (resolved, _) = keymap.bindings_for_input(binding.keystrokes(), &stack);
-            if resolved.first().is_some_and(|found| found.action().partial_eq(binding.action())) {
-                active.push(keys);
-            }
+/// The fuzz runner has a real `Window`; the test runner wraps this in its context.
+#[cfg(any(test, feature = "fuzz"))]
+pub fn state_for(view: &crate::window::CrowWindow, window: &gpui::Window, cx: &gpui::App) -> GenState {
+    let stack = window.context_stack();
+    let os = cx.platform_info().os;
+    let text_focused = view.text_focused(window, cx);
+    let selectors = view.debug_selectors(cx);
+    let tabs = view.tab_count();
+    let vim = cx.global::<crate::ui::Ui>().settings.keymap == crow_core::KeymapLayer::Vim;
+    let windows = cx.windows().len();
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    let mut active = Vec::new();
+    let mut all = Vec::new();
+    for binding in keymap.bindings() {
+        let keys = binding.keystrokes().iter().map(|key| key.inner().unparse(os)).collect::<Vec<_>>().join(" ");
+        if !allowed(&keys, tabs, windows) {
+            continue;
         }
-        (active, all)
-    });
-    let mut state = GenState { active_keys, all_keys, text_focused, selectors, tabs, windows, vim };
+        all.push(keys.clone());
+        let (resolved, _) = keymap.bindings_for_input(binding.keystrokes(), &stack);
+        if resolved.first().is_some_and(|found| found.action().partial_eq(binding.action())) {
+            active.push(keys);
+        }
+    }
+    let mut state = GenState { active_keys: active, all_keys: all, text_focused, selectors, tabs, windows, vim };
     state.add_plain_keys();
     state
+}
+
+#[cfg(test)]
+pub fn state(view: &gpui::Entity<crate::window::CrowWindow>, cx: &mut gpui::VisualTestContext) -> GenState {
+    cx.update(|window, cx| state_for(view.read(cx), window, cx))
 }
 
 /// Run until parked, then wait (bounded) for every tab, operation and watcher

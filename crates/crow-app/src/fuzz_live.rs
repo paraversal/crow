@@ -1,0 +1,1017 @@
+//! `crow --fuzz`: H1's generator in the real app, with a frame-time budget.
+//!
+//! The test platform has no real frames or disk timing, so `fuzz_smoke` cannot
+//! see a freeze. This runner opens a real window on a temp edge tree (or a
+//! scratch folder), dispatches generated keys and typing, records a 16 ms
+//! main-thread heartbeat (its lateness is the frame budget), and prints the
+//! spans that overlapped a slow one. It never opens an app, plays a sound, or
+//! touches the user's Trash or pasteboard: effects and Trash are recorded or
+//! redirected to temp folders.
+
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use gpui::{App, AppContext, AsyncApp, Keystroke, WindowHandle, px, size};
+use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::Layer;
+
+use crate::effects::{self, RecordingEffects};
+use crate::fuzz::{Step, StepGen, Violation};
+use crate::operations::{self, FolderTrash, Operations};
+use crate::window::CrowWindow;
+use crate::{actions, extensions, icons, logging, menus, settings_window, text_input, ui, window};
+use crow_fs::testing::{Churn, ChurnHandle, EdgeTree, make_tree, remove_tree};
+
+/// A frame over this is a slow step.
+const SLOW_MS: f64 = 50.0;
+/// A frame over this fails the run.
+const FREEZE_MS: f64 = 250.0;
+/// A stall this long is treated as a hang; the watchdog quits so a stuck step
+/// cannot swallow the rest of the run. A 100k fixture resize can take 5-6 s and
+/// still finish, so this is well above the freeze threshold.
+const HANG_MS: f64 = 30_000.0;
+/// The ordinary fuzz tree's size, matching H1's `fuzz_long`.
+const FILES: usize = 200;
+
+#[derive(Clone, Debug)]
+struct Options {
+    dir: Option<PathBuf>,
+    seed: u64,
+    minutes: f64,
+    until: Option<usize>,
+    tree: EdgeTree,
+    churn: bool,
+}
+
+impl Options {
+    fn parse(args: &[String]) -> Result<Options, String> {
+        let mut dir = None;
+        let mut dir_is_scratch = false;
+        let mut seed = default_seed();
+        let mut minutes: f64 = 10.0;
+        let mut until = None;
+        let mut tree = EdgeTree::small();
+        let mut tree_given = false;
+        let mut churn = false;
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--seed" => {
+                    let value = args.next().ok_or("--seed needs a number")?;
+                    seed = value.parse().map_err(|_| format!("bad --seed {value:?}"))?;
+                }
+                "--minutes" => {
+                    let value = args.next().ok_or("--minutes needs a number")?;
+                    minutes = value.parse().map_err(|_| format!("bad --minutes {value:?}"))?;
+                    if !minutes.is_finite() || minutes <= 0.0 {
+                        return Err("--minutes must be positive".into());
+                    }
+                }
+                "--until" => {
+                    let value = args.next().ok_or("--until needs a step index")?;
+                    until = Some(value.parse().map_err(|_| format!("bad --until {value:?}"))?);
+                }
+                "--tree" => {
+                    let value = args.next().ok_or("--tree needs a kind list")?;
+                    tree = EdgeTree::parse(value)?;
+                    tree_given = true;
+                }
+                "--churn" => churn = true,
+                "--dir-is-scratch" => dir_is_scratch = true,
+                other if other.starts_with("--") => return Err(format!("unknown option {other:?}")),
+                path => {
+                    if dir.is_some() {
+                        return Err(format!("more than one folder: {path:?}"));
+                    }
+                    dir = Some(PathBuf::from(path));
+                }
+            }
+        }
+        if dir.is_some() && !dir_is_scratch {
+            return Err("refusing to fuzz a user folder: pass --dir-is-scratch to confirm it may be changed".into());
+        }
+        if dir.is_some() && tree_given {
+            return Err("--tree applies to the temp tree; the given folder is used as-is".into());
+        }
+        Ok(Options { dir, seed, minutes, until, tree, churn })
+    }
+}
+
+fn default_seed() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
+}
+
+fn usage() -> &'static str {
+    "crow --fuzz [DIR --dir-is-scratch] [--seed N] [--minutes M] [--churn] [--until INDEX] [--tree KINDS]
+
+  --fuzz              open a real window and drive it with H1's generator
+  DIR                 a scratch folder to fuzz; needs --dir-is-scratch
+  --seed N            the generator seed (default: from the clock; printed)
+  --minutes M         stop after M minutes (default 10; ignored with --until)
+  --until INDEX       dispatch steps 0..INDEX-1, then pause for `xctrace`
+  --churn             change the tree while the fuzzer acts
+  --tree KINDS        temp tree: small (default), all, none, or comma-separated
+                      kinds (long-name,emoji,deep-20,wide-100000,huge-file, ...)
+
+A slow step is a 16 ms heartbeat over 50 ms; over 250 ms fails the run.
+Report and replay a step with --seed N --until INDEX."
+}
+
+pub fn run(args: &[String]) -> ExitCode {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("{}", usage());
+        return ExitCode::SUCCESS;
+    }
+    let options = match Options::parse(args) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("crow --fuzz: {error}\n\n{}", usage());
+            return ExitCode::FAILURE;
+        }
+    };
+    let trace = Trace::new();
+    let _log_guard = logging::init_fuzz(trace.layer());
+    let setup = match prepare(&options) {
+        Ok(setup) => setup,
+        Err(error) => {
+            eprintln!("crow --fuzz: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "FUZZ seed={} tree={} churn={} minutes={} dir={} config={}",
+        options.seed,
+        setup.tree_label,
+        options.churn,
+        options.minutes,
+        setup.root.display(),
+        setup.config_dir.display()
+    );
+    if let Some(until) = options.until {
+        println!("PAUSE before step {until}; the window stays open for profiling");
+    }
+
+    let outcome = Arc::new(Mutex::new(None::<Outcome>));
+    let hang = Arc::new(AtomicBool::new(false));
+    let app = gpui_platform::application().with_assets(icons::Assets);
+    let app_options = options.clone();
+    let app_setup = setup.clone();
+    let app_trace = trace.clone();
+    let app_outcome = outcome.clone();
+    let app_hang = hang.clone();
+    app.run(move |cx: &mut App| {
+        effects::install(cx, Arc::new(RecordingEffects::new()));
+        ui::init_at(
+            cx,
+            app_setup.config_dir.clone(),
+            app_setup.state_dir.clone(),
+            app_setup.root.clone(),
+        );
+        extensions::init(cx);
+        operations::init(cx, Arc::new(FolderTrash(app_setup.trash_dir.clone())));
+        cx.global_mut::<Operations>().jail = Some(app_setup.root.clone());
+        cx.bind_keys(actions::finder_keymap());
+        cx.bind_keys(actions::vim_keymap());
+        cx.bind_keys(text_input::keymap());
+        cx.bind_keys(settings_window::keymap());
+        menus::init(cx);
+        cx.set_global(window::LaunchFolder(app_setup.root.clone()));
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+
+        let Some(handle) = window::open(app_setup.root.clone(), false, None, cx) else {
+            eprintln!("crow --fuzz: could not open the window");
+            set_outcome(&app_outcome, Outcome { failed: true });
+            exit_failure();
+        };
+        if let Err(error) = handle.entity(cx) {
+            eprintln!("crow --fuzz: {error}");
+            set_outcome(&app_outcome, Outcome { failed: true });
+            exit_failure();
+        }
+        let frames = Arc::new(Mutex::new(FrameLog::default()));
+        install_heartbeat(
+            frames.clone(),
+            app_trace.clone(),
+            app_outcome.clone(),
+            app_hang.clone(),
+            app_options.seed,
+            cx,
+        );
+        let options = app_options.clone();
+        let setup = app_setup.clone();
+        let trace = app_trace.clone();
+        cx.spawn(async move |cx| {
+            let churn = options.churn.then(|| Churn::start(&setup.root, options.seed));
+            let result =
+                run_steps(handle, &setup.root, &options, &frames, &trace, churn.as_ref(), cx).await;
+            if app_hang.load(Ordering::Relaxed) {
+                return;
+            }
+            frames.lock().expect("frames").active = false;
+            if let Some(churn) = &churn {
+                churn.pause();
+            }
+            let steps = frames.lock().expect("frames").steps;
+            let elapsed = frames.lock().expect("frames").elapsed();
+            let (report, freeze) = frames.lock().expect("frames").report(&options, &setup.tree_label, steps, elapsed);
+            print!("{report}");
+            match result {
+                RunResult::Paused { index } => {
+                    println!(
+                        "PAUSED before step {index}. The window stays open; attach with:\n  xcrun xctrace record --template 'Time Profiler' --attach crow\nTree: {}\nQuit Crow (⌘Q) when the profile is done.",
+                        setup.root.display()
+                    );
+                    set_outcome(&app_outcome, Outcome { failed: false });
+                }
+                RunResult::Finished { violations } => {
+                    let failed = freeze || !violations.is_empty();
+                    if !violations.is_empty() {
+                        println!("{} invariant violation(s) (first at step {})", violations.len(), violations[0].0);
+                    }
+                    set_outcome(&app_outcome, Outcome { failed });
+                    cleanup(&setup.cleanup, cx).await;
+                    if failed {
+                        exit_failure();
+                    }
+                    cx.update(|cx| cx.quit());
+                }
+                RunResult::Failed { index, violation, script } => {
+                    println!(
+                        "FAIL seed={} step={index}: {} — {}\nreplay: --seed {} --until {index}\nscript:\n{}",
+                        options.seed,
+                        violation.check,
+                        violation.detail,
+                        options.seed,
+                        crate::fuzz::Script(script).print()
+                    );
+                    set_outcome(&app_outcome, Outcome { failed: true });
+                    cleanup(&setup.cleanup, cx).await;
+                    exit_failure();
+                }
+            }
+        })
+        .detach();
+        cx.activate(true);
+    });
+    match outcome.lock().expect("outcome").take() {
+        Some(outcome) if outcome.failed => ExitCode::FAILURE,
+        Some(_) => ExitCode::SUCCESS,
+        None => ExitCode::FAILURE,
+    }
+}
+
+#[derive(Clone)]
+struct TreeSetup {
+    root: PathBuf,
+    config_dir: PathBuf,
+    state_dir: PathBuf,
+    trash_dir: PathBuf,
+    tree_label: String,
+    /// Removed after a finished run; a paused run leaves the tree for profiling.
+    cleanup: Vec<PathBuf>,
+}
+
+fn prepare(options: &Options) -> Result<TreeSetup, String> {
+    let support = std::env::temp_dir().join(format!("crow-fuzz-support-{}-{}", std::process::id(), options.seed));
+    let config_dir = support.join("config");
+    let state_dir = support.join("state");
+    let trash_dir = support.join("trash");
+    for dir in [&config_dir, &state_dir, &trash_dir] {
+        std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    }
+
+    let (root, tree_label, cleanup_tree) = match &options.dir {
+        Some(dir) => {
+            if !dir.is_dir() {
+                return Err(format!("{}: not a folder", dir.display()));
+            }
+            let root = dir.canonicalize().map_err(|error| format!("{}: {error}", dir.display()))?;
+            (root, "external".to_owned(), None)
+        }
+        None => {
+            let root = std::env::temp_dir().join(format!("crow-fuzz-tree-{}-{}", std::process::id(), options.seed));
+            build_tree(&root, &options.tree, options.seed)?;
+            let root = root.canonicalize().map_err(|error| format!("{}: {error}", root.display()))?;
+            let cleanup = root.clone();
+            (root, options.tree.label(), Some(cleanup))
+        }
+    };
+    let sidebar = sidebar_toml(&root);
+    std::fs::write(config_dir.join("sidebar.toml"), sidebar)
+        .map_err(|error| format!("{}: {error}", config_dir.join("sidebar.toml").display()))?;
+
+    let mut cleanup = vec![support.clone()];
+    if let Some(tree) = cleanup_tree {
+        cleanup.push(tree);
+    }
+    Ok(TreeSetup { root, config_dir, state_dir, trash_dir, tree_label, cleanup })
+}
+
+/// The H1 tree: alpha/beta/notes, 200 files, 20 folders, then the edge kinds.
+fn build_tree(root: &Path, edge: &EdgeTree, seed: u64) -> Result<(), String> {
+    remove_tree(root).map_err(|error| format!("{}: {error}", root.display()))?;
+    std::fs::create_dir_all(root.join("alpha/inner")).map_err(|error| format!("{}: {error}", root.display()))?;
+    std::fs::create_dir_all(root.join("beta")).map_err(|error| format!("{}: {error}", root.display()))?;
+    std::fs::write(root.join("notes.txt"), "hello\n").map_err(|error| format!("{}: {error}", root.display()))?;
+    for index in 0..FILES {
+        let path = root.join(format!("file-{index:03}.txt"));
+        std::fs::write(&path, "x").map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+    for index in 0..20 {
+        let path = root.join(format!("dir-{index:02}/inner"));
+        std::fs::create_dir_all(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+    if !edge.is_empty() {
+        make_tree(root, edge, seed).map_err(|error| format!("{}: {error}", root.display()))?;
+    }
+    Ok(())
+}
+
+fn sidebar_toml(root: &Path) -> String {
+    let mut favorites = Vec::new();
+    for name in ["alpha", "beta"] {
+        let path = root.join(name);
+        if path.is_dir() {
+            favorites.push(format!("  {{ path = {:?} }},", path.to_string_lossy()));
+        }
+    }
+    if favorites.is_empty() {
+        favorites.push(format!("  {{ path = {:?} }},", root.to_string_lossy()));
+    }
+    format!(
+        "[[group]]\nname = \"Favorites\"\nitems = [\n{}\n]\n[recent]\nshow = false\n[locations]\nshow = false\n",
+        favorites.join("\n")
+    )
+}
+
+#[derive(Clone, Copy)]
+struct Outcome {
+    failed: bool,
+}
+
+/// A watchdog freeze must win over a runner result that arrives after it; a
+/// successful result must not replace an already-failed one.
+fn set_outcome(outcome: &Arc<Mutex<Option<Outcome>>>, value: Outcome) {
+    let mut slot = outcome.lock().expect("outcome");
+    if slot.as_ref().is_none_or(|current| !current.failed) {
+        *slot = Some(value);
+    }
+}
+
+/// GPUI's macOS `quit` terminates through `NSApplication`, which exits 0 and
+/// never returns to `main`; a failed fuzz run has to exit here.
+fn exit_failure() -> ! {
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(1);
+}
+
+#[derive(Default)]
+struct FrameLog {
+    active: bool,
+    current: Option<(usize, Step, Instant)>,
+    recent: VecDeque<(usize, Step)>,
+    slow: Vec<SlowFrame>,
+    frames: u64,
+    steps: usize,
+    started: Option<Instant>,
+    max_ms: f64,
+}
+
+#[derive(Clone)]
+struct SlowFrame {
+    index: usize,
+    step: Step,
+    ms: f64,
+}
+
+impl FrameLog {
+    fn elapsed(&self) -> Duration {
+        self.started.map_or(Duration::ZERO, |started| started.elapsed())
+    }
+
+    fn report(&self, options: &Options, tree_label: &str, steps: usize, elapsed: Duration) -> (String, bool) {
+        let mut groups: BTreeMap<&'static str, (usize, f64, usize, Step)> = BTreeMap::new();
+        for slow in &self.slow {
+            let entry = groups.entry(slow.step.kind()).or_insert((0, 0.0, slow.index, slow.step.clone()));
+            entry.0 += 1;
+            if slow.ms > entry.1 {
+                entry.1 = slow.ms;
+                entry.2 = slow.index;
+                entry.3 = slow.step.clone();
+            }
+        }
+        let mut rows: Vec<_> = groups.into_iter().collect();
+        rows.sort_by(|a, b| b.1.1.total_cmp(&a.1.1));
+        let freeze = self.max_ms > FREEZE_MS;
+        let mut out = String::new();
+        out.push_str(&format!(
+            "\n==== crow --fuzz ====\nseed {} · tree {} · churn {} · {} steps in {:.1} s\nheartbeats {} · over {SLOW_MS:.0} ms {} · worst {:.1} ms{}\n",
+            options.seed,
+            tree_label,
+            options.churn,
+            steps,
+            elapsed.as_secs_f64(),
+            self.frames,
+            self.slow.len(),
+            self.max_ms,
+            if freeze { " · FREEZE" } else { "" }
+        ));
+        if rows.is_empty() {
+            out.push_str("no step over the budget\n");
+        } else {
+            out.push_str(&format!("{:<20} {:>5} {:>10}  replay\n", "step", "over", "worst"));
+            for (kind, (count, worst, index, step)) in rows {
+                out.push_str(&format!(
+                    "{kind:<20} {count:>5} {worst:>8.1} ms  --seed {} --until {index}  {:?}\n",
+                    options.seed, step
+                ));
+            }
+        }
+        (out, freeze)
+    }
+}
+
+/// A 16 ms heartbeat on the main thread. Its lateness is the frame budget: a
+/// step that blocks the thread delays the timer that would otherwise wake it.
+fn install_heartbeat(
+    frames: Arc<Mutex<FrameLog>>,
+    trace: Arc<Trace>,
+    outcome: Arc<Mutex<Option<Outcome>>>,
+    hang: Arc<AtomicBool>,
+    seed: u64,
+    cx: &mut App,
+) {
+    frames.lock().expect("frames").started = Some(Instant::now());
+    frames.lock().expect("frames").active = true;
+    cx.spawn(async move |cx| {
+        let mut last = Instant::now();
+        let mut frozen_steps = std::collections::HashSet::new();
+        loop {
+            cx.background_executor().timer(Duration::from_millis(16)).await;
+            let now = Instant::now();
+            let ms = (now - last).as_secs_f64() * 1000.0;
+            last = now;
+            let mut freeze = None;
+            let mut hang_step = None;
+            let report = {
+                let mut log = frames.lock().expect("frames");
+                if !log.active {
+                    break;
+                }
+                if let Some((index, step, started)) = log.current.clone() {
+                    log.frames += 1;
+                    log.max_ms = log.max_ms.max(ms);
+                    if ms > SLOW_MS {
+                        let first = !log.slow.iter().any(|slow| slow.index == index);
+                        if let Some(slow) = log.slow.iter_mut().find(|slow| slow.index == index) {
+                            slow.ms = slow.ms.max(ms);
+                        } else {
+                            log.slow.push(SlowFrame { index, step: step.clone(), ms });
+                        }
+                        if ms > FREEZE_MS {
+                            freeze = Some((
+                                index,
+                                step.clone(),
+                                started,
+                                ms,
+                                log.recent.iter().cloned().collect::<Vec<_>>(),
+                            ));
+                        }
+                        if ms > HANG_MS {
+                            hang_step = Some((
+                                index,
+                                step.clone(),
+                                started,
+                                ms,
+                                log.recent.iter().cloned().collect::<Vec<_>>(),
+                            ));
+                        }
+                        first.then(|| (index, step, started, ms, log.recent.iter().cloned().collect::<Vec<_>>()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some((index, step, started, ms, recent)) = report {
+                let spans = trace.span_summary(started, now);
+                let recent: Vec<String> = recent.iter().map(|(index, step)| format!("{index}:{:?}", step)).collect();
+                println!(
+                    "SLOW seed-step {index} {ms:.1} ms {} {:?}\n  last: {}\n  spans: {}",
+                    step.kind(),
+                    step,
+                    if recent.is_empty() { "none".to_owned() } else { recent.join(", ") },
+                    if spans.is_empty() { "none (RUST_LOG may hide debug spans)".to_owned() } else { spans.join(", ") }
+                );
+            }
+            if let Some((index, step, started, ms, recent)) = freeze
+                && frozen_steps.insert(index)
+            {
+                let spans = trace.span_summary(started, now);
+                let recent: Vec<String> = recent.iter().map(|(index, step)| format!("{index}:{:?}", step)).collect();
+                println!(
+                    "FREEZE seed={seed} step={index} {ms:.1} ms {} {:?}\n  last: {}\n  spans: {}",
+                    step.kind(),
+                    step,
+                    if recent.is_empty() { "none".to_owned() } else { recent.join(", ") },
+                    if spans.is_empty() { "none (RUST_LOG may hide debug spans)".to_owned() } else { spans.join(", ") }
+                );
+                *outcome.lock().expect("outcome") = Some(Outcome { failed: true });
+            }
+            if let Some((index, step, started, ms, recent)) = hang_step {
+                let spans = trace.span_summary(started, now);
+                let recent: Vec<String> = recent.iter().map(|(index, step)| format!("{index}:{:?}", step)).collect();
+                println!(
+                    "HANG seed={seed} step={index} {ms:.1} ms {} {:?}\n  last: {}\n  spans: {}",
+                    step.kind(),
+                    step,
+                    if recent.is_empty() { "none".to_owned() } else { recent.join(", ") },
+                    if spans.is_empty() { "none (RUST_LOG may hide debug spans)".to_owned() } else { spans.join(", ") }
+                );
+                frames.lock().expect("frames").active = false;
+                hang.store(true, Ordering::Relaxed);
+                *outcome.lock().expect("outcome") = Some(Outcome { failed: true });
+                exit_failure();
+            }
+        }
+    })
+    .detach();
+}
+
+enum RunResult {
+    Finished { violations: Vec<(usize, Violation)> },
+    Paused { index: usize },
+    Failed { index: usize, violation: Violation, script: Vec<Step> },
+}
+
+async fn run_steps(
+    handle: WindowHandle<CrowWindow>,
+    tree: &Path,
+    options: &Options,
+    frames: &Arc<Mutex<FrameLog>>,
+    trace: &Arc<Trace>,
+    churn: Option<&ChurnHandle>,
+    cx: &mut AsyncApp,
+) -> RunResult {
+    let started = Instant::now();
+    let deadline = Duration::from_secs_f64(options.minutes * 60.0);
+    let mut generator = StepGen::new(options.seed);
+    let mut script = Vec::new();
+    let mut violations = Vec::new();
+    let mut seen = HashSet::new();
+    let mut executed = 0usize;
+    for index in 0.. {
+        if options.until.is_some_and(|until| index >= until) {
+            if let Some(churn) = churn {
+                churn.pause();
+            }
+            wait_quiet(handle, cx).await;
+            return RunResult::Paused { index };
+        }
+        if options.until.is_none() && started.elapsed() >= deadline {
+            break;
+        }
+        let mut state = match generator_state(handle, cx) {
+            Some(state) => state,
+            None => {
+                return RunResult::Failed {
+                    index,
+                    violation: Violation::new("window", "the fuzz window closed"),
+                    script,
+                };
+            }
+        };
+        // Q3: the first version drives keys and typing only. An empty selector
+        // list makes the generator fall back to keys for its click rolls.
+        state.selectors.clear();
+        // Hiding the app leaves the window hidden while the run keeps driving
+        // it; the 100k fixture then stalls on the next step. H1's test platform
+        // has no hide implementation, so this is H3-only.
+        state.active_keys.retain(|key| !matches!(key.as_str(), "cmd-h" | "alt-cmd-h" | "cmd-m" | "cmd-q"));
+        state.all_keys.retain(|key| !matches!(key.as_str(), "cmd-h" | "alt-cmd-h" | "cmd-m" | "cmd-q"));
+        let step = generator.next(&state);
+        script.push(step.clone());
+        {
+            let mut log = frames.lock().expect("frames");
+            log.current = Some((index, step.clone(), Instant::now()));
+            log.recent.push_back((index, step.clone()));
+            if log.recent.len() > 5 {
+                log.recent.pop_front();
+            }
+        }
+        trace.reset_errors();
+        if let Err(violation) = apply_step(handle, tree, churn, frames, &step, cx).await {
+            if matches!(violation.check, "panic" | "window" | "dispatch" | "jail") {
+                return RunResult::Failed { index, violation, script };
+            }
+            note_violation(options.seed, index, violation, &mut seen, &mut violations);
+        }
+        // One step per frame at a realistic pace. Let deferred focus and render
+        // work run before checking, as H1's run_until_parked does.
+        cx.background_executor().timer(Duration::from_millis(16)).await;
+        executed = index + 1;
+        frames.lock().expect("frames").steps = executed;
+        // H1 checks after every step; H3 checks every 25th, because the checks
+        // themselves are main-thread work that would show up as a slow step.
+        if index % 25 == 0 {
+            frames.lock().expect("frames").current = None;
+            if let Some(violation) = check_windows(tree, cx) {
+                if violation.check == "jail" {
+                    return RunResult::Failed { index, violation, script };
+                }
+                note_violation(options.seed, index, violation, &mut seen, &mut violations);
+            }
+        }
+        if trace.errors() > 0 {
+            let violation = Violation::new("log", format!("{} error-level log line(s)", trace.errors()));
+            note_violation(options.seed, index, violation, &mut seen, &mut violations);
+        }
+    }
+
+    if let Some(churn) = churn {
+        churn.pause();
+    }
+    wait_quiet(handle, cx).await;
+    frames.lock().expect("frames").current = None;
+    if let Some(violation) = check_windows(tree, cx) {
+        note_violation(options.seed, executed, violation, &mut seen, &mut violations);
+    }
+    if let Some(violation) = deep_violation(cx, tree).await {
+        note_violation(options.seed, executed, violation, &mut seen, &mut violations);
+    }
+    RunResult::Finished { violations }
+}
+
+fn note_violation(
+    seed: u64,
+    index: usize,
+    violation: Violation,
+    seen: &mut HashSet<(&'static str, String)>,
+    violations: &mut Vec<(usize, Violation)>,
+) {
+    let key = (violation.check, violation.detail.clone());
+    if seen.insert(key) {
+        println!("VIOLATION seed={seed} step={index}: {} — {}", violation.check, violation.detail);
+        violations.push((index, violation));
+    }
+}
+
+async fn apply_step(
+    handle: WindowHandle<CrowWindow>,
+    tree: &Path,
+    churn: Option<&ChurnHandle>,
+    frames: &Arc<Mutex<FrameLog>>,
+    step: &Step,
+    cx: &mut AsyncApp,
+) -> Result<(), Violation> {
+    match step {
+        Step::Keys(keys) => dispatch_keys(handle, keys, cx)?,
+        Step::Type(text) => dispatch_type(handle, text, cx)?,
+        Step::Resize(width, height) => {
+            let resized = cx.update(|cx| {
+                cx.update_window(handle.into(), |_, window, _| window.resize(size(px(*width), px(*height))))
+            });
+            if resized.is_err() {
+                return Err(Violation::new("window", "the fuzz window closed"));
+            }
+        }
+        Step::Settle => {
+            if let Some(churn) = churn {
+                churn.pause();
+            }
+            wait_quiet(handle, cx).await;
+            // The snapshot/compare is the harness reading a 100k listing; do not
+            // report its time as a slow app step.
+            frames.lock().expect("frames").current = None;
+            let found = deep_violation(cx, tree).await;
+            if let Some(churn) = churn {
+                churn.resume();
+            }
+            if let Some(violation) = found {
+                return Err(violation);
+            }
+        }
+        Step::DeleteShownFolder => {
+            let dir = shown_dir(handle, cx)?;
+            // Keep the fuzz target's own root: deleting it would end a 100k run.
+            // H1 covers a deleted root in the test platform.
+            if dir != tree && dir.starts_with(tree) {
+                cx.background_executor()
+                    .spawn(async move {
+                        let _ = remove_tree(&dir);
+                    })
+                    .await;
+            }
+        }
+        Step::ReplaceShownFolder => {
+            let dir = shown_dir(handle, cx)?;
+            if dir != tree && dir.starts_with(tree) {
+                cx.background_executor()
+                    .spawn(async move {
+                        let _ = remove_tree(&dir);
+                        let _ = std::fs::create_dir_all(&dir);
+                        for index in 0..3 {
+                            let _ = std::fs::write(dir.join(format!("replaced-{index}.txt")), "replaced\n");
+                        }
+                    })
+                    .await;
+            }
+        }
+        // AdvanceClock is a test-clock step; real timers run at the 16 ms pace.
+        // Clicks are off for H3's first version (Q3).
+        Step::AdvanceClock(_) | Step::Click(_) | Step::RightClick(..) => {}
+    }
+    bring_back(handle, tree, cx).await?;
+    Ok(())
+}
+
+fn shown_dir(handle: WindowHandle<CrowWindow>, cx: &mut AsyncApp) -> Result<PathBuf, Violation> {
+    handle.update(cx, |view, _, cx| view.current_dir(cx)).map_err(|error| Violation::new("window", error.to_string()))
+}
+
+async fn bring_back(handle: WindowHandle<CrowWindow>, tree: &Path, cx: &mut AsyncApp) -> Result<(), Violation> {
+    let dir = shown_dir(handle, cx)?;
+    if !dir.starts_with(tree) {
+        handle
+            .update(cx, |view, _, cx| view.navigate_to(tree.to_path_buf(), cx))
+            .map_err(|error| Violation::new("window", error.to_string()))?;
+        wait_quiet(handle, cx).await;
+    }
+    Ok(())
+}
+
+fn generator_state(handle: WindowHandle<CrowWindow>, cx: &mut AsyncApp) -> Option<crate::fuzz::GenState> {
+    handle.update(cx, |view, window, cx| crate::fuzz::state_for(view, window, cx)).ok()
+}
+
+fn dispatch_keys(handle: WindowHandle<CrowWindow>, keys: &str, cx: &mut AsyncApp) -> Result<(), Violation> {
+    let os = cx.update(|cx| cx.platform_info().os);
+    cx.update(|cx| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            for part in keys.split(' ') {
+                let keystroke = Keystroke::parse_with_os(part, os)
+                    .map_err(|error| Violation::new("dispatch", format!("{part:?}: {error}")))?;
+                window.dispatch_keystroke(keystroke, cx);
+            }
+            Ok::<(), Violation>(())
+        })
+    })
+    .map_err(|error| Violation::new("window", error.to_string()))?
+}
+
+fn dispatch_type(handle: WindowHandle<CrowWindow>, text: &str, cx: &mut AsyncApp) -> Result<(), Violation> {
+    let os = cx.update(|cx| cx.platform_info().os);
+    cx.update(|cx| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            for character in text.chars() {
+                let keystroke = Keystroke::parse_with_os(&character.to_string(), os)
+                    .map_err(|error| Violation::new("dispatch", format!("{character:?}: {error}")))?;
+                window.dispatch_keystroke(keystroke, cx);
+            }
+            Ok::<(), Violation>(())
+        })
+    })
+    .map_err(|error| Violation::new("window", error.to_string()))?
+}
+
+async fn wait_quiet(handle: WindowHandle<CrowWindow>, cx: &mut AsyncApp) {
+    let mut quiet = 0;
+    for _ in 0..200 {
+        cx.background_executor().timer(Duration::from_millis(50)).await;
+        let busy = handle.update(cx, |view, _, cx| view.is_busy(cx)).unwrap_or(true);
+        if busy {
+            quiet = 0;
+        } else {
+            quiet += 1;
+            if quiet >= 2 {
+                return;
+            }
+        }
+    }
+}
+
+fn check_windows(tree: &Path, cx: &mut AsyncApp) -> Option<Violation> {
+    for handle in cx.update(|cx| cx.windows()) {
+        let Some(handle) = handle.downcast::<CrowWindow>() else { continue };
+        if let Ok(found) = handle.update(cx, |view, window, cx| view.check_invariants(window, cx, false, Some(tree)))
+            && let Some(violation) = found.into_iter().next()
+        {
+            return Some(violation);
+        }
+    }
+    None
+}
+
+async fn deep_violation(cx: &mut AsyncApp, tree: &Path) -> Option<Violation> {
+    let mut last = None;
+    for _ in 0..8 {
+        let mut snapshots = Vec::new();
+        for handle in cx.update(|cx| cx.windows()) {
+            let Some(handle) = handle.downcast::<CrowWindow>() else { continue };
+            if let Ok(found) = handle.update(cx, |view, _, cx| view.listing_snapshot(cx, Some(tree))) {
+                snapshots.extend(found);
+            }
+        }
+        let found = cx.background_executor().spawn(async move { compare_snapshots(snapshots) }).await;
+        match found {
+            Some(violation) => last = Some(violation),
+            None => return None,
+        }
+        cx.background_executor().timer(Duration::from_millis(40)).await;
+    }
+    last
+}
+
+fn compare_snapshots(snapshots: Vec<(PathBuf, Vec<String>, bool)>) -> Option<Violation> {
+    for (index, (dir, mut listed, hidden)) in snapshots.into_iter().enumerate() {
+        let Ok(read) = std::fs::read_dir(&dir) else { continue };
+        let mut disk: Vec<String> = read
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| hidden || !name.starts_with('.'))
+            .collect();
+        disk.sort();
+        listed.sort();
+        if disk != listed {
+            return Some(Violation::new(
+                "listing",
+                format!("pane {index} {}: disk {disk:?}, listing {listed:?}", dir.display()),
+            ));
+        }
+    }
+    None
+}
+
+async fn cleanup(paths: &[PathBuf], cx: &mut AsyncApp) {
+    let paths = paths.to_vec();
+    cx.background_executor()
+        .spawn(async move {
+            for path in paths {
+                let _ = remove_tree(&path);
+            }
+        })
+        .await;
+}
+
+/// What the slow-step reporter saw: closed spans in a window, plus error logs.
+pub struct Trace {
+    spans: Mutex<SpanStore>,
+    errors: AtomicUsize,
+}
+
+#[derive(Default)]
+struct SpanStore {
+    open: HashMap<u64, SpanRecord>,
+    closed: VecDeque<SpanRecord>,
+}
+
+struct SpanRecord {
+    name: &'static str,
+    start: Instant,
+    end: Option<Instant>,
+}
+
+const MAX_SPANS: usize = 4096;
+
+impl Trace {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Trace { spans: Mutex::new(SpanStore::default()), errors: AtomicUsize::new(0) })
+    }
+
+    pub fn layer(self: &Arc<Self>) -> TraceLayer {
+        TraceLayer { trace: self.clone() }
+    }
+
+    fn reset_errors(&self) {
+        self.errors.store(0, Ordering::Relaxed);
+    }
+
+    fn errors(&self) -> usize {
+        self.errors.load(Ordering::Relaxed)
+    }
+
+    fn span_summary(&self, start: Instant, end: Instant) -> Vec<String> {
+        let store = self.spans.lock().expect("spans");
+        let mut spans: Vec<(&'static str, f64, bool)> = store
+            .closed
+            .iter()
+            .filter(|span| span.start <= end && span.end.is_some_and(|closed| closed >= start))
+            .map(|span| (span.name, (span.end.expect("closed") - span.start).as_secs_f64() * 1000.0, false))
+            .chain(
+                store
+                    .open
+                    .values()
+                    .filter(|span| span.start <= end)
+                    .map(|span| (span.name, (end - span.start).as_secs_f64() * 1000.0, true)),
+            )
+            .collect();
+        spans.sort_by(|a, b| b.1.total_cmp(&a.1));
+        spans.truncate(8);
+        spans
+            .into_iter()
+            .map(|(name, ms, open)| if open { format!("{name} {ms:.1}ms (open)") } else { format!("{name} {ms:.1}ms") })
+            .collect()
+    }
+}
+
+/// The tracing layer that feeds [`Trace`]. Installed by `logging::init_fuzz`.
+pub struct TraceLayer {
+    trace: Arc<Trace>,
+}
+
+impl<S: Subscriber> Layer<S> for TraceLayer {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let record = SpanRecord { name: attrs.metadata().name(), start: Instant::now(), end: None };
+        self.trace.spans.lock().expect("spans").open.insert(id.into_u64(), record);
+    }
+
+    fn on_close(&self, id: tracing::span::Id, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+        let mut store = self.trace.spans.lock().expect("spans");
+        let Some(mut span) = store.open.remove(&id.into_u64()) else { return };
+        span.end = Some(Instant::now());
+        store.closed.push_back(span);
+        if store.closed.len() > MAX_SPANS {
+            store.closed.pop_front();
+        }
+    }
+
+    fn on_event(&self, event: &Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().level() == &Level::ERROR {
+            self.trace.errors.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn options_need_the_scratch_confirmation() {
+        let error = Options::parse(&["/tmp/fuzz".into()]).expect_err("a plain folder is refused");
+        assert!(error.contains("--dir-is-scratch"), "{error}");
+    }
+
+    #[test]
+    fn options_parse_a_seeded_run() {
+        let options =
+            Options::parse(&["--seed".into(), "7".into(), "--minutes".into(), "0.5".into(), "--churn".into()])
+                .expect("options");
+        assert_eq!(options.seed, 7);
+        assert_eq!(options.minutes, 0.5);
+        assert!(options.churn);
+        assert_eq!(options.tree, EdgeTree::small());
+    }
+
+    #[test]
+    fn options_reject_a_tree_with_a_scratched_folder() {
+        let error = Options::parse(&["--dir-is-scratch".into(), "--tree".into(), "none".into(), "/tmp/fuzz".into()])
+            .expect_err("the tree option builds the temp tree");
+        assert!(error.contains("--tree"), "{error}");
+    }
+
+    #[test]
+    fn frame_report_groups_by_step_kind() {
+        let log = FrameLog {
+            slow: vec![
+                SlowFrame { index: 3, step: Step::Keys("down".into()), ms: 61.0 },
+                SlowFrame { index: 8, step: Step::Keys("up".into()), ms: 93.0 },
+                SlowFrame { index: 9, step: Step::Settle, ms: 71.0 },
+            ],
+            max_ms: 93.0,
+            frames: 12,
+            ..Default::default()
+        };
+        let options = Options { dir: None, seed: 1, minutes: 1.0, until: None, tree: EdgeTree::small(), churn: false };
+        let (report, freeze) = log.report(&options, "small", 10, Duration::from_secs(1));
+        assert!(!freeze);
+        assert!(report.contains("Keys"), "{report}");
+        assert!(report.contains("Settle"), "{report}");
+        assert!(report.contains("--seed 1 --until 8"), "{report}");
+    }
+
+    #[test]
+    fn a_failed_outcome_is_sticky() {
+        let outcome = Arc::new(Mutex::new(None));
+        set_outcome(&outcome, Outcome { failed: true });
+        set_outcome(&outcome, Outcome { failed: false });
+        assert!(outcome.lock().expect("outcome").as_ref().is_some_and(|outcome| outcome.failed));
+    }
+}

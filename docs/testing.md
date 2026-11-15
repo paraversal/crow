@@ -149,6 +149,64 @@ it until then) and the accessibility tree (GPUI's test platform disables it). Th
 and checked by the invariants but only the first is driven. `cmd-m` is excluded
 because the test platform has no minimize implementation.
 
+### Real frames: `crow --fuzz`
+
+The test platform has no real frames, so H1's invariant runs cannot see a freeze.
+`crow --fuzz` drives the same generator in a real window and runs a 16 ms
+main-thread heartbeat; its lateness is the frame budget:
+
+```bash
+cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --minutes 10
+cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --minutes 10 --churn
+cargo run --release -p crow-app --features fuzz -- --fuzz --tree long-name,deep-20 --minutes 10
+cargo run --release -p crow-app --features fuzz -- --fuzz target/fixture-100k --dir-is-scratch --minutes 10
+```
+
+With no folder it builds a temp H1 tree (`--tree small` by default: every edge kind
+except the 100k folder and the sparse 10 GiB file), with its own config, state and
+Trash under the system temp folder. A user folder is refused unless
+`--dir-is-scratch` says it may be changed. `--tree none` is the ordinary 200-file
+tree; `--tree all` adds `wide-100000` and `huge-file`. Churn is off unless `--churn`
+is passed.
+
+The runner dispatches keys and typing only (H3 Q3); clicks and the Settings window
+come later. It drops `cmd-h`/`cmd-alt-h`/`cmd-m`/`cmd-q`: the test platform has no
+hide/minimize implementation, and driving a hidden window is not a user path. A step
+runs per frame at a 16 ms pace. It checks H1's invariants every 25 steps (the check
+itself is main-thread work), and after a `Settle` (and at the end) it compares the
+listing to disk on a background thread. `Step::AdvanceClock` is a test-clock step and
+does nothing here; real timers run on their own.
+
+A heartbeat over 50 ms is printed as a slow step with the seed, the step index, the
+last five steps and the `tracing` spans that overlapped it (`listing apply`, `rebuild
+rows`, `preview load`, `search batch`, `theme reload`, `icon fetch`; spans are at
+`debug`, which this mode enables for the `crow` target). GPUI's `on_next_frame` is
+throttled for an inactive or occluded window, so the heartbeat, not a frame
+callback, is the source. The report counts heartbeat intervals and groups the slow
+ones by step kind:
+
+```
+step                  over      worst  replay
+Keys                     2    312.4 ms  --seed 42 --until 1234  Keys("cmd-k")
+```
+
+Exit code is 0 unless an invariant fails or a heartbeat is over 250 ms (a freeze).
+A freeze prints `FREEZE` and the run keeps going; a stall over 30 s prints `HANG`
+and quits, so a wedged step cannot swallow the rest of the run (a 100k resize can
+take 5–6 s and still finish). To profile a slow
+step, replay to just before it:
+
+```bash
+cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --until 1234
+xcrun xctrace record --template 'Time Profiler' --attach crow
+```
+
+The window stays open (and the temp tree stays on disk) until Crow quits. A `HANG`
+also leaves the temp tree in place for inspection. Slow steps go into
+`docs/plans/m7/findings.md` with their replay command; `findings.md` is the input
+to the next H4 batch. This runner needs a real GUI session, so it is local only;
+the scheduled workflow runs H1's `fuzz_long`.
+
 Removable and cloud volumes are hand checks, not simulated. Create a disk image
 (`hdiutil create -size 200m -fs APFS -volname CrowTest /tmp/crow.dmg`), attach it,
 browse it in Crow and eject it while shown: the folder should show as gone, with
