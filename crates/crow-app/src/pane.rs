@@ -2946,10 +2946,80 @@ impl Render for Pane {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 impl Pane {
     pub fn rename_text(&self, cx: &gpui::App) -> Option<String> {
         self.renaming.as_ref().map(|r| r.input.read(cx).text().to_owned())
+    }
+
+    /// The filter or rename field's focus handle, when one is open.
+    pub fn text_focus_handle(&self, cx: &gpui::App) -> Option<gpui::FocusHandle> {
+        self.filtering
+            .as_ref()
+            .map(|f| f.input.read(cx).focus_handle(cx))
+            .or_else(|| self.renaming.as_ref().map(|r| r.input.read(cx).focus_handle(cx)))
+    }
+
+    /// Every shown folder's cursor and selection must name a listed row.
+    pub fn invariant_violations(&self, cx: &gpui::App) -> Vec<crate::fuzz::Violation> {
+        use crate::fuzz::Violation;
+        let mut out = Vec::new();
+        for (k, folder) in self.folders.iter().enumerate() {
+            let folder = folder.read(cx);
+            if folder.is_loading() {
+                continue;
+            }
+            if let Some(ix) = folder.cursor_ix()
+                && ix >= folder.row_count()
+            {
+                out.push(Violation::new(
+                    "cursor",
+                    format!("pane {k}: cursor {ix} is past {} rows", folder.row_count()),
+                ));
+            }
+            let listed: std::collections::HashSet<&std::path::Path> =
+                folder.entries().iter().map(|entry| entry.path.as_path()).collect();
+            for path in folder.selection_paths() {
+                if !listed.contains(path.as_path()) {
+                    out.push(Violation::new(
+                        "selection",
+                        format!("pane {k}: {} is selected but not in the listing", path.display()),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every shown folder's listing must equal `read_dir`, honoring hidden files.
+    /// The name filter is a view over `entries` and has its own tests.
+    pub fn listing_violations(&self, cx: &gpui::App) -> Vec<crate::fuzz::Violation> {
+        use crate::fuzz::Violation;
+        let hidden = cx.global::<Ui>().settings.show_hidden_files;
+        let mut out = Vec::new();
+        for (k, folder) in self.folders.iter().enumerate() {
+            let folder = folder.read(cx);
+            if folder.is_loading() || folder.error().is_some() {
+                continue;
+            }
+            let dir = folder.dir();
+            let Ok(read) = std::fs::read_dir(dir) else { continue };
+            let mut disk: Vec<String> = read
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| hidden || !name.starts_with('.'))
+                .collect();
+            disk.sort();
+            let mut listed: Vec<String> = folder.entries().iter().map(|entry| entry.name.clone()).collect();
+            listed.sort();
+            if disk != listed {
+                out.push(Violation::new(
+                    "listing",
+                    format!("pane {k} {}: disk {disk:?}, listing {listed:?}", dir.display()),
+                ));
+            }
+        }
+        out
     }
 
     pub fn filter_text(&self, cx: &gpui::App) -> Option<String> {

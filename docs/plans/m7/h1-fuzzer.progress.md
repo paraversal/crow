@@ -6,8 +6,8 @@ Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: in prog
 | --- | --- | --- |
 | I1 Side-effect seam (`effects`) | done (`4f8f83e`) | `crates/crow-app/src/effects.rs`: `Effects` (`Send + Sync`), `SystemEffects`, `RecordingEffects`, `EffectHost` global. Every escaping call site routed. `main.rs` installs `SystemEffects`; `ui::init_for_tests` installs `RecordingEffects`. Done-when grep hits only `effects.rs`. 10 effect assertions added/extended. |
 | I2 Steps and generator | done | `crates/crow-app/src/fuzz.rs`: `Step`, `StepGen`, `GenState`, `state()` (live keymap + context stack + selectors). `CrowWindow`/`Pane`/`Sidebar`/`SearchView` grew `cfg(any(test, feature = "fuzz"))` selector and text-focus accessors. Caps: 4 tabs, 2 windows; `cmd-q` and last-tab `cmd-w` never generated. Tests: same seed same steps, every generated keystroke parses, forbidden keys never generated, live window yields bindings/selectors. |
-| I3 Invariants | todo | Blocked on Q2/Q4, answered. |
-| I4 Runner, shrinking, replay | todo | Blocked on Q1/Q3, answered. |
+| I3 Invariants | done | `CrowWindow::check_invariants(&self, window, cx)`: cursor/selection rows, focus inside the top overlay (or pane/sidebar/text field), palette/picker exclusivity, rename state, listing = `read_dir` honoring hidden files. `fuzz::Violation`; `fuzz::logs` counts error-level lines per thread. Deliberate-break tests for cursor, selection, listing, stray focus, overlay focus, and the log hook. |
+| I4 Runner, shrinking, replay | todo | Q1/Q3 answered. |
 | I5 First run | todo | Needs I1–I4. |
 
 ## Questions
@@ -28,6 +28,9 @@ Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: in prog
 - `rand`/`rand_chacha` are optional normal dependencies enabled by the `fuzz` feature, and also dev-dependencies for tests. Dev-only would not compile H3's `crow --fuzz` release binary. — Q2 requires the generator outside tests.
 - The generator filters forbidden keys again in `StepGen::keys`, not only in `state()`, so a caller cannot smuggle `cmd-q`/last-tab `cmd-w` in.
 - `cmd-enter` (palette "open in tab") is capped with `cmd-t` at 4 tabs.
+- Invariant 3 checks that the focused handle is one of the known focus-owning surfaces (pane, sidebar, pane text field, or the top overlay). GPUI's test platform disables the accessibility tree (`TestAppContext::new` sets `accessibility_force_disabled`; the test platform's `a11y_init` is a no-op), so role/aria-label presence cannot be read generically; the existing per-surface tests cover it. H7 can strengthen this when it enables a11y.
+- Invariant 5's "one overlay of each kind" is structural (`Option` fields); the meaningful checks are palette/picker exclusivity and rename state vs `rename_text`.
+- Invariant 6 compares the full `entries` listing to `read_dir` (hidden setting honored). The name filter is a view over `entries` and has its own tests; replicating its matcher here would duplicate it.
 
 ## Hand checks
 - [ ] Effects, in the bundle: Return on a file opens it; Space Quick Looks; Show in Finder reveals; Copy Path pastes; the context menu opens and its items work; sounds play (if on). Same as before H1.
@@ -43,6 +46,7 @@ Branch: `m7-h1-fuzzer` · PR: none · Last updated: 2026-11-15 · State: in prog
 - 2026-11-15: I1. Added `effects.rs`, the `fuzz` feature, installed `SystemEffects` in `main` and `RecordingEffects` in `init_for_tests`, routed every escaping call. `cargo test -p crow-app` 377 passed; clippy and fmt clean.
 - 2026-11-15: moved `window.rs`'s tests into `window/tests.rs` (pure move; `include_str!` path and indentation only). 377 tests still pass.
 - 2026-11-15: I2. Added `fuzz.rs` and the selector/text-focus accessors; generator tests pass; clippy clean.
+- 2026-11-15: I3. Added `check_invariants`, pane/folder invariant helpers, the error-log hook, and 7 deliberate-break tests; clippy clean.
 
 ## Next
-I3: `CrowWindow::check_invariants` with one deliberately broken unit test per check.
+I4: runner (`fuzz::run`), delta-debugging shrinker, replay script printer, and `findings.md`.

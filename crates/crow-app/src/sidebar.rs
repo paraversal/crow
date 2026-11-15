@@ -301,6 +301,12 @@ impl Sidebar {
         out
     }
 
+    /// The sidebar's focus handle, for the fuzzer's focus invariant.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn debug_focus_handle(&self, cx: &gpui::App) -> gpui::FocusHandle {
+        self.focus_handle(cx)
+    }
+
     /// Finder's display names for `path`, volume first. Cached: the ancestors are
     /// filesystem calls on the main thread, so each path is asked once.
     fn components(&self, path: &Path) -> Rc<[String]> {

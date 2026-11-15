@@ -3182,6 +3182,64 @@ impl CrowWindow {
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
     }
+
+    /// The H1 invariants: cursor/selection rows, focus inside the top overlay,
+    /// one modal, the rename field in step, and each shown listing equal to disk.
+    /// The runner adds the panic and error-log checks around each step.
+    pub fn check_invariants(&self, window: &Window, cx: &App) -> Vec<crate::fuzz::Violation> {
+        use crate::fuzz::Violation;
+        let mut out = Vec::new();
+        for (index, (_, pane)) in self.tabs.iter().enumerate() {
+            let pane = pane.read(cx);
+            for violation in pane.invariant_violations(cx) {
+                out.push(Violation::new(violation.check, format!("tab {index}: {}", violation.detail)));
+            }
+            for violation in pane.listing_violations(cx) {
+                out.push(Violation::new(violation.check, format!("tab {index}: {}", violation.detail)));
+            }
+        }
+
+        let pane = self.pane().read(cx);
+        let sidebar = self.sidebar.read(cx);
+        let Some(focused) = window.focused(cx) else {
+            out.push(Violation::new("focus", "nothing is focused"));
+            return out;
+        };
+        // The topmost focus-owning overlay decides where focus must be. Tips do
+        // not take focus, and the native context menu is not a GPUI overlay.
+        let mut allowed: Vec<(&'static str, gpui::FocusHandle)> = Vec::new();
+        if let Some(sheet) = &self.sheet {
+            allowed.push(("sheet", sheet.focus().clone()));
+        } else if let Some(palette) = &self.palette {
+            allowed.push(("palette", palette.input.read(cx).focus_handle(cx)));
+        } else if let Some(picker) = &self.picker {
+            allowed.push(("picker", picker.focus.clone()));
+        } else if let Some(why) = &self.why {
+            allowed.push(("why", why.clone()));
+        } else if let Some(search) = &self.search {
+            let search = search.read(cx);
+            allowed.push(("search field", search.input_focus_handle(cx)));
+            allowed.push(("search results", search.results_focus_handle()));
+        } else {
+            allowed.push(("pane", pane.focus_handle().clone()));
+            allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
+            if let Some(text) = pane.text_focus_handle(cx) {
+                allowed.push(("pane text field", text));
+            }
+        }
+        if !allowed.iter().any(|(_, handle)| handle == &focused) {
+            let surface = allowed.first().map_or("expected", |(name, _)| name);
+            out.push(Violation::new("focus", format!("focus is outside the {surface} surface")));
+        }
+
+        if self.palette.is_some() && self.picker.is_some() {
+            out.push(Violation::new("overlay", "the palette and the theme picker are both open"));
+        }
+        if pane.is_renaming() != pane.rename_text(cx).is_some() {
+            out.push(Violation::new("rename", "the rename field and the rename state disagree"));
+        }
+        out
+    }
 }
 
 #[cfg(test)]

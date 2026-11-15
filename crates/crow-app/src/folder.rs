@@ -1290,6 +1290,32 @@ impl Folder {
         names.sort();
         names
     }
+
+    /// The selected paths, for the fuzzer's selection invariant.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn selection_paths(&self) -> Vec<PathBuf> {
+        self.selection.iter().cloned().collect()
+    }
+
+    /// Break the cursor on purpose, to prove the invariant fires.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn set_cursor_ix_for_test(&mut self, ix: Option<usize>) {
+        self.cursor_ix = ix;
+    }
+
+    /// Select a path that is not in the listing, to prove the invariant fires.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn select_path_for_test(&mut self, path: PathBuf) {
+        self.selection.select_only(path);
+    }
+
+    /// Drop a listed entry without touching disk, to prove the listing check fires.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn drop_entry_for_test(&mut self, name: &str, cx: &gpui::App) {
+        let entries: Vec<Entry> = self.entries.iter().filter(|entry| entry.name != name).cloned().collect();
+        self.entries = Arc::new(entries);
+        self.rebuild_rows(cx);
+    }
 }
 
 /// Case-insensitive substring, with an ASCII fast path so filtering 100k rows

@@ -133,6 +133,61 @@ impl GenState {
     }
 }
 
+/// One failed invariant, with the check's name and the state that broke it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Violation {
+    pub check: &'static str,
+    pub detail: String,
+}
+
+impl Violation {
+    pub fn new(check: &'static str, detail: impl Into<String>) -> Self {
+        Violation { check, detail: detail.into() }
+    }
+}
+
+/// Error-level log lines since the last step. Warnings are allowed.
+#[cfg(test)]
+pub mod logs {
+    use std::cell::Cell;
+
+    use tracing::Level;
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+
+    thread_local! {
+        static ERRORS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    struct Counter;
+
+    impl<S: tracing::Subscriber> Layer<S> for Counter {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            if event.metadata().level() == &Level::ERROR {
+                ERRORS.with(|count| count.set(count.get() + 1));
+            }
+        }
+    }
+
+    /// Install the counter once. A subscriber installed by someone else wins;
+    /// then the check sees no errors (recorded in the progress file).
+    pub fn install() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let subscriber = tracing_subscriber::registry().with(Counter);
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+    }
+
+    pub fn errors() -> usize {
+        ERRORS.with(Cell::get)
+    }
+
+    pub fn reset() {
+        ERRORS.with(|count| count.set(0));
+    }
+}
+
 /// Whether a binding may be generated under the current caps. Quitting and
 /// closing the last tab are never generated; new tabs and windows stop at the caps.
 fn allowed(key: &str, tabs: usize, windows: usize) -> bool {
@@ -235,5 +290,15 @@ mod tests {
                 assert!(keys != "cmd-w", "never closes the last tab");
             }
         }
+    }
+
+    #[test]
+    fn error_logs_are_counted() {
+        logs::install();
+        logs::reset();
+        tracing::error!("fuzz test error");
+        assert_eq!(logs::errors(), 1);
+        tracing::warn!("fuzz test warning");
+        assert_eq!(logs::errors(), 1, "warnings are allowed");
     }
 }

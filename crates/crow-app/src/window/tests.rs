@@ -363,6 +363,76 @@ fn effect_calls(cx: &mut VisualTestContext) -> Vec<crate::effects::Call> {
     cx.update(|_, cx| crate::effects::recording(cx).expect("tests install recording effects").take_calls())
 }
 
+fn violations(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> Vec<crate::fuzz::Violation> {
+    cx.update(|window, cx| view.read(cx).check_invariants(window, cx))
+}
+
+#[gpui::test]
+fn invariants_hold_after_open(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-invariants");
+    let (view, mut cx) = open(cx, &root);
+    let found = violations(&view, &mut cx);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[gpui::test]
+fn cursor_past_the_listing_fires(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-cursor");
+    let (view, mut cx) = open(cx, &root);
+    let pane = pane(&view, &cx);
+    let folder = pane.read_with(&cx, |pane, _| pane.test_folder());
+    folder.update(&mut cx, |folder, _| folder.set_cursor_ix_for_test(Some(999)));
+    let found = violations(&view, &mut cx);
+    assert!(found.iter().any(|violation| violation.check == "cursor"), "{found:?}");
+}
+
+#[gpui::test]
+fn selection_outside_the_listing_fires(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-selection");
+    let (view, mut cx) = open(cx, &root);
+    let pane = pane(&view, &cx);
+    let folder = pane.read_with(&cx, |pane, _| pane.test_folder());
+    folder.update(&mut cx, |folder, _| folder.select_path_for_test(root.join("ghost.txt")));
+    let found = violations(&view, &mut cx);
+    assert!(found.iter().any(|violation| violation.check == "selection"), "{found:?}");
+}
+
+#[gpui::test]
+fn listing_mismatch_fires(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-listing");
+    let (view, mut cx) = open(cx, &root);
+    let pane = pane(&view, &cx);
+    let folder = pane.read_with(&cx, |pane, _| pane.test_folder());
+    folder.update(&mut cx, |folder, cx| folder.drop_entry_for_test("notes.txt", cx));
+    let found = violations(&view, &mut cx);
+    assert!(found.iter().any(|violation| violation.check == "listing"), "{found:?}");
+}
+
+#[gpui::test]
+fn focus_outside_the_surface_fires(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-focus");
+    let (view, mut cx) = open(cx, &root);
+    let stray = cx.update(|_, cx| cx.focus_handle());
+    let found = cx.update(|window, cx| {
+        window.focus(&stray, cx);
+        view.read(cx).check_invariants(window, cx)
+    });
+    assert!(found.iter().any(|violation| violation.check == "focus"), "{found:?}");
+}
+
+#[gpui::test]
+fn focus_outside_an_open_overlay_fires(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-overlay-focus");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-k");
+    let pane_focus = pane(&view, &cx).read_with(&cx, |pane, _| pane.focus_handle().clone());
+    let found = cx.update(|window, cx| {
+        window.focus(&pane_focus, cx);
+        view.read(cx).check_invariants(window, cx)
+    });
+    assert!(found.iter().any(|violation| violation.check == "focus"), "{found:?}");
+}
+
 /// Replace a config file and reload, as the file watcher would.
 fn write_config(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, name: &str, text: &str) {
     let dir = config_dir(cx);
