@@ -16,6 +16,9 @@ cargo run --release -p crow-app  # opens your home folder
 
 Running as `Crow.app` makes macOS privacy prompts name Crow instead of your terminal. With a code-signing certificate named
 "Crow Dev" in your keychain (see `scripts/bundle.sh`), macOS keeps those permissions from one build to the next.
+The app icon's sources are SVGs in `crates/crow-app/assets/app-icon`; after editing one, run
+`swift scripts/render-app-icons.swift` to redraw the PNGs the app and bundle use.
+
 ## Command line
 
 `./scripts/bundle.sh --install` also installs the `crow` command into `$HOME/.local/bin`
@@ -53,7 +56,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), font, hidden files (shown by default), the preview (`show_preview`), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, hidden files (shown by default), the preview (`show_preview`), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |

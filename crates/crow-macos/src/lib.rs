@@ -49,6 +49,20 @@ fn ns_url(path: &Path) -> Retained<NSURL> {
     NSURL::fileURLWithPath(&ns_string(path))
 }
 
+/// Show `png` as the app's icon in the Dock (and the About panel and app switcher)
+/// while Crow runs. The bundle's own icon, which Finder shows, is unchanged.
+pub fn set_app_icon(png: &[u8]) {
+    let Some(mtm) = main_thread() else { return };
+    let data = objc2_foundation::NSData::with_bytes(png);
+    let Some(image) =
+        objc2_app_kit::NSImage::initWithData(<objc2_app_kit::NSImage as objc2::AnyThread>::alloc(), &data)
+    else {
+        return;
+    };
+    // SAFETY: the image is a valid NSImage; AppKit retains it.
+    unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
+}
+
 /// The standard About panel, filled from the app bundle's Info.plist.
 pub fn show_about_panel() {
     let Some(mtm) = main_thread() else { return };

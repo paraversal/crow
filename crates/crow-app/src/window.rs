@@ -3532,6 +3532,23 @@ mod tests {
         settle(view, cx);
     }
 
+    #[gpui::test]
+    fn app_icon_setting_switches_the_dock_icon_live(cx: &mut TestAppContext) {
+        use crow_core::AppIcon;
+        let root = fixture("app-icon");
+        let (view, mut cx) = open(cx, &root);
+        let applied = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.global::<Ui>().applied_icon);
+        write_config(&view, &mut cx, "settings.toml", "app_icon = \"sun\"\n");
+        assert_eq!(applied(&mut cx), Some(AppIcon::Sun));
+        write_config(&view, &mut cx, "settings.toml", "app_icon = \"moon\"\n");
+        assert_eq!(applied(&mut cx), Some(AppIcon::Sun), "a bad value keeps the last good icon");
+        write_config(&view, &mut cx, "settings.toml", "theme = \"system\"\n");
+        assert_eq!(applied(&mut cx), Some(AppIcon::Refined), "deleting the line goes back to the default");
+        for icon in [AppIcon::Refined, AppIcon::Sun, AppIcon::Graphite, AppIcon::Bone] {
+            assert!(crate::ui::app_icon_png(icon).starts_with(b"\x89PNG"), "{icon:?} is an embedded PNG");
+        }
+    }
+
     fn favorites_toml(paths: &[&Path]) -> String {
         let items: String = paths.iter().map(|p| format!("  {{ path = \"{}\" }},\n", p.display())).collect();
         format!("[[group]]\nname = \"Favorites\"\nitems = [\n{items}]\n[recent]\nshow = false\n")
