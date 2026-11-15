@@ -3910,6 +3910,45 @@ fn why_sheet_keeps_focus_on_arrows_and_tab(cx: &mut TestAppContext) {
     assert!(found.is_empty(), "{found:?}");
 }
 
+/// Guards the `NoAction` list in `actions.rs`: every key that acts on the
+/// window must do nothing while a sheet is open, so a new window binding
+/// without a `Sheet` block fails here.
+#[gpui::test]
+fn sheets_block_every_window_key(cx: &mut TestAppContext) {
+    use crate::keys::{KeyScope, context_stack};
+    let root = fixture("sheet-keys");
+    let (_view, mut cx) = open(cx, &root);
+    // App-level keys still work with a sheet open, as in macOS.
+    let allowed = ["cmd-m", "cmd-h", "alt-cmd-h", "cmd-q"];
+    let leaks = cx.update(|_, cx| {
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let mut leaks = Vec::new();
+        for layer in [crow_core::KeymapLayer::Finder, crow_core::KeymapLayer::Vim] {
+            let window = context_stack(KeyScope::Window, layer);
+            let sheet = context_stack(KeyScope::Sheet, layer);
+            for binding in keymap.bindings() {
+                let keys = binding.keystrokes().iter().map(|key| key.inner().unparse(gpui::OperatingSystem::Mac));
+                let keys = keys.collect::<Vec<_>>().join(" ");
+                if allowed.contains(&keys.as_str()) {
+                    continue;
+                }
+                let wins = |stack: &[gpui::KeyContext]| {
+                    let (found, _) = keymap.bindings_for_input(binding.keystrokes(), stack);
+                    found.first().is_some_and(|found| found.action().partial_eq(binding.action()))
+                };
+                if wins(&window) && wins(&sheet) {
+                    leaks.push(format!("{keys} ({})", binding.action().name()));
+                }
+            }
+        }
+        leaks.sort();
+        leaks.dedup();
+        leaks
+    });
+    assert!(leaks.is_empty(), "window keys act behind a sheet; add a Sheet NoAction in actions.rs: {leaks:?}");
+}
+
 #[gpui::test]
 fn tab_stays_in_the_theme_picker(cx: &mut TestAppContext) {
     theme_index();
