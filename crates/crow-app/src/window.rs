@@ -3200,6 +3200,8 @@ impl CrowWindow {
     /// after every step; `deep` adds the listing = disk check, which belongs
     /// after a settle (the watcher may still be delivering a change).
     /// The runner adds the panic and error-log checks around each step.
+    /// "The rename field exists only while renaming" needs no check: the field
+    /// lives inside `Pane::renaming`.
     pub fn check_invariants(
         &self,
         window: &Window,
@@ -3264,9 +3266,6 @@ impl CrowWindow {
 
         if self.palette.is_some() && self.picker.is_some() {
             out.push(Violation::new("overlay", "the palette and the theme picker are both open"));
-        }
-        if pane.is_renaming() != pane.rename_text(cx).is_some() {
-            out.push(Violation::new("rename", "the rename field and the rename state disagree"));
         }
         out
     }

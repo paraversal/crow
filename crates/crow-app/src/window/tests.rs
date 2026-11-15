@@ -7034,6 +7034,13 @@ fn apply_and_check(
     Ok(())
 }
 
+/// A right-click's native menu always closes in the app. Unanswered, the
+/// recorder would leave the pane or sidebar in a "menu open" state forever (the
+/// sidebar row keeps its outline), which the fuzzer would then explore.
+fn dismiss_context_menus(cx: &mut VisualTestContext) {
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").set_context_menu_choice(None));
+}
+
 fn replay_script(
     script: &[crate::fuzz::Step],
     tree: &Path,
@@ -7044,6 +7051,7 @@ fn replay_script(
     reset_tree(tree, files);
     let (view, mut cx) = open(cx, tree);
     write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
+    dismiss_context_menus(&mut cx);
     crate::fuzz::logs::install();
     for step in script {
         apply_and_check(&view, step, tree, &mut cx)?;
@@ -7064,6 +7072,7 @@ fn fuzz_run(
     reset_tree(tree, files);
     let (view, mut cx) = open(cx, tree);
     write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
+    dismiss_context_menus(&mut cx);
     crate::fuzz::logs::install();
     let mut generator = StepGen::new(seed);
     let mut script = Vec::new();
@@ -7072,13 +7081,16 @@ fn fuzz_run(
         let step = generator.next(&state);
         script.push(step.clone());
         if let Err(violation) = apply_and_check(&view, &step, tree, &mut cx) {
-            let shrunk = shrink(&script, tree, files, &mut cx.cx);
+            // Printed before shrinking, which can take long: a killed run still names the seed.
+            println!("seed {seed} step {index}: {} — {} (shrinking…)", violation.check, violation.detail);
+            let shrunk = shrink(&script, &violation, tree, files, &mut cx.cx);
             return Err(Failure { seed, step: index, violation, script: shrunk, original: Script(script) });
         }
     }
     crate::fuzz::settle(&view, &mut cx);
     if let Some(violation) = check_all_windows(&mut cx, true, Some(tree)).into_iter().next() {
-        let shrunk = shrink(&script, tree, files, &mut cx.cx);
+        println!("seed {seed} step {steps}: {} — {} (shrinking…)", violation.check, violation.detail);
+        let shrunk = shrink(&script, &violation, tree, files, &mut cx.cx);
         return Err(Failure { seed, step: steps, violation, script: shrunk, original: Script(script) });
     }
     Ok(())
@@ -7086,7 +7098,15 @@ fn fuzz_run(
 
 /// Delta debugging: drop halves, then single steps, then shorten `Type` strings.
 /// Each candidate runs in a fresh window; the trial cap keeps a finding bounded.
-fn shrink(script: &[crate::fuzz::Step], tree: &Path, files: usize, cx: &mut TestAppContext) -> crate::fuzz::Script {
+/// A candidate counts only when it fails the same check as `target`, so the
+/// shrink cannot slip to a different bug.
+fn shrink(
+    script: &[crate::fuzz::Step],
+    target: &crate::fuzz::Violation,
+    tree: &Path,
+    files: usize,
+    cx: &mut TestAppContext,
+) -> crate::fuzz::Script {
     use crate::fuzz::{Script, Step};
     let mut best = script.to_vec();
     let trials = std::cell::Cell::new(0usize);
@@ -7095,8 +7115,11 @@ fn shrink(script: &[crate::fuzz::Step], tree: &Path, files: usize, cx: &mut Test
             return false;
         }
         trials.set(trials.get() + 1);
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| replay_script(candidate, tree, files, cx)))
-            .map_or(true, |result| result.is_err())
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| replay_script(candidate, tree, files, cx))) {
+            Ok(Err(found)) => found.check == target.check,
+            Ok(Ok(())) => false,
+            Err(_) => target.check == "panic",
+        }
     };
     let mut changed = true;
     while changed && trials.get() < 300 {
