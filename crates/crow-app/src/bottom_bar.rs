@@ -22,7 +22,7 @@ use crate::operations::{self, Running};
 use crate::pane::Pane;
 use crate::sidebar::CursorKind;
 use crate::style::{color, color_alpha, error_soft, icon};
-use crate::text_input::{self, Complete, Confirm};
+use crate::text_input::{self, Confirm};
 use crate::ui::Ui;
 use crate::usage;
 use crow_core::motion::{self, Effective};
@@ -208,10 +208,11 @@ const FILTER: Spec = Spec { kind: HintKind::Action(&StartFilter), label: "filter
 // has no other place on screen.
 const LIST_HINTS: &[Spec] = &[FILTER];
 
-const CONFIRM: Spec = Spec { kind: HintKind::Action(&Confirm), label: "open", idle: false };
+// Return in the filter and search fields moves into the matches; Return there opens.
+const TO_MATCHES: Spec = Spec { kind: HintKind::Action(&Confirm), label: "to matches", idle: false };
 const CANCEL: Spec = Spec { kind: HintKind::Action(&text_input::Cancel), label: "clear", idle: false };
 const SEARCH_DEEPER: Spec = Spec { kind: HintKind::Action(&ShowSearch), label: "search deeper", idle: false };
-const FILTER_FIELD_HINTS: &[Spec] = &[CONFIRM, CANCEL, SEARCH_DEEPER];
+const FILTER_FIELD_HINTS: &[Spec] = &[TO_MATCHES, CANCEL, SEARCH_DEEPER];
 
 const OPEN: Spec = Spec { kind: HintKind::Action(&OpenSelection), label: "open", idle: false };
 const CLEAR: Spec = Spec { kind: HintKind::Action(&ClearFilter), label: "clear", idle: false };
@@ -226,9 +227,9 @@ const REVEAL: Spec = Spec { kind: HintKind::Action(&SearchReveal), label: "revea
 const QUICK_LOOK: Spec = Spec { kind: HintKind::Action(&QuickLook), label: "Quick Look", idle: false };
 const RESULT_HINTS: &[Spec] = &[OPEN, REVEAL, QUICK_LOOK];
 
-const COMPLETE: Spec = Spec { kind: HintKind::Action(&Complete), label: "results", idle: false };
+const TO_RESULTS: Spec = Spec { kind: HintKind::Action(&Confirm), label: "to results", idle: false };
 const DONE: Spec = Spec { kind: HintKind::Action(&text_input::Cancel), label: "done", idle: false };
-const FIELD_HINTS: &[Spec] = &[CONFIRM, COMPLETE, DONE];
+const FIELD_HINTS: &[Spec] = &[TO_RESULTS, DONE];
 
 /// The hint set for a focus. Sidebar hints follow the cursor row (Q6).
 fn hint_set(focus: BarFocus, sidebar: Option<CursorKind>) -> Vec<Spec> {

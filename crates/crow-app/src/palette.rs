@@ -587,6 +587,8 @@ pub enum Source {
     Recent,
     Favorite,
     Here,
+    /// A file in the typed path's folder: Return reveals it there.
+    File,
 }
 
 #[derive(Clone, Debug)]
@@ -750,7 +752,7 @@ pub fn section_header(source: Source, here: &str) -> SharedString {
     match source {
         Source::Recent => "Recent".into(),
         Source::Favorite => "Favorites".into(),
-        Source::Here => format!("In {here}").into(),
+        Source::Here | Source::File => format!("In {here}").into(),
     }
 }
 
@@ -788,7 +790,7 @@ pub fn folder_listing(query: &str, folders: &[FolderCandidate], here: &str) -> L
                 let cap = match source {
                     Source::Recent => RECENT_LIMIT,
                     Source::Favorite => usize::MAX,
-                    Source::Here => HERE_LIMIT,
+                    Source::Here | Source::File => HERE_LIMIT,
                 };
                 group.truncate(cap.min(TOTAL_LIMIT.saturating_sub(items.len())));
                 if group.is_empty() {
@@ -879,14 +881,13 @@ pub fn command_listing(query: &str, recent_ids: &[CommandId], show_recent: bool)
 }
 
 /// The path mode's parent and partial, when `query` looks like a path: `/…`,
-/// `~/…` or exactly `~`. The text before the last `/` is the parent.
+/// `~/…` or exactly `~`, also pasted in quotes, shell-escaped or as a `file://` URL.
+/// The text before the last `/` is the parent.
 pub fn path_query(query: &str, cwd: &Path, home: &Path) -> Option<(PathBuf, String)> {
-    if !(query.starts_with('/') || query.starts_with("~/") || query == "~") {
-        return None;
-    }
+    let query = crow_core::clean_pasted_path(query)?;
     let (parent, partial) = match query.rfind('/') {
         Some(i) => (&query[..=i], &query[i + 1..]),
-        None => (query, ""),
+        None => (query.as_str(), ""),
     };
     Some((crow_core::resolve_typed(parent, cwd, home), partial.to_owned()))
 }
@@ -895,11 +896,52 @@ fn file_name(path: &Path) -> String {
     path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// Files shown under a typed path: those whose name starts with the partial.
+const FILE_LIMIT: usize = 5;
+
 /// The children of `parent` matching `partial` by name. With an empty partial the
-/// parent itself comes first ("this folder"), so Return goes there.
-pub fn path_listing(parent: &Path, partial: &str, children: &[PathBuf], home: &Path) -> Listing {
+/// parent itself comes first ("this folder"), so Return goes there. Files whose
+/// name starts with the partial follow the folders, except that a file named
+/// exactly as typed comes first: a pasted file path lands on its file.
+pub fn path_listing(parent: &Path, partial: &str, children: &[PathBuf], files: &[PathBuf], home: &Path) -> Listing {
     let mut rows = vec![Row::Header(section_header(Source::Here, &crate::style::display_name(parent)))];
     let mut items: Vec<Item> = Vec::new();
+    let typed = partial.to_lowercase();
+    let mut file_rows: Vec<&PathBuf> = if partial.is_empty() {
+        Vec::new()
+    } else {
+        files.iter().filter(|path| file_name(path).to_lowercase().starts_with(&typed)).collect()
+    };
+    file_rows.sort_by_key(|path| {
+        let name = file_name(path).to_lowercase();
+        (name != typed, name)
+    });
+    file_rows.truncate(FILE_LIMIT);
+    let exact = file_rows.first().is_some_and(|path| file_name(path).to_lowercase() == typed);
+    let file_item = |path: &PathBuf| {
+        let label = abbreviate_home(path, home);
+        let start = name_start(&label);
+        Item::Folder {
+            path: path.clone(),
+            // The typed prefix, counted in characters so a case change in the name can't split one.
+            matched: std::iter::once(
+                start
+                    ..label[start..]
+                        .char_indices()
+                        .nth(partial.chars().count())
+                        .map_or(label.len(), |(i, _)| start + i),
+            )
+            .collect(),
+            label,
+            name_start: start,
+            source: Source::File,
+            last_visit: None,
+        }
+    };
+    if exact {
+        rows.push(Row::Item(items.len()));
+        items.push(file_item(file_rows[0]));
+    }
     if partial.is_empty() {
         let label = abbreviate_home(parent, home);
         items.push(Item::Folder {
@@ -947,6 +989,13 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathBuf], home: &P
             last_visit: None,
             matched,
         });
+    }
+    for path in file_rows.iter().skip(usize::from(exact)) {
+        if items.len() >= TOTAL_LIMIT {
+            break;
+        }
+        rows.push(Row::Item(items.len()));
+        items.push(file_item(path));
     }
     let count = count_text(items.len());
     Listing { rows, items, count }
@@ -1010,14 +1059,31 @@ mod tests {
     fn path_listing_puts_this_folder_first() {
         let children = [p("/home/me/Files/beta"), p("/home/me/Files/alpha")];
         let parent = Path::new("/home/me/Files");
-        let listing = path_listing(parent, "", &children, Path::new("/home/me"));
+        let listing = path_listing(parent, "", &children, &[], Path::new("/home/me"));
         assert_eq!(row_text(&listing), ["# In Files", "~/Files", "~/Files/alpha", "~/Files/beta"]);
         assert_eq!(listing.items.len(), 3);
         assert_eq!(listing.count, "3 places");
 
-        let listing = path_listing(parent, "alp", &children, Path::new("/home/me"));
+        let listing = path_listing(parent, "alp", &children, &[], Path::new("/home/me"));
         assert_eq!(row_text(&listing), ["# In Files", "~/Files/alpha"]);
         assert_eq!(listing.items[0].name_ranges().first(), Some(&(0..3)), "the match is highlighted in the name");
+    }
+
+    #[test]
+    fn a_file_named_as_typed_comes_first_and_others_follow_folders() {
+        let parent = Path::new("/home/me/Files");
+        let children = [p("/home/me/Files/license-old")];
+        let files = [p("/home/me/Files/LICENSE.md"), p("/home/me/Files/LICENSE"), p("/home/me/Files/notes.txt")];
+        let listing = path_listing(parent, "LICENSE", &children, &files, Path::new("/home/me"));
+        assert_eq!(
+            row_text(&listing),
+            ["# In Files", "~/Files/LICENSE", "~/Files/license-old", "~/Files/LICENSE.md"],
+            "exact file, then folders, then other files starting with the text"
+        );
+        let Item::Folder { source, .. } = &listing.items[0] else { panic!("a row") };
+        assert_eq!(*source, Source::File);
+        let listing = path_listing(parent, "", &children, &files, Path::new("/home/me"));
+        assert!(!row_text(&listing).iter().any(|row| row.contains("notes")), "no files until a name is typed");
     }
 
     #[test]

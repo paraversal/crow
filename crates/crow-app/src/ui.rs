@@ -513,7 +513,7 @@ pub fn refresh_recent(cx: &mut App) {
     let count = sidebar_count.max(50);
     let favorites: Vec<PathBuf> = ui.favorites().into_iter().flat_map(|(_, f)| f).map(|f| f.path).collect();
     let file = ui.state_dir.join("recent.json");
-    let alias_candidates = favorites.clone();
+    let alias_candidates = favorites;
     let task = cx.background_spawn(async move {
         if let Err(e) = recent.save(&file) {
             tracing::warn!("{}: {e}", file.display());
@@ -522,18 +522,23 @@ pub fn refresh_recent(cx: &mut App) {
         let list = recent.top(count, now, &zoxide, |p| p != Path::new("/") && p.is_dir());
         // A sidebar row can only be a symlink (Finder aliases are files, not folders).
         let aliases: HashSet<PathBuf> = alias_candidates
-            .into_iter()
-            .chain(list.iter().cloned())
+            .iter()
+            .chain(list.iter())
             .filter(|path| path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()))
+            .cloned()
             .collect();
-        (list, aliases)
+        // Sidebar Recent leaves out favorites and repeats, also when reached through a
+        // symlink (`~/code/crow` when `~/src/crow` is a favorite and `~/code` links to `~/src`).
+        let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let mut seen: HashSet<PathBuf> = alias_candidates.iter().map(|path| real(path)).collect();
+        let sidebar: Vec<PathBuf> =
+            list.iter().filter(|path| seen.insert(real(path))).take(sidebar_count).cloned().collect();
+        (list, aliases, sidebar)
     });
     cx.spawn(async move |cx| {
-        let (list, aliases) = task.await;
+        let (list, aliases, sidebar) = task.await;
         cx.update(|cx| {
             let ui = cx.global_mut::<Ui>();
-            let sidebar: Vec<PathBuf> =
-                list.iter().filter(|path| !favorites.contains(path)).take(sidebar_count).cloned().collect();
             let changed = ui.recent_list != sidebar || ui.palette_recents != list || ui.aliases != aliases;
             ui.recent_list = sidebar;
             ui.palette_recents = list;

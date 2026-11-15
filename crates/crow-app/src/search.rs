@@ -203,12 +203,13 @@ impl SearchView {
             cx.on_focus(&input_focus, window, |_, _, cx| cx.notify()),
             cx.on_blur(&input_focus, window, |_, _, cx| cx.notify()),
         ];
-        let subscription = cx.subscribe(&input, |this, input, event, cx| match event {
+        let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
             TextInputEvent::Changed => {
                 let query = input.read(cx).text().to_owned();
                 this.start_search(&query, cx);
             }
-            TextInputEvent::Confirmed => this.open_selected(cx),
+            // Return moves into the results, on the first one; Return there opens it.
+            TextInputEvent::Confirmed => this.focus_results_from_field(&SearchFocusResults, window, cx),
             TextInputEvent::Cancelled => {
                 if this.show_skipped {
                     this.show_skipped = false;

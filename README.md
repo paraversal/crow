@@ -97,7 +97,7 @@ cancels it exactly like Esc.
 ## Hints and tips
 
 The bottom bar has three slots: the path, a transient one (hints, operation progress, messages,
-errors) and counts. Hints follow focus: the filter field (Return open, Esc clear, `⌘F` search
+errors) and counts. Hints follow focus: the filter field (Return to matches, Esc clear, `⌘F` search
 deeper), the sidebar (`⌘⌥↑↓` reorder, `⌘⌫` remove, `⌘E` eject a disk), search results and the
 search field. The idle hint shows `/` filter (Search and Go to carry their keys on the toolbar);
 after you have used it three times it retires (`hints = "always"` keeps every hint, `"off"` hides
@@ -124,7 +124,8 @@ In <folder>, each row showing the name and the abbreviated path, so two folders 
 told apart; matched letters are accent in both lines and Recent rows carry the last visit.
 Return goes there and Cmd-Return opens a folder in a new tab. Tab appends the highlighted
 folder's path and `/`, so the next letters search inside it; typing `/` or `~/` does the same by
-hand, with the parent's subfolders listed. Start with `>`: it becomes a Commands token
+hand, with the parent's subfolders listed, and files whose name starts with what follows the last `/`
+(Return shows the file selected in its folder). Start with `>`: it becomes a Commands token
 (Backspace on the empty field goes back to folders) and rows show the menu, the label, an on/off
 chip for toggles and their keys. Commands you run from the palette are remembered under Recently
 used; `palette_recent_commands = false` hides that section and stops recording.
@@ -143,20 +144,22 @@ whose name contains the query come first with their letters highlighted; scatter
 follow the content hits. A name match stays one line, a content-only hit shows its line number and
 line under the name, and the footer counts results and files and lists what was skipped (relative
 to the folder). With nothing typed, four examples fill the field. The right preview follows the
-selected result in list and column view, at the hit line for content hits. Results open with
-Return, reveal with Cmd-R, Quick Look with Space, and take the usual copy, cut and trash keys.
+selected result in list and column view, at the hit line for content hits. Return in the field moves to the
+first result; results open with Return, reveal with Cmd-R, Quick Look with Space, and take the usual copy, cut and trash keys.
 
 ## Keys
 
 Finder's keys work as in Finder: arrows (Shift extends), Option-Up/Down, Cmd-Up/Down,
 Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (opens Cmd-K on this folder's
-path: type a name, Tab completes, Return goes there or selects a file),
+path: type a name, Tab completes, Return goes there or selects a file; a pasted path may be quoted,
+shell-escaped or a `file://` URL),
 Cmd-Shift-. and Space. Cmd-Shift-P shows or hides the preview pane on the right (in list and
 column view, search included; Quick Look still works). Typing a name selects it. Tab moves focus between the sidebar and the list.
 Column headers sort (click again to reverse) and their dividers resize.
 Type `/` to filter the focused folder: the field opens as the first row of the focused column
 (or under the list header), showing the query and "n of N", and matching letters are highlighted.
-Esc clears it, arrows move within the matches, and Return opens the selection. Cmd-F carries the
+Esc clears it, arrows move within the matches, and Return moves focus into them on the selected
+match (the first unless you arrowed); there Cmd-Down opens it and Esc clears the filter. Cmd-F carries the
 filter text into a search of that folder. Cmd-2 shows a list, Cmd-3 columns. A window shows each
 folder in that folder's view, so moving into a folder with its own view (or a `views.toml` rule)
 switches list and columns; with `view_per_folder = false` in `settings.toml` a window keeps the
@@ -165,10 +168,13 @@ view you give it, and Cmd-2/Cmd-3 save nothing. In the list, Right opens the sel
 Sidebar: drag favorites to reorder them (or Cmd-Option-Up/Down), drop files on any row to move or
 copy them there, drop folders between two favorites (a line shows where) or on a group's title to add
 them. Ctrl-Cmd-T adds the selected folder.
-Same-named folders show their parent after the name (and "alias" for a symlink); with
+Same-named folders show their parent after the name (and "alias" for a symlink); Recent leaves out
+folders that are favorites or already listed, also when reached through a symlink. With
 `keymap = "vim"`, favorites with a `key` show the letter on the right. Locations shows free space
 and a bar that warns near full. In the sidebar, Cmd-Delete removes a favorite or forgets a recent
-folder, Cmd-E ejects a disk, and Option-Up/Down jump between groups. Tab into the sidebar and arrow:
+folder, Cmd-E ejects a disk, and Option-Up/Down jump between groups. Right-click or Ctrl-click a row for
+Open, Open in New Tab, Copy Path, Show in Finder and the row's own lines (Move Up/Down and Remove
+for favorites, Add to Sidebar and Remove from Recent for recent folders, Eject for disks). Tab into the sidebar and arrow:
 the folder shows in the center while focus stays in the sidebar.
 
 With `keymap = "vim"`: j/k, h/l (parent and open, or columns), gg/G, yy/dd/p (copy, cut, paste),

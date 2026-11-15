@@ -24,7 +24,7 @@ pub use extensions::{
     Align, Column, ColumnContext, Excerpt, Extensions, PreviewContent, Previewer, TextPreviewer, text_excerpt,
 };
 pub use history::History;
-pub use paths::{complete_typed, resolve_typed};
+pub use paths::{clean_pasted_path, complete_typed, resolve_typed};
 pub use recent::{Recent, parse_zoxide, query_zoxide};
 pub use recent_commands::RecentCommands;
 pub use selection::{Selection, TypeSelect};

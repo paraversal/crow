@@ -66,6 +66,58 @@ fn common_prefix(a: &str, b: &str) -> String {
     a.chars().zip(b.chars()).take_while(|(x, y)| x.to_lowercase().eq(y.to_lowercase())).map(|(x, _)| x).collect()
 }
 
+/// A path as people paste it, made plain: surrounding whitespace and matching quotes
+/// go, a `file://` URL becomes its path, and a shell's backslash escapes (`My\ Files`)
+/// are undone. `None` when the text isn't a path (`/…`, `~/…` or `~`).
+pub fn clean_pasted_path(input: &str) -> Option<String> {
+    let mut text = input.trim();
+    for quote in ['\'', '"'] {
+        if text.len() >= 2 && text.starts_with(quote) && text.ends_with(quote) {
+            text = text[1..text.len() - 1].trim();
+        }
+    }
+    let text = match text.strip_prefix("file://") {
+        Some(rest) => percent_decode(rest.strip_prefix("localhost").unwrap_or(rest))?,
+        None if text.contains('\\') => unescape_shell(text),
+        None => text.to_owned(),
+    };
+    (text.starts_with('/') || text.starts_with("~/") || text == "~").then_some(text)
+}
+
+/// `%20` and friends; `None` when the bytes aren't UTF-8.
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (bytes[i], bytes.get(i + 1).and_then(|&b| hex(b)), bytes.get(i + 2).and_then(|&b| hex(b))) {
+            (b'%', Some(hi), Some(lo)) => {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            }
+            (byte, ..) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// `a\ b` → `a b`: each backslash keeps the character after it.
+fn unescape_shell(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.extend(chars.next()),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,5 +152,21 @@ mod tests {
         let absolute = format!("{}/Des", root.display());
         assert_eq!(complete_typed(&absolute, Path::new("/"), home), Some(format!("{}/Desktop/", root.display())));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn pasted_paths_come_out_plain() {
+        let clean = |s: &str| clean_pasted_path(s);
+        assert_eq!(clean("/a/b.txt").as_deref(), Some("/a/b.txt"));
+        assert_eq!(clean("  /a/b.txt \n").as_deref(), Some("/a/b.txt"), "whitespace");
+        assert_eq!(clean("'/a/My File.txt'").as_deref(), Some("/a/My File.txt"), "single quotes");
+        assert_eq!(clean("\"~/a b\"").as_deref(), Some("~/a b"), "double quotes");
+        assert_eq!(clean("/a/My\\ File\\ \\(1\\).txt").as_deref(), Some("/a/My File (1).txt"), "shell escapes");
+        assert_eq!(clean("file:///a/My%20File.txt").as_deref(), Some("/a/My File.txt"), "file URL");
+        assert_eq!(clean("file://localhost/a/%C3%A9").as_deref(), Some("/a/é"), "localhost and UTF-8");
+        assert_eq!(clean("~").as_deref(), Some("~"));
+        assert_eq!(clean("alpha"), None, "a name is not a path");
+        assert_eq!(clean("'alpha'"), None);
+        assert_eq!(clean("'/a"), None, "an unmatched quote is not stripped");
     }
 }
