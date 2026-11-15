@@ -180,7 +180,7 @@ does nothing here; real timers run on their own.
 A heartbeat over 50 ms is printed as a slow step with the seed, the step index, the
 last five steps and the `tracing` spans that overlapped it (`listing apply`, `rebuild
 rows`, `preview load`, `search batch`, `theme reload`, `icon fetch`; spans are at
-`debug`, which this mode enables for the `crow` target). GPUI's `on_next_frame` is
+`debug`, which this mode enables for the `crow` and `crow_macos` targets). GPUI's `on_next_frame` is
 throttled for an inactive or occluded window, so the heartbeat, not a frame
 callback, is the source. The report counts heartbeat intervals and groups the slow
 ones by step kind:
@@ -192,17 +192,20 @@ Keys                     2    312.4 ms  --seed 42 --until 1234  Keys("cmd-k")
 
 Exit code is 0 unless an invariant fails or a heartbeat is over 250 ms (a freeze).
 A freeze prints `FREEZE` and the run keeps going; a stall over 30 s prints `HANG`
-and quits, so a wedged step cannot swallow the rest of the run (a 100k resize can
-take 5–6 s and still finish). To profile a slow
-step, replay to just before it:
+and exits 1, so a wedged step cannot swallow the rest of the run. A watchdog thread
+watches the heartbeat, so this works even for a step that never returns; a 100k
+resize can take 5–6 s and still finish. To profile a slow step, replay to just
+before it:
 
 ```bash
 cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --until 1234
 xcrun xctrace record --template 'Time Profiler' --attach crow
 ```
 
-The window stays open (and the temp tree stays on disk) until Crow quits. A `HANG`
-also leaves the temp tree in place for inspection. Slow steps go into
+The window stays open until Crow quits. A paused run, a `HANG` and a killed run
+leave the temp tree and its support folder (`crow-fuzz-*` in the system temp folder)
+for inspection; remove them by hand, with `chmod -R u+rwx` first because the edge
+tree has an unreadable folder. Slow steps go into
 `docs/plans/m7/findings.md` with their replay command; `findings.md` is the input
 to the next H4 batch. This runner needs a real GUI session, so it is local only;
 the scheduled workflow runs H1's `fuzz_long`.

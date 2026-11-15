@@ -18,7 +18,8 @@ pub fn init() -> Option<WorkerGuard> {
 /// the spans that were running; `RUST_LOG` still wins for the filter.
 #[cfg(feature = "fuzz")]
 pub fn init_fuzz(trace: crate::fuzz_live::TraceLayer) -> Option<WorkerGuard> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,crow=debug"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,crow=debug,crow_macos=debug"));
     let stderr = fmt::layer().with_writer(std::io::stderr).with_target(false);
     match std::fs::create_dir_all(log_dir()) {
         Ok(()) => {

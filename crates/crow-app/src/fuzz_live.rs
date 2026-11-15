@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -31,9 +31,9 @@ use crow_fs::testing::{Churn, ChurnHandle, EdgeTree, make_tree, remove_tree};
 const SLOW_MS: f64 = 50.0;
 /// A frame over this fails the run.
 const FREEZE_MS: f64 = 250.0;
-/// A stall this long is treated as a hang; the watchdog quits so a stuck step
-/// cannot swallow the rest of the run. A 100k fixture resize can take 5-6 s and
-/// still finish, so this is well above the freeze threshold.
+/// A stall this long is treated as a hang; a watchdog thread quits so a stuck
+/// step cannot swallow the rest of the run. A 100k fixture resize can take 5-6 s
+/// and still finish, so this is well above the freeze threshold.
 const HANG_MS: f64 = 30_000.0;
 /// The ordinary fuzz tree's size, matching H1's `fuzz_long`.
 const FILES: usize = 200;
@@ -157,13 +157,11 @@ pub fn run(args: &[String]) -> ExitCode {
     }
 
     let outcome = Arc::new(Mutex::new(None::<Outcome>));
-    let hang = Arc::new(AtomicBool::new(false));
     let app = gpui_platform::application().with_assets(icons::Assets);
     let app_options = options.clone();
     let app_setup = setup.clone();
     let app_trace = trace.clone();
     let app_outcome = outcome.clone();
-    let app_hang = hang.clone();
     app.run(move |cx: &mut App| {
         effects::install(cx, Arc::new(RecordingEffects::new()));
         ui::init_at(
@@ -203,7 +201,6 @@ pub fn run(args: &[String]) -> ExitCode {
             frames.clone(),
             app_trace.clone(),
             app_outcome.clone(),
-            app_hang.clone(),
             app_options.seed,
             cx,
         );
@@ -214,9 +211,6 @@ pub fn run(args: &[String]) -> ExitCode {
             let churn = options.churn.then(|| Churn::start(&setup.root, options.seed));
             let result =
                 run_steps(handle, &setup.root, &options, &frames, &trace, churn.as_ref(), cx).await;
-            if app_hang.load(Ordering::Relaxed) {
-                return;
-            }
             frames.lock().expect("frames").active = false;
             if let Some(churn) = &churn {
                 churn.pause();
@@ -385,6 +379,8 @@ struct FrameLog {
     frames: u64,
     steps: usize,
     started: Option<Instant>,
+    /// When the heartbeat last ran; the watchdog thread reads it.
+    last_beat: Option<Instant>,
     max_ms: f64,
 }
 
@@ -448,12 +444,16 @@ fn install_heartbeat(
     frames: Arc<Mutex<FrameLog>>,
     trace: Arc<Trace>,
     outcome: Arc<Mutex<Option<Outcome>>>,
-    hang: Arc<AtomicBool>,
     seed: u64,
     cx: &mut App,
 ) {
-    frames.lock().expect("frames").started = Some(Instant::now());
-    frames.lock().expect("frames").active = true;
+    {
+        let mut log = frames.lock().expect("frames");
+        log.started = Some(Instant::now());
+        log.last_beat = Some(Instant::now());
+        log.active = true;
+    }
+    install_watchdog(frames.clone(), trace.clone(), seed);
     cx.spawn(async move |cx| {
         let mut last = Instant::now();
         let mut frozen_steps = std::collections::HashSet::new();
@@ -463,12 +463,12 @@ fn install_heartbeat(
             let ms = (now - last).as_secs_f64() * 1000.0;
             last = now;
             let mut freeze = None;
-            let mut hang_step = None;
             let report = {
                 let mut log = frames.lock().expect("frames");
                 if !log.active {
                     break;
                 }
+                log.last_beat = Some(now);
                 if let Some((index, step, started)) = log.current.clone() {
                     log.frames += 1;
                     log.max_ms = log.max_ms.max(ms);
@@ -488,15 +488,6 @@ fn install_heartbeat(
                                 log.recent.iter().cloned().collect::<Vec<_>>(),
                             ));
                         }
-                        if ms > HANG_MS {
-                            hang_step = Some((
-                                index,
-                                step.clone(),
-                                started,
-                                ms,
-                                log.recent.iter().cloned().collect::<Vec<_>>(),
-                            ));
-                        }
                         first.then(|| (index, step, started, ms, log.recent.iter().cloned().collect::<Vec<_>>()))
                     } else {
                         None
@@ -506,48 +497,63 @@ fn install_heartbeat(
                 }
             };
             if let Some((index, step, started, ms, recent)) = report {
-                let spans = trace.span_summary(started, now);
-                let recent: Vec<String> = recent.iter().map(|(index, step)| format!("{index}:{:?}", step)).collect();
-                println!(
-                    "SLOW seed-step {index} {ms:.1} ms {} {:?}\n  last: {}\n  spans: {}",
-                    step.kind(),
-                    step,
-                    if recent.is_empty() { "none".to_owned() } else { recent.join(", ") },
-                    if spans.is_empty() { "none (RUST_LOG may hide debug spans)".to_owned() } else { spans.join(", ") }
-                );
+                println!("SLOW seed-step {index} {ms:.1} ms {}", stall_detail(&trace, &step, started, now, &recent));
             }
             if let Some((index, step, started, ms, recent)) = freeze
                 && frozen_steps.insert(index)
             {
-                let spans = trace.span_summary(started, now);
-                let recent: Vec<String> = recent.iter().map(|(index, step)| format!("{index}:{:?}", step)).collect();
                 println!(
-                    "FREEZE seed={seed} step={index} {ms:.1} ms {} {:?}\n  last: {}\n  spans: {}",
-                    step.kind(),
-                    step,
-                    if recent.is_empty() { "none".to_owned() } else { recent.join(", ") },
-                    if spans.is_empty() { "none (RUST_LOG may hide debug spans)".to_owned() } else { spans.join(", ") }
+                    "FREEZE seed={seed} step={index} {ms:.1} ms {}",
+                    stall_detail(&trace, &step, started, now, &recent)
                 );
                 *outcome.lock().expect("outcome") = Some(Outcome { failed: true });
-            }
-            if let Some((index, step, started, ms, recent)) = hang_step {
-                let spans = trace.span_summary(started, now);
-                let recent: Vec<String> = recent.iter().map(|(index, step)| format!("{index}:{:?}", step)).collect();
-                println!(
-                    "HANG seed={seed} step={index} {ms:.1} ms {} {:?}\n  last: {}\n  spans: {}",
-                    step.kind(),
-                    step,
-                    if recent.is_empty() { "none".to_owned() } else { recent.join(", ") },
-                    if spans.is_empty() { "none (RUST_LOG may hide debug spans)".to_owned() } else { spans.join(", ") }
-                );
-                frames.lock().expect("frames").active = false;
-                hang.store(true, Ordering::Relaxed);
-                *outcome.lock().expect("outcome") = Some(Outcome { failed: true });
-                exit_failure();
             }
         }
     })
     .detach();
+}
+
+/// The heartbeat runs on the main thread, so it cannot see a step that never
+/// returns. This thread can: when the heartbeat has not run for `HANG_MS` while
+/// a step is current, it prints `HANG` and exits 1.
+fn install_watchdog(frames: Arc<Mutex<FrameLog>>, trace: Arc<Trace>, seed: u64) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(250));
+            let (index, step, started, last_beat, recent) = {
+                let log = frames.lock().expect("frames");
+                if !log.active {
+                    return;
+                }
+                let (Some((index, step, started)), Some(last_beat)) = (log.current.clone(), log.last_beat) else {
+                    continue;
+                };
+                (index, step, started, last_beat, log.recent.iter().cloned().collect::<Vec<_>>())
+            };
+            let now = Instant::now();
+            let ms = (now - last_beat).as_secs_f64() * 1000.0;
+            if ms > HANG_MS {
+                println!(
+                    "HANG seed={seed} step={index} {ms:.1} ms and counting {}",
+                    stall_detail(&trace, &step, started, now, &recent)
+                );
+                exit_failure();
+            }
+        }
+    });
+}
+
+/// The step, the five before it and the spans that overlapped the stall.
+fn stall_detail(trace: &Trace, step: &Step, started: Instant, now: Instant, recent: &[(usize, Step)]) -> String {
+    let spans = trace.span_summary(started, now);
+    let recent: Vec<String> = recent.iter().map(|(index, step)| format!("{index}:{step:?}")).collect();
+    format!(
+        "{} {:?}\n  last: {}\n  spans: {}",
+        step.kind(),
+        step,
+        if recent.is_empty() { "none".to_owned() } else { recent.join(", ") },
+        if spans.is_empty() { "none (RUST_LOG may hide debug spans)".to_owned() } else { spans.join(", ") }
+    )
 }
 
 enum RunResult {
