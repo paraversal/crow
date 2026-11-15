@@ -7488,11 +7488,10 @@ fn edge_tree_replay_lists_a_long_name(cx: &mut TestAppContext) {
     assert!(tree.join(format!("{}.txt", "a".repeat(251))).exists(), "the edge tree was built");
 }
 
-/// H4 #7: replacing the shown root sometimes leaves some old rows. Intermittent
-/// (about half the runs fail; critique: 3 of 6, then 1 of 4 needed to catch one),
-/// so a single pass proves nothing: loop it when fixing.
+/// H4 #7: replacing the shown root left some old rows, because a watcher event
+/// naming the root is not a child change. Looped when fixing (it was
+/// intermittent: about half the runs failed).
 #[gpui::test]
-#[ignore = "H4 #7: replacing the shown root intermittently leaves stale rows"]
 fn replacing_the_shown_folder_reloads(cx: &mut TestAppContext) {
     use crate::fuzz::Step;
     let tree = fuzz_tree("fuzz-replace-root", 40);

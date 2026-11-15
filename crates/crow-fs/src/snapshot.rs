@@ -30,13 +30,22 @@ pub fn read_dir(dir: &Path, show_hidden: bool, sort: &Sort, kind: KindOf) -> std
 /// A path reported through a symlinked ancestor (`/tmp` for `/private/tmp`) is
 /// rewritten into `dir`'s form, so the merge can match it against the listing.
 pub fn stat_changes(dir: &Path, changed: &[PathBuf], show_hidden: bool) -> Vec<(PathBuf, Option<Entry>)> {
+    // `dir` came from the pane and may name a symlinked ancestor (`/tmp`), while
+    // the watcher reports resolved paths (`/private/tmp`); resolve it once so both
+    // directions of that mismatch match.
+    let canonical_dir = dir.canonicalize().ok();
     let mut seen = HashSet::new();
     changed
         .iter()
         .filter_map(|path| {
             let name = path.file_name()?;
             let inside = match path.parent() {
-                Some(parent) => parent == dir || parent.canonicalize().is_ok_and(|canonical| canonical == dir),
+                Some(parent) => {
+                    parent == dir
+                        || canonical_dir.as_deref().is_some_and(|canonical_dir| {
+                            parent == canonical_dir || parent.canonicalize().is_ok_and(|parent| parent == canonical_dir)
+                        })
+                }
                 None => false,
             };
             if !inside {
@@ -150,6 +159,12 @@ mod tests {
         assert_eq!(stats.len(), 1, "the path is inside the folder");
         assert_eq!(stats[0].0, canonical.join("a.txt"), "rewritten into the listing's form");
         assert!(stats[0].1.is_some(), "and stat'ed there");
+
+        // The reverse holds too: the pane opened through the link, the watcher
+        // resolved the path.
+        let stats = stat_changes(&alias, &[canonical.join("a.txt")], false);
+        assert_eq!(stats.len(), 1, "the resolved path is inside the linked folder");
+        assert_eq!(stats[0].0, alias.join("a.txt"), "rewritten into the pane's form");
 
         // A burst can name the same path twice; it must appear once.
         let twice = stat_changes(&canonical, &[alias.join("a.txt"), alias.join("a.txt")], false);
