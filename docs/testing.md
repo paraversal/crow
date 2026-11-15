@@ -87,7 +87,7 @@ CROW_FUZZ_SEED=42 CROW_FUZZ_STEPS=5000 cargo test -p crow-app fuzz_long -- --ign
 
 `fuzz_long` prints `CROW_FUZZ_SEED=<n>` for each seed. With no seed it picks one
 from the clock; `CROW_FUZZ_MINUTES` (default 1) stops after that many minutes,
-`CROW_FUZZ_STEPS` (default 3000) caps each seed, and the long tree has 200 files
+`CROW_FUZZ_STEPS` (default 3000) caps each seed, `CROW_FUZZ_SHRINK_SECS` (default 600) caps shrinking a failure (it prints the best script so far; the seed and step always reproduce it), and the long tree has 200 files
 (the smoke uses 40 to stay near 10 s). The scheduled workflow
 (`.github/workflows/fuzz.yml`) runs 20 minutes every three days.
 
