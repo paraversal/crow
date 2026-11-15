@@ -81,6 +81,7 @@ config and state live in a temp folder, and the sidebar lists only the tree.
 
 ```bash
 cargo test -p crow-app fuzz_smoke                 # 3 seeds x 30 steps on a 40-file tree, in the normal suite
+cargo test -p crow-app fuzz_smoke_edge_trees -- --ignored --nocapture  # every small edge kind (H4 #6)
 CROW_FUZZ_MINUTES=2 cargo test -p crow-app fuzz_long -- --ignored --nocapture
 CROW_FUZZ_SEED=42 CROW_FUZZ_STEPS=5000 cargo test -p crow-app fuzz_long -- --ignored --nocapture
 ```
@@ -90,6 +91,37 @@ from the clock; `CROW_FUZZ_MINUTES` (default 1) stops after that many minutes,
 `CROW_FUZZ_STEPS` (default 3000) caps each seed, `CROW_FUZZ_SHRINK_SECS` (default 600) caps shrinking a failure (it prints the best script so far; the seed and step always reproduce it), and the long tree has 200 files
 (the smoke uses 40 to stay near 10 s). The scheduled workflow
 (`.github/workflows/fuzz.yml`) runs 20 minutes every three days.
+
+### Edge trees and churn
+
+`crates/crow-fs/src/testing.rs` (the `testing` feature) builds awkward trees and
+changes them while the fuzzer acts. `--make-fixture DIR N` and
+`EdgeTree::wide(N)` share one writer, so the bench fixture's names and contents
+are unchanged.
+
+```bash
+CROW_FUZZ_TREE=small CROW_FUZZ_CHURN=1 cargo test -p crow-app fuzz_long -- --ignored --nocapture
+CROW_FUZZ_TREE=long-name,deep-20 CROW_FUZZ_CHURN=0 cargo test -p crow-app fuzz_long -- --ignored --nocapture
+CROW_FUZZ_TREE=wide-100000 CROW_FUZZ_MINUTES=2 cargo test -p crow-app fuzz_long -- --ignored --nocapture
+```
+
+`CROW_FUZZ_TREE` is `small` (every kind except `Wide` and `HugeFile`), `all`, or a
+comma-separated list: `long-name`, `nfc-nfd-twins`, `emoji`, `rtl`,
+`leading-dot`, `spaces`, `newline`, `deep-<n>`, `wide-<n>`, `symlink-loop`,
+`dangling-symlink`, `unreadable`, `package`, `hardlinks`, `empty-folder`,
+`huge-file` (sparse 10 GiB). `fuzz_smoke_edge_trees` covers every small kind; it
+is ignored until H4 #6 fixes the newline-name panic.
+
+`CROW_FUZZ_CHURN=1` starts a thread that creates, renames, deletes, rewrites,
+chmods and moves entries in the shown folder and one level down every 1–50 ms.
+With the variable unset, `fuzz_long` alternates churn off/on per seed. A `Settle`
+step pauses churn before the deep listing check and resumes after it, so the
+check compares a quiet disk. Churn makes replay nondeterministic: a failure
+prints whether its shrunk script still fails with churn off.
+
+`tree.remove()` / `crow_fs::testing::remove_tree` restore permissions before
+deleting, so a mode-000 folder from an `Unreadable` tree cannot leak into the
+next run.
 
 A failure prints the seed, the failing step, the violation and a shrunk script:
 
@@ -105,7 +137,9 @@ fn regression(cx: &mut TestAppContext) {
 ```
 
 The runner prints the row for `docs/plans/m7/findings.md`. Deduplicate by violation
-and place, not by seed; H4 fixes rows and adds the named regression test.
+and place, not by seed; H4 fixes rows and adds the named regression test. For an
+edge-tree or churn finding, replay with the same tree and churn setting:
+`replay_with(cx, &tree, 200, &EdgeTree::single(EdgeKind::LongName), seed, churn, script)`.
 
 A right-click step carries the menu item it picks (`RightClick(selector, Some(slot))`;
 `None` dismisses the menu): the native menu never opens, the recorder answers with
@@ -115,6 +149,12 @@ What the fuzzer does not drive: the Settings window (H7 adds it; its own tests c
 it until then) and the accessibility tree (GPUI's test platform disables it). The second window is opened
 and checked by the invariants but only the first is driven. `cmd-m` is excluded
 because the test platform has no minimize implementation.
+
+Removable and cloud volumes are hand checks, not simulated. Create a disk image
+(`hdiutil create -size 200m -fs APFS -volname CrowTest /tmp/crow.dmg`), attach it,
+browse it in Crow and eject it while shown: the folder should show as gone, with
+no panic. iCloud Drive placeholders (download on open, eviction) are out of scope
+for the test platform; check a cloud-backed folder by hand.
 
 ## Performance
 
@@ -129,12 +169,14 @@ cargo run --release -p crow-app -- --bench-search target/fixture-search-200k
 
 `--bench` scrolls 600 frames and prints first paint, load time and frame times.
 `--bench-filter <query>` applies the name filter first, so the scroll times are for
-highlighted rows. It needs a GPU, so it runs locally, not in CI.
+highlighted rows. It needs a GPU, so it runs locally, not in CI. `--make-fixture`
+uses `crow_fs::testing::EdgeTree::wide`; the 100k fixture's manifest hash (names
+and sizes; the files are empty) is `b659b9a8…`, unchanged since before H2.
 
 | Measure | Budget |
 | --- | --- |
-| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms; U1: 10 ms; U4: 10–11 ms, filtered 10–17 ms; U5: 10–11 ms; U11: 8 ms warm, 39–70 ms cold) |
-| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms; U4: 8.85–8.95 ms, main on the same machine 8.84–8.86 ms, filtered 8.82–9.03 ms; U5: 8.87–9.06 ms, main on the same machine 8.86–8.95 ms; U10: Full 9.73–9.83 ms, Off 9.83 ms, Low 9.97 ms; warm first paint 8–10 ms in all three; UI overhaul as a whole (U11): 8.66–9.86 ms, `main` on the same machine 9.64–9.77 ms, M6 8.66–8.69 ms) |
+| First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms; U1: 10 ms; U4: 10–11 ms, filtered 10–17 ms; U5: 10–11 ms; U11: 8 ms warm, 39–70 ms cold; H2: 7 ms warm, 132 ms cold) |
+| Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms; U4: 8.85–8.95 ms, main on the same machine 8.84–8.86 ms, filtered 8.82–9.03 ms; U5: 8.87–9.06 ms, main on the same machine 8.86–8.95 ms; U10: Full 9.73–9.83 ms, Off 9.83 ms, Low 9.97 ms; warm first paint 8–10 ms in all three; UI overhaul as a whole (U11): 8.66–9.86 ms, `main` on the same machine 9.64–9.77 ms, M6 8.66–8.69 ms; H2: 8.70 ms p99, avg 8.42, max 40.00) |
 | Search, 200k nested files, every file matches (names + contents) | first hit 4 ms; total 4.1 s (M6). `--bench-search` includes the walk, fuzzy names and content reads. |
 
 ## By hand (each milestone)

@@ -89,16 +89,6 @@ pub fn apply_changes(
     apply_stats(entries, &stats, sort, kind)
 }
 
-/// Create `count` empty files for large-folder tests and benchmarks.
-pub fn make_fixture(dir: &Path, count: usize) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let exts = ["txt", "md", "rs", "png", "json", "pdf", "toml", "swift"];
-    for i in 0..count {
-        std::fs::File::create(dir.join(format!("file-{i:06}.{}", exts[i % exts.len()])))?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

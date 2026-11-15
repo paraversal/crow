@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle};
 
+use crow_fs::testing::{Churn, ChurnHandle, EdgeTree};
 use crow_search::{Hit, HitKind};
 
 use crate::actions::StartFilter;
@@ -6867,11 +6868,11 @@ fn context_menu_lines_use_the_menu_bar_names_and_keys(cx: &mut TestAppContext) {
 
 // ----- fuzzer runner -----
 
-/// Recreate the H1 tree from scratch: the usual fixture plus a few hundred files.
-/// Every seed and every shrink trial starts here, so one run's trash or rename
-/// cannot change the next one.
-fn reset_tree(root: &Path, files: usize) {
-    let _ = std::fs::remove_dir_all(root);
+/// Recreate the H1 tree from scratch: the usual fixture plus a few hundred files,
+/// then the edge kinds. Every seed and every shrink trial starts here, so one
+/// run's trash, rename or mode-000 folder cannot change the next one.
+fn reset_tree(root: &Path, files: usize, edge: &EdgeTree, seed: u64) {
+    crow_fs::testing::remove_tree(root).expect("reset fuzz tree");
     std::fs::create_dir_all(root.join("alpha/inner")).expect("fuzz tree");
     std::fs::create_dir_all(root.join("beta")).expect("fuzz tree");
     std::fs::write(root.join("notes.txt"), "hello\n").expect("fuzz tree");
@@ -6880,6 +6881,9 @@ fn reset_tree(root: &Path, files: usize) {
     }
     for i in 0..20 {
         std::fs::create_dir_all(root.join(format!("dir-{i:02}/inner"))).expect("fuzz dir");
+    }
+    if !edge.is_empty() {
+        crow_fs::testing::make_tree(root, edge, seed).expect("edge tree");
     }
 }
 
@@ -6893,8 +6897,27 @@ fn fuzz_sidebar_toml(root: &Path) -> String {
 
 fn fuzz_tree(name: &str, files: usize) -> PathBuf {
     let root = std::env::temp_dir().join(format!("crow-app-{name}-{}", std::process::id()));
-    reset_tree(&root, files);
+    reset_tree(&root, files, &EdgeTree::default(), 0);
     root.canonicalize().expect("canonical fuzz tree")
+}
+
+/// What a run builds and how it behaves. The seed stays a separate argument so
+/// the shrinker can replay a candidate under the same tree and churn setting.
+#[derive(Clone)]
+struct FuzzOptions {
+    files: usize,
+    edge: EdgeTree,
+    churn: bool,
+}
+
+impl FuzzOptions {
+    fn new(files: usize, edge: EdgeTree, churn: bool) -> Self {
+        FuzzOptions { files, edge, churn }
+    }
+
+    fn without_churn(&self) -> Self {
+        FuzzOptions { churn: false, ..self.clone() }
+    }
 }
 
 fn close_all_windows(cx: &mut TestAppContext) {
@@ -6973,6 +6996,7 @@ fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
 fn apply_step(
     view: &Entity<CrowWindow>,
     step: &crate::fuzz::Step,
+    tree: &Path,
     cx: &mut VisualTestContext,
 ) -> Result<(), crate::fuzz::Violation> {
     use crate::fuzz::Step;
@@ -7007,6 +7031,22 @@ fn apply_step(
         Step::Resize(width, height) => cx.simulate_resize(gpui::size(gpui::px(*width), gpui::px(*height))),
         Step::Settle => crate::fuzz::settle(view, cx),
         Step::AdvanceClock(ms) => cx.executor().advance_clock(Duration::from_millis(*ms)),
+        Step::DeleteShownFolder => {
+            let dir = view.read_with(cx, |window, cx| window.pane().read(cx).current_dir(cx));
+            if dir.starts_with(tree) {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+        Step::ReplaceShownFolder => {
+            let dir = view.read_with(cx, |window, cx| window.pane().read(cx).current_dir(cx));
+            if dir.starts_with(tree) {
+                let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::create_dir_all(&dir);
+                for i in 0..3 {
+                    let _ = std::fs::write(dir.join(format!("replaced-{i}.txt")), "replaced\n");
+                }
+            }
+        }
     }));
     match result {
         Ok(()) => Ok(()),
@@ -7064,20 +7104,31 @@ fn apply_and_check(
     view: &Entity<CrowWindow>,
     step: &crate::fuzz::Step,
     tree: &Path,
+    churn: Option<&ChurnHandle>,
     cx: &mut VisualTestContext,
 ) -> Result<(), crate::fuzz::Violation> {
     crate::fuzz::logs::reset();
-    apply_step(view, step, cx)?;
-    keep_in_tree(view, tree, cx);
-    cx.run_until_parked();
     let deep = matches!(step, crate::fuzz::Step::Settle);
-    if let Some(violation) = check_all_windows(cx, deep, Some(tree)).into_iter().next() {
-        return Err(violation);
+    // A deep listing check compares the pane to the disk: quiet the churn first.
+    if deep && let Some(churn) = churn {
+        churn.pause();
     }
-    if crate::fuzz::logs::errors() > 0 {
-        return Err(crate::fuzz::Violation::new("log", "an error was logged"));
+    let result: Result<(), crate::fuzz::Violation> = (|| {
+        apply_step(view, step, tree, cx)?;
+        keep_in_tree(view, tree, cx);
+        cx.run_until_parked();
+        if let Some(violation) = check_all_windows(cx, deep, Some(tree)).into_iter().next() {
+            return Err(violation);
+        }
+        if crate::fuzz::logs::errors() > 0 {
+            return Err(crate::fuzz::Violation::new("log", "an error was logged"));
+        }
+        Ok(())
+    })();
+    if deep && let Some(churn) = churn {
+        churn.resume();
     }
-    Ok(())
+    result
 }
 
 /// Confine a fuzz run to `tree`:
@@ -7096,56 +7147,120 @@ fn fuzz_confine(tree: &Path, cx: &mut VisualTestContext) {
 fn replay_script(
     script: &[crate::fuzz::Step],
     tree: &Path,
-    files: usize,
+    seed: u64,
+    options: &FuzzOptions,
     cx: &mut TestAppContext,
 ) -> Result<(), crate::fuzz::Violation> {
     close_all_windows(cx);
-    reset_tree(tree, files);
+    reset_tree(tree, options.files, &options.edge, seed);
     let (view, mut cx) = open(cx, tree);
     write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
     fuzz_confine(tree, &mut cx);
     crate::fuzz::logs::install();
+    let churn_handle = options.churn.then(|| Churn::start(tree, seed));
     for step in script {
-        apply_and_check(&view, step, tree, &mut cx)?;
+        apply_and_check(&view, step, tree, churn_handle.as_ref(), &mut cx)?;
+    }
+    if let Some(churn) = &churn_handle {
+        churn.pause();
     }
     crate::fuzz::settle(&view, &mut cx);
-    check_all_windows(&mut cx, true, Some(tree)).into_iter().next().map_or(Ok(()), Err)
+    let found = check_all_windows(&mut cx, true, Some(tree)).into_iter().next();
+    drop(churn_handle);
+    found.map_or(Ok(()), Err)
 }
 
 fn fuzz_run(
     seed: u64,
     steps: usize,
     tree: &Path,
-    files: usize,
+    options: &FuzzOptions,
     cx: &mut TestAppContext,
-) -> Result<(), crate::fuzz::Failure> {
+) -> Result<(), Box<crate::fuzz::Failure>> {
     use crate::fuzz::{Failure, Script, StepGen, state};
     close_all_windows(cx);
-    reset_tree(tree, files);
+    reset_tree(tree, options.files, &options.edge, seed);
     let (view, mut cx) = open(cx, tree);
     write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
     fuzz_confine(tree, &mut cx);
     crate::fuzz::logs::install();
+    let mut churn_handle = options.churn.then(|| Churn::start(tree, seed));
     let mut generator = StepGen::new(seed);
     let mut script = Vec::new();
     for index in 0..steps {
         let state = state(&view, &mut cx);
         let step = generator.next(&state);
         script.push(step.clone());
-        if let Err(violation) = apply_and_check(&view, &step, tree, &mut cx) {
+        if let Err(violation) = apply_and_check(&view, &step, tree, churn_handle.as_ref(), &mut cx) {
             // Printed before shrinking, which can take long: a killed run still names the seed.
-            println!("seed {seed} step {index}: {} — {} (shrinking…)", violation.check, violation.detail);
-            let shrunk = shrink(&script, &violation, tree, files, &mut cx.cx);
-            return Err(Failure { seed, step: index, violation, script: shrunk, original: Script(script) });
+            println!(
+                "seed {seed} step {index}: {} — {} (tree {}, churn {}; shrinking…)",
+                violation.check,
+                violation.detail,
+                options.edge.label(),
+                options.churn
+            );
+            drop(churn_handle.take());
+            let shrunk = shrink(&script, &violation, tree, seed, options, &mut cx.cx);
+            let reproduces =
+                !options.churn || fails_without_churn(&shrunk, &violation, tree, seed, options, &mut cx.cx);
+            return Err(Box::new(Failure {
+                seed,
+                step: index,
+                violation,
+                script: shrunk,
+                original: Script(script),
+                tree: options.edge.spec(),
+                churn: options.churn,
+                reproduces_without_churn: reproduces,
+            }));
         }
     }
+    if let Some(churn) = &churn_handle {
+        churn.pause();
+    }
     crate::fuzz::settle(&view, &mut cx);
-    if let Some(violation) = check_all_windows(&mut cx, true, Some(tree)).into_iter().next() {
-        println!("seed {seed} step {steps}: {} — {} (shrinking…)", violation.check, violation.detail);
-        let shrunk = shrink(&script, &violation, tree, files, &mut cx.cx);
-        return Err(Failure { seed, step: steps, violation, script: shrunk, original: Script(script) });
+    let found = check_all_windows(&mut cx, true, Some(tree)).into_iter().next();
+    drop(churn_handle);
+    if let Some(violation) = found {
+        println!(
+            "seed {seed} step {steps}: {} — {} (tree {}, churn {}; shrinking…)",
+            violation.check,
+            violation.detail,
+            options.edge.label(),
+            options.churn
+        );
+        let shrunk = shrink(&script, &violation, tree, seed, options, &mut cx.cx);
+        let reproduces = !options.churn || fails_without_churn(&shrunk, &violation, tree, seed, options, &mut cx.cx);
+        return Err(Box::new(Failure {
+            seed,
+            step: steps,
+            violation,
+            script: shrunk,
+            original: Script(script),
+            tree: options.edge.spec(),
+            churn: options.churn,
+            reproduces_without_churn: reproduces,
+        }));
     }
     Ok(())
+}
+
+/// The plan asks whether a churn finding still fails without churn.
+fn fails_without_churn(
+    script: &crate::fuzz::Script,
+    target: &crate::fuzz::Violation,
+    tree: &Path,
+    seed: u64,
+    options: &FuzzOptions,
+    cx: &mut TestAppContext,
+) -> bool {
+    let quiet = options.without_churn();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| replay_script(&script.0, tree, seed, &quiet, cx))) {
+        Ok(Err(found)) => found.check == target.check,
+        Ok(Ok(())) => false,
+        Err(_) => target.check == "panic",
+    }
 }
 
 /// Delta debugging: drop halves, then single steps, then shorten `Type` strings.
@@ -7158,7 +7273,8 @@ fn shrink(
     script: &[crate::fuzz::Step],
     target: &crate::fuzz::Violation,
     tree: &Path,
-    files: usize,
+    seed: u64,
+    options: &FuzzOptions,
     cx: &mut TestAppContext,
 ) -> crate::fuzz::Script {
     use crate::fuzz::{Script, Step};
@@ -7178,7 +7294,9 @@ fn shrink(
             return false;
         }
         trials.set(trials.get() + 1);
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| replay_script(candidate, tree, files, cx))) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            replay_script(candidate, tree, seed, options, cx)
+        })) {
             Ok(Err(found)) => found.check == target.check,
             Ok(Ok(())) => false,
             Err(_) => target.check == "panic",
@@ -7239,14 +7357,28 @@ fn shrink(
 }
 
 /// The replay entry point the printed scripts use.
-#[allow(dead_code)]
 fn replay(
     cx: &mut TestAppContext,
     tree: &Path,
     files: usize,
     script: crate::fuzz::Script,
 ) -> Vec<crate::fuzz::Violation> {
-    replay_script(&script.0, tree, files, cx).err().into_iter().collect()
+    let options = FuzzOptions::new(files, EdgeTree::default(), false);
+    replay_script(&script.0, tree, 0, &options, cx).err().into_iter().collect()
+}
+
+/// The replay entry point for edge-tree and churn findings.
+fn replay_with(
+    cx: &mut TestAppContext,
+    tree: &Path,
+    files: usize,
+    edge: &EdgeTree,
+    seed: u64,
+    churn: bool,
+    script: crate::fuzz::Script,
+) -> Vec<crate::fuzz::Violation> {
+    let options = FuzzOptions::new(files, edge.clone(), churn);
+    replay_script(&script.0, tree, seed, &options, cx).err().into_iter().collect()
 }
 
 #[gpui::test]
@@ -7285,15 +7417,114 @@ fn fuzzed_right_click_runs_the_chosen_item(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn deleting_the_shown_folder_keeps_the_invariants(cx: &mut TestAppContext) {
+    use crate::fuzz::Step;
+    let tree = fuzz_tree("fuzz-delete", 40);
+    let found = replay(
+        cx,
+        &tree,
+        40,
+        crate::script![
+            Step::Click("row-alpha".into()),
+            Step::Keys("cmd-down".into()),
+            Step::DeleteShownFolder,
+            Step::Settle
+        ],
+    );
+    assert!(found.is_empty(), "{found:?}");
+    assert!(!tree.join("alpha").exists(), "the shown folder is gone");
+}
+
+#[gpui::test]
+fn replace_shown_folder_reloads(cx: &mut TestAppContext) {
+    use crate::fuzz::Step;
+    let tree = fuzz_tree("fuzz-replace", 40);
+    let found = replay(
+        cx,
+        &tree,
+        40,
+        crate::script![
+            Step::Click("row-alpha".into()),
+            Step::Keys("cmd-down".into()),
+            Step::ReplaceShownFolder,
+            Step::Settle
+        ],
+    );
+    assert!(found.is_empty(), "{found:?}");
+    let mut names: Vec<String> = std::fs::read_dir(tree.join("alpha"))
+        .expect("the folder was recreated")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["replaced-0.txt", "replaced-1.txt", "replaced-2.txt"]);
+}
+
+/// I2's test: churn for 2 s on a 1k tree, then pause and compare the listing to
+/// the disk (H1's invariant 6 on purpose).
+#[gpui::test]
+fn churn_run_then_settle_listing_equals_disk(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("fuzz-churn", 1000);
+    let (view, mut cx) = open(cx, &tree);
+    write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(&tree));
+    fuzz_confine(&tree, &mut cx);
+    crate::fuzz::logs::install();
+    let churn = Churn::start(&tree, 7);
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(churn.operations() > 0, "churn ran");
+    churn.pause();
+    crate::fuzz::settle(&view, &mut cx);
+    let found = check_all_windows(&mut cx, true, Some(&tree));
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[gpui::test]
+fn edge_tree_replay_lists_a_long_name(cx: &mut TestAppContext) {
+    use crate::fuzz::Step;
+    let edge = EdgeTree::single(crow_fs::testing::EdgeKind::LongName);
+    let tree = fuzz_tree("fuzz-edge-replay", 40);
+    let found = replay_with(cx, &tree, 40, &edge, 1, false, crate::script![Step::Settle]);
+    assert!(found.is_empty(), "{found:?}");
+    assert!(tree.join(format!("{}.txt", "a".repeat(251))).exists(), "the edge tree was built");
+}
+
+/// H4 #7: replacing the shown root sometimes leaves some old rows. Intermittent
+/// (about half the runs fail; critique: 3 of 6, then 1 of 4 needed to catch one),
+/// so a single pass proves nothing: loop it when fixing.
+#[gpui::test]
+#[ignore = "H4 #7: replacing the shown root intermittently leaves stale rows"]
+fn replacing_the_shown_folder_reloads(cx: &mut TestAppContext) {
+    use crate::fuzz::Step;
+    let tree = fuzz_tree("fuzz-replace-root", 40);
+    let found = replay(cx, &tree, 40, crate::script![Step::ReplaceShownFolder, Step::Settle]);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[gpui::test]
 fn fuzz_smoke(cx: &mut TestAppContext) {
     let tree = fuzz_tree("fuzz-smoke", 40);
+    let options = FuzzOptions::new(40, EdgeTree::default(), false);
     // 30 steps per seed on a 40-file tree keeps the normal suite near the 10 s
     // budget; the long run uses 200 files and 3000 steps.
     for seed in [1, 2, 3] {
-        if let Err(failure) = fuzz_run(seed, 30, &tree, 40, cx) {
+        if let Err(failure) = fuzz_run(seed, 30, &tree, &options, cx) {
             panic!("{}\n{}", failure.print(), failure.finding_row());
         }
     }
+}
+
+/// Q1: every small edge kind, including unreadable children and symlink loops;
+/// `Wide` and `HugeFile` stay in `fuzz_long`. Ignored until H4 #6 fixes the
+/// newline-name panic (the first run shrank to `alt-down`).
+#[gpui::test]
+#[ignore = "H4 #6: a newline name panics GPUI text shaping"]
+fn fuzz_smoke_edge_trees(cx: &mut TestAppContext) {
+    let edge_tree = fuzz_tree("fuzz-smoke-edge", 40);
+    let options = FuzzOptions::new(40, EdgeTree::small(), false);
+    if let Err(failure) = fuzz_run(4, 30, &edge_tree, &options, cx) {
+        panic!("{}\n{}", failure.print(), failure.finding_row());
+    }
+    let _ = crow_fs::testing::remove_tree(&edge_tree);
 }
 
 #[gpui::test]
@@ -7302,25 +7533,34 @@ fn fuzz_long(cx: &mut TestAppContext) {
     let tree = fuzz_tree("fuzz-long", 200);
     let minutes = std::env::var("CROW_FUZZ_MINUTES").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(1);
     let steps = std::env::var("CROW_FUZZ_STEPS").ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(3000);
+    let edge = std::env::var("CROW_FUZZ_TREE")
+        .ok()
+        .map(|spec| EdgeTree::parse(&spec).unwrap_or_else(|error| panic!("CROW_FUZZ_TREE: {error}")))
+        .unwrap_or_default();
+    let churn_env = std::env::var("CROW_FUZZ_CHURN").ok().map(|value| value != "0");
     let explicit = std::env::var("CROW_FUZZ_SEED").ok().and_then(|value| value.parse::<u64>().ok());
-    let run = |seed: u64, cx: &mut TestAppContext| {
-        println!("CROW_FUZZ_SEED={seed}");
-        if let Err(failure) = fuzz_run(seed, steps, &tree, 200, cx) {
+    let run = |seed: u64, churn: bool, cx: &mut TestAppContext| {
+        println!("CROW_FUZZ_SEED={seed} CROW_FUZZ_TREE={} CROW_FUZZ_CHURN={}", edge.spec(), if churn { 1 } else { 0 });
+        let options = FuzzOptions::new(200, edge.clone(), churn);
+        if let Err(failure) = fuzz_run(seed, steps, &tree, &options, cx) {
             println!("{}", failure.print());
             println!("{}", failure.finding_row());
             panic!("fuzz seed {seed} failed: {}", failure.violation.check);
         }
     };
     if let Some(seed) = explicit {
-        run(seed, cx);
+        run(seed, churn_env.unwrap_or(false), cx);
         return;
     }
     let deadline = Instant::now() + Duration::from_secs(minutes * 60);
     let mut seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(1, |elapsed| elapsed.as_nanos() as u64);
+    let mut index = 0;
     while Instant::now() < deadline {
-        run(seed, cx);
+        let churn = churn_env.unwrap_or(index % 2 == 1);
+        run(seed, churn, cx);
+        index += 1;
         seed = seed.wrapping_add(1);
     }
 }

@@ -17,7 +17,8 @@ fuzz = ["dep:rand", "dep:rand_chacha"]
 
 [dependencies]
 crow-core.workspace = true
-crow-fs.workspace = true
+# `testing` builds `--make-fixture` and the fuzzer's edge trees/churn.
+crow-fs = { workspace = true, features = ["testing"] }
 crow-macos.workspace = true
 crow-search.workspace = true
 crow-theme.workspace = true
