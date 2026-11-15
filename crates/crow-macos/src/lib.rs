@@ -7,6 +7,7 @@
 mod context_menu;
 mod drag;
 mod files;
+mod fonts;
 mod icons;
 mod metadata;
 mod names;
@@ -18,6 +19,7 @@ mod volumes;
 pub use context_menu::{ContextMenuEntry, MenuShortcut, show_context_menu};
 pub use drag::{ComboDrag, begin_drag, remember_mouse_down};
 pub use files::{SystemTrash, open_path, pasteboard_change_count, read_file_urls, write_file_urls};
+pub use fonts::available_font_families;
 pub use icons::icon_png;
 pub use metadata::{kind_name, tags, thumbnail_png};
 pub use names::display_components;

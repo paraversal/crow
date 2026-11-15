@@ -91,14 +91,8 @@ pub fn init(cx: &mut App) {
         crate::window::open(home, false, None, cx);
     });
     cx.on_action(|_: &act::About, _| crow_macos::show_about_panel());
-    cx.on_action(|_: &act::OpenSettings, cx| {
-        let path = cx.global::<Ui>().config_dir.join("settings.toml");
-        if !crow_macos::open_in_default_app(&path) {
-            let message = format!("Couldn't open {}: no app is set to open .toml files", path.display());
-            crate::operations::message(message, true, cx);
-            cx.refresh_windows();
-        }
-    });
+    cx.on_action(|_: &act::OpenSettings, cx| crate::settings_window::open(cx));
+    cx.on_action(|_: &act::EditSettings, cx| crate::ui::edit_settings_file(cx));
     cx.on_action(|_: &act::HideApp, cx| cx.hide());
     cx.on_action(|_: &act::HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &act::ShowAll, cx| cx.unhide_other_apps());

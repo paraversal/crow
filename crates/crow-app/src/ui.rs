@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crow_core::motion::Effective;
+use crow_core::motion::{Effective, MotionMode, SoundSet};
 use crow_core::{
-    Exclude, Recent, RecentCommands, Settings, SidebarConfig, Views, load_settings, load_sidebar, load_views,
+    AppIcon, Exclude, HintsMode, KeymapLayer, Recent, RecentCommands, Settings, SidebarConfig, Views, load_settings,
+    load_sidebar, load_views,
 };
 use crow_theme::Theme;
 use gpui::{App, AppContext, Global, SharedString};
@@ -116,6 +117,15 @@ impl Ui {
     #[cfg(test)]
     pub fn fade_duration(&self) -> Option<Duration> {
         self.fade.as_ref().map(|(_, _, duration)| *duration)
+    }
+
+    /// A broken `settings.toml`, with the config dir stripped so the settings
+    /// window can say "settings.toml line 3: …".
+    pub fn settings_error(&self) -> Option<SharedString> {
+        let message = self.errors[SETTINGS].as_ref()?;
+        let dir = self.config_dir.display().to_string();
+        let text = message.strip_prefix(&dir).map_or(message.as_str(), |rest| rest.trim_start_matches('/'));
+        Some(text.to_owned().into())
     }
 
     /// The first config file problem and the file it names, with the config dir
@@ -356,6 +366,8 @@ pub fn reload_config(cx: &mut App) {
     }
     if settings {
         crate::menus::refresh(cx);
+        let show_hidden = cx.global::<Ui>().settings.show_hidden_files;
+        crate::window::apply_show_hidden(show_hidden, cx);
     }
     refresh_feedback(cx);
     refresh_app_icon(cx);
@@ -384,15 +396,144 @@ pub fn refresh_app_icon(cx: &mut App) {
     crow_macos::set_app_icon(app_icon_png(icon));
 }
 
-/// View ▸ Show/Hide Preview: remember the choice for every window and the next launch.
-pub fn set_show_preview(show: bool, cx: &mut App) {
-    if cx.global::<Ui>().settings.show_preview == show {
+/// One change from the settings window or a menu toggle. `set_setting` applies it
+/// to `Ui.settings` at once, then writes only that key to `settings.toml`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SettingChange {
+    Theme(String),
+    Keymap(KeymapLayer),
+    Hints(HintsMode),
+    Motion(MotionMode),
+    Sound(SoundSet),
+    AppIcon(AppIcon),
+    FontFamily(String),
+    FontSize(f32),
+    ShowHiddenFiles(bool),
+    ShowPreview(bool),
+    PaletteRecentCommands(bool),
+    ViewPerFolder(bool),
+    WindowWidth(u32),
+    WindowHeight(u32),
+}
+
+/// Apply `change` in memory, update everything that follows from it, and write
+/// the one key off the main thread. A write failure goes to the status line.
+pub fn set_setting(change: SettingChange, cx: &mut App) {
+    let changed = {
+        let settings = &mut cx.global_mut::<Ui>().settings;
+        match &change {
+            SettingChange::Theme(value) => replace(&mut settings.theme, value.clone()),
+            SettingChange::Keymap(value) => replace(&mut settings.keymap, *value),
+            SettingChange::Hints(value) => replace(&mut settings.hints, *value),
+            SettingChange::Motion(value) => replace(&mut settings.motion, *value),
+            SettingChange::Sound(value) => replace(&mut settings.sound, *value),
+            SettingChange::AppIcon(value) => replace(&mut settings.app_icon, *value),
+            SettingChange::FontFamily(value) => replace(&mut settings.font_family, value.clone()),
+            SettingChange::FontSize(value) => replace(&mut settings.font_size, *value),
+            SettingChange::ShowHiddenFiles(value) => replace(&mut settings.show_hidden_files, *value),
+            SettingChange::ShowPreview(value) => replace(&mut settings.show_preview, *value),
+            SettingChange::PaletteRecentCommands(value) => replace(&mut settings.palette_recent_commands, *value),
+            SettingChange::ViewPerFolder(value) => replace(&mut settings.view_per_folder, *value),
+            SettingChange::WindowWidth(value) => replace(&mut settings.window.width, *value),
+            SettingChange::WindowHeight(value) => replace(&mut settings.window.height, *value),
+        }
+    };
+    if !changed {
         return;
     }
-    cx.global_mut::<Ui>().settings.show_preview = show;
-    write_config(SETTINGS, move |config, _| crow_core::save_bool_setting(config, "show_preview", show), cx);
-    crate::menus::refresh(cx);
+    match &change {
+        SettingChange::Theme(_) => {
+            cx.global_mut::<Ui>().preview_theme = None;
+            reload_theme(cx);
+        }
+        SettingChange::AppIcon(_) => refresh_app_icon(cx),
+        SettingChange::Motion(_) | SettingChange::Sound(_) => refresh_feedback(cx),
+        SettingChange::ShowHiddenFiles(show) => crate::window::apply_show_hidden(*show, cx),
+        SettingChange::ShowPreview(_) => crate::menus::refresh(cx),
+        _ => {}
+    }
     cx.refresh_windows();
+    write_setting(change, cx);
+}
+
+fn replace<T: PartialEq>(slot: &mut T, value: T) -> bool {
+    if *slot == value {
+        return false;
+    }
+    *slot = value;
+    true
+}
+
+fn write_setting(change: SettingChange, cx: &mut App) {
+    match change {
+        SettingChange::Theme(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "theme", &value), cx);
+        }
+        SettingChange::Keymap(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "keymap", value.key()), cx);
+        }
+        SettingChange::Hints(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "hints", value.key()), cx);
+        }
+        SettingChange::Motion(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "motion", value.key()), cx);
+        }
+        SettingChange::Sound(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "sound", value.key()), cx);
+        }
+        SettingChange::AppIcon(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "app_icon", value.key()), cx);
+        }
+        SettingChange::FontFamily(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "font_family", &value), cx);
+        }
+        SettingChange::FontSize(value) => {
+            write_config(
+                SETTINGS,
+                move |config, _| crow_core::save_number_setting(config, "font_size", f64::from(value)),
+                cx,
+            );
+        }
+        SettingChange::ShowHiddenFiles(value) => {
+            write_config(
+                SETTINGS,
+                move |config, _| crow_core::save_bool_setting(config, "show_hidden_files", value),
+                cx,
+            );
+        }
+        SettingChange::ShowPreview(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_bool_setting(config, "show_preview", value), cx);
+        }
+        SettingChange::PaletteRecentCommands(value) => {
+            write_config(
+                SETTINGS,
+                move |config, _| crow_core::save_bool_setting(config, "palette_recent_commands", value),
+                cx,
+            );
+        }
+        SettingChange::ViewPerFolder(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_bool_setting(config, "view_per_folder", value), cx);
+        }
+        SettingChange::WindowWidth(value) => {
+            write_config(
+                SETTINGS,
+                move |config, _| crow_core::save_table_number(config, "window", "width", i64::from(value)),
+                cx,
+            );
+        }
+        SettingChange::WindowHeight(value) => {
+            write_config(
+                SETTINGS,
+                move |config, _| crow_core::save_table_number(config, "window", "height", i64::from(value)),
+                cx,
+            );
+        }
+    }
+}
+
+/// View ▸ Show/Hide Preview: remember the choice for every window and the next launch.
+pub fn set_show_preview(show: bool, cx: &mut App) {
+    set_setting(SettingChange::ShowPreview(show), cx);
 }
 
 /// Re-resolve the theme (after an index change, a settings change, an appearance
@@ -474,12 +615,32 @@ fn run_fade(cx: &mut App) {
 
 /// The theme to apply after the picker: write it to `settings.toml` and show it.
 pub fn choose_theme(id: &str, cx: &mut App) {
-    let ui = cx.global_mut::<Ui>();
-    ui.preview_theme = None;
-    ui.settings.theme = id.to_owned();
-    let id = id.to_owned();
-    write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "theme", &id), cx);
-    reload_theme(cx);
+    set_setting(SettingChange::Theme(id.to_owned()), cx);
+}
+
+/// Open `settings.toml` in its default app, with the same failure message the
+/// old ⌘, showed when no app owns `.toml` files.
+pub fn edit_settings_file(cx: &mut App) {
+    open_config_file("settings.toml", cx);
+}
+
+/// Open `name` from the config folder in its default app.
+pub fn open_config_file(name: &str, cx: &mut App) {
+    let path = cx.global::<Ui>().config_dir.join(name);
+    if !crow_macos::open_in_default_app(&path) {
+        let message = format!("Couldn't open {}: no app is set to open .toml files", path.display());
+        crate::operations::message(message, true, cx);
+        cx.refresh_windows();
+    }
+}
+
+/// Show the config folder in Finder.
+pub fn open_config_folder(cx: &mut App) {
+    let dir = cx.global::<Ui>().config_dir.clone();
+    if !crow_macos::open_folder_in_finder(&dir) {
+        crate::operations::message(format!("Couldn't open {} in Finder", dir.display()), true, cx);
+        cx.refresh_windows();
+    }
 }
 
 /// "Apply to all apps": make `theme` the global choice for its variant and follow it here.
@@ -679,6 +840,39 @@ mod tests {
         theme.id = "other".into();
         theme.palette.insert("accent".into(), Rgb(0x123456));
         theme
+    }
+
+    #[gpui::test]
+    fn each_setting_writes_only_its_key(cx: &mut gpui::TestAppContext) {
+        let config = cx.update(crate::ui::init_for_tests);
+        cx.update(crate::menus::init_for_tests);
+        let before = "# mine\n\ntheme = \"system\" # theme\nkeymap = \"finder\"\nhints = \"auto\"\nmotion = \"auto\"\nsound = \"crow\"\napp_icon = \"refined\"\nfont_family = \"\"\nfont_size = 13.0\nshow_hidden_files = true\nshow_preview = true\npalette_recent_commands = true\nview_per_folder = true\n\n[window]\nwidth = 1200\nheight = 760\n";
+        let changes = [
+            SettingChange::Theme("gruvbox-dark-hard".into()),
+            SettingChange::Keymap(KeymapLayer::Vim),
+            SettingChange::Hints(HintsMode::Always),
+            SettingChange::Motion(MotionMode::Off),
+            SettingChange::Sound(SoundSet::Finder),
+            SettingChange::AppIcon(AppIcon::Sun),
+            SettingChange::FontFamily("Menlo".into()),
+            SettingChange::FontSize(14.0),
+            SettingChange::ShowHiddenFiles(false),
+            SettingChange::ShowPreview(false),
+            SettingChange::PaletteRecentCommands(false),
+            SettingChange::ViewPerFolder(false),
+            SettingChange::WindowWidth(900),
+            SettingChange::WindowHeight(640),
+        ];
+        for change in changes {
+            std::fs::write(config.join("settings.toml"), before).expect("write settings");
+            cx.update(crate::ui::reload_config);
+            cx.update(|cx| set_setting(change.clone(), cx));
+            cx.run_until_parked();
+            let after = std::fs::read_to_string(config.join("settings.toml")).expect("read settings");
+            let changed: Vec<_> = before.lines().zip(after.lines()).filter(|(old, new)| old != new).collect();
+            assert_eq!(changed.len(), 1, "{change:?} changed {changed:?}\n{after}");
+        }
+        std::fs::remove_dir_all(config.parent().unwrap()).ok();
     }
 
     #[gpui::test]

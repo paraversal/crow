@@ -12,12 +12,12 @@ use crow_search::FuzzyMatcher;
 use gpui::{Action, SharedString};
 
 use crate::actions::{
-    AddToSidebar, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, Eject, GoBack, GoForward,
-    GoToFolder, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent,
-    OpenSelection, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView,
-    SearchEverything, SearchReveal, SelectAll, ShowCommandPalette, ShowInFinder, ShowSearch, ShowThemePicker,
-    StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles, TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns,
-    ViewAsList, WhyThisView,
+    AddToSidebar, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, EditSettings, Eject, GoBack,
+    GoForward, GoToFolder, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow,
+    OpenParent, OpenSelection, OpenSettings, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar,
+    Rename, ResetFolderView, SearchEverything, SearchReveal, SelectAll, ShowCommandPalette, ShowInFinder, ShowSearch,
+    ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles, TogglePreview, Undo,
+    UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -108,6 +108,8 @@ pub enum CommandId {
     UseViewAsDefaults,
     ResetFolderView,
     ShowThemePicker,
+    OpenSettings,
+    EditSettings,
     ToggleActivity,
     RemoveFromSidebar,
     MoveFavoriteUp,
@@ -176,6 +178,8 @@ impl CommandId {
             CommandId::UseViewAsDefaults => "use-view-as-defaults",
             CommandId::ResetFolderView => "reset-folder-view",
             CommandId::ShowThemePicker => "show-theme-picker",
+            CommandId::OpenSettings => "open-settings",
+            CommandId::EditSettings => "edit-settings",
             CommandId::ToggleActivity => "toggle-activity",
             CommandId::RemoveFromSidebar => "remove-from-sidebar",
             CommandId::MoveFavoriteUp => "move-favorite-up",
@@ -470,6 +474,22 @@ pub const COMMANDS: &[Command] = &[
         action: &ShowThemePicker,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Theme…" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::OpenSettings,
+        label: "Settings",
+        action: &OpenSettings,
+        scope: KeyScope::Window,
+        menu: None,
+        palette: true,
+    },
+    Command {
+        id: CommandId::EditSettings,
+        label: "Edit settings.toml",
+        action: &EditSettings,
+        scope: KeyScope::Window,
+        menu: None,
         palette: true,
     },
     // Go

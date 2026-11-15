@@ -97,6 +97,7 @@ actions!(
         // App menu
         About,
         OpenSettings,
+        EditSettings,
         HideApp,
         HideOthers,
         ShowAll,

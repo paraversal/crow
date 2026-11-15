@@ -102,6 +102,8 @@ pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
+    /// A stepper's value and range, for VoiceOver's numeric announcement.
+    numeric: Option<Numeric>,
     /// Spoken name when it differs from the placeholder.
     aria_label: Option<SharedString>,
     /// Whether to draw the field box. Bare inputs sit inside a field the parent draws.
@@ -158,6 +160,15 @@ enum EditKind {
 
 const HISTORY_LIMIT: usize = 100;
 
+/// A stepper field's value and range, announced as a spin button.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Numeric {
+    pub value: f64,
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+}
+
 impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl TextInput {
@@ -168,6 +179,7 @@ impl TextInput {
             focus_handle: cx.focus_handle(),
             content,
             placeholder: placeholder.into(),
+            numeric: None,
             aria_label: None,
             chrome: true,
             report_backspace_at_start: false,
@@ -238,6 +250,22 @@ impl TextInput {
     pub fn with_aria_label(mut self, label: impl Into<SharedString>) -> Self {
         self.aria_label = Some(label.into());
         self
+    }
+
+    /// Announce this field as a spin button with `value` in `min..=max`.
+    pub fn with_numeric_range(mut self, value: f64, min: f64, max: f64, step: f64) -> Self {
+        self.numeric = Some(Numeric { value, min, max, step });
+        self
+    }
+
+    /// Keep the announced value in step with the setting.
+    pub fn set_numeric_value(&mut self, value: f64, cx: &mut Context<Self>) {
+        if let Some(numeric) = &mut self.numeric
+            && numeric.value != value
+        {
+            numeric.value = value;
+            cx.notify();
+        }
     }
 
     pub fn set_aria_label(&mut self, label: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -1031,6 +1059,7 @@ impl Render for TextInput {
         }
         let theme = cx.global::<Ui>().theme.clone();
         let chrome = self.chrome;
+        let numeric = self.numeric;
         let mode = cx.global::<Ui>().feedback.mode;
         let now = Instant::now();
         let refuse_look = self.refuse.and_then(|(_, started)| {
@@ -1051,6 +1080,13 @@ impl Render for TextInput {
             .aria_label(self.aria_label.clone().unwrap_or_else(|| self.placeholder.clone()))
             .aria_placeholder(self.placeholder.clone())
             .aria_value(self.content.clone())
+            .when_some(numeric, |field, numeric| {
+                field
+                    .aria_numeric_value(numeric.value)
+                    .aria_min_numeric_value(numeric.min)
+                    .aria_max_numeric_value(numeric.max)
+                    .aria_numeric_value_step(numeric.step)
+            })
             .flex()
             .relative()
             .when_some(refuse_look, |field, look| field.left(px(look.dx)))
