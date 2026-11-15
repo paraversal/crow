@@ -4629,6 +4629,29 @@ fn sorting_keeps_folders_first_and_the_selection(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn sorting_while_a_folder_loads_keeps_its_listing(cx: &mut TestAppContext) {
+    let root = fixture("sort-while-loading");
+    let (view, mut cx) = open(cx, &root);
+    // Enter alpha: its new Folder starts loading with no rows yet.
+    view.update(&mut cx, |window, cx| {
+        let dir = window.pane().read(cx).current_dir(cx).join("alpha");
+        window.pane().update(cx, |pane, cx| pane.navigate(dir, cx));
+    });
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    assert!(folder.read_with(&cx, |folder, _| folder.is_loading()), "the new folder is still loading");
+    assert!(names(&view, &cx).is_empty(), "no rows before the load");
+    // Hold the re-sort in flight until after the load has landed. Before the fix,
+    // the sort applied the empty listing captured before the load and wiped it.
+    folder.update(&mut cx, |folder, _| folder.set_sort_delay(Duration::from_millis(100)));
+    pane(&view, &cx)
+        .update(&mut cx, |pane, cx| pane.set_sort(crow_fs::Sort::default().toggled(crow_fs::SortKey::Size), cx));
+    settle(&view, &mut cx);
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+    assert_eq!(names(&view, &cx), ["inner"], "the load that finished during the sort survives");
+}
+
+#[gpui::test]
 fn exclude_config_reloads_live_and_keeps_the_last_good_rules(cx: &mut TestAppContext) {
     let root = fixture("exclude-reload");
     let (view, mut cx) = open(cx, &root);

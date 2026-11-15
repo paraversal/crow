@@ -231,6 +231,9 @@ pub struct Folder {
     /// Tests hold an apply in flight to reproduce out-of-order batches.
     #[cfg(test)]
     apply_delay: Duration,
+    /// Tests hold a re-sort in flight to reproduce a stale result landing late.
+    #[cfg(test)]
+    sort_delay: Duration,
     _watcher: Option<FolderWatcher>,
     error: Option<SharedString>,
     _poll: Task<()>,
@@ -290,6 +293,8 @@ impl Folder {
             changes_tx: test_tx,
             #[cfg(test)]
             apply_delay: Duration::ZERO,
+            #[cfg(test)]
+            sort_delay: Duration::ZERO,
             _watcher: watcher,
             error: None,
             _poll: poll,
@@ -770,21 +775,54 @@ impl Folder {
             return;
         }
         self.sort = sort;
-        let mut entries = self.entries.as_ref().clone();
+        self.sort_children(sort, cx);
+        if self.loading {
+            // The in-flight load sorts with the order captured when it started;
+            // list again so its result arrives in this order.
+            self.load(cx);
+        } else {
+            self.resort(0, cx);
+        }
+    }
+
+    fn sort_children(&mut self, sort: Sort, cx: &mut Context<Self>) {
+        let children: Vec<Entity<Folder>> = self.children.values().map(|c| c.folder.clone()).collect();
+        for child in children {
+            child.update(cx, |child, cx| child.set_sort(sort, cx));
+        }
+    }
+
+    /// Re-sort the listing off the main thread. The sort runs on the entries captured
+    /// here; if the listing is replaced while it runs, its result is stale — sort the
+    /// newer listing instead (or list again after two conflicts).
+    fn resort(&mut self, attempt: u8, cx: &mut Context<Self>) {
+        let sort = self.sort;
+        let entries = self.entries.clone();
+        let to_sort = entries.clone();
+        #[cfg(test)]
+        let delay = self.sort_delay;
         cx.spawn(async move |this, cx| {
-            let entries = cx
+            let sorted = cx
                 .background_spawn(async move {
+                    let mut entries = to_sort.as_ref().clone();
                     crow_fs::sort_entries(&mut entries, &sort, &kind);
                     entries
                 })
                 .await;
+            #[cfg(test)]
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
             this.update(cx, |this, cx| {
-                if this.sort == sort {
-                    this.replace_entries(entries, cx);
-                    let children: Vec<Entity<Folder>> = this.children.values().map(|c| c.folder.clone()).collect();
-                    for child in children {
-                        child.update(cx, |child, cx| child.set_sort(sort, cx));
-                    }
+                if this.sort != sort {
+                    return;
+                }
+                if Arc::ptr_eq(&this.entries, &entries) {
+                    this.replace_entries(sorted, cx);
+                } else if attempt < 2 {
+                    this.resort(attempt + 1, cx);
+                } else {
+                    this.load(cx);
                 }
             })
             .ok();
@@ -1262,6 +1300,12 @@ impl Folder {
     #[cfg(test)]
     pub(crate) fn set_apply_delay(&mut self, delay: Duration) {
         self.apply_delay = delay;
+    }
+
+    /// Hold re-sorts in flight for `delay` (tests reproduce a stale sort landing late).
+    #[cfg(test)]
+    pub(crate) fn set_sort_delay(&mut self, delay: Duration) {
+        self.sort_delay = delay;
     }
 
     #[cfg(test)]
