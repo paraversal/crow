@@ -7544,14 +7544,17 @@ fn edge_tree_replay_lists_a_long_name(cx: &mut TestAppContext) {
 }
 
 /// H4 #7: replacing the shown root left some old rows, because a watcher event
-/// naming the root is not a child change. Looped when fixing (it was
-/// intermittent: about half the runs failed).
+/// naming the root is not a child change. FSEvents delivers that event on its
+/// own schedule: the bug failed 2 of 17 runs before the fix, so loop to make the
+/// guard reliable rather than depending on one lucky run.
 #[gpui::test]
 fn replacing_the_shown_folder_reloads(cx: &mut TestAppContext) {
     use crate::fuzz::Step;
     let tree = fuzz_tree("fuzz-replace-root", 40);
-    let found = replay(cx, &tree, 40, crate::script![Step::ReplaceShownFolder, Step::Settle]);
-    assert!(found.is_empty(), "{found:?}");
+    for run in 0..20 {
+        let found = replay(cx, &tree, 40, crate::script![Step::ReplaceShownFolder, Step::Settle]);
+        assert!(found.is_empty(), "run {run}: {found:?}");
+    }
 }
 
 /// H4 #6: a name with a newline used to panic GPUI's text shaping when its row
@@ -7571,6 +7574,48 @@ fn newline_in_a_name_does_not_panic_the_list(cx: &mut TestAppContext) {
         crate::script![Step::Resize(1280.0, 1000.0), Step::Keys("alt-down".into())],
     );
     assert!(found.is_empty(), "{found:?}");
+}
+
+/// H4 #6 follow-up: the delete sheet names the file, and the bar draws operation
+/// errors that name it. Both used to reach GPUI's text shaping raw.
+#[gpui::test]
+fn newline_in_a_name_does_not_panic_the_sheet_or_the_bar(cx: &mut TestAppContext) {
+    let root = fixture("newline-sheet-bar");
+    std::fs::write(root.join("line\nbreak.txt"), "x").expect("write");
+    let (view, mut cx) = open(cx, &root);
+    // Rows: alpha, beta, line\nbreak.txt, notes.txt.
+    cx.simulate_keystrokes("down down cmd-alt-backspace");
+    settle(&view, &mut cx);
+    assert!(sheet_open(&view, &cx), "the delete sheet is open");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    cx.update(|_, cx| crate::operations::message("“line\nbreak.txt” no longer exists", true, cx));
+    settle(&view, &mut cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let message = cx.update(|_, cx| {
+        cx.global::<crate::operations::Operations>().message.as_ref().map(|(text, _)| text.to_string())
+    });
+    assert_eq!(message.as_deref(), Some("“line break.txt” no longer exists"));
+}
+
+/// H4 #6 follow-up: the activity sheet draws a rename's old and new names.
+#[gpui::test]
+fn newline_in_a_rename_label_does_not_panic_the_activity(cx: &mut TestAppContext) {
+    let root = fixture("newline-activity");
+    std::fs::write(root.join("line\nbreak.txt"), "x").expect("write");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("down down enter");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("renamed.txt");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(!root.join("line\nbreak.txt").exists(), "the rename applied");
+    cx.simulate_keystrokes("alt-cmd-l");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.show_activity), "the activity sheet is open");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
 #[gpui::test]

@@ -1310,7 +1310,10 @@ impl CrowWindow {
         let (title, body): (String, gpui::AnyElement) = match sheet {
             Sheet::ConfirmDelete { paths, .. } => {
                 let what = match paths.as_slice() {
-                    [one] => format!("“{}”", one.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()),
+                    [one] => {
+                        let name = one.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                        format!("“{}”", crate::style::display_text(&name))
+                    }
                     many => format!("{} items", many.len()),
                 };
                 (
@@ -1501,12 +1504,10 @@ impl CrowWindow {
                     (None, true, _) => "cancelled".to_owned(),
                     _ => String::new(),
                 };
-                (
-                    i,
-                    e.record.label.clone(),
-                    format!("{} {state}", when.format("%H:%M")),
-                    e.record.is_undoable() && !e.undone,
-                )
+                // Rename labels carry both names; errors carry the path at fault.
+                let label = crate::style::display_text(&e.record.label).into_owned();
+                let state = crate::style::display_text(&state).into_owned();
+                (i, label, format!("{} {state}", when.format("%H:%M")), e.record.is_undoable() && !e.undone)
             })
             .collect();
         div()

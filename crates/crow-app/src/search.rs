@@ -1884,7 +1884,7 @@ impl SearchView {
                     if relative.as_os_str().is_empty() {
                         ".".to_owned()
                     } else {
-                        relative.to_string_lossy().into_owned()
+                        display_text(&relative.to_string_lossy()).into_owned()
                     }
                 })
                 .unwrap_or_else(|| crate::style::display_path(path, &self.home)),
