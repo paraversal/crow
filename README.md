@@ -11,11 +11,29 @@ Status: Phase 1 (the "daily driver" MVP): M6 and the UI overhaul are done; next 
 ./scripts/fetch-gpui.sh          # once: Zed's GPUI at a pinned commit, into vendor/, with patches/gpui-*.patch applied
 cargo run --release -p crow-app  # opens your home folder
 ./scripts/bundle.sh --open       # builds and opens target/bundle/Crow.app
-./scripts/bundle.sh --install    # ...and copies it to /Applications (CROW_INSTALL_DIR to change)
+./scripts/bundle.sh --install    # ...and copies it to /Applications, installs `crow` in ~/.local/bin
 ```
 
 Running as `Crow.app` makes macOS privacy prompts name Crow instead of your terminal. With a code-signing certificate named
 "Crow Dev" in your keychain (see `scripts/bundle.sh`), macOS keeps those permissions from one build to the next.
+## Command line
+
+`./scripts/bundle.sh --install` also installs the `crow` command into `$HOME/.local/bin`
+(or `CROW_BIN_DIR`), creating the directory if needed. It prints a note if that directory
+isn't on your PATH.
+
+```bash
+crow ~/Downloads          # a new window on the folder
+crow .                    # the current folder
+crow notes.txt            # its folder, with the file selected
+crow                      # bring Crow to the front
+```
+
+The command is a small shell script that runs `open -a /Applications/Crow.app`; it is not a
+copy of the app, so rebuilding or reinstalling Crow at that path needs no update. If you move
+Crow, set `CROW_APP` or reinstall the command. The `crow` binary itself takes a directory too
+(`cargo run --release -p crow-app -- DIR`), but launching the bundle through `open -a` keeps
+macOS privacy prompts naming Crow.
 
 ## Layout
 

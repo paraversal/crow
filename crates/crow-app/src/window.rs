@@ -78,6 +78,28 @@ pub fn open(
         .ok()
 }
 
+/// Open a path from the command line: a folder in a new window, a file in its
+/// folder with the file selected. `is_dir` comes from the caller's background stat.
+pub fn open_path(path: PathBuf, is_dir: bool, cx: &mut App) {
+    let (dir, reveal) = if is_dir {
+        (path, None)
+    } else {
+        let parent = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/"));
+        (parent, Some(path))
+    };
+    let Some(handle) = open(dir, false, None, cx) else { return };
+    cx.defer(move |cx| {
+        handle
+            .update(cx, |this, window, cx| {
+                if let Some(path) = reveal {
+                    this.pane().update(cx, |pane, cx| pane.reveal(path, cx));
+                }
+                window.activate_window();
+            })
+            .ok();
+    });
+}
+
 /// What `CrowWindow::open_search` starts from. U3 reuses it with a query.
 pub struct SearchStart {
     pub folder: PathBuf,
@@ -6677,6 +6699,33 @@ mod tests {
         assert!(asking, "the Stop and Quit sheet is up");
         assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "nothing is cancelled before the answer");
         app.update(|cx| cx.global_mut::<Operations>().running = None);
+    }
+
+    #[gpui::test]
+    fn open_path_opens_a_folder_and_reveals_a_file(cx: &mut TestAppContext) {
+        let root = fixture("open-path");
+        let (_view, mut cx) = open(cx, &root);
+
+        let folder = root.join("alpha");
+        cx.update(|_, cx| open_path(folder.clone(), true, cx));
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| cx.windows().len()), 2);
+        let handle = cx.update(|_, cx| cx.windows()[1].downcast::<CrowWindow>().expect("folder window"));
+        let mut folder_cx = VisualTestContext::from_window(handle.into(), &cx);
+        let folder_view = handle.root(&mut folder_cx).expect("root view");
+        settle(&folder_view, &mut folder_cx);
+        assert_eq!(dir(&folder_view, &folder_cx), folder);
+
+        let file = root.join("notes.txt");
+        cx.update(|_, cx| open_path(file.clone(), false, cx));
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| cx.windows().len()), 3);
+        let handle = cx.update(|_, cx| cx.windows()[2].downcast::<CrowWindow>().expect("file window"));
+        let mut file_cx = VisualTestContext::from_window(handle.into(), &cx);
+        let file_view = handle.root(&mut file_cx).expect("root view");
+        settle(&file_view, &mut file_cx);
+        assert_eq!(dir(&file_view, &file_cx), root);
+        assert_eq!(selected(&file_view, &file_cx).as_deref(), Some("notes.txt"));
     }
 
     #[gpui::test]

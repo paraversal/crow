@@ -5,9 +5,11 @@
 #   scripts/bundle.sh             build and sign (see Signing below)
 #   scripts/bundle.sh --open      ...then launch it
 #   scripts/bundle.sh --install   ...then copy it to /Applications (replacing an older Crow)
+#                                 and install the `crow` command for the terminal
 #
 # The options combine: `--install --open` launches the installed copy.
-# Set CROW_INSTALL_DIR to install somewhere else (e.g. ~/Applications).
+# Set CROW_INSTALL_DIR to install the app somewhere else (e.g. ~/Applications);
+# set CROW_BIN_DIR to put the `crow` command elsewhere (default ~/.local/bin).
 #
 #
 # Signing: with a code-signing certificate named "Crow Dev" in the keychain, every build
@@ -80,6 +82,26 @@ if $install; then
   ditto "$app" "$dest_dir/Crow.app"
   app="$dest_dir/Crow.app"
   echo "installed $app"
+
+  # The command is a small shell script, not a copy of the app: it runs `open -a`,
+  # so reinstalling or rebuilding Crow at the same path needs no update.
+  bin_dir="${CROW_BIN_DIR:-$HOME/.local/bin}"
+  mkdir -p "$bin_dir" 2>/dev/null || true
+  if [ ! -d "$bin_dir" ]; then
+    echo "crow command: $bin_dir does not exist; set CROW_BIN_DIR" >&2
+  elif [ -w "$bin_dir" ]; then
+    install -m 755 scripts/crow "$bin_dir/crow"
+    echo "installed $bin_dir/crow"
+    case ":$PATH:" in
+      *":$bin_dir:"*) ;;
+      *) echo "note: add $bin_dir to PATH to run \`crow\`" >&2 ;;
+    esac
+    if [ "$app" != "/Applications/Crow.app" ]; then
+      echo "note: $bin_dir/crow points at /Applications/Crow.app; set CROW_APP=$app" >&2
+    fi
+  else
+    echo "crow command: cannot write $bin_dir; set CROW_BIN_DIR to a writable directory" >&2
+  fi
 fi
 
 if $open_after; then open "$app"; fi
