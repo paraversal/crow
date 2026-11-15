@@ -57,3 +57,23 @@ fn resolve_root(dir: &Path) -> PathBuf {
         _ => dir.to_path_buf(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_a_removed_folder_through_its_parent() {
+        let root = std::env::temp_dir().join(format!("crow-watch-resolve-{}", std::process::id()));
+        let dir = root.join("gone");
+        std::fs::create_dir_all(&dir).expect("create dir");
+        // The pane may name the folder through a symlinked ancestor (`/tmp` for
+        // `/private/tmp`), and a root event can arrive after the folder is gone.
+        let alias = root.canonicalize().expect("canonical parent").join("gone");
+        let canonical = dir.canonicalize().expect("canonical dir");
+        assert_eq!(resolve_root(&alias), canonical, "an existing folder resolves");
+        std::fs::remove_dir_all(&dir).expect("remove dir");
+        assert_eq!(resolve_root(&alias), canonical, "a removed folder keeps its resolved name");
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
