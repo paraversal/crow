@@ -215,10 +215,6 @@ pub struct Tree {
 }
 
 impl Tree {
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// Direct children in the root, as the disk reported them after creation.
     pub fn entries(&self) -> usize {
         self.entries
@@ -468,10 +464,6 @@ impl ChurnHandle {
         self.operations.load(Ordering::Relaxed)
     }
 
-    pub fn stop(mut self) {
-        self.stop_inner();
-    }
-
     fn stop_inner(&mut self) {
         let Some(thread) = self.thread.take() else { return };
         {
@@ -680,35 +672,58 @@ mod tests {
         out
     }
 
+    /// How many direct children each kind puts in the root. `NfcNfdTwins` is 1 on
+    /// APFS (normalization-insensitive) and 2 where both spellings can exist.
+    fn expected(kind: EdgeKind) -> std::ops::RangeInclusive<usize> {
+        let n = match kind {
+            EdgeKind::NfcNfdTwins => return 1..=2,
+            EdgeKind::LongName => 2,
+            EdgeKind::Emoji => 4,
+            EdgeKind::Rtl => 3,
+            EdgeKind::LeadingDot => 2,
+            EdgeKind::Spaces => 3,
+            EdgeKind::Newline => 1,
+            EdgeKind::Deep(_) => 1,
+            EdgeKind::Wide(n) => n,
+            EdgeKind::SymlinkLoop => 2,
+            EdgeKind::DanglingSymlink => 1,
+            EdgeKind::Unreadable => 2,
+            EdgeKind::Package => 1,
+            EdgeKind::Hardlinks => 2,
+            EdgeKind::EmptyFolder => 1,
+            EdgeKind::HugeFile => 1,
+        };
+        n..=n
+    }
+
     #[test]
     fn each_kind_builds_and_lists() {
-        let kinds = [
-            EdgeKind::LongName,
-            EdgeKind::NfcNfdTwins,
-            EdgeKind::Emoji,
-            EdgeKind::Rtl,
-            EdgeKind::LeadingDot,
-            EdgeKind::Spaces,
-            EdgeKind::Newline,
-            EdgeKind::Deep(20),
-            EdgeKind::Wide(25),
-            EdgeKind::SymlinkLoop,
-            EdgeKind::DanglingSymlink,
-            EdgeKind::Unreadable,
-            EdgeKind::Package,
-            EdgeKind::Hardlinks,
-            EdgeKind::EmptyFolder,
-            EdgeKind::HugeFile,
-        ];
+        let small = EdgeTree::small();
+        let kinds = small.kinds().iter().copied().chain([EdgeKind::Wide(25), EdgeKind::HugeFile]);
         for kind in kinds {
             let root = temp(&format!("kind-{}", kind.label()));
             let tree = make_tree(&root, &EdgeTree::single(kind), 1).expect("make tree");
-            assert_eq!(tree.entries(), std::fs::read_dir(&root).unwrap().count(), "{kind:?}");
             let names = listed(&root);
+            assert!(expected(kind).contains(&names.len()), "{kind:?}: {names:?}");
             assert_eq!(names.len(), tree.entries(), "{kind:?}: {names:?}");
             tree.remove().expect("remove tree");
             assert!(!root.exists(), "{kind:?} cleaned up");
         }
+    }
+
+    /// One bad child (unreadable, looping, dangling, newline) must not fail the
+    /// listing of the folder that holds all of them.
+    #[test]
+    fn every_small_kind_lists_in_one_folder() {
+        let root = temp("small");
+        let tree = make_tree(&root, &EdgeTree::small(), 1).expect("make tree");
+        let names = listed(&root);
+        let (low, high) = EdgeTree::small()
+            .kinds()
+            .iter()
+            .fold((0, 0), |(low, high), kind| (low + expected(*kind).start(), high + expected(*kind).end()));
+        assert!((low..=high).contains(&names.len()), "{low}..={high}: {names:?}");
+        tree.remove().expect("remove tree");
     }
 
     #[test]
