@@ -5,8 +5,9 @@ Work that is too big for a fix list and belongs after U11 (the finish pass), wit
 Items move here from fix lists when they turn out larger than the list can hold. Say where each one came from.
 
 ## D1 Robustness fuzzing for the UI (direction)
-**From:** the user's notes, 2026-11-14: "fuzzing script for UI robustness? i.e. erratic input to see if anything unexpected happens, edge cases like long names or huge directories, see what slows it down (some of these could also be tackled with tests, like long file names)". The "tests" half went to `ui-overhaul/u10-finish.md` I4 (edge-case layout checks).
+**From:** the user's notes, 2026-11-14: "fuzzing script for UI robustness? i.e. erratic input to see if anything unexpected happens, edge cases like long names or huge directories, see what slows it down (some of these could also be tackled with tests, like long file names)". The "tests" half went to `done/u11-finish.md` I4 (edge-case layout checks).
 **Why:** each U plan tests its own keys and states. Nobody tests random sequences across overlays, focus contexts, views and the file system changing underneath. U7-fix X7 (a deleted file staying in the list, seen once) is the kind of bug this would find.
+**Planned:** M7, [`m7/README.md`](m7/README.md) (H1 fuzzer, H2 edge trees and churn, H3 slowness finder, H4 fixes), 2026-11-15. The sketch below is kept for history.
 **Shape to plan:**
 - **Action fuzzer.** Random but reproducible (seeded) sequences of keystrokes and mouse actions drawn from the live keymap and menu registry, run in the GPUI test platform (`simulate_keystrokes`, `crate::ui::init_for_tests`) over generated temp trees. After every step, check invariants:
   - no panic;

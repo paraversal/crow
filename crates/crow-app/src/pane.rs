@@ -966,13 +966,7 @@ impl Pane {
                 this.schedule_filter_announce(cx);
                 cx.notify();
             }
-            TextInputEvent::Confirmed => {
-                this.open_selected(cx);
-                if this.filtering.is_none() {
-                    this.focus_list_after_filter = false;
-                    window.focus(&this.focus, cx);
-                }
-            }
+            TextInputEvent::Confirmed => this.focus_matches(window, cx),
             TextInputEvent::Cancelled => this.close_filter(window, cx),
             TextInputEvent::CompletionRequested => {}
             TextInputEvent::BackspaceAtStart => {}
@@ -980,6 +974,24 @@ impl Pane {
         let focus = input.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         self.filtering = Some(Filtering { input, _subscription: subscription });
+        cx.notify();
+    }
+
+    /// Return in the filter field: move into the matches, on the selected one (the
+    /// first, unless the arrows moved). The filter stays; Esc in the list clears it.
+    /// With no matches the field keeps focus.
+    fn focus_matches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let folder = self.focused_folder().clone();
+        if folder.read(cx).row_count() == 0 {
+            if let Some(input) = self.filtering.as_ref().map(|filtering| filtering.input.clone()) {
+                crate::feedback::refuse(crate::feedback::RefuseTarget::Field(&input), window, cx);
+            }
+            return;
+        }
+        if self.cursor_entry(cx).is_none() {
+            folder.update(cx, |folder, cx| folder.select_only(0, cx));
+        }
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 

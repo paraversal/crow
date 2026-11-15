@@ -195,6 +195,13 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Activity | Cmd-Option-L lists recent operations; Undo on an older one works or explains why not. |
 | Close during an operation | Copy a large folder to another disk, then ⌘W the only window (or click its red button, or ⌘Q): a sheet asks. Esc keeps the copy running; Return stops it and closes (or quits) once it has wound down. With a second window open, closing one does not ask. |
 
+### Command line
+
+| Check | How |
+| --- | --- |
+| App icon | `./scripts/bundle.sh --open`: Finder, the Dock and ⌘Tab show the icon named by `app_icon` (refined when unset). Change `app_icon` in `settings.toml` to sun, graphite and bone while Crow runs: the Dock icon follows each save; a bad value shows the error in the status line and keeps the icon. Rebundle: Finder shows the new choice. Check the 16 px icon in a Finder list. |
+| `crow` shim | `./scripts/bundle.sh --install` installs the app and the `crow` command into `~/.local/bin` (or `CROW_BIN_DIR`). With Crow running, `crow ~/Downloads` opens a new window there, `crow notes.txt` opens its folder with the file selected, and `crow` brings Crow forward. Quit Crow and repeat: the requested path is the first window, not Home. Paths with spaces work. |
+
 ### Whole window, themes, VoiceOver
 
 | Check | How |

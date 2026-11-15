@@ -11,7 +11,7 @@ This plan builds almost nothing new. It checks that nine PRs built by different 
 ## Why
 "Today, annotated" lists eight findings on screen and four "not on screen, from the code". U1–U10 each fix part of them, in separate PRs, against separate boards. Nobody has yet looked at the whole window: band heights, keycap weights, focus rings and selection fills were each chosen in a different PR, and README/testing.md were each edited in pieces. Finding 6 ("Dead quarter") is not owned by any U plan (see Questions, Q2).
 
-![Today, annotated: the app after M6 with eight numbered findings](img/today-annotated.png)
+![Today, annotated: the app after M6 with eight numbered findings](../ui-overhaul/img/today-annotated.png)
 The as-built window (column view of ~, FireBox): toolbar with only back/forward/title (1), glyph view switch (2), three fills (3), twin "git" (4), orange disk bar (5), empty right quarter (6), one status slot (7), good path bar (8).
 
 ## Decided
@@ -43,63 +43,63 @@ Read on `m6-filter-palette-search` (= PR #7). U1–U10 will have changed most of
 ## Target
 The finished window equals the assembled boards wherever a U plan doesn't say otherwise.
 
-![Target: column view while filtering, with the new top band and bottom bar](img/assembled-filter.png)
+![Target: column view while filtering, with the new top band and bottom bar](../ui-overhaul/img/assembled-filter.png)
 Column view of `crates/crow-core/src` filtering "vi": 52 px band (back/forward icons, title, view switch, "Go to ⌘K", "Search src ⌘F"), 220 px sidebar with twin "src crow-core / crow-app" and neutral disk bar, filter field inside the focused column with "2 of 9" and esc, footer "“vi” in all of crow-core ⌘F", preview filling the rest, bottom bar "↵ open · esc clear · ⌘F search deeper | 1 of 2 shown · 1.2 KB".
 
-![Target: search mode with the field in the toolbar, scope bar, results and preview](img/assembled-search.png)
+![Target: search mode with the field in the toolbar, scope bar, results and preview](../ui-overhaul/img/assembled-search.png)
 Search mode: field grown over the title with accent ring and All/Names/Contents, "Done esc"; scope bar "Search file-crow / Home / This Mac" with "Skip dev folders" switch; Name/Folder/Modified (no Kind); content hits with line numbers; footer "44 results in 15 files · 38 folders skipped › … Search everything ⌘⇧A"; preview with the hit lines; bottom bar "↵ open · ⌘R reveal · Space Quick Look | 1 of 44 selected".
 
 Gallery of the picked variants (check every one against the app in I4):
 
-![Top band B](img/top-band-b.png)
+![Top band B](../ui-overhaul/img/top-band-b.png)
 Band B: drawn chevrons, title, segmented list/columns, "Go to ⌘K", search field "Search me ⌘F"; tooltip "Back to Desktop ⌘[" under the back button.
 
-![Top band D](img/top-band-d.png)
+![Top band D](../ui-overhaul/img/top-band-d.png)
 Band D: field with accent ring across the band, All/Names/Contents, "Done esc". It also shows a scope token "in file-crow ⌄" and "names + contents" inside the field, which the assembled board and U3 do not; follow U3.
 
-![Filter B](img/filter-b.png)
+![Filter B](../ui-overhaul/img/filter-b.png)
 Filter B: field as the first row of the focused column, accent "/", "2 of 9", esc keycap, matched letters in accent, footer row with ⌘F.
 
-![Filter D](img/filter-d.png)
+![Filter D](../ui-overhaul/img/filter-d.png)
 Filter D: "Nothing in src matches “vfs”", button "Search subfolders too ⌘F", "Hidden files are off · Esc clears"; the preview area shows a folder summary "src · Folder · 9 items" (relevant to Q2).
 
-![Bottom bar B](img/bottom-bar-b.png)
+![Bottom bar B](../ui-overhaul/img/bottom-bar-b.png)
 Idle hints "/ filter · ⌘F search · ⌘K go to" right of the path, counts last after a divider.
 
-![Bottom bar C, filtering](img/bottom-bar-c-filter.png)
+![Bottom bar C, filtering](../ui-overhaul/img/bottom-bar-c-filter.png)
 Filtering hints; the board says "clear filter / search subfolders", the assembled board and U5 say "clear / search deeper". U5's copy wins.
 
-![Bottom bar C, sidebar](img/bottom-bar-c-sidebar.png)
+![Bottom bar C, sidebar](../ui-overhaul/img/bottom-bar-c-sidebar.png)
 Sidebar hints "⌘⌥↑↓ reorder · ⌘⌫ remove · ⇥ to list", counts "Favorites · 6".
 
-![Bottom bar D](img/bottom-bar-d.png)
+![Bottom bar D](../ui-overhaul/img/bottom-bar-d.png)
 Progress: 2 px accent bar on the top edge, "Copying 3 items to Backup 1.2 of 4.8 GB · 26 %", "Cancel esc"; path stays.
 
-![Bottom bar E](img/bottom-bar-e.png)
+![Bottom bar E](../ui-overhaul/img/bottom-bar-e.png)
 Config error token in `error` with "Open", beside a hint and the counts.
 
-![Search panel B](img/search-panel-b.png)
+![Search panel B](../ui-overhaul/img/search-panel-b.png)
 Scope bar, rules switch, rows with icon / highlighted name / folder / modified, footer summary.
 
-![Search panel D](img/search-panel-d.png)
+![Search panel D](../ui-overhaul/img/search-panel-d.png)
 Idle pane: "Search names and contents in file-crow", four example chips with explanations, foot line "Esc returns to file-crow · ⌘R reveals a result · Space previews".
 
-![Palette B](img/palette-b.png)
+![Palette B](../ui-overhaul/img/palette-b.png)
 Sheet with scrim, "5 places", sections Recent / Favorites / In me, two-line rows, "just now / 2 h ago", footer keycaps go / new tab / complete / commands.
 
-![Palette C](img/palette-c.png)
+![Palette C](../ui-overhaul/img/palette-c.png)
 "Commands" token, "2 of 34", menu column, on/off chip, Key-weight caps, "Recently used". Its menu column says "Search" for Search everything; U2 has no Search menu, so the app must show U2's menu name.
 
-![Discovery kit 1: keycaps](img/discovery-1.png)
+![Discovery kit 1: keycaps](../ui-overhaul/img/discovery-1.png)
 Outline 18 px (fields, bars), Key 20 px one cap per key (palette rows), Text (tooltips, menus).
 
-![Discovery kit 2: menus](img/discovery-2.png)
+![Discovery kit 2: menus](../ui-overhaul/img/discovery-2.png)
 Edit / Go / File as U2 builds them; "Reveal Result ⌘R" under Go is board-only unless U2 added it.
 
-![Discovery kit 3: tips](img/discovery-3.png)
+![Discovery kit 3: tips](../ui-overhaul/img/discovery-3.png)
 Three tips with an accent keycap and "Got it".
 
-![Discovery kit 4: sidebar](img/discovery-4.png)
+![Discovery kit 4: sidebar](../ui-overhaul/img/discovery-4.png)
 Sidebar B: one fill for the current folder, accent ring for the keyboard cursor, twins with parent in `fg-subtle`, neutral disk bar, mark letters.
 
 ### Whole-window measures (dark FireBox and light Solarized Light, 1280×800)
@@ -140,7 +140,7 @@ Every control added by U1–U10 has an id, a role and an aria label; tooltips ne
 - *Done when*: `target/shots/` holds every state; the progress file records the commands.
 
 ### I3 Findings checklist: every finding fixed or deferred
-![Today, annotated](img/today-annotated.png)
+![Today, annotated](../ui-overhaul/img/today-annotated.png)
 - *Where*: the table below, copied into the progress file and filled with what was seen (screenshot name) and the test that covers it.
 - *Change*: walk each row in the bundled app. If a row fails and the owning U plan clearly specified it, fix it here as a small commit ("U11: <finding> — <fix>"). If the fix would change behavior a plan didn't specify, ASK.
 
@@ -162,8 +162,8 @@ Every control added by U1–U10 has an id, a role and an aria label; tooltips ne
 - *Done when*: every row has a screenshot or test name in the progress file and is "ok", "fixed in <commit>" or "deferred (user, Q…)".
 
 ### I4 Visual drift sweep
-![Target: column view while filtering](img/assembled-filter.png)
-![Target: search mode](img/assembled-search.png)
+![Target: column view while filtering](../ui-overhaul/img/assembled-filter.png)
+![Target: search mode](../ui-overhaul/img/assembled-search.png)
 - *Where*: wherever the drift lives; shared constants in `crates/crow-app/src/style.rs`.
 - *Change*: compare the shots from I2 with the boards side by side (same 2560×1600 size) and with the "Whole-window measures" table. For each measure, find every place it's spelled (`grep -n 'px(28\.\|px(30\.\|px(52\.\|h_7\|rounded_' crates/crow-app/src`). Where the same meaning has two literals (e.g. a bar 28 px in one PR and 30 in another, keycaps 17 and 18, field rings 1 and 2 px), move it to one named constant or helper in `style.rs` (`BAND_HEIGHT`, `BAR_HEIGHT`, `FIELD_HEIGHT`, `ROW_RADIUS`, `field_ring`, …; only constants that end up used in two or more places) and use it everywhere. Check, per row of the table:
   - spacing and heights (band, bars, rows, fields, sheet offsets);
@@ -183,7 +183,7 @@ Every control added by U1–U10 has an id, a role and an aria label; tooltips ne
 - *Done when*: every drift found is fixed or listed; the three tests pass; shots retaken.
 
 ### I5 (only if Q2 = "build here") Preview fills the rest; folder summary
-![Filter D (folder summary in the preview area)](img/filter-d.png)
+![Filter D (folder summary in the preview area)](../ui-overhaul/img/filter-d.png)
 - *Where*: `pane.rs` `render_columns` (`:1567-1633`), `preview.rs`.
 - *Seam (U7-fix X5)*: the preview can be hidden (View ▸ Hide Preview, `show_preview`). When hidden, nothing fills the rest with a preview; the columns keep their widths. Test both states.
 - *Change*: the last strip child takes the remaining width (`flex_1`, min 300 px) instead of `PREVIEW_COLUMN_WIDTH` when the strip is narrower than the pane. When the cursor is a folder, show a summary there: folder icon, name, "Folder · n items" (the count of the child column already loaded; no extra disk I/O on the main thread), modified. Verify first that `flex_1` works inside the `overflow_x_scroll` strip (`pane.rs:1571`); if not, compute the width from the pane's bounds.

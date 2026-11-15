@@ -1,0 +1,19 @@
+#!/bin/sh
+# Open paths in Crow, reusing a running copy. macOS delivers the paths to the
+# app's application:openURLs: handler, which opens a window for each one.
+#
+#   scripts/crow [path ...]
+#
+# Install as `crow` on PATH with `./scripts/bundle.sh --install`, or:
+#   install -m 755 scripts/crow ~/.local/bin/crow
+#
+# CROW_APP selects another bundle (default /Applications/Crow.app).
+set -eu
+
+app="${CROW_APP:-/Applications/Crow.app}"
+if [ ! -d "$app" ]; then
+  echo "crow: $app not found (install with ./scripts/bundle.sh --install, or set CROW_APP)" >&2
+  exit 1
+fi
+
+exec open -a "$app" "$@"

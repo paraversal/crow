@@ -16,8 +16,8 @@ use crow_core::motion::{self, Fx};
 use crow_core::{Favorite, SidebarEdit, Slot};
 use crow_fs::ops::Request;
 use gpui::{
-    Bounds, Context, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement, Pixels, Point,
-    Render, Role, SharedString, Window, div, img, prelude::*, px,
+    Bounds, ClickEvent, Context, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, Role, SharedString, Window, div, img, prelude::*, px,
 };
 
 use crate::actions::{
@@ -25,6 +25,7 @@ use crate::actions::{
     RemoveFromSidebar,
 };
 use crate::chrome::with_tooltip;
+use crate::context_menu::{SidebarMenuKind, SidebarMenuState};
 use crate::palette::CommandId;
 use crate::pane::DraggedSelection;
 use crate::style::{color, current_location, cursor_ring, drop_outline, effect_tint, icon};
@@ -34,6 +35,8 @@ pub enum SidebarEvent {
     /// The cursor moved onto a folder: show it in the center, keep focus here.
     Show(PathBuf),
     Open(PathBuf),
+    /// The context menu's Open in New Tab.
+    OpenInNewTab(PathBuf),
     /// Files dropped on a row.
     Run(Request),
     Message(SharedString, bool),
@@ -220,6 +223,8 @@ pub struct Sidebar {
     receive: Option<(PathBuf, Instant)>,
     /// Bumped per pulse, so an older timer cannot clear a newer one.
     receive_generation: u64,
+    /// The row whose context menu is open (its index and what it is), outlined meanwhile.
+    menu: Option<(usize, SidebarMenuKind)>,
 }
 
 impl Focusable for Sidebar {
@@ -242,6 +247,7 @@ impl Sidebar {
             name_paths: RefCell::new(Vec::new()),
             receive: None,
             receive_generation: 0,
+            menu: None,
         }
     }
 
@@ -685,6 +691,90 @@ impl Sidebar {
         }
     }
 
+    // ----- context menu -----
+
+    /// A right-click or Ctrl-click on row `i`. The row is outlined while its menu is
+    /// open, as in Finder; the cursor and the folder shown stay as they are.
+    fn open_menu(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = Self::selectable(cx).into_iter().nth(i) else { return };
+        let (kind, state) = match &row {
+            Row::Favorite((g, n), _) => {
+                let len = cx.global::<Ui>().favorites().get(*g).map_or(0, |(_, f)| f.len());
+                let state = SidebarMenuState { can_move_up: *n > 0, can_move_down: n + 1 < len, ejectable: false };
+                (SidebarMenuKind::Favorite, state)
+            }
+            Row::Recent(_) => (SidebarMenuKind::Recent, SidebarMenuState::default()),
+            Row::Volume(v) => {
+                (SidebarMenuKind::Volume, SidebarMenuState { ejectable: v.ejectable, ..SidebarMenuState::default() })
+            }
+            Row::Header(..) => return,
+        };
+        let entries = crate::context_menu::sidebar_entries(kind, state, cx);
+        self.menu = Some((i, kind));
+        cx.notify();
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        // Off the main thread (tests) nothing opens; `choose_menu_item` stands in for the click.
+        if !crow_macos::show_context_menu(window, entries, move |chosen| {
+            sender.send(chosen).ok();
+        }) {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let chosen = receiver.await.ok().flatten();
+            this.update_in(cx, |this, window, cx| this.menu_closed(chosen, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// The menu closed with the line at `chosen` picked (an index into its slots), or none.
+    fn menu_closed(&mut self, chosen: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((i, kind)) = self.menu.take() else { return };
+        cx.notify();
+        let Some((id, _)) = chosen.and_then(|ix| crate::context_menu::sidebar_slots(kind).get(ix).copied().flatten())
+        else {
+            return;
+        };
+        let Some(path) = Self::selectable(cx).into_iter().nth(i).and_then(|row| row.path().map(Path::to_path_buf))
+        else {
+            return;
+        };
+        match id {
+            CommandId::Open => {
+                self.cursor = i;
+                cx.emit(SidebarEvent::Open(path));
+            }
+            CommandId::NewTab => cx.emit(SidebarEvent::OpenInNewTab(path)),
+            CommandId::CopyPath => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.to_string_lossy().into_owned()));
+                crate::operations::message("Copied path", false, cx);
+            }
+            CommandId::ShowInFinder => crow_macos::reveal_in_finder(&[path]),
+            CommandId::AddToSidebar => {
+                let at = self.group_end(0, cx);
+                self.add_folders(at, vec![path], cx);
+            }
+            // These act on the cursor row, as their keys do.
+            CommandId::MoveFavoriteUp
+            | CommandId::MoveFavoriteDown
+            | CommandId::RemoveFromSidebar
+            | CommandId::Eject => {
+                self.cursor = i;
+                self.run_command(id, window, cx);
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(test)]
+    pub fn menu(&self) -> Option<(usize, SidebarMenuKind)> {
+        self.menu
+    }
+
+    #[cfg(test)]
+    pub fn choose_menu_item(&mut self, chosen: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_closed(chosen, window, cx);
+    }
+
     fn eject(&mut self, volume: crow_macos::Volume, cx: &mut Context<Self>) {
         if !volume.ejectable {
             return;
@@ -863,8 +953,17 @@ impl Render for Sidebar {
                 .when(look.current, |row| row.bg(current_location(&theme)))
                 .when(look.drop, |row| row.child(drop_outline(&theme).inset_0()))
                 .when(look.ring, |row| row.shadow(cursor_ring(&theme)))
+                .when(self.menu.is_some_and(|(m, _)| m == i), |row| row.child(drop_outline(&theme).inset_0()))
                 .when_some(receive_tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| this.open_menu(i, window, cx)),
+                )
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if event.modifiers().control {
+                        this.open_menu(i, window, cx);
+                        return;
+                    }
                     this.cursor = i;
                     cx.emit(SidebarEvent::Open(target.clone()));
                 }))

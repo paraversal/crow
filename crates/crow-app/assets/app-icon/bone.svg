@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs><clipPath id="c"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ECECEF"/><stop offset="1" stop-color="#D2D2D8"/></linearGradient></defs>
+<rect x="100" y="112" width="824" height="824" rx="185" fill="#000" opacity="0.18"/>
+<g clip-path="url(#c)">
+<rect x="100" y="100" width="824" height="824" fill="#F3F1EC"/>
+<g stroke-linejoin="round" stroke-width="2">
+<polygon points="330,560 420,390 520,470" fill="#26272D" stroke="#26272D"/>
+<polygon points="420,390 560,330 520,470" fill="#34363E" stroke="#34363E"/>
+<polygon points="560,330 680,370 520,470" fill="#4A4D57" stroke="#4A4D57"/>
+<polygon points="680,370 690,500 520,470" fill="#1F2025" stroke="#1F2025"/>
+<polygon points="680,370 880,470 700,440" fill="#5A5D66" stroke="#5A5D66"/>
+<polygon points="700,440 880,470 690,500" fill="#17181C" stroke="#17181C"/>
+<polygon points="680,370 700,440 690,500" fill="#3A3C44" stroke="#3A3C44"/>
+<polygon points="520,470 690,500 600,560" fill="#1A1B20" stroke="#1A1B20"/>
+<polygon points="330,560 520,470 470,640" fill="#1C1D22" stroke="#1C1D22"/>
+<polygon points="520,470 600,560 470,640" fill="#2C2E35" stroke="#2C2E35"/>
+<polygon points="330,560 470,640 290,924" fill="#121316" stroke="#121316"/>
+<polygon points="470,640 600,560 660,924" fill="#25262C" stroke="#25262C"/>
+<polygon points="470,640 660,924 290,924" fill="#1A1B1F" stroke="#1A1B1F"/>
+</g>
+<circle cx="604" cy="414" r="22" fill="#E9A23B"/><circle cx="604" cy="414" r="9" fill="#141417"/>
+</g>
+<rect x="102" y="102" width="820" height="820" rx="183" fill="none" stroke="#000" stroke-opacity="0.08" stroke-width="4"/>
+</svg>

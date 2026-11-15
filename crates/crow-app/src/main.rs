@@ -37,8 +37,10 @@ mod window;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use gpui::App;
+use gpui::{App, AppContext};
 
 /// A nested tree for search benches: 32 groups x 16 subfolders, each file a few
 /// lines with `needle` so both name and content searches do real work.
@@ -100,6 +102,44 @@ fn bench_search(dir: &std::path::Path, text: &str) -> Result<(), String> {
         summary.skipped.len()
     );
     Ok(())
+}
+
+/// The path in a `file://` URL from LaunchServices, or `None` for other schemes.
+fn path_from_open_url(url: &str) -> Option<PathBuf> {
+    let url = url::Url::parse(url).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    url.to_file_path().ok()
+}
+
+/// Open paths delivered by macOS (`open -a Crow …`, `crow …` through the shim).
+/// A folder opens in a new window; a file opens its folder with the file selected.
+fn open_paths(urls: Vec<String>, cx: &mut App) {
+    let paths: Vec<PathBuf> = urls.iter().filter_map(|url| path_from_open_url(url)).collect();
+    if paths.is_empty() {
+        return;
+    }
+    // The main thread never stats: classify in the background, then open on the main thread.
+    let task = cx.background_spawn(async move {
+        paths
+            .into_iter()
+            .filter_map(|path| {
+                let is_dir = std::fs::metadata(&path).ok()?.is_dir();
+                Some((path, is_dir))
+            })
+            .collect::<Vec<_>>()
+    });
+    cx.spawn(async move |cx| {
+        let found = task.await;
+        cx.update(|cx| {
+            for (path, is_dir) in found {
+                tracing::info!(path = %path.display(), "opening from the command line");
+                window::open_path(path, is_dir, cx);
+            }
+        });
+    })
+    .detach();
 }
 
 fn main() -> ExitCode {
@@ -191,6 +231,15 @@ fn main() -> ExitCode {
     };
 
     let app = gpui_platform::application().with_assets(icons::Assets);
+    // Paths from `open -a Crow …` arrive as URLs. At launch they can arrive before
+    // `run`; the queue is drained there, and the poll below handles a running copy.
+    let pending_urls = Arc::new(Mutex::new(Vec::<String>::new()));
+    if !bench {
+        let pending = pending_urls.clone();
+        app.on_open_urls(move |urls| {
+            pending.lock().unwrap().extend(urls);
+        });
+    }
     // Crow stays resident with no windows, like Finder: the Dock icon reopens it.
     app.on_reopen(move |cx| {
         if cx.windows().is_empty() {
@@ -212,8 +261,47 @@ fn main() -> ExitCode {
         cx.bind_keys(actions::vim_keymap());
         cx.bind_keys(text_input::keymap());
         menus::init(cx);
-        window::open(start.clone(), bench, bench_filter.clone(), cx);
+        let initial = {
+            let mut pending = pending_urls.lock().unwrap();
+            std::mem::take(&mut *pending)
+        };
+        if initial.is_empty() {
+            window::open(start.clone(), bench, bench_filter.clone(), cx);
+        } else {
+            open_paths(initial, cx);
+        }
+        if !bench {
+            let pending = pending_urls.clone();
+            cx.spawn(async move |cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(100)).await;
+                    let urls = {
+                        let mut pending = pending.lock().unwrap();
+                        std::mem::take(&mut *pending)
+                    };
+                    if !urls.is_empty() {
+                        cx.update(|cx| open_paths(urls, cx));
+                    }
+                }
+            })
+            .detach();
+        }
         cx.activate(true);
     });
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_from_open_url;
+    use std::path::PathBuf;
+
+    #[test]
+    fn open_urls_become_paths() {
+        assert_eq!(path_from_open_url("file:///Users/me/My%20Folder"), Some(PathBuf::from("/Users/me/My Folder")));
+        assert_eq!(path_from_open_url("file://localhost/Users/me"), Some(PathBuf::from("/Users/me")));
+        assert_eq!(path_from_open_url("file:///"), Some(PathBuf::from("/")));
+        assert_eq!(path_from_open_url("https://example.com/a"), None);
+        assert_eq!(path_from_open_url("not a URL"), None);
+    }
 }

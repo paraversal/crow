@@ -22,6 +22,8 @@ const FADE_REDUCED_MOTION: Duration = Duration::from_millis(150);
 
 pub struct Ui {
     pub settings: Settings,
+    /// The Dock icon last applied, so a reload only touches AppKit when it changes.
+    pub applied_icon: Option<crow_core::AppIcon>,
     /// The motion mode and sound set in effect, and macOS's UI-sounds switch.
     pub feedback: Feedback,
     /// The colors on screen: the current theme, or a step of a fade towards it.
@@ -72,6 +74,7 @@ impl Ui {
         let recent_commands = RecentCommands::load(&state_dir.join("palette-commands.json"));
         let mut ui = Ui {
             settings: Settings::default(),
+            applied_icon: None,
             feedback: Feedback::default(),
             target: theme.clone(),
             theme,
@@ -217,6 +220,8 @@ pub fn init(cx: &mut App) {
     let feedback = cx.global::<Ui>().feedback;
     cx.set_reduce_motion(feedback.mode == Effective::Off);
     feedback::preload(feedback.sound);
+    // After the first frame: decoding the icon is not worth delaying first paint for.
+    cx.defer(refresh_app_icon);
     crate::usage::init(cx);
     crate::tips::init(cx);
 
@@ -353,7 +358,30 @@ pub fn reload_config(cx: &mut App) {
         crate::menus::refresh(cx);
     }
     refresh_feedback(cx);
+    refresh_app_icon(cx);
     cx.refresh_windows();
+}
+
+/// The embedded 1024 px PNG for `icon` (sources and render script: `assets/app-icon`).
+pub fn app_icon_png(icon: crow_core::AppIcon) -> &'static [u8] {
+    use crow_core::AppIcon;
+    match icon {
+        AppIcon::Refined => include_bytes!("../assets/app-icon/refined.png"),
+        AppIcon::Sun => include_bytes!("../assets/app-icon/sun.png"),
+        AppIcon::Graphite => include_bytes!("../assets/app-icon/graphite.png"),
+        AppIcon::Bone => include_bytes!("../assets/app-icon/bone.png"),
+    }
+}
+
+/// Show the `app_icon` setting in the Dock, if it changed since the last call.
+pub fn refresh_app_icon(cx: &mut App) {
+    let ui = cx.global_mut::<Ui>();
+    let icon = ui.settings.app_icon;
+    if ui.applied_icon == Some(icon) {
+        return;
+    }
+    ui.applied_icon = Some(icon);
+    crow_macos::set_app_icon(app_icon_png(icon));
 }
 
 /// View ▸ Show/Hide Preview: remember the choice for every window and the next launch.
@@ -513,7 +541,7 @@ pub fn refresh_recent(cx: &mut App) {
     let count = sidebar_count.max(50);
     let favorites: Vec<PathBuf> = ui.favorites().into_iter().flat_map(|(_, f)| f).map(|f| f.path).collect();
     let file = ui.state_dir.join("recent.json");
-    let alias_candidates = favorites.clone();
+    let alias_candidates = favorites;
     let task = cx.background_spawn(async move {
         if let Err(e) = recent.save(&file) {
             tracing::warn!("{}: {e}", file.display());
@@ -522,18 +550,23 @@ pub fn refresh_recent(cx: &mut App) {
         let list = recent.top(count, now, &zoxide, |p| p != Path::new("/") && p.is_dir());
         // A sidebar row can only be a symlink (Finder aliases are files, not folders).
         let aliases: HashSet<PathBuf> = alias_candidates
-            .into_iter()
-            .chain(list.iter().cloned())
+            .iter()
+            .chain(list.iter())
             .filter(|path| path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()))
+            .cloned()
             .collect();
-        (list, aliases)
+        // Sidebar Recent leaves out favorites and repeats, also when reached through a
+        // symlink (`~/code/crow` when `~/src/crow` is a favorite and `~/code` links to `~/src`).
+        let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let mut seen: HashSet<PathBuf> = alias_candidates.iter().map(|path| real(path)).collect();
+        let sidebar: Vec<PathBuf> =
+            list.iter().filter(|path| seen.insert(real(path))).take(sidebar_count).cloned().collect();
+        (list, aliases, sidebar)
     });
     cx.spawn(async move |cx| {
-        let (list, aliases) = task.await;
+        let (list, aliases, sidebar) = task.await;
         cx.update(|cx| {
             let ui = cx.global_mut::<Ui>();
-            let sidebar: Vec<PathBuf> =
-                list.iter().filter(|path| !favorites.contains(path)).take(sidebar_count).cloned().collect();
             let changed = ui.recent_list != sidebar || ui.palette_recents != list || ui.aliases != aliases;
             ui.recent_list = sidebar;
             ui.palette_recents = list;

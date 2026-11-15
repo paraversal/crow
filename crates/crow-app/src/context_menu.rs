@@ -100,6 +100,97 @@ pub fn entries(kind: MenuKind, state: MenuState, scope: KeyScope, cx: &App) -> V
         .collect()
 }
 
+/// What was right-clicked in the sidebar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarMenuKind {
+    Favorite,
+    Recent,
+    Volume,
+}
+
+/// A sidebar menu line: the command and, when the row needs other words than the
+/// menu bar's, its own title. `None` is a separator.
+pub type SidebarSlot = Option<(CommandId, Option<&'static str>)>;
+
+const SIDEBAR_FAVORITE: &[SidebarSlot] = &[
+    Some((CommandId::Open, None)),
+    Some((CommandId::NewTab, Some("Open in New Tab"))),
+    None,
+    Some((CommandId::CopyPath, None)),
+    Some((CommandId::ShowInFinder, None)),
+    None,
+    Some((CommandId::MoveFavoriteUp, Some("Move Up"))),
+    Some((CommandId::MoveFavoriteDown, Some("Move Down"))),
+    None,
+    Some((CommandId::RemoveFromSidebar, None)),
+];
+
+const SIDEBAR_RECENT: &[SidebarSlot] = &[
+    Some((CommandId::Open, None)),
+    Some((CommandId::NewTab, Some("Open in New Tab"))),
+    None,
+    Some((CommandId::CopyPath, None)),
+    Some((CommandId::ShowInFinder, None)),
+    None,
+    Some((CommandId::AddToSidebar, None)),
+    Some((CommandId::RemoveFromSidebar, Some("Remove from Recent"))),
+];
+
+const SIDEBAR_VOLUME: &[SidebarSlot] = &[
+    Some((CommandId::Open, None)),
+    Some((CommandId::NewTab, Some("Open in New Tab"))),
+    None,
+    Some((CommandId::CopyPath, None)),
+    Some((CommandId::ShowInFinder, None)),
+    None,
+    Some((CommandId::Eject, None)),
+];
+
+pub fn sidebar_slots(kind: SidebarMenuKind) -> &'static [SidebarSlot] {
+    match kind {
+        SidebarMenuKind::Favorite => SIDEBAR_FAVORITE,
+        SidebarMenuKind::Recent => SIDEBAR_RECENT,
+        SidebarMenuKind::Volume => SIDEBAR_VOLUME,
+    }
+}
+
+/// What decides which sidebar lines can act.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SidebarMenuState {
+    pub can_move_up: bool,
+    pub can_move_down: bool,
+    pub ejectable: bool,
+}
+
+pub fn sidebar_enabled(id: CommandId, state: SidebarMenuState) -> bool {
+    match id {
+        CommandId::MoveFavoriteUp => state.can_move_up,
+        CommandId::MoveFavoriteDown => state.can_move_down,
+        CommandId::Eject => state.ejectable,
+        _ => true,
+    }
+}
+
+/// The native menu's lines for a sidebar row. Only keys that act on the sidebar's
+/// cursor row show: ⌘T or ⇧⌘C there would act on the list, not on this row.
+pub fn sidebar_entries(kind: SidebarMenuKind, state: SidebarMenuState, cx: &App) -> Vec<ContextMenuEntry> {
+    sidebar_slots(kind)
+        .iter()
+        .map(|slot| match slot {
+            None => ContextMenuEntry::Separator,
+            Some((id, own_title)) => {
+                let command = command(*id);
+                let row_key = *id == CommandId::Open || command.scope == KeyScope::Sidebar;
+                ContextMenuEntry::Item {
+                    title: own_title.unwrap_or_else(|| title(command)).to_owned(),
+                    shortcut: row_key.then(|| shortcut(command, KeyScope::Sidebar, cx)).flatten(),
+                    enabled: sidebar_enabled(*id, state),
+                }
+            }
+        })
+        .collect()
+}
+
 /// The shortcut a native menu can show: the winning single-keystroke binding in
 /// `scope`. Vim chords like `y y` can't be shown, so ⌘C stays visible with the Vim layer on.
 fn shortcut(command: &Command, scope: KeyScope, cx: &App) -> Option<MenuShortcut> {
@@ -140,6 +231,22 @@ mod tests {
                 assert!(command(*id).menu.is_some(), "{id:?} is in the menu bar too");
             }
         }
+    }
+
+    #[test]
+    fn sidebar_menus_are_registered_commands_without_doubled_separators() {
+        for kind in [SidebarMenuKind::Favorite, SidebarMenuKind::Recent, SidebarMenuKind::Volume] {
+            let slots = sidebar_slots(kind);
+            assert!(slots.first().is_some_and(Option::is_some) && slots.last().is_some_and(Option::is_some));
+            assert!(!slots.windows(2).any(|pair| pair[0].is_none() && pair[1].is_none()));
+            for (id, _) in slots.iter().flatten() {
+                command(*id);
+            }
+        }
+        let first = SidebarMenuState { can_move_up: false, can_move_down: true, ejectable: false };
+        assert!(!sidebar_enabled(CommandId::MoveFavoriteUp, first));
+        assert!(sidebar_enabled(CommandId::MoveFavoriteDown, first));
+        assert!(!sidebar_enabled(CommandId::Eject, first), "an internal disk can't be ejected");
     }
 
     #[test]

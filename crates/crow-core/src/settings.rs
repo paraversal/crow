@@ -37,6 +37,12 @@ motion = "auto"
 # interface sound effects" off silences all but the alert.
 sound = "crow"
 
+# The Dock icon: "refined" (default; black crow on bone), "sun" (crow before an
+# amber disc), "graphite" (folded grey planes) or "bone" (folded black planes on
+# bone). It changes the Dock while Crow runs; scripts/bundle.sh bakes this choice
+# into Crow.app, so Finder and Launchpad show it after the next bundle.
+app_icon = "refined"
+
 # Interface font. Empty uses the system font.
 font_family = ""
 font_size = 13.0
@@ -93,6 +99,29 @@ pub enum HintsMode {
     Off,
 }
 
+/// Which of Crow's icons the Dock shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppIcon {
+    #[default]
+    Refined,
+    Sun,
+    Graphite,
+    Bone,
+}
+
+impl AppIcon {
+    /// The name in `settings.toml`, which is also the asset's file stem.
+    pub fn key(self) -> &'static str {
+        match self {
+            AppIcon::Refined => "refined",
+            AppIcon::Sun => "sun",
+            AppIcon::Graphite => "graphite",
+            AppIcon::Bone => "bone",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct WindowDefaults {
@@ -114,6 +143,7 @@ pub struct Settings {
     pub hints: HintsMode,
     pub motion: MotionMode,
     pub sound: SoundSet,
+    pub app_icon: AppIcon,
     pub font_family: String,
     pub font_size: f32,
     pub show_hidden_files: bool,
@@ -131,6 +161,7 @@ impl Default for Settings {
             hints: HintsMode::Auto,
             motion: MotionMode::Auto,
             sound: SoundSet::Crow,
+            app_icon: AppIcon::Refined,
             font_family: String::new(),
             font_size: 13.0,
             show_hidden_files: true,
@@ -312,6 +343,16 @@ mod tests {
         assert!(err.contains("settings.toml"), "{err}");
         assert!(err.contains("line 1"), "{err}");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn app_icon_values_parse() {
+        let parse = |text: &str| toml::from_str::<Settings>(text).expect("parses");
+        for icon in [AppIcon::Refined, AppIcon::Sun, AppIcon::Graphite, AppIcon::Bone] {
+            assert_eq!(parse(&format!("app_icon = \"{}\"", icon.key())).app_icon, icon);
+        }
+        assert_eq!(parse("theme = \"system\"").app_icon, AppIcon::Refined, "a missing line is Refined");
+        assert!(toml::from_str::<Settings>("app_icon = \"moon\"").is_err());
     }
 
     #[test]

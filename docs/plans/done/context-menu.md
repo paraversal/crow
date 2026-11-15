@@ -2,7 +2,7 @@
 
 Audience: an implementing agent. Follow `.claude/skills/execute-plan/SKILL.md`; read `AGENTS.md` first.
 Base: branch `context-menu` from `main` @ 05deb55 (after Housekeeping, PR 24).
-Progress file: `docs/plans/context-menu.progress.md`.
+Progress file: `docs/plans/done/context-menu.progress.md`.
 PR title: "Context menu and click-to-deselect". Don't merge.
 
 ## Where this comes from (2026-11-14)

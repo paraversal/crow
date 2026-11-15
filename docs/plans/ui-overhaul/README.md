@@ -28,8 +28,8 @@ Each plan is self-contained: its own branch, progress file and PR, carried out w
 | [U7](../done/u7-palette.md)      | Palette sections, two-line rows, Commands token, ⇥ completion, recent commands              | U1, U2 | `ui-u7-palette`      |
 | [U8](../done/u8-sidebar.md) | Sidebar twins, neutral disk bar, one fill per meaning, mark letters                         | U1     | `ui-u8-sidebar`      |
 | [U9](../done/u9-tips.md) | One-time contextual tips                                                                    | U5     | `ui-u9-tips`         |
-| [U10](u10-feedback.md)   | Motion and sound feedback: `motion` off/low/full, `sound` sets, `--motion-lab`              | U9     | `ui-u10-feedback`    |
-| [U11](u11-finish.md)     | Whole-window check against the assembled boards, docs pass, bench                           | all    | `ui-u11-finish`      |
+| [U10](../done/u10-feedback.md)   | Motion and sound feedback: `motion` off/low/full, `sound` sets, `--motion-lab`              | U9     | `ui-u10-feedback`    |
+| [U11](../done/u11-finish.md)     | Whole-window check against the assembled boards, docs pass, bench                           | all    | `ui-u11-finish`      |
 
 The **motion pass** (user request, 2026-11-13: moving and trashing give feedback, an inline animation such as a small trash in the row that swallows the entry, and an optional sound) became U10 on 2026-11-14, before the finish pass, which moved to U11. Its look was settled in the motion lab (`crow --motion-lab`, branch `motion-trial`).
 

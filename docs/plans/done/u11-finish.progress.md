@@ -215,8 +215,8 @@ plus Vim filter and search). Board | Crow for filter and search at 1280Ã—800 (2Ã
 
 | Board | Crow |
 | --- | --- |
-| ![assembled filter](docs/plans/ui-overhaul/img/assembled-filter.png) | ![built filter](docs/plans/ui-overhaul/img/built-filter-firebox.png) |
-| ![assembled search](docs/plans/ui-overhaul/img/assembled-search.png) | ![built search](docs/plans/ui-overhaul/img/built-search-firebox.png) |
+| ![assembled filter](../ui-overhaul/img/assembled-filter.png) | ![built filter](../ui-overhaul/img/built-filter-firebox.png) |
+| ![assembled search](../ui-overhaul/img/assembled-search.png) | ![built search](../ui-overhaul/img/built-search-firebox.png) |
 
 Light theme and Vim shots: built-filter-solarized-light.png, built-search-solarized-light.png,
 built-filter-vim-firebox.png, built-search-vim-firebox.png.
