@@ -1,5 +1,5 @@
 # M7 H7 — Accessibility hardening progress
-Branch: `m7-h7-a11y` · PR: none (critic opens it) · Job: m7-h7-a11y-bf16 · Last updated: 2026-11-16 · State: In critique
+Branch: `m7-h7-a11y` · PR: [#40](https://github.com/paraversal/file-crow/pull/40) · Job: m7-h7-a11y-bf16 · Last updated: 2026-11-16 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -48,6 +48,7 @@ Branch: `m7-h7-a11y` · PR: none (critic opens it) · Job: m7-h7-a11y-bf16 · La
 ## Log
 - 2026-11-16 Read the plan, `AGENTS.md`, `docs/plans/m7/README.md`, the two "unavailable" sites (`window.rs:560`, `search.rs:1118`), GPUI's a11y builder and `accesskit_macos`'s disabled mapping; created the branch and this file.
 - 2026-11-16 I1–I2b committed as `d3f732b`; I3 fixes as `e5fd11f`. Clean GPUI fetch and full checks pass. The AX pass used a temp config (`CROW_CONFIG_DIR`) and a fixture with a 200-file folder; the bundle's AX tree was dumped per area, and the two label defects were fixed and re-checked in the rebuilt bundle.
+- 2026-11-16 Critique fixes as `cb563d7` (fuzz binary build, Settings settle, docs) and `ff410eb` (this record); PR #40 opened. The H5 PR #39 CI failure was diagnosed as a pre-existing temp-path flake in `palette_count_says_places`, not H5 or H7 code.
 
 ## Next
 Critique: review the branch, answer Q4 (GPUI focus patch or later), open the PR.
@@ -74,4 +75,4 @@ Looked at: `target/bundle/Crow.app` with a temp config and a 3-file fixture. AX 
 Verdict: better. Disabled controls now expose AccessKit's `Disabled` instead of a label suffix, the fuzzer refuses unlabelled click/focus elements, and the Settings window is a driven surface. The `--features fuzz` build regression is fixed; the initial-focus defect remains open as Q4.
 
 ## Next
-Q4 (GPUI focus patch now or later) and Q2 (the H5 CI flake) are with the user. Then push and open the PR.
+PR open. Q4 (GPUI focus patch now or later) and Q2 (the H5 CI flake) are with the user.
