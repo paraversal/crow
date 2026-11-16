@@ -4887,7 +4887,11 @@ fn path_bar_edits_the_path_with_cmd_l(cx: &mut TestAppContext) {
 
     cx.simulate_keystrokes("cmd-l");
     settle(&view, &mut cx);
-    assert_eq!(path_edit_text(&view, &cx), Some(root.display().to_string()), "the folder's path, all selected");
+    assert_eq!(
+        path_edit_text(&view, &cx),
+        Some(root.join("alpha").display().to_string()),
+        "the cursor's path, all selected"
+    );
     assert_eq!(cx.debug_bounds("path-bar").expect("bar").size.height, px(30.), "the bar keeps its height");
     assert_eq!(
         cx.debug_bounds("bar-path").expect("path slot").size.height,
@@ -4932,8 +4936,16 @@ fn path_bar_return_reveals_files_and_refuses_missing_paths(cx: &mut TestAppConte
     assert_eq!(dir(&view, &cx), root, "a file opens its folder");
     assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "with the file selected");
 
-    // A missing path: beep, keep the field, say why in the bar.
+    // The bar shows the cursor's path, so the field starts on the file.
     cx.simulate_keystrokes("cmd-l");
+    settle(&view, &mut cx);
+    assert_eq!(
+        path_edit_text(&view, &cx),
+        Some(root.join("notes.txt").display().to_string()),
+        "the field starts on the shown file"
+    );
+
+    // A missing path: beep, keep the field, say why in the bar.
     cx.simulate_input(&root.join("nothing-here").display().to_string());
     settle(&view, &mut cx);
     effect_calls(&mut cx);
@@ -4957,6 +4969,28 @@ fn path_bar_return_reveals_files_and_refuses_missing_paths(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn path_edit_starts_on_the_shown_search_result(cx: &mut TestAppContext) {
+    let root = fixture("path-edit-search");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    let selected = view.read_with(&cx, |w, cx| {
+        w.search.as_ref().and_then(|search| search.read(cx).selected_entry()).map(|(path, _)| path)
+    });
+    assert_eq!(selected, Some(root.join("notes.txt")), "the search selects the name hit");
+
+    cx.simulate_keystrokes("cmd-l");
+    settle(&view, &mut cx);
+    assert_eq!(
+        path_edit_text(&view, &cx),
+        Some(root.join("notes.txt").display().to_string()),
+        "the field starts on the shown result"
+    );
+}
+
+#[gpui::test]
 fn path_bar_double_click_edits_and_single_click_does_not(cx: &mut TestAppContext) {
     let root = fixture("path-edit-click");
     let (view, mut cx) = open(cx, &root);
@@ -4969,7 +5003,11 @@ fn path_bar_double_click_edits_and_single_click_does_not(cx: &mut TestAppContext
 
     double_click(&mut cx, at);
     settle(&view, &mut cx);
-    assert_eq!(path_edit_text(&view, &cx), Some(root.display().to_string()), "a double-click edits");
+    assert_eq!(
+        path_edit_text(&view, &cx),
+        Some(root.join("alpha").display().to_string()),
+        "a double-click edits the shown path"
+    );
 
     // A click on a segment still navigates and never opens the field.
     cx.simulate_keystrokes("escape");
@@ -5024,7 +5062,11 @@ fn palette_offers_edit_path(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
-    assert_eq!(path_edit_text(&view, &cx), Some(root.display().to_string()), "the palette command edits the path");
+    assert_eq!(
+        path_edit_text(&view, &cx),
+        Some(root.join("alpha").display().to_string()),
+        "the palette command edits the shown path"
+    );
 }
 
 /// (number of columns, focused column, folder shown in column `k`, cursor name in column `k`).

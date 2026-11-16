@@ -159,7 +159,7 @@ Finder's keys work as in Finder: arrows (Shift extends), Option-Up/Down, Cmd-Up/
 Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (opens Cmd-K on this folder's
 path: type a name, Tab completes, Return goes there or selects a file; a pasted path may be quoted,
 shell-escaped or a `file://` URL), Cmd-L (or a double-click on empty space in the bottom bar) edits
-the folder's path in place: Tab completes, Return goes there or selects a file, Esc puts the path
+the path the bar shows in place: Tab completes, Return goes there or selects a file, Esc puts the path
 back, Cmd-, (Settings), Cmd-Shift-. and Space. Cmd-K's
 "Settings" opens the window and "Edit settings.toml" opens the file directly. Cmd-Shift-P shows
 or hides the preview pane on the right (in list and column view, search included; Quick Look still

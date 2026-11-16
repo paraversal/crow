@@ -519,8 +519,8 @@ impl CrowWindow {
         self.open_palette(&typed, window, cx);
     }
 
-    /// ⌘L: edit this folder's path in the bottom bar. A second ⌘L selects the
-    /// field's text again; overlays and a rename own the screen, so they keep it.
+    /// ⌘L: edit the path the bar shows in the bottom bar. A second ⌘L selects
+    /// the field's text again; overlays and a rename own the screen, so they keep it.
     fn edit_path(&mut self, _: &EditPath, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(edit) = &self.path_edit {
             let input = edit.input.clone();
@@ -538,8 +538,11 @@ impl CrowWindow {
         {
             return;
         }
-        let dir = self.pane().read(cx).current_dir(cx);
-        let typed = home_relative(&dir);
+        let typed = {
+            let pane = self.pane().read(cx);
+            let (target, _) = self.bar_target(pane, cx);
+            home_relative(&target)
+        };
         let input = cx.new(|cx| TextInput::new(typed.clone(), "Path", cx).bare().with_aria_label("Path"));
         input.update(cx, |input, cx| input.select_range(0..typed.len(), window, cx));
         let subscription = cx.subscribe_in(&input, window, |this, _input, event, window, cx| match event {
@@ -1049,14 +1052,8 @@ impl CrowWindow {
             bar_pane_count(pane, cx)
         };
 
-        // Q8: search mode shows the selected result's path.
-        let search_entry = self.search.as_ref().and_then(|search| search.read(cx).selected_entry());
-        let (target, last_is_dir) = match search_entry {
-            Some((path, is_dir)) => (path, is_dir),
-            None => pane
-                .cursor_entry(cx)
-                .map_or_else(|| (pane.current_dir(cx), true), |entry| (entry.path.clone(), entry.is_dir)),
-        };
+        // Q8: search mode shows the selected result's path; otherwise the cursor's.
+        let (target, last_is_dir) = self.bar_target(pane, cx);
         let parts: Vec<(String, std::path::PathBuf)> = crow_macos::display_components(&target)
             .into_iter()
             .map(|(name, path)| (crate::style::display_text(&name).into_owned(), path))
@@ -1114,6 +1111,16 @@ impl CrowWindow {
         // Narrow windows lose hints from the right and fold the path's middle (I7).
         bottom_bar::fit_to_window(&mut state, window);
         state
+    }
+
+    /// The path the bar shows and whether its last segment is a folder: the
+    /// selected search result, else the cursor entry, else the folder. ⌘L edits
+    /// this path, so entering edit mode never changes what the bar says.
+    fn bar_target(&self, pane: &Pane, cx: &App) -> (PathBuf, bool) {
+        if let Some(entry) = self.search.as_ref().and_then(|search| search.read(cx).selected_entry()) {
+            return entry;
+        }
+        pane.cursor_entry(cx).map_or_else(|| (pane.current_dir(cx), true), |entry| (entry.path, entry.is_dir))
     }
 
     fn render_bottom_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
