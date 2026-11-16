@@ -419,11 +419,35 @@ impl SettingsWindow {
         });
 
         let mut fonts = vec!["System".to_owned()];
-        fonts.extend(crow_macos::available_font_families());
-        if !settings.font_family.is_empty() && !fonts.iter().any(|name| name == &settings.font_family) {
+        if !settings.font_family.is_empty() {
             fonts.push(settings.font_family.clone());
         }
         let font_cursor = font_index(&fonts, &settings.font_family);
+        // Enumerating the installed families is AppKit work that took ~100 ms on
+        // the first Settings open (findings #20). CoreText answers off the main
+        // thread; the list fills in a frame later. Tests inject their own list.
+        #[cfg(not(test))]
+        {
+            let task = cx.background_spawn(async move { crow_macos::available_font_families() });
+            cx.spawn_in(window, async move |this, cx| {
+                let families = task.await;
+                this.update_in(cx, |this, _, cx| {
+                    let family = cx.global::<Ui>().settings.font_family.clone();
+                    let mut fonts = families;
+                    if !fonts.iter().any(|name| name == "System") {
+                        fonts.insert(0, "System".to_owned());
+                    }
+                    if !family.is_empty() && !fonts.iter().any(|name| name == &family) {
+                        fonts.push(family.clone());
+                    }
+                    this.font_cursor = font_index(&fonts, &family);
+                    this.fonts = fonts;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
         let theme = ThemeChoice::new(Vec::new(), &settings.theme);
         let task = theme_choice::load(cx);
         cx.spawn_in(window, async move |this, cx| {

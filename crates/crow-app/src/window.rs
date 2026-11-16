@@ -265,9 +265,9 @@ struct PathState {
     parent: PathBuf,
     partial: String,
     /// `None` while the background listing runs.
-    children: Option<Vec<PathBuf>>,
+    children: Option<Vec<palette::PathEntry>>,
     /// The parent's files (and packages), listed with `children`.
-    files: Vec<PathBuf>,
+    files: Vec<palette::PathEntry>,
     /// The parent is not a folder, or cannot be read.
     missing: bool,
     /// Whether the listing includes hidden entries.
@@ -2410,9 +2410,9 @@ impl CrowWindow {
             let listed = crow_fs::list_dir(&target, hidden, |batch| {
                 for entry in batch {
                     if entry.is_dir && !entry.is_package() {
-                        children.push(entry.path);
+                        children.push(palette::PathEntry::new(entry.path, entry.name));
                     } else {
-                        files.push(entry.path);
+                        files.push(palette::PathEntry::new(entry.path, entry.name));
                     }
                 }
             });

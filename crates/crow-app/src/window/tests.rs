@@ -8348,6 +8348,34 @@ fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
     assert!(batch * 10 < full, "the batch apply took {batch:?}, a full prune {full:?}");
 }
 
+/// H4 #20: the 100 ms watcher poll used to spawn a second batch while the first
+/// was still stat'ing, and both applies could land in one frame (a 152 ms step
+/// on the 100k fixture). A batch now waits for the one in flight.
+#[gpui::test]
+fn watcher_batches_apply_one_at_a_time(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-apply-coalesce");
+    std::fs::write(root.join("a.txt"), "a").expect("write a");
+    std::fs::write(root.join("b.txt"), "b").expect("write b");
+    let folder = cx
+        .update(|cx| cx.new(|cx| crate::folder::Folder::new(root.clone(), false, crow_fs::Sort::default(), false, cx)));
+    cx.update(|cx| folder.update(cx, |folder, _| folder.set_apply_delay(Duration::from_millis(300))));
+    cx.update(|cx| folder.update(cx, |folder, _| folder.queue_changes(vec![root.join("a.txt")])));
+    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| folder.read(cx).apply_batches()), 1, "the first batch is in flight");
+    cx.update(|cx| folder.update(cx, |folder, _| folder.queue_changes(vec![root.join("b.txt")])));
+    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| folder.read(cx).apply_batches()), 1, "a second batch waits for the first");
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| folder.read(cx).apply_batches()), 2, "the queued paths run as the next batch");
+    let names = cx.update(|cx| folder.read(cx).names());
+    assert!(names.contains(&"a.txt".to_owned()) && names.contains(&"b.txt".to_owned()), "{names:?}");
+}
+
 /// H4 #15: FSEvents can coalesce away the delete that follows a rename, leaving
 /// a row the disk no longer has. The quiet reconcile re-stats the paths the
 /// batch added; a delete inside that window drops the phantom.

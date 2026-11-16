@@ -11,6 +11,8 @@ raw-window-handle.workspace = true
 crow-fs.workspace = true
 tracing.workspace = true
 objc2 = "0.6"
+objc2-core-foundation = { version = "0.3", features = ["CFArray", "CFString"] }
+objc2-core-text = "0.3"
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGImage"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSGeometry", "NSObject", "NSData", "NSDictionary", "NSAttributedString", "NSFileManager", "NSValue", "NSError", "NSNotification", "NSUserDefaults", "NSOperation", "block2"] }
 objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSView", "NSWindow", "NSResponder", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSPasteboard", "NSPasteboardItem", "NSEvent", "NSApplication", "NSAccessibility", "NSFont", "NSColor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSSound", "NSGraphics", "NSMenu", "NSMenuItem", "objc2-core-graphics"] }
