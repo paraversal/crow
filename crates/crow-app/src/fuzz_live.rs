@@ -630,6 +630,7 @@ async fn run_steps(
         churn.pause();
     }
     wait_quiet(handle, cx).await;
+    clear_recorded_effects(cx);
     if let Some(churn) = churn {
         churn.resume();
     }
@@ -682,6 +683,9 @@ async fn run_steps(
             }
             note_violation(options.seed, index, violation, &mut seen, &mut violations);
         }
+        // The recorder is a test observation buffer; a live run never reads it,
+        // and a select-all copy records 100k paths per call (findings #14).
+        clear_recorded_effects(cx);
         // One step per frame at a realistic pace. Let deferred focus and render
         // work run before checking, as H1's run_until_parked does.
         cx.background_executor().timer(Duration::from_millis(16)).await;
@@ -847,6 +851,15 @@ fn dispatch_keys(handle: WindowHandle<CrowWindow>, keys: &str, cx: &mut AsyncApp
         })
     })
     .map_err(|error| Violation::new("window", error.to_string()))?
+}
+
+/// Drop the effects the live run recorded: nothing reads them here.
+fn clear_recorded_effects(cx: &mut AsyncApp) {
+    cx.update(|cx| {
+        if let Some(recorder) = crate::effects::recording(cx) {
+            recorder.clear();
+        }
+    });
 }
 
 fn dispatch_type(handle: WindowHandle<CrowWindow>, text: &str, cx: &mut AsyncApp) -> Result<(), Violation> {

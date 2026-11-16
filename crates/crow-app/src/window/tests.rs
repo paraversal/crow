@@ -7600,6 +7600,13 @@ fn apply_and_check(
     if deep && let Some(churn) = churn {
         churn.resume();
     }
+    // The recorder is a test observation buffer; a run does not read it, so
+    // drop each step's calls instead of letting them pile up.
+    cx.update(|_, cx| {
+        if let Some(recorder) = crate::effects::recording(cx) {
+            recorder.clear();
+        }
+    });
     result
 }
 
