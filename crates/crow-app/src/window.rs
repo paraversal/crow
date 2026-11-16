@@ -1644,9 +1644,7 @@ impl CrowWindow {
             pane.selected_entries(cx).iter().filter(|(_, is_dir)| *is_dir).map(|(path, _)| path.clone()).collect();
         let paths = if selected.is_empty() { vec![pane.current_dir(cx)] } else { selected };
         let at = cx.global::<Ui>().favorites().first().map_or(0, |(_, f)| f.len());
-        for (n, path) in paths.into_iter().enumerate() {
-            ui::edit_sidebar(SidebarEdit::Add { path, at: (0, at + n) }, cx);
-        }
+        ui::edit_sidebar(SidebarEdit::AddMany { paths, at: (0, at) }, cx);
     }
 
     // ----- view settings -----

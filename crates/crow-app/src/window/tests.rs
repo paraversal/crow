@@ -642,6 +642,11 @@ fn add_to_sidebar_adds_only_the_selected_folders(cx: &mut TestAppContext) {
     assert!(paths.contains(&root.join("alpha")), "the selected folder is added: {paths:?}");
     assert!(paths.contains(&root.join("beta")), "…and the other one");
     assert!(!paths.contains(&root.join("notes.txt")), "a selected file is not a sidebar row: {paths:?}");
+    let text = std::fs::read_to_string(config_dir(&cx).join("sidebar.toml")).expect("sidebar.toml");
+    for name in ["alpha", "beta"] {
+        assert!(text.contains(&root.join(name).display().to_string()), "{name} is written: {text}");
+    }
+    assert!(!text.contains(&root.join("notes.txt").display().to_string()), "the file is not written: {text}");
 }
 
 #[gpui::test]

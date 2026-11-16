@@ -869,9 +869,7 @@ impl Sidebar {
             cx.emit(SidebarEvent::Message("Only folders can be added to the sidebar".into(), true));
             return;
         }
-        for (n, path) in folders.into_iter().enumerate() {
-            ui::edit_sidebar(SidebarEdit::Add { path, at: (at.0, at.1 + n) }, cx);
-        }
+        ui::edit_sidebar(SidebarEdit::AddMany { paths: folders, at }, cx);
     }
 
     /// The folders among paths dropped from another app: ask the disk off the main
