@@ -7345,7 +7345,7 @@ fn fails_without_churn(
 /// A candidate counts only when it fails the same check as `target`, so the
 /// shrink cannot slip to a different bug. A trial replays the whole candidate,
 /// so long scripts are slow: the shrink stops after `CROW_FUZZ_SHRINK_SECS`
-/// (default 600) and returns the shortest failing script found so far.
+/// (default 60) and returns the shortest failing script found so far.
 fn shrink(
     script: &[crate::fuzz::Step],
     target: &crate::fuzz::Violation,
@@ -7357,7 +7357,7 @@ fn shrink(
     use crate::fuzz::{Script, Step};
     let mut best = script.to_vec();
     let trials = std::cell::Cell::new(0usize);
-    let budget = std::env::var("CROW_FUZZ_SHRINK_SECS").ok().and_then(|value| value.parse().ok()).unwrap_or(600);
+    let budget = std::env::var("CROW_FUZZ_SHRINK_SECS").ok().and_then(|value| value.parse().ok()).unwrap_or(60);
     let deadline = Instant::now() + Duration::from_secs(budget);
     let best_len = std::cell::Cell::new(best.len());
     let fails = |candidate: &[Step], cx: &mut TestAppContext| {

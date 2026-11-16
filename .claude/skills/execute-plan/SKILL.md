@@ -81,9 +81,16 @@ Branch: <name> · PR: <url or none> · Last updated: <date> · State: in progres
 2. For bugs: reproduce first (a failing test where possible, or exact steps). Find the cause and write it in the progress file **before** fixing.
    Then search for the same cause elsewhere: other views, rows or inputs built the same way. Fix the ones in this item's scope. List the rest in the progress file. (M5-fix fixed the `drag_over` flicker in the sidebar, but the same pattern in list and column rows needed a second fix plan.)
 3. Implement the smallest change that satisfies the item. Follow AGENTS.md rules (no main-thread disk I/O, keystroke test for every key behavior, roles and labels, no overwriting files).
-4. Verify: the item's "Done when", then `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. Run the bench when the plan or AGENTS.md says performance matters for that area.
+4. Verify: the item's "Done when", then `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`. Run the bench when the plan or AGENTS.md says performance matters for that area. Long fuzz runs follow the budget below.
 5. Commit (one item or a coherent part of it per commit), update the progress file, set "Next".
 6. Report briefly. Start with anything the user has to do (a question, a hand check, a review). Then say what changed, what's verified and what isn't. Anything only a human can check goes under Hand checks as steps they can follow without reading the code.
+
+### Fuzzer budget
+Long fuzz runs make turns many times slower, and the user waits for them. `cargo test --workspace` already runs `fuzz_smoke`; that is the per-item fuzz check.
+- **Anything over ~30 s of fuzzing needs the user's OK first**: `fuzz_long`, `crow --fuzz`, `CROW_FUZZ_MINUTES` > 0.5, big `CROW_FUZZ_STEPS`. Ask in one line with the command, the expected wall time and what it would tell you that the smoke and a replay don't.
+- **Exception: a run the plan names** (e.g. a "Finish (per batch)" step: "`fuzz_long` 10 minutes"). Do it once, at that point, as written, not after every item and not again because it passed. Start it with `run_in_background` and keep working (progress file, report, hand-check list) while it runs.
+- **Mind the shrink.** A failure shrinks for up to `CROW_FUZZ_SHRINK_SECS` (default 60; it used to be 600, which turned a failing "1-minute" run into 11 minutes). When replaying a known seed to check a fix, set `CROW_FUZZ_SHRINK_SECS=0`. Raise it only with the user's OK, when you need a shorter script than 60 s gives.
+- Checking a finding's fix = replay its seed and steps (findings.md has the command) plus a regression test. Not a fresh long run.
 
 **Stuck or drifting? Step back.** Stop and reassess if any of these happens:
 - a second attempt at the same fix fails;
