@@ -472,8 +472,13 @@ impl CrowWindow {
             self.close_search(window, cx);
         }
         self.close_tip(cx);
-        if self.tabs.close_active().is_none() {
+        if let Some(closed) = self.tabs.close_active() {
+            // Free the closed tab's 100k listing off the main thread.
+            closed.update(cx, |pane, cx| pane.release_listings(cx));
+        } else {
             // The last tab closes the window; Crow stays running with no windows.
+            // Release its listing before the window drops.
+            self.pane().update(cx, |pane, cx| pane.release_listings(cx));
             window.remove_window();
             return;
         }
@@ -1321,7 +1326,7 @@ impl CrowWindow {
     fn on_pane_event(&mut self, event: &PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PaneEvent::Run(request) => self.run_request(request.clone(), window, cx),
-            PaneEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
+            PaneEvent::Copy { paths, cut } => self.copy_paths(paths, *cut, cx),
             PaneEvent::Entered(dir) => {
                 // A stale message would otherwise outlive the place it described (Q2).
                 operations::clear_message(cx);
@@ -1404,32 +1409,34 @@ impl CrowWindow {
             self.pane().update(cx, |pane, cx| pane.clear_filter_for_new_item(cx));
         }
         let trash_paths = match &plan.request {
-            Request::Trash { paths } => Some(paths.clone()),
+            Request::Trash { paths } => Some(paths.as_slice()),
             _ => None,
         };
         let move_paths = match &plan.request {
-            Request::Move { paths, into } => Some((paths.clone(), into.clone())),
+            Request::Move { paths, into } => Some((paths.as_slice(), into.as_path())),
             _ => None,
         };
-        let failed_paths =
-            trash_paths.clone().or_else(|| move_paths.as_ref().map(|(paths, _)| paths.clone())).or_else(|| match &plan
-                .request
-            {
-                Request::Copy { paths, .. } | Request::Duplicate { paths } => Some(paths.clone()),
-                _ => None,
-            });
+        // Only the error callback needs an owned copy; the effects borrow the plan.
+        let failed_paths = match &plan.request {
+            Request::Trash { paths }
+            | Request::Move { paths, .. }
+            | Request::Copy { paths, .. }
+            | Request::Duplicate { paths } => Some(paths.clone()),
+            _ => None,
+        };
         let pane = self.pane().downgrade();
         // The effect starts with the operation, not the key press: a conflict or a
         // delete sheet may have come first, and a second operation is refused.
         if cx.global::<Operations>().running.is_none() {
-            if let Some(paths) = &trash_paths {
-                pane.update(cx, |pane, cx| pane.start_effect(paths.clone(), Fx::Trash, cx)).ok();
+            if let Some(paths) = trash_paths {
+                pane.update(cx, |pane, cx| pane.start_effect(paths, Fx::Trash, cx)).ok();
             }
-            if let Some((paths, into)) = &move_paths {
-                pane.update(cx, |pane, cx| pane.start_effect(paths.clone(), Fx::MoveOut, cx)).ok();
+            if let Some((paths, into)) = move_paths {
+                pane.update(cx, |pane, cx| pane.start_effect(paths, Fx::MoveOut, cx)).ok();
                 // The folder the items land in pulses, in the list and in the sidebar.
-                pane.update(cx, |pane, cx| pane.start_effect(vec![into.clone()], Fx::Receive, cx)).ok();
-                self.sidebar.update(cx, |sidebar, cx| sidebar.pulse(into.clone(), cx));
+                let into = into.to_path_buf();
+                pane.update(cx, |pane, cx| pane.start_effect(std::slice::from_ref(&into), Fx::Receive, cx)).ok();
+                self.sidebar.update(cx, |sidebar, cx| sidebar.pulse(into, cx));
             }
         }
         operations::execute(plan, resolutions, cx, move |outcome, cx| {
@@ -1437,7 +1444,7 @@ impl CrowWindow {
                 && let Some(paths) = &failed_paths
             {
                 // Whatever is still there refuses.
-                pane.update(cx, |pane, cx| pane.start_effect(paths.clone(), Fx::Refuse, cx)).ok();
+                pane.update(cx, |pane, cx| pane.start_effect(paths, Fx::Refuse, cx)).ok();
             }
             let results = outcome.record.results();
             pane.update(cx, |pane, cx| pane.show_results(results, rename_result, cx)).ok();
@@ -2186,14 +2193,14 @@ impl CrowWindow {
                 self.close_search(window, cx);
                 self.run_request(request.clone(), window, cx);
             }
-            SearchEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
+            SearchEvent::Copy { paths, cut } => self.copy_paths(paths, *cut, cx),
         }
     }
 
-    fn copy_paths(&mut self, paths: Vec<PathBuf>, cut: bool, cx: &mut Context<Self>) {
-        let change_count = crate::effects::effects(cx).write_file_urls(&paths);
+    fn copy_paths(&mut self, paths: &[PathBuf], cut: bool, cx: &mut Context<Self>) {
+        let change_count = crate::effects::effects(cx).write_file_urls(paths);
         let n = paths.len();
-        cx.global_mut::<Operations>().clipboard = Some(Clipboard { paths, cut, change_count });
+        cx.global_mut::<Operations>().clipboard = Some(Clipboard { paths: paths.to_vec(), cut, change_count });
         let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
         operations::message(
             if cut { format!("Cut {what}: paste to move") } else { format!("Copied {what}") },
@@ -3529,6 +3536,10 @@ impl CrowWindow {
         }
 
         match window.focused(cx) {
+            // Only the active window's focus is user-visible. GPUI keeps a
+            // deactivated window's `focus` handle, so an inactive window can
+            // still name a surface that has since closed (H4 batch 4 C2).
+            Some(_) if !focus_required => {}
             Some(focused) => {
                 // The topmost focus-owning overlay decides where focus must be. Tips do
                 // not take focus, and the native context menu is not a GPUI overlay.
@@ -3548,7 +3559,13 @@ impl CrowWindow {
                 }
                 if !allowed.iter().any(|(_, handle)| handle == &focused) {
                     let surface = allowed.first().map_or("expected", |(name, _)| name);
-                    out.push(Violation::new("focus", format!("focus is outside the {surface} surface")));
+                    out.push(Violation::new(
+                        "focus",
+                        format!(
+                            "focus is outside the {surface} surface (active={}, {focused:?})",
+                            window.is_window_active()
+                        ),
+                    ));
                 }
             }
             None => {

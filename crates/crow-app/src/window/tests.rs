@@ -485,6 +485,22 @@ fn inactive_windows_may_have_no_focus(cx: &mut TestAppContext) {
     });
     assert!(!inactive.iter().any(|violation| violation.check == "focus"), "{inactive:?}");
     assert!(required.iter().any(|violation| violation.check == "focus"), "{required:?}");
+
+    // GPUI keeps a deactivated window's focus handle; an inactive window may
+    // still name a surface that is no longer allowed. Only the active window's
+    // focus is checked.
+    let (inactive, required) = cx.update(|window, cx| {
+        let stray = cx.focus_handle();
+        window.focus(&stray, cx);
+        assert!(window.focused(cx).is_some(), "the window has a stray focus");
+        let view = view.read(cx);
+        (
+            view.check_invariants_with_focus(window, cx, false, None, false),
+            view.check_invariants_with_focus(window, cx, false, None, true),
+        )
+    });
+    assert!(!inactive.iter().any(|violation| violation.check == "focus"), "{inactive:?}");
+    assert!(required.iter().any(|violation| violation.check == "focus"), "{required:?}");
 }
 
 #[gpui::test]
@@ -6351,8 +6367,8 @@ fn a_move_starts_effects_on_the_source_and_the_target(cx: &mut TestAppContext) {
     let pane = pane(&view, &cx);
     cx.update(|_, cx| {
         pane.update(cx, |pane, cx| {
-            pane.start_effect(vec![root.join("notes.txt")], Fx::MoveOut, cx);
-            pane.start_effect(vec![root.join("alpha")], Fx::Receive, cx);
+            pane.start_effect(&[root.join("notes.txt")], Fx::MoveOut, cx);
+            pane.start_effect(&[root.join("alpha")], Fx::Receive, cx);
         });
     });
     let effects = pane.read_with(&cx, |pane, cx| pane.effects(cx));
@@ -8404,6 +8420,76 @@ fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
     assert_eq!(selection.len(), 99_999, "only the removed path left the selection");
     assert!(!selection.contains(&removed));
     assert!(batch * 10 < full, "the batch apply took {batch:?}, a full prune {full:?}");
+}
+
+/// H4 #22: a staged load shows the rows it has read so far. A partial must not
+/// prune the selection or close an inline folder for a row it has not reached;
+/// the full listing settles both when it lands.
+#[gpui::test]
+fn a_partial_listing_keeps_the_selection_and_open_folders(cx: &mut TestAppContext) {
+    let root = fixture("partial-apply");
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    let alpha = root.join("alpha");
+    let notes = root.join("notes.txt");
+
+    folder.update(&mut cx, |folder, cx| {
+        let ix = folder.entries().iter().position(|entry| entry.path == notes).expect("notes.txt");
+        folder.select_only(ix, cx);
+    });
+    folder.update(&mut cx, |folder, cx| folder.expand(alpha.clone(), cx));
+    settle(&view, &mut cx);
+    let all = folder.read_with(&cx, |folder, _| folder.entries().as_ref().clone());
+    let partial: Vec<Entry> =
+        all.iter().filter(|entry| entry.name != "alpha" && entry.name != "notes.txt").cloned().collect();
+    folder.update(&mut cx, |folder, cx| folder.apply_partial_for_test(partial, cx));
+
+    let (selection, expanded) =
+        folder.read_with(&cx, |folder, cx| (folder.selection_paths(), folder.is_expanded(&alpha, cx)));
+    assert!(selection.contains(&notes), "a partial keeps the selection: {selection:?}");
+    assert!(expanded, "a partial keeps an inline folder open");
+
+    // The full listing restores the rows, the cursor and alpha's child rows.
+    folder.update(&mut cx, |folder, cx| folder.apply_partial_for_test(all, cx));
+    let rows = rows(&view, &cx);
+    assert!(rows.iter().any(|(name, _)| name == "notes.txt"), "{rows:?}");
+    assert!(rows.iter().any(|(name, _)| name == "inner"), "alpha's child rows return: {rows:?}");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "the cursor follows the selection");
+}
+
+/// H4 #22/#26: a 100k duplicate or paste sets `select_when_present` to 100k
+/// paths. The per-path scan of the listing was O(n²) and held the main thread
+/// for 30 s on one apply (the seed-505 live run's HANG at step 9112).
+#[gpui::test]
+fn a_large_select_when_present_applies_quickly(cx: &mut TestAppContext) {
+    let root = fixture("select-when-present");
+    let folder = cx
+        .update(|cx| cx.new(|cx| crate::folder::Folder::new(root.clone(), false, crow_fs::Sort::default(), false, cx)));
+    let entries: Vec<Entry> = (0..100_000)
+        .map(|i| Entry {
+            name: format!("file-{i:06}.txt"),
+            path: root.join(format!("file-{i:06}.txt")),
+            is_dir: false,
+            hidden: false,
+            size: 0,
+            modified: None,
+            created: None,
+            added: None,
+        })
+        .collect();
+    let paths: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(entries.clone(), Some(&[]), cx);
+            folder.select_when_present_for_test(paths, crow_core::motion::Effective::Off);
+        });
+    });
+    let started = Instant::now();
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries, Some(&[]), cx)));
+    let elapsed = started.elapsed();
+    let selection = cx.update(|cx| folder.read(cx).selection_paths());
+    assert_eq!(selection.len(), 100_000, "every result is selected");
+    assert!(elapsed < Duration::from_secs(2), "the apply took {elapsed:?}");
 }
 
 /// H4 #20: the 100 ms watcher poll used to spawn a second batch while the first

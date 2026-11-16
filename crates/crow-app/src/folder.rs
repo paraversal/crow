@@ -888,7 +888,7 @@ impl Folder {
                         this.first_paint_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
                     }
                     match update {
-                        Load::Partial(entries) => this.replace_entries(entries, cx),
+                        Load::Partial(entries) => this.apply_partial(entries, cx),
                         Load::Done(Ok((entries, ms))) => {
                             this.loading = false;
                             this.load_ms = ms;
@@ -919,6 +919,78 @@ impl Folder {
         self.replace_entries_after(entries, None, cx);
     }
 
+    /// Show what a staged load has read so far. A partial only adds entries:
+    /// pruning the selection, closing inline folders or starting effects here
+    /// would act on rows the load has not reached yet. The full listing does
+    /// all of that when it lands.
+    fn apply_partial(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
+        let _span = tracing::debug_span!("listing partial").entered();
+        self.replace_entries_arc(entries, cx);
+        self.rebuild_rows(cx);
+        if let Some(target) = self.select_after_load.clone()
+            && self.entries.iter().any(|e| e.path == target)
+        {
+            self.select_after_load = None;
+            self.selection.select_only(target);
+        }
+        if !self.select_when_present.is_empty() && self.all_present(&self.select_when_present) {
+            let wanted = std::mem::take(&mut self.select_when_present);
+            self.selection.clear();
+            for path in &wanted {
+                self.selection.toggle(path.clone());
+            }
+            let mode = self.arrival_mode;
+            self.start_effect(&wanted, Fx::Arrive, mode, cx);
+        }
+        self.settle_cursor(cx);
+        self.selection_changed();
+        cx.emit(FolderEvent::Changed);
+        cx.notify();
+    }
+
+    /// Whether every path is in the listing. A large result set (a 100k
+    /// duplicate or paste) made the old per-path scan O(n²) and could hold the
+    /// main thread for 30 s on one apply (findings #26).
+    fn all_present(&self, paths: &[PathBuf]) -> bool {
+        if paths.len() <= 16 {
+            paths.iter().all(|path| self.entries.iter().any(|entry| &entry.path == path))
+        } else {
+            let present: HashSet<&Path> = self.entries.iter().map(|entry| entry.path.as_path()).collect();
+            paths.iter().all(|path| present.contains(path.as_path()))
+        }
+    }
+
+    /// Swap the listing and drop the old one off the main thread when it is
+    /// large: freeing a 100k-entry listing is ~15 ms of the apply.
+    fn replace_entries_arc(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
+        let old = std::mem::replace(&mut self.entries, Arc::new(entries));
+        Self::drop_listing(old, cx);
+    }
+
+    /// Free a listing off the main thread when it is large. Dropping a 100k
+    /// listing on the main thread is a visible hitch on navigation, tab close
+    /// and collapse, where the whole folder entity is dropped.
+    fn drop_listing(entries: Arc<Vec<Entry>>, cx: &mut Context<Self>) {
+        if entries.len() >= 1_024 {
+            cx.background_spawn(async move {
+                drop(entries);
+            })
+            .detach();
+        }
+    }
+
+    /// Move this folder's listing (and its open children's) to the background
+    /// before the entity is dropped. The pane calls this when it navigates away,
+    /// closes a tab or collapses an inline folder.
+    pub fn release_listing(&mut self, cx: &mut Context<Self>) {
+        let children: Vec<Entity<Folder>> = self.children.values().map(|child| child.folder.clone()).collect();
+        for child in children {
+            child.update(cx, |child, cx| child.release_listing(cx));
+        }
+        let entries = std::mem::replace(&mut self.entries, Arc::new(Vec::new()));
+        Self::drop_listing(entries, cx);
+    }
+
     /// A watcher batch: only the paths it reports can have left the listing, so
     /// prune just those instead of hashing every row (a 100k select-all paid
     /// ~300 ms per batch). `stats` is `apply_stats`'s input.
@@ -929,9 +1001,23 @@ impl Folder {
         cx: &mut Context<Self>,
     ) {
         let _span = tracing::debug_span!("listing apply").entered();
-        self.entries = Arc::new(entries);
+        self.replace_entries_arc(entries, cx);
         if !self.effects.is_empty() {
-            let present: HashSet<PathBuf> = self.entries.iter().map(|entry| entry.path.clone()).collect();
+            // Only the effect paths matter (at most MAX_EFFECTS); hashing every
+            // listing path cloned 100k paths on every apply with an effect running.
+            let present: HashSet<PathBuf> = {
+                let effect_paths: HashSet<&Path> = self.effects.iter().map(|effect| effect.path.as_path()).collect();
+                let mut present = HashSet::with_capacity(effect_paths.len());
+                for entry in self.entries.iter() {
+                    if effect_paths.contains(entry.path.as_path()) {
+                        present.insert(entry.path.clone());
+                        if present.len() == effect_paths.len() {
+                            break;
+                        }
+                    }
+                }
+                present
+            };
             let mut restored = Vec::new();
             for effect in &mut self.effects {
                 if present.contains(&effect.path) {
@@ -956,9 +1042,7 @@ impl Folder {
             self.select_after_load = None;
             self.selection.select_only(target);
         }
-        if !self.select_when_present.is_empty()
-            && self.select_when_present.iter().all(|p| self.entries.iter().any(|e| &e.path == p))
-        {
+        if !self.select_when_present.is_empty() && self.all_present(&self.select_when_present) {
             let wanted = std::mem::take(&mut self.select_when_present);
             self.selection.clear();
             for path in &wanted {
@@ -1007,6 +1091,17 @@ impl Folder {
             .map(|entry| entry.path.clone())
             .collect();
         self.expanded.retain(|path| wanted.contains(path));
+        // A collapsed inline folder may hold a large listing; free it off the
+        // main thread before the entity drops.
+        let removed: Vec<Entity<Folder>> = self
+            .children
+            .iter()
+            .filter(|(path, _)| !wanted.contains(*path))
+            .map(|(_, child)| child.folder.clone())
+            .collect();
+        for child in removed {
+            child.update(cx, |child, cx| child.release_listing(cx));
+        }
         self.children.retain(|path, _| wanted.contains(path));
         for path in wanted {
             if self.children.contains_key(&path) {
@@ -1259,10 +1354,20 @@ impl Folder {
         #[cfg(test)]
         let delay = self.apply_delay;
         cx.spawn(async move |this, cx| {
-            // Stat off the main thread; merge into the listing *as it is when the
-            // results land*. A batch that lands late therefore cannot replay the
-            // older listing it was computed from (which is how deleted files came back).
-            let stats = cx.background_spawn(async move { crow_fs::stat_changes(&dir, &paths, hidden) }).await;
+            // Stat and merge off the main thread; the merge is against the listing
+            // captured here, and the landing checks it is still current. A batch
+            // that lands late therefore cannot replay the older listing it was
+            // computed from (which is how deleted files came back).
+            let entries = this.update(cx, |this, _| this.entries.clone()).ok();
+            let Some(entries) = entries else { return };
+            let snapshot = entries.clone();
+            let (stats, updated) = cx
+                .background_spawn(async move {
+                    let stats = crow_fs::stat_changes(&dir, &paths, hidden);
+                    let updated = crow_fs::apply_stats(&snapshot, &stats, &sort, &kind);
+                    (stats, updated)
+                })
+                .await;
             #[cfg(test)]
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
@@ -1281,7 +1386,13 @@ impl Folder {
                         }
                     }
                     let added: Vec<PathBuf> = added.into_iter().collect();
-                    let updated = crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind);
+                    // A load or re-sort may have replaced the listing while the
+                    // background merge ran; merge into the current one then.
+                    let updated = if Arc::ptr_eq(&this.entries, &entries) {
+                        updated
+                    } else {
+                        crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind)
+                    };
                     this.replace_entries_after(updated, Some(&stats), cx);
                     if !this.reconcile.is_empty() || !added.is_empty() {
                         this.schedule_reconcile(added, cx);
@@ -1327,7 +1438,21 @@ impl Folder {
                 return;
             }
             let pending_paths = paths.clone();
-            let stats = cx.background_spawn(async move { crow_fs::stat_changes(&dir, &paths, hidden) }).await;
+            let entries = this.update(cx, |this, _| this.entries.clone()).ok();
+            let Some(entries) = entries else { return };
+            let snapshot = entries.clone();
+            let (stats, updated) = cx
+                .background_spawn(async move {
+                    let stats = crow_fs::stat_changes(&dir, &paths, hidden);
+                    // Every added path still existing means no apply; skip the
+                    // merge then, since most reconciles find nothing gone.
+                    let updated = stats
+                        .iter()
+                        .any(|(_, entry)| entry.is_none())
+                        .then(|| crow_fs::apply_stats(&snapshot, &stats, &sort, &kind));
+                    (stats, updated)
+                })
+                .await;
             this.update(cx, |this, cx| {
                 if this.reconcile_gen != generation {
                     return;
@@ -1345,10 +1470,12 @@ impl Folder {
                 }
                 // Every added path still exists: the listing already has them, so
                 // skip the rebuild (a second 100k-row apply per create).
-                if stats.iter().all(|(_, entry)| entry.is_some()) {
-                    return;
-                }
-                let updated = crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind);
+                let Some(updated) = updated else { return };
+                let updated = if Arc::ptr_eq(&this.entries, &entries) {
+                    updated
+                } else {
+                    crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind)
+                };
                 this.replace_entries_after(updated, Some(&stats), cx);
             })
             .ok();
@@ -1567,6 +1694,19 @@ impl Folder {
         self.replace_entries_after(entries, stats, cx);
     }
 
+    /// Apply a staged listing's partial, as the load loop does.
+    #[cfg(test)]
+    pub fn apply_partial_for_test(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
+        self.apply_partial(entries, cx);
+    }
+
+    /// Set the operation results to select without starting a reload.
+    #[cfg(test)]
+    pub fn select_when_present_for_test(&mut self, paths: Vec<PathBuf>, mode: Effective) {
+        self.select_when_present = paths;
+        self.arrival_mode = mode;
+    }
+
     /// Select a path that is not in the listing, to prove the invariant fires.
     #[cfg(any(test, feature = "fuzz"))]
     pub fn select_path_for_test(&mut self, path: PathBuf) {
@@ -1588,8 +1728,14 @@ fn name_matches(name: &str, query: &str, lower_query: &str) -> bool {
     if query.is_empty() {
         return true;
     }
-    if name.is_ascii() && query.is_ascii() {
-        let needle = query.as_bytes();
+    if name.is_ascii() {
+        // An ASCII name can only contain an ASCII query after lowercasing.
+        // A non-ASCII query that lowercases to ASCII (the Kelvin sign) still
+        // matches; one that stays non-ASCII cannot occur in an ASCII name.
+        if !lower_query.is_ascii() {
+            return false;
+        }
+        let needle = lower_query.as_bytes();
         name.as_bytes().windows(needle.len()).any(|window| window.eq_ignore_ascii_case(needle))
     } else {
         name.to_lowercase().contains(lower_query)
@@ -1604,8 +1750,13 @@ fn name_match(name: &str, query: &str, lower_query: &str) -> Option<Range<usize>
     if query.is_empty() {
         return Some(0..0);
     }
-    if name.is_ascii() && query.is_ascii() {
-        let needle = query.as_bytes();
+    if name.is_ascii() {
+        // See `name_matches`: a non-ASCII lowered query cannot occur in an
+        // ASCII name, and the slow path would lowercase the name for nothing.
+        if !lower_query.is_ascii() {
+            return None;
+        }
+        let needle = lower_query.as_bytes();
         return name
             .as_bytes()
             .windows(needle.len())
@@ -1707,5 +1858,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_non_ascii_query_skips_ascii_names_without_lowercasing() {
+        // The old path lowercased every name (and built the char map) for a
+        // non-ASCII query; 100k names made a filter keystroke a ~100 ms
+        // main-thread stall (findings #22).
+        let names: Vec<String> = (0..100_000).map(|i| format!("file-{i:06}.txt")).collect();
+        let slow_match = |name: &str| {
+            let mut lowered = String::with_capacity(name.len());
+            let mut starts: Vec<(usize, usize, usize)> = Vec::with_capacity(name.len());
+            for (byte, ch) in name.char_indices() {
+                let end = byte + ch.len_utf8();
+                for lower in ch.to_lowercase() {
+                    starts.push((lowered.len(), byte, end));
+                    lowered.push(lower);
+                }
+            }
+            lowered.find("م")
+        };
+        let started = Instant::now();
+        for name in &names {
+            assert!(!name_matches(name, "م", "م"));
+            assert_eq!(name_match(name, "م", "م"), None);
+        }
+        let fast = started.elapsed();
+        let started = Instant::now();
+        for name in &names {
+            assert_eq!(slow_match(name), None);
+        }
+        let slow = started.elapsed();
+        assert!(fast * 2 < slow, "the ASCII path took {fast:?}, the old match path {slow:?}");
+        // A non-ASCII query that lowercases to ASCII still matches.
+        assert!(name_matches("k", "\u{212A}", "k"), "the Kelvin sign lowercases to k");
+        assert_eq!(name_match("k", "\u{212A}", "k"), Some(0..1));
     }
 }
