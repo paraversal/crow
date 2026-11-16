@@ -779,12 +779,12 @@ impl SearchView {
         self.query(cx)
     }
 
-    #[cfg(any(test, feature = "fuzz"))]
+    /// The search field's focus handle, for the window's overlay focus rule.
     pub fn input_focus_handle(&self, cx: &App) -> FocusHandle {
         self.input.read(cx).focus_handle(cx)
     }
 
-    #[cfg(any(test, feature = "fuzz"))]
+    /// The results list's focus handle, for the window's overlay focus rule.
     pub fn results_focus_handle(&self) -> FocusHandle {
         self.focus.clone()
     }

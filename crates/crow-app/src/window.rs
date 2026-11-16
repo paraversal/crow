@@ -148,6 +148,8 @@ pub struct CrowWindow {
     search: Option<Entity<SearchView>>,
     /// ⌘L or a double-click on empty path space: the bar's path slot is a field.
     path_edit: Option<PathEdit>,
+    /// A deferred re-focus into an open overlay is already scheduled.
+    refocus_overlay: bool,
     /// The contextual tip on screen, if any.
     tip: Option<TipId>,
     /// Consecutive filter sessions that ended with no matches (U9's ⌘F tip).
@@ -378,6 +380,7 @@ impl CrowWindow {
             palette: None,
             search: None,
             path_edit: None,
+            refocus_overlay: false,
             tip: None,
             zero_streak: ZeroMatchStreak::new(),
             walk_visit: None,
@@ -398,6 +401,33 @@ impl CrowWindow {
         }
         let handle = self.pane().read(cx).focus_handle().clone();
         window.focus(&handle, cx);
+    }
+
+    /// The focus surfaces the topmost overlay owns, in the precedence the fuzzer's
+    /// focus invariant uses. Empty when no overlay is open: the pane, the sidebar
+    /// and their text fields own focus then.
+    fn overlay_focus_surfaces(&self, cx: &App) -> Vec<(&'static str, FocusHandle)> {
+        let mut allowed: Vec<(&'static str, FocusHandle)> = Vec::new();
+        if let Some(sheet) = &self.sheet {
+            allowed.push(("sheet", sheet.focus().clone()));
+        } else if let Some(palette) = &self.palette {
+            allowed.push(("palette", palette.input.read(cx).focus_handle(cx)));
+        } else if let Some(picker) = &self.picker {
+            allowed.push(("picker", picker.focus.clone()));
+        } else if let Some(why) = &self.why {
+            allowed.push(("why", why.clone()));
+        } else if let Some(search) = &self.search {
+            let search = search.read(cx);
+            allowed.push(("search field", search.input_focus_handle(cx)));
+            allowed.push(("search results", search.results_focus_handle()));
+            // The documented Tab cycle goes field -> results -> sidebar -> field.
+            allowed.push(("sidebar", self.sidebar.read(cx).focus_handle(cx)));
+            // ⌘L can edit the path while search is open; the bar's field owns focus then.
+            if let Some(edit) = &self.path_edit {
+                allowed.push(("path field", edit.input.read(cx).focus_handle(cx)));
+            }
+        }
+        allowed
     }
 
     // ----- window actions -----
@@ -1368,6 +1398,11 @@ impl CrowWindow {
 
     fn start(&mut self, plan: Plan, resolutions: HashMap<PathBuf, Resolution>, cx: &mut Context<Self>) {
         let rename_result = matches!(plan.request, Request::NewFolder { .. } | Request::NewFile { .. });
+        if rename_result {
+            // The new item must be visible: a filter that hides it would hide the
+            // rename field that follows (findings #10).
+            self.pane().update(cx, |pane, cx| pane.clear_filter_for_new_item(cx));
+        }
         let trash_paths = match &plan.request {
             Request::Trash { paths } => Some(paths.clone()),
             _ => None,
@@ -3176,6 +3211,26 @@ impl CrowWindow {
 
 impl Render for CrowWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A deferred focus assignment (a new item's rename, the filter handing off
+        // to the list) must not take focus from an overlay opened in between: the
+        // keys the overlay blocks would land in a field behind it. This is the same
+        // rule the fuzzer's focus invariant checks.
+        if !self.refocus_overlay {
+            let surfaces = self.overlay_focus_surfaces(cx);
+            if !surfaces.is_empty() && !surfaces.iter().any(|(_, handle)| Some(handle) == window.focused(cx).as_ref()) {
+                self.refocus_overlay = true;
+                cx.defer_in(window, |this, window, cx| {
+                    this.refocus_overlay = false;
+                    let surfaces = this.overlay_focus_surfaces(cx);
+                    if !surfaces.is_empty()
+                        && !surfaces.iter().any(|(_, handle)| Some(handle) == window.focused(cx).as_ref())
+                    {
+                        window.focus(&surfaces[0].1, cx);
+                        cx.notify();
+                    }
+                });
+            }
+        }
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let show_preview = ui.settings.show_preview;
@@ -3454,34 +3509,16 @@ impl CrowWindow {
             }
         }
 
-        let pane = self.pane().read(cx);
-        let sidebar = self.sidebar.read(cx);
         let Some(focused) = window.focused(cx) else {
             out.push(Violation::new("focus", "nothing is focused"));
             return out;
         };
         // The topmost focus-owning overlay decides where focus must be. Tips do
         // not take focus, and the native context menu is not a GPUI overlay.
-        let mut allowed: Vec<(&'static str, gpui::FocusHandle)> = Vec::new();
-        if let Some(sheet) = &self.sheet {
-            allowed.push(("sheet", sheet.focus().clone()));
-        } else if let Some(palette) = &self.palette {
-            allowed.push(("palette", palette.input.read(cx).focus_handle(cx)));
-        } else if let Some(picker) = &self.picker {
-            allowed.push(("picker", picker.focus.clone()));
-        } else if let Some(why) = &self.why {
-            allowed.push(("why", why.clone()));
-        } else if let Some(search) = &self.search {
-            let search = search.read(cx);
-            allowed.push(("search field", search.input_focus_handle(cx)));
-            allowed.push(("search results", search.results_focus_handle()));
-            // The documented Tab cycle goes field -> results -> sidebar -> field.
-            allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
-            // ⌘L can edit the path while search is open; the bar's field owns focus then.
-            if let Some(edit) = &self.path_edit {
-                allowed.push(("path field", edit.input.read(cx).focus_handle(cx)));
-            }
-        } else {
+        let mut allowed = self.overlay_focus_surfaces(cx);
+        if allowed.is_empty() {
+            let pane = self.pane().read(cx);
+            let sidebar = self.sidebar.read(cx);
             allowed.push(("pane", pane.focus_handle().clone()));
             allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
             for text in pane.text_focus_handles(cx) {
