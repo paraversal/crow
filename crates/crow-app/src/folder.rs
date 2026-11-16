@@ -818,7 +818,7 @@ impl Folder {
                     return;
                 }
                 if Arc::ptr_eq(&this.entries, &entries) {
-                    this.replace_entries(sorted, cx);
+                    this.replace_entries_after(sorted, Some(&[]), cx);
                 } else if attempt < 2 {
                     this.resort(attempt + 1, cx);
                 } else {
@@ -877,6 +877,18 @@ impl Folder {
 
     /// Swap in a new listing, keeping the selection on the same items.
     fn replace_entries(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
+        self.replace_entries_after(entries, None, cx);
+    }
+
+    /// A watcher batch: only the paths it reports can have left the listing, so
+    /// prune just those instead of hashing every row (a 100k select-all paid
+    /// ~300 ms per batch). `stats` is `apply_stats`'s input.
+    fn replace_entries_after(
+        &mut self,
+        entries: Vec<Entry>,
+        stats: Option<&[(PathBuf, Option<Entry>)]>,
+        cx: &mut Context<Self>,
+    ) {
         let _span = tracing::debug_span!("listing apply").entered();
         self.entries = Arc::new(entries);
         if !self.effects.is_empty() {
@@ -927,7 +939,20 @@ impl Folder {
                 self.selection.select_only(first.path.clone());
             }
         }
-        self.prune_selection();
+        match stats {
+            Some(stats) => {
+                let before = self.selection.len();
+                for (path, entry) in stats {
+                    if entry.is_none() {
+                        self.selection.remove(path);
+                    }
+                }
+                if self.selection.len() != before {
+                    self.selection_changed();
+                }
+            }
+            None => self.prune_selection(),
+        }
         self.settle_cursor(cx);
         self.selection_changed();
         cx.emit(FolderEvent::Changed);
@@ -1193,7 +1218,7 @@ impl Folder {
             this.update(cx, |this, cx| {
                 if this.generation == generation && this.sort == sort {
                     let updated = crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind);
-                    this.replace_entries(updated, cx);
+                    this.replace_entries_after(updated, Some(&stats), cx);
                 }
             })
             .ok();
@@ -1392,6 +1417,17 @@ impl Folder {
     #[cfg(any(test, feature = "fuzz"))]
     pub fn set_cursor_ix_for_test(&mut self, ix: Option<usize>) {
         self.cursor_ix = ix;
+    }
+
+    /// Time a synthetic listing apply without a load.
+    #[cfg(test)]
+    pub fn replace_entries_for_test(
+        &mut self,
+        entries: Vec<Entry>,
+        stats: &[(PathBuf, Option<Entry>)],
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_entries_after(entries, Some(stats), cx);
     }
 
     /// Select a path that is not in the listing, to prove the invariant fires.
