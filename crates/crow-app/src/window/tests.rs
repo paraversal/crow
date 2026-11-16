@@ -3993,6 +3993,46 @@ fn why_sheet_keeps_focus_on_arrows_and_tab(cx: &mut TestAppContext) {
     assert!(found.is_empty(), "{found:?}");
 }
 
+#[gpui::test]
+fn a_pending_rename_does_not_take_focus_from_an_overlay(cx: &mut TestAppContext) {
+    let root = fixture("overlay-focus-rename");
+    let (view, mut cx) = open(cx, &root);
+    let pane = pane(&view, &cx);
+    // A new item's row is not listed yet, so its rename waits for the load —
+    // the state ⌘⇧N/⌥⌘N leaves while a big folder reloads.
+    let path = root.join("later.txt");
+    pane.update(&mut cx, |pane, cx| pane.show_results(vec![path.clone()], true, cx));
+    cx.simulate_keystrokes("cmd-j");
+    std::fs::write(&path, "x").expect("create the file");
+    pane.update(&mut cx, |pane, cx| {
+        let folder = pane.test_folder();
+        folder.update(cx, |folder, cx| folder.reload(cx));
+    });
+    settle(&view, &mut cx);
+    let why = view.read_with(&cx, |w, _| w.why.clone()).expect("Why opens");
+    cx.simulate_keystrokes("down");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(why), "focus stays in the sheet");
+    assert!(violations(&view, &mut cx).is_empty());
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+
+    // The theme picker, the other overlay a pending rename raced in the fuzz runs.
+    cx.simulate_keystrokes("alt-cmd-t");
+    settle(&view, &mut cx);
+    let picker = view.read_with(&cx, |w, _| w.picker.as_ref().map(|p| p.focus.clone())).expect("the picker opens");
+    let path = root.join("later-2.txt");
+    pane.update(&mut cx, |pane, cx| pane.show_results(vec![path.clone()], true, cx));
+    std::fs::write(&path, "x").expect("create the file");
+    pane.update(&mut cx, |pane, cx| {
+        let folder = pane.test_folder();
+        folder.update(cx, |folder, cx| folder.reload(cx));
+    });
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(picker), "focus stays in the picker");
+    assert!(violations(&view, &mut cx).is_empty());
+}
+
 /// Guards the `NoAction` list in `actions.rs`: every key that acts on the
 /// window must do nothing while a sheet is open, so a new window binding
 /// without a `Sheet` block fails here.
