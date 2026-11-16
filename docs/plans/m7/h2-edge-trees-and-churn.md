@@ -1,6 +1,6 @@
 # M7 H2 — Edge-case trees and file-system churn
 
-Audience: an implementing agent. Follow `.claude/skills/execute-plan/SKILL.md`; read `AGENTS.md`, `docs/plans/m7/README.md` and `docs/plans/m7/h1-fuzzer.md` first.
+Audience: an implementing agent. Follow the `execute-plan` skill; read `AGENTS.md`, `docs/plans/m7/README.md` and `docs/plans/m7/h1-fuzzer.md` first.
 Base: branch `m7-h2-churn` from `main` **after H1 is merged** (ASK if it isn't). Progress file: `docs/plans/m7/h2-edge-trees-and-churn.progress.md`.
 PR title: "M7 H2: edge-case trees and churn for the fuzzer". Don't merge.
 

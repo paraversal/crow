@@ -1,6 +1,6 @@
 # M7 H4 — Fix what the fuzzer finds
 
-Audience: an implementing agent. Follow `.claude/skills/execute-plan/SKILL.md`; read `AGENTS.md`, `docs/plans/m7/README.md` and `docs/plans/m7/findings.md` first.
+Audience: an implementing agent. Follow the `execute-plan` skill; read `AGENTS.md`, `docs/plans/m7/README.md` and `docs/plans/m7/findings.md` first.
 Base: one branch per batch, `m7-h4-<n>` from `main`, **after the piece that found the items is merged** (H1, H2 or H3). Progress file per batch: `docs/plans/m7/h4-<n>.progress.md`.
 PR title: "M7 H4 batch <n>: <short list>". Don't merge.
 

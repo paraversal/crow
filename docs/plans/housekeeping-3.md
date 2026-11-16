@@ -1,6 +1,6 @@
 # Housekeeping 3 — keyboard and empty-folder menu
 
-Audience: an implementing agent. Follow `.claude/skills/execute-plan/SKILL.md`; read `AGENTS.md` first.
+Audience: an implementing agent. Follow the `execute-plan` skill; read `AGENTS.md` first.
 Base: branch `housekeeping-3` from `main`. Progress file: `docs/plans/housekeeping-3.progress.md`.
 PR title: "Housekeeping 3: ⌘⌫ in fields, Escape deselects, Copy Path on empty space". Don't merge.
 

@@ -1,6 +1,6 @@
 # M7 H5 — No disk I/O on the main thread
 
-Audience: an implementing agent. Follow `.claude/skills/execute-plan/SKILL.md`; read `AGENTS.md` and `docs/plans/m7/README.md` first.
+Audience: an implementing agent. Follow the `execute-plan` skill; read `AGENTS.md` and `docs/plans/m7/README.md` first.
 Base: branch `m7-h5-main-thread-io` from `main`. Progress file: `docs/plans/m7/h5-main-thread-io.progress.md`.
 PR title: "M7 H5: no disk I/O on the main thread". Don't merge.
 
