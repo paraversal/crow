@@ -5327,6 +5327,33 @@ fn new_folder_starts_a_rename_and_return_applies_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_new_folder_clears_a_filter_that_hides_it(cx: &mut TestAppContext) {
+    let root = fixture("newfolder-filter");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("a");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("cmd-shift-n");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    let pane = pane(&view, &cx);
+    assert!(!pane.read_with(&cx, |pane, _| pane.is_filtering()), "the filter clears so the new row shows");
+    assert_eq!(
+        pane.read_with(&cx, |pane, cx| pane.rename_text(cx)).as_deref(),
+        Some("untitled folder"),
+        "the new folder's rename starts"
+    );
+    let handles = pane.read_with(&cx, |pane, cx| pane.text_focus_handles(cx));
+    let focused = cx.update(|window, cx| window.focused(cx)).expect("the name field holds focus");
+    assert_eq!(handles, vec![focused], "the visible name field owns focus");
+    assert!(
+        rows(&view, &cx).iter().any(|(name, _)| name == "untitled folder"),
+        "the new row is visible: {:?}",
+        rows(&view, &cx)
+    );
+}
+
+#[gpui::test]
 fn new_folder_arrives_and_its_rename_takes_typing_at_once(cx: &mut TestAppContext) {
     let root = fixture("newfolder-arrive");
     let (view, mut cx) = open(cx, &root);

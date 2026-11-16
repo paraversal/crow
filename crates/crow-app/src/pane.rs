@@ -1091,9 +1091,11 @@ impl Pane {
         self.close_filter(window, cx);
     }
 
-    fn close_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Close the filter field and clear every folder's filter. Callers decide
+    /// where focus goes next. Returns whether a filter was open.
+    fn end_filter(&mut self, cx: &mut Context<Self>) -> bool {
         if self.filtering.take().is_none() {
-            return;
+            return false;
         }
         self.emit_filter_end(cx);
         self.filter_announce = SharedString::default();
@@ -1102,24 +1104,28 @@ impl Pane {
             folder.update(cx, |folder, cx| folder.set_filter(None, cx));
         }
         self.focus_list_after_filter = false;
-        window.focus(&self.focus, cx);
         cx.notify();
+        true
+    }
+
+    fn close_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.end_filter(cx) {
+            window.focus(&self.focus, cx);
+        }
     }
 
     /// Close the filter from a navigation path that has no window (the list
     /// gets its focus back after the next render).
     fn drop_filter(&mut self, cx: &mut Context<Self>) {
-        if self.filtering.take().is_none() {
-            return;
+        if self.end_filter(cx) {
+            self.focus_list_after_filter = true;
         }
-        self.emit_filter_end(cx);
-        self.filter_announce = SharedString::default();
-        self.filter_announce_gen += 1;
-        for folder in &self.folders {
-            folder.update(cx, |folder, cx| folder.set_filter(None, cx));
-        }
-        self.focus_list_after_filter = true;
-        cx.notify();
+    }
+
+    /// ⌘⇧N/⌥⌘N with a filter open: the new item must be visible, so the filter
+    /// ends. The rename that follows owns focus; there is no hand-off to the list.
+    pub fn clear_filter_for_new_item(&mut self, cx: &mut Context<Self>) {
+        self.end_filter(cx);
     }
 
     /// Tell the window how the filter session ended, before the folders' filters

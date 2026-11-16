@@ -1398,6 +1398,11 @@ impl CrowWindow {
 
     fn start(&mut self, plan: Plan, resolutions: HashMap<PathBuf, Resolution>, cx: &mut Context<Self>) {
         let rename_result = matches!(plan.request, Request::NewFolder { .. } | Request::NewFile { .. });
+        if rename_result {
+            // The new item must be visible: a filter that hides it would hide the
+            // rename field that follows (findings #10).
+            self.pane().update(cx, |pane, cx| pane.clear_filter_for_new_item(cx));
+        }
         let trash_paths = match &plan.request {
             Request::Trash { paths } => Some(paths.clone()),
             _ => None,
