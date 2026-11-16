@@ -228,7 +228,7 @@ browse it in Crow, create and rename a folder on it (⌘⇧N, type `a.b`, Return
 eject it while shown: the bottom bar reports "Can't open …: No such file or
 directory", with no panic and no beachball (the rows stay until you navigate away).
 A sleeping disk or a pulled SMB share is the slow case: the window keeps drawing
-because H5 keeps every `stat` off the main thread (`crates/crow-app/src/io_guard.rs`
+because the app's file-system calls run off the main thread (`crates/crow-app/src/io_guard.rs`
 fails the tests on a new unmarked one). iCloud Drive placeholders (download on open,
 eviction) are out of scope for the test platform; check a cloud-backed folder by hand.
 
