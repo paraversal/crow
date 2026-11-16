@@ -38,6 +38,7 @@ fn drop_moves(path: &Path, into: &Path) -> bool {
 
 fn same_volume(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
+    // io-ok: only called from drop_request, which the drop handlers spawn in the background
     match (a.symlink_metadata(), b.metadata()) {
         (Ok(x), Ok(y)) => x.dev() == y.dev(),
         _ => false,

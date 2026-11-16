@@ -1360,9 +1360,20 @@ impl Pane {
         self.drop_row = None;
         self.drop_target = None;
         self.drop_column = None;
-        if let Some(request) = crate::operations::drop_request(paths.paths(), into, window.modifiers().alt) {
-            cx.emit(PaneEvent::Run(request));
-        }
+        // Move vs copy depends on the volumes, which means a stat: ask off the main thread.
+        let paths = paths.paths().to_vec();
+        let copy = window.modifiers().alt;
+        let task = cx.background_spawn(async move { crate::operations::drop_request(&paths, into, copy) });
+        cx.spawn(async move |this, cx| {
+            let request = task.await;
+            this.update(cx, |_, cx| {
+                if let Some(request) = request {
+                    cx.emit(PaneEvent::Run(request));
+                }
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
