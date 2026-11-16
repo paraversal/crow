@@ -1640,12 +1640,11 @@ impl CrowWindow {
     /// Finder's File ▸ Add to Sidebar: the selected folders, or the folder shown.
     fn add_to_sidebar(&mut self, _: &AddToSidebar, _: &mut Window, cx: &mut Context<Self>) {
         let pane = self.pane().read(cx);
-        let selected: Vec<PathBuf> = pane.selected_paths(cx).into_iter().filter(|p| p.is_dir()).collect();
+        let selected: Vec<PathBuf> =
+            pane.selected_entries(cx).iter().filter(|(_, is_dir)| *is_dir).map(|(path, _)| path.clone()).collect();
         let paths = if selected.is_empty() { vec![pane.current_dir(cx)] } else { selected };
         let at = cx.global::<Ui>().favorites().first().map_or(0, |(_, f)| f.len());
-        for (n, path) in paths.into_iter().enumerate() {
-            ui::edit_sidebar(SidebarEdit::Add { path, at: (0, at + n) }, cx);
-        }
+        ui::edit_sidebar(SidebarEdit::AddMany { paths, at: (0, at) }, cx);
     }
 
     // ----- view settings -----
@@ -2376,7 +2375,7 @@ impl CrowWindow {
         let task = cx.background_spawn(async move {
             let cleaned = crow_core::clean_pasted_path(&typed).unwrap_or_else(|| typed.clone());
             let target = crow_core::resolve_typed(&cleaned, &cwd, &home);
-            target.exists().then(|| (target.is_dir(), target, typed))
+            target.exists().then(|| (target.is_dir(), target, typed)) // io-ok: inside background_spawn
         });
         cx.spawn_in(window, async move |this, cx| {
             let found = task.await;

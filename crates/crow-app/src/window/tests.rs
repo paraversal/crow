@@ -633,6 +633,23 @@ fn sidebar_context_menu_adds_a_recent_folder(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn add_to_sidebar_adds_only_the_selected_folders(cx: &mut TestAppContext) {
+    let root = fixture("add-sidebar-mixed");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-a ctrl-cmd-t");
+    settle(&view, &mut cx);
+    let paths = sidebar_paths(&cx);
+    assert!(paths.contains(&root.join("alpha")), "the selected folder is added: {paths:?}");
+    assert!(paths.contains(&root.join("beta")), "…and the other one");
+    assert!(!paths.contains(&root.join("notes.txt")), "a selected file is not a sidebar row: {paths:?}");
+    let text = std::fs::read_to_string(config_dir(&cx).join("sidebar.toml")).expect("sidebar.toml");
+    for name in ["alpha", "beta"] {
+        assert!(text.contains(&root.join(name).display().to_string()), "{name} is written: {text}");
+    }
+    assert!(!text.contains(&root.join("notes.txt").display().to_string()), "the file is not written: {text}");
+}
+
+#[gpui::test]
 fn sidebar_looks_follow_rows(cx: &mut TestAppContext) {
     let root = fixture("looks");
     let (view, mut cx) = open(cx, &root);
@@ -5118,6 +5135,19 @@ fn new_file_creates_and_renames(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     let rows = view.read_with(&cx, |w, _| w.palette_rows());
     assert!(rows.first().is_some_and(|row| row.contains("New File")), "{rows:?}");
+}
+
+#[gpui::test]
+fn renaming_a_folder_with_a_dot_selects_the_whole_name(cx: &mut TestAppContext) {
+    let root = fixture("rename-folder-dot");
+    std::fs::create_dir_all(root.join("a.b")).expect("create fixture");
+    let (view, mut cx) = open(cx, &root);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("a.b"), "folders first: the cursor starts on a.b");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_input("c");
+    let renaming = pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx));
+    assert_eq!(renaming.as_deref(), Some("c"), "a folder's whole name is selected, dot included");
 }
 
 #[gpui::test]

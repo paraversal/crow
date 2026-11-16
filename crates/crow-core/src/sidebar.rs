@@ -229,6 +229,11 @@ pub enum SidebarEdit {
         path: PathBuf,
         at: Slot,
     },
+    /// Add `paths` at `at` in order, in one write. Paths already in that group are skipped.
+    AddMany {
+        paths: Vec<PathBuf>,
+        at: Slot,
+    },
     Remove(Slot),
     /// Give `path` the mark `key`, adding it to the first group if it isn't a favorite yet.
     /// The key is taken from whichever favorite had it before.
@@ -303,6 +308,20 @@ fn apply(doc: &mut DocumentMut, edit: &SidebarEdit, home: &Path) -> Result<(), S
             let mut table = InlineTable::new();
             table.insert("path", spelled.into());
             target.insert(at.1.min(target.len()), on_own_line(Value::InlineTable(table)));
+            finish(target);
+        }
+        SidebarEdit::AddMany { paths, at } => {
+            let target = items(doc, at.0)?;
+            let mut inserted = 0;
+            for path in paths {
+                if target.iter().any(|v| item_path(v).is_some_and(|p| expand_home(p, home) == *path)) {
+                    continue;
+                }
+                let mut table = InlineTable::new();
+                table.insert("path", abbreviate_home(path, home).into());
+                target.insert((at.1 + inserted).min(target.len()), on_own_line(Value::InlineTable(table)));
+                inserted += 1;
+            }
             finish(target);
         }
         SidebarEdit::Remove((g, i)) => {
@@ -445,6 +464,27 @@ mod tests {
         assert_eq!(c.find_key('d', Path::new(HOME)), Some(PathBuf::from("/tmp/x")));
         assert_eq!(c.group[0].items.iter().filter(|i| i.key.is_some()).count(), 1);
         assert_eq!(c.group[0].items.last().unwrap().path, "/tmp/x");
+    }
+
+    #[test]
+    fn add_many_keeps_every_path_in_one_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        edit(
+            d,
+            SidebarEdit::AddMany {
+                paths: vec!["/Users/me/Projects".into(), "/Users/me/Work".into(), "/Users/me/Downloads".into()],
+                at: (0, 1),
+            },
+        );
+        assert_eq!(
+            paths(d, 0),
+            ["~", "~/Projects", "~/Work", "~/Desktop", "~/Documents", "~/Downloads", "/Applications"]
+        );
+        // A duplicate is skipped and does not push the new path past the slot.
+        edit(d, SidebarEdit::AddMany { paths: vec!["/Users/me/Work".into(), "/Users/me/Play".into()], at: (0, 0) });
+        assert_eq!(paths(d, 0)[0..2], ["~/Play", "~"], "the duplicate does not shift the new path");
+        assert_eq!(paths(d, 0).len(), 8);
     }
 
     #[test]

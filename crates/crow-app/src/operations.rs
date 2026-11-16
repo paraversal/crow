@@ -38,6 +38,7 @@ fn drop_moves(path: &Path, into: &Path) -> bool {
 
 fn same_volume(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
+    // io-ok: only called from drop_request, which the drop handlers spawn in the background
     match (a.symlink_metadata(), b.metadata()) {
         (Ok(x), Ok(y)) => x.dev() == y.dev(),
         _ => false,
@@ -435,6 +436,7 @@ impl Trash for FolderTrash {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let name = path.file_name().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         let dest = self.0.join(format!("{}-{}", N.fetch_add(1, Ordering::Relaxed), name.to_string_lossy()));
+        // io-ok: test/fuzz Trash, not the app's main thread
         std::fs::rename(path, &dest)?;
         Ok(dest)
     }

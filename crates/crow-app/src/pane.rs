@@ -742,6 +742,11 @@ impl Pane {
         self.focused_folder().read(cx).selected_paths()
     }
 
+    /// The selected items of the focused folder as (path, is a folder), in display order.
+    pub fn selected_entries(&self, cx: &gpui::App) -> crate::folder::SelectionEntries {
+        self.focused_folder().read(cx).selected_entries()
+    }
+
     /// Cancel a Vim mark waiting for its letter. Returns whether one was pending.
     pub fn cancel_pending(&mut self, cx: &mut Context<Self>) -> bool {
         let pending = self.mark_pending.take().is_some();
@@ -1248,15 +1253,16 @@ impl Pane {
 
     fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(entry) = self.cursor_entry(cx) {
-            self.begin_rename(entry.path, window, cx);
+            self.begin_rename(entry.path, entry.is_dir, window, cx);
         }
     }
 
     /// Replace the item's name with a text field; the name without its extension is selected.
-    fn begin_rename(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// `is_dir` comes from the listing, so the main thread never stats the path.
+    fn begin_rename(&mut self, path: PathBuf, is_dir: bool, window: &mut Window, cx: &mut Context<Self>) {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let stem_end = match name.rfind('.') {
-            Some(i) if i > 0 && !path.is_dir() => i,
+            Some(i) if i > 0 && !is_dir => i,
             _ => name.len(),
         };
         let input = cx.new(|cx| TextInput::new(name.clone(), "Name", cx));
@@ -1354,9 +1360,20 @@ impl Pane {
         self.drop_row = None;
         self.drop_target = None;
         self.drop_column = None;
-        if let Some(request) = crate::operations::drop_request(paths.paths(), into, window.modifiers().alt) {
-            cx.emit(PaneEvent::Run(request));
-        }
+        // Move vs copy depends on the volumes, which means a stat: ask off the main thread.
+        let paths = paths.paths().to_vec();
+        let copy = window.modifiers().alt;
+        let task = cx.background_spawn(async move { crate::operations::drop_request(&paths, into, copy) });
+        cx.spawn(async move |this, cx| {
+            let request = task.await;
+            this.update(cx, |_, cx| {
+                if let Some(request) = request {
+                    cx.emit(PaneEvent::Run(request));
+                }
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -2733,11 +2750,12 @@ impl Render for Pane {
             None
         };
         if let Some(path) = self.rename_when_present.clone()
-            && self.focused_folder().read(cx).entries().iter().any(|e| e.path == path)
+            && let Some(entry) = self.focused_folder().read(cx).entries().iter().find(|e| e.path == path)
         {
+            let is_dir = entry.is_dir;
             self.rename_when_present = None;
             // Focus can't move during a render; start the rename right after it.
-            cx.defer_in(window, move |this, window, cx| this.begin_rename(path, window, cx));
+            cx.defer_in(window, move |this, window, cx| this.begin_rename(path, is_dir, window, cx));
         }
         let (title, total, shown, filtered) = {
             let focused = self.focused_folder().read(cx);
@@ -3110,6 +3128,7 @@ impl Pane {
         use crate::fuzz::Violation;
         let mut out = Vec::new();
         for (k, (dir, mut listed, hidden)) in self.listing_snapshot(cx, root).into_iter().enumerate() {
+            // io-ok: fuzz invariant, test/fuzz builds only (docs/testing.md calls this main-thread work deliberate)
             let Ok(read) = std::fs::read_dir(&dir) else { continue };
             let mut disk: Vec<String> = read
                 .filter_map(|entry| entry.ok())

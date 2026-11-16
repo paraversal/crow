@@ -224,9 +224,13 @@ the scheduled workflow runs H1's `fuzz_long`.
 
 Removable and cloud volumes are hand checks, not simulated. Create a disk image
 (`hdiutil create -size 200m -fs APFS -volname CrowTest /tmp/crow.dmg`), attach it,
-browse it in Crow and eject it while shown: the folder should show as gone, with
-no panic. iCloud Drive placeholders (download on open, eviction) are out of scope
-for the test platform; check a cloud-backed folder by hand.
+browse it in Crow, create and rename a folder on it (⌘⇧N, type `a.b`, Return), then
+eject it while shown: the bottom bar reports "Can't open …: No such file or
+directory", with no panic and no beachball (the rows stay until you navigate away).
+A sleeping disk or a pulled SMB share is the slow case: the window keeps drawing
+because the app's file-system calls run off the main thread (`crates/crow-app/src/io_guard.rs`
+fails the tests on a new unmarked one). iCloud Drive placeholders (download on open,
+eviction) are out of scope for the test platform; check a cloud-backed folder by hand.
 
 ## Performance
 

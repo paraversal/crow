@@ -285,6 +285,7 @@ pub mod logs {
 
     impl<S: tracing::Subscriber> Layer<S> for Counter {
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            // io-ok: tracing event metadata, not a file
             if event.metadata().level() == &Level::ERROR {
                 ERRORS.with(|count| count.set(count.get() + 1));
             }
