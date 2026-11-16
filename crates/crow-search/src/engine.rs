@@ -29,7 +29,9 @@ pub struct Query {
     pub names: Option<String>,
     pub contents: Option<String>,
     pub show_hidden: bool,
-    pub rules: RuleSet,
+    /// Compiled once per `exclude.toml` generation and shared by every search
+    /// that starts from it: the glob compile is ~14 ms on the main thread.
+    pub rules: Arc<RuleSet>,
     pub everything: bool,
 }
 
@@ -187,7 +189,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
         return Summary::default();
     }
 
-    let rules = Arc::new(if query.everything { RuleSet::empty() } else { query.rules.clone() });
+    let rules = if query.everything { Arc::new(RuleSet::empty()) } else { Arc::clone(&query.rules) };
     let skipped = Arc::new(Mutex::new(Vec::new()));
     let scanned = Arc::new(AtomicU64::new(0));
     let walker = build_walker(root, query.show_hidden, rules, skipped.clone(), cancel.clone());
@@ -447,8 +449,8 @@ mod tests {
         fs::write(path, bytes).expect("write fixture");
     }
 
-    fn rules() -> RuleSet {
-        RuleSet::from_config(&Exclude::default(), Path::new("/Users/nobody")).expect("default rules")
+    fn rules() -> Arc<RuleSet> {
+        Arc::new(RuleSet::from_config(&Exclude::default(), Path::new("/Users/nobody")).expect("default rules"))
     }
 
     fn run(

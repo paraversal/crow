@@ -96,7 +96,7 @@ fn bench_search(dir: &std::path::Path, text: &str) -> Result<(), String> {
         names: Some(text.to_owned()),
         contents: Some(text.to_owned()),
         show_hidden: false,
-        rules,
+        rules: Arc::new(rules),
         everything: false,
     };
     let cancel = Arc::new(AtomicBool::new(false));
