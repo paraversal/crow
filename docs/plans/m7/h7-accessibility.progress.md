@@ -1,5 +1,5 @@
 # M7 H7 — Accessibility hardening progress
-Branch: `m7-h7-a11y` · PR: none · Job: m7-h7-a11y-bf16 · Last updated: 2026-11-16 · State: in progress
+Branch: `m7-h7-a11y` · PR: none (critic opens it) · Job: m7-h7-a11y-bf16 · Last updated: 2026-11-16 · State: Ready for critique
 
 ## Status
 | Item | State | Notes |
@@ -8,12 +8,13 @@ Branch: `m7-h7-a11y` · PR: none · Job: m7-h7-a11y-bf16 · Last updated: 2026-1
 | I2 Fuzzer a11y invariant | done (pending commit) | `patches/gpui-a11y-interactive-registry.patch`: every painted `Div` with a click listener or focus handle is recorded (role, label, disabled, selector, bounds) under debug + test-support; `Window::debug_interactive_elements()` and `Window::debug_bounds(&str)`. `fuzz::a11y_violations` checks role + non-empty label; `CrowWindow::check_invariants` and the Settings check both call it. `fuzz_smoke` (3 seeds × 30) passes. |
 | I2b Fuzz the Settings window | done (pending commit) | `fuzz::settings_state_for` (Settings keymap, control selectors clipped to the viewport, no `cmd-w`, Escape only with an open menu), `StepGen::next_settings` (keys/type/click/settle/clock), `SettingsWindow::{debug_selectors,text_focused,menu_open,check_invariants}`. `settings_run` + `fuzz_settings_smoke` (2 seeds × 30) checks focus-on-control, the a11y registry, error logs, and `Ui.settings` = `settings.toml` after a settle. Clicks resolve (menus open and entries are clicked) and the registry is non-empty. |
 | I3 VoiceOver pass | done (AX-tree pass; listening hand checks below) | Dumped the bundle's AX tree per area with a throwaway Swift script (`/tmp/axdump`). Fixed: Settings section headings had no label (now `aria_label(title)`); column view announced the active folder twice (the focusable `file-list` wrapper now `Role::Group` / "Columns" in column view). Found but not fixed: the initially focused Settings control is not marked `AXFocused` (Space proves GPUI focus is on Theme; the GPUI/AppKit activation path clears the adapter's focus — needs a GPUI patch, asked the user); list/sidebar/search/palette rows map to `AXStaticText` because AccessKit maps `ListBoxOption` that way (larger row-semantics change). Areas recorded below. |
-| Finish | todo | |
+| Finish | done | `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (421 + 93 + 44 + 5 + 20 + 6 pass, `fuzz_long` ignored). `rm -rf vendor/zed && ./scripts/fetch-gpui.sh` fetched `6ceb6fe` and applied all four patches; `cargo check -p crow-app --all-targets` and the a11y/fuzz tests pass after the clean fetch. CI runs on the PR the critic opens. |
 
 ## Questions
 - Q1 (asked 2026-11-16): patch GPUI for `aria_disabled`, or keep the ", unavailable" label suffix? → **patch**. Checked before asking: `accesskit_macos-0.26.3/src/node.rs:634` maps `is_disabled` to `AXEnabled` false, so the macOS adapter does expose `Disabled`.
 - Q2 (asked 2026-11-16): how does the invariant enumerate elements with `on_click`/focus handles? GPUI's test platform only records `debug_selector` bounds and the a11y tree (which drops role-less nodes); neither lists every clickable/focusable element. → **a second small GPUI patch** (debug + test-support only) recording every element with a click listener or focus handle at paint time; `Window::debug_interactive_elements()`.
 - Q3 (asked 2026-11-16): I3 method — AX-tree dump of the bundle vs listening to VoiceOver? → **AX-tree dump** (throwaway Swift script), fix clear defects, list the listening checks as hand checks.
+- Q4 (asked 2026-11-16, in the final report): the initially focused Settings control is not marked `AXFocused` until the user tabs (GPUI/AppKit activation clears the adapter's focus; Space proves GPUI focus is on Theme). Patch GPUI's `windowDidBecomeKey` to request a frame on first activation too, or leave it for a later piece? → waiting.
 
 ## Decisions
 - Branch from `main` @ 9282594, as the plan names it; H1 is merged (`cf85599`). H5 is still an open PR and H6 is unmerged, so the branch has neither; the path bar is out of I3's scope (plan: "H6 if merged").
@@ -46,6 +47,7 @@ Branch: `m7-h7-a11y` · PR: none · Job: m7-h7-a11y-bf16 · Last updated: 2026-1
 
 ## Log
 - 2026-11-16 Read the plan, `AGENTS.md`, `docs/plans/m7/README.md`, the two "unavailable" sites (`window.rs:560`, `search.rs:1118`), GPUI's a11y builder and `accesskit_macos`'s disabled mapping; created the branch and this file.
+- 2026-11-16 I1–I2b committed as `d3f732b`; I3 fixes as `e5fd11f`. Clean GPUI fetch and full checks pass. The AX pass used a temp config (`CROW_CONFIG_DIR`) and a fixture with a 200-file folder; the bundle's AX tree was dumped per area, and the two label defects were fixed and re-checked in the rebuilt bundle.
 
 ## Next
-Ask Q1–Q3, then start I1.
+Critique: review the branch, answer Q4 (GPUI focus patch or later), open the PR.
