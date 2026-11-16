@@ -7830,3 +7830,4 @@ fn filter_enter_acts_on_the_highlighted_row(cx: &mut TestAppContext) {
     let renaming = pane(&view, &cx).read_with(&cx, |p, _| p.renaming_path());
     assert_eq!(renaming, Some(root.join("beta")), "Return acts on the cursor row");
 }
+

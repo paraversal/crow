@@ -68,6 +68,16 @@ impl<K: Clone + Eq + Hash> Selection<K> {
         }
     }
 
+    /// Drop one item, keeping the cursor on a remaining selected item.
+    pub fn remove(&mut self, key: &K) {
+        if self.selected.remove(key) {
+            if self.anchor.as_ref() == Some(key) {
+                self.anchor = self.selected.iter().next().cloned();
+            }
+            self.cursor = self.anchor.clone();
+        }
+    }
+
     /// Shift-click or Shift-arrow: select from the anchor to `target` in display order,
     /// replacing any previous Shift range. `position` finds a key's row; `key_at` reads one.
     pub fn extend_to(&mut self, target: usize, position: impl Fn(&K) -> Option<usize>, key_at: impl Fn(usize) -> K) {
