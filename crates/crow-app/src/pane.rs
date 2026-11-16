@@ -2907,8 +2907,12 @@ impl Render for Pane {
         let list = div()
             .id("file-list")
             .debug_selector(|| "file-list".into())
-            .role(Role::ListBox)
-            .aria_label(if filtered {
+            // In column view the columns are the lists; the focusable wrapper
+            // must not repeat the active column's folder name and count.
+            .role(if self.mode == ViewMode::Columns { Role::Group } else { Role::ListBox })
+            .aria_label(if self.mode == ViewMode::Columns {
+                "Columns".to_owned()
+            } else if filtered {
                 format!("{title}, {shown} of {total} items")
             } else {
                 format!("{title}, {total} items")

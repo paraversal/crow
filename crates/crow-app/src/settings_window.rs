@@ -1354,6 +1354,7 @@ fn section_heading(title: &'static str, theme: &Theme) -> gpui::Stateful<gpui::D
         .pt(px(16.))
         .pb(px(2.))
         .role(Role::Heading)
+        .aria_label(title)
         .aria_level(2)
         .text_size(px(15.))
         .font_weight(FontWeight::SEMIBOLD)

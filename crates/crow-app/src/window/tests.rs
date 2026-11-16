@@ -8068,3 +8068,15 @@ fn interactive_elements_have_roles_and_labels(cx: &mut TestAppContext) {
     assert_eq!(back.label.as_deref(), Some("Back"));
     assert_eq!(back.disabled, Some(true), "a fresh window has nowhere to go back to");
 }
+
+#[gpui::test]
+fn column_view_announces_columns_once(cx: &mut TestAppContext) {
+    let root = fixture("a11y-columns");
+    let (view, mut cx) = open(cx, &root);
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+    settle(&view, &mut cx);
+    let elements = cx.update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec());
+    let wrapper = elements.iter().find(|element| element.selector.as_deref() == Some("file-list")).expect("file list");
+    assert_eq!(wrapper.role, Some(Role::Group), "the focusable wrapper is not a list");
+    assert_eq!(wrapper.label.as_deref(), Some("Columns"), "it does not repeat the active column's label");
+}
