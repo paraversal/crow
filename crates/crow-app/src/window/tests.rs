@@ -633,6 +633,18 @@ fn sidebar_context_menu_adds_a_recent_folder(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn add_to_sidebar_adds_only_the_selected_folders(cx: &mut TestAppContext) {
+    let root = fixture("add-sidebar-mixed");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-a ctrl-cmd-t");
+    settle(&view, &mut cx);
+    let paths = sidebar_paths(&cx);
+    assert!(paths.contains(&root.join("alpha")), "the selected folder is added: {paths:?}");
+    assert!(paths.contains(&root.join("beta")), "…and the other one");
+    assert!(!paths.contains(&root.join("notes.txt")), "a selected file is not a sidebar row: {paths:?}");
+}
+
+#[gpui::test]
 fn sidebar_looks_follow_rows(cx: &mut TestAppContext) {
     let root = fixture("looks");
     let (view, mut cx) = open(cx, &root);

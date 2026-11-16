@@ -44,7 +44,7 @@ pub enum FolderEvent {
 const MAX_DEPTH: usize = 32;
 
 /// The selected rows as (path, is a folder), shared with drag values.
-type SelectionEntries = Arc<Vec<(PathBuf, bool)>>;
+pub(crate) type SelectionEntries = Arc<Vec<(PathBuf, bool)>>;
 
 /// The cached selection: the generation it was built for, and the entries.
 type SelectionCache = RefCell<Option<(u64, SelectionEntries)>>;

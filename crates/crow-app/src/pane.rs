@@ -742,6 +742,11 @@ impl Pane {
         self.focused_folder().read(cx).selected_paths()
     }
 
+    /// The selected items of the focused folder as (path, is a folder), in display order.
+    pub fn selected_entries(&self, cx: &gpui::App) -> crate::folder::SelectionEntries {
+        self.focused_folder().read(cx).selected_entries()
+    }
+
     /// Cancel a Vim mark waiting for its letter. Returns whether one was pending.
     pub fn cancel_pending(&mut self, cx: &mut Context<Self>) -> bool {
         let pending = self.mark_pending.take().is_some();
