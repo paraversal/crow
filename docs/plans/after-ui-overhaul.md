@@ -27,5 +27,14 @@ Items move here from fix lists when they turn out larger than the list can hold.
 **From:** the user, 2026-11-14: show folder sizes, maybe from an index updated as things change.
 **Plan:** [`folder-sizes.md`](folder-sizes.md). The sizes are measured lazily for the folders on screen, cached, and kept correct with FSEvents history (a folder's mtime doesn't change when files deeper inside do). Counting rules borrowed from asimeow.
 
+## D3 Housekeeping triage (2026-11-16)
+**From:** the user's housekeeping list and the triage on 2026-11-16. The keyboard/menu items went to [`housekeeping-3.md`](housekeeping-3.md); these are the rest.
+- **Copy/cut feedback.** Flash the copied rows once and optionally play a tick; dim cut rows until paste/undo. Needs a motion/sound event and clipboard state. The copy flash is small; cut dimming is the larger half.
+- **Open Terminal Here.** `Effects::open_terminal(path)`, a context-menu line, and a decision on Terminal.app vs iTerm and whether it gets a key.
+- **New File/Folder with a row selected.** Decide whether they always create in the shown folder (recommended) or inside a selected folder; then add them to the Items menu.
+- **Fuzz/test job overview.** H3 already prints a per-run report and CI has a step summary; a cross-run dashboard is separate tooling. Clarify scope first.
+- **Window drag.** Dragging on toolbar controls moves the window because AppKit's native titlebar drag is active (`WindowOptions::app_owns_titlebar_drag` is false). Likely fix: set it true and add an explicit drag strip, then hand-test traffic lights and double-click. Timebox; if it needs a vendor patch, it waits.
+- **Sidebar background menu.** Dropped: row menus already exist and the user retracted the empty-background request.
+
 ## Moved here later
 - (U7-fix X6 or X7, if they turn out larger than the fix list: add them here with their findings.)

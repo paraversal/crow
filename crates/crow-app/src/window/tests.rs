@@ -2923,6 +2923,22 @@ fn search_return_in_the_field_moves_to_the_first_result(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn cmd_backspace_clears_the_search_field(cx: &mut TestAppContext) {
+    let root = fixture("search-cmd-backspace");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("needle");
+    wait_for_search(&view, &mut cx);
+    let query = |cx: &VisualTestContext| {
+        view.read_with(cx, |w, cx| w.search.as_ref().expect("search open").read(cx).query_text(cx))
+    };
+    assert_eq!(query(&cx), "needle");
+    cx.simulate_keystrokes("cmd-backspace");
+    assert_eq!(query(&cx), "", "Cmd-Backspace clears the field");
+    assert!(root.join("notes.txt").exists(), "Cmd-Backspace never trashes a file from the search field");
+}
+
+#[gpui::test]
 fn search_down_without_results_stays_in_the_field(cx: &mut TestAppContext) {
     let root = fixture("search-down-empty");
     let (view, mut cx) = open(cx, &root);
@@ -4449,6 +4465,11 @@ fn filter_field_takes_space_slash_and_list_keys_as_text(cx: &mut TestAppContext)
     cx.simulate_keystrokes("a space /");
     assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.filter_query(cx)).as_deref(), Some("a /"));
     cx.simulate_keystrokes("cmd-backspace");
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |p, cx| p.filter_query(cx)).as_deref(),
+        Some(""),
+        "Cmd-Backspace deletes to the start of the field"
+    );
     assert!(root.join("notes.txt").exists(), "Cmd-Backspace did not trash a row from the field");
 }
 
@@ -6636,6 +6657,44 @@ fn click_below_rows_clears_the_selection(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn escape_clears_the_selection_when_nothing_else_is_open(cx: &mut TestAppContext) {
+    let root = fixture("escape-deselect");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+
+    cx.simulate_keystrokes("escape");
+    assert_eq!(selected(&view, &cx), None, "Escape clears the cursor");
+    assert!(selected_names(&view, &cx).is_empty(), "and the selection");
+
+    // The filter owns the first Escape; the next one clears the selection.
+    cx.simulate_keystrokes("down /");
+    cx.simulate_input("a");
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "Escape closed the filter");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "the selection survived the filter close");
+    cx.simulate_keystrokes("escape");
+    assert_eq!(selected(&view, &cx), None, "the next Escape cleared it");
+}
+
+#[gpui::test]
+fn escape_cancels_a_pending_vim_mark_before_deselecting(cx: &mut TestAppContext) {
+    let root = fixture("escape-vim-mark");
+    let (view, mut cx) = open(cx, &root);
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("down m");
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.pending_hint()), Some("Mark this folder: type a letter"));
+
+    cx.simulate_keystrokes("escape");
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.pending_hint()), None, "Escape cancelled the mark");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "and kept the selection");
+
+    cx.simulate_keystrokes("escape");
+    assert_eq!(selected(&view, &cx), None, "the next Escape clears the selection");
+}
+
+#[gpui::test]
 fn click_in_the_row_gutter_clears_the_selection(cx: &mut TestAppContext) {
     let root = fixture("empty-click-gutter");
     let (view, mut cx) = open(cx, &root);
@@ -6901,6 +6960,13 @@ fn copy_path_puts_the_selected_paths_on_the_clipboard(cx: &mut TestAppContext) {
     choose(&view, &mut cx, CommandId::CopyPath);
     let text = cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text()));
     assert_eq!(text, Some(root.join("alpha").display().to_string()));
+
+    // The empty-space menu offers it too, and copies the shown folder.
+    let empty = below_rows(&mut cx, "row-notes.txt");
+    right_click(&mut cx, empty);
+    choose(&view, &mut cx, CommandId::CopyPath);
+    let text = cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text()));
+    assert_eq!(text, Some(root.display().to_string()), "empty space copies the folder shown");
 }
 
 #[gpui::test]
