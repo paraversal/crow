@@ -8450,11 +8450,34 @@ fn a_partial_listing_keeps_the_selection_and_open_folders(cx: &mut TestAppContex
     assert!(expanded, "a partial keeps an inline folder open");
 
     // The full listing restores the rows, the cursor and alpha's child rows.
-    folder.update(&mut cx, |folder, cx| folder.apply_partial_for_test(all, cx));
+    folder.update(&mut cx, |folder, cx| folder.replace_entries_for_test(all, None, cx));
     let rows = rows(&view, &cx);
     assert!(rows.iter().any(|(name, _)| name == "notes.txt"), "{rows:?}");
     assert!(rows.iter().any(|(name, _)| name == "inner"), "alpha's child rows return: {rows:?}");
     assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "the cursor follows the selection");
+}
+
+/// H4 #22: collapsing an inline folder frees its listing before the child
+/// entity drops. A 100k listing dropped on the main thread is a visible hitch.
+#[gpui::test]
+fn collapsing_an_inline_folder_releases_its_listing(cx: &mut TestAppContext) {
+    let root = fixture("collapse-release");
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    let alpha = root.join("alpha");
+    folder.update(&mut cx, |folder, cx| folder.expand(alpha.clone(), cx));
+    settle(&view, &mut cx);
+    let child = folder.read_with(&cx, |folder, _| folder.child_for_test(&alpha)).expect("alpha is open");
+    assert!(
+        !child.read_with(&cx, |folder, _| folder.entries().is_empty()),
+        "the child listed its folder"
+    );
+
+    folder.update(&mut cx, |folder, cx| folder.collapse(&alpha, cx));
+    assert!(
+        child.read_with(&cx, |folder, _| folder.entries().is_empty()),
+        "collapse releases the child's listing before the entity drops"
+    );
 }
 
 /// H4 #22/#26: a 100k duplicate or paste sets `select_when_present` to 100k

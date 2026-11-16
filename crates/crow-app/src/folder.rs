@@ -920,9 +920,9 @@ impl Folder {
     }
 
     /// Show what a staged load has read so far. A partial only adds entries:
-    /// pruning the selection, closing inline folders or starting effects here
-    /// would act on rows the load has not reached yet. The full listing does
-    /// all of that when it lands.
+    /// pruning the selection, closing inline folders or reconciling effect
+    /// state here would act on rows the load has not reached yet. The full
+    /// listing does all of that when it lands.
     fn apply_partial(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
         let _span = tracing::debug_span!("listing partial").entered();
         self.replace_entries_arc(entries, cx);
@@ -1303,7 +1303,11 @@ impl Folder {
             }
             return;
         }
-        self.children.remove(path);
+        // Free the child's listing before the entity drops; a 100k folder
+        // collapsed on the main thread is a visible hitch.
+        if let Some(child) = self.children.remove(path) {
+            child.folder.update(cx, |child, cx| child.release_listing(cx));
+        }
         self.sync_children(cx);
         self.rebuild_rows(cx);
         self.prune_selection();
@@ -1698,6 +1702,12 @@ impl Folder {
     #[cfg(test)]
     pub fn apply_partial_for_test(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
         self.apply_partial(entries, cx);
+    }
+
+    /// The open inline child at `path`, so a test can hold it across a collapse.
+    #[cfg(test)]
+    pub fn child_for_test(&self, path: &Path) -> Option<Entity<Folder>> {
+        self.children.get(path).map(|child| child.folder.clone())
     }
 
     /// Set the operation results to select without starting a reload.
