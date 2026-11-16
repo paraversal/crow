@@ -3360,6 +3360,9 @@ impl CrowWindow {
         if let Some(palette) = &self.palette {
             return palette.input.read(cx).focus_handle(cx).is_focused(window);
         }
+        if let Some(edit) = &self.path_edit {
+            return edit.input.read(cx).focus_handle(cx).is_focused(window);
+        }
         if let Some(search) = &self.search {
             return search.read(cx).input_focused(window, cx);
         }
@@ -3467,11 +3470,19 @@ impl CrowWindow {
             allowed.push(("search results", search.results_focus_handle()));
             // The documented Tab cycle goes field -> results -> sidebar -> field.
             allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
+            // ⌘L can edit the path while search is open; the bar's field owns focus then.
+            if let Some(edit) = &self.path_edit {
+                allowed.push(("path field", edit.input.read(cx).focus_handle(cx)));
+            }
         } else {
             allowed.push(("pane", pane.focus_handle().clone()));
             allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
             for text in pane.text_focus_handles(cx) {
                 allowed.push(("pane text field", text));
+            }
+            // The bottom bar's path field (⌘L) is a focus surface of its own.
+            if let Some(edit) = &self.path_edit {
+                allowed.push(("path field", edit.input.read(cx).focus_handle(cx)));
             }
         }
         if !allowed.iter().any(|(_, handle)| handle == &focused) {

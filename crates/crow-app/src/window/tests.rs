@@ -8270,6 +8270,25 @@ fn interactive_elements_have_roles_and_labels(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn path_edit_keeps_the_focus_invariant(cx: &mut TestAppContext) {
+    let root = fixture("path-edit-invariant");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-l");
+    settle(&view, &mut cx);
+    assert!(violations(&view, &mut cx).is_empty(), "the path field is a focus surface");
+    assert!(crate::fuzz::state(&view, &mut cx).text_focused, "the fuzzer types into the path field");
+
+    // Search can stay open behind the field; the bar's field still owns focus.
+    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-l");
+    settle(&view, &mut cx);
+    assert!(violations(&view, &mut cx).is_empty(), "the path field is a focus surface over search");
+    assert!(crate::fuzz::state(&view, &mut cx).text_focused, "…and the fuzzer still types into it");
+}
+
+#[gpui::test]
 fn column_view_announces_columns_once(cx: &mut TestAppContext) {
     let root = fixture("a11y-columns");
     let (view, mut cx) = open(cx, &root);
