@@ -393,6 +393,18 @@ fn cursor_past_the_listing_fires(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn cursor_without_its_selection_fires(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-cursor-selection");
+    let (view, mut cx) = open(cx, &root);
+    let pane = pane(&view, &cx);
+    let folder = pane.read_with(&cx, |pane, _| pane.test_folder());
+    // Open selects row 0; move the cursor alone, as a highlight that skipped it would.
+    folder.update(&mut cx, |folder, _| folder.set_cursor_ix_for_test(Some(1)));
+    let found = violations(&view, &mut cx);
+    assert!(found.iter().any(|violation| violation.check == "cursor"), "{found:?}");
+}
+
+#[gpui::test]
 fn selection_outside_the_listing_fires(cx: &mut TestAppContext) {
     let root = fixture("fuzz-selection");
     let (view, mut cx) = open(cx, &root);
@@ -7788,4 +7800,33 @@ fn fuzz_long(cx: &mut TestAppContext) {
         index += 1;
         seed = seed.wrapping_add(1);
     }
+}
+
+#[gpui::test]
+fn filter_enter_acts_on_the_highlighted_row(cx: &mut TestAppContext) {
+    let root = fixture("filter-enter-cursor");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("a");
+    settle(&view, &mut cx);
+
+    // Down in the field moves the cursor with the highlight, so Return has a target.
+    cx.simulate_keystrokes("down");
+    let cursor = pane(&view, &cx).read_with(&cx, |p, cx| p.cursor_entry(cx).map(|entry| entry.name.clone()));
+    assert_eq!(cursor.as_deref(), Some("beta"), "the cursor follows the highlight");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+
+    // Return moves focus into the matches without moving the cursor.
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "Return moves focus into the matches");
+    let cursor = pane(&view, &cx).read_with(&cx, |p, cx| p.cursor_entry(cx).map(|entry| entry.name.clone()));
+    assert_eq!(cursor.as_deref(), Some("beta"), "focusing the list keeps the highlighted row");
+
+    // Return in the list renames the cursor row (Crow's Enter is Rename; cmd-down opens).
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    let renaming = pane(&view, &cx).read_with(&cx, |p, _| p.renaming_path());
+    assert_eq!(renaming, Some(root.join("beta")), "Return acts on the cursor row");
 }
