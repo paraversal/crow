@@ -1248,15 +1248,16 @@ impl Pane {
 
     fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(entry) = self.cursor_entry(cx) {
-            self.begin_rename(entry.path, window, cx);
+            self.begin_rename(entry.path, entry.is_dir, window, cx);
         }
     }
 
     /// Replace the item's name with a text field; the name without its extension is selected.
-    fn begin_rename(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// `is_dir` comes from the listing, so the main thread never stats the path.
+    fn begin_rename(&mut self, path: PathBuf, is_dir: bool, window: &mut Window, cx: &mut Context<Self>) {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let stem_end = match name.rfind('.') {
-            Some(i) if i > 0 && !path.is_dir() => i,
+            Some(i) if i > 0 && !is_dir => i,
             _ => name.len(),
         };
         let input = cx.new(|cx| TextInput::new(name.clone(), "Name", cx));
@@ -2733,11 +2734,12 @@ impl Render for Pane {
             None
         };
         if let Some(path) = self.rename_when_present.clone()
-            && self.focused_folder().read(cx).entries().iter().any(|e| e.path == path)
+            && let Some(entry) = self.focused_folder().read(cx).entries().iter().find(|e| e.path == path)
         {
+            let is_dir = entry.is_dir;
             self.rename_when_present = None;
             // Focus can't move during a render; start the rename right after it.
-            cx.defer_in(window, move |this, window, cx| this.begin_rename(path, window, cx));
+            cx.defer_in(window, move |this, window, cx| this.begin_rename(path, is_dir, window, cx));
         }
         let (title, total, shown, filtered) = {
             let focused = self.focused_folder().read(cx);

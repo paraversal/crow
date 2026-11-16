@@ -5121,6 +5121,19 @@ fn new_file_creates_and_renames(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn renaming_a_folder_with_a_dot_selects_the_whole_name(cx: &mut TestAppContext) {
+    let root = fixture("rename-folder-dot");
+    std::fs::create_dir_all(root.join("a.b")).expect("create fixture");
+    let (view, mut cx) = open(cx, &root);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("a.b"), "folders first: the cursor starts on a.b");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_input("c");
+    let renaming = pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx));
+    assert_eq!(renaming.as_deref(), Some("c"), "a folder's whole name is selected, dot included");
+}
+
+#[gpui::test]
 fn a_late_change_batch_does_not_bring_back_a_deleted_file(cx: &mut TestAppContext) {
     let root = fixture("change-race");
     let (view, mut cx) = open(cx, &root);
