@@ -6679,6 +6679,22 @@ fn escape_clears_the_selection_when_nothing_else_is_open(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn escape_cancels_a_pending_vim_mark_before_deselecting(cx: &mut TestAppContext) {
+    let root = fixture("escape-vim-mark");
+    let (view, mut cx) = open(cx, &root);
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("down m");
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.pending_hint()), Some("Mark this folder: type a letter"));
+
+    cx.simulate_keystrokes("escape");
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.pending_hint()), None, "Escape cancelled the mark");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "and kept the selection");
+
+    cx.simulate_keystrokes("escape");
+    assert_eq!(selected(&view, &cx), None, "the next Escape clears the selection");
+}
+
+#[gpui::test]
 fn click_in_the_row_gutter_clears_the_selection(cx: &mut TestAppContext) {
     let root = fixture("empty-click-gutter");
     let (view, mut cx) = open(cx, &root);

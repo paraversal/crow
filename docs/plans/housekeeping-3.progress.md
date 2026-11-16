@@ -1,5 +1,5 @@
 # housekeeping-3 progress
-Branch: `housekeeping-3` · PR: none · Last updated: 2026-11-16 · State: Ready for critique
+Branch: `housekeeping-3` · PR: none · Last updated: 2026-11-16 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -35,3 +35,17 @@ None; the user approved the three behaviors on 2026-11-16.
 
 ## Next
 Hand-check the six items above in `target/bundle/Crow.app`, then run the `critique` skill and open the PR.
+
+## Critique
+Critic session: 2026-11-16 · Base: main @ 91a2e42 · Head reviewed: 913e01e
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | With the Vim layer on, Escape during a pending `m` mark cleared the selection but left “Mark this folder: type a letter” in the status bar. Esc should cancel the sequence first, as Vim does. | `crates/crow-app/src/window.rs:3110`, `pane.rs:739` | UX / code | fix | fixed (critique commit): `Pane::cancel_pending` runs before `clear_selection`; test `escape_cancels_a_pending_vim_mark_before_deselecting`; re-checked in the app with the Vim layer on. |
+| C2 | Escape after a pending `g` chord still clears the selection. GPUI consumes the pending keystroke before dispatching the Escape action, so the app cannot tell a chord was waiting. | `crates/crow-app/src/actions.rs:276` (`g g`) | UX | note | left: needs a GPUI change (expose the cancelled chord to the action); Finder layer is unaffected. |
+| C3 | `Pane::clear_selection` returns `bool` but the window handler ignores it. | `crates/crow-app/src/pane.rs:748` | code sense | note | left: the plan asked for the return value; harmless. |
+
+Checks re-run: fmt ✓ · clippy ✓ · tests ✓ (579 passed, 1 ignored) · bench not needed: no listing, scrolling or first-paint change
+Looked at in the app: search field ⌘⌫ (query cleared, results reset); `/` filter ⌘⌫ (query cleared, row stays selected); list Escape (selection and cursor gone, preview cleared); filter Escape twice (filter closes first, selection survives, next Escape clears); rename, search, palette, delete sheet and theme picker all consume Escape before the list; Escape in the sidebar leaves the list selection; column view Escape clears the column and closes the columns to its right; Vim layer `m` + Escape cancels the mark and keeps the selection. Empty-space context menu not driven (right-click automation blocked); its slot and action are covered by `copy_path_puts_the_selected_paths_on_the_clipboard` and the user asked to skip it.
+
+Verdict: better. The three behaviors work as approved, the empty-space menu matches the row menu, and the only surprise found — Escape eating a pending Vim mark — is fixed.

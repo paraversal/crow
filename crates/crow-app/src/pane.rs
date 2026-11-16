@@ -736,6 +736,15 @@ impl Pane {
         self.focused_folder().read(cx).selected_paths()
     }
 
+    /// Cancel a Vim mark waiting for its letter. Returns whether one was pending.
+    pub fn cancel_pending(&mut self, cx: &mut Context<Self>) -> bool {
+        let pending = self.mark_pending.take().is_some();
+        if pending {
+            cx.notify();
+        }
+        pending
+    }
+
     /// Clear the focused folder's selection. Returns whether anything was selected.
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
         let had_selection = self.focused_folder().read(cx).selected_count() > 0;

@@ -3108,10 +3108,17 @@ impl Render for CrowWindow {
                 {
                     // Esc closed the skipped list; the next one closes search.
                 } else if this.search.is_none() && this.pane().read(cx).focus_handle().is_focused(window) {
-                    // Nothing else wants Escape: clear the list's highlight, as a click
-                    // on empty space does. Filter and rename fields have their own
+                    // Nothing else wants Escape. A Vim mark waiting for its letter is a
+                    // sequence in progress, so Escape cancels it before it deselects,
+                    // as Vim's Esc does. Otherwise clear the list's highlight, as a
+                    // click on empty space does. Filter and rename fields have their own
                     // deeper Escape bindings, and search is handled above.
-                    this.pane().update(cx, |pane, cx| pane.clear_selection(cx));
+                    let pane = this.pane().clone();
+                    if !pane.update(cx, |pane, cx| pane.cancel_pending(cx)) {
+                        pane.update(cx, |pane, cx| {
+                            pane.clear_selection(cx);
+                        });
+                    }
                 } else {
                     this.close_search(window, cx);
                 }
