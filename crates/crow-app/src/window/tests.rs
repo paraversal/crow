@@ -467,6 +467,19 @@ fn a_second_window_keeps_the_focus_invariant(cx: &mut TestAppContext) {
     drop(view);
 }
 
+/// H4 #20: the live run checks every browser window, and a window that is not
+/// key has no focused element by design (the Settings window or a second
+/// browser window is key). The test fuzzer still requires focus.
+#[test]
+fn inactive_windows_may_have_no_focus() {
+    assert!(super::missing_focus_violation(false).is_none(), "an inactive window may have no focus");
+    assert_eq!(
+        super::missing_focus_violation(true).map(|violation| violation.check),
+        Some("focus"),
+        "the test fuzzer still requires focus"
+    );
+}
+
 #[gpui::test]
 fn filter_and_rename_keep_focus_in_the_pane(cx: &mut TestAppContext) {
     use crate::fuzz::Step;

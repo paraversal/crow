@@ -874,7 +874,12 @@ impl Folder {
         let started = Instant::now();
         cx.background_spawn(async move { list_in_stages(&dir, hidden, sort, started, &tx) }).detach();
         cx.spawn(async move |this, cx| {
-            while let Some(update) = rx.next().await {
+            while let Some(mut update) = rx.next().await {
+                // A busy main thread queues several staged partials; only the
+                // latest is worth a 100k apply (two in one frame were 38+38 ms).
+                while let Ok(next) = rx.try_recv() {
+                    update = next;
+                }
                 let current = this.update(cx, |this, cx| {
                     if this.generation != generation {
                         return false;
@@ -1321,6 +1326,7 @@ impl Folder {
                 .ok();
                 return;
             }
+            let pending_paths = paths.clone();
             let stats = cx.background_spawn(async move { crow_fs::stat_changes(&dir, &paths, hidden) }).await;
             this.update(cx, |this, cx| {
                 if this.reconcile_gen != generation {
@@ -1328,6 +1334,13 @@ impl Folder {
                 }
                 this.reconciling = false;
                 if this.sort != sort {
+                    return;
+                }
+                // One apply at a time: a watcher batch or a load may be in
+                // flight, and a second 100k apply in the same frame was 38+38 ms.
+                // Re-stat these paths in the next batch.
+                if this.applying || this.loading {
+                    this.pending.extend(pending_paths);
                     return;
                 }
                 // Every added path still exists: the listing already has them, so
