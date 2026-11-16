@@ -7530,7 +7530,8 @@ fn settings_run(seed: u64, steps: usize, cx: &mut TestAppContext) -> Result<(), 
         }
     }
     crate::fuzz::settle(&browser, &mut bcx);
-    if let Some(violation) = settings_file_mismatch(&mut scx) {
+    // The last step may have started a write; settle it like any other step.
+    if let Err(violation) = apply_settings_and_check(&view, &crate::fuzz::Step::Settle, &mut scx) {
         println!("settings seed {seed} step {steps}: {} — {}", violation.check, violation.detail);
         return Err(failure(steps, violation, script));
     }

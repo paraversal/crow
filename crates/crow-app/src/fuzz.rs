@@ -382,7 +382,10 @@ pub fn state_for(view: &crate::window::CrowWindow, window: &gpui::Window, cx: &g
 /// The Settings window as a fuzz surface: its controls' selectors, the keys its
 /// own keymap resolves, and no window-closing keys. `cmd-w` would end the
 /// surface, and Escape closes the window unless a drop-down is open.
-#[cfg(any(test, feature = "fuzz"))]
+///
+/// Test-only: it clips selectors with `Window::debug_bounds`, which needs GPUI's
+/// `test-support`; the live fuzzer builds without it.
+#[cfg(test)]
 pub fn settings_state_for(
     view: &crate::settings_window::SettingsWindow,
     window: &gpui::Window,
@@ -407,22 +410,30 @@ pub fn settings_state_for(
 }
 
 /// Every painted element with a click listener or focus handle must expose a
-/// role and a non-empty label. Empty in release fuzz builds, which don't record
-/// the list.
+/// role and a non-empty label. Empty in the live fuzzer, which builds without
+/// GPUI's `test-support` and so doesn't record the list.
 #[cfg(any(test, feature = "fuzz"))]
 pub fn a11y_violations(window: &gpui::Window, check: &'static str) -> Vec<Violation> {
-    let Some(elements) = window.debug_interactive_elements() else { return Vec::new() };
-    let mut out = Vec::new();
-    for element in elements {
-        let name = element.selector.as_deref().unwrap_or("an element");
-        if element.role.is_none() {
-            out.push(Violation::new(check, format!("{name} is interactive but has no role")));
+    #[cfg(test)]
+    {
+        let Some(elements) = window.debug_interactive_elements() else { return Vec::new() };
+        let mut out = Vec::new();
+        for element in elements {
+            let name = element.selector.as_deref().unwrap_or("an element");
+            if element.role.is_none() {
+                out.push(Violation::new(check, format!("{name} is interactive but has no role")));
+            }
+            if element.label.as_ref().is_none_or(|label| label.trim().is_empty()) {
+                out.push(Violation::new(check, format!("{name} is interactive but has no aria label")));
+            }
         }
-        if element.label.as_ref().is_none_or(|label| label.trim().is_empty()) {
-            out.push(Violation::new(check, format!("{name} is interactive but has no aria label")));
-        }
+        out
     }
-    out
+    #[cfg(not(test))]
+    {
+        let _ = (window, check);
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

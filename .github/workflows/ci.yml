@@ -49,6 +49,11 @@ jobs:
       - name: Clippy (fuzz)
         run: cargo clippy -p crow-app --features fuzz --all-targets -- -D warnings
 
+      # `--all-targets` unifies GPUI's test-support feature, which the `crow --fuzz`
+      # binary doesn't get; check the bin alone so the feature can't rot there.
+      - name: Check the fuzz binary
+        run: cargo check -p crow-app --features fuzz --bin crow
+
       - name: Tests
         run: cargo test --workspace
 
