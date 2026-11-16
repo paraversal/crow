@@ -721,20 +721,31 @@ impl Pane {
         let dir = here.read(cx).dir().to_path_buf();
         let mine: Vec<PathBuf> = paths.into_iter().filter(|p| p.parent() == Some(dir.as_path())).collect();
         let mode = cx.global::<Ui>().feedback.mode;
+        let mut mine = Some(mine);
         for folder in self.folders.clone() {
-            if folder == here && !mine.is_empty() {
-                folder.update(cx, |f, cx| f.select_when_present(mine.clone(), mode, cx));
-            } else {
-                folder.update(cx, |f, cx| f.reload(cx));
+            if folder == here
+                && let Some(mine) = mine.take().filter(|mine| !mine.is_empty())
+            {
+                folder.update(cx, |f, cx| f.select_when_present(mine, mode, cx));
+                continue;
             }
+            folder.update(cx, |f, cx| f.reload(cx));
         }
     }
 
     /// Start a feedback effect on the focused folder's visible rows among `paths`.
-    pub fn start_effect(&mut self, paths: Vec<PathBuf>, fx: Fx, cx: &mut Context<Self>) {
+    pub fn start_effect(&mut self, paths: &[PathBuf], fx: Fx, cx: &mut Context<Self>) {
         let mode = cx.global::<Ui>().feedback.mode;
         let folder = self.focused_folder().clone();
-        folder.update(cx, |folder, cx| folder.start_effect(&paths, fx, mode, cx));
+        folder.update(cx, |folder, cx| folder.start_effect(paths, fx, mode, cx));
+    }
+
+    /// Free the open folders' listings off the main thread before this pane is
+    /// dropped (closing a tab or a window).
+    pub fn release_listings(&mut self, cx: &mut Context<Self>) {
+        for folder in &self.folders {
+            folder.update(cx, |folder, cx| folder.release_listing(cx));
+        }
     }
 
     /// The selected items of the focused folder, in display order.
@@ -885,6 +896,11 @@ impl Pane {
         match mode {
             // The list shows the folder you were in: the focused column becomes the root.
             ViewMode::List => {
+                for (index, folder) in self.folders.iter().enumerate() {
+                    if index != self.focused {
+                        folder.update(cx, |folder, cx| folder.release_listing(cx));
+                    }
+                }
                 let keep = self.folders.remove(self.focused);
                 let subscription = self.subscriptions.remove(self.focused);
                 let dir = keep.read(cx).dir().to_path_buf();
@@ -905,6 +921,7 @@ impl Pane {
             self.emit_filter_end(cx);
             self.focus_list_after_filter = true;
         }
+        self.release_listings(cx);
         self.folders.clear();
         self.subscriptions.clear();
         self.focused = 0;
@@ -930,7 +947,10 @@ impl Pane {
         self.strip_scroll.scroll_to_item(self.folders.len() - 1);
     }
 
-    fn truncate(&mut self, len: usize) {
+    fn truncate(&mut self, len: usize, cx: &mut Context<Self>) {
+        for folder in &self.folders[len..] {
+            folder.update(cx, |folder, cx| folder.release_listing(cx));
+        }
         self.folders.truncate(len);
         self.subscriptions.truncate(len);
         self.focused = self.focused.min(len.saturating_sub(1));
@@ -966,10 +986,10 @@ impl Pane {
         match child {
             Some(path) if next_matches(self, &path) => {}
             Some(path) => {
-                self.truncate(k + 1);
+                self.truncate(k + 1, cx);
                 self.push_folder(path, false, cx);
             }
-            None => self.truncate(k + 1),
+            None => self.truncate(k + 1, cx),
         }
     }
 

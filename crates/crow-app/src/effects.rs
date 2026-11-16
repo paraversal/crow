@@ -286,6 +286,9 @@ struct Script {
 pub struct RecordingEffects {
     calls: std::sync::Mutex<Vec<Call>>,
     script: std::sync::Mutex<Script>,
+    /// Keep the paths of `write_file_urls` calls. Tests assert them; the live
+    /// fuzzer never reads them, and a 100k copy would clone every path.
+    record_file_urls: bool,
 }
 
 #[cfg(any(test, feature = "fuzz"))]
@@ -299,7 +302,17 @@ impl Default for RecordingEffects {
 #[allow(dead_code)] // the fuzzer scripts answers; not every test uses each setter yet
 impl RecordingEffects {
     pub fn new() -> Self {
-        RecordingEffects { calls: std::sync::Mutex::new(Vec::new()), script: std::sync::Mutex::new(Script::default()) }
+        RecordingEffects {
+            calls: std::sync::Mutex::new(Vec::new()),
+            script: std::sync::Mutex::new(Script::default()),
+            record_file_urls: true,
+        }
+    }
+
+    /// A recorder that only counts clipboard writes, for the live fuzzer: a
+    /// 100k-file copy would otherwise clone every path into the call log.
+    pub fn without_file_urls() -> Self {
+        RecordingEffects { record_file_urls: false, ..Self::new() }
     }
 
     /// Every call since the last `take_calls`, in order.
@@ -420,7 +433,9 @@ impl Effects for RecordingEffects {
     }
 
     fn write_file_urls(&self, paths: &[PathBuf]) -> Option<isize> {
-        self.record(Call::WriteFileUrls(paths.to_vec()));
+        if self.record_file_urls {
+            self.record(Call::WriteFileUrls(paths.to_vec()));
+        }
         self.script.lock().expect("the effect script is not poisoned").write_change_count
     }
 

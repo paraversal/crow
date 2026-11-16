@@ -197,7 +197,7 @@ pub fn run(args: &[String]) -> ExitCode {
     let app_trace = trace.clone();
     let app_outcome = outcome.clone();
     app.run(move |cx: &mut App| {
-        effects::install(cx, Arc::new(RecordingEffects::new()));
+        effects::install(cx, Arc::new(RecordingEffects::without_file_urls()));
         ui::init_at(
             cx,
             app_setup.config_dir.clone(),
