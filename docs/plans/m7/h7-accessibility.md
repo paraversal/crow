@@ -1,6 +1,6 @@
 # M7 H7 — Accessibility hardening
 
-Audience: an implementing agent. Follow `.claude/skills/execute-plan/SKILL.md`; read `AGENTS.md` and `docs/plans/m7/README.md` first.
+Audience: an implementing agent. Follow the `execute-plan` skill; read `AGENTS.md` and `docs/plans/m7/README.md` first.
 Base: branch `m7-h7-a11y` from `main`, **after H1** (for I2; ASK if H1 isn't merged, I1 and I3 can go first). Progress file: `docs/plans/m7/h7-accessibility.progress.md`.
 PR title: "M7 H7: disabled state and VoiceOver pass". Don't merge.
 

@@ -1,6 +1,6 @@
 # M7 H6 — Editable path bar
 
-Audience: an implementing agent. Follow `.claude/skills/execute-plan/SKILL.md`; read `AGENTS.md`, `docs/plans/m7/README.md` and `docs/plans/ui-overhaul/README.md` (Q10) first.
+Audience: an implementing agent. Follow the `execute-plan` skill; read `AGENTS.md`, `docs/plans/m7/README.md` and `docs/plans/ui-overhaul/README.md` (Q10) first.
 Base: branch `m7-h6-path-bar` from `main`. Progress file: `docs/plans/m7/h6-editable-path-bar.progress.md`.
 PR title: "M7 H6: editable path bar". Don't merge.
 

@@ -1,6 +1,6 @@
 # M7 H8 — Leftovers from earlier critiques
 
-Audience: an implementing agent. Follow `.claude/skills/execute-plan/SKILL.md`; read `AGENTS.md` and `docs/plans/m7/README.md` first.
+Audience: an implementing agent. Follow the `execute-plan` skill; read `AGENTS.md` and `docs/plans/m7/README.md` first.
 Base: branch `m7-h8-leftovers` from `main`. Progress file: `docs/plans/m7/h8-leftovers.progress.md`.
 PR title: "M7 H8: leftovers (hints, rounding, palette ~, Open shortcut)". Don't merge.
 
