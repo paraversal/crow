@@ -1,6 +1,7 @@
 //! One Crow window: title bar, tabs, sidebar, the active pane, preview and path bar.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crow_core::motion::Fx;
 use crow_core::{HintsMode, SidebarEdit, Tabs, TipId, ViewMode, ZeroMatchStreak};
@@ -1089,9 +1090,9 @@ impl CrowWindow {
 
         // Q8: search mode shows the selected result's path; otherwise the cursor's.
         let (target, last_is_dir) = self.bar_target(pane, cx);
-        let parts: Vec<(String, std::path::PathBuf)> = crow_macos::display_components(&target)
-            .into_iter()
-            .map(|(name, path)| (crate::style::display_text(&name).into_owned(), path))
+        let parts: Vec<(String, std::path::PathBuf)> = crate::style::display_components(&target)
+            .iter()
+            .map(|(name, path)| (crate::style::display_text(name).into_owned(), path.clone()))
             .collect();
         let spoken = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
         let path = BarPath { parts, last_is_dir, spoken, hidden: None };
@@ -1261,7 +1262,7 @@ enum Sheet {
         focus: FocusHandle,
     },
     ConfirmDelete {
-        paths: Vec<PathBuf>,
+        paths: Arc<[PathBuf]>,
         focus: FocusHandle,
     },
     /// Quitting would stop the running operation partway.
@@ -1326,7 +1327,7 @@ impl CrowWindow {
     fn on_pane_event(&mut self, event: &PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PaneEvent::Run(request) => self.run_request(request.clone(), window, cx),
-            PaneEvent::Copy { paths, cut } => self.copy_paths(paths, *cut, cx),
+            PaneEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
             PaneEvent::Entered(dir) => {
                 // A stale message would otherwise outlive the place it described (Q2).
                 operations::clear_message(cx);
@@ -1409,11 +1410,11 @@ impl CrowWindow {
             self.pane().update(cx, |pane, cx| pane.clear_filter_for_new_item(cx));
         }
         let trash_paths = match &plan.request {
-            Request::Trash { paths } => Some(paths.as_slice()),
+            Request::Trash { paths } => Some(&paths[..]),
             _ => None,
         };
         let move_paths = match &plan.request {
-            Request::Move { paths, into } => Some((paths.as_slice(), into.as_path())),
+            Request::Move { paths, into } => Some((&paths[..], into.as_path())),
             _ => None,
         };
         // Only the error callback needs an owned copy; the effects borrow the plan.
@@ -1439,14 +1440,14 @@ impl CrowWindow {
                 self.sidebar.update(cx, |sidebar, cx| sidebar.pulse(into, cx));
             }
         }
-        operations::execute(plan, resolutions, cx, move |outcome, cx| {
-            if outcome.error.is_some()
+        operations::execute(plan, resolutions, cx, move |record, error, cx| {
+            if error.is_some()
                 && let Some(paths) = &failed_paths
             {
                 // Whatever is still there refuses.
                 pane.update(cx, |pane, cx| pane.start_effect(paths, Fx::Refuse, cx)).ok();
             }
-            let results = outcome.record.results();
+            let results = record.results();
             pane.update(cx, |pane, cx| pane.show_results(results, rename_result, cx)).ok();
         });
     }
@@ -1531,7 +1532,7 @@ impl CrowWindow {
         };
         let (title, body): (String, gpui::AnyElement) = match sheet {
             Sheet::ConfirmDelete { paths, .. } => {
-                let what = match paths.as_slice() {
+                let what = match &paths[..] {
                     [one] => {
                         let name = one.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
                         format!("“{}”", crate::style::display_text(&name))
@@ -1864,6 +1865,15 @@ impl CrowWindow {
         ui::edit_sidebar(SidebarEdit::AddMany { paths, at: (0, at) }, cx);
     }
 
+    /// The path counts the fuzz runner's bulk tag needs: the focused folder's
+    /// selection and entries, the clipboard, and the next undo/redo record.
+    #[cfg(feature = "fuzz")]
+    pub fn fuzz_path_counts(&self, cx: &App) -> (usize, usize, usize, usize, usize) {
+        let pane = self.pane().read(cx);
+        let ops = cx.global::<Operations>();
+        (pane.selected_count(cx), pane.item_count(cx), ops.clipboard_paths(), ops.undo_paths(), ops.redo_paths())
+    }
+
     // ----- view settings -----
 
     fn why_this_view(&mut self, _: &WhyThisView, window: &mut Window, cx: &mut Context<Self>) {
@@ -2193,14 +2203,14 @@ impl CrowWindow {
                 self.close_search(window, cx);
                 self.run_request(request.clone(), window, cx);
             }
-            SearchEvent::Copy { paths, cut } => self.copy_paths(paths, *cut, cx),
+            SearchEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
         }
     }
 
-    fn copy_paths(&mut self, paths: &[PathBuf], cut: bool, cx: &mut Context<Self>) {
-        let change_count = crate::effects::effects(cx).write_file_urls(paths);
+    fn copy_paths(&mut self, paths: Arc<[PathBuf]>, cut: bool, cx: &mut Context<Self>) {
+        let change_count = crate::effects::effects(cx).write_file_urls(&paths);
         let n = paths.len();
-        cx.global_mut::<Operations>().clipboard = Some(Clipboard { paths: paths.to_vec(), cut, change_count });
+        cx.global_mut::<Operations>().clipboard = Some(Clipboard { paths, cut, change_count });
         let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
         operations::message(
             if cut { format!("Cut {what}: paste to move") } else { format!("Copied {what}") },

@@ -29,6 +29,12 @@ use crow_fs::testing::{Churn, ChurnHandle, EdgeTree, make_tree, remove_tree};
 
 /// A frame over this is a slow step.
 const SLOW_MS: f64 = 50.0;
+/// A step that acts on more than this many paths is a bulk step: select-all,
+/// then copy/cut/paste/trash/undo on a 100k folder. Its budget is `BULK_MS`.
+const BULK_PATHS: usize = 10_000;
+/// The budget for a bulk step; the 50 ms one is for scroll, navigation, typing
+/// and single-item operations.
+const BULK_MS: f64 = 100.0;
 /// A frame over this fails the run.
 const FREEZE_MS: f64 = 250.0;
 /// A stall this long is treated as a hang; a watchdog thread quits so a stuck
@@ -44,6 +50,8 @@ struct Options {
     seed: u64,
     minutes: f64,
     until: Option<usize>,
+    /// With `--until`: pause this long for a profiler, then keep going.
+    pause_ms: u64,
     /// Replay this saved script instead of generating steps.
     script: Option<PathBuf>,
     tree: EdgeTree,
@@ -57,6 +65,7 @@ impl Options {
         let mut seed = default_seed();
         let mut minutes: f64 = 10.0;
         let mut until = None;
+        let mut pause_ms = 0;
         let mut script = None;
         let mut tree = EdgeTree::small();
         let mut tree_given = false;
@@ -78,6 +87,10 @@ impl Options {
                 "--until" => {
                     let value = args.next().ok_or("--until needs a step index")?;
                     until = Some(value.parse().map_err(|_| format!("bad --until {value:?}"))?);
+                }
+                "--pause-ms" => {
+                    let value = args.next().ok_or("--pause-ms needs milliseconds")?;
+                    pause_ms = value.parse().map_err(|_| format!("bad --pause-ms {value:?}"))?;
                 }
                 "--script" => {
                     let value = args.next().ok_or("--script needs a file")?;
@@ -105,7 +118,7 @@ impl Options {
         if dir.is_some() && tree_given {
             return Err("--tree applies to the temp tree; the given folder is used as-is".into());
         }
-        Ok(Options { dir, seed, minutes, until, script, tree, churn })
+        Ok(Options { dir, seed, minutes, until, pause_ms, script, tree, churn })
     }
 }
 
@@ -121,7 +134,8 @@ fn usage() -> &'static str {
   --seed N            the generator seed (default: from the clock; printed)
   --minutes M         stop after M minutes (default 10; ignored with --until or --script)
   --script FILE       replay the steps a run saved (its script.txt) instead of generating
-  --until INDEX       dispatch steps 0..INDEX-1, then pause for `xctrace`
+  --until INDEX       dispatch steps 0..INDEX-1, then pause for a profiler
+  --pause-ms MS       with --until: wait MS for the profiler, then keep going
   --churn             change the tree while the fuzzer acts
   --tree KINDS        temp tree: small (default), all, none, or comma-separated
                       kinds (long-name,emoji,deep-20,wide-100000,huge-file, ...)
@@ -186,7 +200,9 @@ pub fn run(args: &[String]) -> ExitCode {
         setup.log_dir.join("crow.log").display(),
         script_path.display()
     );
-    if let Some(until) = options.until {
+    if let Some(until) = options.until
+        && options.pause_ms == 0
+    {
         println!("PAUSE before step {until}; the window stays open for profiling");
     }
 
@@ -411,7 +427,7 @@ fn exit_failure() -> ! {
 #[derive(Default)]
 struct FrameLog {
     active: bool,
-    current: Option<(usize, Step, Instant)>,
+    current: Option<(usize, Step, Instant, bool)>,
     recent: VecDeque<(usize, Step)>,
     slow: Vec<SlowFrame>,
     frames: u64,
@@ -427,6 +443,8 @@ struct SlowFrame {
     index: usize,
     step: Step,
     ms: f64,
+    /// The step acted on more than `BULK_PATHS` paths; its budget is `BULK_MS`.
+    bulk: bool,
 }
 
 impl FrameLog {
@@ -442,9 +460,15 @@ impl FrameLog {
         steps: usize,
         elapsed: Duration,
     ) -> (String, bool) {
-        let mut groups: BTreeMap<&'static str, (usize, f64, usize, Step)> = BTreeMap::new();
+        let mut groups: BTreeMap<(&'static str, bool), (usize, f64, usize, Step)> = BTreeMap::new();
+        let mut over_limit = 0;
         for slow in &self.slow {
-            let entry = groups.entry(slow.step.kind()).or_insert((0, 0.0, slow.index, slow.step.clone()));
+            let limit = if slow.bulk { BULK_MS } else { SLOW_MS };
+            if slow.ms > limit {
+                over_limit += 1;
+            }
+            let key = (slow.step.kind(), slow.bulk);
+            let entry = groups.entry(key).or_insert((0, 0.0, slow.index, slow.step.clone()));
             entry.0 += 1;
             if slow.ms > entry.1 {
                 entry.1 = slow.ms;
@@ -457,7 +481,7 @@ impl FrameLog {
         let freeze = self.max_ms > FREEZE_MS;
         let mut out = String::new();
         out.push_str(&format!(
-            "\n==== crow --fuzz ====\nseed {} · tree {} · churn {} · {} steps in {:.1} s\nheartbeats {} · over {SLOW_MS:.0} ms {} · worst {:.1} ms{}\n",
+            "\n==== crow --fuzz ====\nseed {} · tree {} · churn {} · {} steps in {:.1} s\nheartbeats {} · over {SLOW_MS:.0} ms {} · over the limit {over_limit} · worst {:.1} ms{}\n",
             options.seed,
             tree_label,
             options.churn,
@@ -471,14 +495,32 @@ impl FrameLog {
         if rows.is_empty() {
             out.push_str("no step over the budget\n");
         } else {
-            out.push_str(&format!("{:<20} {:>5} {:>10}  replay\n", "step", "over", "worst"));
-            for (kind, (count, worst, index, step)) in rows {
+            out.push_str(&format!("{:<20} {:>5} {:>10} {:>7}  replay\n", "step", "over", "worst", "limit"));
+            for ((kind, bulk), (count, worst, index, step)) in rows {
+                let kind = if bulk { format!("{kind} (bulk)") } else { kind.to_owned() };
+                let limit = if bulk { BULK_MS } else { SLOW_MS };
                 out.push_str(&format!(
-                    "{kind:<20} {count:>5} {worst:>8.1} ms  {replay_args} --until {index}  {step:?}\n"
+                    "{kind:<20} {count:>5} {worst:>8.1} ms {limit:>6.0} ms  {replay_args} --until {index}  {step:?}\n"
                 ));
             }
         }
         (out, freeze)
+    }
+}
+
+/// Whether `step` acts on more than `BULK_PATHS` paths, so its budget is
+/// `BULK_MS` rather than `SLOW_MS`. Read before the step runs: select-all and
+/// paste grow the selection or the clipboard during the step.
+fn is_bulk_step(step: &Step, handle: WindowHandle<CrowWindow>, cx: &mut AsyncApp) -> bool {
+    let Ok((selected, rows, clipboard, undo, redo)) = handle.read_with(cx, |view, cx| view.fuzz_path_counts(cx)) else {
+        return false;
+    };
+    match step {
+        Step::Keys(keys) if keys == "cmd-a" => rows > BULK_PATHS,
+        Step::Keys(keys) if keys == "cmd-v" => clipboard > BULK_PATHS,
+        Step::Keys(keys) if keys == "cmd-z" => undo > BULK_PATHS,
+        Step::Keys(keys) if keys == "cmd-shift-z" => redo > BULK_PATHS,
+        _ => selected > BULK_PATHS,
     }
 }
 
@@ -513,7 +555,7 @@ fn install_heartbeat(
                     break;
                 }
                 log.last_beat = Some(now);
-                if let Some((index, step, started)) = log.current.clone() {
+                if let Some((index, step, started, bulk)) = log.current.clone() {
                     log.frames += 1;
                     log.max_ms = log.max_ms.max(ms);
                     if ms > SLOW_MS {
@@ -521,7 +563,7 @@ fn install_heartbeat(
                         if let Some(slow) = log.slow.iter_mut().find(|slow| slow.index == index) {
                             slow.ms = slow.ms.max(ms);
                         } else {
-                            log.slow.push(SlowFrame { index, step: step.clone(), ms });
+                            log.slow.push(SlowFrame { index, step: step.clone(), ms, bulk });
                         }
                         if ms > FREEZE_MS {
                             freeze = Some((
@@ -569,7 +611,7 @@ fn install_watchdog(frames: Arc<Mutex<FrameLog>>, trace: Arc<Trace>, seed: u64) 
                 if !log.active {
                     return;
                 }
-                let (Some((index, step, started)), Some(last_beat)) = (log.current.clone(), log.last_beat) else {
+                let (Some((index, step, started, _)), Some(last_beat)) = (log.current.clone(), log.last_beat) else {
                     continue;
                 };
                 (index, step, started, last_beat, log.recent.iter().cloned().collect::<Vec<_>>())
@@ -624,6 +666,7 @@ async fn run_steps(
     let mut violations = Vec::new();
     let mut seen = HashSet::new();
     let mut executed = 0usize;
+    let mut paused = false;
     // The opening listing and first paint are startup, not step 0; H1's runner
     // settles the window before its first step too.
     if let Some(churn) = churn {
@@ -635,14 +678,28 @@ async fn run_steps(
         churn.resume();
     }
     for index in 0.. {
-        if options.until.is_some_and(|until| index >= until) {
+        if !paused && options.until.is_some_and(|until| index >= until) {
             if let Some(churn) = churn {
                 churn.pause();
             }
             wait_quiet(handle, cx).await;
-            return RunResult::Paused { index };
+            if options.pause_ms == 0 {
+                return RunResult::Paused { index };
+            }
+            // A sampler attaches now and keeps sampling while the steps run. The
+            // pause itself is not a step: clear the current frame so the
+            // heartbeat does not count it as a slow one.
+            println!("PAUSE before step {index} for {} ms; attach the profiler now", options.pause_ms);
+            frames.lock().expect("frames").current = None;
+            cx.background_executor().timer(Duration::from_millis(options.pause_ms)).await;
+            paused = true;
+            if let Some(churn) = churn {
+                churn.resume();
+            }
         }
-        if options.until.is_none() && source.replay.is_none() && started.elapsed() >= deadline {
+        // A plain run stops at its deadline; one that resumed after a profiling
+        // pause does too, since `--until` no longer ends it.
+        if source.replay.is_none() && started.elapsed() >= deadline && (options.until.is_none() || paused) {
             break;
         }
         let step = match &source.replay {
@@ -668,9 +725,10 @@ async fn run_steps(
             log.push(&step);
         }
         script.push(step.clone());
+        let bulk = is_bulk_step(&step, handle, cx);
         {
             let mut log = frames.lock().expect("frames");
-            log.current = Some((index, step.clone(), Instant::now()));
+            log.current = Some((index, step.clone(), Instant::now(), bulk));
             log.recent.push_back((index, step.clone()));
             if log.recent.len() > 5 {
                 log.recent.pop_front();
@@ -1195,9 +1253,9 @@ mod tests {
     fn frame_report_groups_by_step_kind() {
         let log = FrameLog {
             slow: vec![
-                SlowFrame { index: 3, step: Step::Keys("down".into()), ms: 61.0 },
-                SlowFrame { index: 8, step: Step::Keys("up".into()), ms: 93.0 },
-                SlowFrame { index: 9, step: Step::Settle, ms: 71.0 },
+                SlowFrame { index: 3, step: Step::Keys("down".into()), ms: 61.0, bulk: false },
+                SlowFrame { index: 8, step: Step::Keys("up".into()), ms: 93.0, bulk: false },
+                SlowFrame { index: 9, step: Step::Settle, ms: 71.0, bulk: true },
             ],
             max_ms: 93.0,
             frames: 12,
@@ -1208,6 +1266,7 @@ mod tests {
             seed: 1,
             minutes: 1.0,
             until: None,
+            pause_ms: 0,
             script: None,
             tree: EdgeTree::small(),
             churn: false,
@@ -1217,6 +1276,36 @@ mod tests {
         assert!(report.contains("Keys"), "{report}");
         assert!(report.contains("Settle"), "{report}");
         assert!(report.contains("--seed 1 --script s.txt --until 8"), "{report}");
+    }
+
+    #[test]
+    fn the_report_tags_bulk_steps_and_counts_their_limit() {
+        let log = FrameLog {
+            slow: vec![
+                SlowFrame { index: 3, step: Step::Keys("cmd-a".into()), ms: 61.0, bulk: false },
+                SlowFrame { index: 4, step: Step::Settle, ms: 80.0, bulk: true },
+            ],
+            max_ms: 80.0,
+            frames: 2,
+            ..Default::default()
+        };
+        let options = Options {
+            dir: None,
+            seed: 1,
+            minutes: 1.0,
+            until: None,
+            pause_ms: 0,
+            script: None,
+            tree: EdgeTree::small(),
+            churn: false,
+        };
+        let (report, freeze) = log.report(&options, "small", "--seed 1", 10, Duration::from_secs(1));
+        assert!(!freeze);
+        // The 61 ms non-bulk frame is over its 50 ms limit; the 80 ms bulk one is
+        // under its 100 ms budget.
+        assert!(report.contains("over the limit 1"), "{report}");
+        assert!(report.contains("Settle (bulk)"), "{report}");
+        assert!(report.contains("100 ms"), "{report}");
     }
 
     #[test]
@@ -1253,6 +1342,7 @@ mod tests {
         .expect("options");
         assert_eq!(options.script.as_deref(), Some(Path::new("/tmp/s.txt")));
         assert_eq!(options.until, Some(40));
+        assert_eq!(options.pause_ms, 0);
         assert!(decode_step("Bogus 1").is_err());
     }
 

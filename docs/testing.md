@@ -192,12 +192,14 @@ last five steps and the `tracing` spans that overlapped it (`listing apply`, `re
 rows`, `preview load`, `search batch`, `theme reload`, `icon fetch`; spans are at
 `debug`, which this mode enables for the `crow` and `crow_macos` targets). GPUI's `on_next_frame` is
 throttled for an inactive or occluded window, so the heartbeat, not a frame
-callback, is the source. The report counts heartbeat intervals and groups the slow
-ones by step kind:
+callback, is the source. A step that acts on more than 10 000 paths (select-all,
+then copy/cut/paste/trash/undo on the 100k fixture) is tagged `(bulk)`: its budget
+is 100 ms, the others keep 50 ms. The report counts heartbeat intervals, groups the
+slow ones by step kind and counts the ones over their own limit:
 
 ```
-step                  over      worst  replay
-Keys                     2    312.4 ms  --seed 42 --script …/script.txt --until 1234  Keys("cmd-k")
+step                  over      worst   limit  replay
+Keys (bulk)              2    312.4 ms    100 ms  --seed 42 --script …/script.txt --until 1234  Keys("cmd-k")
 ```
 
 Exit code is 0 unless an invariant fails or a heartbeat is over 250 ms (a freeze).
@@ -211,12 +213,18 @@ each, so a `HANG` or a killed run keeps the step that stalled. The seed alone do
 not replay a run: the generator reads the live keymap and focus, which depend on
 timing, and two runs of one seed can split after a hundred steps. To profile a slow
 step, replay the saved script to just before it, with the same seed and tree
-options (the seed builds the tree and drives churn), as the report prints it:
+options (the seed builds the tree and drives churn), as the report prints it.
+`--pause-ms` waits at the pause for a sampler, then keeps replaying:
 
 ```bash
-cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --script /path/to/script.txt --until 1234
-xcrun xctrace record --template 'Time Profiler' --attach crow
+cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --script /path/to/script.txt --until 1234 --pause-ms 2000
+sample <pid> 5 -file /tmp/crow.sample   # during the pause; `sample` prints a call tree
 ```
+
+`sample` needs the process to be visible (a GUI app is) and `xcrun xctrace` needs a
+full Xcode install, not just the Command Line Tools. Without `--pause-ms` the run
+pauses before the step and the window stays open until Crow quits, which is enough
+to reproduce the action by hand.
 
 A replay of a `--dir-is-scratch` folder needs it in the same state as the original
 run (a fresh `--make-fixture` for the 100k fixture). The window stays open until

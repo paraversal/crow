@@ -23,6 +23,7 @@ pub fn drop_request(paths: &[PathBuf], into: PathBuf, copy: bool) -> Option<ops:
         return None;
     }
     let same_volume = paths.iter().all(|p| same_volume(p, &into));
+    let paths: Arc<[PathBuf]> = paths.into();
     Some(if same_volume && !copy { ops::Request::Move { paths, into } } else { ops::Request::Copy { paths, into } })
 }
 
@@ -46,7 +47,7 @@ fn same_volume(a: &Path, b: &Path) -> bool {
 }
 
 pub struct LogEntry {
-    pub record: Record,
+    pub record: Arc<Record>,
     pub at: SystemTime,
     pub error: Option<String>,
     pub cancelled: bool,
@@ -79,27 +80,27 @@ pub fn running_label(label: &str) -> String {
 /// What Cmd-C / Cmd-X put on the clipboard. The paths also go on the system
 /// pasteboard; `change_count` tells whether it still holds them (or someone copied since).
 pub struct Clipboard {
-    pub paths: Vec<PathBuf>,
+    pub paths: Arc<[PathBuf]>,
     pub cut: bool,
     pub change_count: Option<isize>,
 }
 
 /// What a paste would bring in, and whether it moves them: our clipboard if the
 /// pasteboard still holds what we put there; otherwise whatever another app (Finder) copied.
-pub fn pasteboard_paths(cx: &App) -> (Vec<PathBuf>, bool) {
+pub fn pasteboard_paths(cx: &App) -> (Arc<[PathBuf]>, bool) {
     let effects = crate::effects::effects(cx);
     let ours =
         cx.global::<Operations>().clipboard.as_ref().filter(|c| c.change_count == effects.pasteboard_change_count());
     match ours {
         Some(c) => (c.paths.clone(), c.cut),
-        None => (effects.read_file_urls(), false),
+        None => (effects.read_file_urls().into(), false),
     }
 }
 
 pub struct Operations {
     trash: Arc<dyn Trash>,
     undo_stack: Vec<usize>,
-    redo_stack: Vec<Record>,
+    redo_stack: Vec<Arc<Record>>,
     pub log: Vec<LogEntry>,
     pub running: Option<Running>,
     pub clipboard: Option<Clipboard>,
@@ -117,6 +118,26 @@ pub struct Operations {
     pub jail: Option<PathBuf>,
     #[cfg(any(test, feature = "fuzz"))]
     pub refused: Vec<PathBuf>,
+}
+
+impl Operations {
+    /// The paths Cmd-C/Cmd-X put on the clipboard, for the fuzz runner's bulk tag.
+    #[cfg(feature = "fuzz")]
+    pub fn clipboard_paths(&self) -> usize {
+        self.clipboard.as_ref().map_or(0, |clipboard| clipboard.paths.len())
+    }
+
+    /// The paths the next undo would touch.
+    #[cfg(feature = "fuzz")]
+    pub fn undo_paths(&self) -> usize {
+        self.undo_stack.last().and_then(|index| self.log.get(*index)).map_or(0, |entry| entry.record.steps.len())
+    }
+
+    /// The paths the next redo would touch.
+    #[cfg(feature = "fuzz")]
+    pub fn redo_paths(&self) -> usize {
+        self.redo_stack.last().map_or(0, |record| record.steps.len())
+    }
 }
 
 /// Info messages clear after this long; errors stay until something replaces them.
@@ -180,19 +201,21 @@ pub fn init(cx: &mut App, trash: Arc<dyn Trash>) {
 
 /// Every path `plan` reads or writes: the request's own and each item's.
 #[cfg(any(test, feature = "fuzz"))]
-fn plan_paths(plan: &Plan) -> Vec<PathBuf> {
+fn plan_paths(plan: &Plan) -> Vec<&Path> {
     use ops::Request;
-    let mut out: Vec<PathBuf> = match &plan.request {
-        Request::NewFolder { parent } | Request::NewFile { parent } => vec![parent.clone()],
-        Request::Rename { path, .. } => vec![path.clone()],
-        Request::Duplicate { paths } | Request::Trash { paths } | Request::DeletePermanently { paths } => paths.clone(),
+    let mut out: Vec<&Path> = match &plan.request {
+        Request::NewFolder { parent } | Request::NewFile { parent } => vec![parent],
+        Request::Rename { path, .. } => vec![path],
+        Request::Duplicate { paths } | Request::Trash { paths } | Request::DeletePermanently { paths } => {
+            paths.iter().map(PathBuf::as_path).collect()
+        }
         Request::Copy { paths, into } | Request::Move { paths, into } => {
-            paths.iter().cloned().chain(std::iter::once(into.clone())).collect()
+            paths.iter().map(PathBuf::as_path).chain(std::iter::once(into.as_path())).collect()
         }
     };
     for item in &plan.items {
-        out.extend(item.source.iter().cloned());
-        out.push(item.target.clone());
+        out.extend(item.source.iter().map(PathBuf::as_path));
+        out.push(item.target.as_path());
     }
     out
 }
@@ -201,16 +224,17 @@ fn plan_paths(plan: &Plan) -> Vec<PathBuf> {
 #[cfg(any(test, feature = "fuzz"))]
 fn outside_jail(plan: &Plan, cx: &App) -> Vec<PathBuf> {
     let Some(jail) = &cx.global::<Operations>().jail else { return Vec::new() };
-    plan_paths(plan).into_iter().filter(|path| !path.starts_with(jail)).collect()
+    plan_paths(plan).into_iter().filter(|path| !path.starts_with(jail)).map(Path::to_path_buf).collect()
 }
 
 /// Carry out `plan` in the background with the user's conflict choices.
-/// `on_done` gets the outcome on the main thread (to select the results).
+/// `on_done` gets the record on the main thread (to select the results) and the
+/// error, if any.
 pub fn execute(
     plan: Plan,
     resolutions: HashMap<PathBuf, Resolution>,
     cx: &mut App,
-    on_done: impl FnOnce(&Outcome, &mut App) + 'static,
+    on_done: impl FnOnce(&Arc<Record>, Option<&ops::OpError>, &mut App) + 'static,
 ) {
     if cx.global::<Operations>().running.is_some() {
         message("Another operation is still running", true, cx);
@@ -263,16 +287,24 @@ pub fn execute(
         }
         let outcome = task.await;
         cx.update(|cx| {
-            finish(&outcome, event, cx);
-            on_done(&outcome, cx);
+            let Outcome { record, error, cancelled } = outcome;
+            let record = Arc::new(record);
+            finish(record.clone(), error.as_ref(), cancelled, event, cx);
+            on_done(&record, error.as_ref(), cx);
             cx.refresh_windows();
         });
     })
     .detach();
 }
 
-fn finish(outcome: &Outcome, event: Option<crow_core::motion::Event>, cx: &mut App) {
-    let label = outcome.record.label.clone();
+fn finish(
+    record: Arc<Record>,
+    error: Option<&ops::OpError>,
+    cancelled: bool,
+    event: Option<crow_core::motion::Event>,
+    cx: &mut App,
+) {
+    let label = record.label.clone();
     let shown = {
         let ops = cx.global::<Operations>();
         ops.running.as_ref().is_some_and(|running| running.started.elapsed() >= Duration::from_secs(1))
@@ -303,22 +335,22 @@ fn finish(outcome: &Outcome, event: Option<crow_core::motion::Event>, cx: &mut A
     };
     {
         let ops = cx.global_mut::<Operations>();
-        if !outcome.record.steps.is_empty() {
-            tracing::info!(label = %label, steps = outcome.record.steps.len(), "operation done");
+        if !record.steps.is_empty() {
+            tracing::info!(label = %label, steps = record.steps.len(), "operation done");
             ops.log.push(LogEntry {
-                record: outcome.record.clone(),
+                record: record.clone(),
                 at: SystemTime::now(),
-                error: outcome.error.as_ref().map(|e| e.to_string()),
-                cancelled: outcome.cancelled,
+                error: error.map(ToString::to_string),
+                cancelled,
                 undone: false,
             });
-            if outcome.record.is_undoable() {
+            if record.is_undoable() {
                 ops.undo_stack.push(ops.log.len() - 1);
             }
             ops.redo_stack.clear();
         }
     }
-    match (&outcome.error, outcome.cancelled) {
+    match (&error, cancelled) {
         (Some(e), _) => {
             crate::feedback::play(crow_core::motion::Event::Refuse, cx);
             message(e.to_string(), true, cx);
@@ -328,7 +360,7 @@ fn finish(outcome: &Outcome, event: Option<crow_core::motion::Event>, cx: &mut A
             // A copy that never showed its progress bar stays silent, and so does a
             // plan that did nothing.
             if let Some(event) = event
-                && !outcome.record.steps.is_empty()
+                && !record.steps.is_empty()
                 && (event != crow_core::motion::Event::CopyDone || shown)
             {
                 crate::feedback::play(event, cx);
@@ -372,7 +404,7 @@ pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf
                         entry.undone = true;
                     }
                     let restored = reversed.results();
-                    ops.redo_stack.push(reversed);
+                    ops.redo_stack.push(Arc::new(reversed));
                     message(label, false, cx);
                     crate::feedback::play(crow_core::motion::Event::Undo, cx);
                     crate::ui::refresh_volumes(cx);
@@ -400,7 +432,7 @@ pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static
                     let label = redone.label.trim_start_matches("Undo Undo ").to_owned();
                     let results = redone.results();
                     ops.log.push(LogEntry {
-                        record: Record { label: label.clone(), steps: redone.steps },
+                        record: Arc::new(Record { label: label.clone(), steps: redone.steps }),
                         at: SystemTime::now(),
                         error: None,
                         cancelled: false,

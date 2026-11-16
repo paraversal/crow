@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Moves items to the Trash. The app uses macOS's Trash (so Finder can Put Back);
@@ -40,22 +41,22 @@ pub enum Request {
         new_name: String,
     },
     Duplicate {
-        paths: Vec<PathBuf>,
+        paths: Arc<[PathBuf]>,
     },
     Copy {
-        paths: Vec<PathBuf>,
+        paths: Arc<[PathBuf]>,
         into: PathBuf,
     },
     Move {
-        paths: Vec<PathBuf>,
+        paths: Arc<[PathBuf]>,
         into: PathBuf,
     },
     Trash {
-        paths: Vec<PathBuf>,
+        paths: Arc<[PathBuf]>,
     },
     /// Not undoable; the UI asks first.
     DeletePermanently {
-        paths: Vec<PathBuf>,
+        paths: Arc<[PathBuf]>,
     },
 }
 
@@ -313,7 +314,7 @@ pub fn plan(request: Request) -> Result<Plan, OpError> {
         Request::Copy { paths, into } | Request::Move { paths, into } => {
             let moving = matches!(request, Request::Move { .. });
             let mut items = Vec::new();
-            for source in paths {
+            for source in paths.iter() {
                 if !exists(source) {
                     return Err(OpError::NotFound(source.clone()));
                 }

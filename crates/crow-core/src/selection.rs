@@ -84,7 +84,13 @@ impl<K: Clone + Eq + Hash> Selection<K> {
 
     /// Shift-click or Shift-arrow: select from the anchor to `target` in display order,
     /// replacing any previous Shift range. `position` finds a key's row; `key_at` reads one.
-    pub fn extend_to(&mut self, target: usize, position: impl Fn(&K) -> Option<usize>, key_at: impl Fn(usize) -> K) {
+    /// Returns the selected row range, so a caller can sum what it just selected.
+    pub fn extend_to(
+        &mut self,
+        target: usize,
+        position: impl Fn(&K) -> Option<usize>,
+        key_at: impl Fn(usize) -> K,
+    ) -> (usize, usize) {
         let anchor = self.anchor.as_ref().and_then(&position).unwrap_or(target);
         let (from, to) = (anchor.min(target), anchor.max(target));
         self.selected = (from..=to).map(&key_at).collect();
@@ -92,6 +98,7 @@ impl<K: Clone + Eq + Hash> Selection<K> {
         if self.anchor.is_none() {
             self.anchor = self.cursor.clone();
         }
+        (from, to)
     }
 
     /// Cmd-A.

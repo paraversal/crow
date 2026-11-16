@@ -92,7 +92,7 @@ pub enum SearchEvent {
     Open { path: PathBuf, is_dir: bool },
     Reveal(PathBuf),
     Run(Request),
-    Copy { paths: Vec<PathBuf>, cut: bool },
+    Copy { paths: Arc<[PathBuf]>, cut: bool },
 }
 
 impl EventEmitter<SearchEvent> for SearchView {}
@@ -896,7 +896,7 @@ impl SearchView {
     }
 
     fn copy_selected(&mut self, cut: bool, cx: &mut Context<Self>) {
-        let paths = self.selected_paths();
+        let paths: Arc<[PathBuf]> = self.selected_paths().into();
         if !paths.is_empty() {
             cx.emit(SearchEvent::Copy { paths, cut });
         }
@@ -907,6 +907,7 @@ impl SearchView {
         if paths.is_empty() {
             return;
         }
+        let paths: Arc<[PathBuf]> = paths.into();
         let request = if permanent { Request::DeletePermanently { paths } } else { Request::Trash { paths } };
         cx.emit(SearchEvent::Run(request));
     }

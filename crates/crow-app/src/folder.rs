@@ -49,15 +49,33 @@ pub(crate) type SelectionEntries = Arc<Vec<(PathBuf, bool)>>;
 /// The cached selection: the generation it was built for, and the entries.
 type SelectionCache = RefCell<Option<(u64, SelectionEntries)>>;
 
-/// The cached selection's file bytes and folder count, by generation.
-type SelectionBytes = RefCell<Option<(u64, (u64, usize))>>;
-
 /// One visible row: an entry of this folder, or one of an expanded folder under it.
 enum FlatRow {
     /// Index into `entries`.
     Own(usize),
     /// An entry of a child folder and its depth under this one.
     Child(Entry, usize),
+}
+
+/// The open children's rows, by path. Arc clones, so an apply can snapshot the
+/// tree for a background flatten without copying a 100k listing.
+type ChildRows = HashMap<PathBuf, (Arc<Vec<FlatRow>>, Arc<Vec<Entry>>)>;
+
+/// A flattened listing: the rows and the per-row tables the list view reads.
+struct Rows {
+    rows: Arc<Vec<FlatRow>>,
+    row_ends: Arc<Vec<usize>>,
+    row_parents: Arc<Vec<Option<usize>>>,
+    match_ranges: Arc<Vec<(u32, u32)>>,
+}
+
+/// Which part of an apply's tail to run once its rows are in place.
+#[derive(Clone, Copy, Debug)]
+enum ApplyKind {
+    /// A staged load's partial: no prune, no first-item select.
+    Partial,
+    /// A full listing; `prune` is false when a watcher batch named its removals.
+    Full { prune: bool },
 }
 
 /// A feedback effect playing on one row (trash, move out, receive, arrive, refuse).
@@ -214,8 +232,17 @@ pub struct Folder {
     row_ends: Arc<Vec<usize>>,
     /// For each nested row, the row of the expanded folder that contains it.
     row_parents: Arc<Vec<Option<usize>>>,
-    /// Bumped whenever the selection or the visible rows change.
+    /// Bumped whenever the selection changes (not on a reorder or a reload).
     selection_generation: u64,
+    /// Bumped by every row build, so a background flatten that lost the race is
+    /// dropped instead of overwriting newer rows.
+    rows_generation: u64,
+    /// Background row builds in flight. Until the last one lands, the entries are
+    /// newer than the rows; checks and tests wait for it (`is_settling`).
+    rows_pending: usize,
+    /// The load's full listing has arrived; the next full apply ends `loading`.
+    /// A sync rebuild during the stream must not, or the window reopens.
+    load_done: bool,
     /// Feedback effects on visible rows (trash, refuse), cleared when their phases end.
     effects: Vec<RowEffect>,
     /// Bumped per effect batch, so an older timer cannot clear a newer effect.
@@ -224,8 +251,10 @@ pub struct Folder {
     disclosures: Vec<Disclosure>,
     /// The selected rows for dragging, rebuilt only after one of those changes.
     selection_entries: SelectionCache,
-    /// The selected files' bytes and folders among them, cached the same way.
-    selection_bytes: SelectionBytes,
+    /// The selected files' bytes and folders among them, kept current by every
+    /// selection change: the bottom bar asks every frame, and rescanning a 100k
+    /// listing per apply was 6% of the main thread's busy time (H4 batch 6).
+    selection_totals: (u64, usize),
     scroll: UniformListScrollHandle,
     changes_rx: Receiver<FolderChange>,
     /// A sender kept only for tests, which queue watcher batches without the disk.
@@ -301,11 +330,14 @@ impl Folder {
             row_ends: Arc::new(Vec::new()),
             row_parents: Arc::new(Vec::new()),
             selection_generation: 0,
+            rows_generation: 0,
+            rows_pending: 0,
+            load_done: false,
             effects: Vec::new(),
             effect_generation: 0,
             disclosures: Vec::new(),
             selection_entries: RefCell::new(None),
-            selection_bytes: RefCell::new(None),
+            selection_totals: (0, 0),
             scroll: UniformListScrollHandle::new(),
             changes_rx,
             #[cfg(test)]
@@ -342,6 +374,22 @@ impl Folder {
 
     pub fn is_loading(&self) -> bool {
         self.loading
+    }
+
+    /// True while the listing or its rows are still being built: a check that
+    /// reads rows must wait, because an apply swaps the entries before its rows.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn is_settling(&self) -> bool {
+        self.loading || self.rows_pending > 0 || self.reconciling
+    }
+
+    /// True while any folder open inside this one is still settling.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn children_settling(&self, cx: &gpui::App) -> bool {
+        self.children.values().any(|child| {
+            let child = child.folder.read(cx);
+            child.is_settling() || child.children_settling(cx)
+        })
     }
 
     /// True while this folder or any folder open inside it is still listing,
@@ -438,8 +486,30 @@ impl Folder {
         }
     }
 
+    fn row_entry<'a>(row: &'a FlatRow, entries: &'a [Entry]) -> Option<&'a Entry> {
+        match row {
+            FlatRow::Own(i) => entries.get(*i),
+            FlatRow::Child(entry, _) => Some(entry),
+        }
+    }
+
     fn index_of_path(&self, path: &Path) -> Option<usize> {
         self.rows.iter().position(|row| Self::row_path(row, &self.entries).is_some_and(|p| p == path))
+    }
+
+    /// The visible row showing `path`, including an inline child row.
+    pub fn row_of_path(&self, path: &Path) -> Option<usize> {
+        self.index_of_path(path)
+    }
+
+    /// The rows still index the current entries. An apply swaps the entries
+    /// before its rows land; a key action in that window must not index the new
+    /// listing with the old rows' indices.
+    fn rows_match_entries(&self) -> bool {
+        self.rows.iter().all(|row| match row {
+            FlatRow::Own(i) => *i < self.entries.len(),
+            FlatRow::Child(..) => true,
+        })
     }
 
     pub fn is_selected(&self, path: &Path) -> bool {
@@ -475,28 +545,21 @@ impl Folder {
     }
 
     /// The selected files' bytes and how many selected items are folders.
-    /// Folders add no bytes: their size needs a disk walk. Cached per generation.
+    /// Folders add no bytes: their size needs a disk walk. Kept current by every
+    /// selection change; no listing scan.
     pub fn selected_bytes(&self) -> (u64, usize) {
-        if let Some((generation, bytes)) = *self.selection_bytes.borrow()
-            && generation == self.selection_generation
-        {
-            return bytes;
-        }
-        let (mut bytes, mut folders) = (0u64, 0usize);
-        for row in self.rows.iter() {
-            let entry = match row {
-                FlatRow::Own(i) => self.entries.get(*i),
-                FlatRow::Child(entry, _) => Some(entry),
-            };
-            let Some(entry) = entry.filter(|entry| self.selection.contains(&entry.path)) else { continue };
-            if entry.is_dir {
-                folders += 1;
-            } else {
-                bytes += entry.size;
-            }
-        }
-        *self.selection_bytes.borrow_mut() = Some((self.selection_generation, (bytes, folders)));
-        (bytes, folders)
+        self.selection_totals
+    }
+
+    /// A row's contribution to `selected_bytes`: file bytes, and 1 for a folder.
+    fn entry_totals(entry: &Entry) -> (u64, usize) {
+        if entry.is_dir { (0, 1) } else { (entry.size, 0) }
+    }
+
+    fn add_totals(totals: &mut (u64, usize), entry: &Entry) {
+        let (bytes, folders) = Self::entry_totals(entry);
+        totals.0 += bytes;
+        totals.1 += folders;
     }
 
     /// Whatever changed, the drag snapshot is stale.
@@ -869,6 +932,7 @@ impl Folder {
         self.reconcile.clear();
         self.reconciling = false;
         self.loading = true;
+        self.load_done = false;
         let (generation, dir, hidden, sort) = (self.generation, self.dir.clone(), self.show_hidden, self.sort);
         let (tx, mut rx) = unbounded();
         let started = Instant::now();
@@ -890,7 +954,8 @@ impl Folder {
                     match update {
                         Load::Partial(entries) => this.apply_partial(entries, cx),
                         Load::Done(Ok((entries, ms))) => {
-                            this.loading = false;
+                            // `finish_apply` clears `loading` when the rows are in place.
+                            this.load_done = true;
                             this.load_ms = ms;
                             tracing::debug!(items = entries.len(), ms, dir = %this.dir.display(), "loaded");
                             this.replace_entries(entries, cx);
@@ -898,6 +963,7 @@ impl Folder {
                         }
                         Load::Done(Err(e)) => {
                             this.loading = false;
+                            this.load_done = false;
                             tracing::warn!("open {}: {e}", this.dir.display());
                             this.error = Some(format!("Can't open “{}”: {e}", this.dir.display()).into());
                             cx.emit(FolderEvent::Loaded);
@@ -924,28 +990,50 @@ impl Folder {
     /// state here would act on rows the load has not reached yet. The full
     /// listing does all of that when it lands.
     fn apply_partial(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
+        self.apply_partial_inner(entries, cx, false);
+    }
+
+    fn apply_partial_inner(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>, sync: bool) {
         let _span = tracing::debug_span!("listing partial").entered();
         self.replace_entries_arc(entries, cx);
-        self.rebuild_rows(cx);
+        if sync {
+            self.rebuild_rows(cx);
+            self.finish_apply(ApplyKind::Partial, cx);
+        } else {
+            self.rebuild_rows_async(cx, ApplyKind::Partial);
+        }
+    }
+
+    /// Select what a load or an operation asked for, and keep the selection's
+    /// totals in step with it. Both the partial and the full apply call this.
+    fn apply_pending_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(target) = self.select_after_load.clone()
-            && self.entries.iter().any(|e| e.path == target)
+            && let Some(entry) = self.entries.iter().find(|entry| entry.path == target)
         {
             self.select_after_load = None;
+            self.selection_totals = Self::entry_totals(entry);
             self.selection.select_only(target);
+            self.selection_changed();
         }
         if !self.select_when_present.is_empty() && self.all_present(&self.select_when_present) {
             let wanted = std::mem::take(&mut self.select_when_present);
             self.selection.clear();
+            let mut totals = (0u64, 0usize);
             for path in &wanted {
                 self.selection.toggle(path.clone());
             }
+            // One pass over the listing, not one lookup per wanted path.
+            let wanted_set: HashSet<&Path> = wanted.iter().map(PathBuf::as_path).collect();
+            for entry in self.entries.iter() {
+                if wanted_set.contains(entry.path.as_path()) {
+                    Self::add_totals(&mut totals, entry);
+                }
+            }
+            self.selection_totals = totals;
+            self.selection_changed();
             let mode = self.arrival_mode;
             self.start_effect(&wanted, Fx::Arrive, mode, cx);
         }
-        self.settle_cursor(cx);
-        self.selection_changed();
-        cx.emit(FolderEvent::Changed);
-        cx.notify();
     }
 
     /// Whether every path is in the listing. A large result set (a 100k
@@ -1000,7 +1088,56 @@ impl Folder {
         stats: Option<&[(PathBuf, Option<Entry>)]>,
         cx: &mut Context<Self>,
     ) {
+        self.replace_entries_after_inner(entries, stats, cx, false);
+    }
+
+    fn replace_entries_after_inner(
+        &mut self,
+        entries: Vec<Entry>,
+        stats: Option<&[(PathBuf, Option<Entry>)]>,
+        cx: &mut Context<Self>,
+        sync: bool,
+    ) {
         let _span = tracing::debug_span!("listing apply").entered();
+        // A watcher batch names the paths it removed; drop the selected ones before
+        // the swap, while the old entries (and their sizes) are still here.
+        if let Some(stats) = stats {
+            let removed: Vec<&PathBuf> = stats
+                .iter()
+                .filter(|(path, entry)| entry.is_none() && self.selection.contains(path))
+                .map(|(path, _)| path)
+                .collect();
+            if !removed.is_empty() {
+                if removed.len() <= 16 {
+                    // The usual batch: find each path and stop at the first hit.
+                    for path in &removed {
+                        if let Some(entry) = self.entries.iter().find(|entry| &entry.path == *path) {
+                            let (bytes, folders) = Self::entry_totals(entry);
+                            self.selection_totals.0 = self.selection_totals.0.saturating_sub(bytes);
+                            self.selection_totals.1 = self.selection_totals.1.saturating_sub(folders);
+                        }
+                    }
+                } else {
+                    // A bulk delete: one pass over the old listing, not one per path.
+                    let gone: HashSet<&PathBuf> = removed.iter().copied().collect();
+                    for entry in self.entries.iter() {
+                        if gone.contains(&entry.path) {
+                            let (bytes, folders) = Self::entry_totals(entry);
+                            self.selection_totals.0 = self.selection_totals.0.saturating_sub(bytes);
+                            self.selection_totals.1 = self.selection_totals.1.saturating_sub(folders);
+                        }
+                    }
+                }
+                for path in &removed {
+                    self.selection.remove(path);
+                }
+                self.selection_changed();
+                // The cursor may have named one of them. Settle it now, not when the
+                // new rows land: until then the old row would draw as the cursor
+                // while the selection no longer holds it (the fuzzer's cursor check).
+                self.settle_cursor(cx);
+            }
+        }
         self.replace_entries_arc(entries, cx);
         if !self.effects.is_empty() {
             // Only the effect paths matter (at most MAX_EFFECTS); hashing every
@@ -1035,51 +1172,12 @@ impl Folder {
             self.effects.retain(|effect| !restored.contains(&effect.path));
         }
         self.sync_children(cx);
-        self.rebuild_rows(cx);
-        if let Some(target) = self.select_after_load.clone()
-            && self.entries.iter().any(|e| e.path == target)
-        {
-            self.select_after_load = None;
-            self.selection.select_only(target);
+        if sync {
+            self.rebuild_rows(cx);
+            self.finish_apply(ApplyKind::Full { prune: stats.is_none() }, cx);
+        } else {
+            self.rebuild_rows_async(cx, ApplyKind::Full { prune: stats.is_none() });
         }
-        if !self.select_when_present.is_empty() && self.all_present(&self.select_when_present) {
-            let wanted = std::mem::take(&mut self.select_when_present);
-            self.selection.clear();
-            for path in &wanted {
-                self.selection.toggle(path.clone());
-            }
-            let mode = self.arrival_mode;
-            self.start_effect(&wanted, Fx::Arrive, mode, cx);
-        }
-        // Only the first full load selects the first item. After that an empty
-        // selection stays empty, as in Finder: trashing or moving the selected
-        // item leaves nothing selected rather than jumping to the top.
-        if self.auto_select && !self.loading {
-            self.auto_select = false;
-            if self.selection.is_empty()
-                && let Some(first) = self.entries.first()
-            {
-                self.selection.select_only(first.path.clone());
-            }
-        }
-        match stats {
-            Some(stats) => {
-                let before = self.selection.len();
-                for (path, entry) in stats {
-                    if entry.is_none() {
-                        self.selection.remove(path);
-                    }
-                }
-                if self.selection.len() != before {
-                    self.selection_changed();
-                }
-            }
-            None => self.prune_selection(),
-        }
-        self.settle_cursor(cx);
-        self.selection_changed();
-        cx.emit(FolderEvent::Changed);
-        cx.notify();
     }
 
     /// Open and close the inline child folders the expansion set asks for.
@@ -1123,104 +1221,134 @@ impl Folder {
     /// With a filter, the rows are this folder's matching entries only (flat).
     fn rebuild_rows(&mut self, cx: &gpui::App) {
         let _span = tracing::debug_span!("rebuild rows").entered();
-        if let Some(filter) = &self.filter {
-            let lower = filter.to_lowercase();
-            let mut rows = Vec::new();
-            let mut ranges = Vec::new();
-            for (i, entry) in self.entries.iter().enumerate() {
-                let range = name_match(&entry.name, filter, &lower);
-                // The predicate keeps today's shown set. `name_match` only adds the
-                // highlight, and can fail where full-string lowercasing differs.
-                let shown = if entry.name.is_ascii() && filter.is_ascii() {
-                    range.is_some()
-                } else {
-                    name_matches(&entry.name, filter, &lower)
-                };
-                if !shown {
-                    continue;
-                }
-                rows.push(FlatRow::Own(i));
-                ranges.push(range.map_or((u32::MAX, u32::MAX), |r| (r.start as u32, r.end as u32)));
+        let children = self.child_rows(cx);
+        let lower;
+        let filter = match &self.filter {
+            Some(query) => {
+                lower = query.to_lowercase();
+                Some((query.as_str(), lower.as_str()))
             }
-            self.row_ends = Arc::new((1..=rows.len()).collect());
-            self.row_parents = Arc::new(vec![None; rows.len()]);
-            self.rows = Arc::new(rows);
-            self.match_ranges = Arc::new(ranges);
-            return;
-        }
-        self.match_ranges = Arc::new(Vec::new());
-        let mut rows = Vec::with_capacity(self.entries.len());
-        for i in 0..self.entries.len() {
-            rows.push(FlatRow::Own(i));
-            let entry = &self.entries[i];
-            if !entry.is_dir || entry.is_package() {
-                continue;
-            }
-            let Some(child) = self.children.get(&entry.path) else { continue };
-            let child = child.folder.read(cx);
-            for row in child.rows.iter() {
-                match row {
-                    FlatRow::Own(j) => {
-                        if let Some(entry) = child.entries.get(*j) {
-                            rows.push(FlatRow::Child(entry.clone(), 1));
-                        }
-                    }
-                    FlatRow::Child(entry, depth) if *depth < MAX_DEPTH => {
-                        rows.push(FlatRow::Child(entry.clone(), depth + 1));
-                    }
-                    FlatRow::Child(..) => {}
-                }
-            }
-        }
-        let mut ends = vec![rows.len(); rows.len()];
-        let mut parents = vec![None; rows.len()];
-        let mut stack: Vec<(usize, usize)> = Vec::new();
-        let mut last_at_depth: Vec<usize> = Vec::new();
-        for (ix, row) in rows.iter().enumerate() {
-            let depth = match row {
-                FlatRow::Own(_) => 0,
-                FlatRow::Child(_, depth) => *depth,
-            };
-            if depth > 0 {
-                parents[ix] = last_at_depth.get(depth - 1).copied();
-            }
-            if last_at_depth.len() > depth {
-                last_at_depth.truncate(depth);
-            }
-            last_at_depth.push(ix);
-            while let Some(&(top, top_depth)) = stack.last() {
-                if depth <= top_depth {
-                    ends[top] = ix;
-                    stack.pop();
-                } else {
-                    break;
-                }
-            }
-            stack.push((ix, depth));
-        }
-        self.rows = Arc::new(rows);
-        self.row_ends = Arc::new(ends);
-        self.row_parents = Arc::new(parents);
+            None => None,
+        };
+        let built = build_rows(&self.entries, &children, filter);
+        self.assign_rows(built);
     }
 
-    /// Drop selected paths that are no longer visible anywhere in the tree.
+    /// The open child folders' rows, by path. Arc clones: the flattening can then
+    /// run off the main thread without reading entities.
+    fn child_rows(&self, cx: &gpui::App) -> ChildRows {
+        self.children
+            .iter()
+            .map(|(path, child)| {
+                let child = child.folder.read(cx);
+                (path.clone(), (child.rows.clone(), child.entries.clone()))
+            })
+            .collect()
+    }
+
+    fn assign_rows(&mut self, built: Rows) {
+        self.rows = built.rows;
+        self.row_ends = built.row_ends;
+        self.row_parents = built.row_parents;
+        self.match_ranges = built.match_ranges;
+        self.rows_generation += 1;
+    }
+
+    /// Build the rows from a snapshot in the background, then finish the apply on
+    /// the main thread. A 100k flatten plus its filter was 17–37 ms of the apply.
+    fn rebuild_rows_async(&mut self, cx: &mut Context<Self>, kind: ApplyKind) {
+        self.rows_pending += 1;
+        let snapshot = self.entries.clone();
+        let entries = self.entries.clone();
+        let children = self.child_rows(cx);
+        let filter = self.filter.clone();
+        let generation = self.generation;
+        let rows_generation = self.rows_generation;
+        cx.spawn(async move |this, cx| {
+            let built = cx
+                .background_spawn(async move {
+                    let lower = filter.as_ref().map(|query| query.to_lowercase());
+                    let filter =
+                        filter.as_ref().zip(lower.as_ref()).map(|(query, lower)| (query.as_str(), lower.as_str()));
+                    build_rows(&snapshot, &children, filter)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.rows_pending = this.rows_pending.saturating_sub(1);
+                // A newer listing, or a synchronous rebuild (an inline folder opened
+                // or closed), owns the rows now; a stale flatten must not overwrite it.
+                if this.generation != generation || !Arc::ptr_eq(&this.entries, &entries) {
+                    return;
+                }
+                if this.rows_generation == rows_generation {
+                    this.assign_rows(built);
+                }
+                this.finish_apply(kind, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The rest of an apply, after its rows are in place.
+    fn finish_apply(&mut self, kind: ApplyKind, cx: &mut Context<Self>) {
+        if let ApplyKind::Full { .. } = kind
+            && self.load_done
+        {
+            // The listing is settled only now: until the rows land, the entries are
+            // newer than the rows, and a check (or a key) that reads one through the
+            // other sees a mismatch. A sync rebuild during the stream keeps it true.
+            self.load_done = false;
+            self.loading = false;
+        }
+        self.apply_pending_selection(cx);
+        if let ApplyKind::Full { prune } = kind {
+            // Only the first full load selects the first item. After that an empty
+            // selection stays empty, as in Finder: trashing or moving the selected
+            // item leaves nothing selected rather than jumping to the top.
+            if self.auto_select && !self.loading {
+                self.auto_select = false;
+                if self.selection.is_empty()
+                    && let Some(first) = self.entries.first()
+                {
+                    self.selection_totals = Self::entry_totals(first);
+                    self.selection.select_only(first.path.clone());
+                    self.selection_changed();
+                }
+            }
+            if prune {
+                self.prune_selection();
+            }
+        }
+        self.settle_cursor(cx);
+        // The drag snapshot is keyed by the selection, not by the rows: a reorder
+        // does not invalidate it, and a 100k select-all no longer rescans per apply.
+        cx.emit(FolderEvent::Changed);
+        cx.notify();
+    }
+
+    /// Drop selected paths that are no longer visible anywhere in the tree, and
+    /// sum what stays: the totals are rebuilt here so no other pass has to scan.
     fn prune_selection(&mut self) {
         let before = self.selection.len();
         if before == 0 {
+            self.selection_totals = (0, 0);
             return;
         }
+        let entries = self.entries.clone();
+        let rows = self.rows.clone();
+        let mut totals = (0u64, 0usize);
         if before <= 16 {
             // The usual selection is one row. Walking the rows once and looking
             // each up in the small selection avoids hashing a 100k-row set on
             // every watcher batch (measured at ~180 ms per apply).
-            let entries = self.entries.clone();
-            let rows = self.rows.clone();
             let mut wanted: HashSet<PathBuf> = self.selection.iter().cloned().collect();
             let mut keep: HashSet<PathBuf> = HashSet::with_capacity(wanted.len());
             for row in rows.iter() {
-                let Some(path) = Self::row_path(row, &entries) else { continue };
-                if wanted.remove(path) {
-                    keep.insert(path.to_path_buf());
+                let Some(entry) = Self::row_entry(row, &entries) else { continue };
+                if wanted.remove(&entry.path) {
+                    keep.insert(entry.path.clone());
+                    Self::add_totals(&mut totals, entry);
                     if wanted.is_empty() {
                         break;
                     }
@@ -1228,11 +1356,17 @@ impl Folder {
             }
             self.selection.retain(|path| keep.contains(path));
         } else {
-            let entries = self.entries.clone();
-            let rows = self.rows.clone();
-            let present: HashSet<&Path> = rows.iter().filter_map(|row| Self::row_path(row, &entries)).collect();
+            let mut present: HashSet<&Path> = HashSet::with_capacity(rows.len());
+            for row in rows.iter() {
+                let Some(entry) = Self::row_entry(row, &entries) else { continue };
+                present.insert(entry.path.as_path());
+                if self.selection.contains(&entry.path) {
+                    Self::add_totals(&mut totals, entry);
+                }
+            }
             self.selection.retain(|path| present.contains(path.as_path()));
         }
+        self.selection_totals = totals;
         if self.selection.len() != before {
             self.selection_changed();
         }
@@ -1504,8 +1638,12 @@ impl Folder {
     }
 
     pub fn select_only(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(path) = self.row(ix).map(|(entry, _)| entry.path.clone()) else { return };
+        let Some((path, totals)) = self.row(ix).map(|(entry, _)| (entry.path.clone(), Self::entry_totals(entry)))
+        else {
+            return;
+        };
         self.selection.select_only(path);
+        self.selection_totals = totals;
         self.selection_changed();
         self.set_cursor(ix, cx);
     }
@@ -1520,8 +1658,19 @@ impl Folder {
     }
 
     pub fn toggle(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(path) = self.row(ix).map(|(entry, _)| entry.path.clone()) else { return };
+        let Some((path, totals)) = self.row(ix).map(|(entry, _)| (entry.path.clone(), Self::entry_totals(entry)))
+        else {
+            return;
+        };
+        let was_selected = self.selection.contains(&path);
         self.selection.toggle(path);
+        if was_selected {
+            self.selection_totals.0 = self.selection_totals.0.saturating_sub(totals.0);
+            self.selection_totals.1 = self.selection_totals.1.saturating_sub(totals.1);
+        } else {
+            self.selection_totals.0 += totals.0;
+            self.selection_totals.1 += totals.1;
+        }
         self.selection_changed();
         match self.selection.cursor().and_then(|cursor| self.index_of_path(cursor)) {
             Some(ix) => self.set_cursor(ix, cx),
@@ -1534,7 +1683,7 @@ impl Folder {
     }
 
     pub fn extend_to(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if ix >= self.rows.len() {
+        if ix >= self.rows.len() || !self.rows_match_entries() {
             return;
         }
         let entries = self.entries.clone();
@@ -1549,24 +1698,43 @@ impl Folder {
                 FlatRow::Child(entry, _) => &entry.path == path,
             })
         };
-        self.selection.extend_to(ix, position, at);
+        let (from, to) = self.selection.extend_to(ix, position, at);
+        let mut totals = (0u64, 0usize);
+        for i in from..=to {
+            if let Some(entry) = self.row(i).map(|(entry, _)| entry) {
+                Self::add_totals(&mut totals, entry);
+            }
+        }
+        self.selection_totals = totals;
         self.selection_changed();
         self.set_cursor(ix, cx);
     }
 
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        if !self.rows_match_entries() {
+            return;
+        }
         let entries = self.entries.clone();
-        let paths = self.rows.iter().map(|row| match row {
-            FlatRow::Own(i) => entries[*i].path.clone(),
-            FlatRow::Child(entry, _) => entry.path.clone(),
+        let mut totals = (0u64, 0usize);
+        // Iterate the rows in place: a clone here is a 100k-element copy on the
+        // main thread, and `selection` is a disjoint field.
+        let paths = self.rows.iter().map(|row| {
+            let entry = match row {
+                FlatRow::Own(i) => &entries[*i],
+                FlatRow::Child(entry, _) => entry,
+            };
+            Self::add_totals(&mut totals, entry);
+            entry.path.clone()
         });
         self.selection.select_all(paths);
+        self.selection_totals = totals;
         self.selection_changed();
         cx.notify();
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.selection.clear();
+        self.selection_totals = (0, 0);
         self.selection_changed();
         self.cursor_ix = None;
         cx.emit(FolderEvent::CursorMoved);
@@ -1587,9 +1755,9 @@ impl Folder {
     pub fn type_char(&mut self, c: char, cx: &mut Context<Self>) {
         let prefix = self.type_select.push(c, Instant::now()).to_owned();
         let entries = self.entries.clone();
-        let names = self.rows.iter().map(|row| match row {
-            FlatRow::Own(i) => entries[*i].name.as_str(),
-            FlatRow::Child(entry, _) => entry.name.as_str(),
+        let names = self.rows.iter().filter_map(|row| match row {
+            FlatRow::Own(i) => entries.get(*i).map(|entry| entry.name.as_str()),
+            FlatRow::Child(entry, _) => Some(entry.name.as_str()),
         });
         if let Some(ix) = TypeSelect::find(&prefix, names) {
             self.select_only(ix, cx);
@@ -1629,9 +1797,9 @@ impl Folder {
     pub fn names(&self) -> Vec<String> {
         self.rows
             .iter()
-            .map(|row| match row {
-                FlatRow::Own(i) => self.entries[*i].name.clone(),
-                FlatRow::Child(entry, _) => entry.name.clone(),
+            .filter_map(|row| match row {
+                FlatRow::Own(i) => self.entries.get(*i).map(|entry| entry.name.clone()),
+                FlatRow::Child(entry, _) => Some(entry.name.clone()),
             })
             .collect()
     }
@@ -1652,6 +1820,24 @@ impl Folder {
         names
     }
 
+    /// The listing generation, for the fuzzer's cursor invariant message.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn generation_for_test(&self) -> u64 {
+        self.generation
+    }
+
+    /// The row generation, for the fuzzer's cursor invariant message.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn rows_generation_for_test(&self) -> u64 {
+        self.rows_generation
+    }
+
+    /// The selection's cursor path, for the fuzzer's cursor invariant.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn selection_cursor_path(&self) -> Option<PathBuf> {
+        self.selection.cursor().cloned()
+    }
+
     /// The selected paths, for the fuzzer's selection invariant.
     #[cfg(any(test, feature = "fuzz"))]
     pub fn selection_paths(&self) -> Vec<PathBuf> {
@@ -1663,9 +1849,9 @@ impl Folder {
     pub fn row_paths(&self) -> Vec<PathBuf> {
         self.rows
             .iter()
-            .map(|row| match row {
-                FlatRow::Own(i) => self.entries[*i].path.clone(),
-                FlatRow::Child(entry, _) => entry.path.clone(),
+            .filter_map(|row| match row {
+                FlatRow::Own(i) => self.entries.get(*i).map(|entry| entry.path.clone()),
+                FlatRow::Child(entry, _) => Some(entry.path.clone()),
             })
             .collect()
     }
@@ -1675,7 +1861,7 @@ impl Folder {
     #[cfg(any(test, feature = "fuzz"))]
     pub fn has_row_path(&self, path: &std::path::Path) -> bool {
         self.rows.iter().any(|row| match row {
-            FlatRow::Own(i) => self.entries[*i].path == path,
+            FlatRow::Own(i) => self.entries.get(*i).is_some_and(|entry| entry.path == path),
             FlatRow::Child(entry, _) => entry.path == path,
         })
     }
@@ -1695,13 +1881,15 @@ impl Folder {
         stats: Option<&[(PathBuf, Option<Entry>)]>,
         cx: &mut Context<Self>,
     ) {
-        self.replace_entries_after(entries, stats, cx);
+        // The apply's row build normally runs on the background executor; a test
+        // wants the finished rows to assert on.
+        self.replace_entries_after_inner(entries, stats, cx, true);
     }
 
     /// Apply a staged listing's partial, as the load loop does.
     #[cfg(test)]
     pub fn apply_partial_for_test(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
-        self.apply_partial(entries, cx);
+        self.apply_partial_inner(entries, cx, true);
     }
 
     /// The open inline child at `path`, so a test can hold it across a collapse.
@@ -1819,6 +2007,89 @@ fn list_in_stages(dir: &Path, hidden: bool, sort: Sort, started: Instant, tx: &U
         (all, started.elapsed().as_secs_f64() * 1000.0)
     });
     tx.unbounded_send(Load::Done(done)).ok();
+}
+
+/// Flatten `entries` and the open children into the rows the list view draws.
+/// Free of entities so an apply can run it on the background executor.
+fn build_rows(entries: &[Entry], children: &ChildRows, filter: Option<(&str, &str)>) -> Rows {
+    if let Some((filter, lower)) = filter {
+        let mut rows = Vec::new();
+        let mut ranges = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            let range = name_match(&entry.name, filter, lower);
+            // The predicate keeps today's shown set. `name_match` only adds the
+            // highlight, and can fail where full-string lowercasing differs.
+            let shown = if entry.name.is_ascii() && filter.is_ascii() {
+                range.is_some()
+            } else {
+                name_matches(&entry.name, filter, lower)
+            };
+            if !shown {
+                continue;
+            }
+            rows.push(FlatRow::Own(i));
+            ranges.push(range.map_or((u32::MAX, u32::MAX), |r| (r.start as u32, r.end as u32)));
+        }
+        return Rows {
+            row_ends: Arc::new((1..=rows.len()).collect()),
+            row_parents: Arc::new(vec![None; rows.len()]),
+            rows: Arc::new(rows),
+            match_ranges: Arc::new(ranges),
+        };
+    }
+    let mut rows = Vec::with_capacity(entries.len());
+    for (i, entry) in entries.iter().enumerate() {
+        rows.push(FlatRow::Own(i));
+        if !entry.is_dir || entry.is_package() {
+            continue;
+        }
+        let Some((child_rows, child_entries)) = children.get(&entry.path) else { continue };
+        for row in child_rows.iter() {
+            match row {
+                FlatRow::Own(j) => {
+                    if let Some(entry) = child_entries.get(*j) {
+                        rows.push(FlatRow::Child(entry.clone(), 1));
+                    }
+                }
+                FlatRow::Child(entry, depth) if *depth < MAX_DEPTH => {
+                    rows.push(FlatRow::Child(entry.clone(), depth + 1));
+                }
+                FlatRow::Child(..) => {}
+            }
+        }
+    }
+    let mut ends = vec![rows.len(); rows.len()];
+    let mut parents = vec![None; rows.len()];
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut last_at_depth: Vec<usize> = Vec::new();
+    for (ix, row) in rows.iter().enumerate() {
+        let depth = match row {
+            FlatRow::Own(_) => 0,
+            FlatRow::Child(_, depth) => *depth,
+        };
+        if depth > 0 {
+            parents[ix] = last_at_depth.get(depth - 1).copied();
+        }
+        if last_at_depth.len() > depth {
+            last_at_depth.truncate(depth);
+        }
+        last_at_depth.push(ix);
+        while let Some(&(top, top_depth)) = stack.last() {
+            if depth <= top_depth {
+                ends[top] = ix;
+                stack.pop();
+            } else {
+                break;
+            }
+        }
+        stack.push((ix, depth));
+    }
+    Rows {
+        rows: Arc::new(rows),
+        row_ends: Arc::new(ends),
+        row_parents: Arc::new(parents),
+        match_ranges: Arc::new(Vec::new()),
+    }
 }
 
 #[cfg(test)]

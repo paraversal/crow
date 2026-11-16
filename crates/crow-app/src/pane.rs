@@ -80,7 +80,7 @@ const PREVIEW_COLUMN_WIDTH: f32 = 300.0;
 pub enum PaneEvent {
     Run(Request),
     Copy {
-        paths: Vec<PathBuf>,
+        paths: Arc<[PathBuf]>,
         cut: bool,
     },
     Paste {
@@ -438,6 +438,16 @@ impl Pane {
 
     pub fn is_loading(&self, cx: &gpui::App) -> bool {
         self.folders.iter().any(|f| f.read(cx).is_loading_deep(cx))
+    }
+
+    /// Like `is_loading`, but also waits for a background row build: tests that
+    /// read rows after an apply need this.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn is_settling(&self, cx: &gpui::App) -> bool {
+        self.folders.iter().any(|f| {
+            let folder = f.read(cx);
+            folder.is_settling() || folder.children_settling(cx)
+        })
     }
 
     /// The visible (name, depth) rows of the focused folder, for tests.
@@ -1334,33 +1344,33 @@ impl Pane {
     fn duplicate(&mut self, _: &Duplicate, _: &mut Window, cx: &mut Context<Self>) {
         let paths = self.selected_paths(cx);
         if !paths.is_empty() {
-            cx.emit(PaneEvent::Run(Request::Duplicate { paths }));
+            cx.emit(PaneEvent::Run(Request::Duplicate { paths: paths.into() }));
         }
     }
 
     fn move_to_trash(&mut self, _: &MoveToTrash, _: &mut Window, cx: &mut Context<Self>) {
         let paths = self.selected_paths(cx);
         if !paths.is_empty() {
-            cx.emit(PaneEvent::Run(Request::Trash { paths }));
+            cx.emit(PaneEvent::Run(Request::Trash { paths: paths.into() }));
         }
     }
 
     fn delete_permanently(&mut self, _: &DeletePermanently, _: &mut Window, cx: &mut Context<Self>) {
         let paths = self.selected_paths(cx);
         if !paths.is_empty() {
-            cx.emit(PaneEvent::Run(Request::DeletePermanently { paths }));
+            cx.emit(PaneEvent::Run(Request::DeletePermanently { paths: paths.into() }));
         }
     }
 
     fn copy_files(&mut self, _: &CopyFiles, _: &mut Window, cx: &mut Context<Self>) {
-        let paths = self.selected_paths(cx);
+        let paths: Arc<[PathBuf]> = self.selected_paths(cx).into();
         if !paths.is_empty() {
             cx.emit(PaneEvent::Copy { paths, cut: false });
         }
     }
 
     fn cut_files(&mut self, _: &CutFiles, _: &mut Window, cx: &mut Context<Self>) {
-        let paths = self.selected_paths(cx);
+        let paths: Arc<[PathBuf]> = self.selected_paths(cx).into();
         if !paths.is_empty() {
             cx.emit(PaneEvent::Copy { paths, cut: true });
         }
@@ -2775,10 +2785,14 @@ impl Render for Pane {
         } else {
             None
         };
-        if let Some(path) = self.rename_when_present.clone()
-            && let Some(entry) = self.focused_folder().read(cx).entries().iter().find(|e| e.path == path)
-        {
-            let is_dir = entry.is_dir;
+        // The row must be built, not just the entry: a rename whose row is not in the
+        // list yet has no field to focus (an apply builds its rows off the main thread).
+        let pending_rename = self.rename_when_present.clone().and_then(|path| {
+            let folder = self.focused_folder().read(cx);
+            let ix = folder.row_of_path(&path)?;
+            folder.row(ix).map(|(entry, _)| (path, entry.is_dir))
+        });
+        if let Some((path, is_dir)) = pending_rename {
             self.rename_when_present = None;
             // Focus can't move during a render; start the rename right after it.
             cx.defer_in(window, move |this, window, cx| this.begin_rename(path, is_dir, window, cx));
@@ -3076,7 +3090,7 @@ impl Pane {
         let mut out = Vec::new();
         for (k, folder) in self.folders.iter().enumerate() {
             let folder = folder.read(cx);
-            if folder.is_loading() {
+            if folder.is_settling() {
                 continue;
             }
             if let Some(ix) = folder.cursor_ix()
@@ -3095,7 +3109,18 @@ impl Pane {
             {
                 out.push(Violation::new(
                     "cursor",
-                    format!("pane {k}: cursor {} is not the selected row", entry.path.display()),
+                    format!(
+                        "pane {k}: cursor {} (row {:?}) is not the selected row; selection cursor {:?}, {} rows, {} selected, dir {}, gen {} rows_gen {} loading {}",
+                        entry.path.display(),
+                        folder.cursor_ix(),
+                        folder.selection_cursor_path(),
+                        folder.row_count(),
+                        folder.selected_count(),
+                        folder.dir().display(),
+                        folder.generation_for_test(),
+                        folder.rows_generation_for_test(),
+                        folder.is_loading()
+                    ),
                 ));
             }
             let selection = folder.selection_paths();

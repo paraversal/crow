@@ -310,7 +310,7 @@ fn settle(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
     for _ in 0..400 {
         cx.run_until_parked();
         let busy = view.read_with(cx, |w, cx| {
-            w.tabs.iter().any(|(_, pane)| pane.read(cx).is_loading(cx)) || cx.global::<Operations>().running.is_some()
+            w.tabs.iter().any(|(_, pane)| pane.read(cx).is_settling(cx)) || cx.global::<Operations>().running.is_some()
         });
         if !busy {
             cx.run_until_parked();
@@ -8422,6 +8422,99 @@ fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
     assert!(batch * 10 < full, "the batch apply took {batch:?}, a full prune {full:?}");
 }
 
+/// H4 batch 6: the bottom bar asks for the selection's bytes every frame, so the
+/// totals are kept current by each selection change instead of rescanning a 100k
+/// listing whenever the selection generation bumps.
+#[gpui::test]
+fn selection_totals_follow_every_selection_change(cx: &mut TestAppContext) {
+    let root = fixture("selection-totals");
+    cx.update(crate::ui::init_for_tests);
+    let folder = cx
+        .update(|cx| cx.new(|cx| crate::folder::Folder::new(root.clone(), false, crow_fs::Sort::default(), false, cx)));
+    let entry = |name: &str, size: u64, is_dir: bool| crow_fs::Entry {
+        name: name.to_owned(),
+        path: root.join(name),
+        is_dir,
+        hidden: false,
+        size,
+        modified: None,
+        created: None,
+        added: None,
+    };
+    let entries =
+        vec![entry("a.txt", 10, false), entry("b.txt", 20, false), entry("dir", 0, true), entry("c.txt", 30, false)];
+    let totals = |cx: &mut TestAppContext| cx.update(|cx| folder.read(cx).selected_bytes());
+    let apply = |cx: &mut TestAppContext,
+                 entries: Vec<crow_fs::Entry>,
+                 stats: Option<&[(std::path::PathBuf, Option<crow_fs::Entry>)]>| {
+        cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries, stats, cx)));
+    };
+    apply(cx, entries.clone(), None);
+
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_only(0, cx)));
+    assert_eq!(totals(cx), (10, 0), "a plain click selects one file");
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.toggle(1, cx)));
+    assert_eq!(totals(cx), (30, 0), "cmd-click adds a file");
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.toggle(2, cx)));
+    assert_eq!(totals(cx), (30, 1), "cmd-click adds a folder, which adds no bytes");
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.toggle(1, cx)));
+    assert_eq!(totals(cx), (10, 1), "cmd-click removes a file");
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.clear_selection(cx)));
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_only(0, cx)));
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.extend_to(3, cx)));
+    assert_eq!(totals(cx), (60, 1), "shift-click sums the range it selects");
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_all(cx)));
+    assert_eq!(totals(cx), (60, 1), "select-all sums every row once");
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.clear_selection(cx)));
+    assert_eq!(totals(cx), (0, 0), "clearing drops the totals");
+
+    // A watcher batch that removes a selected file subtracts it.
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_all(cx)));
+    let removed = vec![(root.join("a.txt"), None)];
+    apply(cx, entries[1..].to_vec(), Some(&removed));
+    assert_eq!(totals(cx), (50, 1), "a removed file leaves the totals");
+
+    // A full apply that drops a selected row prunes and sums in one pass.
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_all(cx)));
+    apply(cx, entries[1..3].to_vec(), None);
+    assert_eq!(totals(cx), (20, 1), "a full apply sums what the selection kept");
+}
+
+/// H4 batch 6: a watcher batch that removes the selected row drops it from the
+/// selection before the new rows are built; the cursor must not keep naming it
+/// (the fuzzer's cursor check: the cursor row must be selected).
+#[gpui::test]
+fn a_removed_selected_row_does_not_keep_the_cursor(cx: &mut TestAppContext) {
+    let root = fixture("removed-cursor");
+    cx.update(crate::ui::init_for_tests);
+    let folder = cx
+        .update(|cx| cx.new(|cx| crate::folder::Folder::new(root.clone(), false, crow_fs::Sort::default(), false, cx)));
+    let entry = |name: &str| crow_fs::Entry {
+        name: name.to_owned(),
+        path: root.join(name),
+        is_dir: false,
+        hidden: false,
+        size: 1,
+        modified: None,
+        created: None,
+        added: None,
+    };
+    let entries = vec![entry("a.txt"), entry("b.txt")];
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries.clone(), None, cx)));
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_only(0, cx)));
+    // a.txt leaves, as a rename's watcher batch reports it.
+    let removed = vec![(root.join("a.txt"), None)];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries[1..].to_vec(), Some(&removed), cx))
+    });
+    let (cursor, selected) = cx.update(|cx| {
+        let folder = folder.read(cx);
+        (folder.cursor_entry().map(|entry| entry.path.clone()), folder.selection_paths())
+    });
+    assert_ne!(cursor, Some(root.join("a.txt")), "the cursor left the removed row");
+    assert!(cursor.as_ref().is_none_or(|path| selected.contains(path)), "the cursor row is selected");
+}
+
 /// H4 #22: a staged load shows the rows it has read so far. A partial must not
 /// prune the selection or close an inline folder for a row it has not reached;
 /// the full listing settles both when it lands.
@@ -8468,10 +8561,7 @@ fn collapsing_an_inline_folder_releases_its_listing(cx: &mut TestAppContext) {
     folder.update(&mut cx, |folder, cx| folder.expand(alpha.clone(), cx));
     settle(&view, &mut cx);
     let child = folder.read_with(&cx, |folder, _| folder.child_for_test(&alpha)).expect("alpha is open");
-    assert!(
-        !child.read_with(&cx, |folder, _| folder.entries().is_empty()),
-        "the child listed its folder"
-    );
+    assert!(!child.read_with(&cx, |folder, _| folder.entries().is_empty()), "the child listed its folder");
 
     folder.update(&mut cx, |folder, cx| folder.collapse(&alpha, cx));
     assert!(
@@ -8534,12 +8624,28 @@ fn watcher_batches_apply_one_at_a_time(cx: &mut TestAppContext) {
     cx.executor().advance_clock(Duration::from_millis(150));
     cx.run_until_parked();
     assert_eq!(cx.update(|cx| folder.read(cx).apply_batches()), 1, "a second batch waits for the first");
-    cx.executor().advance_clock(Duration::from_millis(400));
-    cx.run_until_parked();
-    cx.executor().advance_clock(Duration::from_millis(400));
-    cx.run_until_parked();
-    assert_eq!(cx.update(|cx| folder.read(cx).apply_batches()), 2, "the queued paths run as the next batch");
-    let names = cx.update(|cx| folder.read(cx).names());
+    // The stat and merge run on the background executor; give them real time too.
+    let mut batches = 0;
+    for _ in 0..100 {
+        cx.executor().advance_clock(Duration::from_millis(400));
+        cx.run_until_parked();
+        batches = cx.update(|cx| folder.read(cx).apply_batches());
+        if batches == 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(batches, 2, "the queued paths run as the next batch");
+    // The rows are flattened on the background executor; wait for them to land.
+    let mut names = Vec::new();
+    for _ in 0..100 {
+        cx.run_until_parked();
+        names = cx.update(|cx| folder.read(cx).names());
+        if names.contains(&"a.txt".to_owned()) && names.contains(&"b.txt".to_owned()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(names.contains(&"a.txt".to_owned()) && names.contains(&"b.txt".to_owned()), "{names:?}");
 }
 

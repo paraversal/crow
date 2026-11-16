@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crow_theme::{Rgb, Theme, Variant};
@@ -179,10 +179,37 @@ pub fn display_text(text: &str) -> Cow<'_, str> {
     Cow::Owned(text.chars().map(|c| if c.is_ascii_control() { ' ' } else { c }).collect())
 }
 
+/// Finder's display names for one path: (name, path) from the volume down.
+type DisplayNames = Arc<[(String, PathBuf)]>;
+type DisplayCache = RefCell<HashMap<PathBuf, DisplayNames>>;
+
+/// Finder's display names for a path's ancestors, volume first, cached per thread.
+/// Each name is a LaunchServices filesystem query (`displayNameAtPath`), and the tab
+/// strip, title bar, bottom bar and path bar ask for the same paths every frame:
+/// 40–50% of the main thread's busy time in the 100k fuzz profile. A renamed folder
+/// or volume changes the path, so a path's cached names stay valid.
+pub fn display_components(path: &Path) -> DisplayNames {
+    const MAX: usize = 512;
+    thread_local! {
+        static CACHE: DisplayCache = RefCell::new(HashMap::new());
+    }
+    if let Some(hit) = CACHE.with_borrow(|cache| cache.get(path).cloned()) {
+        return hit;
+    }
+    let parts: DisplayNames = crow_macos::display_components(path).into();
+    CACHE.with_borrow_mut(|cache| {
+        if cache.len() >= MAX {
+            cache.clear();
+        }
+        cache.insert(path.to_path_buf(), parts.clone());
+    });
+    parts
+}
+
 /// A folder's own name for labels: the volume name at the root, else the last
 /// component as Finder writes it.
 pub fn display_name(dir: &Path) -> String {
-    let name = crow_macos::display_components(dir).pop().map_or_else(|| dir.display().to_string(), |(name, _)| name);
+    let name = display_components(dir).last().map_or_else(|| dir.display().to_string(), |(name, _)| name.clone());
     display_text(&name).into_owned()
 }
 
