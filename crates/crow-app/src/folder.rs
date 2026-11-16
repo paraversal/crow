@@ -234,6 +234,15 @@ pub struct Folder {
     /// Tests hold an apply in flight to reproduce out-of-order batches.
     #[cfg(test)]
     apply_delay: Duration,
+    /// Tests count spawned watcher batches.
+    #[cfg(test)]
+    apply_batches: usize,
+    /// A watcher batch is being stat'ed and applied; new changes wait for it.
+    applying: bool,
+    /// Paths that arrived while `applying`; the next batch takes them.
+    pending: Vec<PathBuf>,
+    /// A rescan arrived while `applying`.
+    pending_rescan: bool,
     /// Tests hold a re-sort in flight to reproduce a stale result landing late.
     #[cfg(test)]
     sort_delay: Duration,
@@ -303,6 +312,11 @@ impl Folder {
             changes_tx: test_tx,
             #[cfg(test)]
             apply_delay: Duration::ZERO,
+            #[cfg(test)]
+            apply_batches: 0,
+            applying: false,
+            pending: Vec::new(),
+            pending_rescan: false,
             #[cfg(test)]
             sort_delay: Duration::ZERO,
             _watcher: watcher,
@@ -860,7 +874,12 @@ impl Folder {
         let started = Instant::now();
         cx.background_spawn(async move { list_in_stages(&dir, hidden, sort, started, &tx) }).detach();
         cx.spawn(async move |this, cx| {
-            while let Some(update) = rx.next().await {
+            while let Some(mut update) = rx.next().await {
+                // A busy main thread queues several staged partials; only the
+                // latest is worth a 100k apply (two in one frame were 38+38 ms).
+                while let Ok(next) = rx.try_recv() {
+                    update = next;
+                }
                 let current = this.update(cx, |this, cx| {
                     if this.generation != generation {
                         return false;
@@ -1208,8 +1227,8 @@ impl Folder {
     }
 
     fn apply_folder_changes(&mut self, cx: &mut Context<Self>) {
-        let mut paths = Vec::new();
-        let mut rescan = false;
+        let mut paths = std::mem::take(&mut self.pending);
+        let mut rescan = std::mem::take(&mut self.pending_rescan);
         for change in self.changes_rx.try_iter() {
             match change {
                 FolderChange::Paths(p) => paths.extend(p),
@@ -1219,9 +1238,22 @@ impl Folder {
         if paths.is_empty() && !rescan {
             return;
         }
-        if rescan || self.loading || paths.len() > MAX_DIFF {
+        // One batch at a time: the poll used to spawn a second 100k apply while
+        // the first was in flight, and both could land in the same frame (a
+        // 152 ms step on the 100k fixture). Changes wait for the next batch.
+        if self.applying || self.loading {
+            self.pending.extend(paths);
+            self.pending_rescan |= rescan;
+            return;
+        }
+        if rescan || paths.len() > MAX_DIFF {
             self.load(cx);
             return;
+        }
+        self.applying = true;
+        #[cfg(test)]
+        {
+            self.apply_batches += 1;
         }
         let (dir, hidden, sort, generation) = (self.dir.clone(), self.show_hidden, self.sort, self.generation);
         #[cfg(test)]
@@ -1236,6 +1268,7 @@ impl Folder {
                 cx.background_executor().timer(delay).await;
             }
             this.update(cx, |this, cx| {
+                this.applying = false;
                 if this.generation == generation && this.sort == sort {
                     // The paths this batch added: the reconcile re-stats only those.
                     // One pass over the listing, not one per changed path: a burst
@@ -1254,6 +1287,8 @@ impl Folder {
                         this.schedule_reconcile(added, cx);
                     }
                 }
+                // Changes that arrived meanwhile go next, still one at a time.
+                this.apply_folder_changes(cx);
             })
             .ok();
         })
@@ -1291,6 +1326,7 @@ impl Folder {
                 .ok();
                 return;
             }
+            let pending_paths = paths.clone();
             let stats = cx.background_spawn(async move { crow_fs::stat_changes(&dir, &paths, hidden) }).await;
             this.update(cx, |this, cx| {
                 if this.reconcile_gen != generation {
@@ -1298,6 +1334,13 @@ impl Folder {
                 }
                 this.reconciling = false;
                 if this.sort != sort {
+                    return;
+                }
+                // One apply at a time: a watcher batch or a load may be in
+                // flight, and a second 100k apply in the same frame was 38+38 ms.
+                // Re-stat these paths in the next batch.
+                if this.applying || this.loading {
+                    this.pending.extend(pending_paths);
                     return;
                 }
                 // Every added path still exists: the listing already has them, so
@@ -1437,6 +1480,12 @@ impl Folder {
     #[cfg(test)]
     pub(crate) fn set_apply_delay(&mut self, delay: Duration) {
         self.apply_delay = delay;
+    }
+
+    /// How many watcher batches this folder has spawned (tests).
+    #[cfg(test)]
+    pub(crate) fn apply_batches(&self) -> usize {
+        self.apply_batches
     }
 
     /// Hold re-sorts in flight for `delay` (tests reproduce a stale sort landing late).

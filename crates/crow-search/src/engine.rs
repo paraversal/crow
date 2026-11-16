@@ -67,6 +67,12 @@ pub struct Summary {
     pub error: Option<String>,
 }
 
+/// A pasted query can be a 100k-file clipboard (~10 MB). Nucleo scans the
+/// needle per candidate; cap it (findings #25). The palette caps its own query
+/// at 1024; the search field shares this matcher, so keep its long-needle test
+/// (4000 chars) meaningful.
+const MAX_NEEDLE_CHARS: usize = 4096;
+
 /// A reusable nucleo fuzzy matcher for names and paths.
 pub struct FuzzyMatcher {
     needle: String,
@@ -85,6 +91,8 @@ impl FuzzyMatcher {
         // With `ignore_case`, nucleo compares against a lowercased haystack and
         // expects the needle lowercased too; an uppercase needle letter can pass
         // its prefilter and then trip an assert ("should have been caught by prefilter").
+        // Cap first: a 100k-file clipboard is ~10 MB and made scoring quadratic.
+        let needle: String = needle.chars().take(MAX_NEEDLE_CHARS).collect();
         let needle = needle.to_lowercase();
         let mut needle_chars = Vec::new();
         if !needle.is_ascii() {

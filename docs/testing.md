@@ -182,7 +182,9 @@ come later. It drops `cmd-h`/`cmd-alt-h`/`cmd-m`/`cmd-q`: the test platform has 
 hide/minimize implementation, and driving a hidden window is not a user path. A step
 runs per frame at a 16 ms pace. It checks H1's invariants every 25 steps (the check
 itself is main-thread work), and after a `Settle` (and at the end) it compares the
-listing to disk on a background thread. `Step::AdvanceClock` is a test-clock step and
+listing to disk on a background thread. The focus invariant requires focus only in the
+active window: an inactive browser window may have no focused element (the Settings
+window or a second window is key). `Step::AdvanceClock` is a test-clock step and
 does nothing here; real timers run on their own.
 
 A heartbeat over 50 ms is printed as a slow step with the seed, the step index, the

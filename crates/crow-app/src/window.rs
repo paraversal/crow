@@ -265,9 +265,9 @@ struct PathState {
     parent: PathBuf,
     partial: String,
     /// `None` while the background listing runs.
-    children: Option<Vec<PathBuf>>,
+    children: Option<Vec<palette::PathEntry>>,
     /// The parent's files (and packages), listed with `children`.
-    files: Vec<PathBuf>,
+    files: Vec<palette::PathEntry>,
     /// The parent is not a folder, or cannot be read.
     missing: bool,
     /// Whether the listing includes hidden entries.
@@ -2333,6 +2333,11 @@ impl CrowWindow {
         if self.palette.is_none() {
             return;
         }
+        // A 100k-file clipboard is ~10 MB; scoring the folder or shaping its
+        // missing-path label with that blocked the main thread for 30 s
+        // (findings #25). The field keeps the text; the listing uses its head.
+        let query: String = query.chars().take(palette::MAX_QUERY_CHARS).collect();
+        let query = query.as_str();
         let cwd = self.pane().read(cx).current_dir(cx);
         let home = cx.global::<Ui>().home.clone();
         let show_hidden = self.show_hidden;
@@ -2410,9 +2415,9 @@ impl CrowWindow {
             let listed = crow_fs::list_dir(&target, hidden, |batch| {
                 for entry in batch {
                     if entry.is_dir && !entry.is_package() {
-                        children.push(entry.path);
+                        children.push(palette::PathEntry::new(entry.path, entry.name));
                     } else {
-                        files.push(entry.path);
+                        files.push(palette::PathEntry::new(entry.path, entry.name));
                     }
                 }
             });
@@ -3484,6 +3489,20 @@ impl CrowWindow {
         deep: bool,
         root: Option<&std::path::Path>,
     ) -> Vec<crate::fuzz::Violation> {
+        self.check_invariants_with_focus(window, cx, deep, root, true)
+    }
+
+    /// The H1 invariants. `focus_required` is false for an inactive window: it
+    /// has no focused element by design while another window is key, and the
+    /// live runner checks every browser window.
+    pub fn check_invariants_with_focus(
+        &self,
+        window: &Window,
+        cx: &App,
+        deep: bool,
+        root: Option<&std::path::Path>,
+        focus_required: bool,
+    ) -> Vec<crate::fuzz::Violation> {
         use crate::fuzz::Violation;
         let mut out = Vec::new();
         // First: the runner reports only the first violation, and a refused
@@ -3509,29 +3528,35 @@ impl CrowWindow {
             }
         }
 
-        let Some(focused) = window.focused(cx) else {
-            out.push(Violation::new("focus", "nothing is focused"));
-            return out;
-        };
-        // The topmost focus-owning overlay decides where focus must be. Tips do
-        // not take focus, and the native context menu is not a GPUI overlay.
-        let mut allowed = self.overlay_focus_surfaces(cx);
-        if allowed.is_empty() {
-            let pane = self.pane().read(cx);
-            let sidebar = self.sidebar.read(cx);
-            allowed.push(("pane", pane.focus_handle().clone()));
-            allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
-            for text in pane.text_focus_handles(cx) {
-                allowed.push(("pane text field", text));
+        match window.focused(cx) {
+            Some(focused) => {
+                // The topmost focus-owning overlay decides where focus must be. Tips do
+                // not take focus, and the native context menu is not a GPUI overlay.
+                let mut allowed = self.overlay_focus_surfaces(cx);
+                if allowed.is_empty() {
+                    let pane = self.pane().read(cx);
+                    let sidebar = self.sidebar.read(cx);
+                    allowed.push(("pane", pane.focus_handle().clone()));
+                    allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
+                    for text in pane.text_focus_handles(cx) {
+                        allowed.push(("pane text field", text));
+                    }
+                    // The bottom bar's path field (⌘L) is a focus surface of its own.
+                    if let Some(edit) = &self.path_edit {
+                        allowed.push(("path field", edit.input.read(cx).focus_handle(cx)));
+                    }
+                }
+                if !allowed.iter().any(|(_, handle)| handle == &focused) {
+                    let surface = allowed.first().map_or("expected", |(name, _)| name);
+                    out.push(Violation::new("focus", format!("focus is outside the {surface} surface")));
+                }
             }
-            // The bottom bar's path field (⌘L) is a focus surface of its own.
-            if let Some(edit) = &self.path_edit {
-                allowed.push(("path field", edit.input.read(cx).focus_handle(cx)));
+            None => {
+                if let Some(violation) = missing_focus_violation(focus_required) {
+                    out.push(violation);
+                    return out;
+                }
             }
-        }
-        if !allowed.iter().any(|(_, handle)| handle == &focused) {
-            let surface = allowed.first().map_or("expected", |(name, _)| name);
-            out.push(Violation::new("focus", format!("focus is outside the {surface} surface")));
         }
 
         if self.palette.is_some() && self.picker.is_some() {
@@ -3541,6 +3566,13 @@ impl CrowWindow {
         out.extend(crate::fuzz::a11y_violations(window, "a11y"));
         out
     }
+}
+
+/// A window with no focused element is only a violation when focus is required:
+/// an inactive window has none by design while another window is key.
+#[cfg(any(test, feature = "fuzz"))]
+fn missing_focus_violation(focus_required: bool) -> Option<crate::fuzz::Violation> {
+    focus_required.then(|| crate::fuzz::Violation::new("focus", "nothing is focused"))
 }
 
 #[cfg(test)]

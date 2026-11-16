@@ -1,0 +1,36 @@
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -2198,7 +2198,7 @@ impl Window {
+         platform_window.on_active_status_change(Box::new({
+             let mut cx = cx.to_async();
+             move |active| {
+-                handle
++                let result = handle
+                     .update(&mut cx, |_, window, cx| {
+                         window.active.set(active);
+                         window.modifiers = window.platform_window.modifiers();
+@@ -2212,14 +2212,16 @@ impl Window {
+                         window.refresh();
+ 
+                         SystemWindowTabController::update_last_active(cx, window.handle.id);
+-                    })
+-                    .with_context(|| {
+-                        format!(
+-                            "handling active status change for window {:?}",
+-                            handle.window_id()
+-                        )
+-                    })
+-                    .log_err();
++                    });
++                // A window can close before AppKit delivers its status change;
++                // updating it then is expected, not an error (Crow's fuzz runner
++                // closes windows while the app is active).
++                if let Err(error) = result {
++                    log::debug!(
++                        "active status change for a closed window {:?}: {error}",
++                        handle.window_id()
++                    );
++                }
+             }
+         }));
+         platform_window.on_visibility_change(Box::new({

@@ -467,6 +467,26 @@ fn a_second_window_keeps_the_focus_invariant(cx: &mut TestAppContext) {
     drop(view);
 }
 
+/// H4 #20: the live run checks every browser window, and a window that is not
+/// key may have no focused element (the Settings window or a second browser
+/// window is key). The test fuzzer still requires focus.
+#[gpui::test]
+fn inactive_windows_may_have_no_focus(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-inactive-focus-blur");
+    let (view, mut cx) = open(cx, &root);
+    let (inactive, required) = cx.update(|window, cx| {
+        window.blur(cx);
+        assert!(window.focused(cx).is_none(), "the window has no focus");
+        let view = view.read(cx);
+        (
+            view.check_invariants_with_focus(window, cx, false, None, false),
+            view.check_invariants_with_focus(window, cx, false, None, true),
+        )
+    });
+    assert!(!inactive.iter().any(|violation| violation.check == "focus"), "{inactive:?}");
+    assert!(required.iter().any(|violation| violation.check == "focus"), "{required:?}");
+}
+
 #[gpui::test]
 fn filter_and_rename_keep_focus_in_the_pane(cx: &mut TestAppContext) {
     use crate::fuzz::Step;
@@ -5781,6 +5801,38 @@ fn duplicate_and_paste_into_another_folder(cx: &mut TestAppContext) {
     assert!(root.join("notes copy.txt").exists(), "copy leaves the original");
 }
 
+/// H4 #25: a 100k-file copy is ~10 MB of file URLs. Pasting it into the palette
+/// used to reshape the whole field and score the folder with the whole query.
+#[gpui::test]
+fn a_huge_paste_into_the_palette_stays_quick(cx: &mut TestAppContext) {
+    let root = fixture("huge-paste");
+    let (_view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-shift-g");
+    let text = "a".repeat(10_000_000);
+    cx.update(|_, cx| crate::effects::write_text(text, cx));
+    let started = Instant::now();
+    cx.simulate_keystrokes("cmd-v");
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_millis(250), "a 10 MB paste took {elapsed:?}");
+}
+
+/// H4 #25: a huge path query must not shape a multi-MB missing-path label.
+#[gpui::test]
+fn a_huge_path_query_stays_quick(cx: &mut TestAppContext) {
+    let root = fixture("huge-path");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-shift-g");
+    let huge = format!("/nope-{}/x", "a".repeat(10_000_000));
+    let started = Instant::now();
+    view.update(&mut cx, |view, cx| view.refresh_palette(&huge, cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_millis(500), "a 10 MB path query took {elapsed:?}");
+}
+
 #[gpui::test]
 fn conflicts_ask_first_and_keep_both_by_default(cx: &mut TestAppContext) {
     let root = fixture("conflict");
@@ -7587,6 +7639,12 @@ fn apply_and_check(
     }
     let result: Result<(), crate::fuzz::Violation> = (|| {
         apply_step(view, step, tree, cx)?;
+        // The step ran with churn active; `keep_in_tree` may navigate back and
+        // settle, and churn would keep the folder busy until the 6 s bound
+        // (seed 1794851559033176001, churn on). Quiet the disk for the check.
+        if !deep && let Some(churn) = churn {
+            churn.pause();
+        }
         keep_in_tree(view, tree, cx);
         cx.run_until_parked();
         if let Some(violation) = check_all_windows(cx, deep, Some(tree)).into_iter().next() {
@@ -7597,7 +7655,7 @@ fn apply_and_check(
         }
         Ok(())
     })();
-    if deep && let Some(churn) = churn {
+    if let Some(churn) = churn {
         churn.resume();
     }
     // The recorder is a test observation buffer; a run does not read it, so
@@ -8346,6 +8404,34 @@ fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
     assert_eq!(selection.len(), 99_999, "only the removed path left the selection");
     assert!(!selection.contains(&removed));
     assert!(batch * 10 < full, "the batch apply took {batch:?}, a full prune {full:?}");
+}
+
+/// H4 #20: the 100 ms watcher poll used to spawn a second batch while the first
+/// was still stat'ing, and both applies could land in one frame (a 152 ms step
+/// on the 100k fixture). A batch now waits for the one in flight.
+#[gpui::test]
+fn watcher_batches_apply_one_at_a_time(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-apply-coalesce");
+    std::fs::write(root.join("a.txt"), "a").expect("write a");
+    std::fs::write(root.join("b.txt"), "b").expect("write b");
+    let folder = cx
+        .update(|cx| cx.new(|cx| crate::folder::Folder::new(root.clone(), false, crow_fs::Sort::default(), false, cx)));
+    cx.update(|cx| folder.update(cx, |folder, _| folder.set_apply_delay(Duration::from_millis(300))));
+    cx.update(|cx| folder.update(cx, |folder, _| folder.queue_changes(vec![root.join("a.txt")])));
+    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| folder.read(cx).apply_batches()), 1, "the first batch is in flight");
+    cx.update(|cx| folder.update(cx, |folder, _| folder.queue_changes(vec![root.join("b.txt")])));
+    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| folder.read(cx).apply_batches()), 1, "a second batch waits for the first");
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| folder.read(cx).apply_batches()), 2, "the queued paths run as the next batch");
+    let names = cx.update(|cx| folder.read(cx).names());
+    assert!(names.contains(&"a.txt".to_owned()) && names.contains(&"b.txt".to_owned()), "{names:?}");
 }
 
 /// H4 #15: FSEvents can coalesce away the delete that follows a rename, leaving

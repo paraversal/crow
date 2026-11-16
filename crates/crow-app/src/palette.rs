@@ -921,37 +921,52 @@ pub fn path_query(query: &str, cwd: &Path, home: &Path) -> Option<(PathBuf, Stri
     Some((crow_core::resolve_typed(parent, cwd, home), partial.to_owned()))
 }
 
-fn file_name(path: &Path) -> String {
-    path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default()
-}
-
 /// Files shown under a typed path: those whose name starts with the partial.
 const FILE_LIMIT: usize = 5;
+
+/// The palette scores and shows at most this many query characters. A 100k-file
+/// clipboard is ~10 MB; scoring the folder or shaping a missing-path label with
+/// it blocked the main thread for 30 s (findings #25). No path or query is close.
+pub const MAX_QUERY_CHARS: usize = 1024;
+
+/// A file or folder under a typed path, with its name and lowercased name
+/// computed once off the main thread. Filtering 78k files per keystroke used to
+/// lowercase every name (55 ms on the 100k fixture); the palette now reuses these.
+#[derive(Clone, Debug)]
+pub struct PathEntry {
+    pub path: PathBuf,
+    pub name: String,
+    pub lower: String,
+}
+
+impl PathEntry {
+    pub fn new(path: PathBuf, name: String) -> Self {
+        let lower = name.to_lowercase();
+        Self { path, name, lower }
+    }
+}
 
 /// The children of `parent` matching `partial` by name. With an empty partial the
 /// parent itself comes first ("this folder"), so Return goes there. Files whose
 /// name starts with the partial follow the folders, except that a file named
 /// exactly as typed comes first: a pasted file path lands on its file.
-pub fn path_listing(parent: &Path, partial: &str, children: &[PathBuf], files: &[PathBuf], home: &Path) -> Listing {
+pub fn path_listing(parent: &Path, partial: &str, children: &[PathEntry], files: &[PathEntry], home: &Path) -> Listing {
     let mut rows = vec![Row::Header(section_header(Source::Here, &crate::style::display_name(parent)))];
     let mut items: Vec<Item> = Vec::new();
     let typed = partial.to_lowercase();
-    let mut file_rows: Vec<&PathBuf> = if partial.is_empty() {
+    let mut file_rows: Vec<&PathEntry> = if partial.is_empty() {
         Vec::new()
     } else {
-        files.iter().filter(|path| file_name(path).to_lowercase().starts_with(&typed)).collect()
+        files.iter().filter(|file| file.lower.starts_with(&typed)).collect()
     };
-    file_rows.sort_by_key(|path| {
-        let name = file_name(path).to_lowercase();
-        (name != typed, name)
-    });
+    file_rows.sort_by(|a, b| (a.lower != typed, &a.lower).cmp(&(b.lower != typed, &b.lower)));
     file_rows.truncate(FILE_LIMIT);
-    let exact = file_rows.first().is_some_and(|path| file_name(path).to_lowercase() == typed);
-    let file_item = |path: &PathBuf| {
-        let label = crate::style::display_path(path, home);
+    let exact = file_rows.first().is_some_and(|file| file.lower == typed);
+    let file_item = |file: &PathEntry| {
+        let label = crate::style::display_path(&file.path, home);
         let start = name_start(&label);
         Item::Folder {
-            path: path.clone(),
+            path: file.path.clone(),
             // The typed prefix, counted in characters so a case change in the name can't split one.
             matched: std::iter::once(
                 start
@@ -984,34 +999,30 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathBuf], files: &
         rows.push(Row::Item(0));
     }
     let mut fuzzy = (!partial.is_empty()).then(|| FuzzyMatcher::new(partial));
-    let mut matched: Vec<(u32, &PathBuf)> = children
+    let mut matched: Vec<(u32, &PathEntry)> = children
         .iter()
-        .filter_map(|path| match fuzzy.as_mut() {
-            Some(fuzzy) => fuzzy.score(&file_name(path)).map(|score| (score, path)),
-            None => Some((0, path)),
+        .filter_map(|child| match fuzzy.as_mut() {
+            Some(fuzzy) => fuzzy.score(&child.name).map(|score| (score, child)),
+            None => Some((0, child)),
         })
         .collect();
     let by_name = fuzzy.is_none();
     matched.sort_by(|a, b| {
-        if by_name {
-            file_name(a.1).to_lowercase().cmp(&file_name(b.1).to_lowercase())
-        } else {
-            b.0.cmp(&a.0).then_with(|| file_name(a.1).to_lowercase().cmp(&file_name(b.1).to_lowercase()))
-        }
+        if by_name { a.1.lower.cmp(&b.1.lower) } else { b.0.cmp(&a.0).then_with(|| a.1.lower.cmp(&b.1.lower)) }
     });
     matched.truncate(TOTAL_LIMIT.saturating_sub(items.len()));
-    for (_, path) in matched {
-        let label = crate::style::display_path(path, home);
+    for (_, child) in matched {
+        let label = crate::style::display_path(&child.path, home);
         let start = name_start(&label);
         let matched = match fuzzy.as_mut() {
-            Some(fuzzy) => fuzzy.indices(&file_name(path)).map_or_else(Vec::new, |(_, ranges)| {
+            Some(fuzzy) => fuzzy.indices(&child.name).map_or_else(Vec::new, |(_, ranges)| {
                 ranges.into_iter().map(|range| (range.start + start)..(range.end + start)).collect()
             }),
             None => Vec::new(),
         };
         rows.push(Row::Item(items.len()));
         items.push(Item::Folder {
-            path: path.clone(),
+            path: child.path.clone(),
             label,
             name_start: start,
             source: Source::Here,
@@ -1019,12 +1030,12 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathBuf], files: &
             matched,
         });
     }
-    for path in file_rows.iter().skip(usize::from(exact)) {
+    for file in file_rows.iter().skip(usize::from(exact)) {
         if items.len() >= TOTAL_LIMIT {
             break;
         }
         rows.push(Row::Item(items.len()));
-        items.push(file_item(path));
+        items.push(file_item(file));
     }
     let count = count_text(items.len());
     Listing { rows, items, count }
@@ -1051,6 +1062,12 @@ mod tests {
 
     fn p(path: &str) -> PathBuf {
         PathBuf::from(path)
+    }
+
+    fn pe(path: &str) -> PathEntry {
+        let path = PathBuf::from(path);
+        let name = path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        PathEntry::new(path, name)
     }
 
     fn folders(favorites: &[PathBuf], recents: &[PathBuf], here: &[PathBuf]) -> Vec<FolderCandidate> {
@@ -1086,7 +1103,7 @@ mod tests {
 
     #[test]
     fn path_listing_puts_this_folder_first() {
-        let children = [p("/home/me/Files/beta"), p("/home/me/Files/alpha")];
+        let children = [pe("/home/me/Files/beta"), pe("/home/me/Files/alpha")];
         let parent = Path::new("/home/me/Files");
         let listing = path_listing(parent, "", &children, &[], Path::new("/home/me"));
         assert_eq!(row_text(&listing), ["# In Files", "~/Files", "~/Files/alpha", "~/Files/beta"]);
@@ -1101,8 +1118,8 @@ mod tests {
     #[test]
     fn a_file_named_as_typed_comes_first_and_others_follow_folders() {
         let parent = Path::new("/home/me/Files");
-        let children = [p("/home/me/Files/license-old")];
-        let files = [p("/home/me/Files/LICENSE.md"), p("/home/me/Files/LICENSE"), p("/home/me/Files/notes.txt")];
+        let children = [pe("/home/me/Files/license-old")];
+        let files = [pe("/home/me/Files/LICENSE.md"), pe("/home/me/Files/LICENSE"), pe("/home/me/Files/notes.txt")];
         let listing = path_listing(parent, "LICENSE", &children, &files, Path::new("/home/me"));
         assert_eq!(
             row_text(&listing),
@@ -1113,6 +1130,45 @@ mod tests {
         assert_eq!(*source, Source::File);
         let listing = path_listing(parent, "", &children, &files, Path::new("/home/me"));
         assert!(!row_text(&listing).iter().any(|row| row.contains("notes")), "no files until a name is typed");
+    }
+
+    /// H4 #20: each keystroke in a typed path used to lowercase all 78k file
+    /// names and sort them by a freshly allocated copy (55 ms on the 100k
+    /// fixture). The names are lowercased once when the parent lists; filtering
+    /// is a prefix test over the cached form. The old algorithm is the baseline,
+    /// so the check holds on a slow CI runner too.
+    #[test]
+    fn path_completion_filters_many_files_quickly() {
+        let parent = Path::new("/home/me/Files");
+        let files: Vec<PathEntry> = (0..78_000).map(|i| pe(&format!("/home/me/Files/file-{i:06}.txt"))).collect();
+        let partials = ["f", "fi", "file-0", "-🙂", "file-077"];
+        let started = std::time::Instant::now();
+        for partial in partials {
+            let listing = path_listing(parent, partial, &[], &files, Path::new("/home/me"));
+            assert!(listing.items.len() <= TOTAL_LIMIT);
+        }
+        let cached = started.elapsed();
+        let started = std::time::Instant::now();
+        for partial in partials {
+            let typed = partial.to_lowercase();
+            let mut rows: Vec<&PathEntry> = files
+                .iter()
+                .filter(|file| {
+                    file.path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_lowercase())
+                        .unwrap_or_default()
+                        .starts_with(&typed)
+                })
+                .collect();
+            rows.sort_by_key(|file| {
+                let name = file.path.file_name().map(|name| name.to_string_lossy().to_lowercase()).unwrap_or_default();
+                (name != typed, name)
+            });
+            rows.truncate(FILE_LIMIT);
+        }
+        let per_key = started.elapsed();
+        assert!(cached * 2 < per_key, "cached names {cached:?}, per-keystroke lowercasing {per_key:?}");
     }
 
     #[test]
