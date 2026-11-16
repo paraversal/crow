@@ -842,9 +842,20 @@ impl Sidebar {
 
     /// Files dropped on a row's folder: moved on the same disk, copied to another, Option copies.
     fn drop_on(&mut self, into: PathBuf, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(request) = crate::operations::drop_request(paths.paths(), into, window.modifiers().alt) {
-            cx.emit(SidebarEvent::Run(request));
-        }
+        // Move vs copy depends on the volumes, which means a stat: ask off the main thread.
+        let paths = paths.paths().to_vec();
+        let copy = window.modifiers().alt;
+        let task = cx.background_spawn(async move { crate::operations::drop_request(&paths, into, copy) });
+        cx.spawn(async move |this, cx| {
+            let request = task.await;
+            this.update(cx, |_, cx| {
+                if let Some(request) = request {
+                    cx.emit(SidebarEvent::Run(request));
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The slot after a group's last favorite.
@@ -862,11 +873,17 @@ impl Sidebar {
             ui::edit_sidebar(SidebarEdit::Add { path, at: (at.0, at.1 + n) }, cx);
         }
     }
-}
 
-/// The folders among dropped paths from another app.
-fn folders_of_paths(paths: &ExternalPaths) -> Vec<PathBuf> {
-    paths.paths().iter().filter(|p| p.is_dir()).cloned().collect()
+    /// The folders among paths dropped from another app: ask the disk off the main
+    /// thread, then add them on it.
+    fn add_dropped_folders(&mut self, at: Slot, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async move { paths.into_iter().filter(|p| p.is_dir()).collect::<Vec<_>>() }); // io-ok: inside background_spawn
+        cx.spawn(async move |this, cx| {
+            let folders = task.await;
+            this.update(cx, |this, cx| this.add_folders(at, folders, cx)).ok();
+        })
+        .detach();
+    }
 }
 
 /// The folders in a selection dragged from a pane, which already knows which are folders.
@@ -939,7 +956,7 @@ impl Render for Sidebar {
                         )
                         .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                             let at = this.group_end(g, cx);
-                            this.add_folders(at, folders_of_paths(paths), cx)
+                            this.add_dropped_folders(at, paths.paths().to_vec(), cx)
                         }))
                         .on_drop(cx.listener(move |this, selection: &DraggedSelection, _, cx| {
                             let at = this.group_end(g, cx);
@@ -1013,7 +1030,7 @@ impl Render for Sidebar {
                 .on_drop({
                     let into = path.clone();
                     cx.listener(move |this, paths: &ExternalPaths, window, cx| match this.insert_slot {
-                        Some(at) => this.add_folders(at, folders_of_paths(paths), cx),
+                        Some(at) => this.add_dropped_folders(at, paths.paths().to_vec(), cx),
                         None => this.drop_on(into.clone(), paths, window, cx),
                     })
                 })
