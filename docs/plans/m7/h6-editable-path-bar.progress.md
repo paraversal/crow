@@ -1,5 +1,5 @@
 # M7 H6 — Editable path bar progress
-Branch: m7-h6-path-bar · PR: none · Job: m7-h6-path-bar-6b6b · Last updated: 2026-11-16 · State: In critique
+Branch: m7-h6-path-bar · PR: #42 · Job: m7-h6-path-bar-6b6b · Last updated: 2026-11-16 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -65,4 +65,4 @@ Looked at: bundle shots in FireBox dark and Solarized Light, 640×500 and 1280×
 Verdict: better. The field fits the bar, the interactions work, the fuzzer gap is fixed, and the field now starts on the path the bar shows (C-Q1), so entering edit mode no longer changes the path.
 
 ## Next
-PR open (critic, per AGENTS.md); user hand-tests the double-click and VoiceOver speech.
+PR open: https://github.com/paraversal/file-crow/pull/42; user hand-tests the double-click and VoiceOver speech.
