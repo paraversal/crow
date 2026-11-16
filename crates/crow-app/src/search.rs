@@ -413,6 +413,7 @@ impl SearchView {
     }
 
     fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
+        let _span = tracing::debug_span!("search batch").entered();
         match update {
             // Once the result cap is hit the walk is cancelled; queued batches are
             // dropped rather than merged, so the UI is never busy draining them.

@@ -3192,6 +3192,27 @@ impl CrowWindow {
         self.tabs.len()
     }
 
+    /// The folder the window shows, for the fuzz runner's jail check.
+    #[cfg(feature = "fuzz")]
+    pub fn current_dir(&self, cx: &App) -> PathBuf {
+        self.pane().read(cx).current_dir(cx)
+    }
+
+    /// Bring the window back to the fuzz tree after a typed path or palette row
+    /// left it.
+    #[cfg(feature = "fuzz")]
+    pub fn navigate_to(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        let pane = self.pane().clone();
+        pane.update(cx, |pane, cx| pane.navigate(dir, cx));
+    }
+
+    /// The active pane's listing, for the fuzz runner's deep check. The runner
+    /// compares it to `read_dir` on a background thread.
+    #[cfg(feature = "fuzz")]
+    pub fn listing_snapshot(&self, cx: &App, root: Option<&std::path::Path>) -> Vec<(PathBuf, Vec<String>, bool)> {
+        self.pane().read(cx).listing_snapshot(cx, root)
+    }
+
     /// Bounds for a generated selector, from the views' layout state. Fixed
     /// chrome selectors go through `debug_bounds` in the runner instead.
     pub fn debug_selector_bounds(&self, selector: &str, cx: &App) -> Option<gpui::Bounds<gpui::Pixels>> {

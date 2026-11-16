@@ -426,10 +426,10 @@ pub fn cancel_running(cx: &mut App) {
 }
 
 /// A Trash that is a plain folder, so tests never touch the real one.
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 pub struct FolderTrash(pub PathBuf);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 impl Trash for FolderTrash {
     fn trash(&self, path: &std::path::Path) -> std::io::Result<PathBuf> {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

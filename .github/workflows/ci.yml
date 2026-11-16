@@ -46,6 +46,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Clippy (fuzz)
+        run: cargo clippy -p crow-app --features fuzz --all-targets -- -D warnings
+
       - name: Tests
         run: cargo test --workspace
 

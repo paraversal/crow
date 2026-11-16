@@ -38,6 +38,7 @@ pub fn icon_png(path: &Path, is_dir: bool, points: u32) -> Option<Arc<Vec<u8>>> 
     if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return hit;
     }
+    let _span = tracing::debug_span!("icon fetch").entered();
     let image = NSWorkspace::sharedWorkspace().iconForFile(&ns_string(path));
     let png = png_of(&image, points * 2).map(Arc::new);
     CACHE.with(|c| c.borrow_mut().insert(key, png.clone()));

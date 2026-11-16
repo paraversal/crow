@@ -217,11 +217,15 @@ impl Global for Watchers {}
 
 /// Install the `Ui` global and start watching the theme index, `~/.config/crow` and mounts.
 pub fn init(cx: &mut App) {
-    let home = crow_core::home();
-    let config_dir = crow_core::config_dir();
+    init_at(cx, crow_core::config_dir(), crow_core::state_dir(), crow_core::home());
+}
+
+/// `init` with explicit folders, for `crow --fuzz`: its config, state and home
+/// stay in the run's temp folders, so it cannot read the user's sidebar or write Recent.
+pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: PathBuf) {
     // The config dir is watched, so it has to exist before the first file is written.
     std::fs::create_dir_all(&config_dir).ok();
-    let mut ui = Ui::new(config_dir.clone(), crow_core::state_dir(), home, crow_theme::fallback(), true);
+    let mut ui = Ui::new(config_dir.clone(), state_dir, home, crow_theme::fallback(), true);
     let theme = crow_theme::current(ui.settings.theme_id(), variant_of(cx.window_appearance()));
     tracing::info!(theme = %theme.name, "starting");
     ui.target = theme.clone();
@@ -540,6 +544,7 @@ pub fn set_show_preview(show: bool, cx: &mut App) {
 /// Re-resolve the theme (after an index change, a settings change, an appearance
 /// flip or a move in the theme picker). A broken theme file keeps the current theme.
 pub fn reload_theme(cx: &mut App) {
+    let _span = tracing::debug_span!("theme reload").entered();
     let variant = variant_of(cx.window_appearance());
     let (dir, state) = (crow_theme::themes_dir(), crow_theme::state_dir());
     let ui = cx.global::<Ui>();

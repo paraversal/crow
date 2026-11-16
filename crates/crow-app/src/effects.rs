@@ -203,6 +203,28 @@ pub fn effects(cx: &App) -> Arc<dyn Effects> {
     cx.global::<EffectHost>().0.clone()
 }
 
+/// Put `text` on the general pasteboard (Copy Path, a text field's copy and cut).
+/// With a recorder installed it stays in the recorder, so a fuzz run in a real
+/// window never replaces the user's clipboard.
+pub fn write_text(text: String, cx: &mut App) {
+    #[cfg(any(test, feature = "fuzz"))]
+    if let Some(recorder) = recording(cx) {
+        recorder.write_text(text);
+        return;
+    }
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+}
+
+/// The general pasteboard's text (a text field's paste); the recorder's own
+/// text when one is installed.
+pub fn read_text(cx: &mut App) -> Option<String> {
+    #[cfg(any(test, feature = "fuzz"))]
+    if let Some(recorder) = recording(cx) {
+        return recorder.read_text();
+    }
+    cx.read_from_clipboard().and_then(|item| item.text())
+}
+
 /// The installed recorder, when tests or the fuzzer installed one.
 #[cfg(any(test, feature = "fuzz"))]
 pub fn recording(cx: &App) -> Option<&RecordingEffects> {
@@ -225,6 +247,8 @@ pub enum Call {
     SetQuickLookKeyHandler,
     WriteFileUrls(Vec<PathBuf>),
     ReadFileUrls,
+    WriteText,
+    ReadText,
     PasteboardChangeCount,
     PreloadSounds(Vec<Sound>),
     PlaySound(Sound, f32),
@@ -251,6 +275,8 @@ struct Script {
     write_change_count: Option<isize>,
     open_error: Option<String>,
     begin_drag: bool,
+    /// The recorder's stand-in for the pasteboard's text.
+    text: Option<String>,
 }
 
 /// Records every effect and answers from [`Script`]. Installed by
@@ -323,6 +349,21 @@ impl RecordingEffects {
     /// Whether a native drag should claim the drag (false lets GPUI's own run).
     pub fn set_begin_drag(&self, enabled: bool) {
         self.script.lock().expect("the effect script is not poisoned").begin_drag = enabled;
+    }
+
+    /// The text Crow last put on the (recorded) pasteboard.
+    pub fn text(&self) -> Option<String> {
+        self.script.lock().expect("the effect script is not poisoned").text.clone()
+    }
+
+    fn write_text(&self, text: String) {
+        self.record(Call::WriteText);
+        self.script.lock().expect("the effect script is not poisoned").text = Some(text);
+    }
+
+    fn read_text(&self) -> Option<String> {
+        self.record(Call::ReadText);
+        self.text()
     }
 
     fn record(&self, call: Call) {

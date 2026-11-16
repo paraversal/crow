@@ -787,7 +787,7 @@ impl Sidebar {
             }
             CommandId::NewTab => cx.emit(SidebarEvent::OpenInNewTab(path)),
             CommandId::CopyPath => {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.to_string_lossy().into_owned()));
+                crate::effects::write_text(path.to_string_lossy().into_owned(), cx);
                 crate::operations::message("Copied path", false, cx);
             }
             CommandId::ShowInFinder => crate::effects::effects(cx).reveal_in_finder(&[path]),

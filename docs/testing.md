@@ -149,6 +149,79 @@ it until then) and the accessibility tree (GPUI's test platform disables it). Th
 and checked by the invariants but only the first is driven. `cmd-m` is excluded
 because the test platform has no minimize implementation.
 
+### Real frames: `crow --fuzz`
+
+The test platform has no real frames, so H1's invariant runs cannot see a freeze.
+`crow --fuzz` drives the same generator in a real window and runs a 16 ms
+main-thread heartbeat; its lateness is the frame budget:
+
+```bash
+cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --minutes 10
+cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --minutes 10 --churn
+cargo run --release -p crow-app --features fuzz -- --fuzz --tree long-name,deep-20 --minutes 10
+cargo run --release -p crow-app --features fuzz -- --fuzz target/fixture-100k --dir-is-scratch --minutes 10
+```
+
+With no folder it builds a temp H1 tree (`--tree small` by default: every edge kind
+except the 100k folder and the sparse 10 GiB file). Config, state, Trash, the log
+(`logs/crow.log`) and the saved steps (`script.txt`) go to a support folder under the
+system temp folder, never `~/.config/crow` or `~/Library/Logs/Crow`; the first line
+printed names each. Copy Path and text-field copy, cut and paste use the recorded
+effects' own clipboard, so the user's clipboard is left alone. A user folder is refused unless
+`--dir-is-scratch` says it may be changed. `--tree none` is the ordinary 200-file
+tree; `--tree all` adds `wide-100000` and `huge-file`. Churn is off unless `--churn`
+is passed.
+
+The runner dispatches keys and typing only (H3 Q3); clicks and the Settings window
+come later. It drops `cmd-h`/`cmd-alt-h`/`cmd-m`/`cmd-q`: the test platform has no
+hide/minimize implementation, and driving a hidden window is not a user path. A step
+runs per frame at a 16 ms pace. It checks H1's invariants every 25 steps (the check
+itself is main-thread work), and after a `Settle` (and at the end) it compares the
+listing to disk on a background thread. `Step::AdvanceClock` is a test-clock step and
+does nothing here; real timers run on their own.
+
+A heartbeat over 50 ms is printed as a slow step with the seed, the step index, the
+last five steps and the `tracing` spans that overlapped it (`listing apply`, `rebuild
+rows`, `preview load`, `search batch`, `theme reload`, `icon fetch`; spans are at
+`debug`, which this mode enables for the `crow` and `crow_macos` targets). GPUI's `on_next_frame` is
+throttled for an inactive or occluded window, so the heartbeat, not a frame
+callback, is the source. The report counts heartbeat intervals and groups the slow
+ones by step kind:
+
+```
+step                  over      worst  replay
+Keys                     2    312.4 ms  --seed 42 --script …/script.txt --until 1234  Keys("cmd-k")
+```
+
+Exit code is 0 unless an invariant fails or a heartbeat is over 250 ms (a freeze).
+A freeze prints `FREEZE` and the run keeps going; a stall over 30 s prints `HANG`
+and exits 1, so a wedged step cannot swallow the rest of the run. A watchdog thread
+watches the heartbeat, so this works even for a step that never returns; a 100k
+resize can take 5–6 s and still finish.
+
+Every run saves the steps it sends to `script.txt`, one per line, before sending
+each, so a `HANG` or a killed run keeps the step that stalled. The seed alone does
+not replay a run: the generator reads the live keymap and focus, which depend on
+timing, and two runs of one seed can split after a hundred steps. To profile a slow
+step, replay the saved script to just before it, with the same seed and tree
+options (the seed builds the tree and drives churn), as the report prints it:
+
+```bash
+cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --script /path/to/script.txt --until 1234
+xcrun xctrace record --template 'Time Profiler' --attach crow
+```
+
+A replay of a `--dir-is-scratch` folder needs it in the same state as the original
+run (a fresh `--make-fixture` for the 100k fixture). The window stays open until
+Crow quits. A clean run removes its temp tree and support folder; a run with a slow
+step, a violation or a freeze removes the tree and keeps the support folder (`kept
+for replay:`). A paused run, a `HANG` and a killed run leave both (`crow-fuzz-*` in
+the system temp folder); remove them by hand, with `chmod -R u+rwx` first because
+the edge tree has an unreadable folder. Slow steps go into
+`docs/plans/m7/findings.md` with their replay command; `findings.md` is the input
+to the next H4 batch. This runner needs a real GUI session, so it is local only;
+the scheduled workflow runs H1's `fuzz_long`.
+
 Removable and cloud volumes are hand checks, not simulated. Create a disk image
 (`hdiutil create -size 200m -fs APFS -volname CrowTest /tmp/crow.dmg`), attach it,
 browse it in Crow and eject it while shown: the folder should show as gone, with

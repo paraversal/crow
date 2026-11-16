@@ -877,6 +877,7 @@ impl Folder {
 
     /// Swap in a new listing, keeping the selection on the same items.
     fn replace_entries(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
+        let _span = tracing::debug_span!("listing apply").entered();
         self.entries = Arc::new(entries);
         if !self.effects.is_empty() {
             let present: HashSet<PathBuf> = self.entries.iter().map(|entry| entry.path.clone()).collect();
@@ -962,6 +963,7 @@ impl Folder {
     /// Flatten this listing and every open child folder into the visible rows.
     /// With a filter, the rows are this folder's matching entries only (flat).
     fn rebuild_rows(&mut self, cx: &gpui::App) {
+        let _span = tracing::debug_span!("rebuild rows").entered();
         if let Some(filter) = &self.filter {
             let lower = filter.to_lowercase();
             let mut rows = Vec::new();
@@ -1351,6 +1353,16 @@ impl Folder {
                 FlatRow::Child(entry, _) => entry.path.clone(),
             })
             .collect()
+    }
+
+    /// Whether `path` is one of the visible rows, including an inline child.
+    /// No allocation: the fuzz runner uses it for a small selection.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn has_row_path(&self, path: &std::path::Path) -> bool {
+        self.rows.iter().any(|row| match row {
+            FlatRow::Own(i) => self.entries[*i].path == path,
+            FlatRow::Child(entry, _) => entry.path == path,
+        })
     }
 
     /// Break the cursor on purpose, to prove the invariant fires.

@@ -4,6 +4,8 @@
 //! crow [DIR]                       open a window on DIR (default: home)
 //! crow --bench DIR                 auto-scroll DIR for 600 frames, print frame times, quit
 //! crow --bench-filter QUERY DIR    the same, with the name filter applied first
+//! crow --fuzz [DIR --dir-is-scratch] [--seed N] [--minutes M]  drive a real window
+//!                                  with H1's generator and report slow frames (needs --features fuzz)
 //! crow --make-fixture DIR [N]      create N (default 100,000) empty files in DIR
 //! crow --make-search-fixture DIR [N]  create N (default 200,000) nested text files
 //! crow --bench-search DIR [QUERY]  time a name+contents walk, print first hit and total
@@ -25,6 +27,8 @@ mod feedback;
 mod folder;
 #[cfg(any(test, feature = "fuzz"))]
 mod fuzz;
+#[cfg(feature = "fuzz")]
+mod fuzz_live;
 mod icons;
 mod keys;
 mod logging;
@@ -153,8 +157,19 @@ fn open_paths(urls: Vec<String>, cx: &mut App) {
 }
 
 fn main() -> ExitCode {
-    let _log_guard = logging::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    #[cfg(feature = "fuzz")]
+    if args.first().map(String::as_str) == Some("--fuzz") {
+        return fuzz_live::run(&args[1..]);
+    }
+    #[cfg(not(feature = "fuzz"))]
+    if args.first().map(String::as_str) == Some("--fuzz") {
+        eprintln!("crow --fuzz needs a build with --features fuzz");
+        return ExitCode::FAILURE;
+    }
+
+    let _log_guard = logging::init();
 
     if args.first().map(String::as_str) == Some("--make-fixture") {
         let Some(dir) = args.get(1).map(PathBuf::from) else {

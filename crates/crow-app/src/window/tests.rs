@@ -565,7 +565,7 @@ fn sidebar_context_menu_acts_on_the_clicked_favorite(cx: &mut TestAppContext) {
     assert_eq!(dir(&view, &cx), root.join("alpha"), "on the clicked folder");
 
     sidebar_menu_choose(&view, &mut cx, 0, Some(CommandId::CopyPath));
-    let copied = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+    let copied = cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text()));
     assert_eq!(copied.as_deref(), Some(root.join("beta").to_string_lossy().as_ref()));
 
     sidebar_menu_choose(&view, &mut cx, 0, Some(CommandId::Open));
@@ -5187,7 +5187,7 @@ fn palette_copy_path_copies_the_selection(cx: &mut TestAppContext) {
     cx.simulate_input(">copy path");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+    let text = cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text()));
     assert_eq!(text, Some(root.join("beta").display().to_string()), "the palette ran Copy Path");
 }
 
@@ -6882,7 +6882,7 @@ fn copy_path_puts_the_selected_paths_on_the_clipboard(cx: &mut TestAppContext) {
     let root = fixture("copy-path");
     let (view, mut cx) = open(cx, &root);
     cx.simulate_keystrokes("down shift-down cmd-alt-c");
-    let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+    let text = cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text()));
     let expected = format!("{}\n{}", root.join("beta").display(), root.join("notes.txt").display());
     assert_eq!(text.as_deref(), Some(expected.as_str()), "⌥⌘C copies one path per line");
     let message = cx.read(|cx| cx.global::<Operations>().message.clone());
@@ -6892,14 +6892,14 @@ fn copy_path_puts_the_selected_paths_on_the_clipboard(cx: &mut TestAppContext) {
     let empty = below_rows(&mut cx, "row-notes.txt");
     cx.simulate_click(empty, gpui::Modifiers::default());
     cx.simulate_keystrokes("cmd-alt-c");
-    let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+    let text = cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text()));
     assert_eq!(text, Some(root.display().to_string()));
 
     // And from the menu.
     let alpha = row_center(&mut cx, "row-alpha");
     right_click(&mut cx, alpha);
     choose(&view, &mut cx, CommandId::CopyPath);
-    let text = cx.update(|_, cx| cx.read_from_clipboard()).and_then(|item| item.text());
+    let text = cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text()));
     assert_eq!(text, Some(root.join("alpha").display().to_string()));
 }
 
