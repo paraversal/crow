@@ -7831,3 +7831,41 @@ fn filter_enter_acts_on_the_highlighted_row(cx: &mut TestAppContext) {
     assert_eq!(renaming, Some(root.join("beta")), "Return acts on the cursor row");
 }
 
+/// H4 #12: a watcher batch used to prune the selection by hashing every row
+/// (100k on the 100k fixture), so each batch took ~180 ms on the main thread.
+/// Only the paths the batch removed can leave the selection now.
+#[gpui::test]
+fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-apply-batch");
+    let folder = cx
+        .update(|cx| cx.new(|cx| crate::folder::Folder::new(root.clone(), false, crow_fs::Sort::default(), false, cx)));
+    let entries = |skip: Option<usize>| -> Vec<crow_fs::Entry> {
+        (0..100_000)
+            .filter(|i| Some(*i) != skip)
+            .map(|i| crow_fs::Entry {
+                name: format!("file-{i:06}.txt"),
+                path: root.join(format!("file-{i:06}.txt")),
+                is_dir: false,
+                hidden: false,
+                size: 0,
+                modified: None,
+                created: None,
+                added: None,
+            })
+            .collect()
+    };
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries(None), &[], cx)));
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_all(cx)));
+    // Keep the old listing alive so its drop is not part of the measurement.
+    let old = cx.update(|cx| folder.read(cx).entries().clone());
+    let removed = root.join("file-000000.txt");
+    let stats = vec![(removed.clone(), None)];
+    let started = std::time::Instant::now();
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries(Some(0)), &stats, cx)));
+    let elapsed = started.elapsed();
+    drop(old);
+    let selection = cx.update(|cx| folder.read(cx).selection_paths());
+    assert_eq!(selection.len(), 99_999, "only the removed path left the selection");
+    assert!(!selection.contains(&removed));
+    assert!(elapsed < std::time::Duration::from_millis(50), "the batch apply took {elapsed:?}");
+}
