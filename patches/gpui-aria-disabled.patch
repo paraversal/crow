@@ -1,0 +1,70 @@
+--- a/crates/gpui/src/elements/div.rs
++++ b/crates/gpui/src/elements/div.rs
+@@ -1449,6 +1449,13 @@
+         self
+     }
+ 
++    /// Set the disabled state for this element. Assistive technology announces
++    /// it as dimmed and does not offer its actions.
++    fn aria_disabled(mut self, disabled: bool) -> Self {
++        self.interactivity().aria.disabled = Some(disabled);
++        self
++    }
++
+     /// Set the toggled state for this element.
+     fn aria_toggled(mut self, toggled: accesskit::Toggled) -> Self {
+         self.interactivity().aria.toggled = Some(toggled);
+@@ -2204,6 +2211,7 @@
+     pub(crate) keyshortcuts: Option<SharedString>,
+     pub(crate) selected: Option<bool>,
+     pub(crate) expanded: Option<bool>,
++    pub(crate) disabled: Option<bool>,
+     pub(crate) toggled: Option<accesskit::Toggled>,
+     pub(crate) numeric_value: Option<f64>,
+     pub(crate) min_numeric_value: Option<f64>,
+@@ -3651,6 +3659,11 @@
+         if let Some(expanded) = self.aria.expanded {
+             node.set_expanded(expanded);
+         }
++        match self.aria.disabled {
++            Some(true) => node.set_disabled(),
++            Some(false) => node.clear_disabled(),
++            None => {}
++        }
+         if let Some(toggled) = self.aria.toggled {
+             node.set_toggled(toggled);
+         }
+@@ -5440,6 +5453,19 @@
+     }
+ 
+     #[test]
++    fn test_aria_disabled_writes_the_node_flag() {
++        let mut disabled = div().id("back").aria_disabled(true);
++        let mut node = accesskit::Node::new(accesskit::Role::Button);
++        disabled.interactivity().write_a11y_info(&mut node);
++        assert!(node.is_disabled());
++
++        let mut enabled = div().id("forward").aria_disabled(false);
++        let mut node = accesskit::Node::new(accesskit::Role::Button);
++        enabled.interactivity().write_a11y_info(&mut node);
++        assert!(!node.is_disabled());
++    }
++
++    #[test]
+     fn test_write_a11y_info_string_and_numeric_properties() {
+         let mut interactivity = Interactivity::default();
+         interactivity.aria.author_id = Some("settings.buffer-font-size".into());
+diff --git a/crates/gpui/src/window/a11y/debug.rs b/crates/gpui/src/window/a11y/debug.rs
+index ae98aa5..c168ec3 100644
+--- a/crates/gpui/src/window/a11y/debug.rs
++++ b/crates/gpui/src/window/a11y/debug.rs
+@@ -265,6 +265,9 @@ fn node_to_json(
+     if let Some(v) = node.is_expanded() {
+         aria.insert("expanded".into(), json!(v));
+     }
++    if node.is_disabled() {
++        aria.insert("disabled".into(), json!(true));
++    }
+     if let Some(v) = node.toggled() {
+         aria.insert("toggled".into(), json!(format!("{v:?}")));
+     }

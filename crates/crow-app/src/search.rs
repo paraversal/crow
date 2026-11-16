@@ -1115,13 +1115,13 @@ impl SearchView {
                 Match::Names => ("search-match-names", "Names"),
                 Match::Contents => ("search-match-contents", "Contents"),
             };
-            let aria = if spotlight { format!("{aria}, unavailable") } else { aria.to_owned() };
             let is_selected = selected == matching;
             let segment = div()
                 .id(id)
                 .debug_selector(move || id.into())
                 .role(Role::RadioButton)
                 .aria_label(aria)
+                .aria_disabled(spotlight)
                 .aria_selected(is_selected)
                 .h(px(22.))
                 .px(px(9.))

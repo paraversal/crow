@@ -557,12 +557,12 @@ impl CrowWindow {
          -> gpui::Stateful<gpui::Div> {
             let icon = icons::glyph(icon, 16., "fg-muted", &theme).id("icon");
             let icon = if enabled { icon.group_hover(id, move |s| s.text_color(hover_icon)) } else { icon };
-            let aria = if enabled { aria } else { format!("{aria}, unavailable") };
             let mut button = div()
                 .id(id)
                 .debug_selector(move || id.into())
                 .role(Role::Button)
                 .aria_label(aria)
+                .aria_disabled(!enabled)
                 .w(px(28.))
                 .h(px(28.))
                 .rounded(px(6.))
@@ -3315,6 +3315,8 @@ impl CrowWindow {
         if self.palette.is_some() && self.picker.is_some() {
             out.push(Violation::new("overlay", "the palette and the theme picker are both open"));
         }
+
+        out.extend(crate::fuzz::a11y_violations(window, "a11y"));
         out
     }
 }

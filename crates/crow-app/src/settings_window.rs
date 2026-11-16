@@ -188,6 +188,29 @@ impl ControlId {
         }
     }
 
+    /// The `debug_selector` the control's shared builder gives it: the group
+    /// widgets append `-control`; buttons and links use the key itself.
+    #[cfg(any(test, feature = "fuzz"))]
+    fn selector(self) -> String {
+        match self {
+            ControlId::Theme
+            | ControlId::AppIcon
+            | ControlId::FontFamily
+            | ControlId::FontSize
+            | ControlId::Keymap
+            | ControlId::Hints
+            | ControlId::ShowHidden
+            | ControlId::ShowPreview
+            | ControlId::ViewPerFolder
+            | ControlId::PaletteRecent
+            | ControlId::Motion
+            | ControlId::Sound
+            | ControlId::WindowWidth
+            | ControlId::WindowHeight => format!("{}-control", self.key()),
+            _ => self.key().to_owned(),
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             ControlId::Theme => "Theme",
@@ -453,6 +476,46 @@ impl SettingsWindow {
 
     fn focused_control(&self, window: &Window) -> Option<ControlId> {
         ControlId::ALL.iter().copied().find(|id| self.is_focused(*id, window))
+    }
+
+    /// The fuzzer's selectors for this window: every control, plus an open
+    /// drop-down's list.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn debug_selectors(&self) -> Vec<String> {
+        let mut out: Vec<String> = ControlId::ALL.iter().map(|id| id.selector()).collect();
+        if let Some(menu) = self.menu {
+            out.push(format!("{}-menu", menu.key()));
+        }
+        out
+    }
+
+    /// Whether a stepper's text field has focus, so the fuzzer types instead of
+    /// pressing keys that the field would swallow.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn text_focused(&self, window: &Window) -> bool {
+        matches!(
+            self.focused_control(window),
+            Some(ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight)
+        )
+    }
+
+    /// Whether a drop-down is open, so Escape closes it instead of the window.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn menu_open(&self) -> bool {
+        self.menu.is_some()
+    }
+
+    /// The fuzzer's invariants for this window: focus stays on a control, and
+    /// every painted interactive element has a role and a label. The runner
+    /// compares the shown values to `settings.toml` after a settle.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn check_invariants(&self, window: &Window) -> Vec<crate::fuzz::Violation> {
+        let mut out = Vec::new();
+        if self.focused_control(window).is_none() {
+            out.push(crate::fuzz::Violation::new("settings focus", "focus is not on a control"));
+        }
+        out.extend(crate::fuzz::a11y_violations(window, "settings a11y"));
+        out
     }
 
     fn meta(&self, id: ControlId, cx: &App) -> ControlMeta {
@@ -1291,6 +1354,7 @@ fn section_heading(title: &'static str, theme: &Theme) -> gpui::Stateful<gpui::D
         .pt(px(16.))
         .pb(px(2.))
         .role(Role::Heading)
+        .aria_label(title)
         .aria_level(2)
         .text_size(px(15.))
         .font_weight(FontWeight::SEMIBOLD)

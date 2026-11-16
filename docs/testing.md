@@ -81,6 +81,7 @@ config and state live in a temp folder, and the sidebar lists only the tree.
 
 ```bash
 cargo test -p crow-app fuzz_smoke                 # 3 seeds x 30 steps on a 40-file tree, in the normal suite
+cargo test -p crow-app fuzz_settings_smoke        # 2 seeds x 30 steps on the Settings window
 cargo test -p crow-app fuzz_smoke_edge_trees -- --nocapture  # every small edge kind
 CROW_FUZZ_MINUTES=2 cargo test -p crow-app fuzz_long -- --ignored --nocapture
 CROW_FUZZ_SEED=42 CROW_FUZZ_STEPS=5000 cargo test -p crow-app fuzz_long -- --ignored --nocapture
@@ -144,8 +145,10 @@ A right-click step carries the menu item it picks (`RightClick(selector, Some(sl
 `None` dismisses the menu): the native menu never opens, the recorder answers with
 that slot and the item runs as if clicked.
 
-What the fuzzer does not drive: the Settings window (H7 adds it; its own tests cover
-it until then) and the accessibility tree (GPUI's test platform disables it). The second window is opened
+What the fuzzer does not drive: the accessibility tree (GPUI's test platform disables
+it; the invariants check every painted click/focus element's role and label through
+the debug registry instead). `fuzz_settings_smoke` drives the Settings window as a
+second surface with its own keymap and control selectors. The second browser window is opened
 and checked by the invariants but only the first is driven. `cmd-m` is excluded
 because the test platform has no minimize implementation.
 

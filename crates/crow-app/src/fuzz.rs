@@ -110,6 +110,21 @@ impl StepGen {
         }
     }
 
+    /// Steps for the Settings window: keys, typing, clicks and settles only.
+    /// It has no rows to right-click, folders to churn or size to resize.
+    pub fn next_settings(&mut self, state: &GenState) -> Step {
+        let roll = self.rng.random_range(0..100);
+        match roll {
+            0..=49 => self.keys(state),
+            50..=64 if state.text_focused => self.type_text(),
+            50..=64 => self.keys(state),
+            65..=84 if !state.selectors.is_empty() => self.click(state, false),
+            65..=84 => self.keys(state),
+            85..=94 => Step::Settle,
+            _ => Step::AdvanceClock(self.rng.random_range(50..=2000)),
+        }
+    }
+
     fn keys(&mut self, state: &GenState) -> Step {
         let active = self.rng.random_bool(0.8);
         let source = if active && !state.active_keys.is_empty() {
@@ -325,15 +340,17 @@ fn allowed(key: &str, tabs: usize, windows: usize) -> bool {
     }
 }
 
-/// The generator's view of `view`: live bindings, focus, selectors and caps.
-/// The fuzz runner has a real `Window`; the test runner wraps this in its context.
+/// Live bindings and caps for the window in front of the generator.
 #[cfg(any(test, feature = "fuzz"))]
-pub fn state_for(view: &crate::window::CrowWindow, window: &gpui::Window, cx: &gpui::App) -> GenState {
+fn base_state(
+    window: &gpui::Window,
+    cx: &gpui::App,
+    selectors: Vec<String>,
+    text_focused: bool,
+    tabs: usize,
+) -> GenState {
     let stack = window.context_stack();
     let os = cx.platform_info().os;
-    let text_focused = view.text_focused(window, cx);
-    let selectors = view.debug_selectors(cx);
-    let tabs = view.tab_count();
     let vim = cx.global::<crate::ui::Ui>().settings.keymap == crow_core::KeymapLayer::Vim;
     let windows = cx.windows().len();
     let keymap = cx.key_bindings();
@@ -354,6 +371,70 @@ pub fn state_for(view: &crate::window::CrowWindow, window: &gpui::Window, cx: &g
     let mut state = GenState { active_keys: active, all_keys: all, text_focused, selectors, tabs, windows, vim };
     state.add_plain_keys();
     state
+}
+
+/// The generator's view of `view`: live bindings, focus, selectors and caps.
+/// The fuzz runner has a real `Window`; the test runner wraps this in its context.
+#[cfg(any(test, feature = "fuzz"))]
+pub fn state_for(view: &crate::window::CrowWindow, window: &gpui::Window, cx: &gpui::App) -> GenState {
+    base_state(window, cx, view.debug_selectors(cx), view.text_focused(window, cx), view.tab_count())
+}
+
+/// The Settings window as a fuzz surface: its controls' selectors, the keys its
+/// own keymap resolves, and no window-closing keys. `cmd-w` would end the
+/// surface, and Escape closes the window unless a drop-down is open.
+///
+/// Test-only: it clips selectors with `Window::debug_bounds`, which needs GPUI's
+/// `test-support`; the live fuzzer builds without it.
+#[cfg(test)]
+pub fn settings_state_for(
+    view: &crate::settings_window::SettingsWindow,
+    window: &gpui::Window,
+    cx: &gpui::App,
+) -> GenState {
+    let height = window.viewport_size().height;
+    let selectors = view
+        .debug_selectors()
+        .into_iter()
+        .filter(|selector| {
+            window.debug_bounds(selector).is_some_and(|bounds| bounds.top() < height && bounds.bottom() > gpui::px(0.))
+        })
+        .collect();
+    let mut state = base_state(window, cx, selectors, view.text_focused(window), 2);
+    state.active_keys.retain(|key| key != "cmd-w");
+    state.all_keys.retain(|key| key != "cmd-w");
+    if !view.menu_open() {
+        state.active_keys.retain(|key| key != "escape");
+        state.all_keys.retain(|key| key != "escape");
+    }
+    state
+}
+
+/// Every painted element with a click listener or focus handle must expose a
+/// role and a non-empty label. Empty in the live fuzzer, which builds without
+/// GPUI's `test-support` and so doesn't record the list.
+#[cfg(any(test, feature = "fuzz"))]
+pub fn a11y_violations(window: &gpui::Window, check: &'static str) -> Vec<Violation> {
+    #[cfg(test)]
+    {
+        let Some(elements) = window.debug_interactive_elements() else { return Vec::new() };
+        let mut out = Vec::new();
+        for element in elements {
+            let name = element.selector.as_deref().unwrap_or("an element");
+            if element.role.is_none() {
+                out.push(Violation::new(check, format!("{name} is interactive but has no role")));
+            }
+            if element.label.as_ref().is_none_or(|label| label.trim().is_empty()) {
+                out.push(Violation::new(check, format!("{name} is interactive but has no aria label")));
+            }
+        }
+        out
+    }
+    #[cfg(not(test))]
+    {
+        let _ = (window, check);
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
