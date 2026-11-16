@@ -1,5 +1,5 @@
 # housekeeping-3 progress
-Branch: `housekeeping-3` · PR: none · Last updated: 2026-11-16 · State: In critique
+Branch: `housekeeping-3` · PR: #36 · Last updated: 2026-11-16 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -32,9 +32,10 @@ None; the user approved the three behaviors on 2026-11-16.
 - 2026-11-16: plan and deferred backlog recorded; branch created from `main`.
 - 2026-11-16: implemented all three items; added the search and Escape tests and extended the filter and copy-path tests.
 - 2026-11-16: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (578 passed, 1 ignored) · `./scripts/bundle.sh` ✓. Hand checks still open.
+- 2026-11-16: critique: fixed Escape with a pending Vim mark; checks re-run (579 passed, 1 ignored); PR #36 opened.
 
 ## Next
-Hand-check the six items above in `target/bundle/Crow.app`, then run the `critique` skill and open the PR.
+Hand-check the six items above in the PR build (`target/bundle/Crow.app`); the user merges after CI is green.
 
 ## Critique
 Critic session: 2026-11-16 · Base: main @ 91a2e42 · Head reviewed: 913e01e
