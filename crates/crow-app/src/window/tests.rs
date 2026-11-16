@@ -7587,6 +7587,12 @@ fn apply_and_check(
     }
     let result: Result<(), crate::fuzz::Violation> = (|| {
         apply_step(view, step, tree, cx)?;
+        // The step ran with churn active; `keep_in_tree` may navigate back and
+        // settle, and churn would keep the folder busy until the 6 s bound
+        // (seed 1794851559033176001, churn on). Quiet the disk for the check.
+        if !deep && let Some(churn) = churn {
+            churn.pause();
+        }
         keep_in_tree(view, tree, cx);
         cx.run_until_parked();
         if let Some(violation) = check_all_windows(cx, deep, Some(tree)).into_iter().next() {
@@ -7597,7 +7603,7 @@ fn apply_and_check(
         }
         Ok(())
     })();
-    if deep && let Some(churn) = churn {
+    if let Some(churn) = churn {
         churn.resume();
     }
     // The recorder is a test observation buffer; a run does not read it, so
