@@ -468,16 +468,23 @@ fn a_second_window_keeps_the_focus_invariant(cx: &mut TestAppContext) {
 }
 
 /// H4 #20: the live run checks every browser window, and a window that is not
-/// key has no focused element by design (the Settings window or a second
-/// browser window is key). The test fuzzer still requires focus.
-#[test]
-fn inactive_windows_may_have_no_focus() {
-    assert!(super::missing_focus_violation(false).is_none(), "an inactive window may have no focus");
-    assert_eq!(
-        super::missing_focus_violation(true).map(|violation| violation.check),
-        Some("focus"),
-        "the test fuzzer still requires focus"
-    );
+/// key may have no focused element (the Settings window or a second browser
+/// window is key). The test fuzzer still requires focus.
+#[gpui::test]
+fn inactive_windows_may_have_no_focus(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-inactive-focus-blur");
+    let (view, mut cx) = open(cx, &root);
+    let (inactive, required) = cx.update(|window, cx| {
+        window.blur(cx);
+        assert!(window.focused(cx).is_none(), "the window has no focus");
+        let view = view.read(cx);
+        (
+            view.check_invariants_with_focus(window, cx, false, None, false),
+            view.check_invariants_with_focus(window, cx, false, None, true),
+        )
+    });
+    assert!(!inactive.iter().any(|violation| violation.check == "focus"), "{inactive:?}");
+    assert!(required.iter().any(|violation| violation.check == "focus"), "{required:?}");
 }
 
 #[gpui::test]

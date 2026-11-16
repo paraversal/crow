@@ -419,7 +419,7 @@ impl SettingsWindow {
         });
 
         let mut fonts = vec!["System".to_owned()];
-        if !settings.font_family.is_empty() {
+        if !settings.font_family.is_empty() && !fonts.iter().any(|name| name == &settings.font_family) {
             fonts.push(settings.font_family.clone());
         }
         let font_cursor = font_index(&fonts, &settings.font_family);
@@ -1578,7 +1578,15 @@ mod tests {
     }
 
     fn open_settings(cx: &mut TestAppContext) -> (Entity<SettingsWindow>, VisualTestContext) {
+        open_settings_after(cx, |_| {})
+    }
+
+    fn open_settings_after(
+        cx: &mut TestAppContext,
+        before: impl FnOnce(&mut TestAppContext),
+    ) -> (Entity<SettingsWindow>, VisualTestContext) {
         setup(cx);
+        before(cx);
         let window: WindowHandle<SettingsWindow> = cx.update(|cx| {
             let bounds = Bounds::centered(None, size(px(560.), px(760.)), cx);
             let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
@@ -1819,6 +1827,17 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(preview(&vcx), None, "closing the window drops the preview");
         assert_eq!(saved_theme(&vcx), "system");
+    }
+
+    /// H4 #20 critique: the initial list is ["System"] plus the saved family; a
+    /// hand-edited `font_family = "System"` must not list System twice.
+    #[gpui::test]
+    fn a_system_font_family_is_listed_once(cx: &mut TestAppContext) {
+        let (view, vcx) = open_settings_after(cx, |cx| {
+            cx.update(|cx| cx.global_mut::<Ui>().settings.font_family = "System".into());
+        });
+        let fonts = view.read_with(&vcx, |view, _| view.fonts.clone());
+        assert_eq!(fonts.iter().filter(|name| *name == "System").count(), 1, "{fonts:?}");
     }
 
     #[gpui::test]
