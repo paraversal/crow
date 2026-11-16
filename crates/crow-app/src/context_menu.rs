@@ -44,6 +44,7 @@ const FOLDER: &[Slot] = &[
     None,
     Some(CommandId::Paste),
     None,
+    Some(CommandId::CopyPath),
     Some(CommandId::ShowInFinder),
 ];
 

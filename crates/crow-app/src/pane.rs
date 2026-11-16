@@ -736,6 +736,17 @@ impl Pane {
         self.focused_folder().read(cx).selected_paths()
     }
 
+    /// Clear the focused folder's selection. Returns whether anything was selected.
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let had_selection = self.focused_folder().read(cx).selected_count() > 0;
+        if had_selection {
+            self.with_focused(cx, |folder, cx| folder.clear_selection(cx));
+            self.load_preview(cx);
+            cx.notify();
+        }
+        had_selection
+    }
+
     /// The current folder's subfolders, for the command palette's go-to list.
     pub fn subfolders(&self, cx: &gpui::App) -> Vec<PathBuf> {
         self.focused_folder()

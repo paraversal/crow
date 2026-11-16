@@ -36,6 +36,7 @@ actions!(
         SelectWordRight,
         DeleteWordLeft,
         DeleteWordRight,
+        DeleteToStart,
         SelectAll,
         Home,
         End,
@@ -75,6 +76,7 @@ pub fn keymap() -> Vec<KeyBinding> {
         KeyBinding::new("alt-shift-right", SelectWordRight, c),
         KeyBinding::new("alt-backspace", DeleteWordLeft, c),
         KeyBinding::new("alt-delete", DeleteWordRight, c),
+        KeyBinding::new("cmd-backspace", DeleteToStart, c),
         KeyBinding::new("cmd-a", SelectAll, c),
         KeyBinding::new("home", Home, c),
         KeyBinding::new("cmd-left", Home, c),
@@ -398,6 +400,18 @@ impl TextInput {
                 return;
             }
             self.select_to(end, window, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    /// ⌘⌫: delete back to the start of the line (or the selection).
+    fn delete_to_start(&mut self, _: &DeleteToStart, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            if self.cursor_offset() == 0 {
+                self.refuse(cx);
+                return;
+            }
+            self.select_to(0, window, cx);
         }
         self.replace_text_in_range(None, "", window, cx)
     }
@@ -1116,6 +1130,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::delete_word_left))
             .on_action(cx.listener(Self::delete_word_right))
+            .on_action(cx.listener(Self::delete_to_start))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
