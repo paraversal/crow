@@ -1683,6 +1683,34 @@ fn copy_records_the_pasteboard_write(cx: &mut TestAppContext) {
     assert!(calls.contains(&Call::WriteFileUrls(vec![root.join("notes.txt")])), "{calls:?}");
 }
 
+/// H4 batch 6 critique: above 1000 paths the system pasteboard write blocks the
+/// main thread for seconds and 100k items wedge the pasteboard server. Crow's
+/// own clipboard still holds every path, and the status says it is Crow only.
+#[gpui::test]
+fn a_huge_copy_keeps_the_clipboard_in_crow(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("copy-cap");
+    for i in 0..1001 {
+        std::fs::write(root.join(format!("file-{i:04}.txt")), "").expect("create fixture");
+    }
+    let (_view, mut cx) = open(cx, &root);
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("cmd-a cmd-c");
+    let calls = effect_calls(&mut cx);
+    assert!(
+        !calls.iter().any(|call| matches!(call, Call::WriteFileUrls(..))),
+        "the system pasteboard is skipped: {calls:?}"
+    );
+    let clipboard = cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|clip| clip.paths.len()));
+    // The fixture's alpha, beta and notes.txt plus the 1001 files above.
+    assert_eq!(clipboard, Some(1004), "Crow's clipboard holds every path");
+    let (paths, cut) = cx.read(crate::operations::pasteboard_paths);
+    assert_eq!(paths.len(), 1004, "a paste uses Crow's clipboard");
+    assert!(!cut, "a copy does not move");
+    let message = cx.read(|cx| cx.global::<Operations>().message.clone());
+    assert_eq!(message.map(|(text, _)| text.to_string()).as_deref(), Some("Copied 1004 items (Crow only)"));
+}
+
 #[gpui::test]
 fn trash_records_its_sound(cx: &mut TestAppContext) {
     use crate::effects::Call;
@@ -8478,6 +8506,15 @@ fn selection_totals_follow_every_selection_change(cx: &mut TestAppContext) {
     cx.update(|cx| folder.update(cx, |folder, cx| folder.select_all(cx)));
     apply(cx, entries[1..3].to_vec(), None);
     assert_eq!(totals(cx), (20, 1), "a full apply sums what the selection kept");
+
+    // A watcher batch that changes a selected file's size updates the totals.
+    apply(cx, entries.clone(), None);
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_only(0, cx)));
+    let mut bigger = entries.clone();
+    bigger[0].size = 99;
+    let changed = vec![(root.join("a.txt"), Some(bigger[0].clone()))];
+    apply(cx, bigger, Some(&changed));
+    assert_eq!(totals(cx), (99, 0), "a changed file size updates the totals");
 }
 
 /// H4 batch 6: a watcher batch that removes the selected row drops it from the

@@ -440,8 +440,8 @@ impl Pane {
         self.folders.iter().any(|f| f.read(cx).is_loading_deep(cx))
     }
 
-    /// Like `is_loading`, but also waits for a background row build: tests that
-    /// read rows after an apply need this.
+    /// Like `is_loading`, but also waits for a background row build: a test or
+    /// the fuzzer that reads rows after an apply needs this.
     #[cfg(any(test, feature = "fuzz"))]
     pub fn is_settling(&self, cx: &gpui::App) -> bool {
         self.folders.iter().any(|f| {

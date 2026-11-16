@@ -2208,15 +2208,28 @@ impl CrowWindow {
     }
 
     fn copy_paths(&mut self, paths: Arc<[PathBuf]>, cut: bool, cx: &mut Context<Self>) {
-        let change_count = crate::effects::effects(cx).write_file_urls(&paths);
+        /// Above this many paths the system pasteboard write blocks the main
+        /// thread for seconds and 100k items wedge the pasteboard server; Crow's
+        /// own clipboard still pastes them.
+        const PASTEBOARD_MAX: usize = 1000;
         let n = paths.len();
+        let effects = crate::effects::effects(cx);
+        let (change_count, crow_only) = if n <= PASTEBOARD_MAX {
+            (effects.write_file_urls(&paths), false)
+        } else {
+            // Remember the count without writing: a paste uses our paths until
+            // another app copies (its count differs, so the pasteboard is read).
+            (effects.pasteboard_change_count(), true)
+        };
         cx.global_mut::<Operations>().clipboard = Some(Clipboard { paths, cut, change_count });
         let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
-        operations::message(
-            if cut { format!("Cut {what}: paste to move") } else { format!("Copied {what}") },
-            false,
-            cx,
-        );
+        let message = match (cut, crow_only) {
+            (false, false) => format!("Copied {what}"),
+            (false, true) => format!("Copied {what} (Crow only)"),
+            (true, false) => format!("Cut {what}: paste to move"),
+            (true, true) => format!("Cut {what}: paste to move (Crow only)"),
+        };
+        operations::message(message, false, cx);
         cx.notify();
     }
 
@@ -3487,9 +3500,10 @@ impl CrowWindow {
         self.pane().read(cx).debug_selector_bounds(selector, cx)
     }
 
-    /// Whether any tab is loading or an operation is running; `fuzz::settle` waits on this.
+    /// Whether any tab is still settling (loading, building rows, reconciling) or
+    /// an operation is running; `fuzz::settle` waits on this.
     pub fn is_busy(&self, cx: &App) -> bool {
-        self.tabs.iter().any(|(_, pane)| pane.read(cx).is_loading(cx))
+        self.tabs.iter().any(|(_, pane)| pane.read(cx).is_settling(cx))
             || cx.global::<crate::operations::Operations>().running.is_some()
     }
 

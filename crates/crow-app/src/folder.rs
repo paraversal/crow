@@ -562,6 +562,12 @@ impl Folder {
         totals.1 += folders;
     }
 
+    fn subtract_totals(totals: &mut (u64, usize), entry: &Entry) {
+        let (bytes, folders) = Self::entry_totals(entry);
+        totals.0 = totals.0.saturating_sub(bytes);
+        totals.1 = totals.1.saturating_sub(folders);
+    }
+
     /// Whatever changed, the drag snapshot is stale.
     fn selection_changed(&mut self) {
         self.selection_generation += 1;
@@ -1112,9 +1118,7 @@ impl Folder {
                     // The usual batch: find each path and stop at the first hit.
                     for path in &removed {
                         if let Some(entry) = self.entries.iter().find(|entry| &entry.path == *path) {
-                            let (bytes, folders) = Self::entry_totals(entry);
-                            self.selection_totals.0 = self.selection_totals.0.saturating_sub(bytes);
-                            self.selection_totals.1 = self.selection_totals.1.saturating_sub(folders);
+                            Self::subtract_totals(&mut self.selection_totals, entry);
                         }
                     }
                 } else {
@@ -1122,9 +1126,7 @@ impl Folder {
                     let gone: HashSet<&PathBuf> = removed.iter().copied().collect();
                     for entry in self.entries.iter() {
                         if gone.contains(&entry.path) {
-                            let (bytes, folders) = Self::entry_totals(entry);
-                            self.selection_totals.0 = self.selection_totals.0.saturating_sub(bytes);
-                            self.selection_totals.1 = self.selection_totals.1.saturating_sub(folders);
+                            Self::subtract_totals(&mut self.selection_totals, entry);
                         }
                     }
                 }
@@ -1136,6 +1138,34 @@ impl Folder {
                 // new rows land: until then the old row would draw as the cursor
                 // while the selection no longer holds it (the fuzzer's cursor check).
                 self.settle_cursor(cx);
+            }
+            // A changed entry's size feeds the bottom bar's total too: adjust only
+            // the batch's selected paths, not the whole 100k listing.
+            let changed: Vec<(&PathBuf, &Entry)> = stats
+                .iter()
+                .filter(|(path, entry)| entry.is_some() && self.selection.contains(path))
+                .filter_map(|(path, entry)| entry.as_ref().map(|entry| (path, entry)))
+                .collect();
+            if !changed.is_empty() {
+                if changed.len() <= 16 {
+                    for &(path, new) in &changed {
+                        if let Some(old) = self.entries.iter().find(|entry| &entry.path == path) {
+                            Self::subtract_totals(&mut self.selection_totals, old);
+                        }
+                        Self::add_totals(&mut self.selection_totals, new);
+                    }
+                } else {
+                    // A bulk change: one pass over the old listing, not one per path.
+                    let changed_paths: HashSet<&Path> = changed.iter().map(|(path, _)| path.as_path()).collect();
+                    for entry in self.entries.iter() {
+                        if changed_paths.contains(entry.path.as_path()) {
+                            Self::subtract_totals(&mut self.selection_totals, entry);
+                        }
+                    }
+                    for &(_, new) in &changed {
+                        Self::add_totals(&mut self.selection_totals, new);
+                    }
+                }
             }
         }
         self.replace_entries_arc(entries, cx);
