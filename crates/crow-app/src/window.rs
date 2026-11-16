@@ -2333,6 +2333,11 @@ impl CrowWindow {
         if self.palette.is_none() {
             return;
         }
+        // A 100k-file clipboard is ~10 MB; scoring the folder or shaping its
+        // missing-path label with that blocked the main thread for 30 s
+        // (findings #25). The field keeps the text; the listing uses its head.
+        let query: String = query.chars().take(palette::MAX_QUERY_CHARS).collect();
+        let query = query.as_str();
         let cwd = self.pane().read(cx).current_dir(cx);
         let home = cx.global::<Ui>().home.clone();
         let show_hidden = self.show_hidden;

@@ -924,6 +924,11 @@ pub fn path_query(query: &str, cwd: &Path, home: &Path) -> Option<(PathBuf, Stri
 /// Files shown under a typed path: those whose name starts with the partial.
 const FILE_LIMIT: usize = 5;
 
+/// The palette scores and shows at most this many query characters. A 100k-file
+/// clipboard is ~10 MB; scoring the folder or shaping a missing-path label with
+/// it blocked the main thread for 30 s (findings #25). No path or query is close.
+pub const MAX_QUERY_CHARS: usize = 1024;
+
 /// A file or folder under a typed path, with its name and lowercased name
 /// computed once off the main thread. Filtering 78k files per keystroke used to
 /// lowercase every name (55 ms on the 100k fixture); the palette now reuses these.

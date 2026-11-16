@@ -50,6 +50,11 @@ actions!(
     ]
 );
 
+/// A pasted clipboard can be a 100k-file copy (~10 MB of file URLs). Reshaping
+/// the whole field with it blocked the main thread for seconds (findings #25);
+/// no path, name or query is anywhere near this long.
+const MAX_PASTE_CHARS: usize = 64 * 1024;
+
 pub enum TextInputEvent {
     /// The text changed (typing, deleting, pasting, or `set_text`).
     Changed,
@@ -484,6 +489,9 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = crate::effects::read_text(cx) {
+            // Cap before the newline pass and the reshape: a 100k-file copy is
+            // ~10 MB, and one paste used to block the main thread (findings #25).
+            let text: String = text.chars().take(MAX_PASTE_CHARS).collect();
             self.edit(self.selected_range.clone(), &text.replace("\n", " "), EditKind::Other, window, cx);
         }
     }

@@ -5801,6 +5801,38 @@ fn duplicate_and_paste_into_another_folder(cx: &mut TestAppContext) {
     assert!(root.join("notes copy.txt").exists(), "copy leaves the original");
 }
 
+/// H4 #25: a 100k-file copy is ~10 MB of file URLs. Pasting it into the palette
+/// used to reshape the whole field and score the folder with the whole query.
+#[gpui::test]
+fn a_huge_paste_into_the_palette_stays_quick(cx: &mut TestAppContext) {
+    let root = fixture("huge-paste");
+    let (_view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-shift-g");
+    let text = "a".repeat(10_000_000);
+    cx.update(|_, cx| crate::effects::write_text(text, cx));
+    let started = Instant::now();
+    cx.simulate_keystrokes("cmd-v");
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_millis(250), "a 10 MB paste took {elapsed:?}");
+}
+
+/// H4 #25: a huge path query must not shape a multi-MB missing-path label.
+#[gpui::test]
+fn a_huge_path_query_stays_quick(cx: &mut TestAppContext) {
+    let root = fixture("huge-path");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-shift-g");
+    let huge = format!("/nope-{}/x", "a".repeat(10_000_000));
+    let started = Instant::now();
+    view.update(&mut cx, |view, cx| view.refresh_palette(&huge, cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_millis(500), "a 10 MB path query took {elapsed:?}");
+}
+
 #[gpui::test]
 fn conflicts_ask_first_and_keep_both_by_default(cx: &mut TestAppContext) {
     let root = fixture("conflict");
