@@ -30,6 +30,8 @@ mod fuzz;
 #[cfg(feature = "fuzz")]
 mod fuzz_live;
 mod icons;
+#[cfg(test)]
+mod io_guard;
 mod keys;
 mod logging;
 mod menus;
@@ -59,6 +61,7 @@ use gpui::{App, AppContext};
 /// A nested tree for search benches: 32 groups x 16 subfolders, each file a few
 /// lines with `needle` so both name and content searches do real work.
 fn make_search_fixture(dir: &std::path::Path, count: usize) -> std::io::Result<()> {
+    // io-ok: CLI fixture, before any window opens
     std::fs::create_dir_all(dir)?;
     let (groups, subs) = (32usize, 16usize);
     let per_folder = count.div_ceil(groups * subs);
@@ -66,12 +69,14 @@ fn make_search_fixture(dir: &std::path::Path, count: usize) -> std::io::Result<(
     for group in 0..groups {
         for sub in 0..subs {
             let folder = dir.join(format!("group{group:02}")).join(format!("sub{sub:02}"));
+            // io-ok: CLI fixture, before any window opens
             std::fs::create_dir_all(&folder)?;
             for i in 0..per_folder {
                 if made >= count {
                     break;
                 }
                 let name = format!("file-{group:02}-{sub:02}-{i:05}.txt");
+                // io-ok: CLI fixture, before any window opens
                 std::fs::write(folder.join(name), format!("alpha beta gamma\nneedle in {group}/{sub}/{i}\n"))?;
                 made += 1;
             }
@@ -84,6 +89,7 @@ fn bench_search(dir: &std::path::Path, text: &str) -> Result<(), String> {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
+    // io-ok: CLI bench, before any window opens
     let root = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
     let rules = crow_search::RuleSet::from_config(&crow_core::Exclude::default(), &crow_core::home())?;
     let query = crow_search::Query {
@@ -139,7 +145,7 @@ fn open_paths(urls: Vec<String>, cx: &mut App) {
         paths
             .into_iter()
             .filter_map(|path| {
-                let is_dir = std::fs::metadata(&path).ok()?.is_dir();
+                let is_dir = std::fs::metadata(&path).ok()?.is_dir(); // io-ok: inside background_spawn
                 Some((path, is_dir))
             })
             .collect::<Vec<_>>()
@@ -248,6 +254,7 @@ fn main() -> ExitCode {
         .map(|(_, arg)| PathBuf::from(arg))
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/"));
+    // io-ok: startup: resolve the folder to open before the window exists
     let start = match start.canonicalize() {
         Ok(dir) => dir,
         Err(e) => {

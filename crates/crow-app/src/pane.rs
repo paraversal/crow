@@ -3128,6 +3128,7 @@ impl Pane {
         use crate::fuzz::Violation;
         let mut out = Vec::new();
         for (k, (dir, mut listed, hidden)) in self.listing_snapshot(cx, root).into_iter().enumerate() {
+            // io-ok: fuzz invariant, test/fuzz builds only (docs/testing.md calls this main-thread work deliberate)
             let Ok(read) = std::fs::read_dir(&dir) else { continue };
             let mut disk: Vec<String> = read
                 .filter_map(|entry| entry.ok())

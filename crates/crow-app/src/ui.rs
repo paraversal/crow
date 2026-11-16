@@ -224,6 +224,7 @@ pub fn init(cx: &mut App) {
 /// stay in the run's temp folders, so it cannot read the user's sidebar or write Recent.
 pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: PathBuf) {
     // The config dir is watched, so it has to exist before the first file is written.
+    // io-ok: startup: the config dir must exist before it is watched
     std::fs::create_dir_all(&config_dir).ok();
     let mut ui = Ui::new(config_dir.clone(), state_dir, home, crow_theme::fallback(), true);
     let theme = crow_theme::current(ui.settings.theme_id(), variant_of(cx.window_appearance()));
@@ -306,6 +307,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
+    // io-ok: test-only state reset
     std::fs::remove_dir_all(&root).ok();
     crate::effects::install(cx, std::sync::Arc::new(crate::effects::RecordingEffects::new()));
     let ui = Ui::new(root.join("config"), root.join("state"), crow_core::home(), crow_theme::fallback(), false);
@@ -716,17 +718,18 @@ pub fn refresh_recent(cx: &mut App) {
             tracing::warn!("{}: {e}", file.display());
         }
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        // io-ok: inside background_spawn
         let list = recent.top(count, now, &zoxide, |p| p != Path::new("/") && p.is_dir());
         // A sidebar row can only be a symlink (Finder aliases are files, not folders).
         let aliases: HashSet<PathBuf> = alias_candidates
             .iter()
             .chain(list.iter())
-            .filter(|path| path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()))
+            .filter(|path| path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())) // io-ok: inside background_spawn
             .cloned()
             .collect();
         // Sidebar Recent leaves out favorites and repeats, also when reached through a
         // symlink (`~/code/crow` when `~/src/crow` is a favorite and `~/code` links to `~/src`).
-        let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf()); // io-ok: inside background_spawn
         let mut seen: HashSet<PathBuf> = alias_candidates.iter().map(|path| real(path)).collect();
         let sidebar: Vec<PathBuf> =
             list.iter().filter(|path| seen.insert(real(path))).take(sidebar_count).cloned().collect();

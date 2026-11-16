@@ -2377,7 +2377,7 @@ impl CrowWindow {
         let task = cx.background_spawn(async move {
             let cleaned = crow_core::clean_pasted_path(&typed).unwrap_or_else(|| typed.clone());
             let target = crow_core::resolve_typed(&cleaned, &cwd, &home);
-            target.exists().then(|| (target.is_dir(), target, typed))
+            target.exists().then(|| (target.is_dir(), target, typed)) // io-ok: inside background_spawn
         });
         cx.spawn_in(window, async move |this, cx| {
             let found = task.await;

@@ -436,6 +436,7 @@ impl Trash for FolderTrash {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let name = path.file_name().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         let dest = self.0.join(format!("{}-{}", N.fetch_add(1, Ordering::Relaxed), name.to_string_lossy()));
+        // io-ok: test/fuzz Trash, not the app's main thread
         std::fs::rename(path, &dest)?;
         Ok(dest)
     }

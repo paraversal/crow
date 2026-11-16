@@ -22,6 +22,7 @@ pub fn init_fuzz(trace: crate::fuzz_live::TraceLayer, dir: &std::path::Path) -> 
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,crow=debug,crow_macos=debug"));
     let stderr = fmt::layer().with_writer(std::io::stderr).with_target(false);
+    // io-ok: startup: the log folder must exist before the subscriber starts
     match std::fs::create_dir_all(dir) {
         Ok(()) => {
             let (file, guard) = tracing_appender::non_blocking(tracing_appender::rolling::never(dir, "crow.log"));
@@ -40,6 +41,7 @@ pub fn init_fuzz(trace: crate::fuzz_live::TraceLayer, dir: &std::path::Path) -> 
 fn init_with(default: &str) -> Option<WorkerGuard> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
     let stderr = fmt::layer().with_writer(std::io::stderr).with_target(false);
+    // io-ok: startup: the log folder must exist before the subscriber starts
     match std::fs::create_dir_all(log_dir()) {
         Ok(()) => {
             let (file, guard) = tracing_appender::non_blocking(tracing_appender::rolling::never(log_dir(), "crow.log"));
