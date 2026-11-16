@@ -1,5 +1,5 @@
 # M7 H5 — No disk I/O on the main thread progress
-Branch: `m7-h5-main-thread-io` · PR: none · Job: m7-h5-main-thread-io-cc79 · Last updated: 2026-11-16 · State: In critique
+Branch: `m7-h5-main-thread-io` · PR: #39 · Job: m7-h5-main-thread-io-cc79 · Last updated: 2026-11-16 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -44,7 +44,7 @@ Branch: `m7-h5-main-thread-io` · PR: none · Job: m7-h5-main-thread-io-cc79 · 
 - 2026-11-16 Critique: re-ran fmt/clippy/tests; probed the guard with an unmarked `p.is_dir()` (failed as expected); used the branch bundle on `/tmp/crow-h5-check` (rename `a.b`, Add to Sidebar). Found C1 (pre-existing concurrent `sidebar.toml` writes); Q1 answered fix-now. Added `SidebarEdit::AddMany`, used it in `add_to_sidebar` and `add_folders`, added the core test and the `sidebar.toml` assertion; the app now writes all three folders. C2 docs wording fixed.
 
 ## Next
-Critique: review the five code commits and the docs change, then open the PR ("M7 H5: no disk I/O on the main thread"). Do not merge.
+PR open: https://github.com/paraversal/file-crow/pull/39. The user hand-tests and squash-merges after CI; do not merge. Next piece in the M7 order: H7 (accessibility, needs H1), then H6 (editable path bar), then H8 (leftovers).
 
 ## Critique
 Job: review-m7-h5-e5d4 · Critic session: 2026-11-16 · Base: `main` @ 9282594 · Head reviewed: fe575d8
