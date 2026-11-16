@@ -27,6 +27,9 @@ use crate::style::kind;
 const PARTIAL_EVERY: Duration = Duration::from_millis(50);
 /// More changes than this at once: relisting is cheaper than diffing.
 const MAX_DIFF: usize = 500;
+/// Wait this long for the watcher stream to go quiet, then re-stat the paths
+/// recent batches added (FSEvents can coalesce away a follow-up delete).
+const RECONCILE_DELAY: Duration = Duration::from_millis(300);
 
 pub enum FolderEvent {
     /// The cursor moved to another item (or to none).
@@ -236,6 +239,13 @@ pub struct Folder {
     sort_delay: Duration,
     _watcher: Option<FolderWatcher>,
     error: Option<SharedString>,
+    /// Paths a watcher batch added; re-stat them once the stream is quiet,
+    /// because FSEvents may coalesce away the delete that follows a rename.
+    reconcile: Vec<PathBuf>,
+    /// Bumped per batch, so only the last batch's quiet timer reconciles.
+    reconcile_gen: u64,
+    /// True while a reconcile timer or stat is in flight (Settle waits for it).
+    reconciling: bool,
     _poll: Task<()>,
 }
 
@@ -297,6 +307,9 @@ impl Folder {
             sort_delay: Duration::ZERO,
             _watcher: watcher,
             error: None,
+            reconcile: Vec::new(),
+            reconcile_gen: 0,
+            reconciling: false,
             _poll: poll,
         };
         folder.load(cx);
@@ -317,9 +330,12 @@ impl Folder {
         self.loading
     }
 
-    /// True while this folder or any folder open inside it is still listing.
+    /// True while this folder or any folder open inside it is still listing,
+    /// or a watcher batch is waiting to reconcile its additions.
     pub fn is_loading_deep(&self, cx: &gpui::App) -> bool {
-        self.is_loading() || self.children.values().any(|child| child.folder.read(cx).is_loading_deep(cx))
+        self.is_loading()
+            || self.reconciling
+            || self.children.values().any(|child| child.folder.read(cx).is_loading_deep(cx))
     }
 
     pub fn error(&self) -> Option<&SharedString> {
@@ -818,7 +834,7 @@ impl Folder {
                     return;
                 }
                 if Arc::ptr_eq(&this.entries, &entries) {
-                    this.replace_entries(sorted, cx);
+                    this.replace_entries_after(sorted, Some(&[]), cx);
                 } else if attempt < 2 {
                     this.resort(attempt + 1, cx);
                 } else {
@@ -834,6 +850,10 @@ impl Folder {
     /// been read so far is shown (sorted) every 50 ms until done.
     fn load(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
+        // A fresh listing supersedes any pending reconcile of watcher additions.
+        self.reconcile_gen += 1;
+        self.reconcile.clear();
+        self.reconciling = false;
         self.loading = true;
         let (generation, dir, hidden, sort) = (self.generation, self.dir.clone(), self.show_hidden, self.sort);
         let (tx, mut rx) = unbounded();
@@ -877,6 +897,18 @@ impl Folder {
 
     /// Swap in a new listing, keeping the selection on the same items.
     fn replace_entries(&mut self, entries: Vec<Entry>, cx: &mut Context<Self>) {
+        self.replace_entries_after(entries, None, cx);
+    }
+
+    /// A watcher batch: only the paths it reports can have left the listing, so
+    /// prune just those instead of hashing every row (a 100k select-all paid
+    /// ~300 ms per batch). `stats` is `apply_stats`'s input.
+    fn replace_entries_after(
+        &mut self,
+        entries: Vec<Entry>,
+        stats: Option<&[(PathBuf, Option<Entry>)]>,
+        cx: &mut Context<Self>,
+    ) {
         let _span = tracing::debug_span!("listing apply").entered();
         self.entries = Arc::new(entries);
         if !self.effects.is_empty() {
@@ -927,7 +959,20 @@ impl Folder {
                 self.selection.select_only(first.path.clone());
             }
         }
-        self.prune_selection();
+        match stats {
+            Some(stats) => {
+                let before = self.selection.len();
+                for (path, entry) in stats {
+                    if entry.is_none() {
+                        self.selection.remove(path);
+                    }
+                }
+                if self.selection.len() != before {
+                    self.selection_changed();
+                }
+            }
+            None => self.prune_selection(),
+        }
         self.settle_cursor(cx);
         self.selection_changed();
         cx.emit(FolderEvent::Changed);
@@ -1046,11 +1091,34 @@ impl Folder {
 
     /// Drop selected paths that are no longer visible anywhere in the tree.
     fn prune_selection(&mut self) {
-        let entries = self.entries.clone();
-        let rows = self.rows.clone();
-        let present: HashSet<&Path> = rows.iter().filter_map(|row| Self::row_path(row, &entries)).collect();
         let before = self.selection.len();
-        self.selection.retain(|path| present.contains(path.as_path()));
+        if before == 0 {
+            return;
+        }
+        if before <= 16 {
+            // The usual selection is one row. Walking the rows once and looking
+            // each up in the small selection avoids hashing a 100k-row set on
+            // every watcher batch (measured at ~180 ms per apply).
+            let entries = self.entries.clone();
+            let rows = self.rows.clone();
+            let mut wanted: HashSet<PathBuf> = self.selection.iter().cloned().collect();
+            let mut keep: HashSet<PathBuf> = HashSet::with_capacity(wanted.len());
+            for row in rows.iter() {
+                let Some(path) = Self::row_path(row, &entries) else { continue };
+                if wanted.remove(path) {
+                    keep.insert(path.to_path_buf());
+                    if wanted.is_empty() {
+                        break;
+                    }
+                }
+            }
+            self.selection.retain(|path| keep.contains(path));
+        } else {
+            let entries = self.entries.clone();
+            let rows = self.rows.clone();
+            let present: HashSet<&Path> = rows.iter().filter_map(|row| Self::row_path(row, &entries)).collect();
+            self.selection.retain(|path| present.contains(path.as_path()));
+        }
         if self.selection.len() != before {
             self.selection_changed();
         }
@@ -1169,9 +1237,76 @@ impl Folder {
             }
             this.update(cx, |this, cx| {
                 if this.generation == generation && this.sort == sort {
+                    // The paths this batch added: the reconcile re-stats only those.
+                    // One pass over the listing, not one per changed path: a burst
+                    // of 500 adds in a 100k folder took ~800 ms on the main thread.
+                    let mut added: HashSet<PathBuf> =
+                        stats.iter().filter(|(_, entry)| entry.is_some()).map(|(path, _)| path.clone()).collect();
+                    if !added.is_empty() {
+                        for existing in this.entries.iter() {
+                            added.remove(&existing.path);
+                        }
+                    }
+                    let added: Vec<PathBuf> = added.into_iter().collect();
                     let updated = crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind);
-                    this.replace_entries(updated, cx);
+                    this.replace_entries_after(updated, Some(&stats), cx);
+                    if !this.reconcile.is_empty() || !added.is_empty() {
+                        this.schedule_reconcile(added, cx);
+                    }
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Re-stat the paths recent watcher batches added, once the stream has been
+    /// quiet for `RECONCILE_DELAY`. FSEvents coalesces events and can lose the
+    /// delete that follows a rename, which would leave a row forever; the stat
+    /// is off the main thread and only touches the paths that were added.
+    fn schedule_reconcile(&mut self, added: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.reconcile.extend(added);
+        self.reconcile_gen += 1;
+        self.reconciling = true;
+        let generation = self.reconcile_gen;
+        let (dir, hidden, sort) = (self.dir.clone(), self.show_hidden, self.sort);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RECONCILE_DELAY).await;
+            let paths = this
+                .update(cx, |this, _| {
+                    if this.reconcile_gen != generation {
+                        return None;
+                    }
+                    Some(std::mem::take(&mut this.reconcile))
+                })
+                .ok()
+                .flatten();
+            let Some(paths) = paths else { return };
+            if paths.is_empty() {
+                this.update(cx, |this, _| {
+                    if this.reconcile_gen == generation {
+                        this.reconciling = false;
+                    }
+                })
+                .ok();
+                return;
+            }
+            let stats = cx.background_spawn(async move { crow_fs::stat_changes(&dir, &paths, hidden) }).await;
+            this.update(cx, |this, cx| {
+                if this.reconcile_gen != generation {
+                    return;
+                }
+                this.reconciling = false;
+                if this.sort != sort {
+                    return;
+                }
+                // Every added path still exists: the listing already has them, so
+                // skip the rebuild (a second 100k-row apply per create).
+                if stats.iter().all(|(_, entry)| entry.is_some()) {
+                    return;
+                }
+                let updated = crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind);
+                this.replace_entries_after(updated, Some(&stats), cx);
             })
             .ok();
         })
@@ -1369,6 +1504,18 @@ impl Folder {
     #[cfg(any(test, feature = "fuzz"))]
     pub fn set_cursor_ix_for_test(&mut self, ix: Option<usize>) {
         self.cursor_ix = ix;
+    }
+
+    /// Time a synthetic listing apply without a load. `stats` is a watcher
+    /// batch; `None` is a full reload, which prunes against every row.
+    #[cfg(test)]
+    pub fn replace_entries_for_test(
+        &mut self,
+        entries: Vec<Entry>,
+        stats: Option<&[(PathBuf, Option<Entry>)]>,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_entries_after(entries, stats, cx);
     }
 
     /// Select a path that is not in the listing, to prove the invariant fires.

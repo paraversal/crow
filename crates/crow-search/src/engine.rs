@@ -70,28 +70,40 @@ pub struct Summary {
 /// A reusable nucleo fuzzy matcher for names and paths.
 pub struct FuzzyMatcher {
     needle: String,
+    /// The needle in nucleo's grapheme form, built once. Empty when the needle is
+    /// ASCII (nucleo borrows the bytes directly). `Utf32Str::new` walks the whole
+    /// string, so rebuilding it per candidate made a long query quadratic.
+    needle_chars: Vec<char>,
     matcher: Matcher,
     haystack_buf: Vec<char>,
-    needle_buf: Vec<char>,
 }
 
 impl FuzzyMatcher {
     pub fn new(needle: &str) -> FuzzyMatcher {
         let mut config = Config::DEFAULT;
         config.ignore_case = true;
-        FuzzyMatcher {
-            // With `ignore_case`, nucleo compares against a lowercased haystack and
-            // expects the needle lowercased too; an uppercase needle letter can pass
-            // its prefilter and then trip an assert ("should have been caught by prefilter").
-            needle: needle.to_lowercase(),
-            matcher: Matcher::new(config),
-            haystack_buf: Vec::new(),
-            needle_buf: Vec::new(),
+        // With `ignore_case`, nucleo compares against a lowercased haystack and
+        // expects the needle lowercased too; an uppercase needle letter can pass
+        // its prefilter and then trip an assert ("should have been caught by prefilter").
+        let needle = needle.to_lowercase();
+        let mut needle_chars = Vec::new();
+        if !needle.is_ascii() {
+            let _ = Utf32Str::new(&needle, &mut needle_chars);
+            // A non-ASCII string whose graphemes all start with ASCII is matched as
+            // bytes; keep the buffer empty so the matcher picks the same form.
+            if needle_chars.iter().all(|c| c.is_ascii()) {
+                needle_chars.clear();
+            }
         }
+        FuzzyMatcher { needle, needle_chars, matcher: Matcher::new(config), haystack_buf: Vec::new() }
     }
 
     pub fn score(&mut self, haystack: &str) -> Option<u32> {
-        let needle = Utf32Str::new(&self.needle, &mut self.needle_buf);
+        let needle = if self.needle_chars.is_empty() {
+            Utf32Str::Ascii(self.needle.as_bytes())
+        } else {
+            Utf32Str::Unicode(&self.needle_chars)
+        };
         let haystack = Utf32Str::new(haystack, &mut self.haystack_buf);
         self.matcher.fuzzy_match(haystack, needle).map(u32::from)
     }
@@ -101,7 +113,11 @@ impl FuzzyMatcher {
     /// strings whose every grapheme starts with an ASCII char), else one index
     /// per grapheme. Adjacent matches merge into one range.
     pub fn indices(&mut self, haystack: &str) -> Option<(u32, Vec<Range<usize>>)> {
-        let needle = Utf32Str::new(&self.needle, &mut self.needle_buf);
+        let needle = if self.needle_chars.is_empty() {
+            Utf32Str::Ascii(self.needle.as_bytes())
+        } else {
+            Utf32Str::Unicode(&self.needle_chars)
+        };
         let haystack_utf32 = Utf32Str::new(haystack, &mut self.haystack_buf);
         let mut indices = Vec::new();
         let score = self.matcher.fuzzy_indices(haystack_utf32, needle, &mut indices)?;
@@ -762,5 +778,36 @@ mod tests {
         );
         assert!(hits.len() < 4000, "cancelling stopped the stream");
         assert!(summary.scanned < 4000, "the walk stopped early");
+    }
+
+    /// The palette scores every candidate on each keystroke. A long non-ASCII
+    /// query must not re-walk its graphemes per candidate: 10k names with a
+    /// 4 000-char needle took seconds before the matcher cached the needle form.
+    #[test]
+    fn a_long_unicode_needle_scores_many_names_quickly() {
+        let needle: String = std::iter::repeat_n('ש', 4_000).collect();
+        let mut fuzzy = FuzzyMatcher::new(&needle);
+        let started = std::time::Instant::now();
+        for i in 0..10_000 {
+            assert!(
+                fuzzy.score(&format!("file-{i:06}.txt")).is_none(),
+                "a 4 000-char needle cannot match a short name"
+            );
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_millis(500), "10k scores took {elapsed:?}");
+    }
+
+    /// The cached form must match what `Utf32Str::new` built before it: an emoji,
+    /// RTL letters and a precomposed name still score and report byte ranges.
+    #[test]
+    fn unicode_needles_keep_their_scores_and_ranges() {
+        let mut fuzzy = FuzzyMatcher::new("🙂");
+        assert_eq!(fuzzy.indices("a🙂b.txt").map(|(_, ranges)| ranges), Some(vec![Range { start: 1, end: 5 }]));
+        let mut fuzzy = FuzzyMatcher::new("ש");
+        assert_eq!(fuzzy.indices("שלום.txt").map(|(_, ranges)| ranges), Some(vec![Range { start: 0, end: 2 }]));
+        let mut fuzzy = FuzzyMatcher::new("café");
+        assert!(fuzzy.score("café").is_some(), "a non-ASCII needle still scores");
+        assert!(FuzzyMatcher::new("café").score("other.txt").is_none());
     }
 }

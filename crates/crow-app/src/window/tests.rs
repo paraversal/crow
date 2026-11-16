@@ -393,6 +393,18 @@ fn cursor_past_the_listing_fires(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn cursor_without_its_selection_fires(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-cursor-selection");
+    let (view, mut cx) = open(cx, &root);
+    let pane = pane(&view, &cx);
+    let folder = pane.read_with(&cx, |pane, _| pane.test_folder());
+    // Open selects row 0; move the cursor alone, as a highlight that skipped it would.
+    folder.update(&mut cx, |folder, _| folder.set_cursor_ix_for_test(Some(1)));
+    let found = violations(&view, &mut cx);
+    assert!(found.iter().any(|violation| violation.check == "cursor"), "{found:?}");
+}
+
+#[gpui::test]
 fn selection_outside_the_listing_fires(cx: &mut TestAppContext) {
     let root = fixture("fuzz-selection");
     let (view, mut cx) = open(cx, &root);
@@ -7788,4 +7800,107 @@ fn fuzz_long(cx: &mut TestAppContext) {
         index += 1;
         seed = seed.wrapping_add(1);
     }
+}
+
+#[gpui::test]
+fn filter_enter_acts_on_the_highlighted_row(cx: &mut TestAppContext) {
+    let root = fixture("filter-enter-cursor");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("a");
+    settle(&view, &mut cx);
+
+    // Down in the field moves the cursor with the highlight, so Return has a target.
+    cx.simulate_keystrokes("down");
+    let cursor = pane(&view, &cx).read_with(&cx, |p, cx| p.cursor_entry(cx).map(|entry| entry.name.clone()));
+    assert_eq!(cursor.as_deref(), Some("beta"), "the cursor follows the highlight");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+
+    // Return moves focus into the matches without moving the cursor.
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "Return moves focus into the matches");
+    let cursor = pane(&view, &cx).read_with(&cx, |p, cx| p.cursor_entry(cx).map(|entry| entry.name.clone()));
+    assert_eq!(cursor.as_deref(), Some("beta"), "focusing the list keeps the highlighted row");
+
+    // Return in the list renames the cursor row (Crow's Enter is Rename; cmd-down opens).
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    let renaming = pane(&view, &cx).read_with(&cx, |p, _| p.renaming_path());
+    assert_eq!(renaming, Some(root.join("beta")), "Return acts on the cursor row");
+}
+
+/// H4 #12: a watcher batch used to prune the selection by hashing every row
+/// (100k on the 100k fixture), so each batch took ~180 ms on the main thread.
+/// Only the paths the batch removed can leave the selection now.
+#[gpui::test]
+fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-apply-batch");
+    let folder = cx
+        .update(|cx| cx.new(|cx| crate::folder::Folder::new(root.clone(), false, crow_fs::Sort::default(), false, cx)));
+    let entries = |skip: Option<usize>| -> Vec<crow_fs::Entry> {
+        (0..100_000)
+            .filter(|i| Some(*i) != skip)
+            .map(|i| crow_fs::Entry {
+                name: format!("file-{i:06}.txt"),
+                path: root.join(format!("file-{i:06}.txt")),
+                is_dir: false,
+                hidden: false,
+                size: 0,
+                modified: None,
+                created: None,
+                added: None,
+            })
+            .collect()
+    };
+    let removed = root.join("file-000000.txt");
+    let stats = vec![(removed.clone(), None)];
+    // Apply the listing without row 0 to a fully selected 100k listing, as a
+    // watcher batch or as a full reload, and time only the apply: building the
+    // entries and dropping the old listing stay outside the stopwatch. CI runs a
+    // debug build on a shared runner, so the batch is compared with the full
+    // prune on the same machine rather than with a fixed budget (the bench owns that).
+    let apply = |stats: Option<&[(std::path::PathBuf, Option<crow_fs::Entry>)]>| {
+        cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries(None), Some(&[]), cx)));
+        cx.update(|cx| folder.update(cx, |folder, cx| folder.select_all(cx)));
+        let old = cx.update(|cx| folder.read(cx).entries().clone());
+        let next = entries(Some(0));
+        let started = std::time::Instant::now();
+        cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(next, stats, cx)));
+        let elapsed = started.elapsed();
+        drop(old);
+        elapsed
+    };
+    let full = (0..3).map(|_| apply(None)).min().unwrap();
+    let batch = (0..3).map(|_| apply(Some(&stats))).min().unwrap();
+    let selection = cx.update(|cx| folder.read(cx).selection_paths());
+    assert_eq!(selection.len(), 99_999, "only the removed path left the selection");
+    assert!(!selection.contains(&removed));
+    assert!(batch * 10 < full, "the batch apply took {batch:?}, a full prune {full:?}");
+}
+
+/// H4 #15: FSEvents can coalesce away the delete that follows a rename, leaving
+/// a row the disk no longer has. The quiet reconcile re-stats the paths the
+/// batch added; a delete inside that window drops the phantom.
+#[gpui::test]
+fn a_delete_lost_after_a_rename_is_reconciled(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-reconcile");
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    let renamed = root.join("churn-renamed-000525");
+    std::fs::write(&renamed, "x").expect("write the rename target");
+    folder.update(&mut cx, |folder, _| folder.queue_changes(vec![renamed.clone()]));
+    // Let the 100 ms poll apply the batch, but not the 300 ms reconcile.
+    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.run_until_parked();
+    assert!(rows(&view, &cx).iter().any(|(name, _)| name == "churn-renamed-000525"), "the rename row was added");
+    // The delete's watcher event is lost; only the reconcile can see it.
+    std::fs::remove_file(&renamed).expect("remove the rename target");
+    cx.executor().advance_clock(Duration::from_millis(350));
+    cx.run_until_parked();
+    assert!(
+        !rows(&view, &cx).iter().any(|(name, _)| name == "churn-renamed-000525"),
+        "the quiet reconcile dropped the phantom row"
+    );
 }

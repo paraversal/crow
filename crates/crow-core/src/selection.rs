@@ -68,6 +68,20 @@ impl<K: Clone + Eq + Hash> Selection<K> {
         }
     }
 
+    /// Drop one item. The cursor moves only when it named the removed item, so a
+    /// file vanishing elsewhere in the selection does not yank the highlight.
+    pub fn remove(&mut self, key: &K) {
+        if !self.selected.remove(key) {
+            return;
+        }
+        if self.anchor.as_ref() == Some(key) {
+            self.anchor = self.selected.iter().next().cloned();
+        }
+        if self.cursor.as_ref() == Some(key) {
+            self.cursor = self.anchor.clone().or_else(|| self.selected.iter().next().cloned());
+        }
+    }
+
     /// Shift-click or Shift-arrow: select from the anchor to `target` in display order,
     /// replacing any previous Shift range. `position` finds a key's row; `key_at` reads one.
     pub fn extend_to(&mut self, target: usize, position: impl Fn(&K) -> Option<usize>, key_at: impl Fn(usize) -> K) {
@@ -193,6 +207,18 @@ mod tests {
         s.retain(|k| *k != "d");
         assert_eq!(sorted(&s), ["b"]);
         assert_eq!(s.cursor(), Some(&"b"));
+    }
+
+    #[test]
+    fn removing_another_item_keeps_the_cursor() {
+        let mut s = Selection::default();
+        s.select_only("a");
+        extend(&mut s, 2);
+        s.remove(&"b");
+        assert_eq!(sorted(&s), ["a", "c"]);
+        assert_eq!(s.cursor(), Some(&"c"), "a file vanishing elsewhere in the selection leaves the highlight");
+        s.remove(&"c");
+        assert_eq!(s.cursor(), Some(&"a"), "removing the cursor falls back to the anchor");
     }
 
     #[test]

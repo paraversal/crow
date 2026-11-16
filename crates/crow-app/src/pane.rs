@@ -430,6 +430,12 @@ impl Pane {
         self.renaming.is_some()
     }
 
+    /// The path whose name field is open, for tests that check what Return acted on.
+    #[cfg(test)]
+    pub(crate) fn renaming_path(&self) -> Option<PathBuf> {
+        self.renaming.as_ref().map(|renaming| renaming.path.clone())
+    }
+
     pub fn is_loading(&self, cx: &gpui::App) -> bool {
         self.folders.iter().any(|f| f.read(cx).is_loading_deep(cx))
     }
@@ -3031,6 +3037,17 @@ impl Pane {
                 out.push(Violation::new(
                     "cursor",
                     format!("pane {k}: cursor {ix} is past {} rows", folder.row_count()),
+                ));
+            }
+            // Enter (Rename) and every other row action use the cursor row, and the
+            // row draws as selected: the two must name the same entry. A highlight
+            // that moves without the cursor would act on a row the user is not on.
+            if let Some(entry) = folder.cursor_entry()
+                && !folder.is_selected(&entry.path)
+            {
+                out.push(Violation::new(
+                    "cursor",
+                    format!("pane {k}: cursor {} is not the selected row", entry.path.display()),
                 ));
             }
             let selection = folder.selection_paths();
