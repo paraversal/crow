@@ -132,6 +132,7 @@ When every Fix is committed and every Ask is answered (and its answer carried ou
    - at the end, the attribution the environment requires.
 4. Set the progress file's State to **PR open**, fill in the PR URL, and commit and push it.
 5. Report. Start with what the user has to do (questions, hand checks). Then give the findings by kind, and say plainly whether you think the change makes Crow better as it stands. Don't merge.
+6. End the report with **what comes next**: the next piece in the milestone index's order (for M7, `docs/plans/m7/README.md`, "Suggested order"), with the exact request to give the executing agent ("execute plan H4, batch 2"). If the plan recorded findings for a fix list (M7's `findings.md`), count the open ones and the "must fix" ones, and say whether the fix batch comes before the next piece.
 
 ## Progress file section
 ```markdown
