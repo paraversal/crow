@@ -1,0 +1,119 @@
+--- a/crates/gpui/src/elements/div.rs
++++ b/crates/gpui/src/elements/div.rs
+@@ -2636,6 +2636,22 @@
+                         .record_debug_bounds(debug_selector.clone(), bounds);
+                 }
+ 
++                #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
++                if style.display != Display::None
++                    && style.visibility != Visibility::Hidden
++                    && (!self.click_listeners.is_empty()
++                        || self.tracked_focus_handle.is_some()
++                        || self.focusable)
++                {
++                    window.next_frame.record_interactive_element(crate::InteractiveElementInfo {
++                        role: self.override_role,
++                        label: self.aria.label.clone(),
++                        disabled: self.aria.disabled,
++                        selector: self.debug_selector.clone(),
++                        bounds,
++                    });
++                }
++
+                 self.paint_hover_group_handler(window, cx);
+ 
+                 if style.visibility == Visibility::Hidden {
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -1047,6 +1047,24 @@
+     accessed_entities: FxHashSet<EntityId>,
+ }
+ 
++/// One element with a click listener or focus handle, as painted in the last
++/// frame. Recorded only in builds that also record `debug_selector` bounds, so
++/// tests can check that every interactive element has a role and a label.
++#[cfg(any(test, feature = "test-support"))]
++#[derive(Clone, Debug)]
++pub struct InteractiveElementInfo {
++    /// The role the element exposed, if any.
++    pub role: Option<accesskit::Role>,
++    /// The accessibility label the element exposed, if any.
++    pub label: Option<SharedString>,
++    /// The disabled state the element exposed, if any.
++    pub disabled: Option<bool>,
++    /// The element's `debug_selector`, when it has one.
++    pub selector: Option<String>,
++    /// Where the element was painted.
++    pub bounds: Bounds<Pixels>,
++}
++
+ pub(crate) struct Frame {
+     pub(crate) focus: Option<FocusId>,
+     pub(crate) window_active: bool,
+@@ -1065,6 +1083,8 @@
+     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
+     #[cfg(any(test, feature = "test-support"))]
+     debug_bounds_records: Vec<(String, Bounds<Pixels>)>,
++    #[cfg(any(test, feature = "test-support"))]
++    pub(crate) interactive_elements: Vec<InteractiveElementInfo>,
+     #[cfg(any(feature = "inspector", debug_assertions))]
+     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
+     #[cfg(any(feature = "inspector", debug_assertions))]
+@@ -1102,6 +1122,11 @@
+         self.debug_bounds_records.push((selector, bounds));
+     }
+ 
++    #[cfg(any(test, feature = "test-support"))]
++    pub(crate) fn record_interactive_element(&mut self, info: InteractiveElementInfo) {
++        self.interactive_elements.push(info);
++    }
++
+     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
+         Frame {
+             focus: None,
+@@ -1122,6 +1147,8 @@
+             debug_bounds: FxHashMap::default(),
+             #[cfg(any(test, feature = "test-support"))]
+             debug_bounds_records: Vec::new(),
++            #[cfg(any(test, feature = "test-support"))]
++            interactive_elements: Vec::new(),
+ 
+             #[cfg(any(feature = "inspector", debug_assertions))]
+             next_inspector_instance_ids: FxHashMap::default(),
+@@ -1151,6 +1178,7 @@
+         {
+             self.debug_bounds.clear();
+             self.debug_bounds_records.clear();
++            self.interactive_elements.clear();
+         }
+ 
+         #[cfg(any(feature = "inspector", debug_assertions))]
+@@ -7440,6 +7468,28 @@
+         self.a11y.debug_tree_json()
+     }
+ 
++    /// The bounds recorded for `selector` in the last frame, if it was painted.
++    ///
++    /// `None` in builds that don't record `debug_selector` bounds.
++    #[cfg(any(test, feature = "test-support"))]
++    pub fn debug_bounds(&self, selector: &str) -> Option<Bounds<Pixels>> {
++        self.rendered_frame.debug_bounds.get(selector).copied()
++    }
++
++    /// Every element with a click listener or focus handle that was painted in
++    /// the last frame, with the accessibility properties it exposed.
++    ///
++    /// `None` in builds that don't record `debug_selector` bounds, which are the
++    /// same builds that don't fill this list.
++    #[cfg(any(test, feature = "test-support"))]
++    pub fn debug_interactive_elements(&self) -> Option<&[InteractiveElementInfo]> {
++        if cfg!(any(test, all(debug_assertions, feature = "test-support"))) {
++            Some(&self.rendered_frame.interactive_elements)
++        } else {
++            None
++        }
++    }
++
+     /// Register a listener for an accessibility action on a specific node.
+     /// The listener will be called when a screen reader requests the given
+     /// action on the node identified by `node_id`.

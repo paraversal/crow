@@ -7213,9 +7213,13 @@ fn check_windows(cx: &mut VisualTestContext, deep: bool, root: Option<&Path>) ->
     let handles = cx.update(|_, cx| cx.windows());
     let mut out = Vec::new();
     for handle in handles {
-        let Some(view) = handle.downcast::<CrowWindow>() else { continue };
-        if let Ok(found) =
-            view.update(&mut cx.cx, |window_view, window, cx| window_view.check_invariants(window, cx, deep, root))
+        if let Some(view) = handle.downcast::<CrowWindow>()
+            && let Ok(found) =
+                view.update(&mut cx.cx, |window_view, window, cx| window_view.check_invariants(window, cx, deep, root))
+        {
+            out.extend(found);
+        } else if let Some(view) = handle.downcast::<crate::settings_window::SettingsWindow>()
+            && let Ok(found) = view.update(&mut cx.cx, |settings, window, _| settings.check_invariants(window))
         {
             out.extend(found);
         }
@@ -7397,6 +7401,138 @@ fn fuzz_run(
             churn: options.churn,
             reproduces_without_churn: reproduces,
         }));
+    }
+    Ok(())
+}
+
+fn settings_handle(cx: &mut TestAppContext) -> Option<WindowHandle<crate::settings_window::SettingsWindow>> {
+    cx.update(|cx| cx.windows().into_iter().find_map(|handle| handle.downcast()))
+}
+
+fn settings_state(
+    view: &Entity<crate::settings_window::SettingsWindow>,
+    cx: &mut VisualTestContext,
+) -> crate::fuzz::GenState {
+    cx.update(|window, cx| crate::fuzz::settings_state_for(view.read(cx), window, cx))
+}
+
+/// The window's shown settings versus `settings.toml`. A write can land a few
+/// turns after the control changes, so the settle step retries; this is the
+/// final answer.
+fn settings_file_mismatch(cx: &mut VisualTestContext) -> Option<crate::fuzz::Violation> {
+    let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+    let shown = cx.read_global::<Ui, _>(|ui, _| ui.settings.clone());
+    match crow_core::load_settings(&config) {
+        Ok(file) if file == shown => None,
+        Ok(file) => Some(crate::fuzz::Violation::new(
+            "settings file",
+            format!("the window shows {shown:?} but settings.toml says {file:?}"),
+        )),
+        Err(error) => {
+            Some(crate::fuzz::Violation::new("settings file", format!("settings.toml does not load: {error}")))
+        }
+    }
+}
+
+fn apply_settings_step(step: &crate::fuzz::Step, cx: &mut VisualTestContext) -> Result<(), crate::fuzz::Violation> {
+    use crate::fuzz::Step;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match step {
+        Step::Keys(keys) => cx.simulate_keystrokes(keys),
+        Step::Type(text) => cx.simulate_input(text),
+        Step::Click(selector) => {
+            if let Some(bounds) = cx.update(|window, _| window.debug_bounds(selector)) {
+                cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            }
+        }
+        Step::Settle => {
+            cx.run_until_parked();
+            for _ in 0..40 {
+                if settings_file_mismatch(cx).is_none() {
+                    break;
+                }
+                cx.executor().advance_clock(Duration::from_millis(10));
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        Step::AdvanceClock(ms) => cx.executor().advance_clock(Duration::from_millis(*ms)),
+        _ => {}
+    }));
+    match result {
+        Ok(()) => Ok(()),
+        Err(payload) => Err(crate::fuzz::Violation::new("panic", panic_text(payload))),
+    }
+}
+
+fn apply_settings_and_check(
+    view: &Entity<crate::settings_window::SettingsWindow>,
+    step: &crate::fuzz::Step,
+    cx: &mut VisualTestContext,
+) -> Result<(), crate::fuzz::Violation> {
+    crate::fuzz::logs::reset();
+    apply_settings_step(step, cx)?;
+    cx.run_until_parked();
+    if let Some(violation) = cx.update(|window, cx| view.read(cx).check_invariants(window)).into_iter().next() {
+        return Err(violation);
+    }
+    if matches!(step, crate::fuzz::Step::Settle)
+        && let Some(violation) = settings_file_mismatch(cx)
+    {
+        return Err(violation);
+    }
+    if crate::fuzz::logs::errors() > 0 {
+        return Err(crate::fuzz::Violation::new("log", "an error was logged"));
+    }
+    Ok(())
+}
+
+/// I2b: drive the Settings window as a second fuzz surface. Same generator,
+/// caps and error-log recorder as H1; its own keymap and control selectors.
+fn settings_run(seed: u64, steps: usize, cx: &mut TestAppContext) -> Result<(), Box<crate::fuzz::Failure>> {
+    use crate::fuzz::{Failure, Script, StepGen};
+    close_all_windows(cx);
+    let tree = fuzz_tree(&format!("settings-{seed}"), 6);
+    let (browser, mut bcx) = open(cx, &tree);
+    bcx.update(|_, cx| crate::settings_window::open(cx));
+    bcx.run_until_parked();
+    let handle = settings_handle(&mut bcx.cx).expect("settings window");
+    let mut scx = VisualTestContext::from_window(handle.into(), &bcx.cx);
+    let view = handle.root(&mut scx).expect("settings root");
+    scx.update(|window, cx| {
+        let clear = window.draw(cx);
+        clear.clear(cx);
+    });
+    scx.run_until_parked();
+    let painted = scx.update(|window, _| window.debug_interactive_elements().expect("recorded").len());
+    assert!(painted > 0, "the Settings window painted no interactive elements");
+    crate::fuzz::logs::install();
+    let mut generator = StepGen::new(seed);
+    let mut script = Vec::new();
+    let failure = |step: usize, violation: crate::fuzz::Violation, script: Vec<crate::fuzz::Step>| {
+        Box::new(Failure {
+            seed,
+            step,
+            violation,
+            script: Script(script.clone()),
+            original: Script(script),
+            tree: "settings".to_owned(),
+            churn: false,
+            reproduces_without_churn: true,
+        })
+    };
+    for index in 0..steps {
+        let state = settings_state(&view, &mut scx);
+        let step = generator.next_settings(&state);
+        script.push(step.clone());
+        if let Err(violation) = apply_settings_and_check(&view, &step, &mut scx) {
+            println!("settings seed {seed} step {index}: {} — {}", violation.check, violation.detail);
+            return Err(failure(index, violation, script));
+        }
+    }
+    crate::fuzz::settle(&browser, &mut bcx);
+    if let Some(violation) = settings_file_mismatch(&mut scx) {
+        println!("settings seed {seed} step {steps}: {} — {}", violation.check, violation.detail);
+        return Err(failure(steps, violation, script));
     }
     Ok(())
 }
@@ -7752,6 +7888,17 @@ fn fuzz_smoke(cx: &mut TestAppContext) {
     }
 }
 
+/// I2b: the Settings window as a second surface, driven by its own keymap and
+/// control selectors. Two seeds keep the normal suite's time budget.
+#[gpui::test]
+fn fuzz_settings_smoke(cx: &mut TestAppContext) {
+    for seed in [1, 2] {
+        if let Err(failure) = settings_run(seed, 30, cx) {
+            panic!("{}\n{}", failure.print(), failure.finding_row());
+        }
+    }
+}
+
 /// Q1: every small edge kind, including unreadable children and symlink loops;
 /// `Wide` and `HugeFile` stay in `fuzz_long`.
 #[gpui::test]
@@ -7903,4 +8050,21 @@ fn a_delete_lost_after_a_rename_is_reconciled(cx: &mut TestAppContext) {
         !rows(&view, &cx).iter().any(|(name, _)| name == "churn-renamed-000525"),
         "the quiet reconcile dropped the phantom row"
     );
+}
+
+#[gpui::test]
+fn interactive_elements_have_roles_and_labels(cx: &mut TestAppContext) {
+    let root = fixture("a11y-interactive");
+    let (_view, mut cx) = open(cx, &root);
+    let elements = cx.update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec());
+    let missing: Vec<_> = elements
+        .iter()
+        .filter(|element| element.role.is_none() || element.label.as_ref().is_none_or(|label| label.trim().is_empty()))
+        .map(|element| format!("{:?} role={:?} label={:?}", element.selector, element.role, element.label))
+        .collect();
+    assert!(missing.is_empty(), "{missing:#?}");
+    let back = elements.iter().find(|element| element.selector.as_deref() == Some("back")).expect("back button");
+    assert_eq!(back.role, Some(Role::Button));
+    assert_eq!(back.label.as_deref(), Some("Back"));
+    assert_eq!(back.disabled, Some(true), "a fresh window has nowhere to go back to");
 }
