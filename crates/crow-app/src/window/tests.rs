@@ -15,8 +15,13 @@ fn test_ranges(start: usize, end: usize) -> Vec<std::ops::Range<usize>> {
 }
 
 /// `root/{alpha/inner/, beta/, notes.txt}`, canonicalized (macOS temp dirs sit behind /private).
+///
+/// The base is `/tmp`, not `std::env::temp_dir()`: the palette scores a folder's
+/// whole path, so a random `$TMPDIR` prefix can make a query match an unrelated
+/// sibling. `palette_count_says_places` flaked on CI when the runner's temp path
+/// happened to contain `a-l-p-h-a` in order and `beta` matched `alpha`.
 fn fixture(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("crow-app-{name}-{}", std::process::id()));
+    let root = PathBuf::from("/tmp").join(format!("crow-app-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("alpha/inner")).expect("create fixture");
     std::fs::create_dir_all(root.join("beta")).expect("create fixture");
