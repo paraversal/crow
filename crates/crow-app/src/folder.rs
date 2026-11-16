@@ -1506,15 +1506,16 @@ impl Folder {
         self.cursor_ix = ix;
     }
 
-    /// Time a synthetic listing apply without a load.
+    /// Time a synthetic listing apply without a load. `stats` is a watcher
+    /// batch; `None` is a full reload, which prunes against every row.
     #[cfg(test)]
     pub fn replace_entries_for_test(
         &mut self,
         entries: Vec<Entry>,
-        stats: &[(PathBuf, Option<Entry>)],
+        stats: Option<&[(PathBuf, Option<Entry>)]>,
         cx: &mut Context<Self>,
     ) {
-        self.replace_entries_after(entries, Some(stats), cx);
+        self.replace_entries_after(entries, stats, cx);
     }
 
     /// Select a path that is not in the listing, to prove the invariant fires.

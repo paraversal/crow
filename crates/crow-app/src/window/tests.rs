@@ -7854,20 +7854,30 @@ fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
             })
             .collect()
     };
-    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries(None), &[], cx)));
-    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_all(cx)));
-    // Keep the old listing alive so its drop is not part of the measurement.
-    let old = cx.update(|cx| folder.read(cx).entries().clone());
     let removed = root.join("file-000000.txt");
     let stats = vec![(removed.clone(), None)];
-    let started = std::time::Instant::now();
-    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries(Some(0)), &stats, cx)));
-    let elapsed = started.elapsed();
-    drop(old);
+    // Apply the listing without row 0 to a fully selected 100k listing, as a
+    // watcher batch or as a full reload, and time only the apply: building the
+    // entries and dropping the old listing stay outside the stopwatch. CI runs a
+    // debug build on a shared runner, so the batch is compared with the full
+    // prune on the same machine rather than with a fixed budget (the bench owns that).
+    let apply = |stats: Option<&[(std::path::PathBuf, Option<crow_fs::Entry>)]>| {
+        cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries(None), Some(&[]), cx)));
+        cx.update(|cx| folder.update(cx, |folder, cx| folder.select_all(cx)));
+        let old = cx.update(|cx| folder.read(cx).entries().clone());
+        let next = entries(Some(0));
+        let started = std::time::Instant::now();
+        cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(next, stats, cx)));
+        let elapsed = started.elapsed();
+        drop(old);
+        elapsed
+    };
+    let full = (0..3).map(|_| apply(None)).min().unwrap();
+    let batch = (0..3).map(|_| apply(Some(&stats))).min().unwrap();
     let selection = cx.update(|cx| folder.read(cx).selection_paths());
     assert_eq!(selection.len(), 99_999, "only the removed path left the selection");
     assert!(!selection.contains(&removed));
-    assert!(elapsed < std::time::Duration::from_millis(50), "the batch apply took {elapsed:?}");
+    assert!(batch * 10 < full, "the batch apply took {batch:?}, a full prune {full:?}");
 }
 
 /// H4 #15: FSEvents can coalesce away the delete that follows a rename, leaving
