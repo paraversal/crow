@@ -251,7 +251,7 @@ mod tests {
         );
         assert_eq!(
             by_name("Go"),
-            ["Back", "Forward", "Enclosing Folder", "—", "Go to…", "Go to Folder…", "Reveal Result"]
+            ["Back", "Forward", "Enclosing Folder", "—", "Go to…", "Go to Folder…", "Edit Path", "Reveal Result"]
         );
         assert_eq!(
             by_name("Crow"),

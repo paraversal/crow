@@ -94,22 +94,23 @@ Toolbar icons are [Lucide](https://lucide.dev) 1.72.0, ISC-licensed; the notice 
 File, Edit, View, Go, Window and Help list every command with its key — always the Finder key,
 also in the Vim layer — and grey out what the focused view cannot do. Edit carries Filter This
 Folder, Find… and Find Everything…; Go carries Back, Forward, Enclosing Folder, Go to…, Go to
-Folder… and Reveal Result. Find Everything… (⇧⌘A) opens search with every `exclude.toml` set off.
+Folder…, Edit Path and Reveal Result. Find Everything… (⇧⌘A) opens search with every `exclude.toml` set off.
 Use as Defaults, Reset View for This Folder and Zoom have no shortcut. Sheets (Why This View?,
 the theme picker, Cmd-K and the delete/conflict questions) dim the window; clicking outside one
 cancels it exactly like Esc.
 
 ## Hints and tips
 
-The bottom bar has three slots: the path, a transient one (hints, operation progress, messages,
-errors) and counts. Hints follow focus: the filter field (Return to matches, Esc clear, `⌘F` search
-deeper), the sidebar (`⌘⌥↑↓` reorder, `⌘⌫` remove, `⌘E` eject a disk), search results and the
-search field. The idle hint shows `/` filter (Search and Go to carry their keys on the toolbar);
-after you have used it three times it retires (`hints = "always"` keeps every hint, `"off"` hides
-hints and tips). While an operation runs, a 2 px accent line along the bar's top edge and
-"Copying … · n %" with Cancel esc replace the hints; the path and count stay. A broken config file
-shows an error pill with its file name, line and an Open button, beside progress rather than
-instead of it. Counts name the focused folder ("18 items in Documents"), the selection and its
+The bottom bar has three slots: the path (⌘L or a double-click on its empty space edits it in
+place), a transient one (hints, operation progress, messages, errors) and counts. Hints follow
+focus: the path field (`↩` go, `⇥` complete, `esc` cancel), the filter field (Return to matches,
+Esc clear, `⌘F` search deeper), the sidebar (`⌘⌥↑↓` reorder, `⌘⌫` remove, `⌘E` eject a disk),
+search results and the search field. The idle hint shows `/` filter (Search and Go to carry their
+keys on the toolbar); after you have used it three times it retires (`hints = "always"` keeps every
+hint, `"off"` hides hints and tips). While an operation runs, a 2 px accent line along the bar's
+top edge and "Copying … · n %" with Cancel esc replace the hints; the path and count stay. A broken
+config file shows an error pill with its file name, line and an Open button, beside progress rather
+than instead of it. Counts name the focused folder ("18 items in Documents"), the selection and its
 size, or the cursor's sidebar group (while filtering, the field itself says "n of N"). When room
 runs short the path keeps its first and last segments: its middle folds into a "…" (click it for
 the deepest hidden folder), then hints drop from the right, then a long progress line or error is
@@ -157,7 +158,9 @@ first result; results open with Return, reveal with Cmd-R, Quick Look with Space
 Finder's keys work as in Finder: arrows (Shift extends), Option-Up/Down, Cmd-Up/Down,
 Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (opens Cmd-K on this folder's
 path: type a name, Tab completes, Return goes there or selects a file; a pasted path may be quoted,
-shell-escaped or a `file://` URL), Cmd-, (Settings), Cmd-Shift-. and Space. Cmd-K's
+shell-escaped or a `file://` URL), Cmd-L (or a double-click on empty space in the bottom bar) edits
+the path the bar shows in place: Tab completes, Return goes there or selects a file, Esc puts the path
+back, Cmd-, (Settings), Cmd-Shift-. and Space. Cmd-K's
 "Settings" opens the window and "Edit settings.toml" opens the file directly. Cmd-Shift-P shows
 or hides the preview pane on the right (in list and column view, search included; Quick Look still
 works). Typing a name selects it. Tab moves focus between the sidebar and the list.

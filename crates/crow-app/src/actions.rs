@@ -63,6 +63,8 @@ actions!(
         GoBack,
         GoForward,
         GoToFolder,
+        /// ⌘L or a double-click on empty path space: edit the path in the bottom bar.
+        EditPath,
         ViewAsList,
         ViewAsColumns,
         // List filter
@@ -168,6 +170,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-[", GoBack, Some("Crow")),
         KeyBinding::new("cmd-]", GoForward, Some("Crow")),
         KeyBinding::new("cmd-shift-g", GoToFolder, Some("Crow")),
+        KeyBinding::new("cmd-l", EditPath, Some("Crow")),
         KeyBinding::new("cmd-t", NewTab, Some("Crow")),
         KeyBinding::new("cmd-w", CloseTab, Some("Crow")),
         KeyBinding::new("cmd-shift-]", NextTab, Some("Crow")),
@@ -236,6 +239,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-[", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-]", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-shift-g", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-l", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-t", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-w", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-shift-]", NoAction {}, Some("Sheet")),

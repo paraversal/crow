@@ -11,10 +11,10 @@ use gpui::{
 };
 
 use crate::actions::{
-    AddToSidebar, ApplyThemeEverywhere, CloseTab, GoBack, GoForward, GoToFolder, KeyboardShortcuts, Minimize, MoveDown,
-    MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PreviousTab, ResetFolderView,
-    SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, TogglePreview,
-    UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
+    AddToSidebar, ApplyThemeEverywhere, CloseTab, EditPath, GoBack, GoForward, GoToFolder, KeyboardShortcuts, Minimize,
+    MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PreviousTab,
+    ResetFolderView, SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
+    TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -146,6 +146,8 @@ pub struct CrowWindow {
     palette: Option<Palette>,
     /// Cmd-F, while its results replace the pane.
     search: Option<Entity<SearchView>>,
+    /// ⌘L or a double-click on empty path space: the bar's path slot is a field.
+    path_edit: Option<PathEdit>,
     /// The contextual tip on screen, if any.
     tip: Option<TipId>,
     /// Consecutive filter sessions that ended with no matches (U9's ⌘F tip).
@@ -200,6 +202,17 @@ struct Palette {
     folders: Vec<palette::FolderCandidate>,
     scroll: ScrollHandle,
     _subscription: Subscription,
+}
+
+/// ⌘L or a double-click on empty path space: the bottom bar's path slot becomes
+/// a field. Escape and a focus loss put the segments back without navigating.
+struct PathEdit {
+    input: Entity<TextInput>,
+    /// Where Escape returns focus, if the window had one when editing began.
+    return_focus: Option<FocusHandle>,
+    /// The bar error this field set for a missing path, if it is still the one shown.
+    refused: Option<u64>,
+    _subscriptions: Vec<Subscription>,
 }
 
 #[cfg(test)]
@@ -364,6 +377,7 @@ impl CrowWindow {
             picker: None,
             palette: None,
             search: None,
+            path_edit: None,
             tip: None,
             zero_streak: ZeroMatchStreak::new(),
             walk_visit: None,
@@ -503,6 +517,156 @@ impl CrowWindow {
         let current = home_relative(&self.pane().read(cx).current_dir(cx));
         let typed = if current.ends_with('/') { current } else { format!("{current}/") };
         self.open_palette(&typed, window, cx);
+    }
+
+    /// ⌘L: edit the path the bar shows in the bottom bar. A second ⌘L selects
+    /// the field's text again; overlays and a rename own the screen, so they keep it.
+    fn edit_path(&mut self, _: &EditPath, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(edit) = &self.path_edit {
+            let input = edit.input.clone();
+            let len = input.read(cx).text().len();
+            input.update(cx, |input, cx| input.select_range(0..len, window, cx));
+            let focus = input.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+            return;
+        }
+        if self.sheet.is_some()
+            || self.why.is_some()
+            || self.picker.is_some()
+            || self.palette.is_some()
+            || self.pane().read(cx).is_renaming()
+        {
+            return;
+        }
+        let typed = {
+            let pane = self.pane().read(cx);
+            let (target, _) = self.bar_target(pane, cx);
+            home_relative(&target)
+        };
+        let input = cx.new(|cx| TextInput::new(typed.clone(), "Path", cx).bare().with_aria_label("Path"));
+        input.update(cx, |input, cx| input.select_range(0..typed.len(), window, cx));
+        let subscription = cx.subscribe_in(&input, window, |this, _input, event, window, cx| match event {
+            TextInputEvent::Confirmed => this.confirm_path_edit(window, cx),
+            TextInputEvent::Cancelled => this.close_path_edit(true, window, cx),
+            TextInputEvent::CompletionRequested => this.complete_path_edit(window, cx),
+            TextInputEvent::Changed | TextInputEvent::BackspaceAtStart => {}
+        });
+        let focus = input.read(cx).focus_handle(cx);
+        let blur = cx.on_focus_out(&focus, window, |this, _event, window, cx| {
+            this.close_path_edit(false, window, cx);
+        });
+        let return_focus = window.focused(cx);
+        self.path_edit =
+            Some(PathEdit { input, return_focus, refused: None, _subscriptions: vec![subscription, blur] });
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Leave edit mode and put the segments back. Escape returns focus to where it
+    /// was; a click elsewhere and a focus loss leave focus where the user put it.
+    fn close_path_edit(&mut self, restore_focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.path_edit.take() else { return };
+        // The refusal described the typed path; it goes with the field, unless
+        // something newer replaced it.
+        if let Some(generation) = edit.refused
+            && cx.global::<Operations>().message_generation == generation
+        {
+            operations::clear_message(cx);
+        }
+        if restore_focus {
+            match &edit.return_focus {
+                Some(focus) => window.focus(focus, cx),
+                None => self.focus_center(window, cx),
+            }
+        }
+        cx.notify();
+    }
+
+    /// Return in the path field: go to the folder, or reveal the file. A path that
+    /// doesn't exist beeps and leaves the field open, with the reason in the bar.
+    fn confirm_path_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = &self.path_edit else { return };
+        let input = edit.input.clone();
+        let typed = input.read(cx).text().to_owned();
+        let query = typed.clone();
+        let cwd = self.pane().read(cx).current_dir(cx);
+        let home = cx.global::<Ui>().home.clone();
+        let task = cx.background_spawn(async move {
+            let cleaned = crow_core::clean_pasted_path(&query).unwrap_or_else(|| query.clone());
+            let target = crow_core::resolve_typed(&cleaned, &cwd, &home);
+            // io-ok: inside background_spawn
+            match std::fs::metadata(&target) {
+                Ok(meta) => {
+                    // io-ok: inside background_spawn
+                    let is_dir = meta.is_dir();
+                    Ok((is_dir, target))
+                }
+                Err(error) => Err((query, error.to_string())),
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let found = task.await;
+            this.update_in(cx, |this, window, cx| {
+                let Some(edit) = &this.path_edit else { return };
+                if edit.input.read(cx).text() != typed {
+                    return;
+                }
+                match found {
+                    Ok((is_dir, target)) => {
+                        this.close_path_edit(false, window, cx);
+                        if is_dir {
+                            if this.pane().read(cx).current_dir(cx) != target {
+                                this.pane().update(cx, |pane, cx| pane.navigate(target, cx));
+                            }
+                        } else {
+                            this.pane().update(cx, |pane, cx| pane.reveal(target, cx));
+                        }
+                        this.focus_center(window, cx);
+                        cx.notify();
+                    }
+                    Err((typed, error)) => {
+                        crate::feedback::refuse(crate::feedback::RefuseTarget::Field(&input), window, cx);
+                        operations::message(format!("Can't open “{typed}”: {error}"), true, cx);
+                        if let Some(edit) = &mut this.path_edit {
+                            edit.refused = Some(cx.global::<Operations>().message_generation);
+                        }
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Tab in the path field: complete the last component from disk, like ⌘K.
+    fn complete_path_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = &self.path_edit else { return };
+        let input = edit.input.clone();
+        let query = input.read(cx).text().to_owned();
+        let task = self.complete_typed_path(query.clone(), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let completed = task.await;
+            this.update_in(cx, |this, window, cx| {
+                let Some(edit) = &this.path_edit else { return };
+                if edit.input.read(cx).text() != query {
+                    return;
+                }
+                if let Some(completed) = completed {
+                    input.update(cx, |input, cx| input.set_text(completed, window, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Tab completion for a typed path, off the main thread. The palette and the
+    /// bar's field share it.
+    fn complete_typed_path(&self, typed: String, cx: &mut Context<Self>) -> gpui::Task<Option<String>> {
+        let cwd = self.pane().read(cx).current_dir(cx);
+        let home = cx.global::<Ui>().home.clone();
+        cx.background_spawn(async move { crow_core::complete_typed(&typed, &cwd, &home) })
     }
 
     fn view_as_list(&mut self, _: &ViewAsList, _: &mut Window, cx: &mut Context<Self>) {
@@ -829,6 +993,9 @@ impl CrowWindow {
         if overlay || pane.is_renaming() {
             return BarFocus::Overlay;
         }
+        if self.path_edit.is_some() {
+            return BarFocus::PathEdit;
+        }
         if let Some(search) = &self.search {
             return if search.read(cx).input_focused(window, cx) {
                 BarFocus::SearchField
@@ -885,14 +1052,8 @@ impl CrowWindow {
             bar_pane_count(pane, cx)
         };
 
-        // Q8: search mode shows the selected result's path.
-        let search_entry = self.search.as_ref().and_then(|search| search.read(cx).selected_entry());
-        let (target, last_is_dir) = match search_entry {
-            Some((path, is_dir)) => (path, is_dir),
-            None => pane
-                .cursor_entry(cx)
-                .map_or_else(|| (pane.current_dir(cx), true), |entry| (entry.path.clone(), entry.is_dir)),
-        };
+        // Q8: search mode shows the selected result's path; otherwise the cursor's.
+        let (target, last_is_dir) = self.bar_target(pane, cx);
         let parts: Vec<(String, std::path::PathBuf)> = crow_macos::display_components(&target)
             .into_iter()
             .map(|(name, path)| (crate::style::display_text(&name).into_owned(), path))
@@ -923,6 +1084,7 @@ impl CrowWindow {
                     }
                 }
                 BarFocus::FilterField => KeyScope::Filter,
+                BarFocus::PathEdit => KeyScope::PathBar,
                 BarFocus::Sidebar => KeyScope::Sidebar,
                 BarFocus::SearchResults => KeyScope::SearchResults,
                 BarFocus::SearchField => KeyScope::Search,
@@ -940,6 +1102,7 @@ impl CrowWindow {
             error,
             count,
             path,
+            editing: self.path_edit.as_ref().map(|edit| edit.input.clone()),
             transient_max: None,
             message_id: ops.message_generation,
             progress_done,
@@ -948,6 +1111,16 @@ impl CrowWindow {
         // Narrow windows lose hints from the right and fold the path's middle (I7).
         bottom_bar::fit_to_window(&mut state, window);
         state
+    }
+
+    /// The path the bar shows and whether its last segment is a folder: the
+    /// selected search result, else the cursor entry, else the folder. ⌘L edits
+    /// this path, so entering edit mode never changes what the bar says.
+    fn bar_target(&self, pane: &Pane, cx: &App) -> (PathBuf, bool) {
+        if let Some(entry) = self.search.as_ref().and_then(|search| search.read(cx).selected_entry()) {
+            return entry;
+        }
+        pane.cursor_entry(cx).map_or_else(|| (pane.current_dir(cx), true), |entry| (entry.path, entry.is_dir))
     }
 
     fn render_bottom_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1123,6 +1296,8 @@ impl CrowWindow {
                 // A stale message would otherwise outlive the place it described (Q2).
                 operations::clear_message(cx);
                 self.close_tip(cx);
+                // Navigating behind the field (a sidebar click, a tab) leaves it stale.
+                self.close_path_edit(false, window, cx);
                 if self.search.is_some() {
                     self.close_search(window, cx);
                 }
@@ -2257,10 +2432,7 @@ impl CrowWindow {
         }
         let input = palette.input.clone();
         let query = palette.input.read(cx).text().to_owned();
-        let typed = query.clone();
-        let cwd = self.pane().read(cx).current_dir(cx);
-        let home = cx.global::<Ui>().home.clone();
-        let task = cx.background_spawn(async move { crow_core::complete_typed(&typed, &cwd, &home) });
+        let task = self.complete_typed_path(query.clone(), cx);
         cx.spawn_in(window, async move |this, cx| {
             let completed = task.await;
             this.update_in(cx, |this, window, cx| {
@@ -2423,6 +2595,7 @@ impl CrowWindow {
             CommandId::GoBack => self.go_back(&GoBack, window, cx),
             CommandId::GoForward => self.go_forward(&GoForward, window, cx),
             CommandId::GoToFolder => self.go_to_folder(&GoToFolder, window, cx),
+            CommandId::EditPath => self.edit_path(&EditPath, window, cx),
             CommandId::ViewAsList => self.view_as_list(&ViewAsList, window, cx),
             CommandId::ViewAsColumns => self.view_as_columns(&ViewAsColumns, window, cx),
             CommandId::Undo => self.undo(None, cx),
@@ -3087,6 +3260,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::go_to_folder))
+            .on_action(cx.listener(Self::edit_path))
             .on_action(cx.listener(Self::view_as_list))
             .on_action(cx.listener(Self::view_as_columns))
             .on_action(cx.listener(|this, _: &crate::actions::Undo, _, cx| this.undo(None, cx)))
@@ -3192,6 +3366,9 @@ impl CrowWindow {
     pub fn text_focused(&self, window: &Window, cx: &App) -> bool {
         if let Some(palette) = &self.palette {
             return palette.input.read(cx).focus_handle(cx).is_focused(window);
+        }
+        if let Some(edit) = &self.path_edit {
+            return edit.input.read(cx).focus_handle(cx).is_focused(window);
         }
         if let Some(search) = &self.search {
             return search.read(cx).input_focused(window, cx);
@@ -3300,11 +3477,19 @@ impl CrowWindow {
             allowed.push(("search results", search.results_focus_handle()));
             // The documented Tab cycle goes field -> results -> sidebar -> field.
             allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
+            // ⌘L can edit the path while search is open; the bar's field owns focus then.
+            if let Some(edit) = &self.path_edit {
+                allowed.push(("path field", edit.input.read(cx).focus_handle(cx)));
+            }
         } else {
             allowed.push(("pane", pane.focus_handle().clone()));
             allowed.push(("sidebar", sidebar.debug_focus_handle(cx)));
             for text in pane.text_focus_handles(cx) {
                 allowed.push(("pane text field", text));
+            }
+            // The bottom bar's path field (⌘L) is a focus surface of its own.
+            if let Some(edit) = &self.path_edit {
+                allowed.push(("path field", edit.input.read(cx).focus_handle(cx)));
             }
         }
         if !allowed.iter().any(|(_, handle)| handle == &focused) {
