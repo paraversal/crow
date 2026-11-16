@@ -22,7 +22,12 @@ Treat the agent's progress file and commit messages as **claims to check**, not 
 5. Start a `## Critique` section in the progress file (template at the end) and set State to **In critique**. Keep it current as you go, like the executing agent would.
 
 ## 1. Re-verify, don't trust
-- Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` yourself. Run the bench (AGENTS.md) when the plan touches listing, scrolling, first paint or anything in a 100k folder. Compare with `main`, not with the agent's numbers.
+- Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` yourself. Run the bench (AGENTS.md) when the plan touches listing, scrolling, first paint or anything in a 100k folder. Compare with `main`, not with the agent's numbers. Fuzz within the budget below.
+- **Fuzzer budget.** Long fuzz runs make turns many times slower, and the user waits for them. `cargo test --workspace` already runs `fuzz_smoke`.
+  - **Anything over ~30 s of fuzzing needs the user's OK first**: `fuzz_long`, `crow --fuzz`, `CROW_FUZZ_MINUTES` > 0.5, big `CROW_FUZZ_STEPS`. Ask in one line with the command, the expected wall time and what it would tell you that the smoke and a replay don't.
+  - **A run the plan names** (e.g. "Finish (per batch)": "`fuzz_long` 10 minutes") is the executing agent's. Check that the progress file records it (seeds, minutes, result). Ask before re-running it, and only suggest that if it's missing or code the fuzzer drives changed after it. If the user agrees, start it with `run_in_background` and keep reviewing.
+  - To check a finding's fix, replay its seed and steps (findings.md has the command) with `CROW_FUZZ_SHRINK_SECS=0`, and read its regression test. Not a fresh long run.
+  - A failure shrinks for up to `CROW_FUZZ_SHRINK_SECS` (default 60). Raise it only with the user's OK.
 - For every item, check its **Done when** against the code and the tests, one condition at a time. "Done" with a condition nobody tested is not done.
 - Read the tests, not only their names. Would each test fail without the change? Revert the fix locally if you're unsure. Was any existing test weakened, deleted, `#[ignore]`d or loosened without a user decision on record?
 - For bugs, is the cause in the progress file the real cause, and does the fix address it? Did the agent search for the same cause elsewhere, as `execute-plan` §3.2 asks?

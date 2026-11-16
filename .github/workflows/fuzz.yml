@@ -55,6 +55,7 @@ jobs:
         env:
           CROW_FUZZ_MINUTES: ${{ inputs.minutes || '20' }}
           CROW_FUZZ_SEED: ${{ inputs.seed }}
+          CROW_FUZZ_SHRINK_SECS: '600'
         run: |
           set -o pipefail
           cargo test -p crow-app fuzz_long -- --ignored --nocapture 2>&1 | tee fuzz.log
