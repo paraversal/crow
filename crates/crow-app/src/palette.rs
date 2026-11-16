@@ -11,12 +11,12 @@ use crow_search::FuzzyMatcher;
 use gpui::{Action, SharedString};
 
 use crate::actions::{
-    AddToSidebar, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, EditSettings, Eject, GoBack,
-    GoForward, GoToFolder, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow,
-    OpenParent, OpenSelection, OpenSettings, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar,
-    Rename, ResetFolderView, SearchEverything, SearchReveal, SelectAll, ShowCommandPalette, ShowInFinder, ShowSearch,
-    ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles, TogglePreview, Undo,
-    UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
+    AddToSidebar, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, EditPath, EditSettings, Eject,
+    GoBack, GoForward, GoToFolder, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab,
+    NewWindow, OpenParent, OpenSelection, OpenSettings, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo,
+    RemoveFromSidebar, Rename, ResetFolderView, SearchEverything, SearchReveal, SelectAll, ShowCommandPalette,
+    ShowInFinder, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles,
+    TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -78,6 +78,7 @@ pub enum CommandId {
     GoBack,
     GoForward,
     GoToFolder,
+    EditPath,
     ViewAsList,
     ViewAsColumns,
     Open,
@@ -148,6 +149,7 @@ impl CommandId {
             CommandId::GoBack => "go-back",
             CommandId::GoForward => "go-forward",
             CommandId::GoToFolder => "go-to-folder",
+            CommandId::EditPath => "edit-path",
             CommandId::ViewAsList => "view-as-list",
             CommandId::ViewAsColumns => "view-as-columns",
             CommandId::Open => "open",
@@ -530,6 +532,14 @@ pub const COMMANDS: &[Command] = &[
         action: &GoToFolder,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::Go, section: 1, title: "Go to Folder…" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::EditPath,
+        label: "Edit Path",
+        action: &EditPath,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::Go, section: 1, title: "Edit Path" }),
         palette: true,
     },
     Command {

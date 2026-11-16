@@ -12,8 +12,8 @@ use gpui::{
 };
 
 use crate::actions::{
-    CancelOperation, ClearFilter, Eject, MoveFavoriteDown, MoveFavoriteUp, OpenSelection, QuickLook, RemoveFromSidebar,
-    SearchReveal, ShowSearch, StartFilter, SwitchFocus,
+    CancelOperation, ClearFilter, EditPath, Eject, MoveFavoriteDown, MoveFavoriteUp, OpenSelection, QuickLook,
+    RemoveFromSidebar, SearchReveal, ShowSearch, StartFilter, SwitchFocus,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_tooltip};
 use crate::icons::{self, Glyph};
@@ -22,7 +22,7 @@ use crate::operations::{self, Running};
 use crate::pane::Pane;
 use crate::sidebar::CursorKind;
 use crate::style::{color, color_alpha, error_soft, icon};
-use crate::text_input::{self, Confirm};
+use crate::text_input::{self, Complete, Confirm, TextInput};
 use crate::ui::Ui;
 use crate::usage;
 use crow_core::motion::{self, Effective};
@@ -38,6 +38,8 @@ pub struct BarState {
     pub error: Option<BarError>,
     pub count: Count,
     pub path: Path,
+    /// The path field while ⌘L edits it; the segments give way to it.
+    pub editing: Option<Entity<TextInput>>,
     /// The most the transient slot may take, so the path keeps its first and last
     /// segments (set by `fit_to_window`).
     pub transient_max: Option<Pixels>,
@@ -182,6 +184,7 @@ pub enum BarFocus {
     List,
     FilterField,
     ListFiltered,
+    PathEdit,
     Sidebar,
     SearchResults,
     SearchField,
@@ -231,12 +234,19 @@ const TO_RESULTS: Spec = Spec { kind: HintKind::Action(&Confirm), label: "to res
 const DONE: Spec = Spec { kind: HintKind::Action(&text_input::Cancel), label: "done", idle: false };
 const FIELD_HINTS: &[Spec] = &[TO_RESULTS, DONE];
 
+// The bar's path field (⌘L): Return goes, Tab completes, Escape puts the segments back.
+const GO: Spec = Spec { kind: HintKind::Action(&Confirm), label: "go", idle: false };
+const COMPLETE: Spec = Spec { kind: HintKind::Action(&Complete), label: "complete", idle: false };
+const CANCEL_EDIT: Spec = Spec { kind: HintKind::Action(&text_input::Cancel), label: "cancel", idle: false };
+const PATH_EDIT_HINTS: &[Spec] = &[GO, COMPLETE, CANCEL_EDIT];
+
 /// The hint set for a focus. Sidebar hints follow the cursor row (Q6).
 fn hint_set(focus: BarFocus, sidebar: Option<CursorKind>) -> Vec<Spec> {
     match focus {
         BarFocus::List => LIST_HINTS.to_vec(),
         BarFocus::FilterField => FILTER_FIELD_HINTS.to_vec(),
         BarFocus::ListFiltered => FILTERED_HINTS.to_vec(),
+        BarFocus::PathEdit => PATH_EDIT_HINTS.to_vec(),
         BarFocus::Sidebar => {
             let mut specs = Vec::new();
             match sidebar {
@@ -274,6 +284,10 @@ fn merged_keys(up: &KeyBinding, down: &KeyBinding) -> (SharedString, String) {
 
 /// Gap between the bar's slots and between hints.
 const GAP: f32 = 14.;
+
+/// The path field's minimum width while editing: enough for a folder name and the
+/// caret, while the hints keep their room.
+const PATH_FIELD_MIN: f32 = 180.;
 
 /// How the bar shares its room this frame.
 #[derive(Debug, PartialEq)]
@@ -389,11 +403,16 @@ pub fn fit_to_window(state: &mut BarState, window: &Window) {
         _ => Vec::new(),
     };
 
-    let fit = fit(bar, fixed, &segments, ellipsis, other, &hint_widths);
+    let fit = if state.editing.is_some() {
+        // The field takes the path slot: keep a usable minimum and let hints keep their room.
+        fit(bar, fixed, &[px(PATH_FIELD_MIN)], ellipsis, other, &hint_widths)
+    } else {
+        fit(bar, fixed, &segments, ellipsis, other, &hint_widths)
+    };
     if let Primary::Hints(hints) = &mut state.primary {
         hints.truncate(fit.hints);
     }
-    state.path.hidden = fit.hidden;
+    state.path.hidden = if state.editing.is_some() { None } else { fit.hidden };
     state.transient_max = Some(fit.transient_max);
 }
 
@@ -545,6 +564,8 @@ fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui:
         .child("…")
         .child(div().pl_1().child("›"))
         .on_click(move |_, _, cx| {
+            // The "…" is not empty path space: a double-click must not edit the path.
+            cx.stop_propagation();
             let target = target.clone();
             pane.update(cx, |pane, cx| pane.navigate(target, cx));
         });
@@ -564,62 +585,101 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
     let fg_path = fg;
     let last_is_dir = state.path.last_is_dir;
 
-    let hidden = state.path.hidden.clone().unwrap_or(0..0);
-    let separator = || div().pl_1().flex_none().child("›");
-    let mut children: Vec<AnyElement> = Vec::new();
-    for (i, (name, target)) in parts.iter().enumerate() {
-        if hidden.contains(&i) {
-            if i == hidden.start {
-                children.push(folded_segment(&parts[hidden.clone()], &pane, hover).into_any_element());
+    let path = if let Some(input) = state.editing.clone() {
+        div()
+            .id("bar-path")
+            .debug_selector(|| "bar-path".into())
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .id("bar-path-field")
+                    .debug_selector(|| "bar-path-field".into())
+                    .role(Role::Group)
+                    .aria_label("Edit path")
+                    .h(px(24.))
+                    .flex_1()
+                    .min_w_0()
+                    .rounded(px(5.))
+                    .border_2()
+                    .border_color(crate::style::field_ring(&theme))
+                    .bg(color(theme.role("surface")))
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .child(input),
+            )
+    } else {
+        let hidden = state.path.hidden.clone().unwrap_or(0..0);
+        let separator = || div().pl_1().flex_none().child("›");
+        let mut children: Vec<AnyElement> = Vec::new();
+        for (i, (name, target)) in parts.iter().enumerate() {
+            if hidden.contains(&i) {
+                if i == hidden.start {
+                    children.push(folded_segment(&parts[hidden.clone()], &pane, hover).into_any_element());
+                }
+                continue;
             }
-            continue;
+            let pane = pane.clone();
+            let is_dir = i < last || last_is_dir;
+            let spoke = if is_dir { format!("Go to {name}") } else { format!("Open {name}") };
+            let part = div()
+                .id(("path-segment", i))
+                .debug_selector(move || format!("path-segment-{i}"))
+                .role(Role::Button)
+                .aria_label(spoke.clone())
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_1()
+                .rounded_sm()
+                // Only the last segment gives way (with an ellipsis) once nothing else can fold.
+                .map(|part| if i == last { part.min_w_0().text_color(fg_path) } else { part.flex_none() })
+                .hover(move |s| s.bg(hover))
+                .children(icon(target, is_dir, 14).map(|i| img(i).flex_none().size(px(14.))))
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name.clone()))
+                .when(i < last, |part| part.child(separator()));
+            let target = target.clone();
+            let part = part.on_click(move |_, _, cx| {
+                // A segment is not empty space: a double-click must not edit the path.
+                cx.stop_propagation();
+                let target = target.clone();
+                pane.update(cx, |pane, cx| {
+                    if is_dir {
+                        // Clicking where you already are changes nothing.
+                        if pane.current_dir(cx) != target {
+                            pane.navigate(target.clone(), cx);
+                        }
+                    } else {
+                        pane.open_file(target.clone(), cx);
+                    }
+                });
+            });
+            children.push(with_tooltip(part, spoke, None).into_any_element());
         }
-        let pane = pane.clone();
-        let is_dir = i < last || last_is_dir;
-        let spoke = if is_dir { format!("Go to {name}") } else { format!("Open {name}") };
-        let part = div()
-            .id(("path-segment", i))
-            .debug_selector(move || format!("path-segment-{i}"))
-            .role(Role::Button)
-            .aria_label(spoke.clone())
+        div()
+            .id("bar-path")
+            .debug_selector(|| "bar-path".into())
+            .role(Role::Navigation)
+            .aria_label(format!("Path: {}", state.path.spoken))
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_hidden()
             .flex()
             .items_center()
             .gap_1()
-            .px_1()
-            .rounded_sm()
-            // Only the last segment gives way (with an ellipsis) once nothing else can fold.
-            .map(|part| if i == last { part.min_w_0().text_color(fg_path) } else { part.flex_none() })
-            .hover(move |s| s.bg(hover))
-            .children(icon(target, is_dir, 14).map(|i| img(i).flex_none().size(px(14.))))
-            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name.clone()))
-            .when(i < last, |part| part.child(separator()));
-        let target = target.clone();
-        let part = part.on_click(move |_, _, cx| {
-            let target = target.clone();
-            pane.update(cx, |pane, cx| {
-                if is_dir {
-                    // Clicking where you already are changes nothing.
-                    if pane.current_dir(cx) != target {
-                        pane.navigate(target.clone(), cx);
-                    }
-                } else {
-                    pane.open_file(target.clone(), cx);
+            .children(children)
+            // Finder's path bar edits on a double-click in its empty space; ⌘L is the key.
+            .on_click(|event, window, cx| {
+                if event.click_count() >= 2 {
+                    window.dispatch_action(Box::new(EditPath), cx);
                 }
-            });
-        });
-        children.push(with_tooltip(part, spoke, None).into_any_element());
-    }
-    let path = div()
-        .id("bar-path")
-        .role(Role::Navigation)
-        .aria_label(format!("Path: {}", state.path.spoken))
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
-        .flex()
-        .items_center()
-        .gap_1()
-        .children(children);
+            })
+    };
 
     let idle_text = color(theme.role("fg-subtle"));
     let (primary_aria, primary_el) = match &state.primary {

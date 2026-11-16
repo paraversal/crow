@@ -27,7 +27,9 @@ tabs closing search, the Tab cycle while searching, ↓ into the results and ↑
 (⇧⌘P in list and column view, `show_preview` live reload, the palette chip), the blinking caret,
 the bottom bar
 (hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
-path folding and hint dropping, messages that retire), the contextual tips (a long-folder scroll, two
+path folding and hint dropping, messages that retire, the editable path bar: ⌘L and a double-click on empty
+space, Tab completion, Return to a folder or a file, a missing path's beep and bar error, Escape and a
+click-away, and the path slot keeping its height), the contextual tips (a long-folder scroll, two
 zero-match filters, a typed path for a recent folder, Got it, `hints = "off"`, one at a time, closing on a
 folder change or an overlay, and the retired set surviving a relaunch), closing or quitting during an operation, ⌥ word moves in
 text fields, the list's Name column following the window width, the menu bar

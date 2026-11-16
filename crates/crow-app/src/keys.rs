@@ -20,6 +20,8 @@ pub enum KeyScope {
     ColumnsFiltered,
     Sidebar,
     Filter,
+    /// The bottom bar's path field (⌘L): the window root plus the text input.
+    PathBar,
     Search,
     SearchResults,
     Palette,
@@ -56,6 +58,7 @@ pub fn context_stack(scope: KeyScope, layer: KeymapLayer) -> Vec<KeyContext> {
             context("Filter"),
             context("TextInput"),
         ],
+        KeyScope::PathBar => vec![context("Crow"), context("TextInput")],
         KeyScope::Search => vec![context("Crow"), context("Search"), context("TextInput")],
         KeyScope::SearchResults => {
             vec![context("Crow"), context("Search"), context(if vim { "SearchResults vim" } else { "SearchResults" })]
@@ -341,6 +344,7 @@ mod tests {
                 (CommandId::GoBack, "⌘["),
                 (CommandId::GoForward, "⌘]"),
                 (CommandId::GoToFolder, "⇧⌘G"),
+                (CommandId::EditPath, "⌘L"),
                 (CommandId::ViewAsList, "⌘2"),
                 (CommandId::ViewAsColumns, "⌘3"),
                 (CommandId::Open, "⌘↓"),

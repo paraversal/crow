@@ -4858,6 +4858,175 @@ fn go_to_folder_opens_the_palette_on_this_folder(cx: &mut TestAppContext) {
     assert_eq!(dir(&view, &cx), root, "…without going anywhere");
 }
 
+/// The bar's path field while ⌘L edits it.
+fn path_edit_text(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Option<String> {
+    view.read_with(cx, |w, cx| w.path_edit.as_ref().map(|edit| edit.input.read(cx).text().to_owned()))
+}
+
+fn double_click(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+    cx.simulate_event(gpui::MouseDownEvent {
+        position: at,
+        modifiers: Default::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_event(gpui::MouseUpEvent {
+        position: at,
+        modifiers: Default::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 2,
+    });
+}
+
+#[gpui::test]
+fn path_bar_edits_the_path_with_cmd_l(cx: &mut TestAppContext) {
+    let root = fixture("path-edit");
+    let (view, mut cx) = open(cx, &root);
+    let slot_height = cx.debug_bounds("bar-path").expect("path slot").size.height;
+
+    cx.simulate_keystrokes("cmd-l");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx), Some(root.display().to_string()), "the folder's path, all selected");
+    assert_eq!(cx.debug_bounds("path-bar").expect("bar").size.height, px(30.), "the bar keeps its height");
+    assert_eq!(
+        cx.debug_bounds("bar-path").expect("path slot").size.height,
+        slot_height,
+        "the path slot keeps its height"
+    );
+    assert_eq!(cx.debug_bounds("bar-path-field").expect("field").size.height, px(24.), "the field fits inside it");
+    let state = bar_state(&view, &mut cx);
+    assert_eq!(hint_labels(&state), ["go", "complete", "cancel"]);
+    assert_eq!(hint_keys(&state), ["↩", "⇥", "esc"]);
+
+    // Typing replaces the selection; Tab completes from disk like ⌘K.
+    cx.simulate_input(&format!("{}/al", root.display()));
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx), Some(format!("{}/alpha/", root.display())));
+
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha"));
+    assert_eq!(path_edit_text(&view, &cx), None, "Return closes the field");
+}
+
+#[gpui::test]
+fn path_bar_return_reveals_files_and_refuses_missing_paths(cx: &mut TestAppContext) {
+    let root = fixture("path-edit-return");
+    let (view, mut cx) = open(cx, &root);
+
+    cx.simulate_keystrokes("cmd-l");
+    cx.simulate_input(&root.join("alpha").display().to_string());
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha"), "Return goes to a folder");
+
+    cx.simulate_keystrokes("cmd-l");
+    cx.simulate_input(&root.join("notes.txt").display().to_string());
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root, "a file opens its folder");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "with the file selected");
+
+    // A missing path: beep, keep the field, say why in the bar.
+    cx.simulate_keystrokes("cmd-l");
+    cx.simulate_input(&root.join("nothing-here").display().to_string());
+    settle(&view, &mut cx);
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(path_edit_text(&view, &cx).is_some(), "a missing path keeps the field open");
+    assert_eq!(dir(&view, &cx), root, "…and goes nowhere");
+    let calls = effect_calls(&mut cx);
+    assert!(calls.iter().any(|call| matches!(call, crate::effects::Call::Beep)), "the refusal beeps: {calls:?}");
+    let state = bar_state(&view, &mut cx);
+    let error = state.error.expect("the reason shows in the bar");
+    let text = error.text.to_string();
+    assert!(text.contains("nothing-here"), "the bar names the path: {text}");
+
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx), None, "Escape closes the field");
+    assert_eq!(dir(&view, &cx), root, "…without navigating");
+    let state = bar_state(&view, &mut cx);
+    assert!(state.error.is_none(), "the refusal goes with the field");
+}
+
+#[gpui::test]
+fn path_bar_double_click_edits_and_single_click_does_not(cx: &mut TestAppContext) {
+    let root = fixture("path-edit-click");
+    let (view, mut cx) = open(cx, &root);
+    let bar = cx.debug_bounds("bar-path").expect("path slot");
+    let at = gpui::point(bar.right() - px(8.), bar.center().y);
+
+    cx.simulate_click(at, Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx), None, "a single click does nothing");
+
+    double_click(&mut cx, at);
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx), Some(root.display().to_string()), "a double-click edits");
+
+    // A click on a segment still navigates and never opens the field.
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    let segment = cx.debug_bounds("path-segment-0").expect("first segment");
+    double_click(&mut cx, segment.center());
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx), None, "a segment is not empty space");
+}
+
+#[gpui::test]
+fn path_bar_escape_restores_focus_and_clicking_a_row_cancels(cx: &mut TestAppContext) {
+    let root = fixture("path-edit-leave");
+    let (view, mut cx) = open(cx, &root);
+    // Focus-out listeners only fire for an active window, as in the app.
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("cmd-l");
+    settle(&view, &mut cx);
+    let input_focus =
+        view.read_with(&cx, |w, cx| w.path_edit.as_ref().expect("editing").input.read(cx).focus_handle(cx));
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert_eq!(focused, Some(input_focus), "⌘L focuses the field");
+    cx.simulate_input(&format!("{}/alpha", root.display()));
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx), None);
+    assert_eq!(dir(&view, &cx), root, "Escape does not navigate");
+    let focused = cx.update(|window, cx| window.focused(cx));
+    let pane_focus = pane(&view, &cx).read_with(&cx, |pane, _| pane.focus_handle().clone());
+    assert_eq!(focused, Some(pane_focus), "Escape returns focus to the list");
+
+    cx.simulate_keystrokes("cmd-l");
+    settle(&view, &mut cx);
+    let row = cx.debug_bounds("row-alpha").expect("alpha row");
+    cx.simulate_click(row.center(), Default::default());
+    settle(&view, &mut cx);
+    let focused = cx.update(|window, cx| window.focused(cx));
+    let pane_focus = pane(&view, &cx).read_with(&cx, |pane, _| pane.focus_handle().clone());
+    assert_eq!(focused, Some(pane_focus), "the row click focuses the list");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "…and selects the row");
+    assert_eq!(path_edit_text(&view, &cx), None, "clicking a row cancels the edit");
+}
+
+#[gpui::test]
+fn palette_offers_edit_path(cx: &mut TestAppContext) {
+    let root = fixture("path-edit-palette");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">edit path");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx), Some(root.display().to_string()), "the palette command edits the path");
+}
+
 /// (number of columns, focused column, folder shown in column `k`, cursor name in column `k`).
 fn columns(
     view: &Entity<CrowWindow>,
