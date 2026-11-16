@@ -7869,3 +7869,28 @@ fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
     assert!(!selection.contains(&removed));
     assert!(elapsed < std::time::Duration::from_millis(50), "the batch apply took {elapsed:?}");
 }
+
+/// H4 #15: FSEvents can coalesce away the delete that follows a rename, leaving
+/// a row the disk no longer has. The quiet reconcile re-stats the paths the
+/// batch added; a delete inside that window drops the phantom.
+#[gpui::test]
+fn a_delete_lost_after_a_rename_is_reconciled(cx: &mut TestAppContext) {
+    let root = fixture("fuzz-reconcile");
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    let renamed = root.join("churn-renamed-000525");
+    std::fs::write(&renamed, "x").expect("write the rename target");
+    folder.update(&mut cx, |folder, _| folder.queue_changes(vec![renamed.clone()]));
+    // Let the 100 ms poll apply the batch, but not the 300 ms reconcile.
+    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.run_until_parked();
+    assert!(rows(&view, &cx).iter().any(|(name, _)| name == "churn-renamed-000525"), "the rename row was added");
+    // The delete's watcher event is lost; only the reconcile can see it.
+    std::fs::remove_file(&renamed).expect("remove the rename target");
+    cx.executor().advance_clock(Duration::from_millis(350));
+    cx.run_until_parked();
+    assert!(
+        !rows(&view, &cx).iter().any(|(name, _)| name == "churn-renamed-000525"),
+        "the quiet reconcile dropped the phantom row"
+    );
+}

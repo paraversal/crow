@@ -27,6 +27,9 @@ use crate::style::kind;
 const PARTIAL_EVERY: Duration = Duration::from_millis(50);
 /// More changes than this at once: relisting is cheaper than diffing.
 const MAX_DIFF: usize = 500;
+/// Wait this long for the watcher stream to go quiet, then re-stat the paths
+/// recent batches added (FSEvents can coalesce away a follow-up delete).
+const RECONCILE_DELAY: Duration = Duration::from_millis(300);
 
 pub enum FolderEvent {
     /// The cursor moved to another item (or to none).
@@ -236,6 +239,13 @@ pub struct Folder {
     sort_delay: Duration,
     _watcher: Option<FolderWatcher>,
     error: Option<SharedString>,
+    /// Paths a watcher batch added; re-stat them once the stream is quiet,
+    /// because FSEvents may coalesce away the delete that follows a rename.
+    reconcile: Vec<PathBuf>,
+    /// Bumped per batch, so only the last batch's quiet timer reconciles.
+    reconcile_gen: u64,
+    /// True while a reconcile timer or stat is in flight (Settle waits for it).
+    reconciling: bool,
     _poll: Task<()>,
 }
 
@@ -297,6 +307,9 @@ impl Folder {
             sort_delay: Duration::ZERO,
             _watcher: watcher,
             error: None,
+            reconcile: Vec::new(),
+            reconcile_gen: 0,
+            reconciling: false,
             _poll: poll,
         };
         folder.load(cx);
@@ -317,9 +330,12 @@ impl Folder {
         self.loading
     }
 
-    /// True while this folder or any folder open inside it is still listing.
+    /// True while this folder or any folder open inside it is still listing,
+    /// or a watcher batch is waiting to reconcile its additions.
     pub fn is_loading_deep(&self, cx: &gpui::App) -> bool {
-        self.is_loading() || self.children.values().any(|child| child.folder.read(cx).is_loading_deep(cx))
+        self.is_loading()
+            || self.reconciling
+            || self.children.values().any(|child| child.folder.read(cx).is_loading_deep(cx))
     }
 
     pub fn error(&self) -> Option<&SharedString> {
@@ -834,6 +850,10 @@ impl Folder {
     /// been read so far is shown (sorted) every 50 ms until done.
     fn load(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
+        // A fresh listing supersedes any pending reconcile of watcher additions.
+        self.reconcile_gen += 1;
+        self.reconcile.clear();
+        self.reconciling = false;
         self.loading = true;
         let (generation, dir, hidden, sort) = (self.generation, self.dir.clone(), self.show_hidden, self.sort);
         let (tx, mut rx) = unbounded();
@@ -1217,9 +1237,67 @@ impl Folder {
             }
             this.update(cx, |this, cx| {
                 if this.generation == generation && this.sort == sort {
+                    let added: Vec<PathBuf> = stats
+                        .iter()
+                        .filter(|(path, entry)| {
+                            entry.is_some() && !this.entries.iter().any(|existing| &existing.path == path)
+                        })
+                        .map(|(path, _)| path.clone())
+                        .collect();
                     let updated = crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind);
                     this.replace_entries_after(updated, Some(&stats), cx);
+                    if !this.reconcile.is_empty() || !added.is_empty() {
+                        this.schedule_reconcile(added, cx);
+                    }
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Re-stat the paths recent watcher batches added, once the stream has been
+    /// quiet for `RECONCILE_DELAY`. FSEvents coalesces events and can lose the
+    /// delete that follows a rename, which would leave a row forever; the stat
+    /// is off the main thread and only touches the paths that were added.
+    fn schedule_reconcile(&mut self, added: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.reconcile.extend(added);
+        self.reconcile_gen += 1;
+        self.reconciling = true;
+        let generation = self.reconcile_gen;
+        let (dir, hidden, sort) = (self.dir.clone(), self.show_hidden, self.sort);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RECONCILE_DELAY).await;
+            let paths = this
+                .update(cx, |this, _| {
+                    if this.reconcile_gen != generation {
+                        return None;
+                    }
+                    Some(std::mem::take(&mut this.reconcile))
+                })
+                .ok()
+                .flatten();
+            let Some(paths) = paths else { return };
+            if paths.is_empty() {
+                this.update(cx, |this, _| {
+                    if this.reconcile_gen == generation {
+                        this.reconciling = false;
+                    }
+                })
+                .ok();
+                return;
+            }
+            let stats = cx.background_spawn(async move { crow_fs::stat_changes(&dir, &paths, hidden) }).await;
+            this.update(cx, |this, cx| {
+                if this.reconcile_gen != generation {
+                    return;
+                }
+                this.reconciling = false;
+                if this.sort != sort {
+                    return;
+                }
+                let updated = crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind);
+                this.replace_entries_after(updated, Some(&stats), cx);
             })
             .ok();
         })
