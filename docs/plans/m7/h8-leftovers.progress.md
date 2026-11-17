@@ -1,5 +1,5 @@
 # M7 H8 — leftovers progress
-Branch: m7-h8-leftovers · PR: none · Last updated: 2026-11-17 · State: Ready for critique
+Branch: m7-h8-leftovers · PR: none · Last updated: 2026-11-17 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -39,3 +39,20 @@ Branch: m7-h8-leftovers · PR: none · Last updated: 2026-11-17 · State: Ready 
 
 ## Next
 Ready for critique. The critic should hand-check the narrow sidebar hint drop order and the context menu's Open key, and decide whether `context_menu::shortcut` should use `keys::binding_for`.
+
+## Critique
+Critic session: 2026-11-17 · Base: `main` @ 3a069fc · Head reviewed: 0b19ced (agent) + 4a0ae4be3d (critique)
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | The `binding_for` doc claimed the same rule as GPUI's `DispatchTree::highest_precedence_binding_for_action`, but the branch adds a predicate check GPUI does not make (GPUI only checks that the binding's keystrokes resolve to the action). The check is what keeps the search results' Return from standing in for the sidebar's →. | `keys.rs:78` | code | fix | fixed (4a0ae4be3d) |
+| C2 | The L4 hand check says the context menu's `shortcut` "takes the last binding (⌘↓)". The file list's menu does (driven: Open ⌘↓); the sidebar's menu is built with `KeyScope::Sidebar` and shows L with Vim on (↩ without). Both keys work; pre-existing. | `context_menu.rs:197`, sidebar right-click | UX / record | note | left (pre-existing; the record now names the surface) |
+| C3 | `context_menu::shortcut` still has the scope-shadowing pattern C1 fixed in `binding_for`: it can pick another scope's binding when the keystrokes resolve to the same action. Visible keys do not change today (list menu ⌘↓, sidebar menu L/↩). | `context_menu.rs:197` | code | note | left (the helper needs single-keystroke bindings; the sidebar menu's keys are valid, and changing them needs a user decision) |
+| C4 | `palette_row_names` duplicates `palette_rows` (test-only; one field apart). | `window.rs:3622,3639` | code sense | note | left (12 lines; a shared helper would touch many call sites) |
+| C5 | `HintKind::Merged`'s one-binding fallback is unreachable with the shipped keymaps and untested. | `bottom_bar.rs:443` | code | note | left (harmless; it keeps the hint if a future keymap unbinds one key) |
+| C6 | The palette's home row now displays "jules" but the fuzzy matcher still scores the path label "~": typing `jul` shows "No folders match 'jul'" (bundle). Pre-existing matcher behavior; the new name makes it noticeable. | `palette.rs:712`, bundle | UX | note | left (L3 is display-only; matching the name line would change folder matching for every row and needs a user decision) |
+| C7 | The "to list" hint merges Tab (`SwitchFocus`) and → (`OpenSelection`); pressing → from the sidebar opens the selected folder and focuses the list, not just moves focus. The plan/Q1 asked for "→ to the list"; the behavior is pre-existing. | `bottom_bar.rs:232`, bundle | UX | note | left (plan wording; the key does land focus in the list) |
+
+Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ 619 passed, 1 ignored (449 app, 94 core, 44 fs, 6 macos, 20 search, 6 theme); the four new tests pass. Bench not run: no listing, scroll or first-paint path changed (the palette's name field and the sidebar hint text are not on the bench path; the plan says bench not needed).
+Looked at: branch bundle (`target/bundle/Crow.app`, Vim on, temp config) on `/tmp/crow-h8-check` in FireBox (dark) and Solarized Light at 1200×760 and 640×760: sidebar hints for a favorite, a Recent row and the volume; the 640 px drop order (groups and to-list stay, reorder/remove drop); the palette's home row (name `jules`, path `~`) in both themes; typing `jk` into the palette, filter, rename and search; File ▸ Open ⌘O; the list context menu Open ⌘↓; the sidebar context menu Open L. Not looked at: VoiceOver (the new text is in existing roles/labels; no new roles), the 100k fixture (no listing path changed), the context menu without Vim (traced: the list menu stays ⌘↓, the sidebar menu shows ↩).
+Verdict: Better. All five leftovers are addressed; L1's hint order and L5's typing are visible improvements, L2 is correct at the boundaries, and L3 reads correctly in both themes. The only code beyond the plan is the `binding_for` predicate fix, which the → hint needs. Notes C2, C3 and C6 are pre-existing or outside L3's display scope.
