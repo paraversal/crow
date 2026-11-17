@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crow_core::motion::Fx;
-use crow_core::{HintsMode, SidebarEdit, Tabs, TipId, ViewMode, ZeroMatchStreak};
+use crow_core::{SidebarEdit, Tabs, TipId, TipsMode, ViewMode, ZeroMatchStreak};
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role,
     ScrollHandle, SharedString, Subscription, TitlebarOptions, Toggled, Window, WindowBounds, WindowOptions, div, img,
@@ -31,10 +31,11 @@ use crate::preview;
 use crate::search::{SearchEvent, SearchView};
 use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::style::{
-    BAND_HEIGHT, active_selection, color, color_alpha, highlight_text, icon, truncate_middle_with_ranges, ui_font,
+    BAND_HEIGHT, active_selection, color, color_alpha, cursor_ring, highlight_text, icon, truncate_middle_with_ranges,
+    ui_font,
 };
 use crate::text_input::{TextInput, TextInputEvent};
-use crate::ui::{self, Ui, reload_theme};
+use crate::ui::{self, SettingChange, Ui, reload_theme};
 use crow_fs::Entry;
 use crow_fs::ops::{Plan, Request, Resolution};
 use std::collections::HashMap;
@@ -344,6 +345,14 @@ impl CrowWindow {
         });
         let focus = pane.read(cx).focus_handle().clone();
         window.focus(&focus, cx);
+        let mut sheet = None;
+        if !bench && crate::onboarding::take_pending(cx) {
+            let focus = cx.focus_handle();
+            let show = cx.focus_handle();
+            let no = cx.focus_handle();
+            window.focus(&focus, cx);
+            sheet = Some(Sheet::Onboarding { focus, show, no });
+        }
         let owner = cx.entity_id();
         let subscriptions = vec![
             cx.observe(&pane, |_, _, cx| cx.notify()),
@@ -374,7 +383,7 @@ impl CrowWindow {
             sidebar,
             bench,
             show_hidden,
-            sheet: None,
+            sheet,
             show_activity: false,
             why: None,
             picker: None,
@@ -411,6 +420,12 @@ impl CrowWindow {
         let mut allowed: Vec<(&'static str, FocusHandle)> = Vec::new();
         if let Some(sheet) = &self.sheet {
             allowed.push(("sheet", sheet.focus().clone()));
+            // The first-launch sheet's two choices are its tab ring; the render
+            // invariant must not pull focus back to the panel.
+            if let Sheet::Onboarding { show, no, .. } = sheet {
+                allowed.push(("sheet choice", show.clone()));
+                allowed.push(("sheet choice", no.clone()));
+            }
         } else if let Some(palette) = &self.palette {
             allowed.push(("palette", palette.input.read(cx).focus_handle(cx)));
         } else if let Some(picker) = &self.picker {
@@ -1193,6 +1208,13 @@ impl CrowWindow {
         }
     }
 
+    /// "Don't show tips" on the card: close it and mute every later tip. Key
+    /// hints stay as the `hints` setting has them.
+    fn mute_tips(&mut self, cx: &mut Context<Self>) {
+        self.close_tip(cx);
+        ui::set_setting(SettingChange::Tips(TipsMode::Off), cx);
+    }
+
     /// States a tip must not appear over, and that close one already up.
     fn tip_blocked(&self, cx: &App) -> bool {
         self.sheet.is_some()
@@ -1274,6 +1296,12 @@ enum Sheet {
     StopOperation {
         focus: FocusHandle,
     },
+    /// The first launch asks whether tips should show.
+    Onboarding {
+        focus: FocusHandle,
+        show: FocusHandle,
+        no: FocusHandle,
+    },
 }
 
 impl Sheet {
@@ -1281,7 +1309,8 @@ impl Sheet {
         match self {
             Sheet::Conflicts { focus, .. }
             | Sheet::ConfirmDelete { focus, .. }
-            | Sheet::StopOperation { focus, .. } => focus,
+            | Sheet::StopOperation { focus, .. }
+            | Sheet::Onboarding { focus, .. } => focus,
         }
     }
 }
@@ -1478,8 +1507,37 @@ impl CrowWindow {
     }
 
     fn close_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Escape or a click outside the first-launch sheet keeps the default:
+        // record that it was asked, leave `tips` as the file has it.
+        if matches!(self.sheet, Some(Sheet::Onboarding { .. })) {
+            let show = cx.global::<Ui>().settings.tips == TipsMode::Auto;
+            crate::onboarding::answer(show, cx);
+        }
         self.sheet = None;
         self.focus_center(window, cx);
+        cx.notify();
+    }
+
+    /// The first-launch sheet's answer: record it, write `tips`, close.
+    fn choose_tips(&mut self, show: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.sheet = None;
+        crate::onboarding::answer(show, cx);
+        ui::set_setting(SettingChange::Tips(if show { TipsMode::Auto } else { TipsMode::Off }), cx);
+        self.focus_center(window, cx);
+        cx.notify();
+    }
+
+    fn move_onboarding_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Sheet::Onboarding { show, no, .. }) = &self.sheet else { return };
+        let (show, no) = (show.clone(), no.clone());
+        let target = if forward {
+            if show.is_focused(window) { no } else { show }
+        } else if no.is_focused(window) {
+            show
+        } else {
+            no
+        };
+        window.focus(&target, cx);
         cx.notify();
     }
 
@@ -1498,6 +1556,13 @@ impl CrowWindow {
             }
             Some(Sheet::StopOperation { .. }) => {
                 stop_then_quit(cx);
+                return;
+            }
+            Some(Sheet::Onboarding { no, .. }) => {
+                // Return activates the focused choice; the panel focus means the
+                // default, Show tips.
+                let show_tips = !no.is_focused(window);
+                self.choose_tips(show_tips, window, cx);
                 return;
             }
             None => {}
@@ -1520,7 +1585,7 @@ impl CrowWindow {
         }
     }
 
-    fn render_sheet(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    fn render_sheet(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let sheet = self.sheet.as_ref()?;
         let theme = cx.global::<Ui>().theme.clone();
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
@@ -1528,12 +1593,15 @@ impl CrowWindow {
             Some(keys) => format!("This can't be undone. Move to Trash ({keys}) can."),
             None => "This can't be undone. Move to Trash can.".to_owned(),
         };
-        let button = |id: &'static str, label: String, primary: bool| {
+        let button = |id: &'static str, label: String, primary: bool, focus: Option<&FocusHandle>| {
+            let focused = focus.is_some_and(|focus| focus.is_focused(window));
             div()
                 .id(id)
                 .debug_selector(move || id.into())
                 .role(Role::Button)
                 .aria_label(label.clone())
+                .when_some(focus, |button, focus| button.track_focus(focus).tab_stop(true))
+                .when(focused, |button| button.shadow(cursor_ring(&theme)))
                 .px_3()
                 .py_1()
                 .rounded_md()
@@ -1563,11 +1631,11 @@ impl CrowWindow {
                                 .justify_end()
                                 .gap_2()
                                 .child(
-                                    button("sheet-cancel", "Cancel".into(), false)
+                                    button("sheet-cancel", "Cancel".into(), false, None)
                                         .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
                                 )
                                 .child(
-                                    button("sheet-confirm", "Delete".into(), true)
+                                    button("sheet-confirm", "Delete".into(), true, None)
                                         .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
                                 ),
                         )
@@ -1596,17 +1664,42 @@ impl CrowWindow {
                                 .justify_end()
                                 .gap_2()
                                 .child(
-                                    button("sheet-cancel", "Keep Running".into(), false)
+                                    button("sheet-cancel", "Keep Running".into(), false, None)
                                         .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
                                 )
                                 .child(
-                                    button("sheet-confirm", confirm.into(), true)
+                                    button("sheet-confirm", confirm.into(), true, None)
                                         .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
                                 ),
                         )
                         .into_any_element(),
                 )
             }
+            Sheet::Onboarding { show, no, .. } => (
+                "Show tips as you go?".to_owned(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(div().text_color(color(muted)).child(
+                        "Crow can point out a few keys the first time they matter. You can change this later in Settings.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                button("onboarding-no", "No tips".into(), false, Some(no))
+                                    .on_click(cx.listener(|this, _, window, cx| this.choose_tips(false, window, cx))),
+                            )
+                            .child(
+                                button("onboarding-show", "Show tips".into(), true, Some(show))
+                                    .on_click(cx.listener(|this, _, window, cx| this.choose_tips(true, window, cx))),
+                            ),
+                    )
+                    .into_any_element(),
+            ),
             Sheet::Conflicts { plan, choices, .. } => {
                 let into = plan
                     .items
@@ -1675,19 +1768,19 @@ impl CrowWindow {
                                 .flex()
                                 .gap_2()
                                 .pt_2()
-                                .child(button("all-keep", "Keep Both for All".into(), false).on_click(
+                                .child(button("all-keep", "Keep Both for All".into(), false, None).on_click(
                                     cx.listener(|this, _, _, cx| this.set_choice(None, Resolution::KeepBoth, cx)),
                                 ))
-                                .child(button("all-skip", "Skip All".into(), false).on_click(
+                                .child(button("all-skip", "Skip All".into(), false, None).on_click(
                                     cx.listener(|this, _, _, cx| this.set_choice(None, Resolution::Skip, cx)),
                                 ))
                                 .child(div().flex_1())
                                 .child(
-                                    button("sheet-cancel", "Cancel".into(), false)
+                                    button("sheet-cancel", "Cancel".into(), false, None)
                                         .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
                                 )
                                 .child(
-                                    button("sheet-confirm", "Continue".into(), true)
+                                    button("sheet-confirm", "Continue".into(), true, None)
                                         .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
                                 ),
                         )
@@ -1695,6 +1788,12 @@ impl CrowWindow {
                 )
             }
         };
+        let onboarding_tab = cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+            if event.keystroke.key == "tab" {
+                this.move_onboarding_focus(!event.keystroke.modifiers.shift, window, cx);
+                cx.stop_propagation();
+            }
+        });
         Some(chrome::sheet(
             chrome::sheet_panel("sheet", SheetWidth::Narrow, &theme)
                 .aria_label(title.clone())
@@ -1707,7 +1806,11 @@ impl CrowWindow {
                 .on_action(
                     cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_sheet(window, cx)),
                 )
+                .when(matches!(sheet, Sheet::Onboarding { .. }), |panel| panel.on_key_down(onboarding_tab))
                 .p_4()
+                // The first-launch question sits a little lower than the other
+                // sheets, so it reads as an invitation rather than an alert.
+                .when(matches!(sheet, Sheet::Onboarding { .. }), |panel| panel.mt_2())
                 .flex()
                 .flex_col()
                 .gap_3()
@@ -3318,7 +3421,7 @@ impl Render for CrowWindow {
         // blocking state started (rename, drag, overlay, activity).
         if self.tip.is_some()
             && (self.tip_blocked(cx)
-                || cx.global::<Ui>().settings.hints == HintsMode::Off
+                || cx.global::<Ui>().settings.tips_muted()
                 || crate::tips::owner(cx) != Some(cx.entity_id()))
         {
             self.tip = None;
@@ -3334,11 +3437,12 @@ impl Render for CrowWindow {
                     f32::from(window.viewport_size().width),
                     cx.global::<Ui>().feedback.mode,
                     cx.listener(|this, _, _, cx| this.close_tip(cx)),
+                    cx.listener(|this, _, _, cx| this.mute_tips(cx)),
                 )
             }),
             None => None,
         };
-        let sheet = self.render_sheet(cx);
+        let sheet = self.render_sheet(window, cx);
         let activity = self.show_activity.then(|| self.render_activity(cx));
         let why = self.render_why(cx);
         let picker = self.render_picker(cx);

@@ -43,6 +43,8 @@ fi
 
 work=$(mktemp -d /tmp/crow-shot.XXXXXX)
 mkdir -p "$work/config" "$work/state" "$root/target/shots"
+# Past the first-launch sheet: a shot captures the window, not onboarding.
+printf '{"tips_choice": true}\n' >"$work/state/onboarding.json"
 cat >"$work/config/settings.toml" <<EOF
 theme = "$theme"
 keymap = "$keymap"

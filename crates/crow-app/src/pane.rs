@@ -26,14 +26,15 @@ use gpui::{
     Action, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter,
     ExternalDragPayload, ExternalPaths, FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle,
-    SharedString, SpringAnimation, SpringConfig, Subscription, UniformListScrollHandle, Window, canvas, div, img,
-    point, prelude::*, px, uniform_list,
+    ScrollStrategy, SharedString, SpringAnimation, SpringConfig, Subscription, UniformListScrollHandle, Window, canvas,
+    div, img, point, prelude::*, px, uniform_list,
 };
 
 use crate::actions::{
     BeginJump, BeginMark, ClearFilter, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, EnterRow,
-    ExtendDown, ExtendUp, MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFile,
-    NewFolder, OpenSelection, PasteFiles, PasteMoveFiles, QuickLook, Rename, SelectAll, ShowInFinder, StartFilter,
+    ExtendDown, ExtendUp, FilterFocusField, FilterFocusResults, MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast,
+    MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection, PasteFiles, PasteMoveFiles, QuickLook, Rename, SelectAll,
+    ShowInFinder, StartFilter,
 };
 use crate::context_menu::{MenuKind, MenuState};
 use crate::extensions::Ext;
@@ -566,7 +567,7 @@ impl Pane {
     /// inactive fill, mirroring `render_column_rows`'s predicate.
     #[cfg(test)]
     pub fn selection_fills(&self, window: &gpui::Window, cx: &gpui::App) -> (usize, usize) {
-        let active = self.focus.is_focused(window) || self.filtering.is_some();
+        let active = self.focus.is_focused(window);
         let mut accent = 0;
         let mut inactive = 0;
         for (k, folder) in self.folders.iter().enumerate() {
@@ -1123,6 +1124,31 @@ impl Pane {
         }
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// ↓ in the filter field: enter the matches on the current row, like the search
+    /// field. With no matches nothing happens and the field keeps focus.
+    fn filter_focus_results(&mut self, _: &FilterFocusResults, window: &mut Window, cx: &mut Context<Self>) {
+        let folder = self.focused_folder().clone();
+        if folder.read(cx).row_count() == 0 {
+            return;
+        }
+        self.focus_matches(window, cx);
+        if let Some(ix) = folder.read(cx).cursor_ix() {
+            folder.read(cx).scroll().scroll_to_item(ix, ScrollStrategy::Top);
+        }
+    }
+
+    /// ↑ on the first filtered row: back to the filter field. On a later row it
+    /// moves up as usual. Vim's `k` stays `MoveUp`, as in search.
+    fn filter_focus_field(&mut self, _: &FilterFocusField, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focused_folder().read(cx).cursor_ix() == Some(0) {
+            if let Some(focus) = self.filter_focus(cx) {
+                window.focus(&focus, cx);
+            }
+        } else {
+            self.move_up(&MoveUp, window, cx);
+        }
     }
 
     /// The query in the open filter field, if any (U5 and search escalation read it).
@@ -1941,7 +1967,7 @@ impl Pane {
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
         let rule = color_alpha(theme.role("fg"), 0x30);
-        let active = self.focus.is_focused(window) || self.filtering.is_some();
+        let active = self.focus.is_focused(window);
         let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let column_cx = ColumnContext { kind: &kind, time: &format_time };
@@ -2360,7 +2386,7 @@ impl Pane {
         let mode = ui.feedback.mode;
         let now = Instant::now();
         // Spec: only the focused column shows its selection in the accent color.
-        let active = k == self.focused && (self.focus.is_focused(window) || self.filtering.is_some());
+        let active = k == self.focused && self.focus.is_focused(window);
         let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let subtle = color(theme.role("fg-subtle"));
@@ -2655,8 +2681,7 @@ impl Pane {
                 (None, None, None)
             };
             let has_field = field.is_some();
-            let glide =
-                mode == Effective::Full && k == focused && (self.focus.is_focused(window) || self.filtering.is_some());
+            let glide = mode == Effective::Full && k == focused && self.focus.is_focused(window);
             let body = match no_matches {
                 Some(block) => block,
                 None => {
@@ -3101,7 +3126,7 @@ impl Render for Pane {
         {
             window.request_animation_frame();
         }
-        let glide = mode == Effective::Full && (self.focus.is_focused(window) || self.filtering.is_some());
+        let glide = mode == Effective::Full && self.focus.is_focused(window);
         // The field is inside the list now: while it has focus, the list's actions must be
         // off the focus path so AppKit's menu equivalents let those keys through.
         let filter_focused = self
@@ -3274,6 +3299,7 @@ impl Render for Pane {
             .when(self.renaming.is_none() && !filter_focused, |list| {
                 list.on_action(cx.listener(Self::move_up))
                     .on_action(cx.listener(Self::move_down))
+                    .on_action(cx.listener(Self::filter_focus_field))
                     .on_action(cx.listener(Self::extend_up))
                     .on_action(cx.listener(Self::extend_down))
                     .on_action(cx.listener(Self::move_to_first))

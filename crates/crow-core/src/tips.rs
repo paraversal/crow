@@ -110,8 +110,9 @@ impl TipBook {
     }
 
     /// Checks 1–5 of the plan; the window checks its own blocking states.
-    pub fn may_show(&self, id: TipId, now: Instant, uses: u32, hints_off: bool) -> bool {
-        !hints_off
+    /// `muted` is `Settings::tips_muted` (`tips = "off"` or `hints = "off"`).
+    pub fn may_show(&self, id: TipId, now: Instant, uses: u32, muted: bool) -> bool {
+        !muted
             && !self.state.is_retired(id)
             && uses == 0
             && self.on_screen.is_none()
@@ -219,11 +220,11 @@ mod tests {
     }
 
     #[test]
-    fn tip_book_refuses_when_key_used_or_hints_off() {
+    fn tip_book_refuses_when_key_used_or_muted() {
         let now = Instant::now();
         let book = TipBook::new(TipState::default());
         assert!(!book.may_show(TipId::Filter, now, 1, false), "the key is already known");
-        assert!(!book.may_show(TipId::Filter, now, 0, true), "hints = off");
+        assert!(!book.may_show(TipId::Filter, now, 0, true), "tips = off or hints = off");
         assert!(book.may_show(TipId::Filter, now, 0, false));
     }
 

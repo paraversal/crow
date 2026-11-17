@@ -284,6 +284,17 @@ fn open_sized(cx: &mut TestAppContext, dir: &Path, width: f32, height: f32) -> (
 }
 
 fn open_with(cx: &mut TestAppContext, dir: &Path, options: WindowOptions) -> (Entity<CrowWindow>, VisualTestContext) {
+    open_with_before(cx, dir, options, |_| {})
+}
+
+/// `open_with`, with `before` run after the test globals exist and before the
+/// window is created (a test that needs a different first-launch state).
+fn open_with_before(
+    cx: &mut TestAppContext,
+    dir: &Path,
+    options: WindowOptions,
+    before: impl FnOnce(&mut App),
+) -> (Entity<CrowWindow>, VisualTestContext) {
     let trash =
         dir.parent().unwrap_or(dir).join(format!(".trash-{}", dir.file_name().unwrap_or_default().to_string_lossy()));
     std::fs::create_dir_all(&trash).expect("create test trash");
@@ -294,6 +305,7 @@ fn open_with(cx: &mut TestAppContext, dir: &Path, options: WindowOptions) -> (En
         cx.bind_keys(crate::actions::vim_keymap());
         cx.bind_keys(crate::text_input::keymap());
         cx.bind_keys(crate::settings_window::keymap());
+        before(cx);
     });
     let dir = dir.to_path_buf();
     let window: WindowHandle<CrowWindow> = cx
@@ -4895,7 +4907,7 @@ fn filter_exposes_match_ranges_per_row(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn filter_arrows_and_return_act_on_matching_rows(cx: &mut TestAppContext) {
+fn filter_down_enters_the_matches_and_arrows_move(cx: &mut TestAppContext) {
     let root = fixture("filter-enter");
     let (view, mut cx) = open(cx, &root);
 
@@ -4905,15 +4917,14 @@ fn filter_arrows_and_return_act_on_matching_rows(cx: &mut TestAppContext) {
     assert_eq!(rows(&view, &cx).iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["alpha", "beta"]);
 
     cx.simulate_keystrokes("down");
-    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "arrows move within the matches");
-    cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
-    assert_eq!(dir(&view, &cx), root, "Return in the field does not open anything");
-    assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "the filter stays");
-    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "the list has focus on the selected match");
     let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
-    let list_focused = cx.update(|window, _| list_focus.is_focused(window));
-    assert!(list_focused, "Return moves focus into the matches");
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "↓ moves focus into the matches");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "the first ↓ lands on the current match");
+    assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "the filter stays");
+
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "the next ↓ moves within the matches");
     cx.simulate_keystrokes("cmd-down");
     settle(&view, &mut cx);
     assert_eq!(dir(&view, &cx), root.join("beta"), "the list's keys open the match");
@@ -4922,6 +4933,82 @@ fn filter_arrows_and_return_act_on_matching_rows(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-up");
     settle(&view, &mut cx);
     assert_eq!(rows(&view, &cx).len(), 3, "going back shows the whole folder again");
+}
+
+#[gpui::test]
+fn filter_up_from_the_first_row_returns_to_the_field(cx: &mut TestAppContext) {
+    let root = fixture("filter-up-field");
+    let (view, mut cx) = open(cx, &root);
+    let field_focus = |cx: &mut VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.filter_focus(cx));
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("a");
+    settle(&view, &mut cx);
+    let field = field_focus(&mut cx).expect("filter field");
+    assert!(cx.update(|window, _| field.is_focused(window)), "the field starts focused");
+
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    cx.simulate_keystrokes("up");
+    settle(&view, &mut cx);
+    let field = field_focus(&mut cx).expect("filter field");
+    assert!(cx.update(|window, _| field.is_focused(window)), "↑ on the first row returns to the field");
+
+    cx.simulate_input("l");
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.filter_query(cx)).as_deref(), Some("al"));
+    assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)]);
+
+    cx.simulate_keystrokes("up");
+    settle(&view, &mut cx);
+    let field = field_focus(&mut cx).expect("filter field");
+    assert!(cx.update(|window, _| field.is_focused(window)), "↑ in the field does nothing");
+}
+
+#[gpui::test]
+fn filter_up_on_a_later_row_moves_up(cx: &mut TestAppContext) {
+    let root = fixture("filter-up-row");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("a");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down down");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+
+    cx.simulate_keystrokes("up");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "↑ moves up before it leaves the list");
+    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "the list keeps focus above the first row");
+}
+
+#[gpui::test]
+fn filter_field_and_list_never_look_focused_together(cx: &mut TestAppContext) {
+    let root = fixture("filter-one-focus");
+    let (view, mut cx) = open(cx, &root);
+    let fills =
+        |cx: &mut VisualTestContext| cx.update(|window, cx| view.read(cx).pane().read(cx).selection_fills(window, cx));
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("a");
+    settle(&view, &mut cx);
+    assert_eq!(fills(&mut cx), (0, 1), "the field owns focus; the match is inactive");
+
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    assert_eq!(fills(&mut cx), (1, 0), "the list owns focus and the accent fill");
+}
+
+#[gpui::test]
+fn filter_down_with_no_matches_stays_in_the_field(cx: &mut TestAppContext) {
+    let root = fixture("filter-down-no-match");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("zzz");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    let field = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_focus(cx)).expect("filter field");
+    assert!(cx.update(|window, _| field.is_focused(window)), "↓ with no matches does nothing");
 }
 
 #[gpui::test]
@@ -5004,6 +5091,25 @@ fn filter_letters_stay_in_the_field_in_the_vim_layer(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn filter_vim_k_at_the_first_row_stays_in_the_list(cx: &mut TestAppContext) {
+    let root = fixture("filter-vim-k");
+    let (view, mut cx) = open(cx, &root);
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("a");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+
+    cx.simulate_keystrokes("k");
+    settle(&view, &mut cx);
+    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "Vim k at the first row does not leave the list");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+}
+
+#[gpui::test]
 fn filter_narrows_the_focused_column(cx: &mut TestAppContext) {
     let root = fixture("filter-columns");
     let (view, mut cx) = open(cx, &root);
@@ -5014,6 +5120,16 @@ fn filter_narrows_the_focused_column(cx: &mut TestAppContext) {
     cx.simulate_input("al");
     settle(&view, &mut cx);
     assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)]);
+
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "↓ enters the focused column");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    cx.simulate_keystrokes("up");
+    settle(&view, &mut cx);
+    let field = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_focus(cx)).expect("filter field");
+    assert!(cx.update(|window, _| field.is_focused(window)), "↑ returns to the column's field");
 
     cx.simulate_keystrokes("escape");
     settle(&view, &mut cx);
@@ -7023,6 +7139,32 @@ fn tip_got_it_retires_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tip_no_tips_mutes_and_closes(cx: &mut TestAppContext) {
+    let root = long_fixture("tip-no-tips", 250);
+    let (view, mut cx) = open(cx, &root);
+    scroll(&mut cx, "file-list", 60.);
+    settle(&view, &mut cx);
+    assert_eq!(tip(&view, &cx), Some(TipId::Filter), "the scroll offers the tip");
+
+    let elements = cx.update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec());
+    let no = elements.iter().find(|element| element.selector.as_deref() == Some("tip-no-tips")).expect("the link");
+    assert_eq!(no.role, Some(Role::Button));
+    assert_eq!(no.label.as_deref(), Some("Don't show tips"));
+
+    let button = cx.debug_bounds("tip-no-tips").expect("the link is laid out");
+    cx.simulate_click(button.center(), Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(tip(&view, &cx), None, "the link closes the card");
+    assert_eq!(cx.read_global::<Ui, _>(|ui, _| ui.settings.tips), TipsMode::Off);
+    let settings = config_dir(&cx).join("settings.toml");
+    wait_for_file(&mut cx, &settings, "tips = \"off\"");
+
+    offer(&view, TipId::Search, &mut cx);
+    settle(&view, &mut cx);
+    assert_eq!(tip(&view, &cx), None, "the next tip does not appear");
+}
+
+#[gpui::test]
 fn tip_does_not_cover_the_last_row(cx: &mut TestAppContext) {
     let root = long_fixture("tip-inset", 250);
     let (view, mut cx) = open(cx, &root);
@@ -7073,6 +7215,26 @@ fn tip_hints_off_suppresses_and_hides(cx: &mut TestAppContext) {
     write_config(&view, &mut cx, "settings.toml", "hints = \"off\"\n");
     settle(&view, &mut cx);
     assert_eq!(tip(&view, &cx), None, "turning hints off hides a tip on screen");
+}
+
+#[gpui::test]
+fn tip_tips_off_suppresses_and_hides_but_keeps_hints(cx: &mut TestAppContext) {
+    let root = long_fixture("tip-tips-off", 250);
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "settings.toml", "tips = \"off\"\n");
+    scroll(&mut cx, "file-list", 60.);
+    settle(&view, &mut cx);
+    assert_eq!(tip(&view, &cx), None, "tips = off shows no tips");
+    assert!(hint_labels(&bar_state(&view, &mut cx)).iter().any(|label| label == "filter"), "hints stay");
+
+    write_config(&view, &mut cx, "settings.toml", "tips = \"auto\"\n");
+    scroll(&mut cx, "file-list", 60.);
+    settle(&view, &mut cx);
+    assert_eq!(tip(&view, &cx), Some(TipId::Filter), "auto allows tips");
+
+    write_config(&view, &mut cx, "settings.toml", "tips = \"off\"\n");
+    settle(&view, &mut cx);
+    assert_eq!(tip(&view, &cx), None, "turning tips off hides a tip on screen");
 }
 
 #[gpui::test]
@@ -8898,19 +9060,19 @@ fn filter_enter_acts_on_the_highlighted_row(cx: &mut TestAppContext) {
     cx.simulate_input("a");
     settle(&view, &mut cx);
 
-    // Down in the field moves the cursor with the highlight, so Return has a target.
+    // Down in the field enters the matches on the current row, so Return has a target.
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "↓ moves focus into the matches");
+    let cursor = pane(&view, &cx).read_with(&cx, |p, cx| p.cursor_entry(cx).map(|entry| entry.name.clone()));
+    assert_eq!(cursor.as_deref(), Some("alpha"), "the cursor follows the highlight");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+
     cx.simulate_keystrokes("down");
     let cursor = pane(&view, &cx).read_with(&cx, |p, cx| p.cursor_entry(cx).map(|entry| entry.name.clone()));
     assert_eq!(cursor.as_deref(), Some("beta"), "the cursor follows the highlight");
     assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
-
-    // Return moves focus into the matches without moving the cursor.
-    cx.simulate_keystrokes("enter");
-    settle(&view, &mut cx);
-    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
-    assert!(cx.update(|window, _| list_focus.is_focused(window)), "Return moves focus into the matches");
-    let cursor = pane(&view, &cx).read_with(&cx, |p, cx| p.cursor_entry(cx).map(|entry| entry.name.clone()));
-    assert_eq!(cursor.as_deref(), Some("beta"), "focusing the list keeps the highlighted row");
 
     // Return in the list renames the cursor row (the default; cmd-down opens, and `enter` can switch it).
     cx.simulate_keystrokes("enter");
@@ -9547,4 +9709,163 @@ fn column_view_announces_columns_once(cx: &mut TestAppContext) {
     let wrapper = elements.iter().find(|element| element.selector.as_deref() == Some("file-list")).expect("file list");
     assert_eq!(wrapper.role, Some(Role::Group), "the focusable wrapper is not a list");
     assert_eq!(wrapper.label.as_deref(), Some("Columns"), "it does not repeat the active column's label");
+}
+
+// ----- first launch -----
+
+fn onboarding_path(cx: &VisualTestContext) -> PathBuf {
+    cx.read(|cx| cx.global::<Ui>().state_dir.join(crow_core::ONBOARDING_FILE))
+}
+
+/// A window whose state dir has no answer yet, as on a real first launch.
+fn open_first_launch(cx: &mut TestAppContext, dir: &Path) -> (Entity<CrowWindow>, VisualTestContext) {
+    open_with_before(cx, dir, Default::default(), |cx| {
+        let state = cx.global::<Ui>().state_dir.clone();
+        std::fs::remove_file(state.join(crow_core::ONBOARDING_FILE)).ok();
+        crate::onboarding::init(cx);
+    })
+}
+
+fn onboarding_sheet_open(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> bool {
+    view.read_with(cx, |w, _| matches!(w.sheet, Some(Sheet::Onboarding { .. })))
+}
+
+fn onboarding_focuses(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> (FocusHandle, FocusHandle) {
+    view.read_with(cx, |w, _| match &w.sheet {
+        Some(Sheet::Onboarding { show, no, .. }) => (show.clone(), no.clone()),
+        _ => panic!("the onboarding sheet is open"),
+    })
+}
+
+fn wait_for_file(cx: &mut VisualTestContext, path: &Path, needle: &str) {
+    for _ in 0..100 {
+        cx.run_until_parked();
+        if std::fs::read_to_string(path).is_ok_and(|text| text.contains(needle)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("{path:?} never contained {needle:?}: {:?}", std::fs::read_to_string(path));
+}
+
+#[gpui::test]
+fn tests_start_past_the_first_launch_sheet(cx: &mut TestAppContext) {
+    let root = fixture("onboarding-default");
+    let (view, cx) = open(cx, &root);
+    assert!(!onboarding_sheet_open(&view, &cx), "a test window does not owe the sheet");
+}
+
+#[gpui::test]
+fn first_launch_asks_once_and_show_tips_writes_auto(cx: &mut TestAppContext) {
+    let root = fixture("onboarding-show");
+    let (view, mut cx) = open_first_launch(cx, &root);
+    assert!(onboarding_sheet_open(&view, &cx), "a fresh state dir asks");
+
+    let elements = cx.update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec());
+    let panel =
+        elements.iter().find(|element| element.selector.as_deref() == Some("sheet-panel")).expect("sheet panel");
+    assert_eq!(panel.role, Some(Role::Dialog));
+    assert_eq!(panel.label.as_deref(), Some("Show tips as you go?"));
+    let show =
+        elements.iter().find(|element| element.selector.as_deref() == Some("onboarding-show")).expect("Show tips");
+    assert_eq!(show.role, Some(Role::Button));
+    assert_eq!(show.label.as_deref(), Some("Show tips"));
+    let no = elements.iter().find(|element| element.selector.as_deref() == Some("onboarding-no")).expect("No tips");
+    assert_eq!(no.role, Some(Role::Button));
+    assert_eq!(no.label.as_deref(), Some("No tips"));
+
+    // Return is "Show tips", the default.
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(!onboarding_sheet_open(&view, &cx), "the choice closes the sheet");
+    assert_eq!(cx.read_global::<Ui, _>(|ui, _| ui.settings.tips), TipsMode::Auto);
+    let settings_file = config_dir(&cx).join("settings.toml");
+    wait_for_file(&mut cx, &settings_file, "tips = \"auto\"");
+    let onboarding = onboarding_path(&cx);
+    wait_for_file(&mut cx, &onboarding, "\"tips_choice\": true");
+    assert_eq!(cx.update(|_, cx| crate::onboarding::answered(cx)), Some(true));
+
+    // A relaunch reads the answer and does not ask again.
+    cx.update(|_, cx| crate::onboarding::init(cx));
+    let window: WindowHandle<CrowWindow> = cx
+        .update(|_, cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                cx.new(|cx| CrowWindow::new(root.clone(), false, None, window, cx))
+            })
+        })
+        .expect("second window");
+    let second = window.root(&mut cx).expect("second root");
+    assert!(!onboarding_sheet_open(&second, &cx), "the answer survives the relaunch");
+}
+
+#[gpui::test]
+fn first_launch_tab_reaches_no_tips(cx: &mut TestAppContext) {
+    let root = fixture("onboarding-tab");
+    let (view, mut cx) = open_first_launch(cx, &root);
+    let (show, no) = onboarding_focuses(&view, &cx);
+
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| show.is_focused(window)), "Tab reaches Show tips");
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| no.is_focused(window)), "Tab reaches No tips");
+    cx.simulate_keystrokes("shift-tab");
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| show.is_focused(window)), "Shift-Tab goes back");
+    cx.simulate_keystrokes("shift-tab");
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| no.is_focused(window)), "Shift-Tab wraps to No tips");
+
+    // Return activates the focused choice, not always the default.
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(!onboarding_sheet_open(&view, &cx), "the choice closes the sheet");
+    assert_eq!(cx.read_global::<Ui, _>(|ui, _| ui.settings.tips), TipsMode::Off);
+    let settings_file = config_dir(&cx).join("settings.toml");
+    wait_for_file(&mut cx, &settings_file, "tips = \"off\"");
+    let onboarding = onboarding_path(&cx);
+    wait_for_file(&mut cx, &onboarding, "\"tips_choice\": false");
+}
+
+#[gpui::test]
+fn first_launch_no_tips_writes_off(cx: &mut TestAppContext) {
+    let root = fixture("onboarding-no");
+    let (view, mut cx) = open_first_launch(cx, &root);
+    let button = cx.debug_bounds("onboarding-no").expect("No tips is laid out");
+    cx.simulate_click(button.center(), Default::default());
+    settle(&view, &mut cx);
+    assert!(!onboarding_sheet_open(&view, &cx), "the choice closes the sheet");
+    assert_eq!(cx.read_global::<Ui, _>(|ui, _| ui.settings.tips), TipsMode::Off);
+    let settings_file = config_dir(&cx).join("settings.toml");
+    wait_for_file(&mut cx, &settings_file, "tips = \"off\"");
+    let onboarding = onboarding_path(&cx);
+    wait_for_file(&mut cx, &onboarding, "\"tips_choice\": false");
+    assert_eq!(cx.update(|_, cx| crate::onboarding::answered(cx)), Some(false));
+}
+
+#[gpui::test]
+fn first_launch_broken_state_asks_again_without_a_status_error(cx: &mut TestAppContext) {
+    let root = fixture("onboarding-broken");
+    let (view, cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        let state = cx.global::<Ui>().state_dir.clone();
+        std::fs::write(state.join(crow_core::ONBOARDING_FILE), "{ not json").expect("break state");
+        crate::onboarding::init(cx);
+    });
+    assert!(onboarding_sheet_open(&view, &cx), "a broken state file asks again");
+    assert!(cx.read_global::<Ui, _>(|ui, _| ui.settings_error().is_none()), "state, not config: no status-line error");
+}
+
+#[gpui::test]
+fn first_launch_escape_keeps_the_default(cx: &mut TestAppContext) {
+    let root = fixture("onboarding-escape");
+    let (view, mut cx) = open_first_launch(cx, &root);
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(!onboarding_sheet_open(&view, &cx), "Escape closes it");
+    assert_eq!(cx.read_global::<Ui, _>(|ui, _| ui.settings.tips), TipsMode::Auto, "the default stays");
+    let onboarding = onboarding_path(&cx);
+    wait_for_file(&mut cx, &onboarding, "\"tips_choice\": true");
+    let settings = std::fs::read_to_string(config_dir(&cx).join("settings.toml")).expect("settings");
+    assert!(!settings.contains("tips = \"off\""), "Escape writes no setting: {settings}");
 }

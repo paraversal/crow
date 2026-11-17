@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{self, Effective};
-use crow_core::{HintsMode, TIPS_FILE, TipBook, TipId, TipState};
+use crow_core::{TIPS_FILE, TipBook, TipId, TipState};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AppContext, EntityId, Global, IntoElement, Role, SharedString, Task,
     Window, div, prelude::*, px,
@@ -46,7 +46,7 @@ pub fn owner(cx: &App) -> Option<EntityId> {
 /// event, so a spent tip costs no event.
 pub fn wants(id: TipId, cx: &App) -> bool {
     let tips = cx.global::<Tips>();
-    cx.global::<Ui>().settings.hints != HintsMode::Off
+    !cx.global::<Ui>().settings.tips_muted()
         && !tips.book.state().is_retired(id)
         && !tips.book.is_on_screen()
         && uses_of(id, cx) == 0
@@ -56,12 +56,12 @@ pub fn wants(id: TipId, cx: &App) -> bool {
 /// retirement, one-on-screen and the cooldown; the caller has already checked
 /// its own blocking states.
 pub fn request(id: TipId, owner: EntityId, cx: &mut App) -> bool {
-    let hints_off = cx.global::<Ui>().settings.hints == HintsMode::Off;
+    let muted = cx.global::<Ui>().settings.tips_muted();
     let uses = uses_of(id, cx);
     let now = Instant::now();
     {
         let tips = cx.global_mut::<Tips>();
-        if !tips.book.may_show(id, now, uses, hints_off) {
+        if !tips.book.may_show(id, now, uses, muted) {
             return false;
         }
         tips.book.show(id, now);
@@ -154,10 +154,12 @@ pub fn reload_for_tests(cx: &mut App) {
 }
 
 /// The list reserves this much bottom space while a tip is on screen, so the
-/// card cannot cover the last rows. The card is at most two lines at 640 px.
-pub const INSET: f32 = 64.0;
+/// card cannot cover the last rows. The card is at most two lines at 640 px,
+/// plus the two actions beside them.
+pub const INSET: f32 = 80.0;
 
-/// The tip card: keycap, one sentence, "Got it". Bottom right, above the bar.
+/// The tip card: keycap, one sentence, "Got it" and "Don't show tips".
+/// Bottom right, above the bar.
 pub fn render_tip(
     id: TipId,
     key: SharedString,
@@ -165,6 +167,7 @@ pub fn render_tip(
     window_width: f32,
     mode: Effective,
     on_got_it: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    on_no_tips: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let sentence = text(id, &key);
     let max_width = (window_width - 24.).min(440.);
@@ -173,6 +176,7 @@ pub fn render_tip(
     let hover = color(theme.role("border"));
     let selection = color(theme.role("selection"));
     let fg = color(theme.role("fg"));
+    let muted = color(theme.role("fg-muted"));
     let card = div()
         .id("tip")
         .debug_selector(|| "tip".into())
@@ -217,6 +221,26 @@ pub fn render_tip(
                 .active(move |style| style.bg(selection))
                 .on_click(on_got_it)
                 .child("Got it"),
+        )
+        .child(
+            div()
+                .id("tip-no-tips")
+                .debug_selector(|| "tip-no-tips".into())
+                .role(Role::Button)
+                .aria_label("Don't show tips")
+                .aria_description("Mute every tip; key hints stay")
+                .flex_none()
+                .h(px(24.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .rounded(px(6.))
+                .text_size(px(12.))
+                .text_color(muted)
+                .hover(move |style| style.text_color(fg).bg(hover))
+                .active(move |style| style.bg(selection))
+                .on_click(on_no_tips)
+                .child("Don't show tips"),
         );
     let element_id = SharedString::from(format!("tip-{id:?}"));
     match mode {

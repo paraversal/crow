@@ -8,7 +8,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{Event, MotionMode, SoundSet};
-use crow_core::{AppIcon, EnterAction, HintsMode, KeymapLayer};
+use crow_core::{AppIcon, EnterAction, HintsMode, KeymapLayer, TipsMode};
 use crow_theme::Theme;
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, Image, ImageFormat, IntoElement, KeyBinding,
@@ -120,6 +120,7 @@ enum ControlId {
     Keymap,
     Enter,
     Hints,
+    Tips,
     ShowHidden,
     ShowPreview,
     ViewPerFolder,
@@ -139,7 +140,7 @@ enum ControlId {
 
 impl ControlId {
     /// Reading order: the order Tab visits and the order the page draws.
-    const ALL: [ControlId; 22] = [
+    const ALL: [ControlId; 23] = [
         ControlId::Theme,
         ControlId::AppIcon,
         ControlId::FontFamily,
@@ -147,6 +148,7 @@ impl ControlId {
         ControlId::Keymap,
         ControlId::Enter,
         ControlId::Hints,
+        ControlId::Tips,
         ControlId::ShowHidden,
         ControlId::ShowPreview,
         ControlId::ViewPerFolder,
@@ -173,6 +175,7 @@ impl ControlId {
             ControlId::Keymap => "settings-keymap",
             ControlId::Enter => "settings-enter",
             ControlId::Hints => "settings-hints",
+            ControlId::Tips => "settings-tips",
             ControlId::ShowHidden => "settings-show-hidden",
             ControlId::ShowPreview => "settings-show-preview",
             ControlId::ViewPerFolder => "settings-view-per-folder",
@@ -203,6 +206,7 @@ impl ControlId {
             | ControlId::Keymap
             | ControlId::Enter
             | ControlId::Hints
+            | ControlId::Tips
             | ControlId::ShowHidden
             | ControlId::ShowPreview
             | ControlId::ViewPerFolder
@@ -224,6 +228,7 @@ impl ControlId {
             ControlId::Keymap => "Keymap",
             ControlId::Enter => "What Return does",
             ControlId::Hints => "Key hints",
+            ControlId::Tips => "Tips",
             ControlId::ShowHidden => "Show hidden files",
             ControlId::ShowPreview => "Show preview",
             ControlId::ViewPerFolder => "Folders keep their own view",
@@ -250,6 +255,7 @@ impl ControlId {
             | ControlId::Keymap
             | ControlId::Enter
             | ControlId::Hints
+            | ControlId::Tips
             | ControlId::Motion
             | ControlId::Sound => Role::RadioGroup,
             ControlId::ShowHidden | ControlId::ShowPreview | ControlId::ViewPerFolder | ControlId::PaletteRecent => {
@@ -275,6 +281,7 @@ impl ControlId {
             ControlId::Keymap => "Vim adds hjkl, gg/G, yy/p and marks on top of the Finder keys.",
             ControlId::Enter => "Rename edits the name in place; Open opens the item. F2 always renames.",
             ControlId::Hints => "Auto retires idle hints after you use their key three times.",
+            ControlId::Tips => "Point out a key the first time it matters; off mutes every tip.",
             ControlId::ShowHidden => "List dotfiles and other hidden items.",
             ControlId::ShowPreview => "The preview pane in list view and the column in column view.",
             ControlId::ViewPerFolder => "Each folder opens in its saved view; off keeps the window's view.",
@@ -702,6 +709,7 @@ impl SettingsWindow {
             | ControlId::Keymap
             | ControlId::Enter
             | ControlId::Hints
+            | ControlId::Tips
             | ControlId::Motion
             | ControlId::Sound => {}
         }
@@ -711,7 +719,12 @@ impl SettingsWindow {
         let Some(id) = self.focused_control(window) else { return };
         match id {
             ControlId::AppIcon => self.move_app_icon(delta, window, cx),
-            ControlId::Keymap | ControlId::Enter | ControlId::Hints | ControlId::Motion | ControlId::Sound => {
+            ControlId::Keymap
+            | ControlId::Enter
+            | ControlId::Hints
+            | ControlId::Tips
+            | ControlId::Motion
+            | ControlId::Sound => {
                 self.move_segment(id, delta, window, cx);
             }
             _ => {}
@@ -748,6 +761,7 @@ impl SettingsWindow {
             ControlId::Keymap => (keymap_index(cx.global::<Ui>().settings.keymap), 2),
             ControlId::Enter => (enter_index(cx.global::<Ui>().settings.enter), 2),
             ControlId::Hints => (hints_index(cx.global::<Ui>().settings.hints), 3),
+            ControlId::Tips => (tips_index(cx.global::<Ui>().settings.tips), 2),
             ControlId::Motion => (motion_index(cx.global::<Ui>().settings.motion), 4),
             ControlId::Sound => (sound_index(cx.global::<Ui>().settings.sound), 3),
             _ => return,
@@ -767,6 +781,7 @@ impl SettingsWindow {
                 1 => HintsMode::Always,
                 _ => HintsMode::Off,
             }),
+            ControlId::Tips => SettingChange::Tips(if index == 0 { TipsMode::Auto } else { TipsMode::Off }),
             ControlId::Motion => SettingChange::Motion(match index {
                 0 => MotionMode::Auto,
                 1 => MotionMode::Off,
@@ -1055,6 +1070,7 @@ impl SettingsWindow {
                 ControlId::Keymap => Some(keymap_index(settings.keymap)),
                 ControlId::Enter => Some(enter_index(settings.enter)),
                 ControlId::Hints => Some(hints_index(settings.hints)),
+                ControlId::Tips => Some(tips_index(settings.tips)),
                 ControlId::Motion => Some(motion_index(settings.motion)),
                 ControlId::Sound => Some(sound_index(settings.sound)),
                 _ => None,
@@ -1167,6 +1183,17 @@ impl Render for SettingsWindow {
             hints_index(settings.hints),
             self.style(ControlId::Hints, window, &theme),
             hints_select,
+            None,
+        );
+
+        let tips_select =
+            select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::Tips, index, window, cx));
+        let tips_row = controls::segmented(
+            self.meta(ControlId::Tips, cx),
+            &["Auto", "Off"],
+            tips_index(settings.tips),
+            self.style(ControlId::Tips, window, &theme),
+            tips_select,
             None,
         );
 
@@ -1294,6 +1321,7 @@ impl Render for SettingsWindow {
                 (ControlId::Keymap, keymap_row.into_any_element()),
                 (ControlId::Enter, enter_row.into_any_element()),
                 (ControlId::Hints, hints_row.into_any_element()),
+                (ControlId::Tips, tips_row.into_any_element()),
                 (ControlId::ShowHidden, show_hidden.into_any_element()),
                 (ControlId::ShowPreview, show_preview.into_any_element()),
                 (ControlId::ViewPerFolder, view_per_folder.into_any_element()),
@@ -1537,6 +1565,13 @@ fn hints_index(value: HintsMode) -> usize {
         HintsMode::Auto => 0,
         HintsMode::Always => 1,
         HintsMode::Off => 2,
+    }
+}
+
+fn tips_index(value: TipsMode) -> usize {
+    match value {
+        TipsMode::Auto => 0,
+        TipsMode::Off => 1,
     }
 }
 
@@ -2091,5 +2126,22 @@ mod tests {
         vcx.run_until_parked();
         assert_eq!(state(&view, &vcx, ControlId::Keymap).selected, Some(1));
         assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.keymap), KeymapLayer::Vim);
+    }
+
+    #[gpui::test]
+    fn tips_control_writes_off_and_follows_reloads(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::Tips);
+        vcx.simulate_keystrokes("right");
+        wait_for(&vcx, "tips = \"off\"");
+        vcx.update(|_, cx| ui::reload_config(cx));
+        vcx.run_until_parked();
+        assert_eq!(state(&view, &vcx, ControlId::Tips).selected, Some(1), "Off shows");
+        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.tips), TipsMode::Off);
+        assert!(settings_text(&vcx).contains("hints = \"auto\""), "hints stay independent");
+
+        vcx.simulate_keystrokes("left");
+        wait_for(&vcx, "tips = \"auto\"");
+        assert_eq!(state(&view, &vcx, ControlId::Tips).selected, Some(0), "Auto shows again");
     }
 }

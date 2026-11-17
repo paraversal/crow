@@ -60,8 +60,7 @@ impl Pane {
             .border_color(border)
             .when(place == FilterPlace::Column, |field| field.mx_1().mb_1())
             .when(place == FilterPlace::List, |field| field.mx_2().my_1())
-            .on_action(cx.listener(Self::move_up))
-            .on_action(cx.listener(Self::move_down))
+            .on_action(cx.listener(Self::filter_focus_results))
             .on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(filtering) = &this.filtering {
                     let focus = filtering.input.read(cx).focus_handle(cx);
