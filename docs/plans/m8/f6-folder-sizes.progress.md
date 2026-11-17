@@ -108,6 +108,7 @@ Verdict: better. The feature fills sizes lazily, survives a restart, and no long
 ## Found along the way
 - F6 critique: cache-save starvation, a walk/event race, the UUID reset loop, symlink-to-folder `0 bytes`, the list preview's `--`, unused inode/combining checks, the one-off command staying enabled when visible, and the unhandled FSEvents flags; see Critique.
 - The app's window opened in the critic's session; the executing agent's "no window" was session-specific.
+- CI on PR #54: the two GPUI hover patches both edit the test import line and insert a test before `test_focus_handle_release`, so whichever applied second failed on a fresh fetch (CI at `window.rs:8436`). They are combined into `patches/gpui-hover-and-mouse-exit.patch`; a clean `./scripts/fetch-gpui.sh` at `6ceb6fe` applies the set.
 
 ## Log
 - 2026-11-17: branch `m8-f6-folder-sizes` from `main` @ cb49ae4; read the plan, M8 index and F3's progress file. Started S1.
@@ -119,6 +120,7 @@ Verdict: better. The feature fills sizes lazily, survives a restart, and no long
 - 2026-11-17: S9 checks. `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass. README settings table and `docs/testing.md` updated. Bundle built. The app bench could not run: `target/release/crow --bench target/fixture-100k` starts ("starting theme") but creates no window, so it never reaches a frame; the same happens with the size service disabled, with the bundle (`open -n`), and with the installed Crow.app. The listing bench (no GUI) is 4.3 ms first batch, 184 ms for 100k, 5 ms sorted. The app bench and hand checks are left for the critic/user when the GUI session can open a window.
 - 2026-11-17: critique. The window opened in this session; ran the bench off/visible and the hand checks (fixture, home, light/dark, 640/~1000 px). Fixed C1–C8 (code 9f8088c, b9d2b34): bounded cache save, walk/event race, UUID reset, symlink `--`, inode validation + combining deferred, command disabled/hidden, FSEvents flags, list preview size. Tests 536 app / 101 core / 64 fs / 11 macos / 20 search / 6 theme. The home `Library`/`Files`/`Movies` rows were still `--` when quit; iCloud, 100k-folders and VoiceOver remain.
 - 2026-11-17: PR [#54](https://github.com/paraversal/file-crow/pull/54) opened from `m8-f6-folder-sizes`; the critic's progress record is this commit.
+- 2026-11-17: CI fix. The two GPUI hover patches conflicted on a fresh fetch; combined into `patches/gpui-hover-and-mouse-exit.patch`, verified with a clean `./scripts/fetch-gpui.sh` at `6ceb6fe` (temp tree and the repo) and `cargo check -p crow-app`.
 
 ## Next
 PR open: [#54](https://github.com/paraversal/file-crow/pull/54). The next piece in the M8 index's order after F6 is **F7 — housekeeping** (`docs/plans/m8/f7-housekeeping-4.md`); request for the executing agent: `execute plan F7`.
