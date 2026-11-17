@@ -1906,7 +1906,7 @@ impl Pane {
         let now = Instant::now();
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
-        let rule = color_alpha(theme.role("border"), 0x40);
+        let rule = color_alpha(theme.role("fg"), 0x30);
         let active = self.focus.is_focused(window) || self.filtering.is_some();
         let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
@@ -2009,8 +2009,8 @@ impl Pane {
                             div()
                                 .absolute()
                                 .top_0()
-                                .left_0()
-                                .right_0()
+                                .left(px(8.))
+                                .right(px(8.))
                                 .h(px(1.))
                                 .bg(rule)
                                 .debug_selector(|| format!("island-rule-{}", entry.name)),
@@ -2330,7 +2330,7 @@ impl Pane {
         let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let subtle = color(theme.role("fg-subtle"));
-        let rule = color_alpha(theme.role("border"), 0x40);
+        let rule = color_alpha(theme.role("fg"), 0x30);
         let Some(folder) = self.folders.get(k).map(|f| f.read(cx)) else { return Vec::new() };
         let width = column_width(folder.entries());
         let name_room = px(width - 16.0 - 8.0 - 16.0 - 2.0 * CELL_PADDING - 8.0);
@@ -2415,8 +2415,8 @@ impl Pane {
                             div()
                                 .absolute()
                                 .top_0()
-                                .left_0()
-                                .right_0()
+                                .left(px(CELL_PADDING))
+                                .right(px(CELL_PADDING))
                                 .h(px(1.))
                                 .bg(rule)
                                 .debug_selector(|| format!("column-{k}-island-rule-{}", entry.name)),

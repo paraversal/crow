@@ -1,13 +1,13 @@
 # F1 — Selection and motion progress
 
-Branch: `m8-f1-selection` · PR: none · Last updated: 2026-11-17 · State: In critique
+Branch: `m8-f1-selection` (merged [#48](https://github.com/paraversal/file-crow/pull/48)) · Follow-up: `m8-f1-island-rule` ([#49](https://github.com/paraversal/file-crow/pull/49)) · Last updated: 2026-11-17 · State: PR open
 
 ## Status
 
 | Item | State | Notes |
 | --- | --- | --- |
 | 1 Delete selects the next row | done | `Folder.cursor_before_apply` + `select_next_after_removal`; covers trash, move, permanent delete, watcher and rescan. Tests: middle, last, multi, watcher cursor, external non-cursor, filtered, empty, inline child. |
-| 2 Finder-style selection islands | done | `pane::selection_islands` + `island_edges`; list and column rows round the island ends and draw a 1 px `border` rule inside a run; the glide fill adopts the cursor row's island rounding. Tests: helper units and a render-bounds test for 1/2/3 rows and two islands, with no layout shift. |
+| 2 Finder-style selection islands | done | `pane::selection_islands` + `island_edges`; list and column rows round the island ends and draw a 1 px `fg` rule inside a run, inset from the island's edges (a delimiter, not a full divider); the glide fill adopts the cursor row's island rounding. Tests: helper units and a render-bounds test for 1/2/3 rows and two islands, with no layout shift and an inset rule. |
 | 3 Complete the row-removal animation | done | Audited the trash/move FLIP: operation effects already cover those. Watcher/permanent removals now start `Fx::Trash` at the old index when the batch has no additions (a rename is skipped); Low draws the ghost fade, Off starts nothing; the clear timer waits for the longest effect. Tests: shift non-zero→zero, reorder/rename/Off no effect, an existing effect is not duplicated, Low fades without moving. |
 | 4 Copy/cut feedback | done | `Clipboard` carries the copy flash start, the cut mark flag and a path set. List, column and search rows flash copied rows (accent tint, `COPY_FADE`, none under Off) and mark cut rows with a dashed `fg` outline around the run at full contrast (`style::cut_outline`; the fill stays full). Escape/undo/paste/a new copy clear the mark; the 100 ms poll drops the clipboard when another app copies. Tests: flash state + render, cut outline in list and search, Escape/undo/paste, 100k set lookup. |
 | 5 Sidebar current-folder fill glides | done | One absolute fill behind the rows, targeted from the last prepaint's row bounds. Full springs old→new, Low fades in on the new row, Off jumps. The first layout requests one next-frame refresh so the fill appears. Tests: Full start/land, fast sequence, Off, Low, height match. |
@@ -34,6 +34,7 @@ Branch: `m8-f1-selection` · PR: none · Last updated: 2026-11-17 · State: In c
 - No cursor ring on pane rows (Q1): the active fill and the glide already show the cursor, and the U1 board has no outline.
 - Copy/cut feedback also applies to search results (Q7); one clipboard read, no second source of truth.
 - Cut feedback is a dashed outline, not a dim (user, 2026-11-17, critique): Cmd-X must look distinct from hidden files, so the plan's "dim cut rows" is superseded. `style::cut_outline` draws a 2 px dashed `fg` outline around each contiguous cut run; the icon, name and columns stay at full contrast and the selection fill stays full. `Clipboard.dim` is renamed `marked`.
+- The island rule is a delimiter, not a divider (user, 2026-11-17, post-merge): the 1 px rule inside a run is inset 8 px in the list and `CELL_PADDING` in the column, so it does not touch the island's edges. It uses the `fg` role at 0x30, not `border`, because the user asked for a different color.
 - Rubber-band selection stays deferred (Q6). When it is planned, include Cmd-drag additive selection.
 
 ## Critique
@@ -46,6 +47,7 @@ Critic session: 2026-11-17 · Base: `main` @ 2accf3a · Head reviewed: c0f584f +
 | C3 | Item 2's test asserts marker selectors (`island-top-*`), not the rendered corner radii; the 1 px markers are invisible. | `window/tests.rs:4552`, `pane.rs:2874` | code | note | left: `island_edges`'s unit test covers the edges and the markers assert the same edges; GPUI has no style read for the row's radii |
 | C4 | Executing agent ticked 2 of 8 hand checks; the plan's Finish requires the six items in light/dark, 640 px/wide, empty/100k, Vim on/off, VoiceOver. | progress Hand checks | honesty | fix | fixed (this review): the visual checks below; VoiceOver left for the user |
 | C5 | An external `sidebar.toml` reload leaves the sidebar's cached rows (and the fill's target) stale until a notify. Pre-existing. | `sidebar.rs:1233` | code | note | left: outside F1, already in Found along the way for F2/F7 |
+| C6 | The island rule spanned the full row, so it divided the items instead of being a slight delimiter; the user also asked for a different color. | `pane.rs:2008-2017`, `:2414-2423` | UX | fix | fixed (follow-up): inset 8 px in the list and `CELL_PADDING` in the column, in `fg` 0x30 instead of `border` 0x40; the render test asserts the rule's left and right are inset from the row |
 
 Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (471 app, 96 core, 44 fs, 6 macos, 20 search, 6 theme; `fuzz_smoke` included) · bench branch warm 9 ms / p99 8.52 ms vs `main` @ 2accf3a warm 10 ms / p99 8.47 ms (budgets met; difference within run-to-run noise) · `./scripts/bundle.sh` ✓
 
@@ -79,7 +81,8 @@ Verdict: better — a cut item no longer reads as a hidden one, the outline hold
 - 2026-11-17: Item 6. The list and column bodies reserve `tips::INSET` (64 px) at the bottom while a tip is visible; the card stays bottom-right. `offer_tip`/`close_tip` and the render-time close set the pane's inset. The test scrolls a 250-row folder to the bottom and asserts the last row is above the card.
 - 2026-11-17: Finish. `cargo fmt --check`, clippy (`-D warnings`) and `cargo test --workspace` pass (471 app tests, `fuzz_smoke`, `fuzz_smoke_edge_trees`). Bench on `target/fixture-100k`: branch warm 9 ms / p99 8.63 ms; `main` warm 10 ms / p99 8.61 ms (within run-to-run noise). `./scripts/bundle.sh` built and opened; the single-row and 3-row islands and the cut message were checked visually in the dark theme. `docs/testing.md` has the F1 hand checks. Remaining visual checks are in Hand checks for the critic.
 - 2026-11-17: Critique (9b1fb3c). C1: the cut dim was the hidden dim (`CUT_DIM` = `HIDDEN_DIM` = 0.5), so the user asked for a distinct look. Replaced it with `style::cut_outline`: a 2 px dashed `fg` outline around each contiguous cut run (one box per run, no rule between rows), full-contrast content, an absolute child so nothing shifts; list, column and search share `pane::island_edges`. `Clipboard.dim` → `marked`. Tests assert the outline appears and clears. Re-ran fmt/clippy/tests; bench branch 9/8.52 vs `main` 10/8.47; bundle checked in both themes, 640/wide, list/column/search, Vim, empty/100k. C2 asked (Q8: keep the next row joining the selection); C3 and C5 noted.
+- 2026-11-17: Follow-up after #48 merged (C6). The island rule spanned the full row; the user asked for a dim hline with x padding so it is a slight delimiter, then for a different color. Inset it 8 px in the list and `CELL_PADDING` in the column, and changed the rule from `border` 0x40 to `fg` 0x30 (a light line on the active fill, a dark one on the light theme). The render test asserts the rule's left and right are inset from the row. `docs/testing.md` says the rule is inset.
 
 ## Next
 
-Critique: the second agent runs the critique skill and opens the PR.
+Follow-up PR [#49](https://github.com/paraversal/file-crow/pull/49) is open; the user hand-tests and squash-merges. Next piece: F2 (`execute plan F2`).
