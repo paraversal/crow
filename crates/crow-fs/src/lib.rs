@@ -9,6 +9,7 @@ mod snapshot;
 mod sort;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+pub mod trash;
 mod watch;
 
 pub use listing::{Entry, list_dir, stat_entry};
