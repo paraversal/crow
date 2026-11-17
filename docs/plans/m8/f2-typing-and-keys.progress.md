@@ -1,6 +1,6 @@
 # F2 — Typing and keys progress
 
-Branch: `m8-f2-typing` · PR: none · Last updated: 2026-11-17 · State: in progress
+Branch: `m8-f2-typing` · PR: none · Last updated: 2026-11-17 · State: Ready for critique
 
 ## Status
 
@@ -10,7 +10,7 @@ Branch: `m8-f2-typing` · PR: none · Last updated: 2026-11-17 · State: in prog
 | 2 Enter behavior setting | done | `enter = "rename" \| "open"` (default rename), `EnterRow` reads it, `f2` always renames. Settings ▸ Behaviour ▸ What Return does (Rename/Open). Tests: default renames, open mode opens, F2 renames in both, sidebar and search still open, the control writes only its line and survives a reload; the keymap test now expects F2. |
 | 3 Context menus for search results and the sidebar | done | The sidebar menu already existed; verified, not rebuilt. Search results gained `context_menu::search_entries` (Open, Reveal in Folder, Quick Look, Copy, Cut, Copy Path, Move to Trash) and `SearchView` right-click/Ctrl-click, selection-first, action dispatch. `CopyPath` gained a search handler. Test: titles, Copy Path text, Ctrl-click, Move to Trash once. |
 | 4 Palette home row matching | done | The home row's name is scored when it is not a suffix of the label; `name_matched` carries its ranges so `jul` highlights in the name and `~` in the path. Test: both queries, both highlight lines. |
-| 5 Finish: checks, bundle, docs | todo | fmt, clippy, tests, bundle, README + `docs/testing.md`. |
+| 5 Finish: checks, bundle, docs | done | fmt, clippy and `cargo test --workspace` pass; bench clean run warm 7 ms / p99 8.60 ms (budget met); `./scripts/bundle.sh` built; README and `docs/testing.md` updated. Visual checks below; VoiceOver and the search menu's mouse path left for the critic. |
 
 ## Questions
 
@@ -35,12 +35,13 @@ Branch: `m8-f2-typing` · PR: none · Last updated: 2026-11-17 · State: in prog
 
 ## Hand checks
 
-- [ ] Type `no` in a folder: the bottom bar shows `no` left of the hints; after a second it clears; Escape clears it at once; typing in the `/` field never shows it; Vim letters do not show it.
-- [ ] Enter with `enter = "rename"`: the name field opens; set `enter = "open"`: Enter opens the row; sidebar and search results still open in both; Vim `c w` still renames.
-- [ ] Settings window: the Return key control switches modes, writes only the `enter` line, survives a reload and keeps comments.
-- [ ] Right-click a search result: Open, Reveal in Folder, Quick Look, Copy, Cut, Copy Path, Move to Trash; the chosen action runs once. The file list and sidebar menus are unchanged.
-- [ ] Palette: `jul` shows the home row with `jul` highlighted in the name; `~` still shows it; other folder rows unchanged.
-- [ ] Light and dark, 640 px and wide, Vim on/off, VoiceOver for the new menu items and the bar query.
+- [x] Type `no` in a folder: the bottom bar shows `no` left of the hints (Gruvbox dark, Solarized Light, 1200 px and 640 px). Escape clears it and keeps the row; the 1 s timeout clears it (test); typing in the `/` field never shows it (test); Vim `j` moves and shows no prefix (bundle).
+- [x] Enter with `enter = "rename"`: the name field opens (test); set `enter = "open"` in Settings: Enter opened `beta.txt` in CotEditor; F2 still opened the name field in the same mode (bundle). Sidebar and search results still open (test); Vim `c w` still renames (test).
+- [x] Settings window: "What Return does" shows Rename/Open with the description naming F2; only the `enter` line changes, a reload keeps the control (test); the bundle screenshot shows the control under Behaviour.
+- [ ] Right-click a search result: the automated test drives the titles, Copy Path, Ctrl-click and Move to Trash; the mouse path was not driven in the bundle (a synthetic right-click did not register). The file list and sidebar menus are unchanged (existing tests).
+- [x] Palette: `jul` shows the home row (`jules`, path `~`) with `jul` highlighted in the name (bundle); `~` still shows it with the path highlighted (test); other rows rank as before (test).
+- [x] Light and dark (Solarized Light, Gruvbox dark), 640 px and wide, Vim on and off.
+- [ ] VoiceOver for the new menu items and the bottom-bar query (the query has aria "Type to select: …"; the menu items are native). Left for the critic.
 
 ## Found along the way
 
@@ -53,8 +54,8 @@ Branch: `m8-f2-typing` · PR: none · Last updated: 2026-11-17 · State: in prog
 - 2026-11-17: Item 2. `EnterAction` in `settings.toml`; `EnterRow` in `LIST`; `f2` → `Rename`; the pane dispatches by the setting. Settings control "What Return does", description names F2. `keys::is_function_key` displays F2 instead of f2. README and `docs/testing.md` updated. Tests: window modes, sidebar/search, settings write/reload, keymap string.
 - 2026-11-17: Item 3. Search-result menu: `TitledSlot` (renamed from `SidebarSlot`, now shared), `SEARCH` slots, `search_entries` with the SearchResults scope. `SearchView.menu`, `context_press` (selects an unselected row, keeps a selection), right-click and Ctrl-click handlers, `menu_closed` dispatches the command action, `copy_path` handler. Test drives titles, Copy Path, Ctrl-click and Move to Trash.
 - 2026-11-17: Item 4. `Item::Folder.name_matched`; `folder_listing` scores the name only when `name_start` is None; `name_ranges` prefers it. Test for `jul` and `~`.
-- 2026-11-17: Finish started. `cargo fmt --check` and clippy pass; `cargo test --workspace` passes (478 app, 96 core, 44 fs, 6 macos, 20 search, 6 theme, `fuzz_smoke` included). Bench: the matcher change scores the name only for the home row, so the per-candidate work on a 100k folder is unchanged; the bench does not exercise the palette. Branch bench run started for the record; result pending.
+- 2026-11-17: Finish. `cargo fmt --check` and clippy pass; `cargo test --workspace` passes (478 app, 96 core, 44 fs, 6 macos, 20 search, 6 theme, `fuzz_smoke` included). Bench on `target/fixture-100k`: clean run warm first paint 7 ms, load 240 ms, p50 8.33 ms, p95 8.49 ms, p99 8.60 ms, max 19.57 ms (599 frames, 120 fps); the first run was contaminated by the window being occluded (30 fps, one 6-minute App Nap frame) and is discarded. F1's `main` numbers were warm 10 ms / p99 8.47 ms, so this is within run-to-run noise and the budgets. `./scripts/bundle.sh` built and signed; the bundle was driven with a temp config and fixture for the visual checks above. The palette matcher scores the name only for the home row, so the per-candidate work on a 100k folder is unchanged.
 
 ## Next
 
-Item 5: `cargo fmt --check`, clippy, `cargo test --workspace`, `./scripts/bundle.sh`, then the hand checks and the progress file's final state.
+Critique: build the branch and `main` with `scripts/bundle.sh`, walk the hand checks (especially the search menu by mouse and VoiceOver), fix what is clearly wrong, then open the PR.
