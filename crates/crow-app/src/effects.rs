@@ -61,6 +61,10 @@ pub trait Effects: Send + Sync {
     fn set_app_icon(&self, png: &[u8]);
     /// Start a native drag of `drag`'s items; false to let GPUI's own drag run.
     fn begin_drag(&self, window: &mut Window, drag: &ComboDrag<'_>) -> bool;
+    /// Move the window from an app-owned titlebar drag (`app_owns_titlebar_drag`).
+    fn start_window_move(&self, window: &mut Window);
+    /// The titlebar's double-click action, as the system's preference chooses it.
+    fn titlebar_double_click(&self, window: &mut Window);
 
     /// Eject the volume at `path`.
     fn eject(&self, path: &Path) -> Result<(), String>;
@@ -169,6 +173,14 @@ impl Effects for SystemEffects {
         crow_macos::begin_drag(window, drag)
     }
 
+    fn start_window_move(&self, window: &mut Window) {
+        window.start_window_move();
+    }
+
+    fn titlebar_double_click(&self, window: &mut Window) {
+        window.titlebar_double_click();
+    }
+
     fn eject(&self, path: &Path) -> Result<(), String> {
         crow_macos::eject(path).map_err(|e| e.to_string())
     }
@@ -259,6 +271,8 @@ pub enum Call {
     AboutPanel,
     AppIcon(usize),
     BeginDrag(Vec<PathBuf>),
+    StartWindowMove,
+    TitlebarDoubleClick,
     Eject(PathBuf),
     Spotlight(String),
 }
@@ -498,6 +512,14 @@ impl Effects for RecordingEffects {
     fn begin_drag(&self, _window: &mut Window, drag: &ComboDrag<'_>) -> bool {
         self.record(Call::BeginDrag(drag.paths.iter().map(|(path, _)| path.clone()).collect()));
         self.script.lock().expect("the effect script is not poisoned").begin_drag
+    }
+
+    fn start_window_move(&self, _window: &mut Window) {
+        self.record(Call::StartWindowMove);
+    }
+
+    fn titlebar_double_click(&self, _window: &mut Window) {
+        self.record(Call::TitlebarDoubleClick);
     }
 
     fn eject(&self, path: &Path) -> Result<(), String> {

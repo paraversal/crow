@@ -1488,6 +1488,40 @@ fn toolbar_view_buttons_switch_views(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn band_drag_starts_the_move_but_toolbar_controls_do_not(cx: &mut TestAppContext) {
+    let root = fixture("band-drag");
+    let (_view, mut cx) = open(cx, &root);
+    let drag = cx.debug_bounds("band-drag").expect("the band's drag surface");
+    // The right end of the title's box is empty band, not the title text.
+    let empty = gpui::point(drag.right() - px(24.), drag.center().y);
+    cx.simulate_mouse_down(empty, gpui::MouseButton::Left, gpui::Modifiers::default());
+    cx.simulate_mouse_up(empty, gpui::MouseButton::Left, gpui::Modifiers::default());
+    let moves = |cx: &mut VisualTestContext| {
+        effect_calls(cx).into_iter().filter(|call| matches!(call, crate::effects::Call::StartWindowMove)).count()
+    };
+    assert_eq!(moves(&mut cx), 1, "a press on the band's empty area starts the window move");
+
+    let back = cx.debug_bounds("back").expect("Back");
+    cx.simulate_mouse_down(back.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+    cx.simulate_mouse_up(back.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
+    assert_eq!(moves(&mut cx), 0, "a press on a toolbar button never moves the window");
+
+    // A double-click is the system's titlebar action (zoom, minimize or nothing).
+    cx.simulate_event(gpui::MouseDownEvent {
+        button: gpui::MouseButton::Left,
+        position: empty,
+        modifiers: gpui::Modifiers::default(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    let doubled = effect_calls(&mut cx)
+        .into_iter()
+        .filter(|call| matches!(call, crate::effects::Call::TitlebarDoubleClick))
+        .count();
+    assert_eq!(doubled, 1, "a double-click on the band asks for the titlebar action");
+}
+
+#[gpui::test]
 fn back_button_tooltip_names_the_folder(cx: &mut TestAppContext) {
     let root = fixture("back-tooltip");
     let executor = cx.executor();

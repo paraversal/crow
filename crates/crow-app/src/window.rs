@@ -6,9 +6,9 @@ use std::sync::Arc;
 use crow_core::motion::Fx;
 use crow_core::{SidebarEdit, Tabs, TipId, TipsMode, ViewMode, ZeroMatchStreak};
 use gpui::{
-    App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role,
-    ScrollHandle, SharedString, Subscription, TitlebarOptions, Toggled, Window, WindowBounds, WindowOptions, div, img,
-    point, prelude::*, px, size, transparent_black,
+    App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, Render,
+    Role, ScrollHandle, SharedString, Subscription, TitlebarOptions, Toggled, Window, WindowBounds, WindowOptions, div,
+    img, point, prelude::*, px, size, transparent_black,
 };
 
 use crate::actions::{
@@ -73,6 +73,9 @@ pub fn open(
             appears_transparent: true,
             traffic_light_position: Some(point(px(14.), px(19.))),
         }),
+        // The band draws its own titlebar and starts the move itself, so a drag on
+        // a toolbar control never moves the window (D3).
+        app_owns_titlebar_drag: true,
         // Sidebar 210 plus a usable center; below this the band's parts no longer fit.
         window_min_size: Some(size(px(640.), px(400.))),
         ..Default::default()
@@ -960,6 +963,7 @@ impl CrowWindow {
 
         let title_label = div()
             .id("title")
+            .debug_selector(|| "band-drag".into())
             .role(Role::Heading)
             .aria_level(1)
             .aria_label(title.to_owned())
@@ -971,6 +975,20 @@ impl CrowWindow {
             .font_weight(FontWeight::SEMIBOLD)
             .text_size(px(15.))
             .text_color(fg)
+            // The band's empty area is the title's flex box. AppKit no longer
+            // drags the titlebar (app_owns_titlebar_drag), so a press here moves
+            // the window, and a double-click does what the system setting says.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
+                    let effects = crate::effects::effects(cx);
+                    if event.click_count > 1 {
+                        effects.titlebar_double_click(window);
+                    } else {
+                        effects.start_window_move(window);
+                    }
+                }),
+            )
             .child(title.to_owned());
         let views = div()
             .id("view-switcher")
