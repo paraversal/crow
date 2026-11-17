@@ -151,7 +151,11 @@ impl Column for SizeColumn {
         self.cell(entry, cx).text
     }
     fn cell(&self, entry: &Entry, cx: &ColumnContext) -> ColumnCell {
-        if entry.is_dir && !entry.is_symlink {
+        if entry.is_dir && entry.is_symlink {
+            // The link's target is a folder; Crow does not follow it, so there is
+            // no measured size (the Info pane says the same).
+            ColumnCell { text: "--".into(), spoken: Some("size not calculated".into()), opacity: 1.0, fade: None }
+        } else if entry.is_dir {
             match (cx.size)(entry) {
                 None => ColumnCell {
                     text: "--".into(),
@@ -376,5 +380,27 @@ mod tests {
         assert_eq!(ids, ["modified", "size", "kind", "added"]);
         let shown: Vec<_> = ext.default_columns().iter().map(|c| c.id()).collect();
         assert_eq!(shown, ["modified", "size", "kind"], "Finder's defaults; Date Added is optional");
+    }
+
+    #[test]
+    fn a_symlink_to_a_folder_has_no_measured_size() {
+        let entry = Entry {
+            name: "link".into(),
+            path: std::path::PathBuf::from("/tmp/link"),
+            is_dir: true,
+            is_symlink: true,
+            hidden: false,
+            size: 0,
+            modified: None,
+            created: None,
+            added: None,
+        };
+        let kind = |_: &Entry| Arc::<str>::from("Folder");
+        let time = |_: Option<SystemTime>| "—".to_owned();
+        let size = |_: &Entry| Some(KnownSize { bytes: 1024, stale: false, version: 1 });
+        let cx = ColumnContext { kind: &kind, time: &time, size: &size };
+        let cell = SizeColumn.cell(&entry, &cx);
+        assert_eq!(cell.text, "--", "Crow does not follow the link, so it has no size");
+        assert_eq!(cell.spoken.as_deref(), Some("size not calculated"));
     }
 }

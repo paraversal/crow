@@ -766,15 +766,15 @@ impl Pane {
     /// The preview column's aria label: a folder's summary or a file's preview.
     pub fn preview_label(&self, cx: &gpui::App) -> Option<String> {
         let (entry, items) = self.preview_parts(cx)?;
+        let size = if entry.is_dir && cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible {
+            cx.try_global::<SizeService>().and_then(|service| service.0.read(cx).size(&entry.path)).map(Into::into)
+        } else {
+            None
+        };
         if entry.is_dir && !entry.is_package() {
-            let size = if cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible {
-                cx.try_global::<SizeService>().and_then(|service| service.0.read(cx).size(&entry.path)).map(Into::into)
-            } else {
-                None
-            };
             Some(preview::folder_spoken(&entry.name, items, size))
         } else {
-            Some(preview::spoken(&entry, self.preview(cx)))
+            Some(preview::spoken(&entry, self.preview(cx), size))
         }
     }
 
@@ -3000,15 +3000,17 @@ impl Pane {
             let body = match tab {
                 InfoTab::Preview => {
                     let folder = entry.is_dir && !entry.is_package();
+                    let size = if entry.is_dir
+                        && cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible
+                    {
+                        cx.try_global::<SizeService>()
+                            .and_then(|service| service.0.read(cx).size(&entry.path))
+                            .map(Into::into)
+                    } else {
+                        None
+                    };
                     if folder {
                         let name = display_text(&entry.name);
-                        let size = if cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible {
-                            cx.try_global::<SizeService>()
-                                .and_then(|service| service.0.read(cx).size(&entry.path))
-                                .map(Into::into)
-                        } else {
-                            None
-                        };
                         let summary = preview::FolderSummary {
                             path: &entry.path,
                             name: &name,
@@ -3018,7 +3020,7 @@ impl Pane {
                         };
                         preview::folder_summary(summary, &theme).into_any_element()
                     } else {
-                        preview::contents(&entry, self.preview(cx), &theme).into_any_element()
+                        preview::contents(&entry, self.preview(cx), &theme, size).into_any_element()
                     }
                 }
                 InfoTab::Info => self.info.clone().into_any_element(),

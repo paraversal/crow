@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crow_core::{Excerpt, Extensions, PreviewContent, text_excerpt};
+use crow_core::{Excerpt, Extensions, KnownSize, PreviewContent, text_excerpt};
 use crow_fs::Entry;
 use crow_theme::Theme;
 use gpui::{Div, FontWeight, Image, ImageFormat, div, img, prelude::*, px};
@@ -42,9 +42,14 @@ pub fn fetch_at(entry: &Entry, extensions: &Extensions, line: Option<u64>) -> Pr
     Preview { path: entry.path.clone(), content, image, tags: crow_macos::tags(&entry.path), excerpt }
 }
 
-/// What VoiceOver reads for the preview.
-pub fn spoken(entry: &Entry, preview: Option<&Preview>) -> String {
-    let size = if entry.is_dir { String::new() } else { format!(", {}", crow_fs::human_size(entry.size)) };
+/// What VoiceOver reads for the preview. `folder_size` is the measured size of
+/// the folder (or package) when the size service has one.
+pub fn spoken(entry: &Entry, preview: Option<&Preview>, folder_size: Option<KnownSize>) -> String {
+    let size = if entry.is_dir {
+        folder_size.map(|size| format!(", {}", crow_fs::human_size(size.bytes))).unwrap_or_default()
+    } else {
+        format!(", {}", crow_fs::human_size(entry.size))
+    };
     let tags = preview.map(|p| p.tags.join(", ")).filter(|t| !t.is_empty());
     format!(
         "Preview: {}, {}{size}, created {}, modified {}{}",
@@ -56,11 +61,14 @@ pub fn spoken(entry: &Entry, preview: Option<&Preview>) -> String {
     )
 }
 
-/// The preview's contents for `entry`, stacked top to bottom.
-pub fn contents(entry: &Entry, preview: Option<&Preview>, theme: &Theme) -> Div {
+/// The preview's contents for `entry`, stacked top to bottom. `folder_size` is
+/// the service's measured size for a folder or package; a file uses its own.
+pub fn contents(entry: &Entry, preview: Option<&Preview>, theme: &Theme, folder_size: Option<KnownSize>) -> Div {
     let muted = color(theme.role("fg-muted"));
     let border = color(theme.role("border"));
-    let size = if entry.is_dir { "--".to_owned() } else { crow_fs::human_size(entry.size) };
+    let size = if entry.is_dir { folder_size } else { Some(KnownSize { bytes: entry.size, stale: false, version: 0 }) };
+    let size_text = size.map_or_else(|| "--".to_owned(), |size| crow_fs::human_size(size.bytes));
+    let size_stale = size.is_some_and(|size| size.stale);
     let kind = kind(entry);
     let tags = preview.map(|p| p.tags.join(", ")).filter(|t| !t.is_empty());
     let excerpt = preview.and_then(|p| p.excerpt.as_ref());
@@ -130,6 +138,12 @@ pub fn contents(entry: &Entry, preview: Option<&Preview>, theme: &Theme) -> Div 
             .child(div().flex_none().text_color(muted).child(label.to_owned()))
             .child(div().text_right().child(value))
     };
+    let detail = div()
+        .flex()
+        .items_center()
+        .text_color(muted)
+        .child(format!("{kind} · "))
+        .child(div().when(size_stale, |size| size.opacity(0.5)).child(size_text));
     div()
         .flex()
         .flex_col()
@@ -140,7 +154,7 @@ pub fn contents(entry: &Entry, preview: Option<&Preview>, theme: &Theme) -> Div 
                 .flex()
                 .flex_col()
                 .child(div().text_size(px(15.)).child(display_text(&entry.name).into_owned()))
-                .child(div().text_color(muted).child(format!("{kind} · {size}"))),
+                .child(detail),
         )
         .child(div().pt_2().font_weight(FontWeight::SEMIBOLD).child("Information"))
         .child(info_row("Created", format_time(entry.created)))
@@ -222,4 +236,37 @@ pub fn folder_summary(summary: FolderSummary<'_>, theme: &Theme) -> Div {
                     .child(div().text_right().child(format_time(summary.modified))),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, is_dir: bool, size: u64) -> Entry {
+        Entry {
+            name: name.into(),
+            path: std::path::PathBuf::from("/tmp").join(name),
+            is_dir,
+            is_symlink: false,
+            hidden: false,
+            size,
+            modified: None,
+            created: None,
+            added: None,
+        }
+    }
+
+    #[test]
+    fn a_folder_preview_speaks_the_measured_size() {
+        let folder = entry("nested", true, 0);
+        let line = spoken(&folder, None, Some(KnownSize { bytes: 7_340_032, stale: false, version: 1 }));
+        assert!(line.contains("7.3 MB"), "{line}");
+    }
+
+    #[test]
+    fn a_file_preview_keeps_its_own_size() {
+        let file = entry("a.txt", false, 512_000);
+        let line = spoken(&file, None, None);
+        assert!(line.contains("512.0 KB"), "{line}");
+    }
 }

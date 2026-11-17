@@ -9,7 +9,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -26,6 +26,9 @@ use crate::ui::Ui;
 pub const FSEVENTS_LATENCY: Duration = Duration::from_secs(1);
 /// Wait this long after the last change before writing the cache.
 pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
+/// A steady stream of FSEvents (any activity on the boot volume signals a save)
+/// must not postpone the write forever: save at least this often.
+pub const SAVE_MAX_DELAY: Duration = Duration::from_secs(30);
 /// A pane that stops reporting (a closed window) stops keeping its rows alive.
 const SOURCE_TTL: Duration = Duration::from_secs(5);
 const WORKERS: usize = 2;
@@ -442,7 +445,9 @@ impl FolderSizes {
         cx.spawn(async move |this, cx| {
             let (loaded, uuid) = cx
                 .background_spawn(async move {
-                    let cache = Cache::load(&path);
+                    let mut cache = Cache::load(&path);
+                    // io-ok: inside background_spawn; a recreated folder must not show the old inode's size.
+                    cache.validate_inodes();
                     // io-ok: inside background_spawn
                     let dev = std::fs::metadata("/").map(|meta| device(&meta)).unwrap_or(0);
                     (cache, crow_macos::volume_uuid(dev))
@@ -505,6 +510,7 @@ impl FolderSizes {
 
     fn on_events(&mut self, events: Vec<Event>, cx: &mut Context<Self>) {
         let mut changed = false;
+        let mut restart = false;
         {
             let mut cache = self.cache.write().unwrap_or_else(|poisoned| poisoned.into_inner());
             for event in events {
@@ -513,6 +519,21 @@ impl FolderSizes {
                     cache.set_last_event_id(crow_macos::current_event_id());
                     self.scheduler.clear();
                     changed = true;
+                    continue;
+                }
+                if event.flags.root_changed() {
+                    // The root the stream watches is gone or renamed; skip past
+                    // this event before starting again so it cannot replay into a
+                    // restart loop.
+                    let id = cache.last_event_id().max(event.id);
+                    cache.set_last_event_id(id);
+                    restart = true;
+                    changed = true;
+                    continue;
+                }
+                if event.flags.history_done() {
+                    // The marker only says the replay is complete; it is not a
+                    // changed folder and must not make anything stale.
                     continue;
                 }
                 if event.flags.must_scan_subdirs() {
@@ -524,6 +545,10 @@ impl FolderSizes {
                 self.scheduler.mark_stale(&event.path, &cache);
                 changed = true;
             }
+        }
+        if restart {
+            self.fsevents = None;
+            self.ensure_watcher(cx);
         }
         if changed {
             self.generation += 1;
@@ -564,13 +589,19 @@ fn worker(rx: Receiver<Request>, cache: Arc<RwLock<Cache>>, results: UnboundedSe
             results.unbounded_send(Outcome { path: request.path, generation: request.generation, measured: None }).ok();
             continue;
         }
+        let start_event = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).last_event_id();
         // io-ok: size worker thread
         let inode = std::fs::metadata(&request.path).map(|meta| inode(&meta)).unwrap_or(0);
         let measured = sizer.measure(&request.path, &request.cancel);
         if let Some(measured) = &measured {
             let mut cache = cache.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-            let event_id = cache.last_event_id();
-            cache.insert(&request.path, inode, measured, event_id, now());
+            let current_event = cache.last_event_id();
+            cache.insert(&request.path, inode, measured, start_event, now());
+            if current_event != start_event {
+                // FSEvents saw a change while the walk ran; the walk may have
+                // passed that folder before the change, so the bytes are stale.
+                cache.mark_stale(&request.path);
+            }
             cache.prune(MAX_ENTRIES);
         }
         results.unbounded_send(Outcome { path: request.path, generation: request.generation, measured }).ok();
@@ -584,8 +615,11 @@ fn spawn_saver(cache: Arc<RwLock<Cache>>, path: PathBuf, rx: Receiver<()>) {
             loop {
                 match rx.recv() {
                     Ok(()) => {
-                        while rx.recv_timeout(SAVE_DEBOUNCE).is_ok() {}
+                        let connected = wait_for_save(&rx, SAVE_DEBOUNCE, SAVE_MAX_DELAY);
                         save(&cache, &path);
+                        if !connected {
+                            break;
+                        }
                     }
                     Err(_) => {
                         save(&cache, &path);
@@ -595,6 +629,25 @@ fn spawn_saver(cache: Arc<RwLock<Cache>>, path: PathBuf, rx: Receiver<()>) {
             }
         })
         .ok();
+}
+
+/// Wait for a quiet `debounce` window, but never past `max` from the first
+/// signal: FSEvents on the boot volume can keep signalling forever, and a cache
+/// that is only written on quit loses every measurement if the app crashes.
+/// Returns false when the sender is gone.
+fn wait_for_save(rx: &Receiver<()>, debounce: Duration, max: Duration) -> bool {
+    let deadline = Instant::now() + max;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        match rx.recv_timeout(left.min(debounce)) {
+            Ok(()) => {}
+            Err(RecvTimeoutError::Timeout) => return true,
+            Err(RecvTimeoutError::Disconnected) => return false,
+        }
+    }
 }
 
 fn save(cache: &RwLock<Cache>, path: &Path) {
@@ -764,5 +817,77 @@ mod tests {
         let outcome = futures::executor::block_on(results_rx.recv()).unwrap();
         assert!(outcome.measured.is_none());
         assert!(fake.seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_quiet_channel_saves_after_the_debounce() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(()).unwrap();
+        let started = Instant::now();
+        assert!(wait_for_save(&rx, Duration::from_millis(30), Duration::from_secs(1)));
+        assert!(started.elapsed() >= Duration::from_millis(25), "waited for quiet: {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_steady_stream_of_signals_saves_at_the_cap_not_never() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(std::sync::Barrier::new(2));
+        let sender = {
+            let stop = stop.clone();
+            let started = started.clone();
+            std::thread::spawn(move || {
+                tx.send(()).unwrap();
+                started.wait();
+                while !stop.load(Ordering::Relaxed) {
+                    if tx.send(()).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        started.wait();
+        let at = Instant::now();
+        assert!(wait_for_save(&rx, Duration::from_millis(30), Duration::from_millis(100)));
+        let elapsed = at.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        sender.join().unwrap();
+        assert!(elapsed >= Duration::from_millis(90), "waited for the cap: {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(500), "did not starve: {elapsed:?}");
+    }
+
+    #[test]
+    fn a_closed_channel_stops_the_saver() {
+        let (tx, rx) = mpsc::channel::<()>();
+        drop(tx);
+        assert!(!wait_for_save(&rx, Duration::from_millis(30), Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn an_event_during_a_measure_marks_the_result_stale() {
+        struct EventSizer(Arc<RwLock<Cache>>);
+        impl Sizer for EventSizer {
+            fn measure(&self, _: &Path, _: &Cancel) -> Option<Measured> {
+                self.0.write().unwrap().set_last_event_id(11);
+                Some(Measured { bytes: 7, ..Default::default() })
+            }
+        }
+
+        let cache = Arc::new(RwLock::new(Cache::default()));
+        cache.write().unwrap().set_last_event_id(10);
+        let (results_tx, mut results_rx) = unbounded();
+        let (tx, rx) = mpsc::channel();
+        let worker_cache = cache.clone();
+        let sizer = Arc::new(EventSizer(cache.clone()));
+        std::thread::spawn(move || worker(rx, worker_cache, results_tx, sizer));
+        tx.send(Request { path: PathBuf::from("/a"), cancel: Cancel::new(), generation: 1 }).unwrap();
+        let outcome = futures::executor::block_on(results_rx.recv()).unwrap();
+        assert!(outcome.measured.is_some());
+        let cache = cache.read().unwrap();
+        let entry = cache.get(Path::new("/a")).expect("cached");
+        assert!(entry.stale, "the event invalidated the measure");
+        assert_eq!(entry.event_id, 10, "the walk's start id, not the completion id");
     }
 }

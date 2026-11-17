@@ -1177,13 +1177,23 @@ impl CrowWindow {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let tab = self.info.read(cx).tab();
+        let folder_size = entry.and_then(|entry| {
+            if !entry.is_dir || cx.global::<Ui>().settings.folder_sizes != crow_core::FolderSizesMode::Visible {
+                return None;
+            }
+            cx.try_global::<crate::folder_sizes::SizeService>()
+                .and_then(|service| service.0.read(cx).size(&entry.path))
+                .map(Into::into)
+        });
         let label = match tab {
-            InfoTab::Preview => entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview)),
+            InfoTab::Preview => {
+                entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview, folder_size))
+            }
             InfoTab::Info => self.info.read(cx).label(),
         };
         let body = match tab {
             InfoTab::Preview => match entry {
-                Some(entry) => preview::contents(entry, preview, theme).into_any_element(),
+                Some(entry) => preview::contents(entry, preview, theme, folder_size).into_any_element(),
                 None => div().into_any_element(),
             },
             InfoTab::Info => self.info.clone().into_any_element(),
@@ -2648,7 +2658,12 @@ impl CrowWindow {
         let ui = cx.global::<Ui>();
         let recent: Vec<palette::CommandId> =
             ui.recent_commands.ids().iter().filter_map(|key| palette::CommandId::from_key(key)).collect();
-        palette::command_listing(query, &recent, ui.settings.palette_recent_commands)
+        palette::command_listing(
+            query,
+            &recent,
+            ui.settings.palette_recent_commands,
+            ui.settings.folder_sizes == crow_core::FolderSizesMode::Visible,
+        )
     }
 
     fn refresh_palette(&mut self, query: &str, cx: &mut Context<Self>) {
