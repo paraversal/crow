@@ -4,6 +4,7 @@
 
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
@@ -15,11 +16,11 @@ use crate::actions::{
     CancelOperation, ClearFilter, EditPath, Eject, MoveFavoriteDown, MoveFavoriteUp, NextGroup, OpenSelection,
     PreviousGroup, QuickLook, RemoveFromSidebar, SearchReveal, ShowSearch, StartFilter, SwitchFocus,
 };
-use crate::chrome::{Keycap, KeycapWeight, with_tooltip};
+use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::icons::{self, Glyph};
 use crate::keys::{self, KeyScope};
 use crate::operations::{self, Running};
-use crate::pane::Pane;
+use crate::pane::{DragHandoff, DraggedSelection, Pane, drag_combo, promote_drag};
 use crate::sidebar::CursorKind;
 use crate::style::{color, color_alpha, error_soft, icon};
 use crate::text_input::{self, Complete, Confirm, TextInput};
@@ -563,6 +564,11 @@ fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui:
     let names = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(" › ");
     let (deepest, target) = parts.last().cloned().unwrap_or_default();
     let pane = pane.clone();
+    // The "…" drags the deepest folder it stands for, the same one its click goes to.
+    let drag_icon = icon(&target, true, 22);
+    let drag_label: SharedString = deepest.clone().into();
+    let drag_entries = Arc::new(vec![(target.clone(), true)]);
+    let handoff = DragHandoff::new();
     let part = div()
         .id("path-folded")
         .debug_selector(|| "path-folded".into())
@@ -576,6 +582,13 @@ fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui:
         .hover(move |s| s.bg(hover))
         .child("…")
         .child(div().pl_1().child("›"))
+        .on_drag(DraggedSelection { entries: drag_entries }, {
+            let handoff = handoff.clone();
+            move |_value, offset, window, cx| drag_combo(drag_icon.clone(), &drag_label, offset, &handoff, window, cx)
+        })
+        .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
+            promote_drag(selection, &handoff, window, cx)
+        })
         .on_click(move |_, _, cx| {
             // The "…" is not empty path space: a double-click must not edit the path.
             cx.stop_propagation();
@@ -655,6 +668,23 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
                 .children(icon(target, is_dir, 14).map(|i| img(i).flex_none().size(px(14.))))
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name.clone()))
                 .when(i < last, |part| part.child(separator()));
+            // A segment drags the entry it stands for: the folder, or the file the
+            // last segment shows. The click below still navigates; GPUI clears the
+            // click once a drag starts, so a drag never also navigates.
+            let drag_icon = icon(target, is_dir, 22);
+            let drag_label: SharedString = name.clone().into();
+            let drag_entries = Arc::new(vec![(target.clone(), is_dir)]);
+            let handoff = DragHandoff::new();
+            let part = part
+                .on_drag(DraggedSelection { entries: drag_entries }, {
+                    let handoff = handoff.clone();
+                    move |_value, offset, window, cx| {
+                        drag_combo(drag_icon.clone(), &drag_label, offset, &handoff, window, cx)
+                    }
+                })
+                .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
+                    promote_drag(selection, &handoff, window, cx)
+                });
             let target = target.clone();
             let part = part.on_click(move |_, _, cx| {
                 // A segment is not empty space: a double-click must not edit the path.
@@ -673,6 +703,45 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
             });
             children.push(with_tooltip(part, spoke, None).into_any_element());
         }
+        // The pencil appears while the pointer is over the path area; the empty
+        // space fills on hover. Both are overlay-like: the segments keep their
+        // positions and the bar keeps its height.
+        let edit = with_action_tooltip(
+            div()
+                .id("path-edit")
+                .debug_selector(|| "path-edit".into())
+                .role(Role::Button)
+                .aria_label("Edit path")
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(18.))
+                .rounded(px(4.))
+                .opacity(0.)
+                .group_hover("path-area", |s| s.opacity(1.))
+                .on_click(|_, window, cx| {
+                    cx.stop_propagation();
+                    window.dispatch_action(Box::new(EditPath), cx);
+                })
+                .child(icons::glyph(Glyph::Pencil, 12., "fg-muted", &theme)),
+            "Edit path",
+            &EditPath,
+            KeyScope::Window,
+            cx,
+        );
+        let empty = div()
+            .id("path-empty")
+            .debug_selector(|| "path-empty".into())
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_end()
+            .overflow_hidden()
+            .group_hover("path-area", move |s| s.bg(hover))
+            .child(edit);
         div()
             .id("bar-path")
             .debug_selector(|| "bar-path".into())
@@ -685,12 +754,13 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
             .flex()
             .items_center()
             .gap_1()
+            .group("path-area")
             .children(children)
-            // Finder's path bar edits on a double-click in its empty space; ⌘L is the key.
-            .on_click(|event, window, cx| {
-                if event.click_count() >= 2 {
-                    window.dispatch_action(Box::new(EditPath), cx);
-                }
+            .child(empty)
+            // Finder edits on a double-click; a single click on empty space is the
+            // Windows-like behavior. ⌘L stays the key.
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(EditPath), cx);
             })
     };
 

@@ -27,9 +27,10 @@ tabs closing search, the Tab cycle while searching, ↓ into the results and ↑
 (⇧⌘P in list and column view, `show_preview` live reload, the palette chip), the blinking caret,
 the bottom bar
 (its type-to-select prefix, hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
-path folding and hint dropping, messages that retire, the editable path bar: ⌘L and a double-click on empty
-space, Tab completion, Return to a folder or a file, a missing path's beep and bar error, Escape and a
-click-away, and the path slot keeping its height), the contextual tips (a long-folder scroll, two
+path folding and hint dropping, messages that retire, the editable path bar: ⌘L, a single click on empty
+space, the hover pencil, Tab completion, Return to a folder or a file, a missing path's beep and bar error,
+Escape and a click-away, segment drags (a click still navigates, a drag does not; the folded "…" drags its
+deepest folder; the path field has no drag), and the path slot keeping its height), the contextual tips (a long-folder scroll, two
 zero-match filters, a typed path for a recent folder, Got it, `hints = "off"`, one at a time, closing on a
 folder change or an overlay, and the retired set surviving a relaunch), the Return setting (rename by default, open with `enter = "open"`, F2 always renames, the sidebar and search results still open), the search-result context menu, closing or quitting during an operation, ⌥ word moves in
 text fields, the list's Name column following the window width, the menu bar
@@ -366,12 +367,12 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 
 | Check | How |
 | --- | --- |
-| Path bar | Click a folder segment to go there (Back returns); click the selected file's segment to open it. |
+| Path bar | Click a folder segment to go there (Back returns); click the selected file's segment to open it. Hover the path area: a pencil appears at the right edge and the empty space fills; click either to edit (⌘L and a double-click still do). Drag a segment to Finder: the folder arrives, not text and not the selection; the drag does not also navigate. Drop a segment on a pane or sidebar favorite: the folder moves like a row drag. While the path field is open, dragging selects text and starts no file drag. VoiceOver reads the pencil as "Edit path". |
 | Bottom bar hints | Fresh state dir (`CROW_STATE_DIR=$(mktemp -d)`): idle hint `/ filter` only. Press `/` and Esc three times (or Edit ▸ Filter This Folder): it disappears; relaunch: still gone. Focus the sidebar, a filter, search results: the hint set changes each time. `hints = "always"` brings them back; `"off"` hides all. Vim layer: same, and `m` shows "Mark this folder…". |
 | Bottom bar counts | Column view: hover the count, the tooltip names the focused column's folder. Filter: the bar keeps "N items" (the field says "n of N"). Select several files: "n selected · size". |
 | Progress and cancel | Copy a large folder to another disk: a 2 px accent line along the bottom bar's top edge and "Copying … · n %" with Cancel esc replace the hints; the path and count stay. Esc or Cancel stops it with nothing half-copied. |
 | Bottom bar error | Break `views.toml` while an operation runs: progress and the red token show together, hints are gone; Open opens `views.toml`; fixing it removes the token. |
-| Bottom bar, narrow | In a deep folder, shrink the window: the path's middle folds into "…" first (its tooltip names the hidden folders, a click goes to the deepest), then the hint goes; the first segment and the current folder or selection stay visible. With an error and a running copy at minimum width, the path still shows its ends and nothing runs off the right edge. |
+| Bottom bar, narrow | In a deep folder, shrink the window: the path's middle folds into "…" first (its tooltip names the hidden folders, a click goes to the deepest, a drag drags that folder), then the hint goes; the first segment and the current folder or selection stay visible. With an error and a running copy at minimum width, the path still shows its ends and nothing runs off the right edge. |
 | Tips | With a fresh `CROW_STATE_DIR`: the first launch asks "Show tips as you go?" once; Show tips and No tips both close it and write only the `tips` line, and a relaunch does not ask again (deleting `settings.toml` does not either). Esc keeps the default and closes it. Then scroll a 200+ item folder → "Type / to filter this folder by name." bottom right above the bottom bar, in list and column view, FireBox and Solarized Light; Got it closes it and it never returns after relaunch; "Don't show tips" closes it and mutes every later tip. Two zero-match filters in a row → the ⌘F tip; ⇧⌘G to a recent folder → the ⌘K tip. Using the key closes and retires a tip. `hints = "off"` shows none; `tips = "off"` shows none but keeps the hints. Opening Activity closes a tip; a narrow window wraps the text inside 12 px margins, with the last row above the card. |
 
 ### Files between apps
