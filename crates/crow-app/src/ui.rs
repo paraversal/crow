@@ -314,7 +314,9 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     let state_dir = root.join("state");
     // Tests start past the first-launch sheet unless they ask for it: a fresh
     // state dir would otherwise owe it in every window test.
+    // io-ok: test-only state
     std::fs::create_dir_all(&state_dir).ok();
+    // io-ok: test-only state
     std::fs::write(state_dir.join(crow_core::ONBOARDING_FILE), "{\"tips_choice\": true}\n").ok();
     let ui = Ui::new(root.join("config"), state_dir, crow_core::home(), crow_theme::fallback(), false);
     cx.set_global(ui);

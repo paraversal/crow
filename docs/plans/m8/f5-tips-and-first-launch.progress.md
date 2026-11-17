@@ -1,5 +1,5 @@
 # F5 tips and first launch progress
-Branch: m8-f5-tips · PR: none · Last updated: 2026-11-17 · State: in progress
+Branch: m8-f5-tips · PR: none · Last updated: 2026-11-17 · State: Ready for critique
 
 ## Status
 | Item | State | Notes |
@@ -26,13 +26,15 @@ Branch: m8-f5-tips · PR: none · Last updated: 2026-11-17 · State: in progress
 - Tests start already onboarded: `ui::init_for_tests` writes an answered `onboarding.json`, so only tests that remove it see the sheet. The live fuzzer's `prepare` writes the same answer; the settings fuzz smoke uses `init_for_tests` and does not hang on it.
 
 ## Hand checks
-- [ ] Fresh state dir (`CROW_STATE_DIR=$(mktemp -d)`): the "Show tips as you go?" sheet appears once on the first window; Show tips and No tips both close it; a relaunch does not show it.
+- [x] Fresh state dir (`CROW_STATE_DIR=$(mktemp -d)`): the "Show tips as you go?" sheet appeared on the first window (bundle, 1200×760, FireBox dark); Return (Show tips) closed it and wrote `tips = "auto"` plus `{"tips_choice": true}`; relaunching with the same state dir showed no sheet.
+- [x] Tip card in the bundle: a 250-file folder scrolled with the wheel; the card shows the keycap, the two-line sentence, Got it and "Don't show tips"; the last row sits above the card.
+- [ ] No tips in the bundle: covered by `first_launch_no_tips_writes_off`; the bundle click was not driven (no AX click automation in this session).
+- [ ] "Don't show tips" in the bundle: covered by `tip_no_tips_mutes_and_closes`; the bundle click was not driven.
 - [ ] The sheet's choice writes only the `tips` line in `settings.toml`; deleting `settings.toml` does not bring the sheet back.
 - [ ] Settings ▸ Behaviour ▸ Tips: Auto/Off changes at once, writes only the `tips` line, comments survive; an external edit updates the control; a broken file disables it.
 - [ ] `tips = "off"`: no tip after a long-folder scroll; `hints` still show. `hints = "off"`: no tips and no hints.
 - [ ] Tip card at 640 px and wide, light and dark: text wraps, last row stays above the card; "Don't show tips" is legible in both themes.
 - [ ] VoiceOver: the onboarding sheet's title and both buttons are spoken; the Tips control is a radio group with its label and description; the card's two buttons read.
-- [ ] "Don't show tips" writes `tips = "off"`, closes the card, and the next tip does not appear.
 
 ## Found along the way
 - None yet.
@@ -43,6 +45,9 @@ Branch: m8-f5-tips · PR: none · Last updated: 2026-11-17 · State: in progress
 - 2026-11-17: Item 2. `OnboardingState` + app-side `Onboarding`, `Sheet::Onboarding`, the first window takes it, both choices write `tips`, Escape records the current setting. Five first-launch tests pass; `fuzz_settings_smoke` passes.
 - 2026-11-17: Item 3. "Don't show tips" on the card; `tip_no_tips_mutes_and_closes` passes. `INSET` 64 → 80 because the card now wraps to two lines; all 24 tip tests pass.
 - 2026-11-17: README's settings table and hints/tips section, `docs/testing.md`'s tips, Behaviour and VoiceOver rows updated.
+- 2026-11-17: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass (489 crow-app tests, 1 ignored). The IO guard flagged the test-only onboarding writes; both lines now carry `// io-ok: test-only state`.
+- 2026-11-17: `./scripts/bundle.sh` built; a fresh state dir showed the sheet, Return wrote `tips = "auto"` and `{"tips_choice": true}`, and a relaunch showed no sheet. A 250-file folder scrolled with the wheel showed the card with both actions and the last row above it. `scripts/shot.sh` now writes an answered `onboarding.json`, so screenshots do not capture the sheet.
+- 2026-11-17: No bench: the inset only applies while a tip is visible, and the bench (`--bench`) shows no tips; the normal list layout and first paint are unchanged.
 
 ## Next
-Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; then `./scripts/bundle.sh` for the hand checks (fresh state dir, both choices, the Settings row, the card link, light/dark, 640 px, VoiceOver).
+Ready for critique: the branch is local, the progress file is current, and the critique agent reviews it and opens the PR. Remaining hand checks are light/dark, 640 px, VoiceOver, the Settings row, and the two bundle clicks the session could not drive.
