@@ -20,6 +20,26 @@ pub fn state_dir() -> PathBuf {
     home().join(".local").join("state").join("crow")
 }
 
+/// `$CROW_CACHE_DIR`, else `~/Library/Caches/crow` on macOS, else
+/// `$XDG_CACHE_HOME/crow`, else `~/.cache/crow`: data that can be re-computed
+/// (folder sizes). Time Machine skips `~/Library/Caches`, so losing it is cheap.
+pub fn cache_dir() -> PathBuf {
+    if let Some(dir) = env::var_os("CROW_CACHE_DIR") {
+        return PathBuf::from(dir);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        home().join("Library").join("Caches").join("crow")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(dir) = env::var_os("XDG_CACHE_HOME") {
+            return PathBuf::from(dir).join("crow");
+        }
+        home().join(".cache").join("crow")
+    }
+}
+
 pub fn home() -> PathBuf {
     env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
 }

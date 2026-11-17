@@ -9,6 +9,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod cache;
+pub use cache::{Cache, CachedSize, MAX_ENTRIES};
+
 /// What a walk found. `items` counts every entry below the root (files, symlinks
 /// and folders; a package counts once, not its contents); `folders` is the subset
 /// that are directories. `unreadable` counts folders that could not be listed.
@@ -18,6 +21,8 @@ pub struct Measured {
     pub items: u64,
     pub folders: u64,
     pub unreadable: u64,
+    /// Hard-link entries whose bytes were already counted elsewhere.
+    pub hardlinks: u64,
 }
 
 /// Stops a walk between entries. Cloning shares the flag, so the scheduler can
@@ -75,6 +80,7 @@ impl Walk {
             self.measured.items += 1;
         }
         if nlink > 1 && !self.seen.insert((dev, fileid)) {
+            self.measured.hardlinks += 1;
             return;
         }
         self.measured.bytes += size;

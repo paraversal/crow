@@ -6,7 +6,7 @@ Branch: m8-f6-folder-sizes · PR: none · Last updated: 2026-11-17 · State: in 
 | --- | --- | --- |
 | S1 Spike: measure before choosing | done | numbers below; walk is syscall-bound; logical vs allocated differ 0.5–5%; 0 TCC errors from the shell, 11 dataless files never downloaded |
 | S2 The sizer (`crow-fs`) | done | `crow_fs::sizes::{measure, Measured, Cancel}`; 12 tests (nested, hard links, symlink loop, fake device boundary, unreadable subfolder/root, cancellation, packages, bulk/portable agreement); totals match S1 |
-| S3 The cache | todo | |
+| S3 The cache | done | `crow_fs::sizes::Cache` (versioned JSON, inode, `used_at` bound, `mark_stale`/`mark_subtree_stale`, `combined_size`); `crow_core::cache_dir()` = `~/Library/Caches/crow`; 11 tests |
 | S4 FSEvents history (`crow-macos`) | todo | |
 | S5 Scheduling (`crow-app`) | todo | |
 | S6 Showing sizes | todo | |
@@ -53,6 +53,9 @@ Throwaway `crates/crow-fs/examples/walk_bench.rs` (deleted after the run). All w
 - Hard links count once for bytes by `(dev, file id)`; each directory entry still counts as an item (Finder's item count) (plan's S2).
 - `listing::bulk` now exposes `list_raw(dir, times, on_batch)`; the listing asks for times, the sizer does not. One packed-buffer parser, no second copy (code convention; S2).
 - S2 re-ran the S1 walk shape on the fixture/repo/home and matched the spike's totals; the fixture's absolute time moved from 86 ms (S1) to ~230 ms on both the old spike code and the sizer, so that is cache/environment, not the refactor (see Log).
+- `Cache` stores `folders`, `unreadable`, `hardlinks`, `used_at` and `stale` in addition to the plan's `bytes`, `items`, `inode`, `measured_at`, `event_id`: the first three are needed to combine child sizes honestly, `used_at` is the bound's LRU key, and `stale` is what FSEvents marks (plan's S3 + S4).
+- `Cache::combined_size` refuses to use a child with hard links, because a hard link can cross child folders and would be counted twice; the parent's own hard links are refused too (plan's hard-link rule).
+- The cache file is `crow_core::cache_dir().join("folder-sizes.json")`; `$CROW_CACHE_DIR` overrides it for tests (Q4 + repo config convention).
 
 ## Hand checks
 - [ ] Home in list view with the setting on: sizes fill in top first, fade in, and match Finder's Get Info (logical) within rounding.
@@ -68,6 +71,7 @@ Throwaway `crates/crow-fs/examples/walk_bench.rs` (deleted after the run). All w
 - 2026-11-17: branch `m8-f6-folder-sizes` from `main` @ cb49ae4; read the plan, M8 index and F3's progress file. Started S1.
 - 2026-11-17: S1 done. Three walks timed on the fixture, the repo and `~`; `sample` shows `getattrlistbulk` + one `open` per folder. Cold not measurable without root; TCC from the shell is clean but the app's identity differs; 11 dataless iCloud files stayed dataless. Asked Q1–Q6; answers recorded above.
 - 2026-11-17: S2 done. Refactored `listing::bulk` to a shared `list_raw` (extra `dev`/`file id`/`link count`; times optional) and added `sizes.rs`. `cargo fmt --check`, `clippy -p crow-fs --all-targets -D warnings`, `cargo test -p crow-fs` (55) pass. The sizer's totals on the fixture/repo/home match S1. Note: the fixture's absolute walk time is now ~230 ms for both the old spike code and the sizer; the S1 86 ms was a cache state, not a code difference.
+- 2026-11-17: S3 done. Added `sizes::Cache` (serde JSON, version 1, atomic save, inode check, LRU bound, stale marking, child combining) and `crow_core::cache_dir()`. `cargo test -p crow-fs` is 66 tests.
 
 ## Next
-S3: `crow_fs::sizes::Cache` (versioned JSON, inode check, bound, child sizes help the parent), with tests.
+S4: the FSEvents binding in `crow-macos` (`objc2-core-services`), history replay, UUID check, and the macOS integration tests.
