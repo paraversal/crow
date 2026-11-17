@@ -1,6 +1,6 @@
 # F1 — Selection and motion progress
 
-Branch: `m8-f1-selection` · PR: none · Last updated: 2026-11-17 · State: Ready for critique
+Branch: `m8-f1-selection` · PR: none · Last updated: 2026-11-17 · State: In critique
 
 ## Status
 
@@ -33,6 +33,20 @@ Branch: `m8-f1-selection` · PR: none · Last updated: 2026-11-17 · State: Read
 - No cursor ring on pane rows (Q1): the active fill and the glide already show the cursor, and the U1 board has no outline.
 - Copy/cut feedback also applies to search results (Q7); one clipboard read, no second source of truth.
 - Rubber-band selection stays deferred (Q6). When it is planned, include Cmd-drag additive selection.
+
+## Critique
+Critic session: 2026-11-17 · Base: `main` @ 2accf3a · Head reviewed: c0f584f
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | Cut rows look exactly like hidden rows: `CUT_DIM` and `HIDDEN_DIM` are both 0.5 and both dim icon, name and columns. The user wants cut distinct. | `style.rs:76-82`, `pane.rs:1978`, `search.rs:1724` | UX | fix | |
+| C2 | After a removal drops the cursor row while other rows stay selected, the next row joins the selection. The plan says "keep them selected and move only the cursor"; the agent's Decision cites the cursor-is-selected invariant. | `folder.rs:1482-1508`, plan item 1 | plan | ask | |
+| C3 | Item 2's test asserts marker selectors (`island-top-*`), not the rendered corner radii; the 1 px markers are invisible and the row's actual rounding is untested. | `window/tests.rs:4552`, `pane.rs:2874` | code | note | |
+| C4 | Executing agent ticked only 2 of 8 hand checks; the plan's Finish requires the six items in light/dark, 640 px/wide, empty/100k, Vim on/off, VoiceOver. | progress Hand checks | honesty | fix (this review) | |
+
+Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (workspace, incl. `fuzz_smoke`) · bench and bundle pending
+Looked at: pending
+Verdict: pending
 
 ## Hand checks
 
