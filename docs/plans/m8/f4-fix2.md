@@ -53,11 +53,11 @@ Completion exists: `text_input.rs:96` binds Tab→Complete, `window.rs:602` call
 
 **Cause:** the completion exists (`text_input.rs:96`, `window.rs:602`, `crow_core::complete_typed`), but ⌘L opens the field with the full path selected and the last component complete, so Tab returns the same text and the hint looks dead.
 
-**Change (Q3 C):** `text_input.rs`: the `TextInput` carries an optional completion and renders its suffix after the typed text in `fg-muted` (the caret stays at the typed end; the suffix is not selectable). `window.rs`: the path edit's `Changed` event recomputes `complete_typed` in the background (stale results dropped; a short debounce if the reads are hot) and sets the input's completion; Tab applies it (the existing `complete_path_edit`); the close clears it. The hint stays.
+**Change (Q3 C):** `text_input.rs`: the `TextInput` carries an optional completion and renders its suffix after the typed text in `fg-muted` (the caret stays at the typed end; the suffix is not selectable). The suffix is the completion's tail compared to the typed tail case-insensitively — `complete_typed` keeps the on-disk spelling, so `~/des` → `~/Desktop/` must not rely on `strip_prefix`; the preview shows only when the caret is at the text's end (a mid-text caret shows none, since Tab applies the whole text). `window.rs`: the path edit's `Changed` event recomputes `complete_typed` in the background (stale results dropped; a short debounce if the reads are hot) and sets the input's completion; Tab applies it (the existing `complete_path_edit`); the close clears it. The hint stays.
 
-**Tests:** the `complete_typed` suffix from a partial path; the field's completion set on change and cleared when nothing completes; a stale result from an older typed text is dropped; Tab applies the completion; the hint stays.
+**Tests:** the `complete_typed` suffix from a partial path, including a lowercase typed tail (`~/des` → `~/Desktop/`); the field's completion set on change and cleared when nothing completes; a stale result from an older typed text is dropped; a mid-text caret shows no suffix; Tab applies the completion; the hint stays.
 
-**Done when:** the field shows the muted completion suffix; Tab applies it; a complete path shows no suffix; the hint stays; light/dark and 640 px look right.
+**Done when:** the field shows the muted completion suffix (case-insensitive input included); Tab applies it; a complete path shows no suffix; a mid-text caret shows none; the hint stays; light/dark and 640 px look right.
 
 ## Finish
 

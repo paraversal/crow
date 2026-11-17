@@ -27,6 +27,7 @@ Branch: `m8-f4-path-bar` (F4, unmerged) · PR: none · Last updated: 2026-11-17 
 - 2026-11-17: the user tested the V2: the hover sticks when the pointer leaves the window; no animations; the "Tab complete" hint looks dead. Plan written; awaiting approval.
 - 2026-11-17: corrected the plan: the completion exists (`text_input.rs:96` → `complete_path_edit`); the field opens with the full path selected, so Tab returns the same text. The hover patch must move `mouse_position` out, not just clear the hit test.
 - 2026-11-17: the user answered Q1 A, Q2 A, Q3 C (the inline completion preview); the plan amended; awaiting the OK to build.
+- 2026-11-17: item 3 spells out the case-insensitive suffix (`~/des` → `~/Desktop/`, no `strip_prefix`) and the caret-at-end gate, with tests.
 
 ## Next
 
