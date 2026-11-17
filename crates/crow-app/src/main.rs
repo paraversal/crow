@@ -30,6 +30,7 @@ mod fuzz;
 #[cfg(feature = "fuzz")]
 mod fuzz_live;
 mod icons;
+mod info_pane;
 #[cfg(test)]
 mod io_guard;
 mod keys;

@@ -56,7 +56,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, hidden files (shown by default), the preview (`show_preview`), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, hidden files (shown by default), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
@@ -170,8 +170,11 @@ shell-escaped or a `file://` URL), Cmd-L (or a click on empty space in the botto
 the path the bar shows in place: Tab completes, Return goes there or selects a file, Esc puts the path
 back, Cmd-, (Settings), Cmd-Shift-. and Space. Cmd-K's
 "Settings" opens the window and "Edit settings.toml" opens the file directly. Cmd-Shift-P shows
-or hides the preview pane on the right (in list and column view, search included; Quick Look still
-works). Typing a name selects it and the bottom bar shows the letters. Tab moves focus between the
+or hides the right column (in list and column view, search included; Quick Look still
+works). Cmd-I opens it on the Info tab, and a second Cmd-I closes it; the tab strip switches
+between Preview and Info. The Info tab shows the item's name, kind, size, where, created, modified and
+added dates, tags, permissions and owner/group; a multi-selection shows its count, total file size,
+common kind and parent, and shared tags. Typing a name selects it and the bottom bar shows the letters. Tab moves focus between the
 sidebar and the list.
 Column headers sort (click again to reverse) and their dividers resize.
 Type `/` to filter the focused folder: the field opens as the first row of the focused column
@@ -220,11 +223,11 @@ selected). Nothing is ever overwritten: name clashes ask first, and Replace move
 
 Clicking empty space in the list deselects (focus stays on the list); in column view it also closes
 the columns to the right of the one clicked. Right-click or Ctrl-click opens a native menu with the
-same names and keys as the menu bar: on items, Open, Quick Look, Rename, Duplicate, Copy, Cut,
-Paste, Copy Path, Show in Finder, Add to Sidebar and Move to Trash (an unselected row is selected
+same names and keys as the menu bar: on items, Open, Quick Look, Show Info, Rename, Duplicate, Copy,
+Cut, Paste, Copy Path, Show in Finder, Add to Sidebar and Move to Trash (an unselected row is selected
 first, a row in the selection keeps it); on empty space, New Folder, New File, Paste and Show in
 Finder (opens the folder itself in Finder). Search results have their own menu: Open, Reveal in
-Folder, Quick Look, Copy, Cut, Copy Path and Move to Trash.
+Folder, Quick Look, Show Info, Copy, Cut, Copy Path and Move to Trash.
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).
 Fuzzing: `cargo test -p crow-app fuzz_smoke`; long runs and replay: [docs/testing.md#fuzzing](docs/testing.md#fuzzing). For real frame times, `crow --fuzz` (built with `--features fuzz`) reports any step over its budget (50 ms; 100 ms for a bulk step acting on more than 10 000 paths) and fails on a heartbeat over 250 ms.

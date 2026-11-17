@@ -58,8 +58,9 @@ font_size = 13.0
 # List dotfiles and other hidden items. View ▸ Show Hidden Files (Shift-Cmd-.) toggles it.
 show_hidden_files = true
 
-# The preview pane on the right in list view and the preview column in column view.
-# View ▸ Hide Preview (Shift-Cmd-P) toggles it; Quick Look still works.
+# The right column in list view and the last column in column view: a Preview tab
+# and an Info tab (Cmd-I). View ▸ Hide Preview (Shift-Cmd-P) toggles the column;
+# off is the default only, Cmd-I still opens it. Quick Look still works.
 show_preview = true
 
 # Cmd-K: list the commands you ran from the palette under "Recently used"

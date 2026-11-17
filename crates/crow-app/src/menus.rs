@@ -245,6 +245,7 @@ mod tests {
                 "—",
                 "Show Hidden Files",
                 "Hide Preview",
+                "Show Info",
                 "Show Activity",
                 "Theme…",
             ]

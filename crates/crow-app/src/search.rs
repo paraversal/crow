@@ -2,6 +2,7 @@
 //! Home, or Spotlight names on This Mac. Results stream in; the footer counts
 //! results and skipped folders, and lists the rule that skipped each one.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ use crate::actions::{
 use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::extensions::Ext;
 use crate::icons::{self, Glyph};
+use crate::info_pane::{InfoKey, InfoTarget, SelectionSummary, TAG_SCAN_CAP};
 use crate::keys::{self, KeyScope};
 use crate::operations::Operations;
 use crate::pane::{DraggedSelection, island_edges};
@@ -124,6 +126,10 @@ pub struct SearchView {
     /// The compiled rules for `exclude_generation`; the glob compile is ~14 ms.
     rules: Option<(u64, Arc<RuleSet>)>,
     selection: Selection<PathBuf>,
+    /// Bumped on every selection change; the Info pane keys its load on it.
+    selection_generation: u64,
+    /// The Info tab's multi-selection summary, rebuilt only when the selection changes.
+    summary_cache: RefCell<Option<(u64, SelectionSummary)>>,
     cursor: usize,
     /// The user picked a row, so streaming batches stop re-selecting the best hit.
     user_moved: bool,
@@ -262,6 +268,8 @@ impl SearchView {
             exclude_generation,
             rules: None,
             selection: Selection::default(),
+            selection_generation: 0,
+            summary_cache: RefCell::new(None),
             cursor: 0,
             user_moved: false,
             hit_count: 0,
@@ -334,6 +342,7 @@ impl SearchView {
         self.capped = false;
         self.show_skipped = false;
         self.selection.clear();
+        self.selection_generation += 1;
         self.cursor = 0;
         self.user_moved = false;
         self.hit_count = 0;
@@ -587,6 +596,7 @@ impl SearchView {
         if !self.user_moved {
             if let Some(first) = self.results.first() {
                 self.selection.select_only(first.path.clone());
+                self.selection_generation += 1;
                 if self.cursor != 0 {
                     self.cursor = 0;
                     self.scroll.scroll_to_item(0, ScrollStrategy::Top);
@@ -667,6 +677,84 @@ impl SearchView {
     /// The preview pane's parts, when a result is selected.
     pub fn preview_parts(&self) -> Option<(Entry, Option<Preview>)> {
         self.preview.as_ref().map(|loaded| (loaded.entry.clone(), Some(loaded.preview.clone())))
+    }
+
+    /// What the Info tab shows for the results: the cursor result, or a summary of
+    /// a multi-selection. Sizes for a multi-selection are read off the main thread.
+    pub fn info_target(&self) -> (Option<InfoTarget>, Option<InfoKey>) {
+        if self.selection.len() > 1 {
+            let summary = self.selection_summary();
+            let key = InfoKey::Many { generation: self.selection_generation, count: summary.count };
+            return (Some(InfoTarget::Many(summary)), Some(key));
+        }
+        let Some((entry, _)) = self.preview_parts() else { return (None, None) };
+        let key = InfoKey::Single(entry.path.clone());
+        (Some(InfoTarget::Single { entry, items: None }), Some(key))
+    }
+
+    fn selection_summary(&self) -> SelectionSummary {
+        if let Some((generation, summary)) = &*self.summary_cache.borrow()
+            && *generation == self.selection_generation
+        {
+            return summary.clone();
+        }
+        let mut count = 0;
+        let mut folders = 0;
+        let mut common_parent: Option<PathBuf> = None;
+        let mut parent_set = false;
+        let mut parent_mixed = false;
+        let mut common_kind: Option<(String, bool)> = None;
+        let mut kind_mixed = false;
+        let mut tag_paths = Vec::new();
+        for row in &self.results {
+            if !self.selection.contains(&row.path) {
+                continue;
+            }
+            count += 1;
+            if row.is_dir {
+                folders += 1;
+            }
+            let parent = row.path.parent().map(Path::to_path_buf);
+            if !parent_set {
+                common_parent = parent;
+                parent_set = true;
+            } else if !parent_mixed && common_parent != parent {
+                parent_mixed = true;
+            }
+            if !kind_mixed {
+                let is_folder = row.is_dir && !row.is_package;
+                match &common_kind {
+                    None => {
+                        let ext = Path::new(&row.name).extension().and_then(|e| e.to_str()).unwrap_or("");
+                        common_kind = Some(if is_folder { (String::new(), true) } else { (ext.to_lowercase(), false) });
+                    }
+                    Some((ext, first_is_folder)) => {
+                        let this_ext = Path::new(&row.name).extension().and_then(|e| e.to_str()).unwrap_or("");
+                        if *first_is_folder != is_folder || (!is_folder && !this_ext.eq_ignore_ascii_case(ext)) {
+                            kind_mixed = true;
+                        }
+                    }
+                }
+            }
+            if tag_paths.len() < TAG_SCAN_CAP {
+                tag_paths.push(row.path.clone());
+            }
+        }
+        let summary = SelectionSummary {
+            count,
+            bytes: None,
+            folders,
+            kind: if kind_mixed {
+                None
+            } else {
+                common_kind.map(|(ext, is_folder)| crow_macos::kind_name(&ext, is_folder))
+            },
+            parent: if parent_mixed { None } else { common_parent },
+            tag_paths: tag_paths.into(),
+            tags_truncated: count > TAG_SCAN_CAP,
+        };
+        *self.summary_cache.borrow_mut() = Some((self.selection_generation, summary.clone()));
+        summary
     }
 
     fn query(&self, cx: &App) -> String {
@@ -853,6 +941,7 @@ impl SearchView {
     fn select_only(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(row) = self.results.get(ix) else { return };
         self.selection.select_only(row.path.clone());
+        self.selection_generation += 1;
         self.cursor = ix;
         self.user_moved = true;
         window.focus(&self.focus, cx);
@@ -880,6 +969,7 @@ impl SearchView {
             self.selection.select_only(row.path.clone());
             self.cursor = ix;
         }
+        self.selection_generation += 1;
         self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
         self.load_preview(cx);
         cx.notify();
@@ -898,6 +988,7 @@ impl SearchView {
             // The selection stays, so Copy, Cut and Trash still take all of it.
             self.selection.set_cursor(row.path.clone());
         }
+        self.selection_generation += 1;
         // Single-row actions (Open, Reveal, Quick Look) act on the cursor.
         self.cursor = ix;
         self.load_preview(cx);
@@ -961,6 +1052,7 @@ impl SearchView {
         let position = |path: &PathBuf| paths.iter().position(|candidate| candidate == path);
         let at = |index: usize| paths[index].clone();
         self.selection.extend_to(target, position, at);
+        self.selection_generation += 1;
         self.cursor = target;
         self.user_moved = true;
     }
@@ -1119,6 +1211,7 @@ impl SearchView {
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         let paths = self.results.iter().map(|row| row.path.clone());
         self.selection.select_all(paths);
+        self.selection_generation += 1;
         self.user_moved = true;
         cx.notify();
     }

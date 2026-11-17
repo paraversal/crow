@@ -15,7 +15,7 @@ use crate::actions::{
     GoBack, GoForward, GoToFolder, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab,
     NewWindow, OpenParent, OpenSelection, OpenSettings, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo,
     RemoveFromSidebar, Rename, ResetFolderView, SearchEverything, SearchReveal, SelectAll, ShowCommandPalette,
-    ShowInFinder, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles,
+    ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles,
     TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
@@ -74,6 +74,7 @@ pub enum CommandId {
     SwitchFocus,
     ToggleHiddenFiles,
     TogglePreview,
+    ShowInfo,
     OpenParent,
     GoBack,
     GoForward,
@@ -145,6 +146,7 @@ impl CommandId {
             CommandId::SwitchFocus => "switch-focus",
             CommandId::ToggleHiddenFiles => "toggle-hidden-files",
             CommandId::TogglePreview => "toggle-preview",
+            CommandId::ShowInfo => "show-info",
             CommandId::OpenParent => "open-parent",
             CommandId::GoBack => "go-back",
             CommandId::GoForward => "go-forward",
@@ -459,6 +461,14 @@ pub const COMMANDS: &[Command] = &[
         scope: KeyScope::Window,
         // menus::app_menus turns this into "Hide Preview" while the preview shows.
         menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Preview" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::ShowInfo,
+        label: "Show Info",
+        action: &ShowInfo,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Info" }),
         palette: true,
     },
     Command {

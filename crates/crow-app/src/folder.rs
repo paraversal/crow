@@ -21,6 +21,7 @@ use gpui::{
     prelude::*,
 };
 
+use crate::info_pane::{SelectionSummary, TAG_SCAN_CAP};
 use crate::style::kind;
 
 /// Show what has been read so far at most this often while a big folder loads.
@@ -262,6 +263,8 @@ pub struct Folder {
     /// selection change: the bottom bar asks every frame, and rescanning a 100k
     /// listing per apply was 6% of the main thread's busy time (H4 batch 6).
     selection_totals: (u64, usize),
+    /// The Info tab's multi-selection summary, rebuilt only when the selection changes.
+    selection_summary: RefCell<Option<(u64, SelectionSummary)>>,
     scroll: UniformListScrollHandle,
     changes_rx: Receiver<FolderChange>,
     /// A sender kept only for tests, which queue watcher batches without the disk.
@@ -347,6 +350,7 @@ impl Folder {
             disclosures: Vec::new(),
             selection_entries: RefCell::new(None),
             selection_totals: (0, 0),
+            selection_summary: RefCell::new(None),
             scroll: UniformListScrollHandle::new(),
             changes_rx,
             #[cfg(test)]
@@ -558,6 +562,81 @@ impl Folder {
     /// selection change; no listing scan.
     pub fn selected_bytes(&self) -> (u64, usize) {
         self.selection_totals
+    }
+
+    /// Bumped whenever the selection changes; the Info pane keys its load on it.
+    pub fn selection_generation(&self) -> u64 {
+        self.selection_generation
+    }
+
+    /// The multi-selection summary: count, exact file bytes, folder count, a common
+    /// kind and parent, and up to `TAG_SCAN_CAP` paths for the shared-tag read.
+    /// Cached by selection generation; one scan per selection change, no path clones
+    /// beyond the capped tag list.
+    pub fn selection_summary(&self) -> SelectionSummary {
+        if let Some((generation, summary)) = &*self.selection_summary.borrow()
+            && *generation == self.selection_generation
+        {
+            return summary.clone();
+        }
+        let (bytes, folders) = self.selection_totals;
+        let mut count = 0;
+        let mut common_parent: Option<PathBuf> = None;
+        let mut parent_set = false;
+        let mut parent_mixed = false;
+        let mut common_kind: Option<(String, bool)> = None;
+        let mut kind_mixed = false;
+        let mut tag_paths = Vec::new();
+        for row in self.rows.iter() {
+            let entry = match row {
+                FlatRow::Own(i) => self.entries.get(*i),
+                FlatRow::Child(entry, _) => Some(entry),
+            };
+            let Some(entry) = entry else { continue };
+            if !self.selection.contains(&entry.path) {
+                continue;
+            }
+            count += 1;
+            let parent = entry.path.parent().map(Path::to_path_buf);
+            if !parent_set {
+                common_parent = parent;
+                parent_set = true;
+            } else if !parent_mixed && common_parent != parent {
+                parent_mixed = true;
+            }
+            if !kind_mixed {
+                let is_folder = entry.is_dir && !entry.is_package();
+                match &common_kind {
+                    None => {
+                        common_kind =
+                            Some(if is_folder { (String::new(), true) } else { (entry.ext().to_lowercase(), false) });
+                    }
+                    Some((ext, first_is_folder)) => {
+                        if *first_is_folder != is_folder || (!is_folder && !entry.ext().eq_ignore_ascii_case(ext)) {
+                            kind_mixed = true;
+                        }
+                    }
+                }
+            }
+            if tag_paths.len() < TAG_SCAN_CAP {
+                tag_paths.push(entry.path.clone());
+            }
+        }
+        let summary = SelectionSummary {
+            count,
+            bytes: Some(bytes),
+            folders,
+            kind: if kind_mixed {
+                None
+            } else {
+                common_kind.map(|(ext, is_folder)| crow_macos::kind_name(&ext, is_folder))
+            },
+            parent: if parent_mixed { None } else { common_parent },
+            tag_paths: tag_paths.into(),
+            tags_truncated: count > TAG_SCAN_CAP,
+        };
+        *self.selection_summary.borrow_mut() = Some((self.selection_generation, summary.clone()));
+        summary
     }
 
     /// A row's contribution to `selected_bytes`: file bytes, and 1 for a folder.
@@ -1456,8 +1535,10 @@ impl Folder {
     /// sum what stays: the totals are rebuilt here so no other pass has to scan.
     fn prune_selection(&mut self) {
         let before = self.selection.len();
+        let before_totals = self.selection_totals;
         if before == 0 {
             self.selection_totals = (0, 0);
+            *self.selection_summary.borrow_mut() = None;
             return;
         }
         let entries = self.entries.clone();
@@ -1492,6 +1573,10 @@ impl Folder {
             self.selection.retain(|path| present.contains(path.as_path()));
         }
         self.selection_totals = totals;
+        if self.selection_totals != before_totals {
+            // A selected file's size changed: the Info tab's cached summary is stale.
+            *self.selection_summary.borrow_mut() = None;
+        }
         if self.selection.len() != before {
             self.selection_changed();
         }

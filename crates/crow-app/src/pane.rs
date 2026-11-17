@@ -40,6 +40,7 @@ use crate::context_menu::{MenuKind, MenuState};
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
 use crate::icons::{Glyph, glyph};
+use crate::info_pane::{self, InfoKey, InfoPane, InfoTab, InfoTarget};
 use crate::keys::KeyScope;
 use crate::operations::Operations;
 use crate::palette::CommandId;
@@ -313,6 +314,8 @@ pub struct Pane {
     table: TableLayout,
     resize: Option<ResizeDrag>,
     preview: Option<Preview>,
+    /// The window's right column: tab choice and the Info tab's target.
+    info: Entity<InfoPane>,
     strip_scroll: ScrollHandle,
     status: Option<SharedString>,
     renaming: Option<Renaming>,
@@ -372,6 +375,7 @@ impl Pane {
         start_mode: Option<ViewMode>,
         bench: bool,
         bench_filter: Option<String>,
+        info: Entity<InfoPane>,
         cx: &mut Context<Self>,
     ) -> Self {
         let columns = cx.global::<Ext>().0.default_columns();
@@ -388,6 +392,7 @@ impl Pane {
             columns,
             resize: None,
             preview: None,
+            info,
             strip_scroll: ScrollHandle::new(),
             status: None,
             renaming: None,
@@ -721,6 +726,28 @@ impl Pane {
     pub fn preview(&self, cx: &gpui::App) -> Option<&Preview> {
         let cursor = self.focused_folder().read(cx).cursor_entry().map(|e| e.path.clone())?;
         self.preview.as_ref().filter(|p| p.path == cursor)
+    }
+
+    /// What the Info tab shows for this pane: the cursor item, the focused folder
+    /// when there is no row, or a multi-selection summary. The key is the path or the
+    /// selection generation, so the expensive metadata reloads only on a real change.
+    pub fn info_target(&self, cx: &gpui::App) -> (Option<InfoTarget>, Option<InfoKey>) {
+        let folder = self.focused_folder().read(cx);
+        if folder.selected_count() > 1 {
+            let summary = folder.selection_summary();
+            let key = InfoKey::Many { generation: folder.selection_generation(), count: summary.count };
+            return (Some(InfoTarget::Many(summary)), Some(key));
+        }
+        let Some((entry, items)) = self.preview_parts(cx) else { return (None, None) };
+        let key = InfoKey::Single(entry.path.clone());
+        (Some(InfoTarget::Single { entry, items }), Some(key))
+    }
+
+    /// A folder's item count when the focused column is that folder and its listing
+    /// is loaded; the sidebar's Info target uses it without a disk walk.
+    pub fn folder_items(&self, path: &Path, cx: &gpui::App) -> Option<usize> {
+        let folder = self.focused_folder().read(cx);
+        (folder.dir() == path && !folder.is_loading() && folder.error().is_none()).then(|| folder.entries().len())
     }
 
     // ----- navigation -----
@@ -2789,20 +2816,30 @@ impl Pane {
                         .children(footer),
                 );
         }
-        // The preview is the last column: a file's preview, or a folder's summary.
-        // It takes the rest of the strip when the columns leave room, and keeps
+        // The right column is the last column: a file's preview or a folder's
+        // summary on the Preview tab, the item's metadata on the Info tab. It takes
+        // the rest of the strip when the columns leave room, and keeps
         // PREVIEW_COLUMN_WIDTH when they don't (the strip scrolls instead).
-        let show_preview = cx.global::<Ui>().settings.show_preview;
-        if show_preview && let Some((entry, items)) = self.preview_parts(cx) {
-            let folder = entry.is_dir && !entry.is_package();
-            let label = self.preview_label(cx).unwrap_or_default();
-            let body = if folder {
-                let name = display_text(&entry.name);
-                let summary =
-                    preview::FolderSummary { path: &entry.path, name: &name, modified: entry.modified, items };
-                preview::folder_summary(summary, &theme).into_any_element()
-            } else {
-                preview::contents(&entry, self.preview(cx), &theme).into_any_element()
+        let visible = self.info.read(cx).visible();
+        if visible && let Some((entry, items)) = self.preview_parts(cx) {
+            let tab = self.info.read(cx).tab();
+            let label = match tab {
+                InfoTab::Preview => self.preview_label(cx).unwrap_or_default(),
+                InfoTab::Info => self.info.read(cx).label(),
+            };
+            let body = match tab {
+                InfoTab::Preview => {
+                    let folder = entry.is_dir && !entry.is_package();
+                    if folder {
+                        let name = display_text(&entry.name);
+                        let summary =
+                            preview::FolderSummary { path: &entry.path, name: &name, modified: entry.modified, items };
+                        preview::folder_summary(summary, &theme).into_any_element()
+                    } else {
+                        preview::contents(&entry, self.preview(cx), &theme).into_any_element()
+                    }
+                }
+                InfoTab::Info => self.info.clone().into_any_element(),
             };
             strip = strip.child(
                 div()
@@ -2813,9 +2850,9 @@ impl Pane {
                     .flex_1()
                     .min_w(px(PREVIEW_COLUMN_WIDTH))
                     .h_full()
-                    .p_4()
-                    .overflow_hidden()
-                    .child(body),
+                    .flex_col()
+                    .child(info_pane::tab_strip(&self.info, &theme, cx))
+                    .child(div().id("info-body").flex_1().min_h_0().p_4().overflow_y_scroll().child(body)),
             );
         }
         strip
