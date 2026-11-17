@@ -5,7 +5,7 @@ Branch: `m8-filter-focus` · PR: none · Last updated: 2026-11-17 · State: Read
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| 1 One focus in the `/` filter | done | Keymap: `down` in `Filter` → `FilterFocusResults`, `up` in `ListFiltered` → `FilterFocusField`; the field's ↑ is unbound. `Pane::filter_focus_results` / `filter_focus_field`; the list's active fill now follows `self.focus` only. Tests: keymap + six window tests (↓ enters on the current match, second ↓ moves, ↑ returns from row 0, ↑ moves on later rows, inactive fill while the field is focused, no matches stays in the field); column view covered. fmt, clippy and workspace tests pass; bundle hand checks done. |
+| 1 One focus in the `/` filter | done | Keymap: `down` in `Filter` → `FilterFocusResults`, `up` in `ListFiltered` → `FilterFocusField`; the field's ↑ is unbound. `Pane::filter_focus_results` / `filter_focus_field`; the list's active fill now follows `self.focus` only. Tests: keymap + seven window tests (↓ enters on the current match, second ↓ moves, ↑ returns from row 0, ↑ moves on later rows, inactive fill while the field is focused, no matches stays in the field, Vim `k` at row 0 stays in the list); column view covered. fmt, clippy and workspace tests pass; bundle hand checks done. |
 
 ## Questions
 - None. The search field's ↓/↑ model is the precedent; the user asked for one focused element at a time.
@@ -30,6 +30,7 @@ Branch: `m8-filter-focus` · PR: none · Last updated: 2026-11-17 · State: Read
 ## Log
 - 2026-11-17: plan and progress written; branch `m8-filter-focus` from `main` (`42ba5f4`).
 - 2026-11-17: implemented. `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass. `cargo test -p crow-app filter` 41/41. Bundle hand check next.
+- 2026-11-17: added the Vim `k` pin (keymap + `filter_vim_k_at_the_first_row_stays_in_the_list`); filter suite 35/35, clippy and workspace tests pass. Committed locally; state is Ready for critique.
 
 ## Next
 Ready for critique. The critic runs the `critique` skill, checks the hand checks above (especially Vim on/off and light/dark), and opens the PR.

@@ -371,6 +371,7 @@ mod tests {
         let list = ["Crow", "FileList vim Filtered"];
         assert!(wins(&keymap, "/", &list, &StartFilter));
         assert!(wins(&keymap, "j", &list, &MoveDown));
+        assert!(wins(&keymap, "k", &list, &MoveUp), "Vim k stays MoveUp, as in search");
         assert!(wins(&keymap, "down", &list, &MoveDown));
         assert!(wins(&keymap, "up", &list, &FilterFocusField));
         assert!(wins(&keymap, "escape", &list, &ClearFilter));

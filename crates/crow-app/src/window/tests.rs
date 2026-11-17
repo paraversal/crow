@@ -5079,6 +5079,25 @@ fn filter_letters_stay_in_the_field_in_the_vim_layer(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn filter_vim_k_at_the_first_row_stays_in_the_list(cx: &mut TestAppContext) {
+    let root = fixture("filter-vim-k");
+    let (view, mut cx) = open(cx, &root);
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("a");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+
+    cx.simulate_keystrokes("k");
+    settle(&view, &mut cx);
+    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "Vim k at the first row does not leave the list");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+}
+
+#[gpui::test]
 fn filter_narrows_the_focused_column(cx: &mut TestAppContext) {
     let root = fixture("filter-columns");
     let (view, mut cx) = open(cx, &root);
