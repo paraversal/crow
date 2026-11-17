@@ -12,13 +12,14 @@ Branch: `m8-f4-path-bar` (F4, unmerged) · PR: none · Last updated: 2026-11-17 
 
 ## Questions (user)
 
-- **Q1:** the hover fix — patch GPUI's `MouseExited` to clear the hit test (all hovers; a vendored patch) or the bar's own hover state (the pill only)?
+- **Q1:** the hover fix — patch GPUI's `MouseExited` to move the mouse position out and clear the hit test (all hovers; a vendored patch) or render the pill from a local `on_hover` bool (the pill only)?
 - **Q2:** the animations — 120 ms pill fade, 160 ms field expand, `ease_out`, skipped with motion Off?
-- **Q3:** the "Tab complete" hint — remove the hint and the dead `Complete` action, or implement completion?
+- **Q3:** the "Tab complete" hint — the completion exists; the field opens with the full path selected. Make Tab cycle the parent's matches (the hint stays), or remove the hint (the completion stays)?
 
 ## Log
 
-- 2026-11-17: the user tested the V2: the hover sticks when the pointer leaves the window; no animations; the "Tab complete" hint is wrong. Plan written; awaiting approval.
+- 2026-11-17: the user tested the V2: the hover sticks when the pointer leaves the window; no animations; the "Tab complete" hint looks dead. Plan written; awaiting approval.
+- 2026-11-17: corrected the plan: the completion exists (`text_input.rs:96` → `complete_path_edit`); the field opens with the full path selected, so Tab returns the same text. The hover patch must move `mouse_position` out, not just clear the hit test.
 
 ## Next
 
