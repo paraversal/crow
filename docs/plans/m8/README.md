@@ -17,8 +17,9 @@ Each piece is self-contained: its own branch from `main`, progress file next to 
 | [F5](f5-tips-and-first-launch.md) | Separate `tips` setting, one-time first-launch popup, tip position | F1 if the tip position moves with the row work | `m8-f5-tips` |
 | [F6](f6-folder-sizes.md) | Folder sizes: lazy measuring, cache, FSEvents history, column and bottom bar, setting | — | `m8-f6-folder-sizes` |
 | [F7](f7-housekeeping-4.md) | Open Terminal Here, New File/Folder with a selection, window drag, board-only details, Empty Trash, NSSound hand check | — | `m8-f7-housekeeping` |
+| [F8](f8-filter-focus.md) | One focus in the `/` filter: ↓ enters the matches, ↑ on the first row returns to the field, the list's selection is inactive while the field is focused | — | `m8-filter-focus` |
 
-**Suggested order:** F1 → F2 → F5 → F4 → F3 → F6 → F7. F6 is independent and can start first or any time; never run it concurrently with F1 (both touch row rendering) or F3 (both touch the right column). F7 is small and can run any time, but it also touches `window.rs`/`pane.rs`; never two writers at once.
+**Suggested order:** F1 → F2 → F5 → F4 → F3 → F6 → F7. F6 is independent and can start first or any time; never run it concurrently with F1 (both touch row rendering) or F3 (both touch the right column). F7 is small and can run any time, but it also touches `window.rs`/`pane.rs`; never two writers at once. F8 is independent and can run any time; it touches `pane.rs`/`pane_filter.rs` and the keymap, so do not run it beside F5 or F7 if they are editing the same files.
 
 **M8 is done when:** every piece is merged; the first triage table below has no open item and the second list's M8 item (F7.6 Empty Trash) is done; `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass; the bench on `target/fixture-100k` is within the AGENTS.md budgets for the pieces that touch rows, the right column or first paint; the hand checks cover light and dark themes, 640 px and a wide window, an empty folder and the 100k fixture, Vim on and off, and VoiceOver for every new role; README's status line says M8.5 (search reliability) is next.
 
@@ -38,6 +39,7 @@ Every item the user sent, with its tag and where it went. `f` feature · `p` per
 | 8 | `s` | "What does Enter do": rename vs open | F2.2 |
 | 9 | `d` | Path bar like Windows Explorer, or at least the option; the current editable bar is undiscoverable | F4.3 (design now, setting in M9) |
 | 10 | `ui` | Filter typing in a folder (without `/`) shows the query somewhere | F2.1 |
+| 11 | `ui` | Filter: ↓ should move focus into the results, not leave the field and the list both looking focused | F8 |
 
 ## Triage (2026-11-17, second list)
 
@@ -102,7 +104,7 @@ Index-level questions for the user, asked by whoever starts the first piece:
 
 1. **Order: F1 first or F6 first?** Recommended F1: the triage items are the visible daily annoyances, and F1 settles the row rendering F3 and F6 touch. F6 is already planned and independent; start it first only if folder sizes are the priority.
 2. **Rubber-band selection (drag a rectangle on empty space) is a known Finder gap** (context-menu critique, "Found along the way"). It is not in the user's triage list. Include it in F1 or defer? Recommended defer: F1 already changes selection rendering, and rubber-band adds pointer geometry and auto-scroll.
-3. **One branch per piece?** Recommended yes, as in M7. F1/F2/F3/F6/F7 all touch `pane.rs`/`window.rs`; one writer at a time.
+3. **One branch per piece?** Recommended yes, as in M7. F1/F2/F3/F6/F7/F8 all touch `pane.rs`/`window.rs`; one writer at a time.
 
 Each piece ends with its own "Questions to ASK"; ask those in one batch when that piece starts. Don't answer them all up front.
 

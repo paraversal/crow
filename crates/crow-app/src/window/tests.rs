@@ -4907,7 +4907,7 @@ fn filter_exposes_match_ranges_per_row(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn filter_arrows_and_return_act_on_matching_rows(cx: &mut TestAppContext) {
+fn filter_down_enters_the_matches_and_arrows_move(cx: &mut TestAppContext) {
     let root = fixture("filter-enter");
     let (view, mut cx) = open(cx, &root);
 
@@ -4917,15 +4917,14 @@ fn filter_arrows_and_return_act_on_matching_rows(cx: &mut TestAppContext) {
     assert_eq!(rows(&view, &cx).iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["alpha", "beta"]);
 
     cx.simulate_keystrokes("down");
-    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "arrows move within the matches");
-    cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
-    assert_eq!(dir(&view, &cx), root, "Return in the field does not open anything");
-    assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "the filter stays");
-    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "the list has focus on the selected match");
     let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
-    let list_focused = cx.update(|window, _| list_focus.is_focused(window));
-    assert!(list_focused, "Return moves focus into the matches");
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "↓ moves focus into the matches");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "the first ↓ lands on the current match");
+    assert!(pane(&view, &cx).read_with(&cx, |p, _| p.is_filtering()), "the filter stays");
+
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "the next ↓ moves within the matches");
     cx.simulate_keystrokes("cmd-down");
     settle(&view, &mut cx);
     assert_eq!(dir(&view, &cx), root.join("beta"), "the list's keys open the match");
@@ -4934,6 +4933,82 @@ fn filter_arrows_and_return_act_on_matching_rows(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-up");
     settle(&view, &mut cx);
     assert_eq!(rows(&view, &cx).len(), 3, "going back shows the whole folder again");
+}
+
+#[gpui::test]
+fn filter_up_from_the_first_row_returns_to_the_field(cx: &mut TestAppContext) {
+    let root = fixture("filter-up-field");
+    let (view, mut cx) = open(cx, &root);
+    let field_focus = |cx: &mut VisualTestContext| pane(&view, cx).read_with(cx, |p, cx| p.filter_focus(cx));
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("a");
+    settle(&view, &mut cx);
+    let field = field_focus(&mut cx).expect("filter field");
+    assert!(cx.update(|window, _| field.is_focused(window)), "the field starts focused");
+
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    cx.simulate_keystrokes("up");
+    settle(&view, &mut cx);
+    let field = field_focus(&mut cx).expect("filter field");
+    assert!(cx.update(|window, _| field.is_focused(window)), "↑ on the first row returns to the field");
+
+    cx.simulate_input("l");
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.filter_query(cx)).as_deref(), Some("al"));
+    assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)]);
+
+    cx.simulate_keystrokes("up");
+    settle(&view, &mut cx);
+    let field = field_focus(&mut cx).expect("filter field");
+    assert!(cx.update(|window, _| field.is_focused(window)), "↑ in the field does nothing");
+}
+
+#[gpui::test]
+fn filter_up_on_a_later_row_moves_up(cx: &mut TestAppContext) {
+    let root = fixture("filter-up-row");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("a");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down down");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+
+    cx.simulate_keystrokes("up");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "↑ moves up before it leaves the list");
+    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "the list keeps focus above the first row");
+}
+
+#[gpui::test]
+fn filter_field_and_list_never_look_focused_together(cx: &mut TestAppContext) {
+    let root = fixture("filter-one-focus");
+    let (view, mut cx) = open(cx, &root);
+    let fills =
+        |cx: &mut VisualTestContext| cx.update(|window, cx| view.read(cx).pane().read(cx).selection_fills(window, cx));
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("a");
+    settle(&view, &mut cx);
+    assert_eq!(fills(&mut cx), (0, 1), "the field owns focus; the match is inactive");
+
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    assert_eq!(fills(&mut cx), (1, 0), "the list owns focus and the accent fill");
+}
+
+#[gpui::test]
+fn filter_down_with_no_matches_stays_in_the_field(cx: &mut TestAppContext) {
+    let root = fixture("filter-down-no-match");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("zzz");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    let field = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_focus(cx)).expect("filter field");
+    assert!(cx.update(|window, _| field.is_focused(window)), "↓ with no matches does nothing");
 }
 
 #[gpui::test]
@@ -5016,6 +5091,25 @@ fn filter_letters_stay_in_the_field_in_the_vim_layer(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn filter_vim_k_at_the_first_row_stays_in_the_list(cx: &mut TestAppContext) {
+    let root = fixture("filter-vim-k");
+    let (view, mut cx) = open(cx, &root);
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("a");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+
+    cx.simulate_keystrokes("k");
+    settle(&view, &mut cx);
+    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "Vim k at the first row does not leave the list");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+}
+
+#[gpui::test]
 fn filter_narrows_the_focused_column(cx: &mut TestAppContext) {
     let root = fixture("filter-columns");
     let (view, mut cx) = open(cx, &root);
@@ -5026,6 +5120,16 @@ fn filter_narrows_the_focused_column(cx: &mut TestAppContext) {
     cx.simulate_input("al");
     settle(&view, &mut cx);
     assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)]);
+
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "↓ enters the focused column");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    cx.simulate_keystrokes("up");
+    settle(&view, &mut cx);
+    let field = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_focus(cx)).expect("filter field");
+    assert!(cx.update(|window, _| field.is_focused(window)), "↑ returns to the column's field");
 
     cx.simulate_keystrokes("escape");
     settle(&view, &mut cx);
@@ -8956,19 +9060,19 @@ fn filter_enter_acts_on_the_highlighted_row(cx: &mut TestAppContext) {
     cx.simulate_input("a");
     settle(&view, &mut cx);
 
-    // Down in the field moves the cursor with the highlight, so Return has a target.
+    // Down in the field enters the matches on the current row, so Return has a target.
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
+    assert!(cx.update(|window, _| list_focus.is_focused(window)), "↓ moves focus into the matches");
+    let cursor = pane(&view, &cx).read_with(&cx, |p, cx| p.cursor_entry(cx).map(|entry| entry.name.clone()));
+    assert_eq!(cursor.as_deref(), Some("alpha"), "the cursor follows the highlight");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+
     cx.simulate_keystrokes("down");
     let cursor = pane(&view, &cx).read_with(&cx, |p, cx| p.cursor_entry(cx).map(|entry| entry.name.clone()));
     assert_eq!(cursor.as_deref(), Some("beta"), "the cursor follows the highlight");
     assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
-
-    // Return moves focus into the matches without moving the cursor.
-    cx.simulate_keystrokes("enter");
-    settle(&view, &mut cx);
-    let list_focus = pane(&view, &cx).read_with(&cx, |p, _| p.focus_handle().clone());
-    assert!(cx.update(|window, _| list_focus.is_focused(window)), "Return moves focus into the matches");
-    let cursor = pane(&view, &cx).read_with(&cx, |p, cx| p.cursor_entry(cx).map(|entry| entry.name.clone()));
-    assert_eq!(cursor.as_deref(), Some("beta"), "focusing the list keeps the highlighted row");
 
     // Return in the list renames the cursor row (the default; cmd-down opens, and `enter` can switch it).
     cx.simulate_keystrokes("enter");
