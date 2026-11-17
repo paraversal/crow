@@ -16,11 +16,11 @@ Each piece is self-contained: its own branch from `main`, progress file next to 
 | [F4](f4-path-bar.md) | Drag folders from the bottom path bar, a visible edit affordance; the Windows Explorer-style bar is an M9 setting | — | `m8-f4-path-bar` |
 | [F5](f5-tips-and-first-launch.md) | Separate `tips` setting, one-time first-launch popup, tip position | F1 if the tip position moves with the row work | `m8-f5-tips` |
 | [F6](f6-folder-sizes.md) | Folder sizes: lazy measuring, cache, FSEvents history, column and bottom bar, setting | — | `m8-f6-folder-sizes` |
-| [F7](f7-housekeeping-4.md) | Open Terminal Here, New File/Folder with a selection, window drag, board-only details, NSSound hand check | — | `m8-f7-housekeeping` |
+| [F7](f7-housekeeping-4.md) | Open Terminal Here, New File/Folder with a selection, window drag, board-only details, Empty Trash, NSSound hand check | — | `m8-f7-housekeeping` |
 
 **Suggested order:** F1 → F2 → F5 → F4 → F3 → F6 → F7. F6 is independent and can start first or any time; never run it concurrently with F1 (both touch row rendering) or F3 (both touch the right column). F7 is small and can run any time, but it also touches `window.rs`/`pane.rs`; never two writers at once.
 
-**M8 is done when:** every piece is merged; the triage table below has no open item; `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass; the bench on `target/fixture-100k` is within the AGENTS.md budgets for the pieces that touch rows, the right column or first paint; the hand checks cover light and dark themes, 640 px and a wide window, an empty folder and the 100k fixture, Vim on and off, and VoiceOver for every new role; README's status line says Phase 2 starts in M9.
+**M8 is done when:** every piece is merged; the first triage table below has no open item and the second list's M8 item (F7.6 Empty Trash) is done; `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass; the bench on `target/fixture-100k` is within the AGENTS.md budgets for the pieces that touch rows, the right column or first paint; the hand checks cover light and dark themes, 640 px and a wide window, an empty folder and the 100k fixture, Vim on and off, and VoiceOver for every new role; README's status line says M8.5 (search reliability) is next.
 
 ## Triage (2026-11-17)
 
@@ -38,6 +38,16 @@ Every item the user sent, with its tag and where it went. `f` feature · `p` per
 | 8 | `s` | "What does Enter do": rename vs open | F2.2 |
 | 9 | `d` | Path bar like Windows Explorer, or at least the option; the current editable bar is undiscoverable | F4.3 (design now, setting in M9) |
 | 10 | `ui` | Filter typing in a folder (without `/`) shows the query somewhere | F2.1 |
+
+## Triage (2026-11-17, second list)
+
+The user's follow-up list, triaged after the M8 draft. Same tags.
+
+| # | Tag | Item | Where |
+| --- | --- | --- | --- |
+| 1 | `b` | Test runs leave `crow-*` temp dirs: 124,961 in `$TMPDIR` (5.8 GB), plus a batch in `/tmp` the user already deleted. `ui::init_for_tests` makes one `crow-app-config-*` per GPUI test and never removes it; the fixture helpers do the same. | M9 P9 |
+| 2 | `f` | Empty Trash: ⌘⇧⌫ should empty the Trash, with Finder's confirmation, a File menu item, a palette command and the `EmptyTrash` sound. Crow has no empty-trash action today (only Move to Trash and Delete Permanently). | F7.6 |
+| 3 | `b`/`d` | Search reliability: Cmd-K misses dot-named items; Cmd-F finds "back" but not "backup"; generally unreliable. The fuzzy matcher itself matches all these names, so the miss is in scope, hidden policy, prefix-only file completion, exclusions or the result cap. Needs a repro corpus before a piece list. | M8.5 |
 
 Existing items folded into M8:
 
@@ -100,6 +110,7 @@ Each piece ends with its own "Questions to ASK"; ask those in one batch when tha
 
 - Public Rhai plugin API, git plugin / Projects, icon packs, icon/gallery views, saved queries, Tags, copy queue, batch rename, drop-in/spring-loaded folders, iCloud download status: Phase 2, [`../m9/README.md`](../m9/README.md).
 - Windows Explorer-style path bar: designed in F4.3, built as an M9 setting.
+- Search reliability (the second triage's item 3): its own milestone, [`../m8.5/README.md`](../m8.5/README.md). It needs a repro corpus before it can be split into pieces; it is not part of M8.
 - Rubber-band selection: deferred unless the user says otherwise (index Q2).
 - Remote file systems, desktop icons, Open/Save panels, free icon placement, Mac App Store: the spec's "Not planned" list.
 - Solarized Light contrast: the theme index's palette, not Crow code.

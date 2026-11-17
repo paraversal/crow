@@ -1,6 +1,6 @@
 # M9 — Phase 2: plugins, views, and operations (index)
 
-Phase 1 is done (M6, the UI overhaul, M6.5, M7). M8 is the Finder-parity pass. M9 is Phase 2: the spec's "Later" table plus the infrastructure follow-ups that do not belong in a UI milestone.
+Phase 1 is done (M6, the UI overhaul, M6.5, M7). M8 is the Finder-parity pass; M8.5 is the search-reliability pass between M8 and M9. M9 is Phase 2: the spec's "Later" table plus the infrastructure follow-ups that do not belong in a UI milestone.
 
 This is a roadmap, not a set of plans. Each piece gets its own plan in this folder when it starts, with its own "Questions to ASK", branch, progress file and critique. Do not start a piece until the pieces it needs are merged to `main` (ASK before stacking on an unmerged branch).
 
@@ -18,11 +18,13 @@ Source: the spec's MVP scope / "Later" table (`docs/Crow — Product & Technical
 | P6 Batch rename with preview | Rename many items with a preview, numbering, find/replace; undoable | M4 operations | `m9-p6-batch-rename` |
 | P7 Drop in and spring-loaded folders | Accept drops from other apps everywhere; spring-open a folder after a hover while dragging | M8 F4 for path drag; existing drag plumbing | `m9-p7-drop-in` |
 | P8 iCloud download status | Show not-downloaded/downloading/downloaded for iCloud items; never trigger a download just by browsing | `crow-macos` iCloud keys | `m9-p8-icloud` |
-| P9 Scale and maintenance | Cross-run fuzz/test dashboard; split `window.rs` (9.4k lines); move the palette view out of `window.rs` (~700 lines); the Windows Explorer path-bar setting from M8 F4.3; Solarized Light contrast (theme index, not Crow code) | — | one branch per item |
+| P9 Scale and maintenance | Cross-run fuzz/test dashboard; test temp-dir hygiene; split `window.rs` (9.4k lines); move the palette view out of `window.rs` (~700 lines); the Windows Explorer path-bar setting from M8 F4.3; Solarized Light contrast (theme index, not Crow code) | — | one branch per item |
+
+P9's test temp-dir item is the 2026-11-17 finding: a full test run leaves one `crow-*` folder per test in the system temp folder (`ui::init_for_tests` alone made 69,708 `crow-app-config-*` folders; the whole set was 124,961 folders and 5.8 GB). The same helpers land in `/tmp` when a runner unsets `TMPDIR`, which is where the user first saw them. The fix is a per-test root that is removed when the test process ends, plus a check that a clean run leaves none behind. It is small and independent; it can start before the rest of P9.
 
 **Suggested order:** P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8; P9 in parallel, one item at a time. P1 is first because P2 and P3 need it. P5/P6/P7 all touch `crow_fs::ops` and `window.rs`; never two writers at once. P9's `window.rs` split should wait until the M8 pieces that touch `window.rs` are merged, or be done first in a quiet window.
 
-**M9 is done when:** every piece is merged and hand-checked; the spec's "Later" table has no open row except the "Not planned" ones; README's status line says Phase 2 is done (or names the next milestone); the fuzz dashboard has a recorded baseline.
+**M9 is done when:** every piece is merged and hand-checked; the spec's "Later" table has no open row except the "Not planned" ones; README's status line says Phase 2 is done (or names the next milestone); the fuzz dashboard has a recorded baseline; a clean `cargo test --workspace` leaves no `crow-*` folders in the system temp folder.
 
 ## Questions to ASK
 
@@ -35,7 +37,7 @@ Index-level questions for the user, asked by whoever starts P1:
 5. **Copy queue UI:** a Finder-like queue in the activity list, or a separate window? Recommended the activity list, with pause/resume and a conflict sheet.
 6. **Batch rename rules:** numbering, find/replace, regex, date tokens? Recommended numbering + find/replace + a preview; regex only if asked.
 7. **iCloud status:** show it in the list's Kind/status cell and the info pane? Recommended both, read-only, never download.
-8. **P9 order:** fuzz dashboard first (it feeds every later piece), then the `window.rs` split, then the palette move, then the path-bar setting. Recommended.
+8. **P9 order:** test temp-dir hygiene first (small, stops the 5.8 GB of litter), then the fuzz dashboard (it feeds every later piece), then the `window.rs` split, then the palette move, then the path-bar setting. Recommended.
 
 Each piece gets its own plan with these answered where they apply.
 
@@ -44,5 +46,6 @@ Each piece gets its own plan with these answered where they apply.
 - Remote file systems (SFTP, S3), desktop icons, Open/Save panels, free icon placement, Mac App Store: the spec's "Not planned" list.
 - Staging, committing, pushing: stays with the `git` CLI and tools like lazygit.
 - Folder sizes: M8 F6.
+- Search reliability: M8.5.
 - Rubber-band selection: M8 index Q2; if deferred, it lands in P9 or a small M8 fix list.
 - The Windows Explorer-style path bar: designed in M8 F4.3, built in P9.

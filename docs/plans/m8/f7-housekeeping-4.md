@@ -2,16 +2,17 @@
 
 Audience: an implementing agent. Follow the `execute-plan` skill; read `AGENTS.md` and the M8 index first.
 Base: branch `m8-f7-housekeeping` from `main`. Progress file: `docs/plans/m8/f7-housekeeping-4.progress.md`.
-PR title: "M8 F7: Open Terminal Here, new-item placement, window drag, board details".
+PR title: "M8 F7: Open Terminal Here, new-item placement, window drag, board details, Empty Trash".
 
 ## Why
 
-The D3 inbox and the U11 follow-ups left a handful of small, independent gaps: no Open Terminal Here, New File/Folder ignores a selected folder, dragging on toolbar controls moves the window, a few board-only details were deferred, and the NSSound volume hand check is still open. None is big enough for its own milestone piece; together they are one fix list.
+The D3 inbox and the U11 follow-ups left a handful of small, independent gaps: no Open Terminal Here, New File/Folder ignores a selected folder, dragging on toolbar controls moves the window, a few board-only details were deferred, there is no Empty Trash, and the NSSound volume hand check is still open. None is big enough for its own milestone piece; together they are one fix list.
 
 ## Current state
 
 - **Open Terminal.** `Effects` (`crates/crow-app/src/effects.rs:17`) has `open_path`, `open_text`, `open_config`, `open_in_default_app`, `open_folder_in_finder`, `reveal_in_finder`; no terminal. The context menu (`context_menu.rs`) and `palette::COMMANDS` have no terminal command.
 - **New File/Folder.** `Pane::new_folder` (`pane.rs:1336`) and `new_file` (`pane.rs:1340`) always use `self.current_dir(cx)` as the parent. The actions are `cmd-shift-n` / `cmd-alt-n` (`actions.rs:136-137`); the Items menu and palette use the same actions. `show_results` starts the rename (`pane.rs:728`).
+- **Empty Trash.** There is no `EmptyTrash` action, menu item, palette command or key. `MoveToTrash` is ⌘⌫ and `DeletePermanently` is ⌥⌘⌫ (`actions.rs:139-140`). `crow_core::motion::Event::EmptyTrash` and the Finder sound already exist (`motion.rs:83`, `:128`), and the motion lab fires the event, but the app never does. `SystemTrash` (`crow-macos/src/files.rs:18`) only moves one item; there is no empty-the-Trash backend.
 - **Window drag.** `window.rs:66` builds `WindowOptions` with a transparent titlebar and traffic-light position, but does not set `app_owns_titlebar_drag`, so AppKit's native titlebar drag is active; dragging on toolbar controls moves the window (D3).
 - **Board details** (U11 Q3, deferred): line icons per favorite and clock icons in Recent; a syntax-coloured text preview with line numbers; 196 px columns; a darker focused-column tint; a scope token inside the search field.
 - **NSSound volume.** U10 R3: `NSSound` follows the output volume, not the macOS alert volume; the user kept NSSound and asked for a hand check with the alert slider low (`done/u10-feedback.progress.md:24`, `:40`). The check is still open.
@@ -62,6 +63,14 @@ Build the deferred U11 Q3 details, one at a time, each with a screenshot against
 
 **Tests:** none; a hand check with the alert slider low, `sound = "crow"` and `"finder"`.
 
+### 6 Empty Trash (f)
+
+**Change:** add an `EmptyTrash` action bound to ⌘⇧⌫ in the `Crow` context (blocked by sheets and text fields, like the other window keys), a File menu item "Empty Trash…", and a palette command. Ask first with a confirmation sheet in the permanent-delete sheet's shape: title "Empty the Trash?", body says it can't be undone, Cancel / Empty Trash. Empty the user's Trash (`~/.Trash`) and, when permitted, the `.Trashes/<uid>` folders on mounted volumes; report how many items went and name any that could not be removed. Play `Event::EmptyTrash` on success. An empty Trash says so and does nothing. No undo.
+
+**Tests:** the key resolves in every focus context except sheets and text fields; the menu and palette run it; the sheet confirms and cancels; an empty Trash reports it; a permission error leaves the rest and is reported; the sound records. Tests use a temp Trash, never the real one.
+
+**ASK:** ask before emptying (Finder does; recommended) or empty immediately; home Trash only or every mounted volume (recommended every volume, like Finder); whether the key works from any focus context (recommended yes, except sheets and text fields); whether emptying is undoable (recommended no).
+
 ## Questions to ASK
 
 1. **Terminal:** Terminal.app (recommended) or iTerm when installed? Does a file selection open its parent folder? Does it get a key?
@@ -69,6 +78,7 @@ Build the deferred U11 Q3 details, one at a time, each with a screenshot against
 3. **Window drag:** if the root fix needs a GPUI patch, is that acceptable? Recommended: only with a measured need and a hand check of traffic lights/double-click.
 4. **Board details:** which five to build now (recommended order above)?
 5. **196 px columns:** a fixed constant or a setting? Recommended: fixed, matching the board; a setting adds a config key for a one-time design choice.
+6. **Empty Trash:** ask first (recommended) or immediate? Home Trash only or every mounted volume (recommended every volume)? Any focus context (recommended yes, except sheets and text fields)? Undoable (recommended no)?
 
 ## Finish
 
@@ -76,6 +86,6 @@ Build the deferred U11 Q3 details, one at a time, each with a screenshot against
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 - Bench if the preview, columns or band change the 100k path; compare with `main`.
-- `./scripts/bundle.sh`; hand-check each item in light/dark, 640 px and wide, VoiceOver for the new menu items, and the NSSound check.
+- `./scripts/bundle.sh`; hand-check each item in light/dark, 640 px and wide, VoiceOver for the new menu items, and the NSSound check. For Empty Trash, use a disposable item in the real Trash, confirm the sheet, and check the Finder menu and the sound; do not empty a Trash with anything you need.
 - Update README, `docs/testing.md`, and the context-menu/palette lists.
 - Commit, push, "Ready for critique". Don't merge.
