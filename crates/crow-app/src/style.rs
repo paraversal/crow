@@ -55,14 +55,11 @@ pub fn current_location(theme: &Theme) -> Rgba {
     color(theme.role("selection"))
 }
 
-/// The focused column's tint: its theme background a shade darker, so the
-/// column the keys act on reads apart from its neighbors without a border.
+/// The focused column's tint: the `surface` role over the column background, as
+/// the boards show it. Surface is lighter than the background in dark themes and
+/// darker in light ones, so one role reads in both; 0x50 is the board's contrast.
 pub fn focused_column(theme: &Theme) -> Rgba {
-    let mut tint = color(theme.role("bg"));
-    tint.r *= 0.9;
-    tint.g *= 0.9;
-    tint.b *= 0.9;
-    tint
+    color_alpha(theme.role("surface"), 0x50)
 }
 
 /// An error token's fill: the error role, faint.
@@ -442,8 +439,8 @@ mod tests {
         assert_eq!(current_location(&theme), color(theme.role("selection")));
         let base = color(theme.role("bg"));
         let focused = focused_column(&theme);
-        assert!(focused.r < base.r && focused.g < base.g && focused.b < base.b, "a shade darker");
-        assert_eq!(focused.a, 1.0);
+        assert_eq!(focused, color_alpha(theme.role("surface"), 0x50));
+        assert!(focused.r > base.r && focused.g > base.g && focused.b > base.b, "lighter in a dark theme");
         let ring = cursor_ring(&theme);
         assert_eq!(ring.len(), 1);
         assert!(ring[0].inset);
