@@ -735,7 +735,7 @@ impl Pane {
         let folder = self.focused_folder().read(cx);
         if folder.selected_count() > 1 {
             let summary = folder.selection_summary();
-            let key = InfoKey::Many { generation: folder.selection_generation(), count: summary.count };
+            let key = summary.key(folder.selection_generation());
             return (Some(InfoTarget::Many(summary)), Some(key));
         }
         let Some((entry, items)) = self.preview_parts(cx) else { return (None, None) };

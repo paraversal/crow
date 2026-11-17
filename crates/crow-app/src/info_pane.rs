@@ -68,11 +68,27 @@ impl InfoTarget {
     }
 }
 
-/// What makes the target a new item: a path, or a selection generation.
+impl SelectionSummary {
+    /// The key for the Info pane's load: the selection generation plus the ends of
+    /// the capped path list, which differ when two tabs' selections share a generation.
+    pub fn key(&self, generation: u64) -> InfoKey {
+        InfoKey::Many {
+            generation,
+            count: self.count,
+            first: self.tag_paths.first().cloned(),
+            last: self.tag_paths.last().cloned(),
+        }
+    }
+}
+
+/// What makes the target a new item: a path, or a selection's identity. The
+/// generation alone is per folder (and per search), so two tabs' selections can
+/// share it; the first and last paths keep a switch between them from reusing the
+/// other selection's tags and bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InfoKey {
     Single(PathBuf),
-    Many { generation: u64, count: usize },
+    Many { generation: u64, count: usize, first: Option<PathBuf>, last: Option<PathBuf> },
 }
 
 /// The expensive fields, read off the main thread.
@@ -604,6 +620,43 @@ mod tests {
         assert!(loaded.entry.is_some(), "the link itself still stats");
         assert!(loaded.permissions.is_some(), "the dangling link keeps its own mode");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn a_new_multi_selection_reloads_when_two_generations_match(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::ui::init_for_tests);
+        let pane = cx.new(|cx| InfoPane::with_loader(cx, Arc::new(|_| LoadedInfo::default())));
+        let summary = |first: &str, last: &str| {
+            InfoTarget::Many(SelectionSummary {
+                count: 2,
+                bytes: Some(0),
+                folders: 0,
+                kind: None,
+                parent: Some(PathBuf::from("/tmp")),
+                tag_paths: vec![PathBuf::from(first), PathBuf::from(last)].into(),
+                tags_truncated: false,
+            })
+        };
+        let first = summary("/tmp/a", "/tmp/b");
+        let second = summary("/other/c", "/other/d");
+        pane.update(cx, |pane, cx| {
+            let InfoTarget::Many(summary) = &first else { unreachable!() };
+            pane.set_target(Some(first.clone()), Some(summary.key(1)), cx);
+        });
+        let generation = pane.read_with(cx, |pane, _| pane.generation);
+        pane.update(cx, |pane, _| {
+            assert!(pane.install_loaded(generation, LoadedInfo { tags: vec!["old".into()], ..Default::default() }));
+        });
+
+        // Another tab's selection with the same generation and count: its tags must load.
+        pane.update(cx, |pane, cx| {
+            let InfoTarget::Many(summary) = &second else { unreachable!() };
+            pane.set_target(Some(second.clone()), Some(summary.key(1)), cx);
+        });
+        assert!(
+            pane.read_with(cx, |pane, _| pane.loaded().is_none()),
+            "the other selection's tags must not survive the switch"
+        );
     }
 
     #[gpui::test]

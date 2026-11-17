@@ -684,7 +684,7 @@ impl SearchView {
     pub fn info_target(&self) -> (Option<InfoTarget>, Option<InfoKey>) {
         if self.selection.len() > 1 {
             let summary = self.selection_summary();
-            let key = InfoKey::Many { generation: self.selection_generation, count: summary.count };
+            let key = summary.key(self.selection_generation);
             return (Some(InfoTarget::Many(summary)), Some(key));
         }
         let Some((entry, _)) = self.preview_parts() else { return (None, None) };
