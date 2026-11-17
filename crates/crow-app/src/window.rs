@@ -12,10 +12,11 @@ use gpui::{
 };
 
 use crate::actions::{
-    AddToSidebar, ApplyThemeEverywhere, CloseTab, EditPath, GoBack, GoForward, GoToFolder, KeyboardShortcuts, Minimize,
-    MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover, PathUnhover,
-    PreviousTab, ResetFolderView, SearchEverything, ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker,
-    SwitchFocus, ToggleHiddenFiles, TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
+    AddToSidebar, ApplyThemeEverywhere, CalculateFolderSizes, CloseTab, EditPath, GoBack, GoForward, GoToFolder,
+    KeyboardShortcuts, Minimize, MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent,
+    PaletteOpenInTab, PathHover, PathUnhover, PreviousTab, ResetFolderView, SearchEverything, ShowCommandPalette,
+    ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, TogglePreview, UseViewAsDefaults,
+    ViewAsColumns, ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -344,6 +345,10 @@ impl CrowWindow {
         let start_mode = Some(cx.global::<Ui>().views.default_view());
         let info = cx.new(InfoPane::new);
         let pane = cx.new(|cx| Pane::new(dir.clone(), show_hidden, start_mode, bench, bench_filter, info.clone(), cx));
+        if let Some(service) = cx.try_global::<crate::folder_sizes::SizeService>() {
+            let service = service.0.clone();
+            cx.observe(&service, |_, _, cx| cx.notify()).detach();
+        }
         let sidebar = cx.new(|cx| {
             let mut sidebar = Sidebar::new(cx);
             sidebar.set_current(dir, cx);
@@ -605,6 +610,15 @@ impl CrowWindow {
         cx.notify();
     }
 
+    /// View ▸ Calculate Folder Sizes: measure the current folder's folders once,
+    /// even when `folder_sizes = "off"`.
+    fn calculate_folder_sizes(&mut self, _: &CalculateFolderSizes, _: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.pane().read(cx).folder_paths(cx);
+        let service = cx.global::<crate::folder_sizes::SizeService>().0.clone();
+        service.update(cx, |service, cx| service.measure_once(&paths, cx));
+        cx.notify();
+    }
+
     /// The Info tab's Where link: leave search, show the parent folder, focus the list.
     fn on_info_event(&mut self, event: &InfoPaneEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
@@ -656,6 +670,7 @@ impl CrowWindow {
             name: crate::style::display_name(&path),
             path: path.clone(),
             is_dir: true,
+            is_symlink: false,
             hidden: false,
             size: 0,
             modified: None,
@@ -1162,13 +1177,23 @@ impl CrowWindow {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let tab = self.info.read(cx).tab();
+        let folder_size = entry.and_then(|entry| {
+            if !entry.is_dir || cx.global::<Ui>().settings.folder_sizes != crow_core::FolderSizesMode::Visible {
+                return None;
+            }
+            cx.try_global::<crate::folder_sizes::SizeService>()
+                .and_then(|service| service.0.read(cx).size(&entry.path))
+                .map(Into::into)
+        });
         let label = match tab {
-            InfoTab::Preview => entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview)),
+            InfoTab::Preview => {
+                entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview, folder_size))
+            }
             InfoTab::Info => self.info.read(cx).label(),
         };
         let body = match tab {
             InfoTab::Preview => match entry {
-                Some(entry) => preview::contents(entry, preview, theme).into_any_element(),
+                Some(entry) => preview::contents(entry, preview, theme, folder_size).into_any_element(),
                 None => div().into_any_element(),
             },
             InfoTab::Info => self.info.clone().into_any_element(),
@@ -2633,7 +2658,12 @@ impl CrowWindow {
         let ui = cx.global::<Ui>();
         let recent: Vec<palette::CommandId> =
             ui.recent_commands.ids().iter().filter_map(|key| palette::CommandId::from_key(key)).collect();
-        palette::command_listing(query, &recent, ui.settings.palette_recent_commands)
+        palette::command_listing(
+            query,
+            &recent,
+            ui.settings.palette_recent_commands,
+            ui.settings.folder_sizes == crow_core::FolderSizesMode::Visible,
+        )
     }
 
     fn refresh_palette(&mut self, query: &str, cx: &mut Context<Self>) {
@@ -2940,6 +2970,7 @@ impl CrowWindow {
             CommandId::ToggleHiddenFiles => self.toggle_hidden(&ToggleHiddenFiles, window, cx),
             CommandId::TogglePreview => self.toggle_preview(&TogglePreview, window, cx),
             CommandId::ShowInfo => self.show_info(&ShowInfo, window, cx),
+            CommandId::CalculateFolderSizes => self.calculate_folder_sizes(&CalculateFolderSizes, window, cx),
             CommandId::OpenParent => self.open_parent(&OpenParent, window, cx),
             CommandId::GoBack => self.go_back(&GoBack, window, cx),
             CommandId::GoForward => self.go_forward(&GoForward, window, cx),
@@ -3637,6 +3668,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::toggle_hidden))
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::show_info))
+            .on_action(cx.listener(Self::calculate_folder_sizes))
             .on_action(cx.listener(Self::open_parent))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))

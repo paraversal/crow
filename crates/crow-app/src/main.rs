@@ -25,6 +25,7 @@ mod effects;
 mod extensions;
 mod feedback;
 mod folder;
+mod folder_sizes;
 #[cfg(any(test, feature = "fuzz"))]
 mod fuzz;
 #[cfg(feature = "fuzz")]

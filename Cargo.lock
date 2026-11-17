@@ -1066,6 +1066,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
+ "libc",
  "notify",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
@@ -1099,6 +1100,8 @@ dependencies = [
  "rand 0.9.5",
  "rand_chacha 0.9.0",
  "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1107,10 +1110,12 @@ version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
  "crow-fs",
+ "dispatch2",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-services",
  "objc2-core-text",
  "objc2-foundation 0.3.2",
  "objc2-quick-look-thumbnailing",
@@ -1253,6 +1258,7 @@ checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
+ "libc",
  "objc2 0.6.5",
 ]
 
@@ -3508,6 +3514,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "583300ad934cba24ff5292aee751ecc070f7ca6b39a574cc21b7b5e588e06a0b"
 dependencies = [
+ "dispatch2",
  "libc",
  "objc2-core-foundation",
 ]

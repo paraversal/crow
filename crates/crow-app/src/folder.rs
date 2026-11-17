@@ -21,6 +21,7 @@ use gpui::{
     prelude::*,
 };
 
+use crate::folder_sizes::FolderSizes;
 use crate::info_pane::{SelectionSummary, TAG_SCAN_CAP};
 use crate::style::kind;
 
@@ -265,6 +266,8 @@ pub struct Folder {
     selection_totals: (u64, usize),
     /// The Info tab's multi-selection summary, rebuilt only when the selection changes.
     selection_summary: RefCell<Option<(u64, SelectionSummary)>>,
+    /// The selected folders' known bytes, keyed by (selection generation, size generation).
+    selection_folder_bytes: RefCell<Option<(u64, u64, u64)>>,
     scroll: UniformListScrollHandle,
     changes_rx: Receiver<FolderChange>,
     /// A sender kept only for tests, which queue watcher batches without the disk.
@@ -351,6 +354,7 @@ impl Folder {
             selection_entries: RefCell::new(None),
             selection_totals: (0, 0),
             selection_summary: RefCell::new(None),
+            selection_folder_bytes: RefCell::new(None),
             scroll: UniformListScrollHandle::new(),
             changes_rx,
             #[cfg(test)]
@@ -562,6 +566,32 @@ impl Folder {
     /// selection change; no listing scan.
     pub fn selected_bytes(&self) -> (u64, usize) {
         self.selection_totals
+    }
+
+    /// The selected files' bytes plus the known sizes of selected folders, and
+    /// the folder count. Cached by selection and size generation, so a 100k
+    /// selection is scanned once per change, not once per frame.
+    pub fn selected_bytes_with_sizes(&self, sizes: &FolderSizes) -> (u64, usize) {
+        let (files, folders) = self.selection_totals;
+        if folders == 0 {
+            return (files, 0);
+        }
+        let generation = sizes.generation();
+        if let Some((selection, size_generation, bytes)) = *self.selection_folder_bytes.borrow()
+            && selection == self.selection_generation
+            && size_generation == generation
+        {
+            return (files + bytes, folders);
+        }
+        let bytes = self
+            .selected_entries()
+            .iter()
+            .filter(|(_, is_dir)| *is_dir)
+            .filter_map(|(path, _)| sizes.size(path))
+            .map(|size| size.bytes)
+            .sum();
+        *self.selection_folder_bytes.borrow_mut() = Some((self.selection_generation, generation, bytes));
+        (files + bytes, folders)
     }
 
     /// Bumped whenever the selection changes; the Info pane keys its load on it.
@@ -1025,7 +1055,19 @@ impl Folder {
     }
 
     pub fn set_sort(&mut self, sort: Sort, cx: &mut Context<Self>) {
-        if self.sort == sort {
+        self.set_sort_with_sizes(sort, None, cx);
+    }
+
+    /// `sizes` patches folder rows with the size service's bytes before sorting.
+    /// The pane passes it when the sort key is Size; the children are re-sorted
+    /// by the pane when every visible size is in.
+    pub fn set_sort_with_sizes(
+        &mut self,
+        sort: Sort,
+        sizes: Option<Arc<HashMap<PathBuf, u64>>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sort == sort && sizes.is_none() {
             return;
         }
         self.sort = sort;
@@ -1035,7 +1077,7 @@ impl Folder {
             // list again so its result arrives in this order.
             self.load(cx);
         } else {
-            self.resort(0, cx);
+            self.resort_with_sizes(sizes, 0, cx);
         }
     }
 
@@ -1046,19 +1088,29 @@ impl Folder {
         }
     }
 
-    /// Re-sort the listing off the main thread. The sort runs on the entries captured
-    /// here; if the listing is replaced while it runs, its result is stale — sort the
-    /// newer listing instead (or list again after two conflicts).
-    fn resort(&mut self, attempt: u8, cx: &mut Context<Self>) {
+    /// Re-sort off the main thread; `sizes` patches folder rows first. The sort
+    /// runs on the entries captured here; if the listing is replaced while it
+    /// runs, its result is stale — sort the newer listing instead (or list again
+    /// after two conflicts).
+    pub(crate) fn resort_with_sizes(
+        &mut self,
+        sizes: Option<Arc<HashMap<PathBuf, u64>>>,
+        attempt: u8,
+        cx: &mut Context<Self>,
+    ) {
         let sort = self.sort;
         let entries = self.entries.clone();
         let to_sort = entries.clone();
+        let sizes_for_task = sizes.clone();
         #[cfg(test)]
         let delay = self.sort_delay;
         cx.spawn(async move |this, cx| {
             let sorted = cx
                 .background_spawn(async move {
                     let mut entries = to_sort.as_ref().clone();
+                    if let Some(sizes) = &sizes_for_task {
+                        apply_folder_sizes(&mut entries, sizes);
+                    }
                     crow_fs::sort_entries(&mut entries, &sort, &kind);
                     entries
                 })
@@ -1074,7 +1126,7 @@ impl Folder {
                 if Arc::ptr_eq(&this.entries, &entries) {
                     this.replace_entries_after(sorted, Some(&[]), cx);
                 } else if attempt < 2 {
-                    this.resort(attempt + 1, cx);
+                    this.resort_with_sizes(sizes, attempt + 1, cx);
                 } else {
                     this.load(cx);
                 }
@@ -2267,6 +2319,16 @@ fn list_in_stages(dir: &Path, hidden: bool, sort: Sort, started: Instant, tx: &U
     tx.unbounded_send(Load::Done(done)).ok();
 }
 
+/// Patch folder rows with the size service's known bytes; an unknown folder is
+/// 0, so it sorts before known folders in ascending order (Q3's "once" order).
+fn apply_folder_sizes(entries: &mut [Entry], sizes: &HashMap<PathBuf, u64>) {
+    for entry in entries {
+        if entry.is_dir && !entry.is_symlink {
+            entry.size = sizes.get(&entry.path).copied().unwrap_or(0);
+        }
+    }
+}
+
 /// Flatten `entries` and the open children into the rows the list view draws.
 /// Free of entities so an apply can run it on the background executor.
 fn build_rows(entries: &[Entry], children: &ChildRows, filter: Option<(&str, &str)>) -> Rows {
@@ -2353,6 +2415,38 @@ fn build_rows(entries: &[Entry], children: &ChildRows, filter: Option<(&str, &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(name: &str, size: u64, is_dir: bool) -> Entry {
+        Entry {
+            name: name.to_owned(),
+            path: PathBuf::from("/").join(name),
+            is_dir,
+            is_symlink: false,
+            hidden: false,
+            size,
+            modified: None,
+            created: None,
+            added: None,
+        }
+    }
+
+    #[test]
+    fn size_sort_uses_known_unknown_and_stale_folders() {
+        let mut entries = vec![
+            entry("a", 0, true),
+            entry("b", 0, true),
+            entry("c", 0, true),
+            entry("d", 0, true),
+            entry("e", 5, false),
+        ];
+        // a, b and d are known; c is unknown (0); d's value is stale but still known.
+        let sizes = HashMap::from([(PathBuf::from("/a"), 100), (PathBuf::from("/b"), 10), (PathBuf::from("/d"), 50)]);
+        apply_folder_sizes(&mut entries, &sizes);
+        let sort = Sort { key: crow_fs::SortKey::Size, ascending: true, folders_first: true };
+        crow_fs::sort_entries(&mut entries, &sort, &kind);
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, ["c", "b", "d", "a", "e"], "unknown 0, 10, 50, 100, then the file");
+    }
 
     #[test]
     fn name_match_finds_the_first_ascii_occurrence() {

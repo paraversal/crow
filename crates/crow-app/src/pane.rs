@@ -13,17 +13,17 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crow_core::motion::{Effective, Fx, Look};
 use crow_core::{
-    Align, Column, ColumnContext, ColumnWidth, EnterAction, History, KeymapLayer, ResizeDrag, TIP_SCROLL_ENTRIES,
-    TIP_SCROLL_ROWS, TableLayout, TipId, ViewChange, ViewMode,
+    Align, Column, ColumnCell, ColumnContext, ColumnWidth, EnterAction, History, KeymapLayer, KnownSize, ResizeDrag,
+    TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS, TableLayout, TipId, ViewChange, ViewMode,
 };
 use crow_fs::{Entry, Sort, SortKey};
 use crow_theme::Theme;
 use gpui::{
-    Action, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter,
+    Action, Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter,
     ExternalDragPayload, ExternalPaths, FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle,
     ScrollStrategy, SharedString, SpringAnimation, SpringConfig, Subscription, UniformListScrollHandle, Window, canvas,
@@ -39,6 +39,7 @@ use crate::actions::{
 use crate::context_menu::{MenuKind, MenuState};
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
+use crate::folder_sizes::{SizeService, SourceKey};
 use crate::icons::{Glyph, glyph};
 use crate::info_pane::{self, InfoKey, InfoPane, InfoTab, InfoTarget};
 use crate::keys::KeyScope;
@@ -316,6 +317,12 @@ pub struct Pane {
     preview: Option<Preview>,
     /// The window's right column: tab choice and the Info tab's target.
     info: Entity<InfoPane>,
+    /// This pane's id in the folder-size service's visible-row sources.
+    size_source: u64,
+    /// The service generation whose visible sizes were already sorted (Q3).
+    size_sort_generation: u64,
+    /// `folder_sizes = "visible"` at the last render; turning it off pauses the service.
+    size_enabled: bool,
     strip_scroll: ScrollHandle,
     status: Option<SharedString>,
     renaming: Option<Renaming>,
@@ -379,13 +386,19 @@ impl Pane {
         cx: &mut Context<Self>,
     ) -> Self {
         let columns = cx.global::<Ext>().0.default_columns();
+        let size_service = cx.try_global::<SizeService>().map(|service| service.0.clone());
+        let size_source = size_service.as_ref().map(|service| service.read(cx).source()).unwrap_or(0);
+        let mut subscriptions = Vec::new();
+        if let Some(service) = size_service {
+            subscriptions.push(cx.observe(&service, |pane, _, cx| pane.sizes_changed(cx)));
+        }
         let mut pane = Self {
             history: History::new(dir.clone()),
             mode: ViewMode::List,
             show_hidden,
             sort: Sort::default(),
             folders: Vec::new(),
-            subscriptions: Vec::new(),
+            subscriptions,
             focused: 0,
             focus: cx.focus_handle(),
             table: default_table(&columns),
@@ -393,6 +406,9 @@ impl Pane {
             resize: None,
             preview: None,
             info,
+            size_source,
+            size_sort_generation: 0,
+            size_enabled: cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible,
             strip_scroll: ScrollHandle::new(),
             status: None,
             renaming: None,
@@ -464,9 +480,49 @@ impl Pane {
         self.focused_folder().read(cx).selected_count()
     }
 
-    /// The selected files' bytes and how many selected items are folders.
+    /// The selected files' bytes plus the known sizes of selected folders, and
+    /// how many selected items are folders. Off: file bytes only, as before.
     pub fn selected_bytes(&self, cx: &gpui::App) -> (u64, usize) {
-        self.focused_folder().read(cx).selected_bytes()
+        let folder = self.focused_folder().read(cx);
+        if cx.global::<Ui>().settings.folder_sizes != crow_core::FolderSizesMode::Visible {
+            return folder.selected_bytes();
+        }
+        let Some(service) = cx.try_global::<SizeService>() else {
+            return folder.selected_bytes();
+        };
+        let service = service.0.read(cx);
+        folder.selected_bytes_with_sizes(service)
+    }
+
+    /// The current folder's folder rows, for View ▸ Calculate Folder Sizes.
+    pub fn folder_paths(&self, cx: &gpui::App) -> Vec<PathBuf> {
+        let folder = self.focused_folder().read(cx);
+        folder
+            .entries()
+            .iter()
+            .filter(|entry| entry.is_dir && !entry.is_symlink)
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+
+    /// Report the folder rows this pane shows to the size service. Called from
+    /// the row renderers; it only enqueues work. Off pauses the service once.
+    fn observe_sizes(&mut self, source: SourceKey, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let enabled = cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible;
+        if !enabled {
+            if self.size_enabled {
+                if let Some(service) = cx.try_global::<SizeService>().map(|service| service.0.clone()) {
+                    service.update(cx, |service, _| service.pause());
+                }
+                self.size_enabled = false;
+            }
+            return;
+        }
+        self.size_enabled = true;
+        if let Some(service) = cx.try_global::<SizeService>() {
+            let service = service.0.clone();
+            service.update(cx, |service, cx| service.observe(source, paths, cx));
+        }
     }
 
     /// Whether the `/` filter field is open.
@@ -695,6 +751,7 @@ impl Pane {
                 name: crate::style::display_name(dir),
                 path: dir.to_path_buf(),
                 is_dir: true,
+                is_symlink: false,
                 hidden: false,
                 size: 0,
                 modified: None,
@@ -709,10 +766,15 @@ impl Pane {
     /// The preview column's aria label: a folder's summary or a file's preview.
     pub fn preview_label(&self, cx: &gpui::App) -> Option<String> {
         let (entry, items) = self.preview_parts(cx)?;
-        if entry.is_dir && !entry.is_package() {
-            Some(preview::folder_spoken(&entry.name, items))
+        let size = if entry.is_dir && cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible {
+            cx.try_global::<SizeService>().and_then(|service| service.0.read(cx).size(&entry.path)).map(Into::into)
         } else {
-            Some(preview::spoken(&entry, self.preview(cx)))
+            None
+        };
+        if entry.is_dir && !entry.is_package() {
+            Some(preview::folder_spoken(&entry.name, items, size))
+        } else {
+            Some(preview::spoken(&entry, self.preview(cx), size))
         }
     }
 
@@ -946,11 +1008,61 @@ impl Pane {
             return false;
         }
         self.sort = sort;
+        let service = cx.try_global::<SizeService>().map(|service| service.0.clone());
         for folder in &self.folders {
-            folder.update(cx, |f, cx| f.set_sort(sort, cx));
+            let sizes = if sort.key == SortKey::Size {
+                service.as_ref().map(|service| {
+                    let service = service.read(cx);
+                    let folder = folder.read(cx);
+                    Arc::new(
+                        folder
+                            .entries()
+                            .iter()
+                            .filter(|entry| entry.is_dir && !entry.is_symlink)
+                            .filter_map(|entry| service.size(&entry.path).map(|size| (entry.path.clone(), size.bytes)))
+                            .collect::<HashMap<_, _>>(),
+                    )
+                })
+            } else {
+                None
+            };
+            folder.update(cx, |f, cx| f.set_sort_with_sizes(sort, sizes, cx));
         }
         cx.notify();
         true
+    }
+
+    /// The size service changed: once every visible size is in, re-sort by size
+    /// once (Q3). Scrolling in more rows repeats this when their sizes arrive.
+    fn sizes_changed(&mut self, cx: &mut Context<Self>) {
+        if cx.global::<Ui>().settings.folder_sizes != crow_core::FolderSizesMode::Visible {
+            return;
+        }
+        let service = cx.global::<SizeService>().0.clone();
+        let generation = service.read(cx).generation();
+        if generation == self.size_sort_generation || self.sort.key != SortKey::Size {
+            return;
+        }
+        if !service.read(cx).visible_complete() {
+            return;
+        }
+        self.size_sort_generation = generation;
+        for folder in &self.folders {
+            let sizes = {
+                let service = service.read(cx);
+                let folder = folder.read(cx);
+                Arc::new(
+                    folder
+                        .entries()
+                        .iter()
+                        .filter(|entry| entry.is_dir && !entry.is_symlink)
+                        .filter_map(|entry| service.size(&entry.path).map(|size| (entry.path.clone(), size.bytes)))
+                        .collect::<HashMap<_, _>>(),
+                )
+            };
+            folder.update(cx, |f, cx| f.resort_with_sizes(Some(sizes), 0, cx));
+        }
+        cx.notify();
     }
 
     #[cfg(test)]
@@ -2021,12 +2133,15 @@ impl Pane {
                 folder.update(cx, |folder, cx| folder.set_filter(Some(filter), cx));
             }
         } else if bench.frame > 600 {
-            println!(
+            let line = format!(
                 "BENCH {} warm_first_paint={:.0}ms warm_load={:.0}ms",
                 bench.scrolled.as_deref().unwrap_or_default(),
                 folder.first_paint_ms().unwrap_or_default(),
                 folder.load_ms()
             );
+            println!("{line}");
+            // The bundle launched through `open` has no captured stdout; the log keeps the result.
+            tracing::info!("{line}");
             cx.quit();
         }
     }
@@ -2039,6 +2154,28 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<impl IntoElement + use<>> {
+        let visible: Vec<PathBuf> = {
+            let folder = self.folders[0].read(cx);
+            range
+                .clone()
+                .filter_map(|ix| folder.row(ix))
+                .filter(|(entry, _)| entry.is_dir && !entry.is_symlink)
+                .map(|(entry, _)| entry.path.clone())
+                .collect()
+        };
+        let sizes_enabled = cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible;
+        let size_snapshot: HashMap<PathBuf, KnownSize> = match cx.try_global::<SizeService>() {
+            Some(service) => {
+                let service = service.0.read(cx);
+                visible
+                    .iter()
+                    .filter(|path| sizes_enabled || service.manual(path))
+                    .filter_map(|path| service.size(path).map(|size| (path.clone(), size.into())))
+                    .collect()
+            }
+            None => HashMap::new(),
+        };
+        self.observe_sizes((self.size_source, 0), &visible, cx);
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
         let font_size = px(ui.settings.font_size);
@@ -2050,7 +2187,8 @@ impl Pane {
         let active = self.focus.is_focused(window);
         let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
-        let column_cx = ColumnContext { kind: &kind, time: &format_time };
+        let size = |entry: &Entry| size_snapshot.get(&entry.path).copied();
+        let column_cx = ColumnContext { kind: &kind, time: &format_time, size: &size };
         let widths = self.table_widths();
         // Columns hidden for a narrow pane have width 0; the last shown one stretches.
         let last = widths.iter().rposition(|w| *w > 0.0).unwrap_or(0);
@@ -2092,10 +2230,14 @@ impl Pane {
             .collect();
         rows.into_iter()
             .map(|(ix, entry, depth, selected)| {
-                let cells: Vec<(String, Align)> =
-                    self.columns.iter().map(|c| (c.text(&entry, &column_cx), c.align())).collect();
-                let spoken =
-                    cells.iter().map(|(text, _)| text.as_str()).filter(|t| *t != "--").collect::<Vec<_>>().join(", ");
+                let cells: Vec<(ColumnCell, Align)> =
+                    self.columns.iter().map(|c| (c.cell(&entry, &column_cx), c.align())).collect();
+                let spoken = cells
+                    .iter()
+                    .map(|(cell, _)| cell.spoken.as_deref().unwrap_or(&cell.text))
+                    .filter(|text| *text != "--")
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let indent = NAME_INSET + depth as f32 * INDENT;
                 let name_room = px(widths[0] - indent - TRIANGLE_WIDTH - 8.0 - 16.0 - 8.0 - CELL_PADDING);
                 let name = truncate_middle_parts(&entry.name, name_room, font_size, window);
@@ -2313,9 +2455,11 @@ impl Pane {
                             ),
                     );
                 row.children(cells.into_iter().enumerate().filter(|(i, _)| widths[i + 1] > 0.0).map(
-                    |(i, (text, align))| {
+                    |(i, (cell, align))| {
                         let width = px(widths[i + 1]);
-                        div()
+                        let opacity = dim * cell.opacity;
+                        let fade = cell.fade.filter(|_| mode != Effective::Off);
+                        let cell = div()
                             .when(i + 1 == last, |cell| cell.flex_1().min_w(width))
                             .when(i + 1 != last, |cell| cell.w(width).flex_none())
                             .px(px(CELL_PADDING))
@@ -2323,9 +2467,21 @@ impl Pane {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .text_color(muted)
-                            .opacity(dim)
+                            .opacity(opacity)
                             .when(align == Align::Right, |cell| cell.text_right())
-                            .child(text)
+                            .child(cell.text);
+                        match fade {
+                            Some(version) => {
+                                let key = SharedString::from(format!("size-fade-{ix}-{i}-{version}"));
+                                cell.with_animation(
+                                    key,
+                                    Animation::new(Duration::from_millis(crow_core::motion::ms::STATUS)),
+                                    move |el, t| el.opacity(opacity * (0.3 + 0.7 * crow_core::motion::ease_out(t))),
+                                )
+                                .into_any_element()
+                            }
+                            None => cell.into_any_element(),
+                        }
                     },
                 ))
             })
@@ -2425,6 +2581,20 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<impl IntoElement + use<>> {
+        let visible: Vec<PathBuf> = self
+            .folders
+            .get(k)
+            .map(|folder| {
+                let folder = folder.read(cx);
+                range
+                    .clone()
+                    .filter_map(|ix| folder.row(ix))
+                    .filter(|(entry, _)| entry.is_dir && !entry.is_symlink)
+                    .map(|(entry, _)| entry.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.observe_sizes((self.size_source, k + 1), &visible, cx);
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
         let font_size = px(ui.settings.font_size);
@@ -2830,13 +3000,27 @@ impl Pane {
             let body = match tab {
                 InfoTab::Preview => {
                     let folder = entry.is_dir && !entry.is_package();
+                    let size = if entry.is_dir
+                        && cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible
+                    {
+                        cx.try_global::<SizeService>()
+                            .and_then(|service| service.0.read(cx).size(&entry.path))
+                            .map(Into::into)
+                    } else {
+                        None
+                    };
                     if folder {
                         let name = display_text(&entry.name);
-                        let summary =
-                            preview::FolderSummary { path: &entry.path, name: &name, modified: entry.modified, items };
+                        let summary = preview::FolderSummary {
+                            path: &entry.path,
+                            name: &name,
+                            modified: entry.modified,
+                            items,
+                            size,
+                        };
                         preview::folder_summary(summary, &theme).into_any_element()
                     } else {
-                        preview::contents(&entry, self.preview(cx), &theme).into_any_element()
+                        preview::contents(&entry, self.preview(cx), &theme, size).into_any_element()
                     }
                 }
                 InfoTab::Info => self.info.clone().into_any_element(),

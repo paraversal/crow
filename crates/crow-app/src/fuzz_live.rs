@@ -219,6 +219,7 @@ pub fn run(args: &[String]) -> ExitCode {
             app_setup.config_dir.clone(),
             app_setup.state_dir.clone(),
             app_setup.root.clone(),
+            app_setup.state_dir.join("cache"),
         );
         extensions::init(cx);
         operations::init(cx, Arc::new(FolderTrash(app_setup.trash_dir.clone())));

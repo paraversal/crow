@@ -18,7 +18,7 @@ fn menu_title(command: &Command, slot: MenuSlot, show_preview: bool) -> &'static
     }
 }
 
-fn command_item(command: &Command, slot: MenuSlot, show_preview: bool) -> MenuItem {
+fn command_item(command: &Command, slot: MenuSlot, show_preview: bool, folder_sizes_visible: bool) -> MenuItem {
     let title = menu_title(command, slot, show_preview);
     let os_action = match command.id {
         CommandId::Undo => Some(OsAction::Undo),
@@ -34,12 +34,14 @@ fn command_item(command: &Command, slot: MenuSlot, show_preview: bool) -> MenuIt
         action: command.action.boxed_clone(),
         os_action,
         checked: false,
-        disabled: false,
+        // The setting already measures every visible folder; the one-off command
+        // would duplicate that work.
+        disabled: folder_sizes_visible && command.id == CommandId::CalculateFolderSizes,
     }
 }
 
 /// The whole menu bar in macOS order: Crow, File, Edit, View, Go, Window, Help.
-pub fn app_menus(show_preview: bool) -> Vec<Menu> {
+pub fn app_menus(show_preview: bool, folder_sizes_visible: bool) -> Vec<Menu> {
     let mut menus = Vec::with_capacity(MenuName::ALL.len());
     for menu in MenuName::ALL {
         let mut items = Vec::new();
@@ -72,7 +74,7 @@ pub fn app_menus(show_preview: bool) -> Vec<Menu> {
             if section.is_some_and(|previous| previous != slot.section) {
                 items.push(MenuItem::separator());
             }
-            items.push(command_item(command, slot, show_preview));
+            items.push(command_item(command, slot, show_preview, folder_sizes_visible));
             section = Some(slot.section);
         }
 
@@ -99,10 +101,14 @@ pub fn init(cx: &mut App) {
     refresh(cx);
 }
 
-/// Rebuild the menu bar; View ▸ Show/Hide Preview follows the setting.
+/// Rebuild the menu bar; View ▸ Show/Hide Preview follows the setting, and
+/// View ▸ Calculate Folder Sizes is disabled while the setting measures on its own.
 pub fn refresh(cx: &mut App) {
-    let show_preview = cx.global::<Ui>().settings.show_preview;
-    cx.set_menus(app_menus(show_preview));
+    let (show_preview, folder_sizes_visible) = {
+        let settings = &cx.global::<Ui>().settings;
+        (settings.show_preview, settings.folder_sizes == crow_core::FolderSizesMode::Visible)
+    };
+    cx.set_menus(app_menus(show_preview, folder_sizes_visible));
 }
 
 #[cfg(test)]
@@ -140,7 +146,7 @@ mod tests {
 
     #[test]
     fn every_menu_command_is_in_the_menus() {
-        let menus = app_menus(true);
+        let menus = app_menus(true, false);
         for command in COMMANDS {
             let Some(slot) = command.menu else { continue };
             let menu = menus.iter().find(|menu| menu.name.as_ref() == slot.menu.title()).expect("menu exists");
@@ -180,7 +186,7 @@ mod tests {
     #[test]
     fn preview_menu_names_the_action() {
         let view_items = |show_preview: bool| {
-            let menus = app_menus(show_preview);
+            let menus = app_menus(show_preview, false);
             let view = menus.iter().find(|menu| menu.name.as_ref() == "View").expect("View menu");
             titles(&view.items).into_iter().map(str::to_owned).collect::<Vec<_>>()
         };
@@ -189,8 +195,22 @@ mod tests {
     }
 
     #[test]
+    fn calculate_folder_sizes_is_disabled_when_the_setting_is_visible() {
+        let disabled = |folder_sizes_visible: bool| {
+            let menus = app_menus(false, folder_sizes_visible);
+            let view = menus.iter().find(|menu| menu.name.as_ref() == "View").expect("View menu");
+            view.items.iter().find_map(|item| match item {
+                MenuItem::Action { name, disabled, .. } if name.as_ref() == "Calculate Folder Sizes" => Some(*disabled),
+                _ => None,
+            })
+        };
+        assert_eq!(disabled(false), Some(false), "off: the one-off command is usable");
+        assert_eq!(disabled(true), Some(true), "visible: the setting already measures");
+    }
+
+    #[test]
     fn menus_are_in_bar_order() {
-        let menus = app_menus(true);
+        let menus = app_menus(true, false);
         let names: Vec<&str> = menus.iter().map(|menu| menu.name.as_ref()).collect();
         assert_eq!(names, ["Crow", "File", "Edit", "View", "Go", "Window", "Help"]);
 
@@ -246,6 +266,7 @@ mod tests {
                 "Show Hidden Files",
                 "Hide Preview",
                 "Show Info",
+                "Calculate Folder Sizes",
                 "Show Activity",
                 "Theme…",
             ]

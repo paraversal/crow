@@ -11,12 +11,12 @@ use crow_search::FuzzyMatcher;
 use gpui::{Action, SharedString};
 
 use crate::actions::{
-    AddToSidebar, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, EditPath, EditSettings, Eject,
-    GoBack, GoForward, GoToFolder, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab,
-    NewWindow, OpenParent, OpenSelection, OpenSettings, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo,
-    RemoveFromSidebar, Rename, ResetFolderView, SearchEverything, SearchReveal, SelectAll, ShowCommandPalette,
-    ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles,
-    TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
+    AddToSidebar, CalculateFolderSizes, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate,
+    EditPath, EditSettings, Eject, GoBack, GoForward, GoToFolder, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash,
+    NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, OpenSettings, PasteFiles, PasteMoveFiles,
+    QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView, SearchEverything, SearchReveal, SelectAll,
+    ShowCommandPalette, ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity,
+    ToggleHiddenFiles, TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -75,6 +75,7 @@ pub enum CommandId {
     ToggleHiddenFiles,
     TogglePreview,
     ShowInfo,
+    CalculateFolderSizes,
     OpenParent,
     GoBack,
     GoForward,
@@ -147,6 +148,7 @@ impl CommandId {
             CommandId::ToggleHiddenFiles => "toggle-hidden-files",
             CommandId::TogglePreview => "toggle-preview",
             CommandId::ShowInfo => "show-info",
+            CommandId::CalculateFolderSizes => "calculate-folder-sizes",
             CommandId::OpenParent => "open-parent",
             CommandId::GoBack => "go-back",
             CommandId::GoForward => "go-forward",
@@ -469,6 +471,14 @@ pub const COMMANDS: &[Command] = &[
         action: &ShowInfo,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Info" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::CalculateFolderSizes,
+        label: "Calculate Folder Sizes",
+        action: &CalculateFolderSizes,
+        scope: KeyScope::List,
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Calculate Folder Sizes" }),
         palette: true,
     },
     Command {
@@ -908,8 +918,17 @@ fn folder_item(folder: &FolderCandidate, matched: Vec<Range<usize>>, name_matche
 /// `show_recent`, up to five remembered commands come first under a
 /// "Recently used" header and are not repeated below. A typed query is a flat
 /// list, best score first.
-pub fn command_listing(query: &str, recent_ids: &[CommandId], show_recent: bool) -> Listing {
-    let listed: Vec<&Command> = COMMANDS.iter().filter(|command| command.palette).collect();
+pub fn command_listing(
+    query: &str,
+    recent_ids: &[CommandId],
+    show_recent: bool,
+    folder_sizes_visible: bool,
+) -> Listing {
+    let listed: Vec<&Command> = COMMANDS
+        .iter()
+        .filter(|command| command.palette)
+        .filter(|command| !(folder_sizes_visible && command.id == CommandId::CalculateFolderSizes))
+        .collect();
     let total = listed.len();
     let mut items: Vec<Item> = Vec::new();
     let mut rows: Vec<Row> = Vec::new();
@@ -1243,7 +1262,7 @@ mod tests {
     }
 
     fn command_ids(query: &str) -> Vec<CommandId> {
-        command_listing(query, &[], false)
+        command_listing(query, &[], false, false)
             .items
             .into_iter()
             .filter_map(|item| match item {
@@ -1373,7 +1392,7 @@ mod tests {
     #[test]
     fn an_empty_command_query_leaves_out_quit() {
         assert!(!command_ids("").contains(&CommandId::Quit), "> then Return must not quit");
-        let recent = command_listing("", &[CommandId::Quit, CommandId::NewTab], true);
+        let recent = command_listing("", &[CommandId::Quit, CommandId::NewTab], true, false);
         let ids: Vec<CommandId> = recent
             .items
             .iter()
@@ -1439,7 +1458,7 @@ mod tests {
     #[test]
     fn settings_commands_are_in_the_palette() {
         let commands = |query: &str| -> Vec<CommandId> {
-            command_listing(query, &[], true)
+            command_listing(query, &[], true, false)
                 .items
                 .iter()
                 .filter_map(|item| match item {
@@ -1450,6 +1469,25 @@ mod tests {
         };
         assert!(commands("settings").contains(&CommandId::OpenSettings));
         assert!(commands("edit settings").contains(&CommandId::EditSettings));
+    }
+
+    #[test]
+    fn calculate_folder_sizes_is_hidden_when_sizes_are_automatic() {
+        let commands = |folder_sizes_visible: bool| -> Vec<CommandId> {
+            command_listing("", &[], false, folder_sizes_visible)
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Command { command, .. } => Some(command.id),
+                    Item::Folder { .. } => None,
+                })
+                .collect()
+        };
+        assert!(commands(false).contains(&CommandId::CalculateFolderSizes), "off: the command is the way to measure");
+        assert!(
+            !commands(true).contains(&CommandId::CalculateFolderSizes),
+            "visible: the setting already measures; the one-off command would duplicate it"
+        );
     }
 
     #[test]

@@ -125,6 +125,7 @@ mod tests {
             name: name.into(),
             path: PathBuf::from("/d").join(name),
             is_dir: false,
+            is_symlink: false,
             hidden: false,
             size,
             modified: None,

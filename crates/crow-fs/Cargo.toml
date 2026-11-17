@@ -16,6 +16,8 @@ notify.workspace = true
 rand = { version = "0.9", optional = true }
 rand_chacha = { version = "0.9", optional = true }
 rayon = "1"
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 rand = "0.9"

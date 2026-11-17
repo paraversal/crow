@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crow_core::motion::{Effective, MotionMode, SoundSet};
 use crow_core::{
-    AppIcon, EnterAction, Exclude, HintsMode, KeymapLayer, Recent, RecentCommands, Settings, SidebarConfig, TipsMode,
-    Views, load_settings, load_sidebar, load_views,
+    AppIcon, EnterAction, Exclude, FolderSizesMode, HintsMode, KeymapLayer, Recent, RecentCommands, Settings,
+    SidebarConfig, TipsMode, Views, load_settings, load_sidebar, load_views,
 };
 use crow_theme::Theme;
 use gpui::{App, AppContext, Global, SharedString};
@@ -217,12 +217,13 @@ impl Global for Watchers {}
 
 /// Install the `Ui` global and start watching the theme index, `~/.config/crow` and mounts.
 pub fn init(cx: &mut App) {
-    init_at(cx, crow_core::config_dir(), crow_core::state_dir(), crow_core::home());
+    init_at(cx, crow_core::config_dir(), crow_core::state_dir(), crow_core::home(), crow_core::cache_dir());
 }
 
-/// `init` with explicit folders, for `crow --fuzz`: its config, state and home
-/// stay in the run's temp folders, so it cannot read the user's sidebar or write Recent.
-pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: PathBuf) {
+/// `init` with explicit folders, for `crow --fuzz`: its config, state, home and
+/// cache stay in the run's temp folders, so it cannot read the user's sidebar or
+/// write Recent or folder sizes.
+pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: PathBuf, cache_dir: PathBuf) {
     // The config dir is watched, so it has to exist before the first file is written.
     // io-ok: startup: the config dir must exist before it is watched
     std::fs::create_dir_all(&config_dir).ok();
@@ -232,6 +233,7 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     ui.target = theme.clone();
     ui.theme = theme;
     cx.set_global(ui);
+    crate::folder_sizes::init_at(cx, cache_dir, true);
     let feedback = cx.global::<Ui>().feedback;
     cx.set_reduce_motion(feedback.mode == Effective::Off);
     feedback::preload(feedback.sound, cx);
@@ -441,6 +443,7 @@ pub enum SettingChange {
     Enter(EnterAction),
     Hints(HintsMode),
     Tips(TipsMode),
+    FolderSizes(FolderSizesMode),
     Motion(MotionMode),
     Sound(SoundSet),
     AppIcon(AppIcon),
@@ -465,6 +468,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             SettingChange::Enter(value) => replace(&mut settings.enter, *value),
             SettingChange::Hints(value) => replace(&mut settings.hints, *value),
             SettingChange::Tips(value) => replace(&mut settings.tips, *value),
+            SettingChange::FolderSizes(value) => replace(&mut settings.folder_sizes, *value),
             SettingChange::Motion(value) => replace(&mut settings.motion, *value),
             SettingChange::Sound(value) => replace(&mut settings.sound, *value),
             SettingChange::AppIcon(value) => replace(&mut settings.app_icon, *value),
@@ -520,6 +524,9 @@ fn write_setting(change: SettingChange, cx: &mut App) {
         }
         SettingChange::Tips(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "tips", value.key()), cx);
+        }
+        SettingChange::FolderSizes(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "folder_sizes", value.key()), cx);
         }
         SettingChange::Motion(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "motion", value.key()), cx);

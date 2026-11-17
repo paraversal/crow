@@ -171,6 +171,7 @@ mod sort_tests {
             name: name.into(),
             path: format!("/x/{name}").into(),
             is_dir,
+            is_symlink: false,
             hidden: false,
             size,
             modified: Some(UNIX_EPOCH + Duration::from_secs(secs)),
