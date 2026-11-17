@@ -1,6 +1,6 @@
 # F4 fix 2 progress
 
-Branch: `m8-f4-path-bar` (F4, unmerged) · PR: none · Last updated: 2026-11-17 · State: Ready for test
+Branch: `m8-f4-path-bar` (F4, unmerged) · PR: none · Last updated: 2026-11-17 · State: In critique
 
 ## Status
 
@@ -40,4 +40,4 @@ Branch: `m8-f4-path-bar` (F4, unmerged) · PR: none · Last updated: 2026-11-17 
 
 ## Next
 
-The user's test of the bundle; then the bench re-run with the shader compile warm.
+The critique is in `f4-path-bar.progress.md` (Critique 2): the pencil's rest color, the hints' fade, the field's hover reset and the docs are fixed; Q5-Q7 wait on the user (the field's expansion start, the mount flash, focus loss). The bench re-run and the bundle follow the answers.

@@ -1,5 +1,5 @@
 # F4 path bar progress
-Branch: m8-f4-path-bar · PR: none · Last updated: 2026-11-17 · State: Ready for test
+Branch: m8-f4-path-bar · PR: none · Last updated: 2026-11-17 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -66,3 +66,25 @@ Critic session: 2026-11-17 · Base: `main` @ 4c0a4b7 · Head reviewed: 143fbbe
 Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (500 app + 1 ignored, 99 core, 44 search, 6 fs, 20 macos, 6 theme) · bench on `target/fixture-100k`: cold 156 ms, warm 11 ms, p99 8.63 ms (main 143 / 11 / 8.64; the F4 branch 153 / 11 / 8.59); within the AGENTS.md budgets and run-to-run noise · `./scripts/bundle.sh` built `target/bundle/Crow.app`.
 Looked at: the design mockups (six options in `docs/plans/m8/img/`), the V2 build's tests at 1280 and 640, the bench. Not hand-driven yet: the user tests the bundle; the drag-to-Finder, VoiceOver and light/dark checks are on the hand-check list.
 Verdict: the drag work is solid; the V2 build replaces the slab/pencil/field with the pill, the path-end pencil and the left-section field. The user's test decides whether the shape is right.
+
+### Critique 2 (fix 1 + fix 2)
+
+Critic session: 2026-11-17 · Base: `main` @ 4c0a4b7 · Head reviewed: c3244cf, then this session's fixes
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C10 | With motion on, the pencil fades to transparent at rest: the animation paints `fg` with alpha `1-t`, so the "always visible" pencil disappears after 120 ms (and flashes `fg` on first paint); the docs and the user's decision say always visible | `bottom_bar.rs:717-735`; `docs/testing.md:370` | UI / plan | fix | fixed: rest `fg-subtle` → hover `fg`, no transparency; the hand check covers the rest state |
+| C11 | The field's hints pop in at full opacity; the plan (Q2 A) says they fade in with the field | `bottom_bar.rs:970-985` | UI / plan | fix | fixed: the hints fade over `FIELD` with the field; motion Off is instant |
+| C12 | The pill's hover state sticks after the field closes: the field replaces the path's `on_hover`, so a pointer that leaves while editing never sends `PathUnhover`; Escape brings the pill back wherever the pointer is | `window.rs:622-627`; `bottom_bar.rs:791-809` | UX / code | fix | fixed: `close_path_edit` resets `path_hovered`; test `path_bar_field_clears_the_hover` |
+| C13 | The U5 board note still says 30 px; the fix plan asks for the note | `docs/plans/done/u5-bottom-bar.md:63-67` | plan | fix | fixed: a note records the 38 px bar and the 32 px pill/field |
+| C14 | README and `docs/testing.md` say a segment drags "the folder"; the last segment can be a file (the recorded Decision) | `README.md:107`; `docs/testing.md:370` | plan / docs | fix | fixed: "the folder or file it shows" |
+| C15 | The field expands from 0 width, not from the pill's width as Q2 A decided; the path text vanishes and the field sweeps from the left | `bottom_bar.rs:1015-1023`; `f4-fix2.md` Q2 A | UX / plan | ask | Q5 |
+| C16 | The pill and pencil animations restart at their visible state on mount: the pill flashes `surface` and the pencil `fg` for 120 ms on first paint and after the field closes; `with_animation` cannot start a two-state fade at rest | `bottom_bar.rs:760-785` | UX / code | ask | Q6 |
+| C17 | Hover survives the app losing focus: the GPUI patch clears on `MouseExited` only; Cmd-Tab or clicking another app leaves the segment fills and the pill; the fix2 hand check asks for focus loss | `patches/gpui-mouse-exit-hover.patch`; `window.rs:366` | UX / plan | ask | Q7 |
+| C18 | The first segment's width guard was loosened 20 → 14 px; the segment is 16 px at 700 px with a long progress line. The separator moved out of the segment, so the old 20 included it; 16 px still fits the 14 px icon, and the name is clipped | `window/tests.rs:2024` | code / test | note | left: the separator move explains it; the icon stays |
+| C19 | The drag test asserts the internal `DraggedSelection`, not the external file URLs; `promote_drag` is shared with rows and hand-checked | `window/tests.rs:5735` | code / test | note | left: the Finder hand check covers the external payload (C7) |
+| C20 | The last segment drags the file it shows, not a folder; recorded as a Decision and matches the segment's click | `bottom_bar.rs:660`; progress Decisions | plan | note | left: the user can ask for folder-only |
+| C21 | The completion preview has no debounce: every keystroke reads the parent dir; the plan allowed a short debounce if the reads are hot, and no measurement is recorded | `window.rs:723-746` | code / performance | note | left: background reads; the preview drops stale results; the hand check types a path |
+| C22 | The bar shows the cursor's path, so the last segment is the selected item, not the current folder (H6 C-Q1, user) | `window.rs:1205` | UX | note | left: the user decision stands |
+| C23 | The fix2 bench record is invalid: p99 33.68 ms and max 55.9 s include the runtime Metal shader compile; the plan asks for a bench against `main` | `f4-fix2.progress.md` Log | code / performance | note | re-run below |
+
