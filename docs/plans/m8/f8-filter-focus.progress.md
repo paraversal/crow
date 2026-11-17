@@ -1,6 +1,6 @@
 # F8 — One focus in the filter progress
 
-Branch: `m8-filter-focus` · PR: none · Last updated: 2026-11-17 · State: In critique
+Branch: `m8-filter-focus` (combined PR head `m8-f5-f8`) · PR: #51 · Last updated: 2026-11-17 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -45,4 +45,4 @@ Looked at: list and column view; FireBox dark and Solarized Light; Vim on and of
 Verdict: better. One surface owns the keys and the fill follows it; the search field's model is now consistent in the filter, with no layout change.
 
 ## Next
-Ready for critique. The critic runs the `critique` skill, checks the hand checks above (especially Vim on/off and light/dark), and opens the PR.
+PR #51 is open (combined with F5 at the user's request). The user hand-tests, then squash-merges when CI is green. Next M8 piece: F4 (path bar).

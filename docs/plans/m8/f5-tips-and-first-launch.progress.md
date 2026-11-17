@@ -1,5 +1,5 @@
 # F5 tips and first launch progress
-Branch: m8-f5-tips · PR: none · Last updated: 2026-11-17 · State: In critique
+Branch: m8-f5-tips (combined PR head `m8-f5-f8`) · PR: #51 · Last updated: 2026-11-17 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -69,4 +69,4 @@ Looked at: fresh onboarding sheet in FireBox dark (position, mouse No tips, Tab 
 Verdict: better. The sheet sits lower, both choices work by mouse, VoiceOver and keyboard, and the tip card fits at 640 px without covering the last row.
 
 ## Next
-Ready for the combined F5+F8 PR: the critic's fixes are committed, the branch is local, and the user asked for one PR covering both pieces.
+PR #51 is open (combined with F8 at the user's request). The user hand-tests, then squash-merges when CI is green. Next M8 piece: F4 (path bar).
