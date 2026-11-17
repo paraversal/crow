@@ -56,7 +56,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), folder sizes (`folder_sizes`: `"off"` or `"visible"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, hidden files (shown by default), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), folder sizes (`folder_sizes`: `"off"` or `"visible"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, the terminal app Open Terminal Here uses (`terminal`: a name like `"Terminal"` or `"iTerm"`, or a path to an app), hidden files (shown by default), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
@@ -214,7 +214,9 @@ dragging Name's own divider trades width with the column after it.
 File operations use Finder's keys: Return renames (with `enter = "open"` it opens instead; F2
 always renames), Cmd-Shift-N new folder, Cmd-Option-N new file,
 Cmd-D duplicate, Cmd-Delete moves to the Trash, Cmd-Option-Delete deletes permanently (after asking),
-Cmd-C / Cmd-X / Cmd-V copy, cut and paste (also to and from Finder), Cmd-Option-V moves,
+Cmd-Shift-Backspace (⌘⇧⌫) empties the Trash after asking (the home Trash and every mounted volume's,
+with the empty-trash sound), Cmd-C / Cmd-X / Cmd-V copy, cut and paste (also to and from Finder),
+Cmd-Option-V moves,
 Cmd-Z / Cmd-Shift-Z undo and redo, Esc cancels a running operation, Cmd-Option-L shows activity.
 Copying or cutting more than 1000 items keeps them in Crow's own clipboard (the status says
 "Crow only"); smaller copies also go on the system pasteboard for Finder and other apps.
@@ -224,9 +226,11 @@ selected). Nothing is ever overwritten: name clashes ask first, and Replace move
 Clicking empty space in the list deselects (focus stays on the list); in column view it also closes
 the columns to the right of the one clicked. Right-click or Ctrl-click opens a native menu with the
 same names and keys as the menu bar: on items, Open, Quick Look, Show Info, Rename, Duplicate, Copy,
-Cut, Paste, Copy Path, Show in Finder, Add to Sidebar and Move to Trash (an unselected row is selected
-first, a row in the selection keeps it); on empty space, New Folder, New File, Paste and Show in
-Finder (opens the folder itself in Finder). Search results have their own menu: Open, Reveal in
+Cut, Paste, Copy Path, Show in Finder, Open Terminal Here, Add to Sidebar and Move to Trash (an
+unselected row is selected first, a row in the selection keeps it); on empty space, New Folder, New
+File, Paste, Show in Finder (opens the folder itself in Finder) and Open Terminal Here (the shown
+folder). A folder opens itself in the terminal; a file opens its parent; a multi-selection has no
+single "here", so that line is disabled. Search results have their own menu: Open, Reveal in
 Folder, Quick Look, Show Info, Copy, Cut, Copy Path and Move to Trash.
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).
