@@ -8,7 +8,7 @@ Branch: m7-h8-leftovers · PR: none · Last updated: 2026-11-17 · State: in pro
 | L2 `short_bytes` rounds after choosing the unit (U8) | done | `sidebar.rs:177` now rounds at the shown precision and re-checks the unit; 999 950 bytes → "1.0 MB", 9.96 GB → "10 GB". Unit test `short_sizes_round_before_choosing_the_unit` covers the KB/MB and GB/TB boundaries. |
 | L3 Palette home row reads "~" twice (U7) | in progress | `palette.rs` `folder_candidates` labels home `~`; row name is `label[name_start..]`; path is the same label. Q3 answered: short name. |
 | L4 Open: ⌘↓ in the context menu, ⌘O in the menu bar (context-menu C4) | done (no change) | User chose the Finder split: menu bar ⌘O, hints/context menu ⌘↓. `actions.rs:129-131` already does this; the comment now records why. Evidence: Finder's File ▸ Open is ⌘O (System Events). |
-| L5 Vim j/k block typing those letters (U7) | in progress | Palette has `Palette && vim` j/k; rename sits in a `FileList && vim` context with no `!TextInput`. Filter already has `!Filter`; search field has no vim binding. |
+| L5 Vim j/k block typing those letters (U7) | done | Removed the palette's `Palette && vim` j/k bindings; added `!TextInput` to the Vim list/column contexts so a rename field keeps plain letters. Filter (`!Filter`) and search (no vim binding) were already fine. Test `vim_letters_type_in_every_text_field` types "jk" into all four. |
 
 ## Questions
 - Q1 (asked 2026-11-17): L1 hint order when the bar is narrow — recommended keep "⇥ to list" and "⌥↑↓ groups", drop reorder and remove first. → answer: `groups_first` (groups, then to-list, then reorder/remove; eject stays first on volume rows).

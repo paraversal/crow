@@ -3522,27 +3522,46 @@ fn command_palette_keys_follow_the_layer(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn command_palette_vim_keys_move_the_cursor(cx: &mut TestAppContext) {
-    let root = fixture("palette-vim");
+fn vim_letters_type_in_every_text_field(cx: &mut TestAppContext) {
+    let root = fixture("vim-typing");
     let (view, mut cx) = open(cx, &root);
     use_vim(&view, &mut cx);
-    // Visit alpha so Recent has a row above the "In" header.
-    pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.join("alpha"), cx));
-    settle(&view, &mut cx);
-    pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.clone(), cx));
-    settle(&view, &mut cx);
+
+    // The palette's input always has focus; j/k must type, not move its cursor.
     cx.simulate_keystrokes("cmd-k");
     settle(&view, &mut cx);
-    let cursor = |cx: &VisualTestContext| view.read_with(cx, |w, _| w.palette.as_ref().map(|p| p.cursor));
-    assert_eq!(cursor(&cx), Some(0));
-    let rows = view.read_with(&cx, |w, _| w.palette_rows());
-    assert!(rows[2].starts_with("# "), "a section header sits after the first item: {rows:?}");
-    cx.simulate_keystrokes("j");
-    assert_eq!(cursor(&cx), Some(1), "j moves down across the header");
-    cx.simulate_keystrokes("k");
-    assert_eq!(cursor(&cx), Some(0), "k moves up");
+    cx.simulate_input("jk");
+    let palette = view.read_with(&cx, |w, cx| {
+        w.palette.as_ref().map(|p| (p.input.read(cx).text().to_owned(), p.cursor))
+    });
+    assert_eq!(palette, Some(("jk".to_owned(), 0)), "j and k type in the palette");
     cx.simulate_keystrokes("escape");
-    assert!(view.read_with(&cx, |w, _| w.palette.is_none()));
+    settle(&view, &mut cx);
+
+    // The filter field already excludes the Vim layer via `!Filter`.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("jk");
+    let filter = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_text(cx));
+    assert_eq!(filter.as_deref(), Some("jk"), "j and k type in the filter");
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+
+    // A rename field sits inside the list's context, so it needs `!TextInput`.
+    cx.simulate_keystrokes("g g");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_input("jk");
+    let name = pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx));
+    assert_eq!(name.as_deref(), Some("jk"), "j and k type in a rename");
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+
+    // The search field is its own context and never had a Vim binding.
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("jk");
+    let query = view.read_with(&cx, |w, cx| w.search.as_ref().map(|s| s.read(cx).query_text(cx)));
+    assert_eq!(query.as_deref(), Some("jk"), "j and k type in the search field");
 }
 
 #[gpui::test]
