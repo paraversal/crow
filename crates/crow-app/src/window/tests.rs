@@ -3205,7 +3205,6 @@ fn search_result_menu_lists_its_items_and_runs_them(cx: &mut TestAppContext) {
         })
         .expect("Copy Path is in the menu");
     assert_eq!(
-        titles,
         copy_path,
         Some(crow_macos::MenuShortcut { key: "c".into(), cmd: true, shift: false, alt: true, ctrl: false }),
         "Copy Path shows the same ⌥⌘C as the file list"
