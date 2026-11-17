@@ -1,5 +1,5 @@
 # f7-housekeeping-4 progress
-Branch: m8-f7-housekeeping · PR: none · Last updated: 2026-11-17 · State: In critique
+Branch: m8-f7-housekeeping · PR: #55 (https://github.com/paraversal/file-crow/pull/55) · Last updated: 2026-11-17 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -54,6 +54,7 @@ Branch: m8-f7-housekeeping · PR: none · Last updated: 2026-11-17 · State: In 
 - 2026-11-17: `./scripts/bundle.sh` built and signed. `scripts/shot.sh` screenshots: `target/shots/f7-details-firebox.png` (line icons, clock, 196 px columns, focused tint), `target/shots/f7-syntax-firebox.png` and `target/shots/f7-syntax-light-solarized-light.png` (numbered, coloured syntax preview in dark and light). The shots are build artifacts, not committed.
 - 2026-11-17: State Ready for critique. Not pushed (AGENTS.md: the executing agent commits locally; the critic opens the PR).
 - 2026-11-17: Critique. Read the diff and the boards; ran fmt, clippy and the workspace tests (772 passed, 1 ignored). Compared the focused-column pixels with `assembled-filter.png`: the board's focused column is #201e1d against #151515, the branch's was #121212 (darker, 3 levels). Fixed `style::focused_column` to `surface` at 0x50 (9d0403a): measured #201e1e against #151515 in FireBox and a visible darker column in Solarized Light; shots `target/shots/f7-critique-tint-firebox.png`, `-solarized-light.png`, `f7-critique-filter-firebox.png` (build artifacts). Q6 asked: the board's filtered column is 250 px; user chose 196 everywhere.
+- 2026-11-17: State PR open: the branch is pushed and https://github.com/paraversal/file-crow/pull/55 is open. Hand checks remain for the user.
 
 ## Critique
 Critic session: 2026-11-17 · Base: `main` @ d7da229 · Head reviewed: a967af8 + critique
@@ -68,4 +69,4 @@ Looked at: FireBox and Solarized Light at 1280×800 (`f7-critique-tint-firebox.p
 Verdict: the four board details are right; the tint's direction was the one regression, and its strength now matches the board in both themes.
 
 ## Next
-Critique this branch. Hand checks still owed by the user/critic: window drag in AppKit, NSSound alert volume, Empty Trash on the real Trash and a disk image, Open Terminal Here, the board details at 640 px/wide, VoiceOver for the new menu items and sheet, and the Settings terminal field.
+PR #55 is open. Hand checks still owed by the user: window drag in AppKit, NSSound alert volume, Empty Trash on the real Trash and a disk image, Open Terminal Here, the board details at 640 px/wide, VoiceOver for the new menu items and sheet, and the Settings terminal field. M8 is complete once this merges and the NSSound check is recorded; next is M8.5 S1 (repro corpus and diagnostics), whose plan is not written yet.
