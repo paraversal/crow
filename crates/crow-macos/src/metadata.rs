@@ -3,6 +3,7 @@
 //! thumbnail call must run off it, because it waits for Quick Look).
 
 use std::collections::HashMap;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -13,7 +14,10 @@ use objc2::AnyThread;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
-use objc2_foundation::{NSArray, NSDictionary, NSError, NSSize, NSString, NSURLTagNamesKey};
+use objc2_foundation::{
+    NSArray, NSDictionary, NSError, NSFileAttributeKey, NSFileGroupOwnerAccountName, NSFileManager,
+    NSFileOwnerAccountName, NSSize, NSString, NSURLTagNamesKey,
+};
 use objc2_quick_look_thumbnailing::{
     QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes, QLThumbnailGenerator,
     QLThumbnailRepresentation,
@@ -77,6 +81,98 @@ pub fn tags(path: &Path) -> Vec<String> {
     })
 }
 
+/// The mode bits and owner/group names Finder's Get Info shows. Safe off the main
+/// thread (Foundation only); `mode` is the permission bits, `file_type` the `ls` letter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Permissions {
+    pub mode: u32,
+    pub file_type: char,
+    pub owner: Option<String>,
+    pub group: Option<String>,
+}
+
+impl Permissions {
+    /// `drwxr-xr-x`, `-rw-r--r--`, `lrwxr-xr-x`.
+    pub fn mode_string(&self) -> String {
+        format_mode(self.mode, self.file_type)
+    }
+}
+
+/// Read `path`'s permissions, following a symlink when its target exists (as Finder
+/// does); a dangling link keeps the link's own mode. `None` when neither stat works.
+pub fn permissions(path: &Path) -> Option<Permissions> {
+    let meta = std::fs::metadata(path).or_else(|_| std::fs::symlink_metadata(path)).ok()?;
+    let file_type = file_type_char(meta.file_type());
+    let mode = meta.mode() & 0o7777;
+    // NSFileManager follows the path; canonicalize first so a symlink reports its target.
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let (owner, group) = autoreleasepool(|_| owner_group(&resolved));
+    Some(Permissions { mode, file_type, owner, group })
+}
+
+fn file_type_char(file_type: std::fs::FileType) -> char {
+    if file_type.is_symlink() {
+        'l'
+    } else if file_type.is_dir() {
+        'd'
+    } else if file_type.is_block_device() {
+        'b'
+    } else if file_type.is_char_device() {
+        'c'
+    } else if file_type.is_fifo() {
+        'p'
+    } else if file_type.is_socket() {
+        's'
+    } else {
+        '-'
+    }
+}
+
+fn owner_group(path: &Path) -> (Option<String>, Option<String>) {
+    let Some(path) = path.to_str() else { return (None, None) };
+    let manager = NSFileManager::defaultManager();
+    let Ok(attrs) = manager.attributesOfItemAtPath_error(&NSString::from_str(path)) else {
+        return (None, None);
+    };
+    let read = |key: &NSFileAttributeKey| {
+        attrs.objectForKey(key).and_then(|value| value.downcast::<NSString>().ok()).map(|s| s.to_string())
+    };
+    // SAFETY: Foundation's attribute-key constants are immutable strings for the
+    // lifetime of the process.
+    let (owner_key, group_key) = unsafe { (NSFileOwnerAccountName, NSFileGroupOwnerAccountName) };
+    (read(owner_key), read(group_key))
+}
+
+/// The ten-character `ls -l` mode string, including setuid/setgid/sticky.
+pub fn format_mode(mode: u32, file_type: char) -> String {
+    let mut out = String::with_capacity(10);
+    out.push(file_type);
+    let bits = [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001];
+    let chars = ['r', 'w', 'x', 'r', 'w', 'x', 'r', 'w', 'x'];
+    for (i, (bit, ch)) in bits.into_iter().zip(chars).enumerate() {
+        let set = mode & bit != 0;
+        let special = match i {
+            2 => mode & 0o4000 != 0,
+            5 => mode & 0o2000 != 0,
+            8 => mode & 0o1000 != 0,
+            _ => false,
+        };
+        out.push(if special {
+            match (set, i) {
+                (true, 2 | 5) => 's',
+                (true, _) => 't',
+                (false, 2 | 5) => 'S',
+                (false, _) => 'T',
+            }
+        } else if set {
+            ch
+        } else {
+            '-'
+        });
+    }
+    out
+}
+
 /// A Quick Look thumbnail for `path` as PNG bytes, at most `points` square (rendered
 /// at 2x). Waits up to two seconds; `None` if Quick Look has nothing or takes longer.
 /// Returns `None` on the main thread rather than blocking it.
@@ -135,6 +231,32 @@ mod tests {
         let file = std::env::temp_dir().join(format!("crow-tags-{}", std::process::id()));
         std::fs::write(&file, "x").unwrap();
         assert!(tags(&file).is_empty());
+        std::fs::remove_file(&file).ok();
+    }
+
+    #[test]
+    fn mode_strings_match_ls() {
+        assert_eq!(format_mode(0o755, 'd'), "drwxr-xr-x");
+        assert_eq!(format_mode(0o644, '-'), "-rw-r--r--");
+        assert_eq!(format_mode(0o000, '-'), "----------");
+        assert_eq!(format_mode(0o777, 'l'), "lrwxrwxrwx");
+        assert_eq!(format_mode(0o4755, '-'), "-rwsr-xr-x", "setuid with execute");
+        assert_eq!(format_mode(0o4644, '-'), "-rwSr--r--", "setuid without execute");
+        assert_eq!(format_mode(0o2755, 'd'), "drwxr-sr-x", "setgid with execute");
+        assert_eq!(format_mode(0o1777, 'd'), "drwxrwxrwt", "sticky with execute");
+        assert_eq!(format_mode(0o1666, 'd'), "drw-rw-rwT", "sticky without execute");
+    }
+
+    #[test]
+    fn permissions_read_the_file_and_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = std::env::temp_dir().join(format!("crow-permissions-{}", std::process::id()));
+        std::fs::write(&file, "x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let permissions = permissions(&file).expect("permissions");
+        assert_eq!(permissions.mode_string(), "-rw-r-----");
+        assert!(permissions.owner.is_some(), "the owner name comes from NSFileManager");
+        assert!(permissions.group.is_some(), "the group name comes from NSFileManager");
         std::fs::remove_file(&file).ok();
     }
 }

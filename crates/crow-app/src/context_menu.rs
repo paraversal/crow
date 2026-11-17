@@ -24,6 +24,7 @@ pub type Slot = Option<CommandId>;
 const ITEMS: &[Slot] = &[
     Some(CommandId::Open),
     Some(CommandId::QuickLook),
+    Some(CommandId::ShowInfo),
     None,
     Some(CommandId::Rename),
     Some(CommandId::Duplicate),
@@ -198,6 +199,7 @@ const SEARCH: &[TitledSlot] = &[
     Some((CommandId::Open, None)),
     Some((CommandId::SearchReveal, Some("Reveal in Folder"))),
     Some((CommandId::QuickLook, None)),
+    Some((CommandId::ShowInfo, None)),
     None,
     Some((CommandId::Copy, None)),
     Some((CommandId::Cut, None)),

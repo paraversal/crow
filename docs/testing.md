@@ -23,8 +23,10 @@ footer counts and skipped list, idle examples, best-row selection while results 
 row after they move, contiguous name hits before content and weak fuzzy names after, one-line regex
 errors, singular skipped wording, preview in list and column view at the hit line, match cycling), the top band
 (search field click, Cmd-F refocus and select-all, Done/Esc, Go to, All/Names/Contents, switching
-tabs closing search, the Tab cycle while searching, ↓ into the results and ↑ back, focus never left on an element that is gone), the preview toggle
-(⇧⌘P in list and column view, `show_preview` live reload, the palette chip), the blinking caret,
+tabs closing search, the Tab cycle while searching, ↓ into the results and ↑ back, focus never left on an element that is gone), the right column
+(⇧⌘P in list and column view, `show_preview` live reload, the palette chip, ⌘I opening Info and a second ⌘I closing it, the tab strip and its
+click targets, the tab choice across folders, the Info fields for a file, folder, package and symlink, a multi-selection summary, the Where link,
+search and sidebar targets, and a stale metadata load dropped when the selection changes), the blinking caret,
 the bottom bar
 (its type-to-select prefix, hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
 path folding and hint dropping, messages that retire, the editable path bar: ⌘L, a single click on empty

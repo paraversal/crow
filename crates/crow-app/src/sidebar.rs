@@ -512,6 +512,11 @@ impl Sidebar {
         self.cursor
     }
 
+    /// The cursor row's folder, for the Info tab.
+    pub fn cursor_path(&self, cx: &gpui::App) -> Option<PathBuf> {
+        self.cursor_row(cx)?.path().map(Path::to_path_buf)
+    }
+
     /// What the cursor row is, for which hints apply.
     pub fn cursor_kind(&self, cx: &gpui::App) -> Option<CursorKind> {
         match self.cursor_row(cx)? {

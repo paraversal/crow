@@ -283,7 +283,7 @@ impl ControlId {
             ControlId::Hints => "Auto retires idle hints after you use their key three times.",
             ControlId::Tips => "Point out a key the first time it matters; off mutes every tip.",
             ControlId::ShowHidden => "List dotfiles and other hidden items.",
-            ControlId::ShowPreview => "The preview pane in list view and the column in column view.",
+            ControlId::ShowPreview => "The right column's default in list and column view: Preview and Info tabs.",
             ControlId::ViewPerFolder => "Each folder opens in its saved view; off keeps the window's view.",
             ControlId::PaletteRecent => "List the commands you ran from ⌘K under Recently used.",
             ControlId::Motion => {

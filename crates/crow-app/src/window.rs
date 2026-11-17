@@ -14,14 +14,15 @@ use gpui::{
 use crate::actions::{
     AddToSidebar, ApplyThemeEverywhere, CloseTab, EditPath, GoBack, GoForward, GoToFolder, KeyboardShortcuts, Minimize,
     MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover, PathUnhover,
-    PreviousTab, ResetFolderView, SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus,
-    ToggleHiddenFiles, TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
+    PreviousTab, ResetFolderView, SearchEverything, ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker,
+    SwitchFocus, ToggleHiddenFiles, TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
 };
 use crate::chrome::{self, Keycap, KeycapWeight, SheetWidth, with_action_tooltip, with_tooltip};
 use crate::icons::{self, Glyph};
+use crate::info_pane::{self, InfoKey, InfoPane, InfoPaneEvent, InfoTab, InfoTarget};
 use crate::keys::{self, KeyScope};
 use crate::operations::{self, Clipboard, Operations};
 use crate::palette::{self, Item, Row, Source};
@@ -135,6 +136,8 @@ pub struct SearchStart {
 pub struct CrowWindow {
     tabs: Tabs<Entity<Pane>>,
     sidebar: Entity<Sidebar>,
+    /// The right column's tab choice and Info target, shared by every tab.
+    info: Entity<InfoPane>,
     /// Benchmark runs leave Recent alone, so its saves don't land in the measurement.
     bench: bool,
     show_hidden: bool,
@@ -339,7 +342,8 @@ impl CrowWindow {
             ui::record_visit(&dir, cx);
         }
         let start_mode = Some(cx.global::<Ui>().views.default_view());
-        let pane = cx.new(|cx| Pane::new(dir.clone(), show_hidden, start_mode, bench, bench_filter, cx));
+        let info = cx.new(InfoPane::new);
+        let pane = cx.new(|cx| Pane::new(dir.clone(), show_hidden, start_mode, bench, bench_filter, info.clone(), cx));
         let sidebar = cx.new(|cx| {
             let mut sidebar = Sidebar::new(cx);
             sidebar.set_current(dir, cx);
@@ -359,6 +363,8 @@ impl CrowWindow {
         let subscriptions = vec![
             cx.observe(&pane, |_, _, cx| cx.notify()),
             cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)),
+            cx.observe(&info, |_, _, cx| cx.notify()),
+            cx.subscribe_in(&info, window, |this, _, event, window, cx| this.on_info_event(event, window, cx)),
             cx.subscribe_in(&sidebar, window, |this, _, event, window, cx| this.on_sidebar_event(event, window, cx)),
             cx.observe_window_appearance(window, |_, _, cx| reload_theme(cx)),
             // Another window coming to the front mid-drag must be able to receive it,
@@ -375,8 +381,11 @@ impl CrowWindow {
             // Focus on an element that left the tree (an emptied results list, a hidden pane)
             // dispatches keys from the bare root, above the Crow context, so every key goes dead.
             cx.on_focus_lost(window, |this, window, cx| this.focus_center(window, cx)),
-            // A reloaded views.toml applies to every tab's folder at once.
+            // A reloaded views.toml applies to every tab's folder at once; a changed
+            // show_preview is the column's new default for this window.
             cx.observe_global::<Ui>(|this, cx| {
+                let default = cx.global::<Ui>().settings.show_preview;
+                this.info.update(cx, |info, cx| info.set_default(default, cx));
                 for (_, pane) in this.tabs.iter() {
                     pane.update(cx, |pane, cx| pane.apply_view(cx));
                 }
@@ -387,6 +396,7 @@ impl CrowWindow {
         Self {
             tabs: Tabs::new(pane),
             sidebar,
+            info,
             bench,
             show_hidden,
             sheet,
@@ -481,7 +491,7 @@ impl CrowWindow {
         let show_hidden = self.show_hidden;
         // A new tab keeps the window's view when views don't follow folders.
         let start_mode = Some(self.pane().read(cx).mode());
-        let pane = cx.new(|cx| Pane::new(dir, show_hidden, start_mode, false, None, cx));
+        let pane = cx.new(|cx| Pane::new(dir, show_hidden, start_mode, false, None, self.info.clone(), cx));
         self._subscriptions.push(cx.observe(&pane, |_, _, cx| cx.notify()));
         self._subscriptions
             .push(cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)));
@@ -564,9 +574,95 @@ impl CrowWindow {
     }
 
     fn toggle_preview(&mut self, _: &TogglePreview, _: &mut Window, cx: &mut Context<Self>) {
-        let show = !cx.global::<Ui>().settings.show_preview;
+        let show = !self.info.read(cx).visible();
         crate::ui::set_show_preview(show, cx);
+        self.info.update(cx, |info, cx| {
+            info.set_visible(show, cx);
+            if show {
+                info.set_tab(InfoTab::Preview, cx);
+            }
+        });
         cx.notify();
+    }
+
+    /// ⌘I: open the column on Info, or close it when Info is already showing.
+    /// Unlike ⇧⌘P this does not change the setting, so the column can be opened
+    /// in a window whose default is off.
+    fn show_info(&mut self, _: &ShowInfo, _: &mut Window, cx: &mut Context<Self>) {
+        let info = self.info.clone();
+        let (visible, tab) = {
+            let info = info.read(cx);
+            (info.visible(), info.tab())
+        };
+        if visible && tab == InfoTab::Info {
+            info.update(cx, |info, cx| info.set_visible(false, cx));
+        } else {
+            info.update(cx, |info, cx| {
+                info.set_visible(true, cx);
+                info.set_tab(InfoTab::Info, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// The Info tab's Where link: leave search, show the parent folder, focus the list.
+    fn on_info_event(&mut self, event: &InfoPaneEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            InfoPaneEvent::Navigate(path) => {
+                if self.search.is_some() {
+                    self.close_search(window, cx);
+                }
+                // The item's own folder is often the one shown: focus the list
+                // without adding a duplicate history step.
+                if *path != self.pane().read(cx).current_dir(cx) {
+                    let path = path.clone();
+                    self.pane().update(cx, |pane, cx| pane.navigate(path, cx));
+                }
+                self.focus_center(window, cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Point the Info tab at what the keys currently describe: the search result,
+    /// the sidebar's cursor folder, or the pane's cursor/selection.
+    fn sync_info_target(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let info = self.info.clone();
+        let (visible, tab) = {
+            let info = info.read(cx);
+            (info.visible(), info.tab())
+        };
+        if !visible || tab != InfoTab::Info {
+            return;
+        }
+        if self.sheet.is_some() || self.palette.is_some() || self.picker.is_some() || self.why.is_some() {
+            return;
+        }
+        let (target, key) = if let Some(search) = &self.search {
+            search.read(cx).info_target()
+        } else if self.sidebar.read(cx).focus_handle(cx).is_focused(window) {
+            self.sidebar_info_target(cx)
+        } else {
+            self.pane().read(cx).info_target(cx)
+        };
+        info.update(cx, |info, cx| info.set_target(target, key, cx));
+    }
+
+    /// The sidebar's cursor row is a folder; its listing may already be the center's.
+    fn sidebar_info_target(&self, cx: &App) -> (Option<InfoTarget>, Option<InfoKey>) {
+        let Some(path) = self.sidebar.read(cx).cursor_path(cx) else { return (None, None) };
+        let items = self.pane().read(cx).folder_items(&path, cx);
+        let entry = Entry {
+            name: crate::style::display_name(&path),
+            path: path.clone(),
+            is_dir: true,
+            hidden: false,
+            size: 0,
+            modified: None,
+            created: None,
+            added: None,
+        };
+        (Some(InfoTarget::Single { entry, items }), Some(InfoKey::Single(path)))
     }
 
     /// Shift-Cmd-G: the palette with this folder's path typed, ready for a child's
@@ -1046,35 +1142,50 @@ impl CrowWindow {
             }))
     }
 
-    /// List view's right-hand preview pane (column view shows it as its last column).
+    /// List view's right-hand column (column view shows it as its last column).
     fn render_preview(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
-        let pane = self.pane().read(cx);
-        let entry = pane.cursor_entry(cx);
-        let preview = pane.preview(cx);
-        self.render_preview_pane(entry.as_ref(), preview, &theme)
+        let (entry, preview) = {
+            let pane = self.pane().read(cx);
+            (pane.cursor_entry(cx), pane.preview(cx).cloned())
+        };
+        self.render_preview_pane(entry.as_ref(), preview.as_ref(), &theme, cx)
     }
 
-    /// The 300 px preview chrome, shared by the pane and search.
+    /// The 300 px column chrome, shared by the pane and search: a tab strip and
+    /// either the preview or the Info tab's fields.
     fn render_preview_pane(
         &self,
         entry: Option<&Entry>,
         preview: Option<&crate::preview::Preview>,
         theme: &crow_theme::Theme,
+        cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
+        let tab = self.info.read(cx).tab();
+        let label = match tab {
+            InfoTab::Preview => entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview)),
+            InfoTab::Info => self.info.read(cx).label(),
+        };
+        let body = match tab {
+            InfoTab::Preview => match entry {
+                Some(entry) => preview::contents(entry, preview, theme).into_any_element(),
+                None => div().into_any_element(),
+            },
+            InfoTab::Info => self.info.clone().into_any_element(),
+        };
         div()
             .id("preview")
             .debug_selector(|| "preview".into())
             .role(Role::Group)
-            .aria_label(entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview)))
+            .aria_label(label)
             .w(px(300.))
             .flex_none()
             .h_full()
-            .p_4()
+            .flex_col()
             .border_l_1()
             .border_color(color(theme.role("border")))
-            .overflow_hidden()
-            .children(entry.map(|e| preview::contents(e, preview, theme)))
+            .child(info_pane::tab_strip(&self.info, theme, cx))
+            .child(div().id("info-body").flex_1().min_h_0().p_4().overflow_y_scroll().child(body))
     }
 
     /// Which element owns the keys, for the bar's hints.
@@ -2828,6 +2939,7 @@ impl CrowWindow {
             CommandId::SwitchFocus => self.switch_focus(&SwitchFocus, window, cx),
             CommandId::ToggleHiddenFiles => self.toggle_hidden(&ToggleHiddenFiles, window, cx),
             CommandId::TogglePreview => self.toggle_preview(&TogglePreview, window, cx),
+            CommandId::ShowInfo => self.show_info(&ShowInfo, window, cx),
             CommandId::OpenParent => self.open_parent(&OpenParent, window, cx),
             CommandId::GoBack => self.go_back(&GoBack, window, cx),
             CommandId::GoForward => self.go_forward(&GoForward, window, cx),
@@ -3432,9 +3544,10 @@ impl Render for CrowWindow {
                 });
             }
         }
+        self.sync_info_target(window, cx);
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
-        let show_preview = ui.settings.show_preview;
+        let show_preview = self.info.read(cx).visible();
         let (font, font_size) = (ui_font(&ui.settings.font_family), ui.settings.font_size);
         let title = crate::style::display_name(&self.pane().read(cx).current_dir(cx));
         let list_view = self.pane().read(cx).mode() == ViewMode::List;
@@ -3446,11 +3559,20 @@ impl Render for CrowWindow {
         let sidebar = self.sidebar.clone();
         let search_preview = self.search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);
+        // A narrow search hides the column by default; ⌘I or ⇧⌘P still opens it.
+        let explicit = self.info.read(cx).explicit();
         let preview: Option<gpui::AnyElement> = if !show_preview {
             None
         } else if self.search.is_some() {
-            if narrow { None } else { search_preview }.map(|(entry, preview)| {
-                self.render_preview_pane(Some(&entry), preview.as_ref(), &theme).into_any_element()
+            if narrow && !explicit { None } else { search_preview }.map(|(entry, preview)| {
+                let column = self.render_preview_pane(Some(&entry), preview.as_ref(), &theme, cx);
+                if narrow {
+                    // Search has no narrow mode: float the column over the results
+                    // instead of squeezing their scope row and header into a sliver.
+                    column.absolute().top_0().right_0().bottom_0().bg(color(theme.role("bg"))).into_any_element()
+                } else {
+                    column.into_any_element()
+                }
             })
         } else if list_view {
             Some(self.render_preview(cx).into_any_element())
@@ -3514,6 +3636,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::switch_focus))
             .on_action(cx.listener(Self::toggle_hidden))
             .on_action(cx.listener(Self::toggle_preview))
+            .on_action(cx.listener(Self::show_info))
             .on_action(cx.listener(Self::open_parent))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
@@ -3592,7 +3715,7 @@ impl Render for CrowWindow {
             .text_size(px(font_size))
             .child(title_bar)
             .children(tab_bar)
-            .child(div().flex_1().min_h_0().flex().child(sidebar).child(center).children(preview))
+            .child(div().relative().flex_1().min_h_0().flex().child(sidebar).child(center).children(preview))
             .child(path_bar)
             .children(tip)
             .children(sheet)

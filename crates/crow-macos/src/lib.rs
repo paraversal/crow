@@ -21,7 +21,7 @@ pub use drag::{ComboDrag, begin_drag, remember_mouse_down};
 pub use files::{SystemTrash, open_path, pasteboard_change_count, read_file_urls, write_file_urls};
 pub use fonts::available_font_families;
 pub use icons::icon_png;
-pub use metadata::{kind_name, tags, thumbnail_png};
+pub use metadata::{Permissions, kind_name, permissions, tags, thumbnail_png};
 pub use names::display_components;
 pub use quick_look::{QuickLookKey, set_quick_look_key_handler, toggle_quick_look, update_quick_look};
 pub use sound::{Sound, beep, play, preload, set_volume, stop, ui_sounds_enabled};

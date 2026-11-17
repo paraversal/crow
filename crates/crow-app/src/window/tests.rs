@@ -3206,7 +3206,10 @@ fn search_result_menu_lists_its_items_and_runs_them(cx: &mut TestAppContext) {
             _ => None,
         })
         .collect();
-    assert_eq!(titles, ["Open", "Reveal in Folder", "Quick Look", "Copy", "Cut", "Copy Path", "Move to Trash"]);
+    assert_eq!(
+        titles,
+        ["Open", "Reveal in Folder", "Quick Look", "Show Info", "Copy", "Cut", "Copy Path", "Move to Trash"]
+    );
     let copy_path = entries
         .iter()
         .find_map(|entry| match entry {
@@ -3232,6 +3235,22 @@ fn search_result_menu_lists_its_items_and_runs_them(cx: &mut TestAppContext) {
     assert_eq!(
         cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text())),
         Some(path.to_string_lossy().into_owned())
+    );
+
+    // Show Info opens the right column on its Info tab.
+    let at = row_center(&mut cx, "search-row-0");
+    right_click(&mut cx, at);
+    cx.run_until_parked();
+    let ix = crate::context_menu::search_slots()
+        .iter()
+        .position(|slot| slot.is_some_and(|(id, _)| id == CommandId::ShowInfo))
+        .expect("Show Info is in the menu");
+    search.update_in(&mut cx, |search, window, cx| search.choose_menu_item(Some(ix), window, cx));
+    settle(&view, &mut cx);
+    assert_eq!(
+        view.read_with(&cx, |w, cx| w.info.read(cx).tab()),
+        crate::info_pane::InfoTab::Info,
+        "the search result's Show Info opened the Info tab"
     );
 
     // Ctrl-click opens it too, and Move to Trash runs once.
@@ -6328,6 +6347,270 @@ fn preview_toggle_hides_it_in_list_and_columns(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn cmd_i_opens_info_and_a_second_closes_it(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("info-toggle");
+    let (view, mut cx) = open(cx, &root);
+    assert!(cx.debug_bounds("preview").is_some(), "the column starts on Preview");
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Preview);
+
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("preview").is_some(), "⌘I keeps the column open");
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
+    assert!(cx.read(|cx| cx.global::<Ui>().settings.show_preview), "⌘I does not change the default");
+    let elements = cx.update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec());
+    let info_tab = elements.iter().find(|e| e.selector.as_deref() == Some("info-tab-info")).expect("Info tab");
+    assert_eq!(info_tab.role, Some(Role::Tab));
+    assert_eq!(info_tab.label.as_deref(), Some("Info"));
+    let preview_tab = elements.iter().find(|e| e.selector.as_deref() == Some("info-tab-preview")).expect("Preview tab");
+    assert_eq!(preview_tab.role, Some(Role::Tab));
+    assert_eq!(preview_tab.label.as_deref(), Some("Preview"));
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
+    assert!(label.starts_with("Info: alpha, Folder"), "{label}");
+
+    // Clicking Preview brings the old preview back without closing the column.
+    let preview_tab = cx.debug_bounds("info-tab-preview").expect("Preview tab");
+    cx.simulate_click(preview_tab.center(), Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Preview);
+    assert!(cx.debug_bounds("preview").is_some());
+
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("preview").is_none(), "a second ⌘I closes the column");
+    assert!(cx.read(|cx| cx.global::<Ui>().settings.show_preview), "the setting is still the default");
+}
+
+#[gpui::test]
+fn info_opens_when_the_default_is_off(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("info-default-off");
+    let (view, mut cx) = open(cx, &root);
+    let text = std::fs::read_to_string(config_dir(&cx).join("settings.toml")).expect("settings file");
+    write_config(&view, &mut cx, "settings.toml", &text.replace("show_preview = true", "show_preview = false"));
+    assert!(cx.debug_bounds("preview").is_none(), "the default hides the column");
+
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("preview").is_some(), "⌘I opens it anyway");
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
+    assert!(!cx.read(|cx| cx.global::<Ui>().settings.show_preview), "the default stays off");
+
+    cx.simulate_keystrokes("cmd-shift-p");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("preview").is_none(), "⇧⌘P hides the explicit column");
+    assert!(!cx.read(|cx| cx.global::<Ui>().settings.show_preview));
+
+    cx.simulate_keystrokes("cmd-shift-p");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("preview").is_some(), "⇧⌘P shows it again");
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Preview, "⇧⌘P shows the Preview tab");
+}
+
+#[gpui::test]
+fn info_tab_survives_a_folder_change(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("info-folder-change");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
+
+    cx.simulate_keystrokes("cmd-down");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha"));
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info, "the tab choice survives");
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
+    assert!(label.contains("inner"), "the pane follows the new cursor: {label}");
+
+    cx.simulate_keystrokes("cmd-[");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root);
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
+}
+
+#[gpui::test]
+fn info_multi_selection_is_a_summary(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTarget;
+    let root = fixture("info-multi");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-a");
+    settle(&view, &mut cx);
+
+    let target = view.read_with(&cx, |w, cx| w.info.read(cx).target().cloned()).expect("target");
+    let InfoTarget::Many(summary) = target else { panic!("a multi-selection is a summary") };
+    assert_eq!(summary.count, 3);
+    assert_eq!(summary.folders, 2);
+    assert_eq!(summary.bytes, Some(6), "notes.txt is 6 bytes; folders add none");
+    assert_eq!(summary.parent.as_deref(), Some(root.as_path()));
+    assert!(summary.kind.is_none(), "a folder and a file have no common kind");
+    assert_eq!(summary.tag_paths.len(), 3);
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
+    assert!(label.starts_with("Info: 3 items"), "{label}");
+}
+
+#[gpui::test]
+fn info_file_shows_its_size(cx: &mut TestAppContext) {
+    let root = fixture("info-file");
+    let (view, mut cx) = open(cx, &root);
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.reveal(root.join("notes.txt"), cx));
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
+    assert!(label.starts_with("Info: notes.txt"), "{label}");
+    assert!(label.contains("6 bytes"), "{label}");
+}
+
+#[gpui::test]
+fn info_package_is_not_a_folder(cx: &mut TestAppContext) {
+    let root = fixture("info-package");
+    std::fs::create_dir_all(root.join("Safari.app")).expect("create package");
+    let (view, mut cx) = open(cx, &root);
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.reveal(root.join("Safari.app"), cx));
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
+    assert!(label.to_lowercase().contains("application"), "{label}");
+    assert!(!label.contains("Folder"), "a package is not a folder: {label}");
+}
+
+#[gpui::test]
+fn info_multi_selection_without_a_common_parent(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTarget;
+    let root = fixture("info-mixed-parent");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("right");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("shift-down");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+
+    let target = view.read_with(&cx, |w, cx| w.info.read(cx).target().cloned()).expect("target");
+    let InfoTarget::Many(summary) = target else { panic!("a multi-selection is a summary") };
+    assert_eq!(summary.count, 2);
+    assert_eq!(summary.parent, None, "the folder and its child have different parents");
+    assert_eq!(summary.kind.as_deref(), Some("Folder"), "both are folders");
+}
+
+#[gpui::test]
+fn info_shows_in_column_view(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("info-columns");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-3");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("preview-column").is_some(), "the last column is the Info tab");
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
+    assert!(label.starts_with("Info: alpha, Folder"), "{label}");
+}
+
+#[gpui::test]
+fn palette_show_info_opens_the_info_tab(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("info-palette");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-k");
+    settle(&view, &mut cx);
+    cx.simulate_input(">show info");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
+    assert!(cx.debug_bounds("preview").is_some());
+}
+
+#[gpui::test]
+fn info_search_result_target(cx: &mut TestAppContext) {
+    use crate::info_pane::{InfoTab, InfoTarget};
+    let root = fixture("info-search");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    wait_for_preview(&view, &mut cx, &root.join("notes.txt"));
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+
+    let target = view.read_with(&cx, |w, cx| w.info.read(cx).target().cloned()).expect("target");
+    let InfoTarget::Single { entry, .. } = target else { panic!("one result") };
+    assert_eq!(entry.path, root.join("notes.txt"));
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
+}
+
+#[gpui::test]
+fn info_opens_in_a_narrow_search(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("info-narrow-search");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_resize(gpui::size(px(640.), px(800.)));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    wait_for_preview(&view, &mut cx, &root.join("notes.txt"));
+    assert!(cx.debug_bounds("preview").is_none(), "a narrow search hides the column by default");
+    let row_before = cx.debug_bounds("search-row-0").expect("result row");
+
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    let column = cx.debug_bounds("preview").expect("⌘I shows the column in a narrow search");
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
+    let row_after = cx.debug_bounds("search-row-0").expect("result row");
+    assert_eq!(row_after.size.width, row_before.size.width, "the overlay does not squeeze the results");
+    assert!(column.left() < row_after.right(), "the column floats over the results");
+
+    cx.simulate_keystrokes("cmd-shift-p");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("preview").is_none(), "⇧⌘P hides the explicit column");
+}
+
+#[gpui::test]
+fn info_sidebar_target_and_where_link(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTarget;
+    let root = fixture("info-sidebar");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    // Walk into alpha so the sidebar's current row and the Info target are alpha.
+    cx.simulate_keystrokes("cmd-down");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    // The sidebar starts on Home; walk to the Recent row for alpha.
+    let alpha = root.join("alpha");
+    for _ in 0..20 {
+        if view.read_with(&cx, |w, cx| w.sidebar.read(cx).cursor_path(cx)).as_deref() == Some(alpha.as_path()) {
+            break;
+        }
+        cx.simulate_keystrokes("down");
+        settle(&view, &mut cx);
+    }
+
+    let target = view.read_with(&cx, |w, cx| w.info.read(cx).target().cloned()).expect("target");
+    let InfoTarget::Single { entry, items } = target else { panic!("a sidebar folder") };
+    assert_eq!(entry.path, alpha);
+    assert_eq!(entry.name, "alpha");
+    assert!(items.is_some(), "the center lists alpha");
+
+    let where_link = cx.debug_bounds("info-where").expect("Where link");
+    cx.simulate_click(where_link.center(), Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root, "Where navigates to the folder's parent");
+}
+
+#[gpui::test]
 fn show_preview_false_in_settings_hides_it(cx: &mut TestAppContext) {
     let root = fixture("preview-setting");
     let (view, mut cx) = open(cx, &root);
@@ -8276,6 +8559,10 @@ fn context_menu_lines_use_the_menu_bar_names_and_keys(cx: &mut TestAppContext) {
     assert_eq!(
         line(&mut cx, "Copy Path"),
         ContextMenuEntry::Item { title: "Copy Path".into(), shortcut: shortcut("c", true, true), enabled: true }
+    );
+    assert_eq!(
+        line(&mut cx, "Show Info"),
+        ContextMenuEntry::Item { title: "Show Info".into(), shortcut: shortcut("i", true, false), enabled: true }
     );
     // The Vim layer's `y y` can't be shown in a native menu; ⌘C still is.
     use_vim(&view, &mut cx);
