@@ -92,7 +92,7 @@ pub enum SearchEvent {
     Open { path: PathBuf, is_dir: bool },
     Reveal(PathBuf),
     Run(Request),
-    Copy { paths: Vec<PathBuf>, cut: bool },
+    Copy { paths: Arc<[PathBuf]>, cut: bool },
 }
 
 impl EventEmitter<SearchEvent> for SearchView {}
@@ -119,6 +119,8 @@ pub struct SearchView {
     cancel: Arc<AtomicBool>,
     generation: u64,
     exclude_generation: u64,
+    /// The compiled rules for `exclude_generation`; the glob compile is ~14 ms.
+    rules: Option<(u64, Arc<RuleSet>)>,
     selection: Selection<PathBuf>,
     cursor: usize,
     /// The user picked a row, so streaming batches stop re-selecting the best hit.
@@ -254,6 +256,7 @@ impl SearchView {
             cancel: Arc::new(AtomicBool::new(false)),
             generation: 0,
             exclude_generation,
+            rules: None,
             selection: Selection::default(),
             cursor: 0,
             user_moved: false,
@@ -357,14 +360,26 @@ impl SearchView {
             })
             .detach();
         } else {
-            let exclude = cx.global::<Ui>().exclude.clone();
-            let rules = match RuleSet::from_config(&exclude, &self.home) {
-                Ok(rules) => rules,
-                Err(error) => {
-                    self.error = Some(error.into());
-                    self.searching = false;
-                    cx.notify();
-                    return;
+            let exclude_generation = cx.global::<Ui>().exclude_generation;
+            let cached = match &self.rules {
+                Some((generation, rules)) if *generation == exclude_generation => Some(rules.clone()),
+                _ => None,
+            };
+            let rules = match cached {
+                Some(rules) => rules,
+                None => {
+                    let exclude = cx.global::<Ui>().exclude.clone();
+                    let rules = match RuleSet::from_config(&exclude, &self.home) {
+                        Ok(rules) => Arc::new(rules),
+                        Err(error) => {
+                            self.error = Some(error.into());
+                            self.searching = false;
+                            cx.notify();
+                            return;
+                        }
+                    };
+                    self.rules = Some((exclude_generation, rules.clone()));
+                    rules
                 }
             };
             let root = match self.scope {
@@ -896,7 +911,7 @@ impl SearchView {
     }
 
     fn copy_selected(&mut self, cut: bool, cx: &mut Context<Self>) {
-        let paths = self.selected_paths();
+        let paths: Arc<[PathBuf]> = self.selected_paths().into();
         if !paths.is_empty() {
             cx.emit(SearchEvent::Copy { paths, cut });
         }
@@ -907,6 +922,7 @@ impl SearchView {
         if paths.is_empty() {
             return;
         }
+        let paths: Arc<[PathBuf]> = paths.into();
         let request = if permanent { Request::DeletePermanently { paths } } else { Request::Trash { paths } };
         cx.emit(SearchEvent::Run(request));
     }

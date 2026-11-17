@@ -203,6 +203,8 @@ File operations use Finder's keys: Return renames, Cmd-Shift-N new folder, Cmd-O
 Cmd-D duplicate, Cmd-Delete moves to the Trash, Cmd-Option-Delete deletes permanently (after asking),
 Cmd-C / Cmd-X / Cmd-V copy, cut and paste (also to and from Finder), Cmd-Option-V moves,
 Cmd-Z / Cmd-Shift-Z undo and redo, Esc cancels a running operation, Cmd-Option-L shows activity.
+Copying or cutting more than 1000 items keeps them in Crow's own clipboard (the status says
+"Crow only"); smaller copies also go on the system pasteboard for Finder and other apps.
 Cmd-Option-C copies the selected items' paths (one per line; the folder's own path with nothing
 selected). Nothing is ever overwritten: name clashes ask first, and Replace moves the old item to the Trash.
 
@@ -214,7 +216,7 @@ first, a row in the selection keeps it); on empty space, New Folder, New File, P
 Finder (opens the folder itself in Finder).
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).
-Fuzzing: `cargo test -p crow-app fuzz_smoke`; long runs and replay: [docs/testing.md#fuzzing](docs/testing.md#fuzzing). For real frame times, `crow --fuzz` (built with `--features fuzz`) reports any step over 50 ms and fails on a heartbeat over 250 ms.
+Fuzzing: `cargo test -p crow-app fuzz_smoke`; long runs and replay: [docs/testing.md#fuzzing](docs/testing.md#fuzzing). For real frame times, `crow --fuzz` (built with `--features fuzz`) reports any step over its budget (50 ms; 100 ms for a bulk step acting on more than 10 000 paths) and fails on a heartbeat over 250 ms.
 
 Dev tools: `crow --motion-lab` opens a fake folder where every feedback event (trash, move,
 undo, new folder, refuse, copy, tip, empty Trash) can be fired in the three motion modes and

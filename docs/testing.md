@@ -192,12 +192,14 @@ last five steps and the `tracing` spans that overlapped it (`listing apply`, `re
 rows`, `preview load`, `search batch`, `theme reload`, `icon fetch`; spans are at
 `debug`, which this mode enables for the `crow` and `crow_macos` targets). GPUI's `on_next_frame` is
 throttled for an inactive or occluded window, so the heartbeat, not a frame
-callback, is the source. The report counts heartbeat intervals and groups the slow
-ones by step kind:
+callback, is the source. A step that acts on more than 10 000 paths (select-all,
+then copy/cut/paste/trash/undo on the 100k fixture) is tagged `(bulk)`: its budget
+is 100 ms, the others keep 50 ms. The report counts heartbeat intervals, groups the
+slow ones by step kind and counts the ones over their own limit:
 
 ```
-step                  over      worst  replay
-Keys                     2    312.4 ms  --seed 42 --script …/script.txt --until 1234  Keys("cmd-k")
+step                  over      worst   limit  replay
+Keys (bulk)              2    312.4 ms    100 ms  --seed 42 --script …/script.txt --until 1234  Keys("cmd-k")
 ```
 
 Exit code is 0 unless an invariant fails or a heartbeat is over 250 ms (a freeze).
@@ -211,12 +213,18 @@ each, so a `HANG` or a killed run keeps the step that stalled. The seed alone do
 not replay a run: the generator reads the live keymap and focus, which depend on
 timing, and two runs of one seed can split after a hundred steps. To profile a slow
 step, replay the saved script to just before it, with the same seed and tree
-options (the seed builds the tree and drives churn), as the report prints it:
+options (the seed builds the tree and drives churn), as the report prints it.
+`--pause-ms` waits at the pause for a sampler, then keeps replaying:
 
 ```bash
-cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --script /path/to/script.txt --until 1234
-xcrun xctrace record --template 'Time Profiler' --attach crow
+cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --script /path/to/script.txt --until 1234 --pause-ms 2000
+sample <pid> 5 -file /tmp/crow.sample   # during the pause; `sample` prints a call tree
 ```
+
+`sample` needs the process to be visible (a GUI app is) and `xcrun xctrace` needs a
+full Xcode install, not just the Command Line Tools. Without `--pause-ms` the run
+pauses before the step and the window stays open until Crow quits, which is enough
+to reproduce the action by hand.
 
 A replay of a `--dir-is-scratch` folder needs it in the same state as the original
 run (a fresh `--make-fixture` for the 100k fixture). The window stays open until
@@ -369,7 +377,7 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Drag out | Drag one row, then a multiple selection, onto a Finder window and into a Mail message. The image is the same small icon plus name pill inside and outside Crow (right edge at the cursor if the grab point is past it); leaving and re-entering the window keeps that one image, with no clipped frame or second icon; dropping back inside Crow moves the item. List and column rows keep one steady drop target while the pointer rests on them. |
 | Drop in | Drag files from Finder onto a Crow list, onto a column, and onto sidebar rows and group titles: the target keeps one steady highlight while the pointer moves within it; same disk moves, other disk copies, Option copies. Drag a row from Crow's own list the same way. |
 | Trash and Put Back | Cmd-Delete a file in Crow, then use Finder's Put Back on it in the Trash. |
-| Finder clipboard | Copy in Crow, paste in Finder; copy in Finder, paste in Crow. |
+| Finder clipboard | Copy in Crow, paste in Finder; copy in Finder, paste in Crow. Above 1000 selected items the status says "(Crow only)": Crow's own paste works, Finder keeps its previous clipboard. |
 | Activity | Cmd-Option-L lists recent operations; Undo on an older one works or explains why not. |
 | Close during an operation | Copy a large folder to another disk, then ⌘W the only window (or click its red button, or ⌘Q): a sheet asks. Esc keeps the copy running; Return stops it and closes (or quits) once it has wound down. With a second window open, closing one does not ask. |
 

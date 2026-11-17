@@ -4,9 +4,15 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::ops::*;
+
+/// A request's paths are shared: a 100k selection hands them over as one refcount.
+fn paths(paths: Vec<PathBuf>) -> Arc<[PathBuf]> {
+    paths.into()
+}
 
 /// A Trash that is just a folder, so tests can see what was trashed.
 struct FolderTrash(PathBuf);
@@ -123,7 +129,8 @@ fn copy_keeps_contents_and_undo_trashes_the_copies() {
     let dest = f.dir("dest");
     let before = f.snapshot();
 
-    let out = f.run(Request::Copy { paths: vec![f.path("src/a.txt"), f.path("src/folder")], into: dest.clone() });
+    let out =
+        f.run(Request::Copy { paths: paths(vec![f.path("src/a.txt"), f.path("src/folder")]), into: dest.clone() });
     ok(&out);
     let after = f.snapshot();
     assert_eq!(after["dest/a.txt"], "alpha");
@@ -141,7 +148,7 @@ fn copy_keeps_contents_and_undo_trashes_the_copies() {
 fn copying_into_the_same_folder_duplicates() {
     let f = Fixture::new("copy-self");
     f.file("a.txt", "x");
-    ok(&f.run(Request::Copy { paths: vec![f.path("a.txt")], into: f.root.clone() }));
+    ok(&f.run(Request::Copy { paths: paths(vec![f.path("a.txt")]), into: f.root.clone() }));
     assert_eq!(f.snapshot()["a copy.txt"], "x");
 }
 
@@ -151,16 +158,19 @@ fn move_and_undo_and_moving_into_itself_is_refused() {
     f.file("a/inner.txt", "i");
     let dest = f.dir("b");
     let before = f.snapshot();
-    let out = f.run(Request::Move { paths: vec![f.path("a")], into: dest.clone() });
+    let out = f.run(Request::Move { paths: paths(vec![f.path("a")]), into: dest.clone() });
     ok(&out);
     assert_eq!(f.snapshot()["b/a/inner.txt"], "i");
     assert!(!f.path("a").exists());
     undo(&out.record, &f.trash).unwrap();
     assert_eq!(f.snapshot(), before);
 
-    assert!(matches!(plan(Request::Move { paths: vec![f.path("a")], into: f.path("a") }), Err(OpError::IntoItself(_))));
+    assert!(matches!(
+        plan(Request::Move { paths: paths(vec![f.path("a")]), into: f.path("a") }),
+        Err(OpError::IntoItself(_))
+    ));
     assert!(
-        plan(Request::Move { paths: vec![f.path("a")], into: f.root.clone() }).unwrap().items.is_empty(),
+        plan(Request::Move { paths: paths(vec![f.path("a")]), into: f.root.clone() }).unwrap().items.is_empty(),
         "already there"
     );
 }
@@ -170,7 +180,7 @@ fn conflicts_are_planned_and_each_choice_is_honoured() {
     let f = Fixture::new("conflict");
     f.file("new/a.txt", "new");
     f.file("dest/a.txt", "old");
-    let request = Request::Copy { paths: vec![f.path("new/a.txt")], into: f.path("dest") };
+    let request = Request::Copy { paths: paths(vec![f.path("new/a.txt")]), into: f.path("dest") };
     let planned = plan(request.clone()).unwrap();
     assert_eq!(planned.conflicts().count(), 1);
 
@@ -198,7 +208,7 @@ fn a_name_taken_after_planning_is_never_overwritten() {
     let f = Fixture::new("race");
     f.file("src/a.txt", "mine");
     let dest = f.dir("dest");
-    let planned = plan(Request::Copy { paths: vec![f.path("src/a.txt")], into: dest }).unwrap();
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest }).unwrap();
     assert_eq!(planned.conflicts().count(), 0);
     f.file("dest/a.txt", "appeared meanwhile");
     ok(&execute(&planned, &HashMap::new(), &f.trash, &AtomicBool::new(false), &mut |_| {}));
@@ -212,7 +222,7 @@ fn cancelling_stops_between_items_and_leaves_no_partial_copies() {
     for i in 0..5 {
         f.file(&format!("src/{i}.txt"), &"x".repeat(1000));
     }
-    let paths: Vec<PathBuf> = (0..5).map(|i| f.path(&format!("src/{i}.txt"))).collect();
+    let paths: Arc<[PathBuf]> = (0..5).map(|i| f.path(&format!("src/{i}.txt"))).collect::<Vec<_>>().into();
     let planned = plan(Request::Copy { paths, into: f.dir("dest") }).unwrap();
     let cancel = AtomicBool::new(false);
     let out = execute(&planned, &HashMap::new(), &f.trash, &cancel, &mut |p| {
@@ -236,7 +246,7 @@ fn a_failed_copy_leaves_nothing_behind_and_keeps_the_source() {
     f.file("src/a.txt", "a");
     let dest = f.dir("dest");
     std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let out = f.run(Request::Copy { paths: vec![f.path("src/a.txt")], into: dest.clone() });
+    let out = f.run(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() });
     std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(out.error.is_some(), "writing into a read-only folder fails");
     assert!(out.record.steps.is_empty());
@@ -249,7 +259,8 @@ fn a_vanished_source_stops_the_operation_with_a_clear_error() {
     let f = Fixture::new("vanished");
     f.file("a.txt", "a");
     f.file("b.txt", "b");
-    let planned = plan(Request::Copy { paths: vec![f.path("a.txt"), f.path("b.txt")], into: f.dir("dest") }).unwrap();
+    let planned =
+        plan(Request::Copy { paths: paths(vec![f.path("a.txt"), f.path("b.txt")]), into: f.dir("dest") }).unwrap();
     std::fs::remove_file(f.path("b.txt")).unwrap();
     let out = execute(&planned, &HashMap::new(), &f.trash, &AtomicBool::new(false), &mut |_| {});
     assert!(matches!(out.error, Some(OpError::NotFound(_))));
@@ -298,13 +309,13 @@ fn new_folder_trash_and_permanent_delete() {
     assert!(f.snapshot().contains_key("untitled folder 2"));
 
     f.file("t.txt", "t");
-    let trashed = f.run(Request::Trash { paths: vec![f.path("t.txt")] });
+    let trashed = f.run(Request::Trash { paths: paths(vec![f.path("t.txt")]) });
     ok(&trashed);
     assert!(!f.path("t.txt").exists());
     undo(&trashed.record, &f.trash).unwrap();
     assert_eq!(f.snapshot()["t.txt"], "t", "Put Back");
 
-    let deleted = f.run(Request::DeletePermanently { paths: vec![f.path("t.txt")] });
+    let deleted = f.run(Request::DeletePermanently { paths: paths(vec![f.path("t.txt")]) });
     ok(&deleted);
     assert!(!deleted.record.is_undoable());
     assert!(matches!(undo(&deleted.record, &f.trash), Err(OpError::NotUndoable)));
@@ -333,7 +344,8 @@ fn progress_counts_items_and_bytes() {
     let f = Fixture::new("progress");
     f.file("src/a", &"x".repeat(3000));
     f.file("src/b", &"y".repeat(1000));
-    let planned = plan(Request::Copy { paths: vec![f.path("src/a"), f.path("src/b")], into: f.dir("dest") }).unwrap();
+    let planned =
+        plan(Request::Copy { paths: paths(vec![f.path("src/a"), f.path("src/b")]), into: f.dir("dest") }).unwrap();
     assert_eq!(planned.total_bytes, 4000);
     let mut last = Progress::default();
     ok(&execute(&planned, &HashMap::new(), &f.trash, &AtomicBool::new(false), &mut |p| last = p.clone()));
@@ -370,10 +382,10 @@ fn do_then_undo_restores_the_tree() {
         let before = f.snapshot();
         let pick = items[rand(items.len())].clone();
         let request = match rand(5) {
-            0 => Request::Copy { paths: vec![pick], into: sub.clone() },
-            1 => Request::Move { paths: vec![pick], into: sub.clone() },
-            2 => Request::Trash { paths: vec![pick] },
-            3 => Request::Duplicate { paths: vec![pick] },
+            0 => Request::Copy { paths: paths(vec![pick]), into: sub.clone() },
+            1 => Request::Move { paths: paths(vec![pick]), into: sub.clone() },
+            2 => Request::Trash { paths: paths(vec![pick]) },
+            3 => Request::Duplicate { paths: paths(vec![pick]) },
             _ => Request::Rename { path: pick, new_name: format!("renamed-{round}.txt") },
         };
         let resolution = [Resolution::KeepBoth, Resolution::Replace, Resolution::Skip][rand(3)];
@@ -405,7 +417,7 @@ fn moving_across_volumes_copies_then_removes_the_source() {
     f.file("src/tree/sub/b.txt", "b");
     let before = f.snapshot();
     FORCE_CROSS_DEVICE.store(true, Ordering::Relaxed);
-    let out = f.run(Request::Move { paths: vec![f.path("src/tree")], into: f.dir("dest") });
+    let out = f.run(Request::Move { paths: paths(vec![f.path("src/tree")]), into: f.dir("dest") });
     let undone = undo(&out.record, &f.trash);
     FORCE_CROSS_DEVICE.store(false, Ordering::Relaxed);
     ok(&out);
