@@ -1440,8 +1440,8 @@ fn hints_follow_focus(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("tab");
     settle(&view, &mut cx);
     let state = bar_state(&view, &mut cx);
-    assert_eq!(hint_labels(&state), ["reorder", "remove", "to list"]);
-    assert_eq!(hint_keys(&state), ["⌥⌘↑↓", "⌘⌫", "⇥"]);
+    assert_eq!(hint_labels(&state), ["groups", "to list", "reorder", "remove"]);
+    assert_eq!(hint_keys(&state), ["⌥↑↓", "⇥→", "⌥⌘↑↓", "⌘⌫"]);
 
     cx.simulate_keystrokes("tab");
     settle(&view, &mut cx);
@@ -1452,6 +1452,19 @@ fn hints_follow_focus(cx: &mut TestAppContext) {
     let state = bar_state(&view, &mut cx);
     assert_eq!(hint_labels(&state), ["open", "reveal", "Quick Look"]);
     assert_eq!(hint_keys(&state), ["↩", "⌘R", "Space"]);
+}
+
+#[gpui::test]
+fn sidebar_hints_at_1280_show_groups_and_the_right_arrow(cx: &mut TestAppContext) {
+    let root = fixture("bar-hints-sidebar-1280");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+
+    let state = bar_state(&view, &mut cx);
+    assert_eq!(hint_labels(&state), ["groups", "to list", "reorder", "remove"]);
+    assert_eq!(hint_keys(&state), ["⌥↑↓", "⇥→", "⌥⌘↑↓", "⌘⌫"]);
 }
 
 #[gpui::test]
@@ -1466,7 +1479,8 @@ fn vim_layer_hints_use_the_vim_context(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("tab");
     settle(&view, &mut cx);
     let state = bar_state(&view, &mut cx);
-    assert_eq!(hint_labels(&state), ["reorder", "remove", "to list"]);
+    assert_eq!(hint_labels(&state), ["groups", "to list", "reorder", "remove"]);
+    assert_eq!(hint_keys(&state), ["⌥↑↓", "⇥l", "⌥⌘↑↓", "⌘⌫"], "the Vim layer's l opens the list");
 
     cx.simulate_keystrokes("tab m");
     settle(&view, &mut cx);

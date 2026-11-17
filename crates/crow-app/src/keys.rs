@@ -77,7 +77,7 @@ pub fn context_stack(scope: KeyScope, layer: KeymapLayer) -> Vec<KeyContext> {
 
 /// The binding that wins for `action` in `scope`. Same rule as
 /// `DispatchTree::highest_precedence_binding_for_action`: the last binding
-/// added whose keystrokes resolve to this action in this context stack.
+/// added whose own context applies and whose keystrokes resolve to this action.
 pub fn binding_for(action: &dyn Action, scope: KeyScope, cx: &App) -> Option<KeyBinding> {
     let keymap = cx.key_bindings();
     let keymap = keymap.borrow();
@@ -86,6 +86,12 @@ pub fn binding_for(action: &dyn Action, scope: KeyScope, cx: &App) -> Option<Key
         .bindings_for_action(action)
         .rev()
         .find(|binding| {
+            // A binding for another scope can share this action's keystrokes (the
+            // search results' Return and the sidebar's Return); only its own
+            // predicate decides whether it is the one shown.
+            if !binding.predicate().is_none_or(|predicate| predicate.depth_of(&stack).is_some()) {
+                return false;
+            }
             let (resolved, _) = keymap.bindings_for_input(binding.keystrokes(), &stack);
             resolved.first().is_some_and(|found| found.action().partial_eq(action))
         })

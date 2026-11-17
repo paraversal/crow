@@ -166,8 +166,9 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("up", MoveUp, Some("Sidebar")),
         KeyBinding::new("down", MoveDown, Some("Sidebar")),
         KeyBinding::new("enter", OpenSelection, Some("Sidebar")),
-        KeyBinding::new("right", OpenSelection, Some("Sidebar")),
         KeyBinding::new("cmd-down", OpenSelection, Some("Sidebar")),
+        // Last, so the sidebar's "to list" hint shows → (the last binding wins).
+        KeyBinding::new("right", OpenSelection, Some("Sidebar")),
         KeyBinding::new("cmd-up", OpenParent, Some("Crow")),
         KeyBinding::new("cmd-[", GoBack, Some("Crow")),
         KeyBinding::new("cmd-]", GoForward, Some("Crow")),

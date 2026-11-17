@@ -4,7 +4,7 @@ Branch: m7-h8-leftovers · PR: none · Last updated: 2026-11-17 · State: in pro
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| L1 Sidebar hints miss ⌥↑/↓ and → (U8 C6) | in progress | `bottom_bar.rs` `hint_set` sidebar arm has reorder/remove/eject/to list only; `actions.rs` binds ⌥↑/↓ to PreviousGroup/NextGroup and → to OpenSelection. Q1 answered: groups first. |
+| L1 Sidebar hints miss ⌥↑/↓ and → (U8 C6) | done | `hint_set` sidebar order is groups, to list, reorder, remove (eject first on volumes). "to list" merges ⇥ and →; `binding_for` now checks a binding's own context predicate (the search results' Return was shadowing the sidebar's →). Tests: `hints_follow_focus`, `vim_layer_hints_use_the_vim_context`, `sidebar_hints_at_1280_show_groups_and_the_right_arrow`. |
 | L2 `short_bytes` rounds after choosing the unit (U8) | done | `sidebar.rs:177` now rounds at the shown precision and re-checks the unit; 999 950 bytes → "1.0 MB", 9.96 GB → "10 GB". Unit test `short_sizes_round_before_choosing_the_unit` covers the KB/MB and GB/TB boundaries. |
 | L3 Palette home row reads "~" twice (U7) | in progress | `palette.rs` `folder_candidates` labels home `~`; row name is `label[name_start..]`; path is the same label. Q3 answered: short name. |
 | L4 Open: ⌘↓ in the context menu, ⌘O in the menu bar (context-menu C4) | done (no change) | User chose the Finder split: menu bar ⌘O, hints/context menu ⌘↓. `actions.rs:129-131` already does this; the comment now records why. Evidence: Finder's File ▸ Open is ⌘O (System Events). |
