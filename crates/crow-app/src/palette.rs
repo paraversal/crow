@@ -655,15 +655,22 @@ pub enum Item {
         last_visit: Option<u64>,
         /// Matched letters as byte ranges in `label`.
         matched: Vec<Range<usize>>,
+        /// Matched letters as byte ranges in `name`, when the name is not part of
+        /// the label (the home row shows the account name but its path is `~`).
+        name_matched: Vec<Range<usize>>,
     },
 }
 
 impl Item {
     /// The matches inside the folder's name, shifted to name-relative bytes; a
-    /// range that straddles the name's start is clipped.
+    /// range that straddles the name's start is clipped. A name that is not part
+    /// of the label (the home row) carries its own ranges.
     pub fn name_ranges(&self) -> Vec<Range<usize>> {
-        let Item::Folder { name_start: Some(name_start), matched, .. } = self else { return Vec::new() };
-        let name_start = *name_start;
+        let Item::Folder { name_start, matched, name_matched, .. } = self else { return Vec::new() };
+        if !name_matched.is_empty() {
+            return name_matched.clone();
+        }
+        let Some(name_start) = *name_start else { return Vec::new() };
         matched
             .iter()
             .filter(|range| range.end > name_start)
@@ -808,17 +815,39 @@ pub fn folder_listing(query: &str, folders: &[FolderCandidate], here: &str) -> L
     let mut rows: Vec<Row> = Vec::new();
     match (!query.is_empty()).then(|| FuzzyMatcher::new(query)) {
         Some(mut fuzzy) => {
-            let mut matched: Vec<(u32, &FolderCandidate)> =
-                folders.iter().filter_map(|folder| fuzzy.score(&folder.label).map(|score| (score, folder))).collect();
+            // The home row's name is not part of its label (`~`), so score both; every
+            // other name is a suffix of the label, and scoring it twice would change
+            // the ranking and double the work on a folder with 100k subfolders.
+            let mut matched: Vec<(u32, &FolderCandidate, bool)> = folders
+                .iter()
+                .filter_map(|folder| {
+                    let label = fuzzy.score(&folder.label).map(|score| (score, folder, false));
+                    let name = folder
+                        .name_start
+                        .is_none()
+                        .then(|| fuzzy.score(&folder.name).map(|score| (score, folder, true)))
+                        .flatten();
+                    match (label, name) {
+                        (Some(label), Some(name)) => Some(if name.0 > label.0 { name } else { label }),
+                        (Some(label), None) => Some(label),
+                        (None, Some(name)) => Some(name),
+                        (None, None) => None,
+                    }
+                })
+                .collect();
             matched.sort_by(|a, b| {
                 b.0.cmp(&a.0)
                     .then_with(|| b.1.frecency.total_cmp(&a.1.frecency))
                     .then_with(|| a.1.label.cmp(&b.1.label))
             });
             matched.truncate(TOTAL_LIMIT);
-            for (_, folder) in matched {
-                let ranges = fuzzy.indices(&folder.label).map_or_else(Vec::new, |(_, ranges)| ranges);
-                items.push(folder_item(folder, ranges));
+            for (_, folder, by_name) in matched {
+                let (matched, name_matched) = if by_name {
+                    (Vec::new(), fuzzy.indices(&folder.name).map_or_else(Vec::new, |(_, ranges)| ranges))
+                } else {
+                    (fuzzy.indices(&folder.label).map_or_else(Vec::new, |(_, ranges)| ranges), Vec::new())
+                };
+                items.push(folder_item(folder, matched, name_matched));
             }
             rows = (0..items.len()).map(Row::Item).collect();
         }
@@ -842,7 +871,7 @@ pub fn folder_listing(query: &str, folders: &[FolderCandidate], here: &str) -> L
                 rows.push(Row::Header(section_header(source, here)));
                 for folder in group {
                     rows.push(Row::Item(items.len()));
-                    items.push(folder_item(folder, Vec::new()));
+                    items.push(folder_item(folder, Vec::new(), Vec::new()));
                 }
             }
         }
@@ -851,7 +880,7 @@ pub fn folder_listing(query: &str, folders: &[FolderCandidate], here: &str) -> L
     Listing { rows, items, count }
 }
 
-fn folder_item(folder: &FolderCandidate, matched: Vec<Range<usize>>) -> Item {
+fn folder_item(folder: &FolderCandidate, matched: Vec<Range<usize>>, name_matched: Vec<Range<usize>>) -> Item {
     Item::Folder {
         path: folder.path.clone(),
         label: folder.label.clone(),
@@ -860,6 +889,7 @@ fn folder_item(folder: &FolderCandidate, matched: Vec<Range<usize>>) -> Item {
         source: folder.source,
         last_visit: folder.last_visit,
         matched,
+        name_matched,
     }
 }
 
@@ -997,6 +1027,7 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathEntry], files:
             name_start,
             source: Source::File,
             last_visit: None,
+            name_matched: Vec::new(),
         }
     };
     if exact {
@@ -1014,6 +1045,7 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathEntry], files:
             source: Source::Here,
             last_visit: None,
             matched: Vec::new(),
+            name_matched: Vec::new(),
         });
         rows.push(Row::Item(0));
     }
@@ -1049,6 +1081,7 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathEntry], files:
             source: Source::Here,
             last_visit: None,
             matched,
+            name_matched: Vec::new(),
         });
     }
     for file in file_rows.iter().skip(usize::from(exact)) {
@@ -1278,8 +1311,29 @@ mod tests {
             source: Source::Recent,
             last_visit: None,
             matched: vec![3..7],
+            name_matched: Vec::new(),
         };
         assert_eq!(straddling.name_ranges().first(), Some(&(0..2)), "a range across the name's start is clipped");
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // The matched list is the point of the test.
+    fn home_row_matches_its_name_and_its_path() {
+        let home = Path::new("/home/jules");
+        let candidates = folder_candidates(vec![home.to_path_buf()], Vec::new(), Vec::new(), home, |_| None);
+
+        let listing = folder_listing("jul", &candidates, "jules");
+        assert_eq!(listing.items.len(), 1, "the account name finds the home row");
+        let Item::Folder { label, name, name_start, matched, .. } = &listing.items[0] else { panic!("the home row") };
+        assert_eq!((label.as_str(), name.as_str(), *name_start), ("~", "jules", None));
+        assert!(matched.is_empty(), "the path line has no match");
+        assert_eq!(listing.items[0].name_ranges(), vec![0..3], "the name line highlights jul");
+
+        let listing = folder_listing("~", &candidates, "jules");
+        assert_eq!(listing.items.len(), 1, "~ still finds it");
+        let Item::Folder { matched, .. } = &listing.items[0] else { panic!("the home row") };
+        assert_eq!(matched, &vec![0..1], "the path line highlights ~");
+        assert!(listing.items[0].name_ranges().is_empty(), "the name line has no match");
     }
 
     #[test]

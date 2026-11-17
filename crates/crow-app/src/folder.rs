@@ -38,6 +38,8 @@ pub enum FolderEvent {
     Loaded,
     /// The visible rows changed: a listing, an expansion or a child folder.
     Changed,
+    /// A type-to-select run started or expired; the bottom bar shows its prefix.
+    TypeSelect,
 }
 
 /// The deepest folder list view expands inline; stops symlink cycles.
@@ -220,6 +222,8 @@ pub struct Folder {
     /// a folder's contents without selecting anything until you move into them.
     auto_select: bool,
     type_select: TypeSelect,
+    /// Bumped per typed letter, so only the last run's timer clears the prefix.
+    type_select_gen: u64,
     show_hidden: bool,
     /// Name filter (list/column view): shown rows are this folder's matches, flat.
     filter: Option<String>,
@@ -325,6 +329,7 @@ impl Folder {
             arrival_mode: Effective::Off,
             auto_select,
             type_select: TypeSelect::default(),
+            type_select_gen: 0,
             show_hidden,
             filter: None,
             match_ranges: Arc::new(Vec::new()),
@@ -591,6 +596,23 @@ impl Folder {
 
     pub fn type_select_active(&self) -> bool {
         self.type_select.is_active(Instant::now())
+    }
+
+    /// What was typed in the current run (lowercased), whether or not it is still active.
+    pub fn type_select_prefix(&self) -> &str {
+        self.type_select.prefix()
+    }
+
+    /// End the typing run, if any. Returns whether one was active.
+    pub fn cancel_type_select(&mut self, cx: &mut Context<Self>) -> bool {
+        let active = self.type_select_active();
+        if active {
+            self.type_select.clear();
+            self.type_select_gen += 1;
+            cx.emit(FolderEvent::TypeSelect);
+            cx.notify();
+        }
+        active
     }
 
     /// The active name filter, if any.
@@ -1888,6 +1910,22 @@ impl Folder {
     /// Finder's type-to-select within this folder.
     pub fn type_char(&mut self, c: char, cx: &mut Context<Self>) {
         let prefix = self.type_select.push(c, Instant::now()).to_owned();
+        // The run expires on its own; each letter's timer checks its generation,
+        // so only the last run's timer clears the prefix.
+        self.type_select_gen += 1;
+        let generation = self.type_select_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TypeSelect::TIMEOUT).await;
+            this.update(cx, |this, cx| {
+                if this.type_select_gen == generation {
+                    this.type_select.clear();
+                    cx.emit(FolderEvent::TypeSelect);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
         let entries = self.entries.clone();
         let names = self.rows.iter().filter_map(|row| match row {
             FlatRow::Own(i) => entries.get(*i).map(|entry| entry.name.as_str()),
@@ -1896,6 +1934,7 @@ impl Folder {
         if let Some(ix) = TypeSelect::find(&prefix, names) {
             self.select_only(ix, cx);
         }
+        cx.emit(FolderEvent::TypeSelect);
     }
 
     /// Bench helper: jump the view without touching the selection.

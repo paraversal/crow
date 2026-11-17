@@ -22,8 +22,9 @@ use gpui::{
 };
 
 use crate::actions::{
-    CloseSearch, CopyFiles, CutFiles, CycleMatch, DeletePermanently, MoveDown, MoveToFirst, MoveToLast, MoveToTrash,
-    MoveUp, OpenSelection, QuickLook, SearchEverything, SearchFocusField, SearchFocusResults, SearchReveal, SelectAll,
+    CloseSearch, CopyFiles, CopyPath, CutFiles, CycleMatch, DeletePermanently, MoveDown, MoveToFirst, MoveToLast,
+    MoveToTrash, MoveUp, OpenSelection, QuickLook, SearchEverything, SearchFocusField, SearchFocusResults,
+    SearchReveal, SelectAll,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::extensions::Ext;
@@ -136,6 +137,8 @@ pub struct SearchView {
     preview: Option<LoadedPreview>,
     scroll: UniformListScrollHandle,
     show_skipped: bool,
+    /// The row whose context menu is open, while it is.
+    menu: Option<usize>,
     _subscription: Subscription,
     _ui_subscription: Subscription,
     /// Repaint the band's focus ring when the field or the results take focus.
@@ -267,6 +270,7 @@ impl SearchView {
             preview: None,
             scroll: UniformListScrollHandle::new(),
             show_skipped: false,
+            menu: None,
             _subscription: subscription,
             _ui_subscription: ui_subscription,
             _focus_subscriptions: focus_subscriptions,
@@ -860,6 +864,10 @@ impl SearchView {
     fn press(&mut self, ix: usize, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         let Some(row) = self.results.get(ix) else { return };
+        if event.modifiers.control {
+            self.context_press(ix, window, cx);
+            return;
+        }
         self.user_moved = true;
         if event.modifiers.platform {
             self.selection.toggle(row.path.clone());
@@ -875,6 +883,74 @@ impl SearchView {
         self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
         self.load_preview(cx);
         cx.notify();
+    }
+
+    /// A right-click or Ctrl-click on result `ix`. An unselected row is selected
+    /// first; a row in the selection keeps it, as in the list, and becomes the
+    /// active row, so the bar, the preview and the single-row actions all name it.
+    fn context_press(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        let Some(row) = self.results.get(ix) else { return };
+        if !self.selection.contains(&row.path) {
+            self.selection.select_only(row.path.clone());
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        } else {
+            // The selection stays, so Copy, Cut and Trash still take all of it.
+            self.selection.set_cursor(row.path.clone());
+        }
+        // Single-row actions (Open, Reveal, Quick Look) act on the cursor.
+        self.cursor = ix;
+        self.load_preview(cx);
+        self.user_moved = true;
+        cx.notify();
+        self.open_menu(ix, window, cx);
+    }
+
+    fn open_menu(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = crate::context_menu::search_entries(cx);
+        self.menu = Some(ix);
+        cx.notify();
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        // Off the main thread (tests) the recorder answers at once; in the app the
+        // native menu calls back when it closes.
+        if !crate::effects::effects(cx).show_context_menu(
+            window,
+            entries,
+            Box::new(move |chosen| {
+                sender.send(chosen).ok();
+            }),
+        ) {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let chosen = receiver.await.ok().flatten();
+            this.update_in(cx, |this, window, cx| this.menu_closed(chosen, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// The menu closed with the line at `chosen` picked (an index into its slots), or none.
+    fn menu_closed(&mut self, chosen: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu.take().is_none() {
+            return;
+        }
+        cx.notify();
+        let Some((id, _)) = chosen.and_then(|ix| crate::context_menu::search_slots().get(ix).copied().flatten()) else {
+            return;
+        };
+        // The results have focus, so the action runs exactly as its key would.
+        window.focus(&self.focus, cx);
+        window.dispatch_action(crate::context_menu::command(id).action.boxed_clone(), cx);
+    }
+
+    #[cfg(test)]
+    pub fn menu(&self) -> Option<usize> {
+        self.menu
+    }
+
+    #[cfg(test)]
+    pub fn choose_menu_item(&mut self, chosen: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_closed(chosen, window, cx);
     }
 
     fn extend_to(&mut self, target: usize) {
@@ -1053,6 +1129,24 @@ impl SearchView {
 
     fn cut(&mut self, _: &CutFiles, _: &mut Window, cx: &mut Context<Self>) {
         self.copy_selected(true, cx);
+    }
+
+    /// The search menu's Copy Path: the selected results, or the cursor's row.
+    fn copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
+        let mut paths = self.selected_paths();
+        if paths.is_empty()
+            && let Some(row) = self.results.get(self.cursor)
+        {
+            paths.push(row.path.clone());
+        }
+        if paths.is_empty() {
+            return;
+        }
+        let text = paths.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>().join("\n");
+        crate::effects::write_text(text, cx);
+        let what = if paths.len() == 1 { "path".to_owned() } else { format!("{} paths", paths.len()) };
+        crate::operations::message(format!("Copied {what}"), false, cx);
+        cx.notify();
     }
 
     fn move_to_trash(&mut self, _: &MoveToTrash, _: &mut Window, cx: &mut Context<Self>) {
@@ -1685,6 +1779,7 @@ impl SearchView {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
+            .on_action(cx.listener(Self::copy_path))
             .on_action(cx.listener(Self::move_to_trash))
             .on_action(cx.listener(Self::delete_permanently))
             .on_action(cx.listener(Self::close_action))
@@ -1825,6 +1920,10 @@ impl SearchView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| this.press(i, event, window, cx)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _: &MouseDownEvent, window, cx| this.context_press(i, window, cx)),
                     )
                     .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                         if event.click_count() == 2 {

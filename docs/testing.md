@@ -10,7 +10,7 @@ cargo fmt --check
 
 The keystroke tests (`crates/crow-app/src/window.rs`) drive a real window through
 GPUI's test platform: key contexts, history, tabs, hidden files, multiple
-selection, type-to-select, sorting, Go to Folder (Shift-Cmd-G into the palette), views kept per window, the column view's focus rules, file operations
+selection, type-to-select (its bottom-bar prefix, timeout, Escape, and staying out of the filter and Vim), sorting, Go to Folder (Shift-Cmd-G into the palette), views kept per window, the column view's focus rules, file operations
 (new folder and new file with inline rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete),
 drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent,
 twin hints across Favorites and Recent, the current-folder fill and cursor ring, mark letters, the disk
@@ -18,7 +18,7 @@ row's free space and warning tone, arrows showing the folder in the center, Opti
 live change batches (a late batch cannot bring back a deleted file, watcher paths through a
 symlinked ancestor still match),
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
-(preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette (sections, two-line rows and match ranges, the Commands token and chips, path mode and Tab completion, recently used commands), the search panel (scope bar and switch,
+(preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette (sections, two-line rows and match ranges, the home row matching its account name, the Commands token and chips, path mode and Tab completion, recently used commands), the search panel (scope bar and switch,
 footer counts and skipped list, idle examples, best-row selection while results stream and the user's
 row after they move, contiguous name hits before content and weak fuzzy names after, one-line regex
 errors, singular skipped wording, preview in list and column view at the hit line, match cycling), the top band
@@ -26,12 +26,12 @@ errors, singular skipped wording, preview in list and column view at the hit lin
 tabs closing search, the Tab cycle while searching, ↓ into the results and ↑ back, focus never left on an element that is gone), the preview toggle
 (⇧⌘P in list and column view, `show_preview` live reload, the palette chip), the blinking caret,
 the bottom bar
-(hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
+(its type-to-select prefix, hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
 path folding and hint dropping, messages that retire, the editable path bar: ⌘L and a double-click on empty
 space, Tab completion, Return to a folder or a file, a missing path's beep and bar error, Escape and a
 click-away, and the path slot keeping its height), the contextual tips (a long-folder scroll, two
 zero-match filters, a typed path for a recent folder, Got it, `hints = "off"`, one at a time, closing on a
-folder change or an overlay, and the retired set surviving a relaunch), closing or quitting during an operation, ⌥ word moves in
+folder change or an overlay, and the retired set surviving a relaunch), the Return setting (rename by default, open with `enter = "open"`, F2 always renames, the sidebar and search results still open), the search-result context menu, closing or quitting during an operation, ⌥ word moves in
 text fields, the list's Name column following the window width, the menu bar
 (every registry command listed, Finder keys, enabled by focus, dispatch matching the key) and the
 Vim layer (motions, marks). The finish pass adds the whole-window checks: the assembled layout at
@@ -320,6 +320,8 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | View settings | Cmd-3 in one folder, then visit another: it keeps its own view; going up in column view stays in columns. Add a `[[rule]]` to `views.toml` with the folder open: it applies at once. Cmd-J explains each value. Set `view_per_folder = false`: Cmd-3, then visit that folder with its own list view and go Back: the window stays in columns, Cmd-T opens columns, `views.toml` is unchanged, Cmd-J says "this window". |
 | Vim layer | Set `keymap = "vim"`: hjkl, gg/G, `m a` then `'a` from elsewhere. |
 | Typing is not stolen | Rename a file and type `/`, Space and Return: the characters stay in the field (Return commits) and no filter or Quick Look opens. Same in the filter, search and palette fields. |
+| Type-to-select query | Type `no` in a folder: the bottom bar shows `no` left of the hints and the selection jumps to the first match. Wait a second: it clears. Type again and press Esc: it clears at once and the row stays selected. Type `/`: the field opens and no prefix shows; type in it: still none. With `keymap = "vim"`, letters move instead and no prefix shows. Check light and dark, 640 px and wide. |
+| Return setting | `enter = "rename"` (default): Return opens the name field. Set `enter = "open"`: Return opens the cursor item; F2 still opens the name field in both modes. In both modes Return in the sidebar and in search results still opens. Vim `c w` still renames. Change it in Settings ▸ Behaviour ▸ What Return does: only the `enter` line changes in `settings.toml`, comments survive, and an external edit updates the control. |
 | Word moves | In the filter, search and palette fields: ⌥←/⌥→ jump by word (`m5-fix.md` is three words), ⌥⇧←/→ select, ⌥⌫ deletes a word. |
 
 ### Filter
@@ -344,6 +346,7 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Search idle | Cmd-F with nothing typed: the heading follows All / Names / Contents and the four left-aligned examples fill the field, switch to This Mac, or flip the switch; the fourth is plain key text and disappears when no `exclude.toml` set is enabled. The key line follows `keymap = "vim"`. |
 | Search errors | Type `/(/`: one red footer line, "Invalid pattern: unclosed group"; no rows, and the body shows "Can't search: Invalid pattern: unclosed group" and suggests removing the slashes. |
 | Search themes | FireBox and a light scheme: switch knob, selected segment and match highlights on the selected row stay readable; VoiceOver reads the switch as on/off and the footer once per finished search. |
+| Search context menu | Right-click or Ctrl-click a result: Open, Reveal in Folder, Quick Look, Copy, Cut, Copy Path, Move to Trash. An unselected row is selected first; a row in a multi-selection keeps it. Each item runs once and the menu closes; the file list and sidebar menus are unchanged. Check in the Vim layer too. |
 
 ### Palette and sheets
 
@@ -351,6 +354,7 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | --- | --- |
 | Command palette | Cmd-K over a scrim; the folder you are in is not listed, so Cmd-K then Return goes to the one before it; sections Recent / Favorites / In <folder>; two folders with the same name show different paths; matched letters accented in name and path; Recent rows show "2 h ago"-style times; ↵ goes, ⌘↵ opens a tab; Vim j/k move across headers. Keycaps follow the layer: `>` rows show ⇧⌘G-style keys, and with `keymap = "vim"` Copy shows `yy`. |
 | Palette ⇥ | ⇥ on a row puts its path and `/` in the field; typing narrows to its subfolders; ↵ on "this folder" goes there; `.` shows hidden folders. |
+| Palette home row | With Home in Favorites or Recent, type `jul` (your account's first letters): the home row shows and `jul` is highlighted in its name; type `~`: the same row shows with `~` highlighted in the path. Other folder rows rank as before. |
 | Palette commands | `>` turns into the Commands token and Return on the empty list never quits (typing `quit` finds Quit Crow); Backspace on an empty field removes it; rows show menu, on/off chip for Show Hidden Files and Show Activity, and keycaps (switch to the Vim layer: keycaps follow). |
 | Recently used | Run two commands from the palette, quit, relaunch: `>` lists them under Recently used. Set `palette_recent_commands = false`: the section disappears without a restart, and new runs aren't recorded. |
 | Palette themes | FireBox and Solarized Light: token, highlights, chip and keycaps readable, the input and footer dividers visible; narrow window keeps the sheet inside with 16 px margins. |

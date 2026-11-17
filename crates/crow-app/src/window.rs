@@ -1074,6 +1074,8 @@ impl CrowWindow {
             file: error.file,
         });
         let focus = self.bar_focus(window, pane, cx);
+        // A typing run is the list's own state; the bar shows it only while the list owns the keys.
+        let type_select = (focus == BarFocus::List).then(|| pane.type_select_prefix(cx)).flatten().map(Into::into);
 
         let sidebar_focused = focus == BarFocus::Sidebar;
         let count = if let Some(search) = &self.search {
@@ -1135,6 +1137,7 @@ impl CrowWindow {
         let (progress_done, progress_id) = ops.progress_done.map_or((None, 0), |(fraction, id)| (Some(fraction), id));
         let mut state = BarState {
             primary,
+            type_select,
             error,
             count,
             path,
@@ -3397,7 +3400,10 @@ impl Render for CrowWindow {
                     // click on empty space does. Filter and rename fields have their own
                     // deeper Escape bindings, and search is handled above.
                     let pane = this.pane().clone();
-                    if !pane.update(cx, |pane, cx| pane.cancel_pending(cx)) {
+                    // A type-to-select run owns Escape first: dismiss its query, keep the
+                    // selection, as Finder does.
+                    let consumed = pane.update(cx, |pane, cx| pane.cancel_type_select(cx));
+                    if !consumed && !pane.update(cx, |pane, cx| pane.cancel_pending(cx)) {
                         pane.update(cx, |pane, cx| {
                             pane.clear_selection(cx);
                         });

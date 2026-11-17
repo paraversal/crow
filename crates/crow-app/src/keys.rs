@@ -159,6 +159,11 @@ fn function_key(key: &str) -> Option<&'static str> {
     })
 }
 
+/// Function keys display as `F2`, as on the keyboard.
+fn is_function_key(key: &str) -> bool {
+    key.strip_prefix('f').is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn spoken_key(key: &str) -> &'static str {
     match key {
         "backspace" => "Delete",
@@ -192,7 +197,7 @@ fn keystroke_caps(keystroke: &gpui::KeybindingKeystroke) -> Vec<SharedString> {
     let mut caps: Vec<SharedString> = symbols(modifiers).into_iter().map(SharedString::from).collect();
     let text = match function_key(key) {
         Some(symbol) => symbol.to_owned(),
-        None if is_letter(key) => key.to_ascii_uppercase(),
+        None if is_letter(key) || is_function_key(key) => key.to_ascii_uppercase(),
         None => key.to_owned(),
     };
     caps.push(text.into());
@@ -213,7 +218,7 @@ fn keystroke_spoken(keystroke: &gpui::KeybindingKeystroke) -> String {
     let spoken = spoken_key(key);
     let key_word = if !spoken.is_empty() {
         spoken.to_owned()
-    } else if is_letter(key) {
+    } else if is_letter(key) || is_function_key(key) {
         key.to_ascii_uppercase()
     } else {
         key.to_owned()
@@ -356,7 +361,7 @@ mod tests {
                 (CommandId::ViewAsColumns, "⌘3"),
                 (CommandId::Open, "⌘↓"),
                 (CommandId::QuickLook, "Space"),
-                (CommandId::Rename, "↩"),
+                (CommandId::Rename, "F2"),
                 (CommandId::NewFolder, "⇧⌘N"),
                 (CommandId::NewFile, "⌥⌘N"),
                 (CommandId::Duplicate, "⌘D"),

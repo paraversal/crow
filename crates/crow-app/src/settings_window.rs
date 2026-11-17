@@ -8,7 +8,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{Event, MotionMode, SoundSet};
-use crow_core::{AppIcon, HintsMode, KeymapLayer};
+use crow_core::{AppIcon, EnterAction, HintsMode, KeymapLayer};
 use crow_theme::Theme;
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, Image, ImageFormat, IntoElement, KeyBinding,
@@ -118,6 +118,7 @@ enum ControlId {
     FontFamily,
     FontSize,
     Keymap,
+    Enter,
     Hints,
     ShowHidden,
     ShowPreview,
@@ -138,12 +139,13 @@ enum ControlId {
 
 impl ControlId {
     /// Reading order: the order Tab visits and the order the page draws.
-    const ALL: [ControlId; 21] = [
+    const ALL: [ControlId; 22] = [
         ControlId::Theme,
         ControlId::AppIcon,
         ControlId::FontFamily,
         ControlId::FontSize,
         ControlId::Keymap,
+        ControlId::Enter,
         ControlId::Hints,
         ControlId::ShowHidden,
         ControlId::ShowPreview,
@@ -169,6 +171,7 @@ impl ControlId {
             ControlId::FontFamily => "settings-font-family",
             ControlId::FontSize => "settings-font-size",
             ControlId::Keymap => "settings-keymap",
+            ControlId::Enter => "settings-enter",
             ControlId::Hints => "settings-hints",
             ControlId::ShowHidden => "settings-show-hidden",
             ControlId::ShowPreview => "settings-show-preview",
@@ -198,6 +201,7 @@ impl ControlId {
             | ControlId::FontFamily
             | ControlId::FontSize
             | ControlId::Keymap
+            | ControlId::Enter
             | ControlId::Hints
             | ControlId::ShowHidden
             | ControlId::ShowPreview
@@ -218,6 +222,7 @@ impl ControlId {
             ControlId::FontFamily => "Font",
             ControlId::FontSize => "Font size",
             ControlId::Keymap => "Keymap",
+            ControlId::Enter => "What Return does",
             ControlId::Hints => "Key hints",
             ControlId::ShowHidden => "Show hidden files",
             ControlId::ShowPreview => "Show preview",
@@ -241,9 +246,12 @@ impl ControlId {
     fn role(self) -> Role {
         match self {
             ControlId::Theme | ControlId::FontFamily => Role::ComboBox,
-            ControlId::AppIcon | ControlId::Keymap | ControlId::Hints | ControlId::Motion | ControlId::Sound => {
-                Role::RadioGroup
-            }
+            ControlId::AppIcon
+            | ControlId::Keymap
+            | ControlId::Enter
+            | ControlId::Hints
+            | ControlId::Motion
+            | ControlId::Sound => Role::RadioGroup,
             ControlId::ShowHidden | ControlId::ShowPreview | ControlId::ViewPerFolder | ControlId::PaletteRecent => {
                 Role::Switch
             }
@@ -265,6 +273,7 @@ impl ControlId {
             ControlId::FontFamily => "Installed families; System follows macOS.",
             ControlId::FontSize => "10 to 24 points.",
             ControlId::Keymap => "Vim adds hjkl, gg/G, yy/p and marks on top of the Finder keys.",
+            ControlId::Enter => "Rename edits the name in place; Open opens the item. F2 always renames.",
             ControlId::Hints => "Auto retires idle hints after you use their key three times.",
             ControlId::ShowHidden => "List dotfiles and other hidden items.",
             ControlId::ShowPreview => "The preview pane in list view and the column in column view.",
@@ -689,7 +698,12 @@ impl SettingsWindow {
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => {
                 self.commit_stepper(id, window, cx);
             }
-            ControlId::AppIcon | ControlId::Keymap | ControlId::Hints | ControlId::Motion | ControlId::Sound => {}
+            ControlId::AppIcon
+            | ControlId::Keymap
+            | ControlId::Enter
+            | ControlId::Hints
+            | ControlId::Motion
+            | ControlId::Sound => {}
         }
     }
 
@@ -697,7 +711,7 @@ impl SettingsWindow {
         let Some(id) = self.focused_control(window) else { return };
         match id {
             ControlId::AppIcon => self.move_app_icon(delta, window, cx),
-            ControlId::Keymap | ControlId::Hints | ControlId::Motion | ControlId::Sound => {
+            ControlId::Keymap | ControlId::Enter | ControlId::Hints | ControlId::Motion | ControlId::Sound => {
                 self.move_segment(id, delta, window, cx);
             }
             _ => {}
@@ -732,6 +746,7 @@ impl SettingsWindow {
     fn move_segment(&mut self, id: ControlId, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let (current, count) = match id {
             ControlId::Keymap => (keymap_index(cx.global::<Ui>().settings.keymap), 2),
+            ControlId::Enter => (enter_index(cx.global::<Ui>().settings.enter), 2),
             ControlId::Hints => (hints_index(cx.global::<Ui>().settings.hints), 3),
             ControlId::Motion => (motion_index(cx.global::<Ui>().settings.motion), 4),
             ControlId::Sound => (sound_index(cx.global::<Ui>().settings.sound), 3),
@@ -746,6 +761,7 @@ impl SettingsWindow {
     fn select_segment(&mut self, id: ControlId, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
         let change = match id {
             ControlId::Keymap => SettingChange::Keymap(if index == 0 { KeymapLayer::Finder } else { KeymapLayer::Vim }),
+            ControlId::Enter => SettingChange::Enter(if index == 0 { EnterAction::Rename } else { EnterAction::Open }),
             ControlId::Hints => SettingChange::Hints(match index {
                 0 => HintsMode::Auto,
                 1 => HintsMode::Always,
@@ -1037,6 +1053,7 @@ impl SettingsWindow {
                 ControlId::AppIcon => Some(app_icon_index(settings.app_icon)),
                 ControlId::FontFamily => Some(self.font_cursor),
                 ControlId::Keymap => Some(keymap_index(settings.keymap)),
+                ControlId::Enter => Some(enter_index(settings.enter)),
                 ControlId::Hints => Some(hints_index(settings.hints)),
                 ControlId::Motion => Some(motion_index(settings.motion)),
                 ControlId::Sound => Some(sound_index(settings.sound)),
@@ -1128,6 +1145,17 @@ impl Render for SettingsWindow {
             keymap_index(settings.keymap),
             self.style(ControlId::Keymap, window, &theme),
             keymap_select,
+            None,
+        );
+
+        let enter_select =
+            select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::Enter, index, window, cx));
+        let enter_row = controls::segmented(
+            self.meta(ControlId::Enter, cx),
+            &["Rename", "Open"],
+            enter_index(settings.enter),
+            self.style(ControlId::Enter, window, &theme),
+            enter_select,
             None,
         );
 
@@ -1264,6 +1292,7 @@ impl Render for SettingsWindow {
             &theme,
             vec![
                 (ControlId::Keymap, keymap_row.into_any_element()),
+                (ControlId::Enter, enter_row.into_any_element()),
                 (ControlId::Hints, hints_row.into_any_element()),
                 (ControlId::ShowHidden, show_hidden.into_any_element()),
                 (ControlId::ShowPreview, show_preview.into_any_element()),
@@ -1496,6 +1525,13 @@ fn keymap_index(value: KeymapLayer) -> usize {
     }
 }
 
+fn enter_index(value: EnterAction) -> usize {
+    match value {
+        EnterAction::Rename => 0,
+        EnterAction::Open => 1,
+    }
+}
+
 fn hints_index(value: HintsMode) -> usize {
     match value {
         HintsMode::Auto => 0,
@@ -1720,6 +1756,27 @@ mod tests {
         vcx.simulate_keystrokes("left");
         assert_eq!(state(&view, &vcx, ControlId::Keymap).selected, Some(0));
         wait_for(&vcx, "keymap = \"finder\"");
+    }
+
+    #[gpui::test]
+    fn enter_control_writes_only_its_line_and_survives_reload(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::Enter);
+        assert_eq!(state(&view, &vcx, ControlId::Enter).selected, Some(0), "Rename is the default");
+        let before = settings_text(&vcx);
+
+        vcx.simulate_keystrokes("right");
+        assert_eq!(state(&view, &vcx, ControlId::Enter).selected, Some(1));
+        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.enter), EnterAction::Open);
+        wait_for(&vcx, "enter = \"open\"");
+        let after = settings_text(&vcx);
+        let changed: Vec<_> = before.lines().zip(after.lines()).filter(|(a, b)| a != b).collect();
+        assert_eq!(changed.len(), 1, "only one line changes: {changed:?}");
+        assert!(changed[0].1.starts_with("enter = "), "and it is the enter line");
+
+        vcx.update(|_, cx| ui::reload_config(cx));
+        vcx.run_until_parked();
+        assert_eq!(state(&view, &vcx, ControlId::Enter).selected, Some(1), "a reload keeps the control");
     }
 
     #[gpui::test]

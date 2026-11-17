@@ -20,6 +20,10 @@ theme = "system"
 # (m x, 'x) and more on top of the Finder keys; letters then no longer select by name.
 keymap = "finder"
 
+# What Return does in the file list: "rename" (default, like Finder) edits the
+# name in place; "open" opens the item. F2 renames in either mode.
+enter = "rename"
+
 # Key hints in the bottom bar: "auto" (default), "always" or "off".
 # "auto" retires each idle hint (/ filter, Cmd-F search, Cmd-K go to) after you
 # have used its key 3 times; hints for the focused filter, sidebar or search stay.
@@ -85,6 +89,27 @@ impl KeymapLayer {
         match self {
             KeymapLayer::Finder => "finder",
             KeymapLayer::Vim => "vim",
+        }
+    }
+}
+
+/// What Return does in the file list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EnterAction {
+    /// Finder's default: edit the name in place.
+    #[default]
+    Rename,
+    /// Open the selected item, as Cmd-Down does.
+    Open,
+}
+
+impl EnterAction {
+    /// The value in `settings.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            EnterAction::Rename => "rename",
+            EnterAction::Open => "open",
         }
     }
 }
@@ -161,6 +186,7 @@ impl Default for WindowDefaults {
 pub struct Settings {
     pub theme: String,
     pub keymap: KeymapLayer,
+    pub enter: EnterAction,
     pub hints: HintsMode,
     pub motion: MotionMode,
     pub sound: SoundSet,
@@ -179,6 +205,7 @@ impl Default for Settings {
         Self {
             theme: "system".into(),
             keymap: KeymapLayer::Finder,
+            enter: EnterAction::Rename,
             hints: HintsMode::Auto,
             motion: MotionMode::Auto,
             sound: SoundSet::Crow,

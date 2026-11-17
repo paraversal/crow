@@ -56,7 +56,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), key hints (`"auto"`, `"always"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, hidden files (shown by default), the preview (`show_preview`), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, hidden files (shown by default), the preview (`show_preview`), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
@@ -102,7 +102,8 @@ cancels it exactly like Esc.
 ## Hints and tips
 
 The bottom bar has three slots: the path (⌘L or a double-click on its empty space edits it in
-place), a transient one (hints, operation progress, messages, errors) and counts. Hints follow
+place), a transient one (type-to-select letters, hints, operation progress, messages, errors) and
+counts. While you type a name, the transient slot shows the letters so far, left of the hints. Hints follow
 focus: the path field (`↩` go, `⇥` complete, `esc` cancel), the filter field (Return to matches,
 Esc clear, `⌘F` search deeper), the sidebar (`⌥↑↓` groups, `⇥`/`→` to list, `⌘⌥↑↓` reorder,
 `⌘⌫` remove, `⌘E` eject a disk),
@@ -128,7 +129,8 @@ overlay closes it. The retired ids live in `~/.local/state/crow/tips.json`.
 
 Cmd-K opens the command palette over a scrim: folders are grouped into Recent, Favorites and
 In <folder>, each row showing the name and the abbreviated path, so two folders called `git` are
-told apart; matched letters are accent in both lines and Recent rows carry the last visit.
+told apart; the home folder matches its account name as well as `~`. Matched letters are accent in
+both lines and Recent rows carry the last visit.
 Return goes there and Cmd-Return opens a folder in a new tab. Tab appends the highlighted
 folder's path and `/`, so the next letters search inside it; typing `/` or `~/` does the same by
 hand, with the parent's subfolders listed, and files whose name starts with what follows the last `/`
@@ -164,7 +166,8 @@ the path the bar shows in place: Tab completes, Return goes there or selects a f
 back, Cmd-, (Settings), Cmd-Shift-. and Space. Cmd-K's
 "Settings" opens the window and "Edit settings.toml" opens the file directly. Cmd-Shift-P shows
 or hides the preview pane on the right (in list and column view, search included; Quick Look still
-works). Typing a name selects it. Tab moves focus between the sidebar and the list.
+works). Typing a name selects it and the bottom bar shows the letters. Tab moves focus between the
+sidebar and the list.
 Column headers sort (click again to reverse) and their dividers resize.
 Type `/` to filter the focused folder: the field opens as the first row of the focused column
 (or under the list header), showing the query and "n of N", and matching letters are highlighted.
@@ -200,7 +203,8 @@ Return stops it cleanly (finished items stay and Undo can reverse them; the item
 takes whatever width the window gives; the other columns keep the widths you drag them to, and
 dragging Name's own divider trades width with the column after it.
 
-File operations use Finder's keys: Return renames, Cmd-Shift-N new folder, Cmd-Option-N new file,
+File operations use Finder's keys: Return renames (with `enter = "open"` it opens instead; F2
+always renames), Cmd-Shift-N new folder, Cmd-Option-N new file,
 Cmd-D duplicate, Cmd-Delete moves to the Trash, Cmd-Option-Delete deletes permanently (after asking),
 Cmd-C / Cmd-X / Cmd-V copy, cut and paste (also to and from Finder), Cmd-Option-V moves,
 Cmd-Z / Cmd-Shift-Z undo and redo, Esc cancels a running operation, Cmd-Option-L shows activity.
@@ -214,7 +218,8 @@ the columns to the right of the one clicked. Right-click or Ctrl-click opens a n
 same names and keys as the menu bar: on items, Open, Quick Look, Rename, Duplicate, Copy, Cut,
 Paste, Copy Path, Show in Finder, Add to Sidebar and Move to Trash (an unselected row is selected
 first, a row in the selection keeps it); on empty space, New Folder, New File, Paste and Show in
-Finder (opens the folder itself in Finder).
+Finder (opens the folder itself in Finder). Search results have their own menu: Open, Reveal in
+Folder, Quick Look, Copy, Cut, Copy Path and Move to Trash.
 
 Testing, benchmarks and the hand-test checklist: [docs/testing.md](docs/testing.md).
 Fuzzing: `cargo test -p crow-app fuzz_smoke`; long runs and replay: [docs/testing.md#fuzzing](docs/testing.md#fuzzing). For real frame times, `crow --fuzz` (built with `--features fuzz`) reports any step over its budget (50 ms; 100 ms for a bulk step acting on more than 10 000 paths) and fails on a heartbeat over 250 ms.
