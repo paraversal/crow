@@ -9626,6 +9626,13 @@ fn onboarding_sheet_open(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> b
     view.read_with(cx, |w, _| matches!(w.sheet, Some(Sheet::Onboarding { .. })))
 }
 
+fn onboarding_focuses(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> (FocusHandle, FocusHandle) {
+    view.read_with(cx, |w, _| match &w.sheet {
+        Some(Sheet::Onboarding { show, no, .. }) => (show.clone(), no.clone()),
+        _ => panic!("the onboarding sheet is open"),
+    })
+}
+
 fn wait_for_file(cx: &mut VisualTestContext, path: &Path, needle: &str) {
     for _ in 0..100 {
         cx.run_until_parked();
@@ -9685,6 +9692,36 @@ fn first_launch_asks_once_and_show_tips_writes_auto(cx: &mut TestAppContext) {
         .expect("second window");
     let second = window.root(&mut cx).expect("second root");
     assert!(!onboarding_sheet_open(&second, &cx), "the answer survives the relaunch");
+}
+
+#[gpui::test]
+fn first_launch_tab_reaches_no_tips(cx: &mut TestAppContext) {
+    let root = fixture("onboarding-tab");
+    let (view, mut cx) = open_first_launch(cx, &root);
+    let (show, no) = onboarding_focuses(&view, &cx);
+
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| show.is_focused(window)), "Tab reaches Show tips");
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| no.is_focused(window)), "Tab reaches No tips");
+    cx.simulate_keystrokes("shift-tab");
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| show.is_focused(window)), "Shift-Tab goes back");
+    cx.simulate_keystrokes("shift-tab");
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| no.is_focused(window)), "Shift-Tab wraps to No tips");
+
+    // Return activates the focused choice, not always the default.
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(!onboarding_sheet_open(&view, &cx), "the choice closes the sheet");
+    assert_eq!(cx.read_global::<Ui, _>(|ui, _| ui.settings.tips), TipsMode::Off);
+    let settings_file = config_dir(&cx).join("settings.toml");
+    wait_for_file(&mut cx, &settings_file, "tips = \"off\"");
+    let onboarding = onboarding_path(&cx);
+    wait_for_file(&mut cx, &onboarding, "\"tips_choice\": false");
 }
 
 #[gpui::test]
