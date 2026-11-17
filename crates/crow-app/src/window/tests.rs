@@ -790,6 +790,57 @@ fn sidebar_cursor_is_a_ring_and_only_the_current_folder_is_filled(cx: &mut TestA
 }
 
 #[gpui::test]
+fn sidebar_fill_glides_in_full_and_jumps_in_off(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-fill-glide");
+    let (view, mut cx) = open(cx, &root.join("alpha"));
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+    set_motion(&mut cx, "full");
+    // The config reload changed the sidebar rows; redraw it and let the fill
+    // settle on the new favorite row before measuring.
+    let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+    sidebar.update(&mut cx, |_, cx| cx.notify());
+    for _ in 0..30 {
+        cx.executor().advance_clock(Duration::from_millis(32));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+    let alpha = cx.debug_bounds("sidebar-0").expect("alpha row");
+    let beta = cx.debug_bounds("sidebar-1").expect("beta row");
+    let fill = cx.debug_bounds("sidebar-fill").expect("the fill");
+    assert!((fill.top() - alpha.top()).abs() <= px(1.), "the fill starts on alpha: {fill:?} vs {alpha:?}");
+
+    // Full: the fill springs from alpha to beta.
+    cx.simulate_keystrokes("tab down");
+    let fill = cx.debug_bounds("sidebar-fill").expect("the fill");
+    assert!((fill.top() - alpha.top()).abs() <= px(1.), "the glide starts on alpha: {fill:?}");
+    for _ in 0..30 {
+        cx.executor().advance_clock(Duration::from_millis(32));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+    let fill = cx.debug_bounds("sidebar-fill").expect("the fill");
+    assert!((fill.top() - beta.top()).abs() <= px(1.), "the glide lands on beta: {fill:?} vs {beta:?}");
+    assert_eq!(fill.size.height, beta.size.height, "the fill matches the row's height");
+
+    // A fast sequence still leaves one fill, on the last folder.
+    cx.simulate_keystrokes("up down up");
+    let fill = cx.debug_bounds("sidebar-fill").expect("one fill");
+    assert!(fill.top() >= alpha.top() - px(1.) && fill.top() <= beta.top() + px(1.), "one fill: {fill:?}");
+
+    // Off: the fill jumps to alpha.
+    set_motion(&mut cx, "off");
+    cx.simulate_keystrokes("up");
+    let fill = cx.debug_bounds("sidebar-fill").expect("the fill");
+    assert!((fill.top() - alpha.top()).abs() <= px(1.), "Off jumps to alpha: {fill:?} vs {alpha:?}");
+
+    // Low: no glide; the fill appears on the new row and fades.
+    set_motion(&mut cx, "low");
+    cx.simulate_keystrokes("down");
+    let fill = cx.debug_bounds("sidebar-fill").expect("the fill");
+    assert!((fill.top() - beta.top()).abs() <= px(1.), "Low jumps to beta: {fill:?} vs {beta:?}");
+}
+
+#[gpui::test]
 fn sidebar_vim_j_moves_the_ring(cx: &mut TestAppContext) {
     let root = fixture("ring-vim");
     let (view, mut cx) = open(cx, &root);

@@ -12,12 +12,13 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crow_core::motion::{self, Fx};
+use crow_core::motion::{self, Effective, Fx};
 use crow_core::{Favorite, SidebarEdit, Slot};
 use crow_fs::ops::Request;
 use gpui::{
-    Bounds, ClickEvent, Context, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement,
-    MouseButton, MouseDownEvent, Pixels, Point, Render, Role, SharedString, Window, div, img, prelude::*, px,
+    Animation, AnimationExt, Bounds, ClickEvent, Context, EventEmitter, ExternalPaths, FocusHandle, Focusable,
+    FontWeight, IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, Role, SharedString, SpringAnimation,
+    SpringConfig, Window, div, img, prelude::*, px,
 };
 
 use crate::actions::{
@@ -936,6 +937,45 @@ impl Render for Sidebar {
             self.insert_slot = None;
             self.dragging_favorite.set(false);
         }
+        let current_child = rows.iter().position(|row| row.path() == Some(self.current.as_path()));
+        let fill = {
+            let layout = self.layout.borrow();
+            let current_bounds = current_child.and_then(|ix| layout.get(ix).map(|(_, _, bounds)| *bounds));
+            let first_bounds = layout.first().map(|(_, _, bounds)| *bounds);
+            match (current_bounds, first_bounds) {
+                (Some(current), Some(first)) => {
+                    let top = f32::from(current.top() - first.top());
+                    let base = div()
+                        .absolute()
+                        .top(px(top))
+                        .left(px(8.))
+                        .right(px(8.))
+                        .h(current.size.height)
+                        .rounded_md()
+                        .bg(current_location(&theme))
+                        .debug_selector(|| "sidebar-fill".into());
+                    match mode {
+                        Effective::Full => base
+                            .with_spring(
+                                "sidebar-fill",
+                                SpringAnimation::new(SpringConfig::new(2500.0, 2.0 * 2500.0f32.sqrt(), 1.0))
+                                    .to(px(top)),
+                                |el, y| el.top(px(f32::from(y))),
+                            )
+                            .into_any_element(),
+                        Effective::Low => base
+                            .with_animation(
+                                ("sidebar-fill", current_child.unwrap_or(usize::MAX)),
+                                Animation::new(Duration::from_millis(crow_core::motion::ms::LOW_IN)),
+                                |el, t| el.opacity(motion::ease_out(t)),
+                            )
+                            .into_any_element(),
+                        Effective::Off => base.into_any_element(),
+                    }
+                }
+                _ => div().absolute().size(px(0.)).debug_selector(|| "sidebar-fill".into()).into_any_element(),
+            }
+        };
         let mut kinds: Vec<(Option<DropTarget>, Option<Slot>)> = Vec::with_capacity(rows.len());
         let mut looks = self.looks(&rows, focused, ui).into_iter();
         let mut index = 0;
@@ -1022,7 +1062,6 @@ impl Render for Sidebar {
                 .flex()
                 .flex_col()
                 .relative()
-                .when(look.current, |row| row.bg(current_location(&theme)))
                 .when(look.drop, |row| row.child(drop_outline(&theme).inset_0()))
                 .when(look.ring, |row| row.shadow(cursor_ring(&theme)))
                 .when(self.menu.is_some_and(|(m, _)| m == i), |row| row.child(drop_outline(&theme).inset_0()))
@@ -1194,13 +1233,21 @@ impl Render for Sidebar {
         }
         let layout = self.layout.clone();
         div()
-            .on_children_prepainted(move |bounds, _, _| {
+            .on_children_prepainted(move |bounds, window, _| {
+                // The first child is the current-folder fill; the rest are rows.
+                let mut bounds = bounds.into_iter();
+                let _fill = bounds.next();
+                let was_empty = layout.borrow().is_empty();
                 *layout.borrow_mut() = kinds
                     .iter()
                     .copied()
                     .zip(bounds)
                     .map(|((target, favorite), bounds)| (target, favorite, bounds))
                     .collect();
+                // The fill needs the bounds from this first layout; draw it next frame.
+                if was_empty {
+                    window.on_next_frame(|window, _| window.refresh());
+                }
             })
             .id("sidebar")
             .role(Role::ListBox)
@@ -1230,6 +1277,7 @@ impl Render for Sidebar {
             .flex()
             .flex_col()
             .gap(px(1.))
+            .child(fill)
             .children(children)
     }
 }
