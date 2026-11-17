@@ -153,6 +153,17 @@ impl TypeSelect {
         !self.buffer.is_empty() && self.last.is_some_and(|t| now.duration_since(t) <= Self::TIMEOUT)
     }
 
+    /// What was typed in the current run (lowercased), for showing it.
+    pub fn prefix(&self) -> &str {
+        &self.buffer
+    }
+
+    /// End the run: the next letter starts a new prefix.
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+        self.last = None;
+    }
+
     /// The first name starting with `prefix`; otherwise the first name that sorts
     /// after it, like Finder, so typing always lands somewhere sensible.
     pub fn find<'a>(prefix: &str, names: impl IntoIterator<Item = &'a str>) -> Option<usize> {
@@ -249,8 +260,12 @@ mod tests {
         let t0 = Instant::now();
         let mut t = TypeSelect::default();
         assert_eq!(t.push('R', t0), "r");
+        assert_eq!(t.prefix(), "r");
         assert_eq!(t.push('e', t0 + Duration::from_millis(300)), "re");
         assert_eq!(t.push('x', t0 + Duration::from_millis(2000)), "x");
+        t.clear();
+        assert_eq!(t.prefix(), "", "clear ends the run");
+        assert!(!t.is_active(t0 + Duration::from_millis(2100)));
     }
 
     #[test]

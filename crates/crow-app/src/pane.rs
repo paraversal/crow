@@ -789,6 +789,18 @@ impl Pane {
         pending
     }
 
+    /// The focused folder's type-to-select prefix, while its run is active.
+    pub fn type_select_prefix(&self, cx: &App) -> Option<String> {
+        let folder = self.focused_folder().read(cx);
+        folder.type_select_active().then(|| folder.type_select_prefix().to_owned())
+    }
+
+    /// End the focused folder's type-to-select run. Returns whether one was active.
+    pub fn cancel_type_select(&mut self, cx: &mut Context<Self>) -> bool {
+        let folder = self.focused_folder().clone();
+        folder.update(cx, |folder, cx| folder.cancel_type_select(cx))
+    }
+
     /// Clear the focused folder's selection. Returns whether anything was selected.
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
         let had_selection = self.focused_folder().read(cx).selected_count() > 0;
