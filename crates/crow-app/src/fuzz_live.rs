@@ -361,6 +361,10 @@ fn prepare(options: &Options) -> Result<TreeSetup, String> {
     let sidebar = sidebar_toml(&root);
     std::fs::write(config_dir.join("sidebar.toml"), sidebar)
         .map_err(|error| format!("{}: {error}", config_dir.join("sidebar.toml").display()))?;
+    // The live fuzzer's steps assume a usable window; the first-launch sheet is
+    // covered by its own test, not by random input.
+    std::fs::write(state_dir.join(crow_core::ONBOARDING_FILE), "{\"tips_choice\": true}\n")
+        .map_err(|error| format!("{}: {error}", state_dir.join(crow_core::ONBOARDING_FILE).display()))?;
 
     Ok(TreeSetup { root, config_dir, state_dir, trash_dir, log_dir, tree_label, support, tree: cleanup_tree })
 }

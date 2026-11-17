@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crow_core::motion::Fx;
-use crow_core::{HintsMode, SidebarEdit, Tabs, TipId, ViewMode, ZeroMatchStreak};
+use crow_core::{SidebarEdit, Tabs, TipId, TipsMode, ViewMode, ZeroMatchStreak};
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role,
     ScrollHandle, SharedString, Subscription, TitlebarOptions, Toggled, Window, WindowBounds, WindowOptions, div, img,
@@ -34,7 +34,7 @@ use crate::style::{
     BAND_HEIGHT, active_selection, color, color_alpha, highlight_text, icon, truncate_middle_with_ranges, ui_font,
 };
 use crate::text_input::{TextInput, TextInputEvent};
-use crate::ui::{self, Ui, reload_theme};
+use crate::ui::{self, SettingChange, Ui, reload_theme};
 use crow_fs::Entry;
 use crow_fs::ops::{Plan, Request, Resolution};
 use std::collections::HashMap;
@@ -344,6 +344,12 @@ impl CrowWindow {
         });
         let focus = pane.read(cx).focus_handle().clone();
         window.focus(&focus, cx);
+        let mut sheet = None;
+        if !bench && crate::onboarding::take_pending(cx) {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            sheet = Some(Sheet::Onboarding { focus });
+        }
         let owner = cx.entity_id();
         let subscriptions = vec![
             cx.observe(&pane, |_, _, cx| cx.notify()),
@@ -374,7 +380,7 @@ impl CrowWindow {
             sidebar,
             bench,
             show_hidden,
-            sheet: None,
+            sheet,
             show_activity: false,
             why: None,
             picker: None,
@@ -1193,6 +1199,13 @@ impl CrowWindow {
         }
     }
 
+    /// "Don't show tips" on the card: close it and mute every later tip. Key
+    /// hints stay as the `hints` setting has them.
+    fn mute_tips(&mut self, cx: &mut Context<Self>) {
+        self.close_tip(cx);
+        ui::set_setting(SettingChange::Tips(TipsMode::Off), cx);
+    }
+
     /// States a tip must not appear over, and that close one already up.
     fn tip_blocked(&self, cx: &App) -> bool {
         self.sheet.is_some()
@@ -1274,6 +1287,10 @@ enum Sheet {
     StopOperation {
         focus: FocusHandle,
     },
+    /// The first launch asks whether tips should show.
+    Onboarding {
+        focus: FocusHandle,
+    },
 }
 
 impl Sheet {
@@ -1281,7 +1298,8 @@ impl Sheet {
         match self {
             Sheet::Conflicts { focus, .. }
             | Sheet::ConfirmDelete { focus, .. }
-            | Sheet::StopOperation { focus, .. } => focus,
+            | Sheet::StopOperation { focus, .. }
+            | Sheet::Onboarding { focus } => focus,
         }
     }
 }
@@ -1478,7 +1496,22 @@ impl CrowWindow {
     }
 
     fn close_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Escape or a click outside the first-launch sheet keeps the default:
+        // record that it was asked, leave `tips` as the file has it.
+        if matches!(self.sheet, Some(Sheet::Onboarding { .. })) {
+            let show = cx.global::<Ui>().settings.tips == TipsMode::Auto;
+            crate::onboarding::answer(show, cx);
+        }
         self.sheet = None;
+        self.focus_center(window, cx);
+        cx.notify();
+    }
+
+    /// The first-launch sheet's answer: record it, write `tips`, close.
+    fn choose_tips(&mut self, show: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.sheet = None;
+        crate::onboarding::answer(show, cx);
+        ui::set_setting(SettingChange::Tips(if show { TipsMode::Auto } else { TipsMode::Off }), cx);
         self.focus_center(window, cx);
         cx.notify();
     }
@@ -1498,6 +1531,10 @@ impl CrowWindow {
             }
             Some(Sheet::StopOperation { .. }) => {
                 stop_then_quit(cx);
+                return;
+            }
+            Some(Sheet::Onboarding { .. }) => {
+                self.choose_tips(true, window, cx);
                 return;
             }
             None => {}
@@ -1607,6 +1644,31 @@ impl CrowWindow {
                         .into_any_element(),
                 )
             }
+            Sheet::Onboarding { .. } => (
+                "Show tips as you go?".to_owned(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(div().text_color(color(muted)).child(
+                        "Crow can point out a few keys the first time they matter. You can change this later in Settings.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                button("onboarding-no", "No tips".into(), false)
+                                    .on_click(cx.listener(|this, _, window, cx| this.choose_tips(false, window, cx))),
+                            )
+                            .child(
+                                button("onboarding-show", "Show tips".into(), true)
+                                    .on_click(cx.listener(|this, _, window, cx| this.choose_tips(true, window, cx))),
+                            ),
+                    )
+                    .into_any_element(),
+            ),
             Sheet::Conflicts { plan, choices, .. } => {
                 let into = plan
                     .items
@@ -3318,7 +3380,7 @@ impl Render for CrowWindow {
         // blocking state started (rename, drag, overlay, activity).
         if self.tip.is_some()
             && (self.tip_blocked(cx)
-                || cx.global::<Ui>().settings.hints == HintsMode::Off
+                || cx.global::<Ui>().settings.tips_muted()
                 || crate::tips::owner(cx) != Some(cx.entity_id()))
         {
             self.tip = None;
@@ -3334,6 +3396,7 @@ impl Render for CrowWindow {
                     f32::from(window.viewport_size().width),
                     cx.global::<Ui>().feedback.mode,
                     cx.listener(|this, _, _, cx| this.close_tip(cx)),
+                    cx.listener(|this, _, _, cx| this.mute_tips(cx)),
                 )
             }),
             None => None,

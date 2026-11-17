@@ -6,6 +6,7 @@ mod exclude;
 mod extensions;
 mod history;
 pub mod motion;
+mod onboarding;
 mod paths;
 mod recent;
 mod recent_commands;
@@ -24,13 +25,14 @@ pub use extensions::{
     Align, Column, ColumnContext, Excerpt, Extensions, PreviewContent, Previewer, TextPreviewer, text_excerpt,
 };
 pub use history::History;
+pub use onboarding::{ONBOARDING_FILE, OnboardingState};
 pub use paths::{clean_pasted_path, complete_typed, resolve_typed};
 pub use recent::{Recent, parse_zoxide, query_zoxide};
 pub use recent_commands::RecentCommands;
 pub use selection::{Selection, TypeSelect};
 pub use settings::{
-    AppIcon, DEFAULT_SETTINGS, EnterAction, HintsMode, KeymapLayer, Settings, SettingsError, ViewMode, config_dir,
-    load_settings, save_bool_setting, save_number_setting, save_setting, save_table_number,
+    AppIcon, DEFAULT_SETTINGS, EnterAction, HintsMode, KeymapLayer, Settings, SettingsError, TipsMode, ViewMode,
+    config_dir, load_settings, save_bool_setting, save_number_setting, save_setting, save_table_number,
 };
 pub use sidebar::{
     DEFAULT_SIDEBAR, Favorite, FavoriteItem, Group, SidebarConfig, SidebarEdit, Slot, TwinInput, edit_sidebar,

@@ -30,6 +30,10 @@ enter = "rename"
 # "off" hides every hint and tip.
 hints = "auto"
 
+# Contextual tips: "auto" (default) or "off". Tips point out a key the first
+# time it matters. "off" mutes every tip; key hints stay as set above.
+tips = "auto"
+
 # Motion: "auto" (default) follows macOS Reduce Motion (full when it is off, low
 # when it is on); "off" changes state in one frame; "low" fades opacity and color
 # only; "full" also moves and resizes (trash swallows the row, the gap closes).
@@ -145,6 +149,25 @@ impl HintsMode {
     }
 }
 
+/// Whether the contextual tips may appear.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TipsMode {
+    #[default]
+    Auto,
+    Off,
+}
+
+impl TipsMode {
+    /// The value in `settings.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            TipsMode::Auto => "auto",
+            TipsMode::Off => "off",
+        }
+    }
+}
+
 /// Which of Crow's icons the Dock shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -188,6 +211,7 @@ pub struct Settings {
     pub keymap: KeymapLayer,
     pub enter: EnterAction,
     pub hints: HintsMode,
+    pub tips: TipsMode,
     pub motion: MotionMode,
     pub sound: SoundSet,
     pub app_icon: AppIcon,
@@ -207,6 +231,7 @@ impl Default for Settings {
             keymap: KeymapLayer::Finder,
             enter: EnterAction::Rename,
             hints: HintsMode::Auto,
+            tips: TipsMode::Auto,
             motion: MotionMode::Auto,
             sound: SoundSet::Crow,
             app_icon: AppIcon::Refined,
@@ -225,6 +250,12 @@ impl Settings {
     /// `None` means "follow the system" in the theme index.
     pub fn theme_id(&self) -> Option<&str> {
         (self.theme != "system" && !self.theme.is_empty()).then_some(self.theme.as_str())
+    }
+
+    /// Whether tips are muted: `tips = "off"`, or `hints = "off"` as the older
+    /// one-switch fallback.
+    pub fn tips_muted(&self) -> bool {
+        self.tips == TipsMode::Off || self.hints == HintsMode::Off
     }
 }
 
@@ -438,6 +469,28 @@ mod tests {
         assert!(err.contains("settings.toml"), "{err}");
         assert!(err.contains("line 1"), "{err}");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tips_values_parse_and_mute() {
+        let parse = |text: &str| toml::from_str::<Settings>(text).expect("parses");
+        assert_eq!(parse("tips = \"auto\"").tips, TipsMode::Auto);
+        assert_eq!(parse("tips = \"off\"").tips, TipsMode::Off);
+        assert_eq!(parse("theme = \"system\"").tips, TipsMode::Auto, "a missing line is Auto");
+
+        let dir = temp_dir("tips-bad");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.toml"), "tips = \"sometimes\"\n").unwrap();
+        let err = load_settings(&dir).expect_err("rejects an unknown mode").to_string();
+        assert!(err.contains("settings.toml"), "{err}");
+        assert!(err.contains("line 1"), "{err}");
+        fs::remove_dir_all(&dir).ok();
+
+        assert!(!Settings::default().tips_muted());
+        assert!(parse("tips = \"off\"").tips_muted(), "tips = off mutes");
+        assert!(parse("hints = \"off\"").tips_muted(), "hints = off still mutes");
+        assert_eq!(parse("tips = \"off\"").hints, HintsMode::Auto, "tips = off leaves hints alone");
+        assert_eq!(parse("hints = \"off\"").tips, TipsMode::Auto, "hints = off leaves tips alone");
     }
 
     #[test]

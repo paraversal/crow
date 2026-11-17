@@ -56,7 +56,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, hidden files (shown by default), the preview (`show_preview`), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, hidden files (shown by default), the preview (`show_preview`), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
@@ -109,7 +109,8 @@ Esc clear, `⌘F` search deeper), the sidebar (`⌥↑↓` groups, `⇥`/`→` t
 `⌘⌫` remove, `⌘E` eject a disk),
 search results and the search field. The idle hint shows `/` filter (Search and Go to carry their
 keys on the toolbar); after you have used it three times it retires (`hints = "always"` keeps every
-hint, `"off"` hides hints and tips). While an operation runs, a 2 px accent line along the bar's
+hint, `"off"` hides hints and tips). Tips have their own switch: `tips = "off"` mutes them and
+leaves the key hints alone. While an operation runs, a 2 px accent line along the bar's
 top edge and "Copying … · n %" with Cancel esc replace the hints; the path and count stay. A broken
 config file shows an error pill with its file name, line and an Open button, beside progress rather
 than instead of it. Counts name the focused folder ("18 items in Documents"), the selection and its
@@ -123,7 +124,9 @@ way: scrolling a folder of 200+ items ("Type / to filter this folder by name."),
 row that matched nothing ("⌘F searches subfolders and file contents too."), or typing a whole path
 in the palette for a folder it already lists ("⌘K finds recent and favorite folders by a few
 letters."). It retires the moment it shows; Got it, using its key, changing folder or opening an
-overlay closes it. The retired ids live in `~/.local/state/crow/tips.json`.
+overlay closes it. "Don't show tips" on the card mutes every later tip. The first launch asks
+"Show tips as you go?" once; the answer lives in `~/.local/state/crow/onboarding.json`, so
+deleting `settings.toml` does not ask again. The retired ids live in `~/.local/state/crow/tips.json`.
 
 ## Palette
 

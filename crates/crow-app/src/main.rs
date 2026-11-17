@@ -36,6 +36,7 @@ mod keys;
 mod logging;
 mod menus;
 mod motion_lab;
+mod onboarding;
 mod operations;
 mod palette;
 mod pane;

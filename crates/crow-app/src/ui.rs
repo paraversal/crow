@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crow_core::motion::{Effective, MotionMode, SoundSet};
 use crow_core::{
-    AppIcon, EnterAction, Exclude, HintsMode, KeymapLayer, Recent, RecentCommands, Settings, SidebarConfig, Views,
-    load_settings, load_sidebar, load_views,
+    AppIcon, EnterAction, Exclude, HintsMode, KeymapLayer, Recent, RecentCommands, Settings, SidebarConfig, TipsMode,
+    Views, load_settings, load_sidebar, load_views,
 };
 use crow_theme::Theme;
 use gpui::{App, AppContext, Global, SharedString};
@@ -239,6 +239,7 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     cx.defer(refresh_app_icon);
     crate::usage::init(cx);
     crate::tips::init(cx);
+    crate::onboarding::init(cx);
 
     let (theme_tx, theme_rx) = mpsc::channel();
     let theme_watcher = crow_theme::watch(theme_tx).inspect_err(|e| tracing::warn!("theme watch: {e}")).ok();
@@ -310,11 +311,17 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     // io-ok: test-only state reset
     std::fs::remove_dir_all(&root).ok();
     crate::effects::install(cx, std::sync::Arc::new(crate::effects::RecordingEffects::new()));
-    let ui = Ui::new(root.join("config"), root.join("state"), crow_core::home(), crow_theme::fallback(), false);
+    let state_dir = root.join("state");
+    // Tests start past the first-launch sheet unless they ask for it: a fresh
+    // state dir would otherwise owe it in every window test.
+    std::fs::create_dir_all(&state_dir).ok();
+    std::fs::write(state_dir.join(crow_core::ONBOARDING_FILE), "{\"tips_choice\": true}\n").ok();
+    let ui = Ui::new(root.join("config"), state_dir, crow_core::home(), crow_theme::fallback(), false);
     cx.set_global(ui);
     crate::extensions::init(cx);
     crate::usage::init(cx);
     crate::tips::init(cx);
+    crate::onboarding::init(cx);
     install_drag_cancel(cx);
     root.join("config")
 }
@@ -431,6 +438,7 @@ pub enum SettingChange {
     Keymap(KeymapLayer),
     Enter(EnterAction),
     Hints(HintsMode),
+    Tips(TipsMode),
     Motion(MotionMode),
     Sound(SoundSet),
     AppIcon(AppIcon),
@@ -454,6 +462,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             SettingChange::Keymap(value) => replace(&mut settings.keymap, *value),
             SettingChange::Enter(value) => replace(&mut settings.enter, *value),
             SettingChange::Hints(value) => replace(&mut settings.hints, *value),
+            SettingChange::Tips(value) => replace(&mut settings.tips, *value),
             SettingChange::Motion(value) => replace(&mut settings.motion, *value),
             SettingChange::Sound(value) => replace(&mut settings.sound, *value),
             SettingChange::AppIcon(value) => replace(&mut settings.app_icon, *value),
@@ -506,6 +515,9 @@ fn write_setting(change: SettingChange, cx: &mut App) {
         }
         SettingChange::Hints(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "hints", value.key()), cx);
+        }
+        SettingChange::Tips(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "tips", value.key()), cx);
         }
         SettingChange::Motion(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "motion", value.key()), cx);
@@ -882,11 +894,12 @@ mod tests {
     fn each_setting_writes_only_its_key(cx: &mut gpui::TestAppContext) {
         let config = cx.update(crate::ui::init_for_tests);
         cx.update(crate::menus::init_for_tests);
-        let before = "# mine\n\ntheme = \"system\" # theme\nkeymap = \"finder\"\nhints = \"auto\"\nmotion = \"auto\"\nsound = \"crow\"\napp_icon = \"refined\"\nfont_family = \"\"\nfont_size = 13.0\nshow_hidden_files = true\nshow_preview = true\npalette_recent_commands = true\nview_per_folder = true\n\n[window]\nwidth = 1200\nheight = 760\n";
+        let before = "# mine\n\ntheme = \"system\" # theme\nkeymap = \"finder\"\nhints = \"auto\"\ntips = \"auto\"\nmotion = \"auto\"\nsound = \"crow\"\napp_icon = \"refined\"\nfont_family = \"\"\nfont_size = 13.0\nshow_hidden_files = true\nshow_preview = true\npalette_recent_commands = true\nview_per_folder = true\n\n[window]\nwidth = 1200\nheight = 760\n";
         let changes = [
             SettingChange::Theme("gruvbox-dark-hard".into()),
             SettingChange::Keymap(KeymapLayer::Vim),
             SettingChange::Hints(HintsMode::Always),
+            SettingChange::Tips(TipsMode::Off),
             SettingChange::Motion(MotionMode::Off),
             SettingChange::Sound(SoundSet::Finder),
             SettingChange::AppIcon(AppIcon::Sun),
