@@ -377,7 +377,7 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Drag out | Drag one row, then a multiple selection, onto a Finder window and into a Mail message. The image is the same small icon plus name pill inside and outside Crow (right edge at the cursor if the grab point is past it); leaving and re-entering the window keeps that one image, with no clipped frame or second icon; dropping back inside Crow moves the item. List and column rows keep one steady drop target while the pointer rests on them. |
 | Drop in | Drag files from Finder onto a Crow list, onto a column, and onto sidebar rows and group titles: the target keeps one steady highlight while the pointer moves within it; same disk moves, other disk copies, Option copies. Drag a row from Crow's own list the same way. |
 | Trash and Put Back | Cmd-Delete a file in Crow, then use Finder's Put Back on it in the Trash. |
-| Finder clipboard | Copy in Crow, paste in Finder; copy in Finder, paste in Crow. |
+| Finder clipboard | Copy in Crow, paste in Finder; copy in Finder, paste in Crow. Above 1000 selected items the status says "(Crow only)": Crow's own paste works, Finder keeps its previous clipboard. |
 | Activity | Cmd-Option-L lists recent operations; Undo on an older one works or explains why not. |
 | Close during an operation | Copy a large folder to another disk, then ⌘W the only window (or click its red button, or ⌘Q): a sheet asks. Esc keeps the copy running; Return stops it and closes (or quits) once it has wound down. With a second window open, closing one does not ask. |
 
