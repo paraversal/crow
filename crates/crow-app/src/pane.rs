@@ -40,11 +40,12 @@ use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
 use crate::icons::{Glyph, glyph};
 use crate::keys::KeyScope;
+use crate::operations::Operations;
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, content_opacity, display_text, drop_outline, effect_tint, format_time,
-    highlight_text, icon, inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
+    CUT_DIM, active_selection, color, color_alpha, content_opacity, display_text, drop_outline, effect_tint,
+    format_time, highlight_text, icon, inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -1907,6 +1908,23 @@ impl Pane {
         let selected_entries = folder.selected_entries();
         let total = folder.row_count();
         let cursor = folder.cursor_ix();
+        let range_start = range.start;
+        let (flash, clipboard_flags) = {
+            let clipboard = cx.global::<Operations>().clipboard.as_ref();
+            let flash = clipboard
+                .and_then(|clipboard| clipboard.flash)
+                .map(|started| crow_core::motion::copy_flash(mode, started, now))
+                .unwrap_or(0.0);
+            let cut = clipboard.is_some_and(|clipboard| clipboard.cut && clipboard.dim);
+            let flags: Vec<(bool, bool)> = (range.start..range.end)
+                .map(|ix| {
+                    let on =
+                        folder.row(ix).is_some_and(|(entry, _)| clipboard.is_some_and(|c| c.contains(&entry.path)));
+                    (on && cut, on && flash > 0.0)
+                })
+                .collect();
+            (flash, flags)
+        };
         let (flags_first, edges) = {
             let (first, flags) = island_flags(&folder, range.clone());
             (first, island_edges(&flags))
@@ -1945,10 +1963,12 @@ impl Pane {
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
                 let tint = effect_tint(look, theme);
+                let (is_cut, is_flash) = clipboard_flags[ix - range_start];
                 let dim = content_opacity(
                     entry.hidden,
                     self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
-                );
+                ) * if is_cut { CUT_DIM } else { 1.0 };
+                let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
                 let reveal = folder.disclosure_opacity(ix, now);
                 let turn = folder.chevron_turn(&entry.path, now).unwrap_or(if expanded { 1.0 } else { 0.0 });
                 let island = edges.get(ix - flags_first).copied().flatten();
@@ -2005,6 +2025,12 @@ impl Pane {
                     .when(draws_selection_fill(selected, glide, cursor == Some(ix)), |row| row.bg(selection_bg))
                     .when_some(tint, |row, tint| {
                         row.child(with_island_rounding(div().absolute().inset_0().bg(tint), island))
+                    })
+                    .when_some(flash_tint, |row, tint| {
+                        row.child(
+                            with_island_rounding(div().absolute().inset_0().bg(tint), island)
+                                .debug_selector(|| format!("flash-{}", entry.name)),
+                        )
                     })
                     .debug_selector(|| format!("row-{}", entry.name))
                     .on_drag(DraggedSelection { entries: drag_entries }, {
@@ -2123,7 +2149,7 @@ impl Pane {
                             } else {
                                 div().w(px(TRIANGLE_WIDTH)).flex_none().into_any_element()
                             })
-                            .child(row_icon(&entry, look, theme))
+                            .child(row_icon(&entry, look, theme, dim))
                             .child(
                                 div()
                                     .debug_selector(|| format!("row-name-{}", entry.name))
@@ -2287,6 +2313,23 @@ impl Pane {
         let name_room = px(width - 16.0 - 8.0 - 16.0 - 2.0 * CELL_PADDING - 8.0);
         let total = folder.row_count();
         let cursor = folder.cursor_ix();
+        let range_start = range.start;
+        let (flash, clipboard_flags) = {
+            let clipboard = cx.global::<Operations>().clipboard.as_ref();
+            let flash = clipboard
+                .and_then(|clipboard| clipboard.flash)
+                .map(|started| crow_core::motion::copy_flash(mode, started, now))
+                .unwrap_or(0.0);
+            let cut = clipboard.is_some_and(|clipboard| clipboard.cut && clipboard.dim);
+            let flags: Vec<(bool, bool)> = (range.start..range.end)
+                .map(|ix| {
+                    let on =
+                        folder.row(ix).is_some_and(|(entry, _)| clipboard.is_some_and(|c| c.contains(&entry.path)));
+                    (on && cut, on && flash > 0.0)
+                })
+                .collect();
+            (flash, flags)
+        };
         let (flags_first, edges) = {
             let (first, flags) = island_flags(folder, range.clone());
             (first, island_edges(&flags))
@@ -2315,10 +2358,12 @@ impl Pane {
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
                 let tint = effect_tint(look, theme);
+                let (is_cut, is_flash) = clipboard_flags[ix - range_start];
                 let dim = content_opacity(
                     entry.hidden,
                     self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
-                );
+                ) * if is_cut { CUT_DIM } else { 1.0 };
+                let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
                 let island = edges.get(ix - flags_first).copied().flatten();
                 div()
                     .id(ix)
@@ -2373,6 +2418,12 @@ impl Pane {
                     .when(draws_selection_fill(selected, glide, cursor == Some(ix)), |row| row.bg(selection_bg))
                     .when_some(tint, |row, tint| {
                         row.child(with_island_rounding(div().absolute().inset_0().bg(tint), island))
+                    })
+                    .when_some(flash_tint, |row, tint| {
+                        row.child(
+                            with_island_rounding(div().absolute().inset_0().bg(tint), island)
+                                .debug_selector(|| format!("column-{k}-flash-{}", entry.name)),
+                        )
                     })
                     .debug_selector(|| format!("column-{k}-row-{}", entry.name))
                     .on_drag(DraggedSelection { entries: drag_entries }, {
@@ -2454,7 +2505,7 @@ impl Pane {
                             this.open_selected(cx);
                         }
                     }))
-                    .child(row_icon(&entry, look, theme))
+                    .child(row_icon(&entry, look, theme, dim))
                     .child(
                         div()
                             .debug_selector(|| format!("column-{k}-row-name-{}", entry.name))
@@ -2487,7 +2538,11 @@ impl Pane {
                                 },
                             }),
                     )
-                    .child(div().w(px(10.)).flex_none().text_color(subtle).child(if navigable { "›" } else { "" }))
+                    .child(div().w(px(10.)).flex_none().opacity(dim).text_color(subtle).child(if navigable {
+                        "›"
+                    } else {
+                        ""
+                    }))
             })
             .collect()
     }
@@ -2814,14 +2869,14 @@ fn with_island_rounding<E: Styled>(element: E, island: Option<IslandEdges>) -> E
 }
 
 /// The file icon with the trash glyph drawn over it while a row is swallowed.
-fn row_icon(entry: &Entry, look: Look, theme: &Theme) -> Div {
+fn row_icon(entry: &Entry, look: Look, theme: &Theme, dim: f32) -> Div {
     div()
         .relative()
         .size(px(16.))
         .flex_none()
         .child(
             div()
-                .opacity((1.0 - look.trash) * content_opacity(entry.hidden, false))
+                .opacity((1.0 - look.trash) * dim)
                 .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
         )
         .when(look.trash > 0.0, |slot| {
@@ -2846,7 +2901,7 @@ fn ghost_row(entry: &Entry, look: Look, theme: &Theme, font_size: Pixels) -> Div
         .gap_2()
         .px(px(CELL_PADDING))
         .opacity(look.opacity)
-        .child(row_icon(entry, look, theme))
+        .child(row_icon(entry, look, theme, content_opacity(entry.hidden, false)))
         .child(
             div()
                 .relative()
@@ -2967,6 +3022,15 @@ impl Render for Pane {
             (ui.feedback.mode, px(ui.settings.font_size), ui.theme.clone())
         };
         let now = Instant::now();
+        if cx
+            .global::<Operations>()
+            .clipboard
+            .as_ref()
+            .and_then(|clipboard| clipboard.flash)
+            .is_some_and(|started| crow_core::motion::copy_flash(mode, started, now) > 0.0)
+        {
+            window.request_animation_frame();
+        }
         let glide = mode == Effective::Full && (self.focus.is_focused(window) || self.filtering.is_some());
         // The field is inside the list now: while it has focus, the list's actions must be
         // off the focus path so AppKit's menu equivalents let those keys through.

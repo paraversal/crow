@@ -77,6 +77,10 @@ pub fn drop_outline(theme: &Theme) -> gpui::Div {
 /// the selection fill behind them stays full).
 pub const HIDDEN_DIM: f32 = 0.5;
 
+/// How much contrast a cut item's icon and text keep until the clipboard changes.
+/// Like Finder's cut icons: the selection fill stays full.
+pub const CUT_DIM: f32 = 0.5;
+
 /// The opacity of a row's icon and text: hidden items are dimmed, except while
 /// being renamed, so the field reads at full contrast.
 pub fn content_opacity(hidden: bool, renaming: bool) -> f32 {

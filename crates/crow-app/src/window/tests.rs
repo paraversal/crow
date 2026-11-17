@@ -1726,6 +1726,80 @@ fn a_huge_copy_keeps_the_clipboard_in_crow(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn copy_flashes_and_cut_dims(cx: &mut TestAppContext) {
+    let root = fixture("copy-feedback");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-c");
+    let (flash, cut, dim) = cx.read(|cx| {
+        let clipboard = cx.global::<Operations>().clipboard.as_ref().expect("clipboard");
+        (clipboard.flash, clipboard.cut, clipboard.dim)
+    });
+    assert!(flash.is_some(), "a copy starts a flash");
+    assert!(!cut && !dim, "a copy does not dim");
+    assert!(cx.debug_bounds("flash-alpha").is_some(), "the copied row flashes");
+    let first = flash.expect("flash");
+    // Age the flash past COPY_FADE (the clock is the real one, not the test clock).
+    cx.update(|_, cx| {
+        if let Some(clipboard) = &mut cx.global_mut::<Operations>().clipboard {
+            clipboard.flash = Some(Instant::now() - Duration::from_millis(crow_core::motion::ms::COPY_FADE + 1));
+        }
+    });
+    pane(&view, &cx).update(&mut cx, |_, cx| cx.notify());
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("flash-alpha").is_none(), "the flash is one pulse");
+    cx.simulate_keystrokes("cmd-x");
+    let (flash, cut, dim) = cx.read(|cx| {
+        let clipboard = cx.global::<Operations>().clipboard.as_ref().expect("clipboard");
+        (clipboard.flash, clipboard.cut, clipboard.dim)
+    });
+    assert!(flash.is_none() && cut && dim, "a cut dims without a flash");
+    std::thread::sleep(Duration::from_millis(2));
+    cx.simulate_keystrokes("cmd-c");
+    let (flash, cut, dim) = cx.read(|cx| {
+        let clipboard = cx.global::<Operations>().clipboard.as_ref().expect("clipboard");
+        (clipboard.flash, clipboard.cut, clipboard.dim)
+    });
+    assert!(flash.is_some_and(|flash| flash > first), "a new copy starts a new flash");
+    assert!(!cut && !dim, "the new copy replaces the cut");
+}
+
+#[gpui::test]
+fn escape_undo_and_paste_clear_the_cut_dim(cx: &mut TestAppContext) {
+    let root = fixture("cut-dim-clear");
+    let (_view, mut cx) = open(cx, &root);
+    let state = |cx: &VisualTestContext| {
+        cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|clipboard| (clipboard.cut, clipboard.dim)))
+    };
+    cx.simulate_keystrokes("cmd-x");
+    assert_eq!(state(&cx), Some((true, true)));
+    cx.simulate_keystrokes("escape");
+    assert_eq!(state(&cx), Some((true, false)), "Escape clears the dim, keeps the cut");
+    cx.simulate_keystrokes("down cmd-x");
+    assert_eq!(state(&cx), Some((true, true)), "a new cut dims again");
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(state(&cx), Some((true, false)), "undo clears the dim");
+    cx.simulate_keystrokes("cmd-x cmd-v");
+    assert_eq!(state(&cx), None, "a cut paste consumes the clipboard");
+}
+
+#[gpui::test]
+fn search_results_flash_and_dim_with_the_clipboard(cx: &mut TestAppContext) {
+    let root = fixture("search-copy-feedback");
+    std::fs::write(root.join("needle.txt"), "needle\n").expect("create fixture");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("needle");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("tab cmd-c");
+    assert!(cx.debug_bounds("search-flash-0").is_some(), "the result row flashes");
+    cx.simulate_keystrokes("cmd-x");
+    let state =
+        cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|clipboard| (clipboard.cut, clipboard.dim)));
+    assert_eq!(state, Some((true, true)), "the result row dims");
+}
+
+#[gpui::test]
 fn trash_records_its_sound(cx: &mut TestAppContext) {
     use crate::effects::Call;
     let root = fixture("effects-sound");

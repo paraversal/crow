@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crow_core::{Exclude, KeymapLayer, Selection, SetName};
 use crow_fs::Entry;
@@ -29,11 +29,12 @@ use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::extensions::Ext;
 use crate::icons::{self, Glyph};
 use crate::keys::{self, KeyScope};
+use crate::operations::Operations;
 use crate::pane::DraggedSelection;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, display_text, field_ring, format_time, format_time_short, highlight_text,
-    icon, inactive_selection, map_range, truncate_middle_parts,
+    CUT_DIM, active_selection, color, color_alpha, display_text, field_ring, format_time, format_time_short,
+    highlight_text, icon, inactive_selection, map_range, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -1708,9 +1709,21 @@ impl SearchView {
         let selection_bg = if focused { active_selection(theme) } else { inactive_selection(theme) };
         let count = self.results.len();
         let cursor = self.cursor;
+        let mode = ui.feedback.mode;
+        let now = Instant::now();
         range
             .filter_map(|i| {
                 let row = self.results.get(i)?;
+                let clipboard = cx.global::<Operations>().clipboard.as_ref();
+                let flash = clipboard
+                    .and_then(|clipboard| clipboard.flash)
+                    .map(|started| crow_core::motion::copy_flash(mode, started, now))
+                    .unwrap_or(0.0);
+                let on_clipboard = clipboard.is_some_and(|clipboard| clipboard.contains(&row.path));
+                let is_cut = on_clipboard && clipboard.is_some_and(|clipboard| clipboard.cut && clipboard.dim);
+                let dim = if is_cut { CUT_DIM } else { 1.0 };
+                let flash_tint = (on_clipboard && flash > 0.0)
+                    .then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
                 let selected = self.selection.contains(&row.path);
                 let on_selection = selected && focused;
                 let truncated = truncate_middle_parts(&row.name, px(300.), px(13.), window);
@@ -1781,10 +1794,21 @@ impl SearchView {
                     .w_full()
                     .px_2()
                     .rounded_md()
+                    .relative()
                     .flex()
                     .items_center()
                     .gap_2()
                     .when(selected, |row| row.bg(selection_bg))
+                    .when_some(flash_tint, |row, tint| {
+                        row.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .rounded_md()
+                                .bg(tint)
+                                .debug_selector(|| format!("search-flash-{i}")),
+                        )
+                    })
                     .debug_selector(|| format!("search-row-{i}"))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1837,6 +1861,7 @@ impl SearchView {
                             .flex()
                             .items_center()
                             .gap_2()
+                            .opacity(dim)
                             .child(
                                 div()
                                     .size(px(16.))
@@ -1871,6 +1896,7 @@ impl SearchView {
                             .text_ellipsis()
                             .text_size(px(12.))
                             .text_color(muted)
+                            .opacity(dim)
                             .child(row.folder.clone()),
                     )
                     .child(
@@ -1972,10 +1998,20 @@ impl SearchView {
 }
 
 impl Render for SearchView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let idle = self.query(cx).trim().is_empty();
+        let now = Instant::now();
+        if cx
+            .global::<Operations>()
+            .clipboard
+            .as_ref()
+            .and_then(|clipboard| clipboard.flash)
+            .is_some_and(|started| crow_core::motion::copy_flash(ui.feedback.mode, started, now) > 0.0)
+        {
+            window.request_animation_frame();
+        }
         div()
             .id("search-view")
             .role(Role::Group)
