@@ -624,8 +624,12 @@ pub enum Source {
 pub struct FolderCandidate {
     pub path: PathBuf,
     pub label: String,
-    /// Byte offset of the folder's name inside `label`.
-    pub name_start: usize,
+    /// The folder's own name for the row's first line. The home folder shows the
+    /// account's short name instead of `~`.
+    pub name: String,
+    /// Byte offset of the name inside `label`; `None` when the name is not a
+    /// suffix of the label (the home folder).
+    pub name_start: Option<usize>,
     pub source: Source,
     /// Higher is more recent/frequent; 0 for favorites and subfolders not in Recent.
     pub frecency: f64,
@@ -643,7 +647,10 @@ pub enum Item {
     Folder {
         path: PathBuf,
         label: String,
-        name_start: usize,
+        /// The row's first line; the home folder uses the account's short name.
+        name: String,
+        /// Byte offset of the name inside `label`; `None` for the home folder.
+        name_start: Option<usize>,
         source: Source,
         last_visit: Option<u64>,
         /// Matched letters as byte ranges in `label`.
@@ -655,7 +662,7 @@ impl Item {
     /// The matches inside the folder's name, shifted to name-relative bytes; a
     /// range that straddles the name's start is clipped.
     pub fn name_ranges(&self) -> Vec<Range<usize>> {
-        let Item::Folder { name_start, matched, .. } = self else { return Vec::new() };
+        let Item::Folder { name_start: Some(name_start), matched, .. } = self else { return Vec::new() };
         let name_start = *name_start;
         matched
             .iter()
@@ -699,6 +706,19 @@ fn name_start(label: &str) -> usize {
     }
 }
 
+/// The name line for a folder. The home folder shows the account's short name
+/// (Finder's sidebar does the same) instead of the label's `~`; its path line
+/// stays `~`, so the name is not a suffix of the label.
+fn folder_name(path: &Path, label: &str, home: &Path) -> (String, Option<usize>) {
+    if path == home {
+        let name = crate::style::display_name(home);
+        (if name.is_empty() { "Home".to_owned() } else { name }, None)
+    } else {
+        let start = name_start(label);
+        (label[start..].to_owned(), Some(start))
+    }
+}
+
 /// Favorites first, then Recent's frecency list, then the current folder's
 /// subfolders. Paths appear once, under the first source that has them
 /// (Favorites > Recent > Here); a favorite that is also recent takes its
@@ -714,8 +734,10 @@ pub fn folder_candidates(
     let mut out: Vec<FolderCandidate> = Vec::new();
     let push = |path: PathBuf, source: Source, frecency: f64, out: &mut Vec<FolderCandidate>| {
         let label = crate::style::display_path(&path, home);
+        let (name, name_start) = folder_name(&path, &label, home);
         out.push(FolderCandidate {
-            name_start: name_start(&label),
+            name,
+            name_start,
             label,
             source,
             frecency,
@@ -841,6 +863,7 @@ fn folder_item(folder: &FolderCandidate, matched: Vec<Range<usize>>) -> Item {
     Item::Folder {
         path: folder.path.clone(),
         label: folder.label.clone(),
+        name: folder.name.clone(),
         name_start: folder.name_start,
         source: folder.source,
         last_visit: folder.last_visit,
@@ -964,7 +987,8 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathEntry], files:
     let exact = file_rows.first().is_some_and(|file| file.lower == typed);
     let file_item = |file: &PathEntry| {
         let label = crate::style::display_path(&file.path, home);
-        let start = name_start(&label);
+        let (name, name_start) = folder_name(&file.path, &label, home);
+        let start = name_start.unwrap_or(label.len());
         Item::Folder {
             path: file.path.clone(),
             // The typed prefix, counted in characters so a case change in the name can't split one.
@@ -977,7 +1001,8 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathEntry], files:
             )
             .collect(),
             label,
-            name_start: start,
+            name,
+            name_start,
             source: Source::File,
             last_visit: None,
         }
@@ -988,10 +1013,12 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathEntry], files:
     }
     if partial.is_empty() {
         let label = crate::style::display_path(parent, home);
+        let (name, name_start) = folder_name(parent, &label, home);
         items.push(Item::Folder {
             path: parent.to_path_buf(),
-            label: label.clone(),
-            name_start: name_start(&label),
+            label,
+            name,
+            name_start,
             source: Source::Here,
             last_visit: None,
             matched: Vec::new(),
@@ -1013,7 +1040,8 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathEntry], files:
     matched.truncate(TOTAL_LIMIT.saturating_sub(items.len()));
     for (_, child) in matched {
         let label = crate::style::display_path(&child.path, home);
-        let start = name_start(&label);
+        let (name, name_start) = folder_name(&child.path, &label, home);
+        let start = name_start.unwrap_or(label.len());
         let matched = match fuzzy.as_mut() {
             Some(fuzzy) => fuzzy.indices(&child.name).map_or_else(Vec::new, |(_, ranges)| {
                 ranges.into_iter().map(|range| (range.start + start)..(range.end + start)).collect()
@@ -1024,7 +1052,8 @@ pub fn path_listing(parent: &Path, partial: &str, children: &[PathEntry], files:
         items.push(Item::Folder {
             path: child.path.clone(),
             label,
-            name_start: start,
+            name,
+            name_start,
             source: Source::Here,
             last_visit: None,
             matched,
@@ -1252,7 +1281,8 @@ mod tests {
         let straddling = Item::Folder {
             path: PathBuf::new(),
             label: "~/ab/cd".into(),
-            name_start: 5,
+            name: "cd".into(),
+            name_start: Some(5),
             source: Source::Recent,
             last_visit: None,
             matched: vec![3..7],

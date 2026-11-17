@@ -2955,10 +2955,9 @@ impl CrowWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let Item::Folder { path, label, name_start, source, last_visit, matched, .. } = &listing.items[i] else {
+        let Item::Folder { path, label, name, source, last_visit, matched, .. } = &listing.items[i] else {
             return div().into_any_element();
         };
-        let name = label[*name_start..].to_owned();
         let (name_text, name_ranges) = (name.clone(), listing.items[i].name_ranges());
         let (path_text, path_ranges) =
             truncate_middle_with_ranges(label, matched, px(palette_path_width(window)), px(12.), window);
@@ -3631,6 +3630,24 @@ impl CrowWindow {
                 Row::Status(text) => text.to_string(),
                 Row::Item(i) => match &palette.listing.items[*i] {
                     Item::Folder { label, .. } => label.clone(),
+                    Item::Command { command, .. } => command.label.to_owned(),
+                },
+            })
+            .collect()
+    }
+
+    /// The first line of each palette row, aligned with `palette_rows`.
+    fn palette_row_names(&self) -> Vec<String> {
+        let Some(palette) = self.palette.as_ref() else { return Vec::new() };
+        palette
+            .listing
+            .rows
+            .iter()
+            .map(|row| match row {
+                Row::Header(text) => format!("# {text}"),
+                Row::Status(text) => text.to_string(),
+                Row::Item(i) => match &palette.listing.items[*i] {
+                    Item::Folder { name, .. } => name.clone(),
                     Item::Command { command, .. } => command.label.to_owned(),
                 },
             })

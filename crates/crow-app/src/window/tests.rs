@@ -3605,6 +3605,23 @@ fn palette_lists_sections_in_order(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn palette_home_row_names_the_account_and_keeps_the_tilde_path(cx: &mut TestAppContext) {
+    let root = fixture("palette-home");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-k");
+    settle(&view, &mut cx);
+
+    let (rows, names) = view.read_with(&cx, |w, _| (w.palette_rows(), w.palette_row_names()));
+    let home = rows.iter().position(|row| row == "~").expect("the home row");
+    let home_path = cx.read(|cx| cx.global::<Ui>().home.clone());
+    let expected = crate::style::display_name(&home_path);
+    let expected = if expected.is_empty() { "Home".to_owned() } else { expected };
+    assert_eq!(names[home], expected, "the name line is the account's short name");
+    assert_ne!(names[home], "~", "the name is not the path");
+    assert_eq!(rows[home], "~", "the path line stays ~");
+}
+
+#[gpui::test]
 fn palette_twins_get_distinct_labels(cx: &mut TestAppContext) {
     let root = fixture("palette-match");
     for side in ["a", "b"] {
