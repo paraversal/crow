@@ -7,7 +7,7 @@ Branch: `m8-f1-selection` · PR: none · Last updated: 2026-11-17 · State: in p
 | Item | State | Notes |
 | --- | --- | --- |
 | 1 Delete selects the next row | done | `Folder.cursor_before_apply` + `select_next_after_removal`; covers trash, move, permanent delete, watcher and rescan. Tests: middle, last, multi, watcher cursor, external non-cursor, filtered, empty, inline child. |
-| 2 Finder-style selection islands | todo | `pane.rs` list and column rows; `selection_islands` helper; one fill per contiguous run; 1 px rule inside a run. |
+| 2 Finder-style selection islands | done | `pane::selection_islands` + `island_edges`; list and column rows round the island ends and draw a 1 px `border` rule inside a run; the glide fill adopts the cursor row's island rounding. Tests: helper units and a render-bounds test for 1/2/3 rows and two islands, with no layout shift. |
 | 3 Complete the row-removal animation | todo | Audit the trash/move FLIP, then a leaving effect for watcher/permanent removals with no operation effect. |
 | 4 Copy/cut feedback | todo | Flash copied rows; dim cut rows from `Operations.clipboard`; clear on paste, undo, Escape, new copy/cut. |
 | 5 Sidebar current-folder fill glides | todo | Full: glide old→new row; Low: fade; Off: jump. No layout shift. |
@@ -51,7 +51,8 @@ Branch: `m8-f1-selection` · PR: none · Last updated: 2026-11-17 · State: in p
 
 - 2026-11-17: Read AGENTS.md, the M8 index, the F1 plan, `folder.rs`, `pane.rs`, `sidebar.rs`, `tips.rs`, `motion.rs`, `selection.rs`, and the tip/glide tests. Created the branch and this progress file. Asked Q1–Q7; answers recorded.
 - 2026-11-17: Item 1. `Selection::set_cursor` added; `Folder` remembers the cursor row before an apply and, when the apply drops it, selects the row now at that index (or the new last row). If other selected rows remain, the next row joins the selection so the cursor row stays selected. Tests updated where the old behavior asserted “nothing selected after trash”; new tests for middle/last/multi trash, watcher cursor/last/other, filtered, empty, inline child.
+- 2026-11-17: Item 2. Islands in list and column view; the cursor glide fill takes the cursor row's island rounding so a multi-row island stays one box. No cursor ring (Q1). Render test asserts the top/bottom markers, the rule count and unchanged row bounds.
 
 ## Next
 
-Start item 2: Finder-style selection islands.
+Start item 3: complete the row-removal animation.

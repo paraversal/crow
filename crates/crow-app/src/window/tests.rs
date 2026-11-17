@@ -4425,6 +4425,53 @@ fn shift_arrows_extend_and_cmd_a_selects_all(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn selection_islands_round_the_ends_and_rule_the_middle(cx: &mut TestAppContext) {
+    let root = fixture("islands");
+    let (view, mut cx) = open(cx, &root);
+    let rows_before =
+        ["row-alpha", "row-beta", "row-notes.txt"].map(|selector| cx.debug_bounds(selector).expect("row"));
+    // One row: alpha is the first load's selection.
+    assert!(cx.debug_bounds("island-top-alpha").is_some());
+    assert!(cx.debug_bounds("island-bottom-alpha").is_some());
+    assert!(cx.debug_bounds("island-rule-alpha").is_none());
+    assert!(cx.debug_bounds("island-top-beta").is_none());
+
+    // Two adjacent rows: one box, one rule.
+    cx.simulate_keystrokes("shift-down");
+    assert_eq!(selected_names(&view, &cx), ["alpha", "beta"]);
+    assert!(cx.debug_bounds("island-top-alpha").is_some());
+    assert!(cx.debug_bounds("island-bottom-alpha").is_none(), "alpha continues into beta");
+    assert!(cx.debug_bounds("island-top-beta").is_none(), "beta continues alpha's island");
+    assert!(cx.debug_bounds("island-bottom-beta").is_some());
+    assert!(cx.debug_bounds("island-rule-beta").is_some(), "one rule inside the island");
+    assert!(cx.debug_bounds("island-rule-notes.txt").is_none());
+
+    // Three adjacent rows: two rules, one box.
+    cx.simulate_keystrokes("shift-down");
+    assert_eq!(selected_names(&view, &cx), ["alpha", "beta", "notes.txt"]);
+    assert!(cx.debug_bounds("island-rule-notes.txt").is_some(), "the second rule");
+    assert!(cx.debug_bounds("island-top-notes.txt").is_none());
+    assert!(cx.debug_bounds("island-bottom-notes.txt").is_some());
+
+    // Two islands separated by an unselected row: each gets its own box, no rule.
+    cx.simulate_keystrokes("escape");
+    click_selector(&mut cx, "row-alpha");
+    let notes = cx.debug_bounds("row-notes.txt").expect("notes row");
+    cx.simulate_click(notes.center(), gpui::Modifiers::command());
+    assert_eq!(selected_names(&view, &cx), ["alpha", "notes.txt"]);
+    assert!(cx.debug_bounds("island-bottom-alpha").is_some());
+    assert!(cx.debug_bounds("island-top-notes.txt").is_some());
+    assert!(cx.debug_bounds("island-rule-notes.txt").is_none(), "separate islands have no rule");
+    assert!(cx.debug_bounds("island-top-beta").is_none());
+
+    let rows_after = ["row-alpha", "row-beta", "row-notes.txt"].map(|selector| cx.debug_bounds(selector).expect("row"));
+    for (before, after) in rows_before.iter().zip(rows_after.iter()) {
+        assert_eq!(before.top(), after.top(), "selection never moves a row");
+        assert_eq!(after.size.height, px(crate::pane::ROW_HEIGHT), "row height is unchanged");
+    }
+}
+
+#[gpui::test]
 fn typing_selects_by_name_and_space_continues_a_name(cx: &mut TestAppContext) {
     let root = fixture("typeselect");
     std::fs::write(root.join("my file.txt"), "").expect("create fixture");
