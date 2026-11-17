@@ -234,6 +234,8 @@ pub mod ms {
     pub const LOW_IN: u64 = 160;
     pub const LOW_TINT: u64 = 420;
     pub const STATUS: u64 = 140;
+    pub const HOVER: u64 = 120;
+    pub const FIELD: u64 = 160;
     pub const COPY: u64 = 1600;
     pub const COPY_FADE: u64 = 320;
     pub const DISCLOSE: u64 = 180;

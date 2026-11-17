@@ -67,6 +67,9 @@ actions!(
         GoToFolder,
         /// ⌘L or a double-click on empty path space: edit the path in the bottom bar.
         EditPath,
+        /// The path bar's hover state, so the pill can fade.
+        PathHover,
+        PathUnhover,
         ViewAsList,
         ViewAsColumns,
         // List filter

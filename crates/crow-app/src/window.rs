@@ -13,9 +13,9 @@ use gpui::{
 
 use crate::actions::{
     AddToSidebar, ApplyThemeEverywhere, CloseTab, EditPath, GoBack, GoForward, GoToFolder, KeyboardShortcuts, Minimize,
-    MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PreviousTab,
-    ResetFolderView, SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
-    TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
+    MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover, PathUnhover,
+    PreviousTab, ResetFolderView, SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus,
+    ToggleHiddenFiles, TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -150,6 +150,8 @@ pub struct CrowWindow {
     search: Option<Entity<SearchView>>,
     /// ⌘L or a double-click on empty path space: the bar's path slot is a field.
     path_edit: Option<PathEdit>,
+    /// The path bar's hover state, so the pill can fade.
+    path_hovered: bool,
     /// A deferred re-focus into an open overlay is already scheduled.
     refocus_overlay: bool,
     /// The contextual tip on screen, if any.
@@ -390,6 +392,7 @@ impl CrowWindow {
             palette: None,
             search: None,
             path_edit: None,
+            path_hovered: false,
             refocus_overlay: false,
             tip: None,
             zero_streak: ZeroMatchStreak::new(),
@@ -1179,7 +1182,7 @@ impl CrowWindow {
 
     fn render_bottom_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let state = self.bar_state(window, cx);
-        bottom_bar::render(state, self.pane().clone(), cx)
+        bottom_bar::render(state, self.pane().clone(), self.path_hovered, cx)
     }
 
     // ----- contextual tips -----
@@ -3478,6 +3481,14 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::go_to_folder))
             .on_action(cx.listener(Self::edit_path))
+            .on_action(cx.listener(|this, _: &PathHover, _, cx| {
+                this.path_hovered = true;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &PathUnhover, _, cx| {
+                this.path_hovered = false;
+                cx.notify();
+            }))
             .on_action(cx.listener(Self::view_as_list))
             .on_action(cx.listener(Self::view_as_columns))
             .on_action(cx.listener(|this, _: &crate::actions::Undo, _, cx| this.undo(None, cx)))

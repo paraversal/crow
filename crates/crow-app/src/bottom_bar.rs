@@ -14,7 +14,8 @@ use gpui::{
 
 use crate::actions::{
     CancelOperation, ClearFilter, EditPath, Eject, MoveFavoriteDown, MoveFavoriteUp, NextGroup, OpenSelection,
-    PreviousGroup, QuickLook, RemoveFromSidebar, SearchReveal, ShowSearch, StartFilter, SwitchFocus,
+    PathHover, PathUnhover, PreviousGroup, QuickLook, RemoveFromSidebar, SearchReveal, ShowSearch, StartFilter,
+    SwitchFocus,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::icons::{self, Glyph};
@@ -608,7 +609,7 @@ fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui:
 }
 
 /// One bar: path · transient · counts.
-pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoElement + use<> {
+pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) -> impl IntoElement + use<> {
     let ui = cx.global::<Ui>();
     let theme = ui.theme.clone();
     let border = color(theme.role("border"));
@@ -713,11 +714,24 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
                     cx.stop_propagation();
                     window.dispatch_action(Box::new(EditPath), cx);
                 })
-                .child(
-                    icons::glyph(Glyph::Pencil, 14., "fg-subtle", &theme)
-                        .group_hover("path-area", move |s| s.text_color(muted))
-                        .group_hover("path-edit", move |s| s.text_color(fg)),
-                ),
+                .child({
+                    let pencil_theme = theme.clone();
+                    let pencil = icons::glyph(Glyph::Pencil, 14., "fg-subtle", &theme);
+                    if ui.feedback.mode == Effective::Off {
+                        pencil.into_any_element()
+                    } else {
+                        pencil
+                            .with_animation(
+                                SharedString::from(format!("path-pencil-{hovered}")),
+                                Animation::new(Duration::from_millis(motion::ms::HOVER)),
+                                move |el, t| {
+                                    let t = motion::ease_out(if hovered { t } else { 1.0 - t });
+                                    el.text_color(color_alpha(pencil_theme.role("fg"), (t * 255.) as u8))
+                                },
+                            )
+                            .into_any_element()
+                    }
+                }),
             "Edit path",
             &EditPath,
             KeyScope::Window,
@@ -737,8 +751,22 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
             .border_1()
             .border_color(transparent_black())
             .bg(transparent_black())
-            .group_hover("path-area", move |s| s.bg(color(pill_theme.role("surface"))).border_color(border))
             .children(children);
+        let pill = if ui.feedback.mode == Effective::Off {
+            pill.into_any_element()
+        } else {
+            pill.with_animation(
+                SharedString::from(format!("path-pill-{hovered}")),
+                Animation::new(Duration::from_millis(motion::ms::HOVER)),
+                move |el, t| {
+                    let t = motion::ease_out(if hovered { t } else { 1.0 - t });
+                    let alpha = (t * 255.) as u8;
+                    el.bg(color_alpha(pill_theme.role("surface"), alpha))
+                        .border_color(color_alpha(pill_theme.role("border"), alpha))
+                },
+            )
+            .into_any_element()
+        };
         let empty = div()
             .id("path-empty")
             .debug_selector(|| "path-empty".into())
@@ -766,6 +794,13 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
             // and the pencil do the same. Segments stop propagation.
             .on_click(|_, window, cx| {
                 window.dispatch_action(Box::new(EditPath), cx);
+            })
+            .on_hover(move |hovered, window, cx| {
+                if *hovered {
+                    window.dispatch_action(Box::new(PathHover), cx);
+                } else {
+                    window.dispatch_action(Box::new(PathUnhover), cx);
+                }
             })
     };
 
@@ -959,6 +994,15 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
                     .child(input),
             )
             .child(transient);
+        let field = if ui.feedback.mode == Effective::Off {
+            field.into_any_element()
+        } else {
+            field
+                .with_animation("bar-path-field", Animation::new(Duration::from_millis(motion::ms::FIELD)), |el, t| {
+                    el.max_w(relative(motion::ease_out(t)))
+                })
+                .into_any_element()
+        };
         bar_children.push(field.into_any_element());
     } else {
         bar_children.push(path.into_any_element());
