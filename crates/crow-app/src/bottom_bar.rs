@@ -4,22 +4,25 @@
 
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, Entity, FontWeight, IntoElement, KeyBinding, Pixels, Role,
-    SharedString, TextRun, Window, div, img, prelude::*, px, relative,
+    SharedString, SpringAnimation, SpringConfig, TextRun, Window, div, img, prelude::*, px, relative,
+    transparent_black,
 };
 
 use crate::actions::{
     CancelOperation, ClearFilter, EditPath, Eject, MoveFavoriteDown, MoveFavoriteUp, NextGroup, OpenSelection,
-    PreviousGroup, QuickLook, RemoveFromSidebar, SearchReveal, ShowSearch, StartFilter, SwitchFocus,
+    PathHover, PathUnhover, PreviousGroup, QuickLook, RemoveFromSidebar, SearchReveal, ShowSearch, StartFilter,
+    SwitchFocus,
 };
-use crate::chrome::{Keycap, KeycapWeight, with_tooltip};
+use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::icons::{self, Glyph};
 use crate::keys::{self, KeyScope};
 use crate::operations::{self, Running};
-use crate::pane::Pane;
+use crate::pane::{DragHandoff, DraggedSelection, Pane, drag_combo, promote_drag};
 use crate::sidebar::CursorKind;
 use crate::style::{color, color_alpha, error_soft, icon};
 use crate::text_input::{self, Complete, Confirm, TextInput};
@@ -30,7 +33,7 @@ use crow_core::{HintsMode, idle_hint_visible};
 use crow_fs::human_size;
 
 /// The bar's height; tips sit above it.
-pub const HEIGHT: f32 = 30.;
+pub const HEIGHT: f32 = 38.;
 
 /// Everything the bar draws this frame, computed on the main thread.
 pub struct BarState {
@@ -45,6 +48,10 @@ pub struct BarState {
     /// The most the transient slot may take, so the path keeps its first and last
     /// segments (set by `fit_to_window`).
     pub transient_max: Option<Pixels>,
+    /// The path pill's width at rest, so the field can expand from it.
+    pub pill_width: Pixels,
+    /// The left section's width, the field's final width.
+    pub field_width: Pixels,
     /// Bumped by every message; the transient fades in when it changes.
     pub message_id: u64,
     /// A finished operation's fraction while its bar fades, and its id.
@@ -362,19 +369,26 @@ pub fn fit_to_window(state: &mut BarState, window: &Window) {
         window.text_system().shape_line(SharedString::from(text.to_owned()), px(12.), &[run], None).width
     };
     let cap = |keys: &str| (measure(keys) + px(12.)).max(px(18.));
-    // The segment's gap before the separator, its pl_1, "›", and the path's gap to the next.
-    let separator = px(4. + 4.) + measure("›") + px(4.);
+    // The sibling separator: 6 px on both sides and "›".
+    let separator = px(12.) + measure("›");
     let last = state.path.parts.len().saturating_sub(1);
-    // px_1 both sides, the 14 px icon, the segment's 4 px gap, the name, the separator.
+    // The pill's 12 px padding on both sides (24, on the first segment), the
+    // segment's px_1, the 14 px icon, its 4 px gap, the name, the separator, and
+    // the pencil (20 px + its 4 px margin) on the last segment.
     let segments: Vec<Pixels> = state
         .path
         .parts
         .iter()
         .enumerate()
-        .map(|(i, (name, _))| px(8. + 14. + 4.) + measure(name) + if i < last { separator } else { px(0.) })
+        .map(|(i, (name, _))| {
+            px(8. + 14. + 4.)
+                + measure(name)
+                + if i < last { separator } else { px(24.) }
+                + if i == 0 { px(24.) } else { px(0.) }
+        })
         .collect();
-    // px_1 both sides, "…", pl_1 + "›" (no gap inside), the path's gap to the next.
-    let ellipsis = px(8.) + measure("…") + px(4.) + measure("›") + px(4.);
+    // The "…" segment: its px_1, the "…", the separator's 12 px and "›".
+    let ellipsis = px(8.) + measure("…") + px(12.) + measure("›");
 
     let bar = window.viewport_size().width - px(24.);
     let fixed = measure(&state.count.text) + px(12. + 1.) + px(2. * GAP);
@@ -409,11 +423,21 @@ pub fn fit_to_window(state: &mut BarState, window: &Window) {
         _ => Vec::new(),
     };
 
+    // The path's own fit gives the pill's width at rest even while the field replaces it.
+    let path_fit = fit(bar, fixed, &segments, ellipsis, other, &hint_widths);
+    state.pill_width = match &path_fit.hidden {
+        Some(hidden) => path_width(&segments, ellipsis, hidden.end),
+        None => segments.iter().copied().sum(),
+    };
+    // The field spans the left section: the bar less the counts and one gap.
+    state.field_width = (bar - fixed + px(GAP)).max(px(0.));
     let fit = if state.editing.is_some() {
-        // The field takes the path slot: keep a usable minimum and let hints keep their room.
-        fit(bar, fixed, &[px(PATH_FIELD_MIN)], ellipsis, other, &hint_widths)
+        // The field takes the left section: the input's minimum plus the hints inside
+        // it and the field's 12 px padding on both sides and 14 px gap.
+        let field_min = px(PATH_FIELD_MIN + 38.) + hint_widths.iter().copied().sum::<Pixels>();
+        fit(bar, fixed, &[field_min], ellipsis, other, &hint_widths)
     } else {
-        fit(bar, fixed, &segments, ellipsis, other, &hint_widths)
+        path_fit
     };
     if let Primary::Hints(hints) = &mut state.primary {
         hints.truncate(fit.hints);
@@ -563,6 +587,11 @@ fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui:
     let names = parts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(" › ");
     let (deepest, target) = parts.last().cloned().unwrap_or_default();
     let pane = pane.clone();
+    // The "…" drags the deepest folder it stands for, the same one its click goes to.
+    let drag_icon = icon(&target, true, 22);
+    let drag_label: SharedString = deepest.clone().into();
+    let drag_entries = Arc::new(vec![(target.clone(), true)]);
+    let handoff = DragHandoff::new();
     let part = div()
         .id("path-folded")
         .debug_selector(|| "path-folded".into())
@@ -572,10 +601,17 @@ fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui:
         .flex_none()
         .items_center()
         .px_1()
+        .h(px(20.))
         .rounded_sm()
         .hover(move |s| s.bg(hover))
         .child("…")
-        .child(div().pl_1().child("›"))
+        .on_drag(DraggedSelection { entries: drag_entries }, {
+            let handoff = handoff.clone();
+            move |_value, offset, window, cx| drag_combo(drag_icon.clone(), &drag_label, offset, &handoff, window, cx)
+        })
+        .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
+            promote_drag(selection, &handoff, window, cx)
+        })
         .on_click(move |_, _, cx| {
             // The "…" is not empty path space: a double-click must not edit the path.
             cx.stop_propagation();
@@ -585,8 +621,22 @@ fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui:
     with_tooltip(part, names, None)
 }
 
+/// The pill and pencil settle in about 120 ms, critically damped.
+fn path_spring() -> SpringConfig {
+    SpringConfig::new(5000., 141.42, 1.)
+}
+
+/// The path area's hover, so the pill fades in and out.
+fn hover_path(hovered: &bool, window: &mut Window, cx: &mut App) {
+    if *hovered {
+        window.dispatch_action(Box::new(PathHover), cx);
+    } else {
+        window.dispatch_action(Box::new(PathUnhover), cx);
+    }
+}
+
 /// One bar: path · transient · counts.
-pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoElement + use<> {
+pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) -> impl IntoElement + use<> {
     let ui = cx.global::<Ui>();
     let theme = ui.theme.clone();
     let border = color(theme.role("border"));
@@ -598,41 +648,16 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
     let fg_path = fg;
     let last_is_dir = state.path.last_is_dir;
 
-    let path = if let Some(input) = state.editing.clone() {
-        div()
-            .id("bar-path")
-            .debug_selector(|| "bar-path".into())
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .items_center()
-            .child(
-                div()
-                    .id("bar-path-field")
-                    .debug_selector(|| "bar-path-field".into())
-                    .role(Role::Group)
-                    .aria_label("Edit path")
-                    .h(px(24.))
-                    .flex_1()
-                    .min_w_0()
-                    .rounded(px(5.))
-                    .border_2()
-                    .border_color(crate::style::field_ring(&theme))
-                    .bg(color(theme.role("surface")))
-                    .px(px(6.))
-                    .flex()
-                    .items_center()
-                    .child(input),
-            )
-    } else {
+    let path = {
         let hidden = state.path.hidden.clone().unwrap_or(0..0);
-        let separator = || div().pl_1().flex_none().child("›");
+        let subtle = color(theme.role("fg-subtle"));
+        let separator = || div().px(px(6.)).flex_none().text_color(subtle).child("›");
         let mut children: Vec<AnyElement> = Vec::new();
         for (i, (name, target)) in parts.iter().enumerate() {
             if hidden.contains(&i) {
                 if i == hidden.start {
                     children.push(folded_segment(&parts[hidden.clone()], &pane, hover).into_any_element());
+                    children.push(separator().into_any_element());
                 }
                 continue;
             }
@@ -648,13 +673,30 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
                 .items_center()
                 .gap_1()
                 .px_1()
+                .h(px(20.))
                 .rounded_sm()
                 // Only the last segment gives way (with an ellipsis) once nothing else can fold.
                 .map(|part| if i == last { part.min_w_0().text_color(fg_path) } else { part.flex_none() })
                 .hover(move |s| s.bg(hover))
                 .children(icon(target, is_dir, 14).map(|i| img(i).flex_none().size(px(14.))))
-                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name.clone()))
-                .when(i < last, |part| part.child(separator()));
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name.clone()));
+            // A segment drags the entry it stands for: the folder, or the file the
+            // last segment shows. The click below still navigates; GPUI clears the
+            // click once a drag starts, so a drag never also navigates.
+            let drag_icon = icon(target, is_dir, 22);
+            let drag_label: SharedString = name.clone().into();
+            let drag_entries = Arc::new(vec![(target.clone(), is_dir)]);
+            let handoff = DragHandoff::new();
+            let part = part
+                .on_drag(DraggedSelection { entries: drag_entries }, {
+                    let handoff = handoff.clone();
+                    move |_value, offset, window, cx| {
+                        drag_combo(drag_icon.clone(), &drag_label, offset, &handoff, window, cx)
+                    }
+                })
+                .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
+                    promote_drag(selection, &handoff, window, cx)
+                });
             let target = target.clone();
             let part = part.on_click(move |_, _, cx| {
                 // A segment is not empty space: a double-click must not edit the path.
@@ -672,7 +714,91 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
                 });
             });
             children.push(with_tooltip(part, spoke, None).into_any_element());
+            if i < last {
+                children.push(separator().into_any_element());
+            }
         }
+        // The pencil sits at the end of the path and is always visible. On hover the
+        // pill around the path fades in (instant for now); a click on the pill's
+        // padding or the empty space edits the path.
+        let pencil = with_action_tooltip(
+            div()
+                .id("path-edit")
+                .debug_selector(|| "path-edit".into())
+                .role(Role::Button)
+                .aria_label("Edit path")
+                .aria_keyshortcuts("Command+L")
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .ml_1()
+                .size(px(20.))
+                .rounded(px(4.))
+                .hover(move |s| s.bg(hover))
+                .on_click(|_, window, cx| {
+                    cx.stop_propagation();
+                    window.dispatch_action(Box::new(EditPath), cx);
+                })
+                .child({
+                    let pencil_theme = theme.clone();
+                    let pencil = icons::glyph(Glyph::Pencil, 14., "fg-subtle", &theme);
+                    if ui.feedback.mode == Effective::Off {
+                        pencil.into_any_element()
+                    } else {
+                        let rest = color(pencil_theme.role("fg-subtle"));
+                        let hot = color(pencil_theme.role("fg"));
+                        pencil
+                            .with_spring(
+                                "path-pencil",
+                                SpringAnimation::new(path_spring()).to(hovered),
+                                move |el, phase| {
+                                    let t = phase.0.clamp(0., 1.);
+                                    el.text_color(rest.blend(hot.alpha(t)))
+                                },
+                            )
+                            .into_any_element()
+                    }
+                }),
+            "Edit path",
+            &EditPath,
+            KeyScope::Window,
+            cx,
+        );
+        children.push(pencil.into_any_element());
+        let pill_theme = theme.clone();
+        let pill = div()
+            .id("path-pill")
+            .debug_selector(|| "path-pill".into())
+            .flex_none()
+            .h(px(32.))
+            .flex()
+            .items_center()
+            .px(px(12.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(transparent_black())
+            .bg(transparent_black())
+            .children(children);
+        let pill = if ui.feedback.mode == Effective::Off {
+            pill.into_any_element()
+        } else {
+            pill.with_spring("path-pill", SpringAnimation::new(path_spring()).to(hovered), move |el, phase| {
+                let alpha = (phase.0.clamp(0., 1.) * 255.) as u8;
+                el.bg(color_alpha(pill_theme.role("surface"), alpha))
+                    .border_color(color_alpha(pill_theme.role("border"), alpha))
+            })
+            .into_any_element()
+        };
+        let empty = div()
+            .id("path-empty")
+            .debug_selector(|| "path-empty".into())
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .overflow_hidden();
         div()
             .id("bar-path")
             .debug_selector(|| "bar-path".into())
@@ -680,18 +806,18 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
             .aria_label(format!("Path: {}", state.path.spoken))
             .flex_1()
             .min_w_0()
-            .h_full()
+            .h(px(32.))
             .overflow_hidden()
             .flex()
             .items_center()
-            .gap_1()
-            .children(children)
-            // Finder's path bar edits on a double-click in its empty space; ⌘L is the key.
-            .on_click(|event, window, cx| {
-                if event.click_count() >= 2 {
-                    window.dispatch_action(Box::new(EditPath), cx);
-                }
+            .child(pill)
+            .child(empty)
+            // A click on the pill's padding or the empty space edits the path; ⌘L
+            // and the pencil do the same. Segments stop propagation.
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(EditPath), cx);
             })
+            .on_hover(hover_path)
     };
 
     let idle_text = color(theme.role("fg-subtle"));
@@ -849,6 +975,79 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         }),
     };
 
+    // The left section: the path slot at rest, or one field across the path and
+    // the transient (up to the counts' divider) while editing.
+    let mut bar_children: Vec<AnyElement> = Vec::new();
+    if let Some(input) = state.editing.clone() {
+        // The hints fade in with the field instead of popping in at full opacity.
+        let field_hints = if ui.feedback.mode == Effective::Off {
+            transient
+        } else {
+            div()
+                .flex_none()
+                .min_w_0()
+                .child(transient)
+                .with_animation(
+                    "bar-path-field-hints",
+                    Animation::new(Duration::from_millis(motion::ms::FIELD)),
+                    |el, t| el.opacity(motion::ease_out(t)),
+                )
+                .into_any_element()
+        };
+        let field = div()
+            .id("bar-path")
+            .debug_selector(|| "bar-path".into())
+            .role(Role::Navigation)
+            .aria_label(format!("Path: {}", state.path.spoken))
+            .flex_1()
+            .min_w_0()
+            .h(px(32.))
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .gap(px(14.))
+            .px(px(12.))
+            .rounded(px(8.))
+            .border_2()
+            .border_color(crate::style::field_ring(&theme))
+            .bg(color(theme.role("surface")))
+            .child(
+                div()
+                    .id("bar-path-field")
+                    .debug_selector(|| "bar-path-field".into())
+                    .role(Role::Group)
+                    .aria_label("Edit path")
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(input),
+            )
+            .child(field_hints);
+        let field = if ui.feedback.mode == Effective::Off {
+            field.into_any_element()
+        } else {
+            let start = state.pill_width.as_f32();
+            let end = state.field_width.as_f32();
+            field
+                .with_animation(
+                    "bar-path-field",
+                    Animation::new(Duration::from_millis(motion::ms::FIELD)),
+                    move |el, t| {
+                        let t = motion::ease_out(t);
+                        el.max_w(px(start + (end - start) * t))
+                    },
+                )
+                .into_any_element()
+        };
+        bar_children.push(field.into_any_element());
+    } else {
+        bar_children.push(path.into_any_element());
+        bar_children.push(transient);
+    }
+    bar_children.extend(counts.map(IntoElement::into_any_element));
+
     div()
         .id("path-bar")
         .debug_selector(|| "path-bar".into())
@@ -865,9 +1064,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         .border_color(border)
         .text_size(px(12.))
         .text_color(muted)
-        .child(path)
-        .child(transient)
-        .children(counts)
+        .children(bar_children)
         .children(progress)
 }
 

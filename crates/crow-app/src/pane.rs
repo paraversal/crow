@@ -132,7 +132,7 @@ impl DraggedSelection {
 /// Handed from the drag constructor to the native-promotion resolver: the measured
 /// combo and the grab point, so the native image starts in exactly the same place.
 #[derive(Clone)]
-struct DragHandoff {
+pub(crate) struct DragHandoff {
     cursor: Rc<Cell<Point<Pixels>>>,
     width: Rc<Cell<f32>>,
     pill_width: Rc<Cell<f32>>,
@@ -140,7 +140,7 @@ struct DragHandoff {
 }
 
 impl DragHandoff {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             cursor: Rc::new(Cell::new(Point::default())),
             width: Rc::new(Cell::new(0.0)),
@@ -152,7 +152,7 @@ impl DragHandoff {
 
 /// The image that follows the pointer while dragging with GPUI inside the window:
 /// a small icon and a pill with the name.
-struct DraggedFiles {
+pub(crate) struct DraggedFiles {
     icon: Option<Arc<Image>>,
     label: SharedString,
     pill_width: f32,
@@ -218,6 +218,59 @@ fn measure_combo(label: &SharedString, window: &mut Window) -> (SharedString, f3
     let pill = text_width + 16.0;
     let width = 22.0 + 8.0 + pill;
     (display, pill, width)
+}
+
+/// The combo that follows the pointer for a drag of `entries`, and the measurements
+/// the native promotion needs. Shared by rows, search results and the path bar.
+pub(crate) fn drag_combo(
+    icon: Option<Arc<Image>>,
+    label: &SharedString,
+    offset: Point<Pixels>,
+    handoff: &DragHandoff,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<DraggedFiles> {
+    let (display, pill_width, width) = measure_combo(label, window);
+    handoff.cursor.set(offset);
+    handoff.width.set(width);
+    handoff.pill_width.set(pill_width);
+    *handoff.label.borrow_mut() = display.clone();
+    cx.new(|_| DraggedFiles { icon, label: display, pill_width, width, cursor: offset })
+}
+
+/// Hand a dragged selection to the platform. When AppKit can start a native session,
+/// it does so now with the combo image; otherwise GPUI promotes the paths itself.
+pub(crate) fn promote_drag(
+    selection: &DraggedSelection,
+    handoff: &DragHandoff,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<ExternalDragPayload> {
+    let width = handoff.width.get();
+    let pill_width = handoff.pill_width.get();
+    let cursor = handoff.cursor.get();
+    let label = handoff.label.borrow().clone();
+    let entries = selection.entries.as_slice();
+    if let Some((path, is_dir)) = entries.first()
+        && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
+        && crate::effects::effects(cx).begin_drag(
+            window,
+            &crow_macos::ComboDrag {
+                paths: entries,
+                icon_png: png.as_slice(),
+                label: label.as_ref(),
+                width,
+                height: 24.0,
+                pill_width,
+                cursor_from_left: f32::from(cursor.x).min(width),
+                cursor_from_top: f32::from(cursor.y).min(24.0),
+            },
+        )
+    {
+        cx.stop_active_drag(window);
+        return None;
+    }
+    Some(ExternalDragPayload::Files(FileDragPaths::new(entries.iter().cloned())))
 }
 
 /// An inline rename in progress.
@@ -2119,46 +2172,11 @@ impl Pane {
                     .on_drag(DraggedSelection { entries: drag_entries }, {
                         let handoff = handoff.clone();
                         move |_value, offset, window, cx| {
-                            let (display, pill_width, width) = measure_combo(&drag_label, window);
-                            handoff.cursor.set(offset);
-                            handoff.width.set(width);
-                            handoff.pill_width.set(pill_width);
-                            *handoff.label.borrow_mut() = display.clone();
-                            cx.new(|_| DraggedFiles {
-                                icon: drag_icon.clone(),
-                                label: display,
-                                pill_width,
-                                width,
-                                cursor: offset,
-                            })
+                            drag_combo(drag_icon.clone(), &drag_label, offset, &handoff, window, cx)
                         }
                     })
                     .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
-                        let width = handoff.width.get();
-                        let pill_width = handoff.pill_width.get();
-                        let cursor = handoff.cursor.get();
-                        let label = handoff.label.borrow().clone();
-                        let entries = selection.entries.as_slice();
-                        if let Some((path, is_dir)) = entries.first()
-                            && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
-                            && crate::effects::effects(cx).begin_drag(
-                                window,
-                                &crow_macos::ComboDrag {
-                                    paths: entries,
-                                    icon_png: png.as_slice(),
-                                    label: label.as_ref(),
-                                    width,
-                                    height: 24.0,
-                                    pill_width,
-                                    cursor_from_left: f32::from(cursor.x).min(width),
-                                    cursor_from_top: f32::from(cursor.y).min(24.0),
-                                },
-                            )
-                        {
-                            cx.stop_active_drag(window);
-                            return None;
-                        }
-                        Some(ExternalDragPayload::Files(FileDragPaths::new(entries.iter().cloned())))
+                        promote_drag(selection, &handoff, window, cx)
                     })
                     .when_some(drop_folder, |row, target| {
                         let target_selection = target.clone();
@@ -2524,46 +2542,11 @@ impl Pane {
                     .on_drag(DraggedSelection { entries: drag_entries }, {
                         let handoff = handoff.clone();
                         move |_value, offset, window, cx| {
-                            let (display, pill_width, width) = measure_combo(&drag_label, window);
-                            handoff.cursor.set(offset);
-                            handoff.width.set(width);
-                            handoff.pill_width.set(pill_width);
-                            *handoff.label.borrow_mut() = display.clone();
-                            cx.new(|_| DraggedFiles {
-                                icon: drag_icon.clone(),
-                                label: display,
-                                pill_width,
-                                width,
-                                cursor: offset,
-                            })
+                            drag_combo(drag_icon.clone(), &drag_label, offset, &handoff, window, cx)
                         }
                     })
                     .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
-                        let width = handoff.width.get();
-                        let pill_width = handoff.pill_width.get();
-                        let cursor = handoff.cursor.get();
-                        let label = handoff.label.borrow().clone();
-                        let entries = selection.entries.as_slice();
-                        if let Some((path, is_dir)) = entries.first()
-                            && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
-                            && crate::effects::effects(cx).begin_drag(
-                                window,
-                                &crow_macos::ComboDrag {
-                                    paths: entries,
-                                    icon_png: png.as_slice(),
-                                    label: label.as_ref(),
-                                    width,
-                                    height: 24.0,
-                                    pill_width,
-                                    cursor_from_left: f32::from(cursor.x).min(width),
-                                    cursor_from_top: f32::from(cursor.y).min(24.0),
-                                },
-                            )
-                        {
-                            cx.stop_active_drag(window);
-                            return None;
-                        }
-                        Some(ExternalDragPayload::Files(FileDragPaths::new(entries.iter().cloned())))
+                        promote_drag(selection, &handoff, window, cx)
                     })
                     .when(navigable, |row| {
                         let target = entry.path.clone();

@@ -73,7 +73,7 @@ fn assembled_layout_matches_boards(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert_eq!(cx.debug_bounds("toolbar").expect("band").size.height, px(52.), "band");
     assert_eq!(cx.debug_bounds("sidebar").expect("sidebar").size.width, px(210.), "sidebar");
-    assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(30.), "bottom bar");
+    assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(38.), "bottom bar");
     assert_eq!(cx.debug_bounds("column-0-row-alpha").expect("a column row").size.height, px(24.), "row");
     cx.simulate_keystrokes("/");
     cx.simulate_input("vi");
@@ -2021,7 +2021,7 @@ fn error_and_progress_leave_the_path_its_ends(cx: &mut TestAppContext) {
     let last: &'static str = format!("path-segment-{}", state.path.parts.len() - 1).leak();
     let first = cx.debug_bounds("path-segment-0").expect("the first segment is drawn");
     let tail = cx.debug_bounds(last).expect("the last segment is drawn");
-    assert!(first.size.width > px(20.), "the first segment keeps its room: {first:?}");
+    assert!(first.size.width > px(14.), "the first segment keeps its icon: {first:?}");
     assert!(tail.size.width > px(20.), "the last segment keeps its room: {tail:?}");
     let counts = cx.debug_bounds("bar-cancel").expect("Cancel is drawn");
     assert!(counts.right() <= px(700.), "the transient stays inside the window: {counts:?}");
@@ -5565,6 +5565,12 @@ fn path_edit_text(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Option<S
     view.read_with(cx, |w, cx| w.path_edit.as_ref().map(|edit| edit.input.read(cx).text().to_owned()))
 }
 
+fn path_edit_completion(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Option<String> {
+    view.read_with(cx, |w, cx| {
+        w.path_edit.as_ref().and_then(|edit| edit.input.read(cx).completion_visible().map(str::to_owned))
+    })
+}
+
 fn double_click(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
     cx.simulate_event(gpui::MouseDownEvent {
         position: at,
@@ -5594,13 +5600,13 @@ fn path_bar_edits_the_path_with_cmd_l(cx: &mut TestAppContext) {
         Some(root.join("alpha").display().to_string()),
         "the cursor's path, all selected"
     );
-    assert_eq!(cx.debug_bounds("path-bar").expect("bar").size.height, px(30.), "the bar keeps its height");
+    assert_eq!(cx.debug_bounds("path-bar").expect("bar").size.height, px(38.), "the bar keeps its height");
     assert_eq!(
         cx.debug_bounds("bar-path").expect("path slot").size.height,
         slot_height,
         "the path slot keeps its height"
     );
-    assert_eq!(cx.debug_bounds("bar-path-field").expect("field").size.height, px(24.), "the field fits inside it");
+    assert_eq!(cx.debug_bounds("bar-path-field").expect("field").size.height, px(28.), "the field fits inside it");
     let state = bar_state(&view, &mut cx);
     assert_eq!(hint_labels(&state), ["go", "complete", "cancel"]);
     assert_eq!(hint_keys(&state), ["↩", "⇥", "esc"]);
@@ -5608,9 +5614,18 @@ fn path_bar_edits_the_path_with_cmd_l(cx: &mut TestAppContext) {
     // Typing replaces the selection; Tab completes from disk like ⌘K.
     cx.simulate_input(&format!("{}/al", root.display()));
     settle(&view, &mut cx);
+    // The muted completion preview: the suffix Tab would apply, hidden mid-text.
+    assert_eq!(path_edit_completion(&view, &cx).as_deref(), Some("pha/"));
+    cx.simulate_keystrokes("left");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_completion(&view, &cx), None, "a mid-text caret shows no suffix");
+    cx.simulate_keystrokes("right");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_completion(&view, &cx).as_deref(), Some("pha/"));
     cx.simulate_keystrokes("tab");
     settle(&view, &mut cx);
     assert_eq!(path_edit_text(&view, &cx), Some(format!("{}/alpha/", root.display())));
+    assert_eq!(path_edit_completion(&view, &cx).as_deref(), Some("inner/"), "the preview moves to the next level");
 
     cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
@@ -5693,31 +5708,191 @@ fn path_edit_starts_on_the_shown_search_result(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn path_bar_double_click_edits_and_single_click_does_not(cx: &mut TestAppContext) {
+fn path_bar_clicks_edit_the_path_and_segments_navigate(cx: &mut TestAppContext) {
     let root = fixture("path-edit-click");
     let (view, mut cx) = open(cx, &root);
     let bar = cx.debug_bounds("bar-path").expect("path slot");
-    let at = gpui::point(bar.right() - px(8.), bar.center().y);
+    let empty = gpui::point(bar.right() - px(8.), bar.center().y);
 
-    cx.simulate_click(at, Default::default());
-    settle(&view, &mut cx);
-    assert_eq!(path_edit_text(&view, &cx), None, "a single click does nothing");
-
-    double_click(&mut cx, at);
+    cx.simulate_click(empty, Default::default());
     settle(&view, &mut cx);
     assert_eq!(
         path_edit_text(&view, &cx),
         Some(root.join("alpha").display().to_string()),
-        "a double-click edits the shown path"
+        "a single click on empty space edits the shown path"
     );
-
-    // A click on a segment still navigates and never opens the field.
     cx.simulate_keystrokes("escape");
     settle(&view, &mut cx);
-    let segment = cx.debug_bounds("path-segment-0").expect("first segment");
-    double_click(&mut cx, segment.center());
+
+    // A click on a segment still navigates and never opens the field.
+    let last = bar_state(&view, &mut cx).path.parts.len() - 1;
+    let last_selector: &'static str = format!("path-segment-{last}").leak();
+    let segment = cx.debug_bounds(last_selector).expect("last segment");
+    cx.simulate_click(segment.center(), Default::default());
     settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha"), "the segment navigates");
     assert_eq!(path_edit_text(&view, &cx), None, "a segment is not empty space");
+
+    // The parent segment goes back; the double-click still edits.
+    let state = bar_state(&view, &mut cx);
+    let parent = state.path.parts.iter().position(|(_, path)| *path == root).expect("the fixture root segment");
+    let parent_selector: &'static str = format!("path-segment-{parent}").leak();
+    let segment = cx.debug_bounds(parent_selector).expect("root segment");
+    cx.simulate_click(segment.center(), Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root, "the parent segment navigates back");
+    assert_eq!(path_edit_text(&view, &cx), None);
+
+    let bar = cx.debug_bounds("bar-path").expect("path slot");
+    double_click(&mut cx, gpui::point(bar.right() - px(8.), bar.center().y));
+    settle(&view, &mut cx);
+    assert_eq!(
+        path_edit_text(&view, &cx),
+        Some(root.join("alpha").display().to_string()),
+        "a double-click still edits the shown path"
+    );
+}
+
+/// Start a drag at `from` and return what the active drag carries.
+fn start_drag(cx: &mut VisualTestContext, from: gpui::Point<gpui::Pixels>) -> Option<Vec<(PathBuf, bool)>> {
+    cx.simulate_mouse_down(from, gpui::MouseButton::Left, Default::default());
+    cx.simulate_mouse_move(from + gpui::point(px(20.), px(0.)), Some(gpui::MouseButton::Left), Default::default());
+    cx.update(|_, cx| {
+        cx.active_drag_value::<crate::pane::DraggedSelection>().map(|selection| selection.entries.as_slice().to_vec())
+    })
+}
+
+#[gpui::test]
+fn path_bar_segments_drag_the_folder_they_show(cx: &mut TestAppContext) {
+    let root = fixture("path-drag");
+    let (view, mut cx) = open(cx, &root);
+    let state = bar_state(&view, &mut cx);
+    let last = state.path.parts.len() - 1;
+    assert_eq!(state.path.parts[last].1, root.join("alpha"), "the bar shows the cursor's folder");
+    let selector: &'static str = format!("path-segment-{last}").leak();
+    let from = cx.debug_bounds(selector).expect("last segment").center();
+
+    assert_eq!(
+        start_drag(&mut cx, from),
+        Some(vec![(root.join("alpha"), true)]),
+        "the segment drags the folder it shows, not the text or the selection"
+    );
+    assert_eq!(dir(&view, &cx), root, "a drag does not also navigate");
+    cx.simulate_mouse_up(from + gpui::point(px(20.), px(0.)), gpui::MouseButton::Left, Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root, "the click after the drag does not navigate");
+}
+
+#[gpui::test]
+fn path_bar_field_has_no_drag(cx: &mut TestAppContext) {
+    let root = fixture("path-drag-field");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-l");
+    settle(&view, &mut cx);
+    let from = cx.debug_bounds("bar-path-field").expect("path field").center();
+    assert_eq!(start_drag(&mut cx, from), None, "the path field has no file drag");
+    cx.simulate_mouse_up(from + gpui::point(px(20.), px(0.)), gpui::MouseButton::Left, Default::default());
+}
+
+#[gpui::test]
+fn folded_path_segment_drags_the_deepest_folder(cx: &mut TestAppContext) {
+    let root = fixture("path-drag-folded");
+    let (view, mut cx) = open(cx, &root);
+    for width in (380..=1200).rev().step_by(20) {
+        cx.simulate_resize(gpui::size(px(width as f32), px(500.)));
+        cx.run_until_parked();
+        if bar_state(&view, &mut cx).path.hidden.is_some() {
+            break;
+        }
+    }
+    let state = bar_state(&view, &mut cx);
+    let hidden = state.path.hidden.clone().expect("the path folds");
+    let deepest = state.path.parts[hidden.end - 1].1.clone();
+    let from = cx.debug_bounds("path-folded").expect("the … is drawn").center();
+    assert_eq!(start_drag(&mut cx, from), Some(vec![(deepest, true)]), "the … drags the deepest folder it stands for");
+    cx.simulate_mouse_up(from + gpui::point(px(20.), px(0.)), gpui::MouseButton::Left, Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root, "the drag does not navigate");
+}
+
+#[gpui::test]
+fn path_bar_hover_offers_the_edit_affordance(cx: &mut TestAppContext) {
+    let root = fixture("path-edit-affordance");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    let bar = cx.debug_bounds("bar-path").expect("path slot");
+    let pencil = cx.debug_bounds("path-edit").expect("the pencil is laid out");
+    assert_eq!(pencil.size, gpui::size(px(20.), px(20.)), "the affordance is a 20 px target");
+    assert!(pencil.right() <= bar.right(), "it sits inside the path slot");
+    let last = bar_state(&view, &mut cx).path.parts.len() - 1;
+    let selector: &'static str = format!("path-segment-{last}").leak();
+    let segment = cx.debug_bounds(selector).expect("last segment");
+    assert!(pencil.left() >= segment.right(), "it sits at the end of the path, not on a segment");
+    assert!(pencil.right() < bar.right() - px(100.), "it sits at the path's end, not the far right");
+
+    // Hovering the empty space keeps it laid out; a click on it edits.
+    let empty = gpui::point(bar.right() - px(8.), bar.center().y);
+    cx.simulate_mouse_move(empty, None, Default::default());
+    cx.run_until_parked();
+    assert_eq!(cx.debug_bounds("path-edit").expect("still there").size, pencil.size);
+    let pencil = cx.debug_bounds("path-edit").expect("pencil").center();
+    cx.simulate_click(pencil, Default::default());
+    settle(&view, &mut cx);
+    assert!(path_edit_text(&view, &cx).is_some(), "the pencil edits the path");
+}
+
+#[gpui::test]
+fn path_bar_field_clears_the_hover(cx: &mut TestAppContext) {
+    let root = fixture("path-hover-field");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    let bar = cx.debug_bounds("bar-path").expect("path slot");
+    let empty = gpui::point(bar.right() - px(8.), bar.center().y);
+    cx.simulate_mouse_move(empty, None, Default::default());
+    cx.run_until_parked();
+    assert!(view.read_with(&cx, |w, _| w.path_hovered), "hovering the path sets the pill");
+    cx.simulate_click(empty, Default::default());
+    settle(&view, &mut cx);
+    assert!(path_edit_text(&view, &cx).is_some(), "the click opens the field");
+    let counts = gpui::point(bar.right() + px(20.), bar.center().y);
+    cx.simulate_mouse_move(counts, None, Default::default());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(!view.read_with(&cx, |w, _| w.path_hovered), "the pill does not stick after the field closes");
+}
+
+#[gpui::test]
+fn path_bar_hover_clears_when_the_window_deactivates(cx: &mut TestAppContext) {
+    let root = fixture("path-hover-deactivate");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let bar = cx.debug_bounds("bar-path").expect("path slot");
+    let empty = gpui::point(bar.right() - px(8.), bar.center().y);
+    cx.simulate_mouse_move(empty, None, Default::default());
+    cx.run_until_parked();
+    assert!(view.read_with(&cx, |w, _| w.path_hovered), "hovering the path sets the pill");
+    cx.deactivate_window();
+    assert!(!view.read_with(&cx, |w, _| w.path_hovered), "deactivation clears the pill");
+}
+
+#[gpui::test]
+fn path_bar_edit_affordance_does_not_shift_the_segments(cx: &mut TestAppContext) {
+    let root = fixture("path-affordance-layout");
+    let (_view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    let bar = cx.debug_bounds("bar-path").expect("path slot");
+    let first = cx.debug_bounds("path-segment-0").expect("first segment");
+    assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(38.), "the bar keeps its height");
+    assert_eq!(first.left(), bar.left() + px(13.), "the first segment sits inside the pill's padding");
+
+    cx.simulate_mouse_move(gpui::point(bar.right() - px(8.), bar.center().y), None, Default::default());
+    cx.run_until_parked();
+    assert_eq!(cx.debug_bounds("path-segment-0").expect("first segment"), first, "hover moves nothing");
+
+    cx.simulate_resize(gpui::size(px(640.), px(800.)));
+    cx.run_until_parked();
+    let bar = cx.debug_bounds("bar-path").expect("path slot");
+    assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(38.), "640 px keeps the bar's height");
+    assert_eq!(cx.debug_bounds("path-segment-0").expect("first segment").left(), bar.left() + px(13.));
 }
 
 #[gpui::test]

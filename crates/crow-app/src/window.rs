@@ -13,9 +13,9 @@ use gpui::{
 
 use crate::actions::{
     AddToSidebar, ApplyThemeEverywhere, CloseTab, EditPath, GoBack, GoForward, GoToFolder, KeyboardShortcuts, Minimize,
-    MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PreviousTab,
-    ResetFolderView, SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles,
-    TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
+    MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover, PathUnhover,
+    PreviousTab, ResetFolderView, SearchEverything, ShowCommandPalette, ShowSearch, ShowThemePicker, SwitchFocus,
+    ToggleHiddenFiles, TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -150,6 +150,8 @@ pub struct CrowWindow {
     search: Option<Entity<SearchView>>,
     /// ⌘L or a double-click on empty path space: the bar's path slot is a field.
     path_edit: Option<PathEdit>,
+    /// The path bar's hover state, so the pill can fade.
+    path_hovered: bool,
     /// A deferred re-focus into an open overlay is already scheduled.
     refocus_overlay: bool,
     /// The contextual tip on screen, if any.
@@ -361,9 +363,13 @@ impl CrowWindow {
             cx.observe_window_appearance(window, |_, _, cx| reload_theme(cx)),
             // Another window coming to the front mid-drag must be able to receive it,
             // even while the pointer stays inside Crow's bounds.
-            cx.observe_window_activation(window, |_, window, cx| {
+            cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
                     window.promote_active_drag_to_platform(cx);
+                    // The pointer can stay over the path while another app is active;
+                    // the pill must not stay on screen with it.
+                    this.path_hovered = false;
+                    cx.notify();
                 }
             }),
             // Focus on an element that left the tree (an emptied results list, a hidden pane)
@@ -390,6 +396,7 @@ impl CrowWindow {
             palette: None,
             search: None,
             path_edit: None,
+            path_hovered: false,
             refocus_overlay: false,
             tip: None,
             zero_streak: ZeroMatchStreak::new(),
@@ -600,7 +607,8 @@ impl CrowWindow {
             TextInputEvent::Confirmed => this.confirm_path_edit(window, cx),
             TextInputEvent::Cancelled => this.close_path_edit(true, window, cx),
             TextInputEvent::CompletionRequested => this.complete_path_edit(window, cx),
-            TextInputEvent::Changed | TextInputEvent::BackspaceAtStart => {}
+            TextInputEvent::Changed => this.complete_path_preview(window, cx),
+            TextInputEvent::BackspaceAtStart => {}
         });
         let focus = input.read(cx).focus_handle(cx);
         let blur = cx.on_focus_out(&focus, window, |this, _event, window, cx| {
@@ -617,6 +625,9 @@ impl CrowWindow {
     /// was; a click elsewhere and a focus loss leave focus where the user put it.
     fn close_path_edit(&mut self, restore_focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(edit) = self.path_edit.take() else { return };
+        // The field replaced the path area, so its hover state is stale; the pill
+        // fades back in on the next hover instead of sticking where the pointer left.
+        self.path_hovered = false;
         // The refusal described the typed path; it goes with the field, unless
         // something newer replaced it.
         if let Some(generation) = edit.refused
@@ -704,8 +715,36 @@ impl CrowWindow {
                     return;
                 }
                 if let Some(completed) = completed {
-                    input.update(cx, |input, cx| input.set_text(completed, window, cx));
+                    input.update(cx, |input, cx| {
+                        input.set_text(completed, window, cx);
+                        input.set_completion(None, cx);
+                    });
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Recompute the field's muted completion preview as the typed path changes.
+    fn complete_path_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = &self.path_edit else { return };
+        let input = edit.input.clone();
+        let typed = input.read(cx).text().to_owned();
+        let task = self.complete_typed_path(typed.clone(), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let completed = task.await;
+            this.update_in(cx, |this, window, cx| {
+                let Some(edit) = &this.path_edit else { return };
+                if edit.input.read(cx).text() != typed {
+                    return;
+                }
+                let suffix = completed.and_then(|completed| {
+                    let prefix = completed.get(..typed.len())?;
+                    prefix.eq_ignore_ascii_case(&typed).then(|| SharedString::from(&completed[typed.len()..]))
+                });
+                input.update(cx, |input, cx| input.set_completion(suffix, cx));
+                let _ = window;
             })
             .ok();
         })
@@ -1158,6 +1197,8 @@ impl CrowWindow {
             path,
             editing: self.path_edit.as_ref().map(|edit| edit.input.clone()),
             transient_max: None,
+            pill_width: px(0.),
+            field_width: px(0.),
             message_id: ops.message_generation,
             progress_done,
             progress_id,
@@ -1179,7 +1220,7 @@ impl CrowWindow {
 
     fn render_bottom_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let state = self.bar_state(window, cx);
-        bottom_bar::render(state, self.pane().clone(), cx)
+        bottom_bar::render(state, self.pane().clone(), self.path_hovered, cx)
     }
 
     // ----- contextual tips -----
@@ -3478,6 +3519,14 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::go_to_folder))
             .on_action(cx.listener(Self::edit_path))
+            .on_action(cx.listener(|this, _: &PathHover, _, cx| {
+                this.path_hovered = true;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &PathUnhover, _, cx| {
+                this.path_hovered = false;
+                cx.notify();
+            }))
             .on_action(cx.listener(Self::view_as_list))
             .on_action(cx.listener(Self::view_as_columns))
             .on_action(cx.listener(|this, _: &crate::actions::Undo, _, cx| this.undo(None, cx)))

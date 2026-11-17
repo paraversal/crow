@@ -109,6 +109,8 @@ pub struct TextInput {
     id: ElementId,
     focus_handle: FocusHandle,
     content: SharedString,
+    /// The muted suffix Tab would complete, shown after the text at the caret's end.
+    completion: Option<SharedString>,
     placeholder: SharedString,
     /// A stepper's value and range, for VoiceOver's numeric announcement.
     numeric: Option<Numeric>,
@@ -187,6 +189,7 @@ impl TextInput {
             id: "text-input".into(),
             focus_handle: cx.focus_handle(),
             content,
+            completion: None,
             placeholder: placeholder.into(),
             numeric: None,
             aria_label: None,
@@ -212,6 +215,23 @@ impl TextInput {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// The muted suffix Tab would complete; `None` hides it.
+    pub fn set_completion(&mut self, completion: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.completion == completion {
+            return;
+        }
+        self.completion = completion;
+        cx.notify();
+    }
+
+    /// The completion suffix the field would paint right now (the caret at the end).
+    #[cfg(test)]
+    pub fn completion_visible(&self) -> Option<&str> {
+        self.completion
+            .as_deref()
+            .filter(|_| self.selected_range.is_empty() && self.cursor_offset() == self.content.len())
     }
 
     /// A unique element id, for several fields in one window.
@@ -915,6 +935,8 @@ struct TextElement {
 
 struct PrepaintState {
     line: Option<ShapedLine>,
+    /// The completion suffix, drawn muted after the text when the caret is at its end.
+    suffix: Option<ShapedLine>,
     /// The line's vertical offset inside the field's bounds (see `prepaint`).
     text_top: Pixels,
     cursor: Option<PaintQuad>,
@@ -959,7 +981,7 @@ impl Element for TextElement {
         let input = self.input.read(cx);
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
+        let cursor_offset = input.cursor_offset();
         let style = window.text_style();
         let theme = &cx.global::<Ui>().theme;
         let placeholder_role = if input.chrome { "fg-subtle" } else { "fg-muted" };
@@ -1006,7 +1028,7 @@ impl Element for TextElement {
             line.runs.first().map_or(px(0.), |run| window.text_system().x_height(run.font_id, line.font_size));
         let text_top = (x_height - (line.ascent - line.descent)) / 2.;
 
-        let cursor_pos = line.x_for_index(cursor);
+        let cursor_pos = line.x_for_index(cursor_offset);
         let text_width = bounds.size.width - px(TEXT_INSET);
         let scroll_x = scroll_for_caret(cursor_pos, line.width, text_width, input.scroll_x);
         // The caret sits at the insertion point; the text is inset, so the caret
@@ -1017,7 +1039,10 @@ impl Element for TextElement {
             (
                 None,
                 Some(fill(
-                    Bounds::new(point(caret_x(cursor), bounds.top()), size(px(2.), bounds.bottom() - bounds.top())),
+                    Bounds::new(
+                        point(caret_x(cursor_offset), bounds.top()),
+                        size(px(2.), bounds.bottom() - bounds.top()),
+                    ),
                     cursor_color,
                 )),
             )
@@ -1033,7 +1058,22 @@ impl Element for TextElement {
                 None,
             )
         };
-        PrepaintState { line: Some(line), text_top, scroll_x, selection, cursor }
+        let suffix = input
+            .completion
+            .as_ref()
+            .filter(|_| selected_range.is_empty() && cursor_offset == content.len() && !content.is_empty());
+        let suffix_line = suffix.map(|suffix| {
+            let run = TextRun {
+                len: suffix.len(),
+                font: style.font(),
+                color: color(theme.role("fg-muted")).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window.text_system().shape_line(suffix.clone(), font_size, &[run], None)
+        });
+        PrepaintState { line: Some(line), suffix: suffix_line, text_top, scroll_x, selection, cursor }
     }
 
     fn paint(
@@ -1058,6 +1098,18 @@ impl Element for TextElement {
             let origin = point(bounds.left() + px(TEXT_INSET) - scroll_x, bounds.top() + text_top);
             if let Err(e) = line.paint(origin, window.line_height(), gpui::TextAlign::Left, None, window, cx) {
                 tracing::warn!("text input paint: {e}");
+            }
+            if let Some(suffix) = prepaint.suffix.take()
+                && let Err(e) = suffix.paint(
+                    point(origin.x + line.width, origin.y),
+                    window.line_height(),
+                    gpui::TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
+            {
+                tracing::warn!("text input suffix paint: {e}");
             }
             let focused = focus_handle.is_focused(window);
             let caret_shown = focused && {

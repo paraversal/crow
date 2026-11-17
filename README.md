@@ -101,9 +101,11 @@ cancels it exactly like Esc.
 
 ## Hints and tips
 
-The bottom bar has three slots: the path (⌘L or a double-click on its empty space edits it in
-place), a transient one (type-to-select letters, hints, operation progress, messages, errors) and
-counts. While you type a name, the transient slot shows the letters so far, left of the hints. Hints follow
+The bottom bar has three slots: the path (⌘L, a click on its empty space or the pencil at the end
+of the path edits it in place; the path's pill fades in on hover and clears when the pointer leaves
+the window, and the field expands across the path and the hints up to the counts; while editing, the
+suffix Tab would complete shows muted after the text; each segment drags the folder or file it shows), a transient
+one (type-to-select letters, hints, operation progress, messages, errors) and counts. While you type a name, the transient slot shows the letters so far, left of the hints. Hints follow
 focus: the path field (`↩` go, `⇥` complete, `esc` cancel), the filter field (Return to matches,
 Esc clear, `⌘F` search deeper), the sidebar (`⌥↑↓` groups, `⇥`/`→` to list, `⌘⌥↑↓` reorder,
 `⌘⌫` remove, `⌘E` eject a disk),
@@ -116,8 +118,8 @@ config file shows an error pill with its file name, line and an Open button, bes
 than instead of it. Counts name the focused folder ("18 items in Documents"), the selection and its
 size, or the cursor's sidebar group (while filtering, the field itself says "n of N"). When room
 runs short the path keeps its first and last segments: its middle folds into a "…" (click it for
-the deepest hidden folder), then hints drop from the right, then a long progress line or error is
-cut with an ellipsis.
+the deepest hidden folder, or drag it to drag that folder), then hints drop from the right, then a
+long progress line or error is cut with an ellipsis.
 
 A contextual tip appears once, bottom right above the bar, when you visibly do something the slow
 way: scrolling a folder of 200+ items ("Type / to filter this folder by name."), two filters in a
@@ -164,7 +166,7 @@ first result; results open with Return, reveal with Cmd-R, Quick Look with Space
 Finder's keys work as in Finder: arrows (Shift extends), Option-Up/Down, Cmd-Up/Down,
 Cmd-[ and Cmd-], Cmd-A, Cmd-T, Cmd-W, Cmd-Shift-[ and ], Cmd-Shift-G (opens Cmd-K on this folder's
 path: type a name, Tab completes, Return goes there or selects a file; a pasted path may be quoted,
-shell-escaped or a `file://` URL), Cmd-L (or a double-click on empty space in the bottom bar) edits
+shell-escaped or a `file://` URL), Cmd-L (or a click on empty space in the bottom bar) edits
 the path the bar shows in place: Tab completes, Return goes there or selects a file, Esc puts the path
 back, Cmd-, (Settings), Cmd-Shift-. and Space. Cmd-K's
 "Settings" opens the window and "Edit settings.toml" opens the file directly. Cmd-Shift-P shows
