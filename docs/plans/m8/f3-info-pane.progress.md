@@ -1,5 +1,5 @@
 # F3 — Info pane progress
-Branch: m8-f3-info · PR: none · Last updated: 2026-11-17 · State: In critique
+Branch: m8-f3-info · PR: [#53](https://github.com/paraversal/file-crow/pull/53) · Last updated: 2026-11-17 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -57,7 +57,7 @@ Critic session: 2026-11-17 · Base: `main` @ c0ff7bf · Head reviewed: d8398f0
 | C8 | The tab strip is not keyboard-focusable; ⌘I/⇧⌘P are the keyboard path. | `info_pane.rs:290` | UX | note | left (roles/labels are set; the keys cover it) |
 | C9 | A 100k selection's Tags row says `—` (the shared-tag read is capped at 500). | `info_pane.rs:23` | UX | note | left (agent's Decision; an honest cap) |
 
-Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (518 passed, 1 ignored in crow-app; 78 in the other crates) · bench `target/fixture-100k`: cold first paint 168 ms, warm 9 ms, avg 8.35 ms, p99 8.52 ms, max 16.74 ms vs `main`'s warm 10 ms, avg 8.35, p99 8.52; warm and p99 are equal, cold varies (92–168 ms across runs) and is not a budget.
+Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (518 passed, 1 ignored in crow-app; 99 core, 44 fs, 8 macos, 20 search, 6 theme) · bench `target/fixture-100k`: cold first paint 168 ms, warm 9 ms, avg 8.35 ms, p99 8.52 ms, max 16.74 ms vs `main`'s warm 10 ms, avg 8.35, p99 8.52; warm and p99 are equal, cold varies (92–168 ms across runs) and is not a budget.
 Looked at: list, column, search and sidebar Info; light and dark; 1280 and 640 px; file, folder, package, symlink, dangling link, 5-item and 100k selections; the tab strip in all three surfaces; the narrow-search overlay. VoiceOver could not be driven through System Events (the GPUI window exposes only the menu bar there); the role/label tests cover the new elements, and the real VoiceOver pass is a hand check.
 Verdict: better. The pane is legible in both themes, the multi-selection summary is honest, and the two critique fixes remove a stale-metadata bug and a silent narrow-search no-op. The remaining notes are small; the View menu title is the only visible inconsistency, and it needs a per-window menu rebuild to fix.
 
@@ -75,4 +75,4 @@ Verdict: better. The pane is legible in both themes, the multi-selection summary
 - 2026-11-17: critique: fixed the Many key (11f9212) and the narrow-search override/overlay (d8398f0); re-ran fmt/clippy/tests (518 app tests) and the bench; checked light/dark, 640/wide, package/symlink/dangling, 5-item and 100k selections, and the search/sidebar targets; opened the PR.
 
 ## Next
-PR open: <url>. The next piece in the M8 index's order is **F6 — folder sizes** (`docs/plans/m8/f6-folder-sizes.md`); F3 is merged into the branch, so F6 can start. Request for the executing agent: `execute plan F6`.
+PR open: https://github.com/paraversal/file-crow/pull/53. The next piece in the M8 index's order is **F6 — folder sizes** (`docs/plans/m8/f6-folder-sizes.md`); F3 is merged into the branch, so F6 can start. Request for the executing agent: `execute plan F6`.
