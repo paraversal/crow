@@ -1,6 +1,6 @@
 # F8 — One focus in the filter progress
 
-Branch: `m8-filter-focus` · PR: none · Last updated: 2026-11-17 · State: Ready for critique
+Branch: `m8-filter-focus` · PR: none · Last updated: 2026-11-17 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -22,7 +22,7 @@ Branch: `m8-filter-focus` · PR: none · Last updated: 2026-11-17 · State: Read
 - [x] Column view: the same on the focused column; the second column follows alpha. (bundle, 1280 px; screenshot `/tmp/crow-f8-columns.png`.)
 - [x] 640 px: the column view with the filter still lays out; the list owns the focus and the field ring is gone. (screenshot `/tmp/crow-f8-640.png`.)
 - [x] No matches: `zzz`, ↓ does nothing and the field keeps focus. (screenshot `/tmp/crow-f8-nomatch.png`.)
-- [ ] Vim on and off; light and dark; an empty folder. The Vim keymap is covered by `filter_field_context_disables_list_keys` and the existing Vim filter tests; the change uses the existing active/inactive selection roles, so light/dark is a visual check for the critic. The empty folder uses the same `row_count() == 0` path as no matches.
+- [x] Vim on and off; light and dark; an empty folder. Critic: Vim on with Solarized Light (`target/shots/f8-down-solarized-solarized-light.png`), Finder keys with FireBox (`target/shots/f8-down-firebox.png`); the field's ring is gone and the cursor row uses the accent fill in both. 640 px with FireBox (`/tmp/f8-640-critic.png`). Empty folder `/tmp/crow-empty-f8`: `/`, `a`, ↓ leaves the field focused, "0 of 0" (`target/shots/f8-empty-firebox.png`).
 
 ## Found along the way
 - None yet.
@@ -31,6 +31,18 @@ Branch: `m8-filter-focus` · PR: none · Last updated: 2026-11-17 · State: Read
 - 2026-11-17: plan and progress written; branch `m8-filter-focus` from `main` (`42ba5f4`).
 - 2026-11-17: implemented. `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass. `cargo test -p crow-app filter` 41/41. Bundle hand check next.
 - 2026-11-17: added the Vim `k` pin (keymap + `filter_vim_k_at_the_first_row_stays_in_the_list`); filter suite 35/35, clippy and workspace tests pass. Committed locally; state is Ready for critique.
+
+## Critique
+Critic session: 2026-11-17 · Base: `main` @ `42ba5f4` · Head reviewed: `f2852ca`
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | The keymap test asserts ↑ in the field is not `MoveUp`, but not that it is unbound; a future binding could move the selection behind the field. The predicate `LIST_FILTERED = "FileList && Filtered && !Filter"` keeps it unbound today, and the row-0 window test covers the common path. | `crates/crow-app/src/actions.rs:361-370` | code / tests | note | left: the code is correct; the existing window test covers the field's ↑ at row 0. |
+| C2 | `filter_focus_field` with no cursor falls through to `move_up`, which selects the last row (`Folder::step(-1)` from `None`). The list can be focused with no cursor after a click on empty space. | `crates/crow-app/src/pane.rs:1144-1152`, `crates/crow-app/src/folder.rs:1901` | code / UX | note | left: "otherwise move up" is the plan's wording, and selecting the last row from nothing matches the list's existing ↑ behavior. |
+
+Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (486 crow-app, 96 crow-core, 44 crow-fs, 6 crow-macos, 20 crow-search, 6 crow-theme; 1 ignored) · bench not needed: no row rendering or first-paint change.
+Looked at: list and column view; FireBox dark and Solarized Light; Vim on and off; 640 px; no matches and an empty folder; field ring vs cursor fill. VoiceOver: no new role or label in this change.
+Verdict: better. One surface owns the keys and the fill follows it; the search field's model is now consistent in the filter, with no layout change.
 
 ## Next
 Ready for critique. The critic runs the `critique` skill, checks the hand checks above (especially Vim on/off and light/dark), and opens the PR.
