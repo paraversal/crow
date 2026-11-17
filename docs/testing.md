@@ -427,7 +427,7 @@ In the bundled app (`./scripts/bundle.sh`), FireBox dark and Solarized Light, ea
 
 | Check | How |
 | --- | --- |
-| Trash | ⌘⌫ one file, three files, and a folder of 500 files, in list and column view: the row fades (Low) or its icon becomes a trash and swallows the name while the gap closes (Full); Off removes it in one frame. One sound per operation; afterwards nothing is selected (as in Finder), and ↓ starts at the first row. The animation runs smoothly to its end without moving the mouse. |
+| Trash | ⌘⌫ one file, three files, and a folder of 500 files, in list and column view: the row fades (Low) or its icon becomes a trash and swallows the name while the gap closes (Full); Off removes it in one frame. One sound per operation; afterwards the next row is selected (the previous row if the last row went), and ↓ moves from it. The animation runs smoothly to its end without moving the mouse. |
 | Move | Drag a file onto a folder row and onto a sidebar favorite: the source fades, the target row pulses (Full after the fly phase, Low at once), the favorite pulses; Purr in `crow`. |
 | New folder | ⇧⌘N: the new folder arrives (rows below slide down in Full), then the rename field opens and takes typing at once. Pop in `crow`. |
 | Undo | ⌘Z after a trash: the file arrives; Bottle in `crow`. |
@@ -440,3 +440,17 @@ In the bundled app (`./scripts/bundle.sh`), FireBox dark and Solarized Light, ea
 | Hidden items | A folder with dotfiles (Home): hidden files and folders show dimmed (icon, name and every column) in list and column view, in light and dark themes; selected, the fill stays full and the name stays readable; renaming one shows the field at full contrast. |
 | Glide | Full, hold ↓: the selection fill follows within one row and settles; ⌘A shows every row selected. Trackpad scroll a long list and a short one that fits: the fill stays on the cursor row and never drifts; the cursor never moves. |
 | Lab | `crow --motion-lab` still runs, matches the app, and its sheet (`p`) fades like the app's. |
+
+## Selection and motion (F1)
+
+In the bundle, light and dark, 640 px and wide, list and column view, Vim on and off:
+
+| Check | How |
+| --- | --- |
+| Delete selects the next row | Trash a middle row, the last row, and a multi-selection (⇧↓ then ⌘⌫): the next row is selected, the previous row when the last row went, and the row after the selection for a block. Delete a file from Terminal while its folder is open: the same, with the row fading (Low) or swallowing then closing the gap (Full). A non-cursor row vanishing leaves the cursor alone; an empty folder leaves nothing selected. |
+| Selection islands | Select one row, two adjacent, three adjacent, and two islands separated by an unselected row: one rounded box per contiguous run, square edges between rows, a faint 1 px rule inside a run, each island its own box. List and column view, focused (accent) and unfocused (muted). Rows keep their height and position; the cursor glide fill takes the cursor row's rounding. |
+| Copy and cut | ⌘C: the copied rows pulse once (no pulse under Off). ⌘X: the cut rows dim, the fill stays full. Esc, ⌘Z, a paste, or a new copy/cut clears the dim; a copy in another app clears it within 100 ms. The same in search results. A 100k copy stays responsive. |
+| Sidebar fill | Click folders quickly in Full: one fill glides from the old row to the new one; Low fades it in on the new row; Off jumps. The row's text and icons never move. |
+| Tip inset | In a long folder, scroll until the `/` tip appears and scroll to the bottom: the last row sits above the card at 640 px and wide, light and dark. "Got it" removes the inset with the card. |
+| VoiceOver | Cmd-F5: a selected row reads as selected, the cursor row as active, an unselected row as not selected; the sidebar's current folder reads "current folder" and the ring row is active. |
+
