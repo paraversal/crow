@@ -1777,16 +1777,16 @@ fn a_huge_copy_keeps_the_clipboard_in_crow(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn copy_flashes_and_cut_dims(cx: &mut TestAppContext) {
+fn copy_flashes_and_cut_is_marked(cx: &mut TestAppContext) {
     let root = fixture("copy-feedback");
     let (view, mut cx) = open(cx, &root);
     cx.simulate_keystrokes("cmd-c");
-    let (flash, cut, dim) = cx.read(|cx| {
+    let (flash, cut, marked) = cx.read(|cx| {
         let clipboard = cx.global::<Operations>().clipboard.as_ref().expect("clipboard");
-        (clipboard.flash, clipboard.cut, clipboard.dim)
+        (clipboard.flash, clipboard.cut, clipboard.marked)
     });
     assert!(flash.is_some(), "a copy starts a flash");
-    assert!(!cut && !dim, "a copy does not dim");
+    assert!(!cut && !marked, "a copy is not marked");
     assert!(cx.debug_bounds("flash-alpha").is_some(), "the copied row flashes");
     let first = flash.expect("flash");
     // Age the flash past COPY_FADE (the clock is the real one, not the test clock).
@@ -1800,42 +1800,45 @@ fn copy_flashes_and_cut_dims(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("flash-alpha").is_none(), "the flash is one pulse");
     cx.simulate_keystrokes("cmd-x");
-    let (flash, cut, dim) = cx.read(|cx| {
+    let (flash, cut, marked) = cx.read(|cx| {
         let clipboard = cx.global::<Operations>().clipboard.as_ref().expect("clipboard");
-        (clipboard.flash, clipboard.cut, clipboard.dim)
+        (clipboard.flash, clipboard.cut, clipboard.marked)
     });
-    assert!(flash.is_none() && cut && dim, "a cut dims without a flash");
+    assert!(flash.is_none() && cut && marked, "a cut is marked without a flash");
+    assert!(cx.debug_bounds("cut-outline-alpha").is_some(), "the cut row is outlined");
+    assert!(cx.debug_bounds("cut-outline-beta").is_none(), "an uncut row is not");
     std::thread::sleep(Duration::from_millis(2));
     cx.simulate_keystrokes("cmd-c");
-    let (flash, cut, dim) = cx.read(|cx| {
+    let (flash, cut, marked) = cx.read(|cx| {
         let clipboard = cx.global::<Operations>().clipboard.as_ref().expect("clipboard");
-        (clipboard.flash, clipboard.cut, clipboard.dim)
+        (clipboard.flash, clipboard.cut, clipboard.marked)
     });
     assert!(flash.is_some_and(|flash| flash > first), "a new copy starts a new flash");
-    assert!(!cut && !dim, "the new copy replaces the cut");
+    assert!(!cut && !marked, "the new copy replaces the cut");
+    assert!(cx.debug_bounds("cut-outline-alpha").is_none(), "the outline is gone");
 }
 
 #[gpui::test]
-fn escape_undo_and_paste_clear_the_cut_dim(cx: &mut TestAppContext) {
-    let root = fixture("cut-dim-clear");
+fn escape_undo_and_paste_clear_the_cut_mark(cx: &mut TestAppContext) {
+    let root = fixture("cut-mark-clear");
     let (_view, mut cx) = open(cx, &root);
     let state = |cx: &VisualTestContext| {
-        cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|clipboard| (clipboard.cut, clipboard.dim)))
+        cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|clipboard| (clipboard.cut, clipboard.marked)))
     };
     cx.simulate_keystrokes("cmd-x");
     assert_eq!(state(&cx), Some((true, true)));
     cx.simulate_keystrokes("escape");
-    assert_eq!(state(&cx), Some((true, false)), "Escape clears the dim, keeps the cut");
+    assert_eq!(state(&cx), Some((true, false)), "Escape clears the mark, keeps the cut");
     cx.simulate_keystrokes("down cmd-x");
-    assert_eq!(state(&cx), Some((true, true)), "a new cut dims again");
+    assert_eq!(state(&cx), Some((true, true)), "a new cut marks again");
     cx.simulate_keystrokes("cmd-z");
-    assert_eq!(state(&cx), Some((true, false)), "undo clears the dim");
+    assert_eq!(state(&cx), Some((true, false)), "undo clears the mark");
     cx.simulate_keystrokes("cmd-x cmd-v");
     assert_eq!(state(&cx), None, "a cut paste consumes the clipboard");
 }
 
 #[gpui::test]
-fn search_results_flash_and_dim_with_the_clipboard(cx: &mut TestAppContext) {
+fn search_results_flash_and_mark_with_the_clipboard(cx: &mut TestAppContext) {
     let root = fixture("search-copy-feedback");
     std::fs::write(root.join("needle.txt"), "needle\n").expect("create fixture");
     let (view, mut cx) = open(cx, &root);
@@ -1846,8 +1849,9 @@ fn search_results_flash_and_dim_with_the_clipboard(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("search-flash-0").is_some(), "the result row flashes");
     cx.simulate_keystrokes("cmd-x");
     let state =
-        cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|clipboard| (clipboard.cut, clipboard.dim)));
-    assert_eq!(state, Some((true, true)), "the result row dims");
+        cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|clipboard| (clipboard.cut, clipboard.marked)));
+    assert_eq!(state, Some((true, true)), "the result row is marked");
+    assert!(cx.debug_bounds("search-cut-outline-0").is_some(), "the result row is outlined");
 }
 
 #[gpui::test]

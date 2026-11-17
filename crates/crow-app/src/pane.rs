@@ -44,7 +44,7 @@ use crate::operations::Operations;
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
-    CUT_DIM, active_selection, color, color_alpha, content_opacity, display_text, drop_outline, effect_tint,
+    active_selection, color, color_alpha, content_opacity, cut_outline, display_text, drop_outline, effect_tint,
     format_time, highlight_text, icon, inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
@@ -1920,25 +1920,30 @@ impl Pane {
         let total = folder.row_count();
         let cursor = folder.cursor_ix();
         let range_start = range.start;
-        let (flash, clipboard_flags) = {
+        let (flags_first, edges) = {
+            let (first, flags) = island_flags(folder, range.clone());
+            (first, island_edges(&flags))
+        };
+        let (flash, cut_edges, flash_flags) = {
             let clipboard = cx.global::<Operations>().clipboard.as_ref();
             let flash = clipboard
                 .and_then(|clipboard| clipboard.flash)
                 .map(|started| crow_core::motion::copy_flash(mode, started, now))
                 .unwrap_or(0.0);
-            let cut = clipboard.is_some_and(|clipboard| clipboard.cut && clipboard.dim);
-            let flags: Vec<(bool, bool)> = (range.start..range.end)
+            let cut = clipboard.is_some_and(|clipboard| clipboard.cut && clipboard.marked);
+            let last = (range.end + 1).min(folder.row_count());
+            let cut_flags: Vec<bool> = (flags_first..last)
                 .map(|ix| {
-                    let on =
-                        folder.row(ix).is_some_and(|(entry, _)| clipboard.is_some_and(|c| c.contains(&entry.path)));
-                    (on && cut, on && flash > 0.0)
+                    cut && folder.row(ix).is_some_and(|(entry, _)| clipboard.is_some_and(|c| c.contains(&entry.path)))
                 })
                 .collect();
-            (flash, flags)
-        };
-        let (flags_first, edges) = {
-            let (first, flags) = island_flags(folder, range.clone());
-            (first, island_edges(&flags))
+            let flash_flags: Vec<bool> = (range.start..range.end)
+                .map(|ix| {
+                    flash > 0.0
+                        && folder.row(ix).is_some_and(|(entry, _)| clipboard.is_some_and(|c| c.contains(&entry.path)))
+                })
+                .collect();
+            (flash, island_edges(&cut_flags), flash_flags)
         };
         let rows: Vec<(usize, Entry, usize, bool)> = range
             .filter_map(|ix| {
@@ -1974,11 +1979,12 @@ impl Pane {
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
                 let tint = effect_tint(look, theme);
-                let (is_cut, is_flash) = clipboard_flags[ix - range_start];
+                let is_flash = flash_flags[ix - range_start];
+                let cut_edge = cut_edges.get(ix - flags_first).copied().flatten();
                 let dim = content_opacity(
                     entry.hidden,
                     self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
-                ) * if is_cut { CUT_DIM } else { 1.0 };
+                );
                 let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
                 let reveal = folder.disclosure_opacity(ix, now);
                 let turn = folder.chevron_turn(&entry.path, now).unwrap_or(if expanded { 1.0 } else { 0.0 });
@@ -2041,6 +2047,12 @@ impl Pane {
                         row.child(
                             with_island_rounding(div().absolute().inset_0().bg(tint), island)
                                 .debug_selector(|| format!("flash-{}", entry.name)),
+                        )
+                    })
+                    .when_some(cut_edge, |row, edge| {
+                        row.child(
+                            cut_outline(theme, edge.top, edge.bottom)
+                                .debug_selector(|| format!("cut-outline-{}", entry.name)),
                         )
                     })
                     .debug_selector(|| format!("row-{}", entry.name))
@@ -2325,25 +2337,30 @@ impl Pane {
         let total = folder.row_count();
         let cursor = folder.cursor_ix();
         let range_start = range.start;
-        let (flash, clipboard_flags) = {
+        let (flags_first, edges) = {
+            let (first, flags) = island_flags(folder, range.clone());
+            (first, island_edges(&flags))
+        };
+        let (flash, cut_edges, flash_flags) = {
             let clipboard = cx.global::<Operations>().clipboard.as_ref();
             let flash = clipboard
                 .and_then(|clipboard| clipboard.flash)
                 .map(|started| crow_core::motion::copy_flash(mode, started, now))
                 .unwrap_or(0.0);
-            let cut = clipboard.is_some_and(|clipboard| clipboard.cut && clipboard.dim);
-            let flags: Vec<(bool, bool)> = (range.start..range.end)
+            let cut = clipboard.is_some_and(|clipboard| clipboard.cut && clipboard.marked);
+            let last = (range.end + 1).min(folder.row_count());
+            let cut_flags: Vec<bool> = (flags_first..last)
                 .map(|ix| {
-                    let on =
-                        folder.row(ix).is_some_and(|(entry, _)| clipboard.is_some_and(|c| c.contains(&entry.path)));
-                    (on && cut, on && flash > 0.0)
+                    cut && folder.row(ix).is_some_and(|(entry, _)| clipboard.is_some_and(|c| c.contains(&entry.path)))
                 })
                 .collect();
-            (flash, flags)
-        };
-        let (flags_first, edges) = {
-            let (first, flags) = island_flags(folder, range.clone());
-            (first, island_edges(&flags))
+            let flash_flags: Vec<bool> = (range.start..range.end)
+                .map(|ix| {
+                    flash > 0.0
+                        && folder.row(ix).is_some_and(|(entry, _)| clipboard.is_some_and(|c| c.contains(&entry.path)))
+                })
+                .collect();
+            (flash, island_edges(&cut_flags), flash_flags)
         };
         let selected_entries = folder.selected_entries();
         let rows: Vec<(usize, Entry, bool)> =
@@ -2369,11 +2386,12 @@ impl Pane {
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
                 let tint = effect_tint(look, theme);
-                let (is_cut, is_flash) = clipboard_flags[ix - range_start];
+                let is_flash = flash_flags[ix - range_start];
+                let cut_edge = cut_edges.get(ix - flags_first).copied().flatten();
                 let dim = content_opacity(
                     entry.hidden,
                     self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
-                ) * if is_cut { CUT_DIM } else { 1.0 };
+                );
                 let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
                 let island = edges.get(ix - flags_first).copied().flatten();
                 div()
@@ -2434,6 +2452,12 @@ impl Pane {
                         row.child(
                             with_island_rounding(div().absolute().inset_0().bg(tint), island)
                                 .debug_selector(|| format!("column-{k}-flash-{}", entry.name)),
+                        )
+                    })
+                    .when_some(cut_edge, |row, edge| {
+                        row.child(
+                            cut_outline(theme, edge.top, edge.bottom)
+                                .debug_selector(|| format!("column-{k}-cut-outline-{}", entry.name)),
                         )
                     })
                     .debug_selector(|| format!("column-{k}-row-{}", entry.name))
@@ -2828,14 +2852,14 @@ fn selection_islands(rows: usize, selected: impl Fn(usize) -> bool) -> Vec<Range
 /// A selected row's place in its island: the first row rounds its top, the last
 /// its bottom, and every row after the first draws the faint rule above it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct IslandEdges {
-    top: bool,
-    bottom: bool,
+pub(crate) struct IslandEdges {
+    pub(crate) top: bool,
+    pub(crate) bottom: bool,
     rule_above: bool,
 }
 
 /// Per-row island edges for `flags` (`None` for an unselected row).
-fn island_edges(flags: &[bool]) -> Vec<Option<IslandEdges>> {
+pub(crate) fn island_edges(flags: &[bool]) -> Vec<Option<IslandEdges>> {
     let mut edges = vec![None; flags.len()];
     for island in selection_islands(flags.len(), |ix| flags[ix]) {
         for ix in island.clone() {

@@ -1456,9 +1456,9 @@ impl CrowWindow {
     }
 
     fn undo(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
-        // Undo ends the cut dim; the clipboard itself stays for a later paste.
+        // Undo ends the cut mark; the clipboard itself stays for a later paste.
         if let Some(clipboard) = &mut cx.global_mut::<Operations>().clipboard {
-            clipboard.dim = false;
+            clipboard.marked = false;
         }
         self.notify_views(cx);
         let pane = self.pane().downgrade();
@@ -2216,7 +2216,7 @@ impl CrowWindow {
     }
 
     /// Redraw every pane and the search results after app-wide clipboard state
-    /// changes (a copy's flash, a cut's dim, Escape/undo clearing it).
+    /// changes (a copy's flash, a cut's mark, Escape/undo clearing it).
     fn notify_views(&self, cx: &mut App) {
         for (_, pane) in self.tabs.iter() {
             pane.update(cx, |_, cx| cx.notify());
@@ -3401,10 +3401,10 @@ impl Render for CrowWindow {
                         pane.update(cx, |pane, cx| {
                             pane.clear_selection(cx);
                         });
-                        // Escape also ends the cut dim; the clipboard itself stays,
+                        // Escape also ends the cut mark; the clipboard itself stays,
                         // so Cmd-V still moves the cut items.
                         if let Some(clipboard) = &mut cx.global_mut::<Operations>().clipboard {
-                            clipboard.dim = false;
+                            clipboard.marked = false;
                         }
                         this.notify_views(cx);
                     }

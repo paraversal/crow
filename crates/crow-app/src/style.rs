@@ -77,9 +77,25 @@ pub fn drop_outline(theme: &Theme) -> gpui::Div {
 /// the selection fill behind them stays full).
 pub const HIDDEN_DIM: f32 = 0.5;
 
-/// How much contrast a cut item's icon and text keep until the clipboard changes.
-/// Like Finder's cut icons: the selection fill stays full.
-pub const CUT_DIM: f32 = 0.5;
+/// The mark for a cut row: a dashed outline around the run. A cut item is pending
+/// a move, so it must not read as a hidden item (which only dims its content).
+/// Absolute, so it never shifts layout; the caller adds the run's rounding.
+pub fn cut_outline(theme: &Theme, top: bool, bottom: bool) -> gpui::Div {
+    use gpui::prelude::FluentBuilder;
+    use gpui::{Styled, div};
+    div()
+        .absolute()
+        .inset_0()
+        .border_l_2()
+        .border_r_2()
+        .when(top, |el| el.border_t_2())
+        .when(bottom, |el| el.border_b_2())
+        .border_dashed()
+        .border_color(color_alpha(theme.role("fg"), 0x99))
+        .when(top && bottom, |el| el.rounded_md())
+        .when(top && !bottom, |el| el.rounded_t_md())
+        .when(bottom && !top, |el| el.rounded_b_md())
+}
 
 /// The opacity of a row's icon and text: hidden items are dimmed, except while
 /// being renamed, so the field reads at full contrast.

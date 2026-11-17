@@ -85,8 +85,9 @@ pub struct Clipboard {
     pub change_count: Option<isize>,
     /// When a copy's tint pulse started; `None` for a cut.
     pub flash: Option<Instant>,
-    /// The cut rows still dim. Cleared by Escape, undo, a paste or a new copy/cut.
-    pub dim: bool,
+    /// The cut rows still show their mark. Cleared by Escape, undo, a paste or a
+    /// new copy/cut.
+    pub marked: bool,
     /// The paths as a set: a visible row is one lookup, never a 100k scan.
     set: HashSet<PathBuf>,
 }
@@ -94,7 +95,7 @@ pub struct Clipboard {
 impl Clipboard {
     pub fn new(paths: Arc<[PathBuf]>, cut: bool, change_count: Option<isize>) -> Self {
         let set = paths.iter().cloned().collect();
-        Self { paths, cut, change_count, flash: (!cut).then(Instant::now), dim: cut, set }
+        Self { paths, cut, change_count, flash: (!cut).then(Instant::now), marked: cut, set }
     }
 
     /// Whether `path` is on the clipboard.
@@ -521,9 +522,9 @@ mod tests {
         assert!(clipboard.contains(Path::new("/tmp/f99999")));
         assert!(!clipboard.contains(Path::new("/tmp/nope")));
         assert!(clipboard.flash.is_some(), "a copy starts a flash");
-        assert!(!clipboard.dim, "a copy does not dim");
+        assert!(!clipboard.marked, "a copy is not marked");
         let cut = Clipboard::new(vec![PathBuf::from("/tmp/a")].into(), true, None);
         assert!(cut.flash.is_none(), "a cut does not flash");
-        assert!(cut.dim, "a cut dims");
+        assert!(cut.marked, "a cut is marked");
     }
 }
