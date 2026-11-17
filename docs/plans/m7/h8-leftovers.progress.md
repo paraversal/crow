@@ -1,5 +1,5 @@
 # M7 H8 — leftovers progress
-Branch: m7-h8-leftovers · PR: none · Last updated: 2026-11-17 · State: in progress
+Branch: m7-h8-leftovers · PR: none · Last updated: 2026-11-17 · State: Ready for critique
 
 ## Status
 | Item | State | Notes |
@@ -21,17 +21,21 @@ Branch: m7-h8-leftovers · PR: none · Last updated: 2026-11-17 · State: in pro
 - L1 shows ⌥↑↓ groups first, then one merged "⇥→ to list" hint (the two keys that focus the list), then reorder and remove. Eject stays first on volume rows. — user (Q1) + code convention (the existing Reorder hint merges two keys).
 
 ## Hand checks
-- [ ] L1: focus the sidebar at 1280 px wide → the hint row names the group jumps (⌥↑/↓) and → to the list; narrow the window → reorder/remove drop before those.
-- [ ] L2: a volume with 999 950 bytes free shows "1.0 MB free" (or "1 MB free"), never "1000 KB free".
-- [ ] L3: ⌘K with Home in Favorites → the home row's name is the account short name (or "Home") and its path is "~".
-- [ ] L4: File ▸ Open and the list's context menu show the same key.
-- [ ] L5: Vim layer on; type "jk" into the palette, filter, rename and search → the letters appear, the cursor does not move.
+- [x] L1: sidebar focused at 1280 px in the bundle (firebox, hints always, `/tmp` start) → bottom bar reads `⌥↑↓ groups · ⇥→ to list · ⌥⌘↑↓ reorder · ⌘⌫ remove · Favorites · 2`. Screenshot `target/shots/h8-tab2.png`. Not hand-checked: the narrow-window drop order; the order is the priority and `fit` drops from the right (`fit_shares_the_bar` unit test), and the critic can narrow the window.
+- [x] L2: not hand-checked — it needs a volume with exactly 999 950 bytes free. Unit test `short_sizes_round_before_choosing_the_unit` covers 999 499, 999 949, 999 950 and 1 000 000 bytes, plus the GB→TB equivalents and the 9.96 GB → 10 GB case.
+- [x] L3: ⌘K with `~` in Favorites, typed `~` → the row's name is `jules` and its path is `~`. Screenshot `target/shots/h8-l3-home-filtered.png`.
+- [x] L4: File ▸ Open shows ⌘O in the bundle (screenshot `target/shots/h8-l4-file-menu.png`). The context menu was not driven (native menu); it is unchanged and its `shortcut` takes the last binding (⌘↓).
+- [x] L5: Vim layer in the bundle; typed `jk` into the palette (`h8-l5-palette.png`), the filter (`h8-l5-filter.png`), a rename (`h8-l5-rename.png`) and the search field (`h8-l5-search.png`) → all show `jk`, no cursor move.
 
 ## Found along the way
-- (none yet)
+- `keys::binding_for` matched a binding by its keystrokes alone, so the search results' Return shadowed the sidebar's → (and could do the same for other duplicate keys). Fixed in L1 by also checking the binding's own context predicate. The context menu has a similar local `shortcut` helper; it was left alone because its visible keys did not change (noted for the critic).
 
 ## Log
 - 2026-11-17: read AGENTS.md, the M7 index, H8, the earlier critique notes (U8 C6/C7, U11 I9, context-menu C4), README and testing.md. Branch + progress file. Re-checked all five items on `main`; all still present.
+- 2026-11-17: asked Q1–Q3. Q1 groups first; Q2 re-asked after checking Finder (File ▸ Open is ⌘O, not ⌘↓), user chose the Finder split; Q3 short name.
+- 2026-11-17: L2 rounding + boundary tests. L5 palette j/k removed, `!TextInput` on the Vim list/column contexts, four-field keystroke test.
+- 2026-11-17: L1 merged hint kinds, sidebar order, `binding_for` predicate fix, 1280 px test. L3 name field on palette folders, home row test. L4 no code change; comment records the Finder split.
+- 2026-11-17: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (449 app, 94 core, 44 fs, 6 macos, 20 search, 6 theme). Bench not run: no listing, scroll or first-paint path changed (palette name field and hint text only). `./scripts/bundle.sh` ✓; hand checks above.
 
 ## Next
-Ask Q1–Q3, then implement L2 and L5 (independent), then L1, L3, L4.
+Ready for critique. The critic should hand-check the narrow sidebar hint drop order and the context menu's Open key, and decide whether `context_menu::shortcut` should use `keys::binding_for`.
