@@ -3545,9 +3545,8 @@ fn vim_letters_type_in_every_text_field(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-k");
     settle(&view, &mut cx);
     cx.simulate_input("jk");
-    let palette = view.read_with(&cx, |w, cx| {
-        w.palette.as_ref().map(|p| (p.input.read(cx).text().to_owned(), p.cursor))
-    });
+    let palette =
+        view.read_with(&cx, |w, cx| w.palette.as_ref().map(|p| (p.input.read(cx).text().to_owned(), p.cursor)));
     assert_eq!(palette, Some(("jk".to_owned(), 0)), "j and k type in the palette");
     cx.simulate_keystrokes("escape");
     settle(&view, &mut cx);

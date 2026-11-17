@@ -221,8 +221,7 @@ const OPEN: Spec = Spec { kind: HintKind::Action(&OpenSelection), label: "open",
 const CLEAR: Spec = Spec { kind: HintKind::Action(&ClearFilter), label: "clear", idle: false };
 const FILTERED_HINTS: &[Spec] = &[OPEN, CLEAR, SEARCH_DEEPER];
 
-const GROUPS: Spec =
-    Spec { kind: HintKind::Merged(&PreviousGroup, &NextGroup), label: "groups", idle: false };
+const GROUPS: Spec = Spec { kind: HintKind::Merged(&PreviousGroup, &NextGroup), label: "groups", idle: false };
 const REORDER: Spec =
     Spec { kind: HintKind::Merged(&MoveFavoriteUp, &MoveFavoriteDown), label: "reorder", idle: false };
 const REMOVE: Spec = Spec { kind: HintKind::Action(&RemoveFromSidebar), label: "remove", idle: false };

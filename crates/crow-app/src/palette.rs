@@ -735,15 +735,7 @@ pub fn folder_candidates(
     let push = |path: PathBuf, source: Source, frecency: f64, out: &mut Vec<FolderCandidate>| {
         let label = crate::style::display_path(&path, home);
         let (name, name_start) = folder_name(&path, &label, home);
-        out.push(FolderCandidate {
-            name,
-            name_start,
-            label,
-            source,
-            frecency,
-            last_visit: last_visit(&path),
-            path,
-        });
+        out.push(FolderCandidate { name, name_start, label, source, frecency, last_visit: last_visit(&path), path });
     };
     for path in favorites {
         if seen.insert(path.clone()) {
