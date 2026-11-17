@@ -183,11 +183,25 @@ fn short_bytes(bytes: u64) -> String {
         unit += 1;
     }
     if unit == 0 {
-        format!("{bytes} bytes")
-    } else if value >= 10.0 {
-        format!("{value:.0} {}", units[unit])
-    } else {
-        format!("{value:.1} {}", units[unit])
+        return format!("{bytes} bytes");
+    }
+    // Round at the precision the row will show, then re-check the unit: 999.95 KB
+    // must read "1.0 MB", not "1000 KB". Rounding can also cross 10 ("9.96 GB" ->
+    // "10 GB"), so the decimals are chosen again after it.
+    loop {
+        let decimals = usize::from(value < 10.0);
+        let scale = 10f64.powi(decimals as i32);
+        let rounded = (value * scale).round() / scale;
+        if rounded >= 1000.0 && unit + 1 < units.len() {
+            value = rounded / 1000.0;
+            unit += 1;
+            continue;
+        }
+        return if rounded >= 10.0 {
+            format!("{rounded:.0} {}", units[unit])
+        } else {
+            format!("{rounded:.1} {}", units[unit])
+        };
     }
 }
 
@@ -1238,6 +1252,22 @@ mod tests {
         assert_eq!(short_bytes(980_000_000), "980 MB");
         assert_eq!(short_bytes(1_000_000_000_000), "1.0 TB");
         assert_eq!(short_bytes(0), "0 bytes");
+    }
+
+    #[test]
+    fn short_sizes_round_before_choosing_the_unit() {
+        // 999.949 KB and 999.95 KB both round to 1000 KB, which is 1.0 MB.
+        assert_eq!(short_bytes(999_499), "999 KB");
+        assert_eq!(short_bytes(999_949), "1.0 MB");
+        assert_eq!(short_bytes(999_950), "1.0 MB");
+        assert_eq!(short_bytes(1_000_000), "1.0 MB");
+        // The same boundary at GB -> TB, and the 9.96 GB -> 10 GB case from U8 C7.
+        assert_eq!(short_bytes(999_400_000_000), "999 GB");
+        assert_eq!(short_bytes(999_949_000_000), "1.0 TB");
+        assert_eq!(short_bytes(999_950_000_000), "1.0 TB");
+        assert_eq!(short_bytes(1_000_000_000_000), "1.0 TB");
+        assert_eq!(short_bytes(9_960_000_000), "10 GB");
+        assert_eq!(short_bytes(999_600_000_000), "1.0 TB");
     }
 
     #[test]

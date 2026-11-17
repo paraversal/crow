@@ -4,19 +4,21 @@ Branch: m7-h8-leftovers · PR: none · Last updated: 2026-11-17 · State: in pro
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| L1 Sidebar hints miss ⌥↑/↓ and → (U8 C6) | blocked (Q1) | `bottom_bar.rs` `hint_set` sidebar arm has reorder/remove/eject/to list only; `actions.rs` binds ⌥↑/↓ to PreviousGroup/NextGroup and → to OpenSelection. Ordering needs Q1. |
-| L2 `short_bytes` rounds after choosing the unit (U8) | in progress | `sidebar.rs:177`; 999 950 bytes → "1000 KB". Unit test boundaries. |
-| L3 Palette home row reads "~" twice (U7) | blocked (Q3) | `palette.rs` `folder_candidates` labels home `~`; row name is `label[name_start..]`; path is the same label. Name source needs Q3. |
-| L4 Open: ⌘↓ in the context menu, ⌘O in the menu bar (context-menu C4) | blocked (Q2) | `actions.rs:129-131`: cmd-o first, cmd-down last. Hints/context menu take the last; GPUI's native menu takes the first (`vendor/zed/crates/gpui_macos/src/platform.rs:348`). |
+| L1 Sidebar hints miss ⌥↑/↓ and → (U8 C6) | in progress | `bottom_bar.rs` `hint_set` sidebar arm has reorder/remove/eject/to list only; `actions.rs` binds ⌥↑/↓ to PreviousGroup/NextGroup and → to OpenSelection. Q1 answered: groups first. |
+| L2 `short_bytes` rounds after choosing the unit (U8) | done | `sidebar.rs:177` now rounds at the shown precision and re-checks the unit; 999 950 bytes → "1.0 MB", 9.96 GB → "10 GB". Unit test `short_sizes_round_before_choosing_the_unit` covers the KB/MB and GB/TB boundaries. |
+| L3 Palette home row reads "~" twice (U7) | in progress | `palette.rs` `folder_candidates` labels home `~`; row name is `label[name_start..]`; path is the same label. Q3 answered: short name. |
+| L4 Open: ⌘↓ in the context menu, ⌘O in the menu bar (context-menu C4) | done (no change) | User chose the Finder split: menu bar ⌘O, hints/context menu ⌘↓. `actions.rs:129-131` already does this; the comment now records why. Evidence: Finder's File ▸ Open is ⌘O (System Events). |
 | L5 Vim j/k block typing those letters (U7) | in progress | Palette has `Palette && vim` j/k; rename sits in a `FileList && vim` context with no `!TextInput`. Filter already has `!Filter`; search field has no vim binding. |
 
 ## Questions
-- Q1 (asked 2026-11-17): L1 hint order when the bar is narrow — recommended keep "⇥ to list" and "⌥↑↓ groups", drop reorder and remove first.
-- Q2 (asked 2026-11-17): L4 which Open key wins — recommended ⌘↓ everywhere, keep ⌘O bound but not shown.
-- Q3 (asked 2026-11-17): L3 home row name — recommended the account's short name, fall back to "Home".
+- Q1 (asked 2026-11-17): L1 hint order when the bar is narrow — recommended keep "⇥ to list" and "⌥↑↓ groups", drop reorder and remove first. → answer: `groups_first` (groups, then to-list, then reorder/remove; eject stays first on volume rows).
+- Q2 (asked 2026-11-17): L4 which Open key wins — recommended ⌘↓ everywhere. → re-asked with Finder evidence: Finder's File ▸ Open is ⌘O (checked with System Events), while its list views open with ⌘↓. Answer: `split` — keep the menu bar on ⌘O and the hints/context menu on ⌘↓; no code change, record the evidence and drop L4.
+- Q3 (asked 2026-11-17): L3 home row name — recommended the account's short name, fall back to "Home". → answer: `short_name`.
 
 ## Decisions
 - Branch `m7-h8-leftovers` from `main` (plan) — plan.
+- L4 is not a bug: the menu bar and the list surfaces intentionally show different Open keys, matching Finder's own split (File ▸ Open ⌘O; list ⌘↓). L4 is dropped with no behavior change, and the comment in `actions.rs` now records why. — user (Q2).
+- L1 shows ⌥↑↓ groups first, then one merged "⇥→ to list" hint (the two keys that focus the list), then reorder and remove. Eject stays first on volume rows. — user (Q1) + code convention (the existing Reorder hint merges two keys).
 
 ## Hand checks
 - [ ] L1: focus the sidebar at 1280 px wide → the hint row names the group jumps (⌥↑/↓) and → to the list; narrow the window → reorder/remove drop before those.
