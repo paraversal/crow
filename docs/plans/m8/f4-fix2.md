@@ -23,8 +23,9 @@ The cause is in GPUI: `PlatformInput::MouseExited` (`vendor/zed/crates/gpui/src/
 
 **Q3 — The "Tab complete" hint: make Tab visible or remove the hint?**
 Completion exists: `text_input.rs:96` binds Tab→Complete, `window.rs:602` calls `complete_path_edit` → `crow_core::complete_typed` (`paths.rs:34`). The user saw nothing because ⌘L opens the field with the full path selected (`window.rs:598`) and the last component is already complete, so Tab returns the same text.
-- **A (recommended): make Tab visibly useful.** When the typed path's last component is complete, Tab cycles the parent's matching entries (the field's text changes; the hint stays). Cost: completion state (the prefix, the matches, the index) and its tests.
-- **B: remove the hint.** The completion stays (Tab still completes a partial path), but the field no longer claims it. Cost: the user loses the hint; the completion is undocumented.
+- **A:** make Tab visibly useful: when the typed path's last component is complete, Tab cycles the parent's matching entries (the field's text changes; the hint stays). Cost: completion state (the prefix, the matches, the index) and its tests.
+- **B:** remove the hint. The completion stays (Tab still completes a partial path), but the field no longer claims it. Cost: the user loses the hint; the completion is undocumented.
+- **C (user's choice): the inline completion preview.** The field shows the typed text and, after it, the completion's suffix in `fg-muted` (the Finder ⌘⇧G pattern); Tab applies the completion; no suffix when nothing completes, so a complete path visibly has nothing to Tab; the hint stays accurate. Cost: the completion's async preview and its stale-result handling.
 
 ## Items
 
@@ -48,24 +49,24 @@ Completion exists: `text_input.rs:96` binds Tab→Complete, `window.rs:602` call
 
 **Done when:** the pill fades in and out; the field expands from the pill to the left section; both are instant with motion Off; light/dark and 640 px look right.
 
-### 3 The "Tab complete" hint
+### 3 The "Tab complete" hint and the inline completion preview
 
 **Cause:** the completion exists (`text_input.rs:96`, `window.rs:602`, `crow_core::complete_typed`), but ⌘L opens the field with the full path selected and the last component complete, so Tab returns the same text and the hint looks dead.
 
-**Change (Q3 A):** in `complete_path_edit`/`complete_typed`, when the typed path's last component is already complete, Tab cycles the parent's matching entries (the field's text changes each press); the hint stays. If Q3 is B, remove `COMPLETE` from `PATH_EDIT_HINTS`; the completion stays.
+**Change (Q3 C):** `text_input.rs`: the `TextInput` carries an optional completion and renders its suffix after the typed text in `fg-muted` (the caret stays at the typed end; the suffix is not selectable). `window.rs`: the path edit's `Changed` event recomputes `complete_typed` in the background (stale results dropped; a short debounce if the reads are hot) and sets the input's completion; Tab applies it (the existing `complete_path_edit`); the close clears it. The hint stays.
 
-**Tests:** for A, `complete_typed` cycles the matches from a complete path and the field's Tab changes the text; for B, the `hint_set` test asserts the field's hints no longer include "complete".
+**Tests:** the `complete_typed` suffix from a partial path; the field's completion set on change and cleared when nothing completes; a stale result from an older typed text is dropped; Tab applies the completion; the hint stays.
 
-**Done when:** A: Tab visibly changes the field from a complete path; B: the hint is gone and Tab still completes a partial path.
+**Done when:** the field shows the muted completion suffix; Tab applies it; a complete path shows no suffix; the hint stays; light/dark and 640 px look right.
 
 ## Finish
 
-Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo test -p gpui` if the patch lands, the bench on `target/fixture-100k` against `main` (the bar's render path changes), and `./scripts/bundle.sh`. Update `README.md` and `docs/testing.md` for the hover-out, the motion and the removed hint. Commit on `m8-f4-path-bar`, update `docs/plans/m8/f4-fix2.progress.md`, stop at "Ready for test". Don't merge; no PR until the user has tested.
+Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo test -p gpui` if the patch lands, the bench on `target/fixture-100k` against `main` (the bar's render path changes), and `./scripts/bundle.sh`. Update `README.md` and `docs/testing.md` for the hover-out, the motion and the completion preview. Commit on `m8-f4-path-bar`, update `docs/plans/m8/f4-fix2.progress.md`, stop at "Ready for test". Don't merge; no PR until the user has tested.
 
-**Hand checks:** hover the path, then move the pointer out of the window (the pill clears); the same on a segment, a row and a tab; the pill fades in/out; click the path (the field expands from the pill; the hints fade in); motion Off (instant); 640 px and wide; Firebox and Solarized Light; ⌘L and double-click; the field's hints show no "Tab complete"; VoiceOver; search mode.
+**Hand checks:** hover the path, then move the pointer out of the window (the pill clears); the same on a segment, a row and a tab; the pill fades in/out; click the path (the field expands from the pill; the hints fade in); motion Off (instant); 640 px and wide; Firebox and Solarized Light; ⌘L and double-click; the field's muted completion suffix (type a partial path; Tab applies it; a complete path has no suffix); VoiceOver; search mode.
 
-## Answers (user, date)
+## Answers (user, 2026-11-17)
 
-1. **Q1:** —
-2. **Q2:** —
-3. **Q3:** —
+1. **Q1:** A, the GPUI patch.
+2. **Q2:** A, 120/160 ms, `ease_out`, instant with motion Off.
+3. **Q3:** C, the inline completion preview: the muted suffix, Tab applies, no suffix when nothing completes, the hint stays.
