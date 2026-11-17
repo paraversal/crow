@@ -1197,6 +1197,8 @@ impl CrowWindow {
             path,
             editing: self.path_edit.as_ref().map(|edit| edit.input.clone()),
             transient_max: None,
+            pill_width: px(0.),
+            field_width: px(0.),
             message_id: ops.message_generation,
             progress_done,
             progress_id,

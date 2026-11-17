@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, Entity, FontWeight, IntoElement, KeyBinding, Pixels, Role,
-    SharedString, TextRun, Window, div, img, prelude::*, px, relative, transparent_black,
+    SharedString, SpringAnimation, SpringConfig, TextRun, Window, div, img, prelude::*, px, relative,
+    transparent_black,
 };
 
 use crate::actions::{
@@ -47,6 +48,10 @@ pub struct BarState {
     /// The most the transient slot may take, so the path keeps its first and last
     /// segments (set by `fit_to_window`).
     pub transient_max: Option<Pixels>,
+    /// The path pill's width at rest, so the field can expand from it.
+    pub pill_width: Pixels,
+    /// The left section's width, the field's final width.
+    pub field_width: Pixels,
     /// Bumped by every message; the transient fades in when it changes.
     pub message_id: u64,
     /// A finished operation's fraction while its bar fades, and its id.
@@ -418,13 +423,21 @@ pub fn fit_to_window(state: &mut BarState, window: &Window) {
         _ => Vec::new(),
     };
 
+    // The path's own fit gives the pill's width at rest even while the field replaces it.
+    let path_fit = fit(bar, fixed, &segments, ellipsis, other, &hint_widths);
+    state.pill_width = match &path_fit.hidden {
+        Some(hidden) => path_width(&segments, ellipsis, hidden.end),
+        None => segments.iter().copied().sum(),
+    };
+    // The field spans the left section: the bar less the counts and one gap.
+    state.field_width = (bar - fixed + px(GAP)).max(px(0.));
     let fit = if state.editing.is_some() {
         // The field takes the left section: the input's minimum plus the hints inside
         // it and the field's 12 px padding on both sides and 14 px gap.
         let field_min = px(PATH_FIELD_MIN + 38.) + hint_widths.iter().copied().sum::<Pixels>();
         fit(bar, fixed, &[field_min], ellipsis, other, &hint_widths)
     } else {
-        fit(bar, fixed, &segments, ellipsis, other, &hint_widths)
+        path_fit
     };
     if let Primary::Hints(hints) = &mut state.primary {
         hints.truncate(fit.hints);
@@ -608,6 +621,11 @@ fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui:
     with_tooltip(part, names, None)
 }
 
+/// The pill and pencil settle in about 120 ms, critically damped.
+fn path_spring() -> SpringConfig {
+    SpringConfig::new(5000., 141.42, 1.)
+}
+
 /// The path area's hover, so the pill fades in and out.
 fn hover_path(hovered: &bool, window: &mut Window, cx: &mut App) {
     if *hovered {
@@ -731,11 +749,11 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
                         let rest = color(pencil_theme.role("fg-subtle"));
                         let hot = color(pencil_theme.role("fg"));
                         pencil
-                            .with_animation(
-                                SharedString::from(format!("path-pencil-{hovered}")),
-                                Animation::new(Duration::from_millis(motion::ms::HOVER)),
-                                move |el, t| {
-                                    let t = motion::ease_out(if hovered { t } else { 1.0 - t });
+                            .with_spring(
+                                "path-pencil",
+                                SpringAnimation::new(path_spring()).to(hovered),
+                                move |el, phase| {
+                                    let t = phase.0.clamp(0., 1.);
                                     el.text_color(rest.blend(hot.alpha(t)))
                                 },
                             )
@@ -765,16 +783,11 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
         let pill = if ui.feedback.mode == Effective::Off {
             pill.into_any_element()
         } else {
-            pill.with_animation(
-                SharedString::from(format!("path-pill-{hovered}")),
-                Animation::new(Duration::from_millis(motion::ms::HOVER)),
-                move |el, t| {
-                    let t = motion::ease_out(if hovered { t } else { 1.0 - t });
-                    let alpha = (t * 255.) as u8;
-                    el.bg(color_alpha(pill_theme.role("surface"), alpha))
-                        .border_color(color_alpha(pill_theme.role("border"), alpha))
-                },
-            )
+            pill.with_spring("path-pill", SpringAnimation::new(path_spring()).to(hovered), move |el, phase| {
+                let alpha = (phase.0.clamp(0., 1.) * 255.) as u8;
+                el.bg(color_alpha(pill_theme.role("surface"), alpha))
+                    .border_color(color_alpha(pill_theme.role("border"), alpha))
+            })
             .into_any_element()
         };
         let empty = div()
@@ -1015,10 +1028,17 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
         let field = if ui.feedback.mode == Effective::Off {
             field.into_any_element()
         } else {
+            let start = state.pill_width.as_f32();
+            let end = state.field_width.as_f32();
             field
-                .with_animation("bar-path-field", Animation::new(Duration::from_millis(motion::ms::FIELD)), |el, t| {
-                    el.max_w(relative(motion::ease_out(t)))
-                })
+                .with_animation(
+                    "bar-path-field",
+                    Animation::new(Duration::from_millis(motion::ms::FIELD)),
+                    move |el, t| {
+                        let t = motion::ease_out(t);
+                        el.max_w(px(start + (end - start) * t))
+                    },
+                )
                 .into_any_element()
         };
         bar_children.push(field.into_any_element());
