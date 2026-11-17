@@ -44,4 +44,4 @@ Critique 2 in `f4-path-bar.progress.md`: the pencil rest, hints fade, field hove
 
 ## Next
 
-The critique is in `f4-path-bar.progress.md` (Critique 2): the pencil's rest color, the hints' fade, the field's hover reset, focus loss and the docs are fixed (779e493); Q5 (the field's expansion start) and Q6 (the mount flash) wait on the user. The bench re-ran at 8.55 ms p99 and the bundle is built.
+PR #52 open. The critique is in `f4-path-bar.progress.md` (Critique 2): the pencil's rest color, the hints' fade, the field's hover reset, focus loss and the docs are fixed (779e493); Q5/Q6 are answered and built (b3fc089): the field expands from the pill, the pill/pencil use springs. The final bench is p99 8.72 ms; the user's hand test is next.
