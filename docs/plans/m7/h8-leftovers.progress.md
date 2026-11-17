@@ -1,5 +1,5 @@
 # M7 H8 — leftovers progress
-Branch: m7-h8-leftovers · PR: none · Last updated: 2026-11-17 · State: In critique
+Branch: m7-h8-leftovers · PR: #47 · Last updated: 2026-11-17 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -38,7 +38,7 @@ Branch: m7-h8-leftovers · PR: none · Last updated: 2026-11-17 · State: In cri
 - 2026-11-17: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (449 app, 94 core, 44 fs, 6 macos, 20 search, 6 theme). Bench not run: no listing, scroll or first-paint path changed (palette name field and hint text only). `./scripts/bundle.sh` ✓; hand checks above. README's Hints and tips line now names the sidebar's groups and to-list keys.
 
 ## Next
-Ready for critique. The critic should hand-check the narrow sidebar hint drop order and the context menu's Open key, and decide whether `context_menu::shortcut` should use `keys::binding_for`.
+PR open: https://github.com/paraversal/file-crow/pull/47. The user hand-tests and squash-merges after CI. H8 was the last M7 piece; after the merge, run the M7 finish checks (30-minute fuzz on three seeds, `crow --fuzz` on the 100k fixture, README status line). Next piece after M7: D2 folder sizes (`docs/plans/folder-sizes.md`) unless the user picks D3 housekeeping.
 
 ## Critique
 Critic session: 2026-11-17 · Base: `main` @ 3a069fc · Head reviewed: 0b19ced (agent) + 4a0ae4be3d (critique)
