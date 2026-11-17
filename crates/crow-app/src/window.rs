@@ -1075,8 +1075,7 @@ impl CrowWindow {
         });
         let focus = self.bar_focus(window, pane, cx);
         // A typing run is the list's own state; the bar shows it only while the list owns the keys.
-        let type_select =
-            (focus == BarFocus::List).then(|| pane.type_select_prefix(cx)).flatten().map(Into::into);
+        let type_select = (focus == BarFocus::List).then(|| pane.type_select_prefix(cx)).flatten().map(Into::into);
 
         let sidebar_focused = focus == BarFocus::Sidebar;
         let count = if let Some(search) = &self.search {

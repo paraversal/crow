@@ -23,8 +23,8 @@ use gpui::{
 
 use crate::actions::{
     CloseSearch, CopyFiles, CopyPath, CutFiles, CycleMatch, DeletePermanently, MoveDown, MoveToFirst, MoveToLast,
-    MoveToTrash, MoveUp, OpenSelection, QuickLook, SearchEverything, SearchFocusField, SearchFocusResults, SearchReveal,
-    SelectAll,
+    MoveToTrash, MoveUp, OpenSelection, QuickLook, SearchEverything, SearchFocusField, SearchFocusResults,
+    SearchReveal, SelectAll,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::extensions::Ext;
@@ -892,11 +892,13 @@ impl SearchView {
         let Some(row) = self.results.get(ix) else { return };
         if !self.selection.contains(&row.path) {
             self.selection.select_only(row.path.clone());
-            self.cursor = ix;
-            self.user_moved = true;
             self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
             self.load_preview(cx);
         }
+        // Single-row actions (Open, Reveal, Quick Look) act on the cursor; the
+        // selection stays, so Copy, Cut and Trash still take all of it.
+        self.cursor = ix;
+        self.user_moved = true;
         cx.notify();
         self.open_menu(ix, window, cx);
     }
@@ -926,11 +928,11 @@ impl SearchView {
 
     /// The menu closed with the line at `chosen` picked (an index into its slots), or none.
     fn menu_closed(&mut self, chosen: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        self.menu.take();
+        if self.menu.take().is_none() {
+            return;
+        }
         cx.notify();
-        let Some((id, _)) =
-            chosen.and_then(|ix| crate::context_menu::search_slots().get(ix).copied().flatten())
-        else {
+        let Some((id, _)) = chosen.and_then(|ix| crate::context_menu::search_slots().get(ix).copied().flatten()) else {
             return;
         };
         // The results have focus, so the action runs exactly as its key would.
@@ -1129,10 +1131,10 @@ impl SearchView {
     /// The search menu's Copy Path: the selected results, or the cursor's row.
     fn copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
         let mut paths = self.selected_paths();
-        if paths.is_empty() {
-            if let Some(row) = self.results.get(self.cursor) {
-                paths.push(row.path.clone());
-            }
+        if paths.is_empty()
+            && let Some(row) = self.results.get(self.cursor)
+        {
+            paths.push(row.path.clone());
         }
         if paths.is_empty() {
             return;

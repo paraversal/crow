@@ -1317,6 +1317,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::single_range_in_vec_init)] // The matched list is the point of the test.
     fn home_row_matches_its_name_and_its_path() {
         let home = Path::new("/home/jules");
         let candidates = folder_candidates(vec![home.to_path_buf()], Vec::new(), Vec::new(), home, |_| None);

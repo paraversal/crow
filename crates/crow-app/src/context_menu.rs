@@ -193,7 +193,7 @@ pub fn sidebar_entries(kind: SidebarMenuKind, state: SidebarMenuState, cx: &App)
 }
 
 /// Search results: the row's own menu. Reveal is the search panel's ⌘R, which
-/// closes search and shows the result in its folder; Show in Finder is the list's.
+/// closes search and shows the result in its folder.
 const SEARCH: &[TitledSlot] = &[
     Some((CommandId::Open, None)),
     Some((CommandId::SearchReveal, Some("Reveal in Folder"))),

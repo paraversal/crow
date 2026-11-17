@@ -31,9 +31,9 @@ use gpui::{
 };
 
 use crate::actions::{
-    BeginJump, BeginMark, ClearFilter, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, EnterRow, ExtendDown,
-    ExtendUp, MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFile, NewFolder,
-    OpenSelection, PasteFiles, PasteMoveFiles, QuickLook, Rename, SelectAll, ShowInFinder, StartFilter,
+    BeginJump, BeginMark, ClearFilter, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, EnterRow,
+    ExtendDown, ExtendUp, MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFile,
+    NewFolder, OpenSelection, PasteFiles, PasteMoveFiles, QuickLook, Rename, SelectAll, ShowInFinder, StartFilter,
 };
 use crate::context_menu::{MenuKind, MenuState};
 use crate::extensions::Ext;

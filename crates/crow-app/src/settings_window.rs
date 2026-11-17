@@ -761,9 +761,7 @@ impl SettingsWindow {
     fn select_segment(&mut self, id: ControlId, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
         let change = match id {
             ControlId::Keymap => SettingChange::Keymap(if index == 0 { KeymapLayer::Finder } else { KeymapLayer::Vim }),
-            ControlId::Enter => {
-                SettingChange::Enter(if index == 0 { EnterAction::Rename } else { EnterAction::Open })
-            }
+            ControlId::Enter => SettingChange::Enter(if index == 0 { EnterAction::Rename } else { EnterAction::Open }),
             ControlId::Hints => SettingChange::Hints(match index {
                 0 => HintsMode::Auto,
                 1 => HintsMode::Always,

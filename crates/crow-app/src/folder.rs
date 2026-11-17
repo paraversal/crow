@@ -38,6 +38,8 @@ pub enum FolderEvent {
     Loaded,
     /// The visible rows changed: a listing, an expansion or a child folder.
     Changed,
+    /// A type-to-select run started or expired; the bottom bar shows its prefix.
+    TypeSelect,
 }
 
 /// The deepest folder list view expands inline; stops symlink cycles.
@@ -220,6 +222,8 @@ pub struct Folder {
     /// a folder's contents without selecting anything until you move into them.
     auto_select: bool,
     type_select: TypeSelect,
+    /// Bumped per typed letter, so only the last run's timer clears the prefix.
+    type_select_gen: u64,
     show_hidden: bool,
     /// Name filter (list/column view): shown rows are this folder's matches, flat.
     filter: Option<String>,
@@ -325,6 +329,7 @@ impl Folder {
             arrival_mode: Effective::Off,
             auto_select,
             type_select: TypeSelect::default(),
+            type_select_gen: 0,
             show_hidden,
             filter: None,
             match_ranges: Arc::new(Vec::new()),

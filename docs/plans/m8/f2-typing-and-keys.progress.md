@@ -31,6 +31,7 @@ Branch: `m8-f2-typing` · PR: none · Last updated: 2026-11-17 · State: in prog
 - The Settings label is "What Return does" (user asked for a descriptive label), values "Rename" / "Open", description names F2.
 - The search-result menu reuses the command registry; `SearchReveal` gets the row title "Reveal in Folder", and `CopyPath` gains a search handler because the pane's handler is not in the search overlay's focus tree.
 - Palette matching scores the name only when it is not a suffix of the label (the home row, `name_start: None`). Scoring every name would double the 100k-folder work and change the ranking of ordinary folders whose label already contains the name.
+- The plan's edge case says Rename is disabled with more than one selected "as today"; the code has no such check (`Pane::rename` renames the cursor row, and the context menu alone disables Rename for `selected != 1`). Left as the existing key behavior; changing it is a separate product call, not part of F2.
 
 ## Hand checks
 
@@ -52,6 +53,7 @@ Branch: `m8-f2-typing` · PR: none · Last updated: 2026-11-17 · State: in prog
 - 2026-11-17: Item 2. `EnterAction` in `settings.toml`; `EnterRow` in `LIST`; `f2` → `Rename`; the pane dispatches by the setting. Settings control "What Return does", description names F2. `keys::is_function_key` displays F2 instead of f2. README and `docs/testing.md` updated. Tests: window modes, sidebar/search, settings write/reload, keymap string.
 - 2026-11-17: Item 3. Search-result menu: `TitledSlot` (renamed from `SidebarSlot`, now shared), `SEARCH` slots, `search_entries` with the SearchResults scope. `SearchView.menu`, `context_press` (selects an unselected row, keeps a selection), right-click and Ctrl-click handlers, `menu_closed` dispatches the command action, `copy_path` handler. Test drives titles, Copy Path, Ctrl-click and Move to Trash.
 - 2026-11-17: Item 4. `Item::Folder.name_matched`; `folder_listing` scores the name only when `name_start` is None; `name_ranges` prefers it. Test for `jul` and `~`.
+- 2026-11-17: Finish started. `cargo fmt --check` and clippy pass; `cargo test --workspace` passes (478 app, 96 core, 44 fs, 6 macos, 20 search, 6 theme, `fuzz_smoke` included). Bench: the matcher change scores the name only for the home row, so the per-candidate work on a 100k folder is unchanged; the bench does not exercise the palette. Branch bench run started for the record; result pending.
 
 ## Next
 
