@@ -6,8 +6,9 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::SystemTime;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use grep_matcher::Matcher as _;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
@@ -22,6 +23,79 @@ use crate::rules::RuleSet;
 /// with a great many matching lines can produce more hits than this; sending
 /// them all at once makes the UI freeze while it drains one batch.
 const BATCH: usize = 256;
+
+/// How long a hit may wait in `pending` before it is sent, once the first batch is out.
+const FLUSH: Duration = Duration::from_millis(30);
+
+/// Decides when pending hits go to the sink. The first hit goes at once (time to
+/// first result); after that a batch goes when `BATCH` hits are pending or `FLUSH`
+/// has passed since the last send. Pure: the caller passes the clock.
+struct Batcher {
+    pending: Vec<Hit>,
+    last_sent: Option<Instant>,
+}
+
+impl Batcher {
+    fn new() -> Self {
+        Batcher { pending: Vec::new(), last_sent: None }
+    }
+
+    /// Add hits; returns the batches to send now (each at most `BATCH` long).
+    fn push(&mut self, hits: Vec<Hit>, now: Instant) -> Vec<Vec<Hit>> {
+        self.pending.extend(hits);
+        let mut ready = Vec::new();
+        if self.pending.is_empty() {
+            return ready;
+        }
+        let Some(last_sent) = self.last_sent else {
+            // The first result must not wait for a full batch or a timer.
+            while !self.pending.is_empty() {
+                ready.push(self.take_batch());
+            }
+            self.last_sent = Some(now);
+            return ready;
+        };
+        while self.pending.len() >= BATCH {
+            ready.push(self.take_batch());
+        }
+        if !ready.is_empty() {
+            self.last_sent = Some(now);
+        }
+        if !self.pending.is_empty() && now.saturating_duration_since(last_sent) >= FLUSH {
+            ready.push(std::mem::take(&mut self.pending));
+            self.last_sent = Some(now);
+        }
+        ready
+    }
+
+    /// Called when the receiver times out: the pending hits if `FLUSH` has passed.
+    fn due(&mut self, now: Instant) -> Option<Vec<Hit>> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let due = self.last_sent.is_none_or(|last| now.saturating_duration_since(last) >= FLUSH);
+        if due {
+            self.last_sent = Some(now);
+            Some(std::mem::take(&mut self.pending))
+        } else {
+            None
+        }
+    }
+
+    /// The walk ended: whatever is left.
+    fn finish(self) -> Option<Vec<Hit>> {
+        (!self.pending.is_empty()).then_some(self.pending)
+    }
+
+    /// The first `BATCH` hits: one huge file can make `pending` huge.
+    fn take_batch(&mut self) -> Vec<Hit> {
+        if self.pending.len() <= BATCH {
+            return std::mem::take(&mut self.pending);
+        }
+        let rest = self.pending.split_off(BATCH);
+        std::mem::replace(&mut self.pending, rest)
+    }
+}
 
 /// What to look for. `contents` is literal and case-insensitive unless wrapped
 /// in `/…/`, which makes it a regex. `everything` ignores every exclusion set.
@@ -63,10 +137,40 @@ pub enum HitKind {
 pub struct Summary {
     /// Directory entries visited (files and folders).
     pub scanned: u64,
-    /// Folders the rules removed, with the rule that removed each one.
-    pub skipped: Vec<(PathBuf, String)>,
+    /// Folders the walk did not enter, and why.
+    pub skipped: Vec<Skip>,
     /// Set when the query itself is invalid (a bad regex); no walk ran.
     pub error: Option<String>,
+}
+
+/// A folder the walk did not enter, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Skip {
+    pub path: PathBuf,
+    pub reason: SkipReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SkipReason {
+    /// An exclude.toml set: `"dev: name \"node_modules\""` (the rule's text).
+    Rule(String),
+    /// The folder could not be read: `"no permission"`, or the error text.
+    Unreadable(String),
+}
+
+impl SkipReason {
+    /// Whether Search everything would walk it.
+    pub fn lifted_by_everything(&self) -> bool {
+        matches!(self, SkipReason::Rule(_))
+    }
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SkipReason::Rule(text) | SkipReason::Unreadable(text) => f.write_str(text),
+        }
+    }
 }
 
 /// A pasted query can be a 100k-file clipboard (~10 MB). Nucleo scans the
@@ -196,12 +300,14 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
     let (tx, rx) = mpsc::channel::<Vec<Hit>>();
 
     let scanned_thread = scanned.clone();
+    let skipped_thread = skipped.clone();
     std::thread::scope(|scope| {
         scope.spawn(move || {
             walker.run(|| {
                 let tx = tx.clone();
                 let cancel = cancel.clone();
                 let scanned = scanned_thread.clone();
+                let skipped = skipped_thread.clone();
                 let names = names.clone();
                 let pattern = content_pattern.clone();
                 let mut fuzzy = names.as_deref().map(FuzzyMatcher::new);
@@ -210,56 +316,81 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                     if cancel.load(Ordering::Relaxed) {
                         return WalkState::Quit;
                     }
-                    let Ok(entry) = result else { return WalkState::Continue };
+                    let entry = match result {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            // A folder the walk could not read is a gap the user must see,
+                            // not silence: record it with its reason.
+                            if let Some(path) = error_path(&error)
+                                && let Ok(mut list) = skipped.lock()
+                            {
+                                list.push(Skip {
+                                    path: path.to_path_buf(),
+                                    reason: SkipReason::Unreadable(error_text(&error)),
+                                });
+                            }
+                            return WalkState::Continue;
+                        }
+                    };
                     if entry.depth() == 0 {
                         return WalkState::Continue;
                     }
                     scanned.fetch_add(1, Ordering::Relaxed);
-                    let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+                    let file_type = entry.file_type();
+                    let is_dir = file_type.is_some_and(|kind| kind.is_dir());
                     let metadata = entry.metadata().ok();
                     let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
                     let size = metadata.as_ref().map_or(0, |meta| meta.len());
-                    let mut hits = Vec::new();
                     if let Some(fuzzy) = fuzzy.as_mut() {
                         let name = entry.file_name();
                         let name = name.to_string_lossy();
                         if let Some((score, ranges)) = fuzzy.indices(name.as_ref()) {
-                            hits.push(Hit {
+                            // Send the name hit before this file's contents are read: a large
+                            // file must not delay its own name, or the results that follow it.
+                            let _ = tx.send(vec![Hit {
                                 path: entry.path().to_path_buf(),
                                 is_dir,
                                 score,
                                 kind: HitKind::Name { ranges },
                                 modified,
                                 size,
-                            });
+                            }]);
                         }
                     }
+                    // Contents only from regular files, and symlinks to regular files. A
+                    // FIFO with no writer blocks its reader forever, which would stall the
+                    // whole search; sockets and devices are no better.
+                    let readable = file_type.is_some_and(|kind| kind.is_file())
+                        || (file_type.is_some_and(|kind| kind.is_symlink())
+                            && std::fs::metadata(entry.path()).is_ok_and(|meta| meta.is_file()));
                     if let Some(content) = content.as_mut()
-                        && !is_dir
+                        && readable
                     {
-                        let before = hits.len();
-                        let matches = content.search(entry.path(), modified, size, &mut hits, &cancel);
+                        let mut content_hits = Vec::new();
+                        let matches = content.search(entry.path(), modified, size, &mut content_hits, &cancel);
                         if matches > 1
-                            && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) = hits.get_mut(before)
+                            && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) = content_hits.first_mut()
                         {
                             *more = matches - 1;
                         }
-                    }
-                    if !hits.is_empty() {
-                        let _ = tx.send(hits);
+                        if !content_hits.is_empty() {
+                            let _ = tx.send(content_hits);
+                        }
                     }
                     WalkState::Continue
                 })
             });
         });
 
-        let mut pending = Vec::new();
-        for batch in rx {
-            pending.extend(batch);
-            while pending.len() >= BATCH {
-                // Hand out a bounded slice; a huge file can make `pending` huge.
-                let rest = pending.split_off(BATCH);
-                sink(std::mem::replace(&mut pending, rest));
+        let mut batcher = Batcher::new();
+        loop {
+            let ready = match rx.recv_timeout(FLUSH) {
+                Ok(hits) => batcher.push(hits, Instant::now()),
+                Err(RecvTimeoutError::Timeout) => batcher.due(Instant::now()).into_iter().collect(),
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+            for batch in ready {
+                sink(batch);
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
@@ -268,13 +399,15 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                 break;
             }
         }
-        if !pending.is_empty() && !cancel.load(Ordering::Relaxed) {
-            sink(pending);
+        if !cancel.load(Ordering::Relaxed)
+            && let Some(rest) = batcher.finish()
+        {
+            sink(rest);
         }
     });
 
     let mut skipped = skipped.lock().map(|mut list| std::mem::take(&mut *list)).unwrap_or_default();
-    skipped.sort_by(|a, b| a.0.cmp(&b.0));
+    skipped.sort_by(|a, b| a.path.cmp(&b.path));
     Summary { scanned: scanned.load(Ordering::Relaxed), skipped, error: None }
 }
 
@@ -282,7 +415,7 @@ fn build_walker(
     root: &Path,
     show_hidden: bool,
     rules: Arc<RuleSet>,
-    skipped: Arc<Mutex<Vec<(PathBuf, String)>>>,
+    skipped: Arc<Mutex<Vec<Skip>>>,
     cancel: Arc<AtomicBool>,
 ) -> WalkParallel {
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
@@ -307,13 +440,32 @@ fn build_walker(
             let name = name.to_string_lossy();
             if let Some(rule) = rules.skip(entry.path(), name.as_ref(), true) {
                 if let Ok(mut list) = skipped.lock() {
-                    list.push((entry.path().to_path_buf(), rule));
+                    list.push(Skip { path: entry.path().to_path_buf(), reason: SkipReason::Rule(rule) });
                 }
                 return false;
             }
             true
         });
     builder.build_parallel()
+}
+
+/// The path an `ignore` walk error is about, when it carries one.
+fn error_path(error: &ignore::Error) -> Option<&Path> {
+    match error {
+        ignore::Error::WithDepth { err, .. } => error_path(err),
+        ignore::Error::WithLineNumber { err, .. } => error_path(err),
+        ignore::Error::WithPath { path, .. } => Some(path),
+        _ => None,
+    }
+}
+
+/// The reason text for a folder the walk could not read.
+fn error_text(error: &ignore::Error) -> String {
+    match error.io_error() {
+        Some(io_error) if io_error.kind() == io::ErrorKind::PermissionDenied => "no permission".to_owned(),
+        Some(io_error) => io_error.to_string(),
+        None => error.to_string(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -528,20 +680,46 @@ mod tests {
         let root = dev_tree("rules");
         let (hits, summary) = run(&root, None, Some("needle"), true, false);
         assert_eq!(paths(&hits), [root.join("keep.txt"), root.join("sub/build/notes.txt")]);
-        let skipped: BTreeSet<_> = summary.skipped.iter().map(|(path, _)| path.clone()).collect();
+        let skipped: BTreeSet<_> = summary.skipped.iter().map(|skip| skip.path.clone()).collect();
         let expected: BTreeSet<_> =
             [".git", ".logicprojects", ".venv", "__pycache__", "build", "dist", "node_modules", "target"]
                 .into_iter()
                 .map(|name| root.join(name))
                 .collect();
         assert_eq!(skipped, expected);
-        assert!(summary.skipped.iter().any(|(path, rule)| {
-            path == &root.join("target") && rule.contains("dev") && rule.contains("Cargo.toml")
+        assert!(summary.skipped.iter().any(|skip| {
+            skip.path == root.join("target")
+                && matches!(&skip.reason, SkipReason::Rule(rule) if rule.contains("dev") && rule.contains("Cargo.toml"))
         }));
-        assert!(
-            summary.skipped.iter().any(|(path, rule)| { path == &root.join("node_modules") && rule.contains("name") })
-        );
+        assert!(summary.skipped.iter().any(|skip| {
+            skip.path == root.join("node_modules")
+                && matches!(&skip.reason, SkipReason::Rule(rule) if rule.contains("name"))
+        }));
         assert!(summary.scanned > 0);
+    }
+
+    #[test]
+    fn unreadable_folder_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = root("unreadable");
+        write(&root, "unreadable/backup-hidden.txt", b"needle\n");
+        let folder = root.join("unreadable");
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        let (hits, summary) = run(&root, Some("backup"), None, true, true);
+        // Check the mode before restoring it: a folder this user cannot read is
+        // the case under test. Restoring first made the check succeed always and
+        // the assertions below never ran.
+        let unreadable = fs::read_dir(&folder).is_err();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).expect("restore mode");
+        if !unreadable {
+            println!("read_dir succeeded on mode 000 (running as root?); skipping the unreadable assertion");
+            return;
+        }
+        assert!(hits.is_empty(), "nothing inside an unreadable folder is a hit: {hits:?}");
+        assert_eq!(
+            summary.skipped,
+            [Skip { path: folder, reason: SkipReason::Unreadable("no permission".to_owned()) }]
+        );
     }
 
     #[test]
@@ -664,6 +842,130 @@ mod tests {
         // One excerpt per file: its first matching line, plus the count of the rest.
         assert_eq!(content(&hits), [(2, "NEEDLE here".to_owned(), ranges(0, 6))]);
         assert_eq!(extra_matches(&hits), 1, "the third line is counted, not carried");
+    }
+
+    fn hit(path: &str) -> Hit {
+        Hit {
+            path: PathBuf::from(path),
+            is_dir: false,
+            score: 1,
+            kind: HitKind::Name { ranges: Vec::new() },
+            modified: None,
+            size: 0,
+        }
+    }
+
+    fn hits(count: usize) -> Vec<Hit> {
+        (0..count).map(|i| hit(&format!("h{i}"))).collect()
+    }
+
+    #[test]
+    fn batcher_sends_the_first_hit_at_once() {
+        let base = Instant::now();
+        let mut batcher = Batcher::new();
+        let ready = batcher.push(vec![hit("first")], base);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].len(), 1);
+    }
+
+    #[test]
+    fn batcher_holds_hits_until_flush() {
+        let base = Instant::now();
+        let mut batcher = Batcher::new();
+        assert_eq!(batcher.push(vec![hit("first")], base).len(), 1);
+        assert!(batcher.push(hits(10), base + Duration::from_millis(5)).is_empty(), "under FLUSH, nothing is due");
+        assert!(batcher.due(base + Duration::from_millis(20)).is_none());
+        assert_eq!(batcher.due(base + Duration::from_millis(36)).map(|batch| batch.len()), Some(10));
+    }
+
+    #[test]
+    fn batcher_sends_full_batches_immediately() {
+        let base = Instant::now();
+        let mut batcher = Batcher::new();
+        assert_eq!(batcher.push(vec![hit("first")], base).len(), 1);
+        let ready = batcher.push(hits(600), base + Duration::from_millis(1));
+        let lengths: Vec<usize> = ready.iter().map(Vec::len).collect();
+        assert_eq!(lengths, [256, 256]);
+        assert_eq!(batcher.finish().map(|batch| batch.len()), Some(88));
+    }
+
+    #[test]
+    fn batcher_never_sends_empty() {
+        let base = Instant::now();
+        let mut batcher = Batcher::new();
+        assert!(batcher.due(base + Duration::from_millis(100)).is_none());
+        assert!(batcher.finish().is_none());
+    }
+
+    #[test]
+    fn content_search_skips_fifos() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let root = root("fifo");
+        write(&root, "file.txt", b"needle\n");
+        let pipe = root.join("pipe");
+        let path = CString::new(pipe.as_os_str().as_bytes()).expect("no NUL in a temp path");
+        // SAFETY: `path` is a valid NUL-terminated path in `root`.
+        let made = unsafe { libc::mkfifo(path.as_ptr(), 0o644) };
+        assert_eq!(made, 0, "mkfifo: {}", io::Error::last_os_error());
+
+        let query = Query {
+            names: None,
+            contents: Some("needle".into()),
+            show_hidden: false,
+            rules: rules(),
+            everything: true,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let search_root = root.clone();
+        std::thread::spawn(move || {
+            let mut hits = Vec::new();
+            let summary = search(&search_root, &query, |batch| hits.extend(batch), &cancel);
+            let _ = tx.send((hits, summary));
+        });
+        let (hits, summary) = rx.recv_timeout(Duration::from_secs(10)).expect("the search finishes despite the FIFO");
+        assert!(summary.error.is_none(), "{:?}", summary.error);
+        assert_eq!(paths(&hits), [root.join("file.txt")], "the FIFO is never opened");
+    }
+
+    #[test]
+    fn name_hit_arrives_before_its_content_hit() {
+        let root = root("name-before-content");
+        write(&root, "needle.txt", b"needle\n");
+        let query = Query {
+            names: Some("needle".into()),
+            contents: Some("needle".into()),
+            show_hidden: false,
+            rules: rules(),
+            everything: true,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut batches: Vec<Vec<bool>> = Vec::new();
+        let summary = search(
+            &root,
+            &query,
+            |batch| batches.push(batch.into_iter().map(|hit| matches!(hit.kind, HitKind::Name { .. })).collect()),
+            &cancel,
+        );
+        assert!(summary.error.is_none(), "{:?}", summary.error);
+        let name = batches.iter().position(|batch| batch.iter().any(|is_name| *is_name)).expect("a name hit");
+        let content = batches.iter().position(|batch| batch.iter().any(|is_name| !*is_name)).expect("a content hit");
+        // The name hit leaves before its file is read. The old engine sent both
+        // in one batch, after the content read; the position check alone passed
+        // because the name hit came first inside that shared batch.
+        assert!(name < content, "the name hit arrives before its own content read: {batches:?}");
+    }
+
+    #[test]
+    fn a_symlink_to_a_file_gets_a_content_hit() {
+        let root = root("symlink-content");
+        write(&root, "target.txt", b"needle\n");
+        std::os::unix::fs::symlink("target.txt", root.join("link.txt")).expect("symlink");
+        let (hits, summary) = run(&root, None, Some("needle"), false, true);
+        assert!(summary.error.is_none(), "{:?}", summary.error);
+        let link = hits.iter().find(|hit| hit.path == root.join("link.txt")).expect("the symlink is read");
+        assert!(matches!(link.kind, HitKind::Content { .. }));
     }
 
     #[test]

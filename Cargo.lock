@@ -1135,6 +1135,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "libc",
  "nucleo-matcher",
  "regex-syntax",
  "unicode-segmentation",

@@ -1,52 +1,77 @@
 # M8.5 — Search reliability (index)
 
-Between M8 (Finder parity) and M9 (Phase 2). This is a roadmap, not a set of plans: each piece gets its own plan in this folder when it starts, with its own "Questions to ASK", branch, progress file and critique. Do not start a piece until the pieces it needs are merged to `main` (ASK before stacking on an unmerged branch).
+Between M8 (Finder parity) and M9 (Phase 2). Five batches, each a plan in this folder with its own branch, progress file, critique and PR. Execute them in order (B1 → B5). Do not start a batch until the one before it is merged to `main` (ASK before stacking on an unmerged branch): B2, B3 and B4 all write `crates/crow-app/src/search.rs`, and B2 and B4 both change `crow_search`'s public API.
 
-Drafted 2026-11-17 from the user's second triage list: Cmd-K cannot find files/folders whose names start with a dot; Cmd-F finds "back" quickly but not "backup"; search is "kind of really unreliable" in general. The user made it its own milestone because the problem spans the engine, the palette, the search panel and the band, and because a repro corpus is needed before the causes can be split.
+Drafted 2026-11-17 from the user's second triage list: Cmd-K cannot find files/folders whose names start with a dot; Cmd-F finds "back" quickly but not "backup"; search is "kind of really unreliable" in general. **Re-cut into batches on 2026-11-18** after a code review found the likely cause of the "backup" report (below). The first draft's S1–S7 map onto the batches as shown in the table; `s1-corpus.md` is superseded by `b1-streaming.md` and kept only for history.
 
 ## What we know
 
-- **The fuzzy matcher is not the cause of the "backup" miss.** `crow_search::FuzzyMatcher` scores `backup`, `.backup`, `Backups`, `backup-excludes`, `savegameBackup`, `do-not-backup` and `tm-backup` for both `back` and `backup`; all match, with contiguous ranges. A scratch test confirmed this on 2026-11-17.
-- **Hidden files are on in the user's config** (`show_hidden_files = true`), and the `[hidden]` exclusion set is off (`~/.config/crow/exclude.toml`). So a plain dotfile miss is not explained by the setting alone.
-- **Cmd-K is the palette, not file search.** Its empty query lists Recent, Favorites and the current folder's subfolders (`palette::folder_candidates`). A typed path lists folders by fuzzy match but files by **prefix only** (`palette::path_listing`, `crates/crow-app/src/palette.rs:972`), so `.backup.txt` is not found by typing `backup`. Path mode hides dot folders until the partial starts with `.` when hidden files are off; a test enshrines that (`palette_path_mode_hides_dot_folders_until_typed`, `crates/crow-app/src/window/tests.rs:4067`).
-- **Cmd-F searches the current folder by default**, not Home or This Mac. `SearchView` starts in `Scope::Folder`; the scope bar switches to Home or This Mac. The band shows the scope, but a user who expects a global search sees a miss.
-- **Cmd-F searches names and contents by default** (`Match::All`). Name hits stream first; content hits read every file. The result cap is 20,000 (`MAX_RESULTS`, `crates/crow-app/src/search.rs:42`); hitting it cancels the walk. A strong name hit that arrives after the cap is dropped.
-- **Exclusions are on by default** (`exclude.toml` dev set: `node_modules`, `.git`, `target`, `build`, `dist`, …). A target inside an excluded folder is skipped and only counted in the skipped list.
-- **The walker honors the hidden setting** (`build_walker`, `crates/crow-search/src/engine.rs:291`): `hidden(!show_hidden)`. With hidden off, dotfiles and dot folders are not visited at all.
+- **The fuzzy matcher is not the cause.** `crow_search::FuzzyMatcher` scores `backup`, `.backup`, `Backups`, `backup-excludes`, `savegameBackup`, `do-not-backup` and `tm-backup` for both `back` and `backup`, and `.backu` against `.backup_excludes` (score 152, range 0..6). Probes on 2026-11-17 and 2026-11-18.
+- **The engine holds small result sets until the walk ends.** `crow_search::search` (`crates/crow-search/src/engine.rs:257-268`) sends hits to the sink only when 256 (`BATCH`) are pending, or when the walk finishes. Nothing sends on a timer. A query with many matches (`.back` in `~`) fills a batch quickly and shows results; a query with a few matches (`.backu`) shows nothing until the walk ends. With match All, rooted at `~` and with hidden on, the walk reads the contents of every file in the home folder (`~/Library` included), which takes minutes. **This matches the user's repro exactly**: the list clears and the footer keeps saying "Searching…".
+- **Content search opens every non-directory, FIFOs included** (`engine.rs:237-238`: `!is_dir`). Opening a named pipe with no writer blocks that walker thread forever, so a folder with a FIFO in it never finishes searching. It's a second possible cause of "keeps searching", and it's fixed in B1.
+- **A file's name hit waits for its content read.** The walker builds one `Vec` per entry (name hit, then content hits) and sends it after reading the file, so a large file delays its own name hit.
+- **Unreadable folders are silent gaps.** `Err(entry)` is dropped (`engine.rs:213`); a TCC-protected folder in `~` is neither searched nor reported.
+- **Cmd-K is the palette, not file search.** Its empty query lists Recent, Favorites and the current folder's subfolders (`palette::folder_candidates`). A typed non-path query matches folders only. A typed path lists folders by fuzzy match but files by **prefix only** (`palette::path_listing`, `crates/crow-app/src/palette.rs:1048`). Path mode lists hidden entries only once the partial starts with `.` (`window.rs:2801`, `spawn_path_listing` at `:2854`); a test enshrines that (`palette_path_mode_hides_dot_folders_until_typed`, `crates/crow-app/src/window/tests.rs:4449`).
+- **Cmd-F searches the current folder by default** (`Scope::Folder`), names and contents (`Match::All`). The result cap is 20,000 rows (`MAX_RESULTS`, `crates/crow-app/src/search.rs:45`); reaching it cancels the walk (`:478-481`), so a strong name hit that arrives later is lost.
+- **Exclusions are on by default** (`exclude.toml` `dev` set). The walker honors Show Hidden Files with `hidden(!show_hidden)` (`engine.rs:291`), so with it off, dot files and dot folders are not visited at all.
 
-The reported "backup" miss is therefore one of: scope (the item is outside the current folder), hidden policy (the target is dot-named and hidden is off in the running app), exclusion (the target is inside a skipped folder), the 20k cap, or the match mode (Contents only). The first piece must reproduce it and name the cause before any behavior changes.
+## Decisions
 
-## The pieces
+### Product (the user, 2026-11-18; do not re-ask)
 
-| Piece | What | Needs | Branch |
+- **The repro:** `~/.backup_excludes`, searched from `~`, scope Folder, match All, Show Hidden Files on. `.back` finds it; `.backu` clears the list and keeps the footer searching.
+- **Hidden and dot names:** Cmd-F and Cmd-K find them with Show Hidden Files off, mark them hidden, and Cmd-K matches them without a leading dot.
+- **Cmd-K files:** a typed query fuzzy-matches files in the current folder, folders first; the empty query stays places-only.
+- **Cmd-F default scope:** keep the current folder as the default; make the scope bar and the empty state say so, and add a one-key Search Home from a miss.
+- **Cap:** always keep exact/contiguous name hits; reserve the cap for content and weak fuzzy hits; the footer says what was dropped.
+
+### Architecture (review, 2026-11-18; binding for the batches)
+
+These are decisions, not suggestions. An executing agent that finds one impossible ASKs instead of picking another.
+
+1. **No `explain` mirror of the walker.** Diagnostics run the real engine and read its output (`crow --search-trace`). A second implementation of the walk rules would drift. The only independent reimplementation is B5's test oracle, where disagreement is the point.
+2. **Batching is a small pure type** (`Batcher` in `engine.rs`) with a clock passed in, so it can be unit-tested. Policy: the first hit goes out at once; after that, a batch goes out when 256 are pending or 30 ms have passed since the last send.
+3. **Content search reads regular files only** (and symlinks whose target is a regular file). FIFOs, sockets and devices are never opened.
+4. **A name hit is sent before its file's contents are read.**
+5. **Skips are typed.** `Summary.skipped: Vec<Skip>`, with `Skip { path, reason: SkipReason }` and `SkipReason::{Rule(String), HiddenFolder, Package, Unreadable(String)}`. `SkipReason::lifted_by_everything()` decides whether "Search everything" helps: true for Rule, HiddenFolder and Package, false for Unreadable. B1 adds `Rule` and `Unreadable`; B2 adds `HiddenFolder`; B3 adds `Package`.
+6. **The hidden policy in search** (B2) is how the user's "find them with Show Hidden Files off" works without walking every dot folder in `~`:
+   - The walker always visits dot-named entries, so their names and contents match at any level it reaches.
+   - With Show Hidden Files off, it does not descend into a dot folder. It records a `HiddenFolder` skip instead. Search everything descends.
+   - With Show Hidden Files on, it descends, as today. The `[hidden]` exclusion set still applies.
+   - Every hit carries `hidden` (dot name or the macOS `UF_HIDDEN` flag), and rows draw it the way the list does (`style::content_opacity`).
+
+   This keeps the default walk cost where it is today while finding `~/.backup_excludes`, `~/.zshrc` and `~/.config` itself.
+7. **Cmd-K always lists with hidden entries** and filters or demotes them in one pure function (`palette::match_entries`). With Show Hidden Files off: an empty partial hides them; a typed partial includes them, ranked after visible matches unless the partial starts with `.`. Both the path mode and the typed non-path query use it.
+8. **Search does not descend into packages** (`.app`, `.bundle`, `.framework`, `.photoslibrary`); the package itself is still a name hit, and Search everything descends. This follows Finder (principle 5). The package test moves from `crow-fs` to `crow-core` (`crow_core::is_package_name`) so `crow-search` can use it without depending on `crow-fs`; `crow-fs` and `search.rs`'s own list both call it.
+9. **The cap is two budgets** (B4): 20,000 strong name rows, and 20,000 other rows (content and weak fuzzy). When the other budget fills, the engine **stops reading contents** but keeps walking for names (`Control::stop_contents`). Only filling the strong budget cancels the walk. A `Control` struct replaces the bare `cancel: &Arc<AtomicBool>` parameter.
+10. **`Query.show_hidden` is renamed `enter_hidden_folders`** in B2, because it no longer decides what matches.
+
+## The batches
+
+| Batch | What | Was | Branch |
 | --- | --- | --- | --- |
-| S1 Repro corpus and diagnostics | Repro corpus and diagnostics: a deterministic tree with dot names, `backup` names, excluded folders, packages, symlinks and a 100k subtree; a query log that records scope, match mode, hidden, exclusions and cap, and explains why each candidate was included or skipped. The user's failing folder/name becomes a named case. No behavior change. | — | `m8.5-s1-corpus` |
-| S2 Hidden and dot names | Hidden and dot-name policy for Cmd-F and Cmd-K: decide whether search finds dot-named items when View > Show Hidden Files is off; make Cmd-K path mode match files by name (fuzzy or prefix, per the user), not only by prefix; remove the "type the dot first" trap if the user wants. | S1 | `m8.5-s2-hidden` |
-| S3 Scope and exclusions | Scope and recall: make the default scope and the scope bar unambiguous; decide whether Cmd-F should start in the current folder or Home; show skipped folders and "Search everything" at the point of a miss; cover packages, symlinks and unreadable folders. | S1 | `m8.5-s3-scope` |
-| S4 Ranking and cap | Ranking, cap and streaming: keep exact/contiguous name hits ahead of content and weak fuzzy hits even when the cap is reached; make the cap per file or reserve room for names; keep selection stable while batches arrive; make the footer's "First 20000 files" state actionable. | S1 | `m8.5-s4-ranking` |
-| S5 Performance | Performance and cancellation: profile `back` vs `backup` on the corpus and the 200k search fixture; keep name hits streaming while contents are read; ensure cancellation and batching never block the main thread; record the budget. | S1, S4 | `m8.5-s5-performance` |
-| S6 Feedback | Feedback and recovery: say why a search is empty (hidden off, excluded folder, contents still running, cap reached), keep the skipped list reachable, and make the scope/match/hidden state visible without a caption. | S2, S3, S4 | `m8.5-s6-feedback` |
-| S7 Regression | Regression and fuzz: corpus assertions for every reported case, an oracle that compares the engine to a brute-force walk on small trees, and a search fuzz pass; bench on `target/fixture-search-200k`. | S2–S5 | `m8.5-s7-regression` |
+| [B1](b1-streaming.md) Streaming fix, corpus, trace | Time-based flush, name hits before contents, regular files only for contents, typed skips with unreadable folders, a small deterministic corpus with named cases, `--search-trace`, start/done log lines. Fixes the user's report. | S1 (trimmed) + the streaming half of S5 | `m8.5-b1-streaming` |
+| [B2](b2-hidden-and-palette.md) Hidden names and Cmd-K files | Hidden policy in the engine, `hidden` on hits and rows, Cmd-K path mode lists hidden entries and fuzzy-matches files, typed Cmd-K query matches files in the current folder. | S2 | `m8.5-b2-hidden` |
+| [B3](b3-scope-and-misses.md) Scope and misses | Search Home (⇧⌘H), a clearer Folder scope, the empty state offers every way to widen the search, skipped list shows all reasons, packages not descended, unreadable folders listed. | S3 + S6 | `m8.5-b3-scope` |
+| [B4](b4-cap-and-performance.md) Cap and performance | `Control` with stop-contents, two-budget cap, footer says what was dropped, selection stable under late strong names, bench with a query argument and the budget recorded. | S4 + the rest of S5 | `m8.5-b4-cap` |
+| [B5](b5-regression.md) Regression and finish | Oracle on random small trees, the app-level corpus matrix, search actions in the fuzzer, docs, README status line. | S7 + the milestone finish | `m8.5-b5-regression` |
 
-**Suggested order:** S1 → S2 → S3 → S4 → S5 → S6 → S7. S1 is first because every later piece needs a failing case. S2/S3/S4 all touch `search.rs`, `palette.rs` and the band; never two writers at once. S5 can run after S4; S6 after the behavior settles; S7 last.
+**Order:** B1 → B2 → B3 → B4 → B5, one at a time; none can run in parallel (see the top). B1 is small and fixes the reported bug, so the user can hand-test it on day one.
 
-**M8.5 is done when:** the user's dot-name and "backup" cases are in the corpus and pass; Cmd-K and Cmd-F agree on hidden/dot policy; the scope and cap are visible and explained at a miss; the search bench on `target/fixture-search-200k` is no worse than `main` (first hit and total); `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass; the hand checks cover light/dark, 640 px and wide, hidden on/off, all three scopes, all three match modes, and VoiceOver for new roles; README's status line names M9 next.
-
-## Questions to ASK
-
-Index-level questions for the user, asked by whoever starts S1:
-
-1. **Exact repro for "backup".** Which folder, which item, which scope (Folder/Home/This Mac), which match mode (All/Names/Contents), and was View > Show Hidden Files on? Recommended: add it to S1's corpus as the named case; if it cannot be reproduced, S1's diagnostics should still explain the miss.
-2. **Hidden and dot names.** Should Cmd-F and Cmd-K find dot-named items when Show Hidden Files is off? Finder's search can surface hidden items even when the list hides them. Recommended: search includes them, marks them as hidden, and Cmd-K path mode matches them by name without requiring a leading dot. This is a product decision, not a code default.
-3. **Cmd-K files vs folders.** Today Cmd-K is "go to a folder": the empty query lists folders, and files appear only under a typed path. Should a typed query also fuzzy-match files in the current folder? Recommended: yes for a typed query, with folders first; the empty query stays places-only. This is the closest fix to "Cmd-K can't find files".
-4. **Cmd-F default scope.** Current folder (today), Home, or This Mac? Recommended: keep the current folder as the default and make the scope bar and the empty state say so; add a one-key "Search Home" path from a miss. Changing the default is a bigger product change and should be explicit.
-5. **Cap policy.** When 20,000 results are reached, should exact/contiguous name hits always be kept even if they arrive late? Recommended: reserve the cap for content and weak fuzzy hits, and always keep a strong name hit; the footer should say what was dropped.
-
-Each piece ends with its own "Questions to ASK"; ask those in one batch when that piece starts. Don't answer them all up front.
+**M8.5 is done when:**
+- the user's `.backu` case and the dot-name cases are in the corpus and pass;
+- Cmd-K and Cmd-F agree on the hidden policy;
+- the scope, skips and cap are visible and explained at a miss;
+- the search bench on `target/fixture-search-200k` is no worse than `main` (first hit and total; B4 sets the margin);
+- `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass;
+- the hand checks cover light/dark, 640 px and wide, hidden on/off, all three scopes, all three match modes, and VoiceOver for new roles;
+- README's status line names M9 next.
 
 ## Not in M8.5
 
 - Saved queries, Tags, Spotlight indexing and a search-history UI: M9 P4 and later.
 - Content indexing or a database: Crow stays a live walker; no index to keep fresh.
-- Regex syntax changes: `/…/` already works; S4/S5 may tune its cost, not its language.
+- Regex syntax changes: `/…/` already works.
 - Remote file systems and iCloud placeholder downloads: out of scope, as in M8/M9.
+- Following symlinked folders during a walk: stays off (loops, duplicates). A symlink is a name hit; a symlink to a file is content-searched.
+- A size limit for content reads, or a "names only inside `~/Library`" rule: revisit after B4's numbers if Home searches are still slow.
