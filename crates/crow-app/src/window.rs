@@ -3559,11 +3559,20 @@ impl Render for CrowWindow {
         let sidebar = self.sidebar.clone();
         let search_preview = self.search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);
+        // A narrow search hides the column by default; ⌘I or ⇧⌘P still opens it.
+        let explicit = self.info.read(cx).explicit();
         let preview: Option<gpui::AnyElement> = if !show_preview {
             None
         } else if self.search.is_some() {
-            if narrow { None } else { search_preview }.map(|(entry, preview)| {
-                self.render_preview_pane(Some(&entry), preview.as_ref(), &theme, cx).into_any_element()
+            if narrow && !explicit { None } else { search_preview }.map(|(entry, preview)| {
+                let column = self.render_preview_pane(Some(&entry), preview.as_ref(), &theme, cx);
+                if narrow {
+                    // Search has no narrow mode: float the column over the results
+                    // instead of squeezing their scope row and header into a sliver.
+                    column.absolute().top_0().right_0().bottom_0().bg(color(theme.role("bg"))).into_any_element()
+                } else {
+                    column.into_any_element()
+                }
             })
         } else if list_view {
             Some(self.render_preview(cx).into_any_element())
@@ -3706,7 +3715,7 @@ impl Render for CrowWindow {
             .text_size(px(font_size))
             .child(title_bar)
             .children(tab_bar)
-            .child(div().flex_1().min_h_0().flex().child(sidebar).child(center).children(preview))
+            .child(div().relative().flex_1().min_h_0().flex().child(sidebar).child(center).children(preview))
             .child(path_bar)
             .children(tip)
             .children(sheet)

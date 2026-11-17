@@ -6550,6 +6550,33 @@ fn info_search_result_target(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn info_opens_in_a_narrow_search(cx: &mut TestAppContext) {
+    use crate::info_pane::InfoTab;
+    let root = fixture("info-narrow-search");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_resize(gpui::size(px(640.), px(800.)));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    wait_for_preview(&view, &mut cx, &root.join("notes.txt"));
+    assert!(cx.debug_bounds("preview").is_none(), "a narrow search hides the column by default");
+    let row_before = cx.debug_bounds("search-row-0").expect("result row");
+
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    let column = cx.debug_bounds("preview").expect("⌘I shows the column in a narrow search");
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
+    let row_after = cx.debug_bounds("search-row-0").expect("result row");
+    assert_eq!(row_after.size.width, row_before.size.width, "the overlay does not squeeze the results");
+    assert!(column.left() < row_after.right(), "the column floats over the results");
+
+    cx.simulate_keystrokes("cmd-shift-p");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("preview").is_none(), "⇧⌘P hides the explicit column");
+}
+
+#[gpui::test]
 fn info_sidebar_target_and_where_link(cx: &mut TestAppContext) {
     use crate::info_pane::InfoTarget;
     let root = fixture("info-sidebar");

@@ -116,6 +116,9 @@ pub struct InfoPane {
     tab: InfoTab,
     /// The column's visibility in this window; `default` is `settings.show_preview`.
     visible: bool,
+    /// The user opened or closed the column with ⌘I or ⇧⌘P, not the setting. A narrow
+    /// search hides the column by default; an explicit open still shows it.
+    explicit: bool,
     default: bool,
     target: Option<InfoTarget>,
     key: Option<InfoKey>,
@@ -134,6 +137,7 @@ impl InfoPane {
         Self {
             tab: InfoTab::Preview,
             visible: default,
+            explicit: false,
             default,
             target: None,
             key: None,
@@ -155,6 +159,12 @@ impl InfoPane {
 
     pub fn visible(&self) -> bool {
         self.visible
+    }
+
+    /// Whether the column is showing because the user opened it, not because of the
+    /// setting. A narrow search uses this to keep an explicit open visible.
+    pub fn explicit(&self) -> bool {
+        self.explicit
     }
 
     #[cfg(test)]
@@ -187,18 +197,24 @@ impl InfoPane {
     }
 
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if self.visible != visible {
+        if self.visible != visible || self.explicit != visible {
             self.visible = visible;
+            self.explicit = visible;
             cx.notify();
         }
     }
 
     /// The setting is the column's default; a change in Settings applies to every
-    /// window, while an explicit ⌘I only changes this one.
+    /// window, while an explicit ⌘I only changes this one. ⇧⌘P writes the setting and
+    /// toggles this window, so a setting that now agrees with the explicit state keeps
+    /// it (the narrow search's override survives the observer).
     pub fn set_default(&mut self, default: bool, cx: &mut Context<Self>) {
         if default != self.default {
             self.default = default;
-            self.visible = default;
+            if !self.explicit || self.visible != default {
+                self.visible = default;
+                self.explicit = false;
+            }
             cx.notify();
         }
     }
