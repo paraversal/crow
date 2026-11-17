@@ -75,9 +75,10 @@ pub fn context_stack(scope: KeyScope, layer: KeymapLayer) -> Vec<KeyContext> {
     }
 }
 
-/// The binding that wins for `action` in `scope`. Same rule as
-/// `DispatchTree::highest_precedence_binding_for_action`: the last binding
-/// added whose own context applies and whose keystrokes resolve to this action.
+/// The binding that wins for `action` in `scope`: the last one added whose own
+/// context applies and whose keystrokes resolve to this action. The context
+/// check keeps another scope's binding (the search results' Return) from
+/// standing in for this scope's key (the sidebar's →).
 pub fn binding_for(action: &dyn Action, scope: KeyScope, cx: &App) -> Option<KeyBinding> {
     let keymap = cx.key_bindings();
     let keymap = keymap.borrow();
