@@ -7,7 +7,7 @@ Branch: m8-f6-folder-sizes · PR: none · Last updated: 2026-11-17 · State: in 
 | S1 Spike: measure before choosing | done | numbers below; walk is syscall-bound; logical vs allocated differ 0.5–5%; 0 TCC errors from the shell, 11 dataless files never downloaded |
 | S2 The sizer (`crow-fs`) | done | `crow_fs::sizes::{measure, Measured, Cancel}`; 12 tests (nested, hard links, symlink loop, fake device boundary, unreadable subfolder/root, cancellation, packages, bulk/portable agreement); totals match S1 |
 | S3 The cache | done | `crow_fs::sizes::Cache` (versioned JSON, inode, `used_at` bound, `mark_stale`/`mark_subtree_stale`, `combined_size`); `crow_core::cache_dir()` = `~/Library/Caches/crow`; 11 tests |
-| S4 FSEvents history (`crow-macos`) | todo | |
+| S4 FSEvents history (`crow-macos`) | done | `crow_macos::fsevents::{watch, Event, EventFlags, current_event_id, volume_uuid}`; one boot-volume stream, folder-level, IDs, `WatchRoot`; 3 macOS tests (live stale, restart replay, UUID) |
 | S5 Scheduling (`crow-app`) | todo | |
 | S6 Showing sizes | todo | |
 | S7 Sorting by size | todo | |
@@ -56,6 +56,8 @@ Throwaway `crates/crow-fs/examples/walk_bench.rs` (deleted after the run). All w
 - `Cache` stores `folders`, `unreadable`, `hardlinks`, `used_at` and `stale` in addition to the plan's `bytes`, `items`, `inode`, `measured_at`, `event_id`: the first three are needed to combine child sizes honestly, `used_at` is the bound's LRU key, and `stale` is what FSEvents marks (plan's S3 + S4).
 - `Cache::combined_size` refuses to use a child with hard links, because a hard link can cross child folders and would be counted twice; the parent's own hard links are refused too (plan's hard-link rule).
 - The cache file is `crow_core::cache_dir().join("folder-sizes.json")`; `$CROW_CACHE_DIR` overrides it for tests (Q4 + repo config convention).
+- FSEvents uses `objc2-core-services` (already in the lock through `notify`) with `dispatch2`; one stream on `/`, folder-level events (no `FileEvents`), `WatchRoot`, 1 s latency in the app (100 ms in tests). The callback sends `Vec<Event>` over an `mpsc` channel; the `Arc<Callback>` context makes drop safe while a callback is queued (plan's S4).
+- The UUID check is a binding (`volume_uuid`) plus `Cache::reset_history`; the app service compares them at startup (S5), because only it owns the cache and the stream (plan's S4).
 
 ## Hand checks
 - [ ] Home in list view with the setting on: sizes fill in top first, fade in, and match Finder's Get Info (logical) within rounding.
@@ -72,6 +74,7 @@ Throwaway `crates/crow-fs/examples/walk_bench.rs` (deleted after the run). All w
 - 2026-11-17: S1 done. Three walks timed on the fixture, the repo and `~`; `sample` shows `getattrlistbulk` + one `open` per folder. Cold not measurable without root; TCC from the shell is clean but the app's identity differs; 11 dataless iCloud files stayed dataless. Asked Q1–Q6; answers recorded above.
 - 2026-11-17: S2 done. Refactored `listing::bulk` to a shared `list_raw` (extra `dev`/`file id`/`link count`; times optional) and added `sizes.rs`. `cargo fmt --check`, `clippy -p crow-fs --all-targets -D warnings`, `cargo test -p crow-fs` (55) pass. The sizer's totals on the fixture/repo/home match S1. Note: the fixture's absolute walk time is now ~230 ms for both the old spike code and the sizer; the S1 86 ms was a cache state, not a code difference.
 - 2026-11-17: S3 done. Added `sizes::Cache` (serde JSON, version 1, atomic save, inode check, LRU bound, stale marking, child combining) and `crow_core::cache_dir()`. `cargo test -p crow-fs` is 66 tests.
+- 2026-11-17: S4 done. Added `crow_macos::fsevents` with `objc2-core-services`/`dispatch2`; one boot-volume stream, folder-level events, IDs, `WatchRoot`, `volume_uuid`. Three tests pass repeatedly: a live write marks the folder and ancestors stale, a restart replays a write made while off, and the boot volume has a UUID. `cargo test -p crow-macos` is 11 tests.
 
 ## Next
-S4: the FSEvents binding in `crow-macos` (`objc2-core-services`), history replay, UUID check, and the macOS integration tests.
+S5: the app's size service (visible ranges, two low-QoS workers, cancel on scroll, cache load/save, FSEvents consumer), with a fake sizer.
