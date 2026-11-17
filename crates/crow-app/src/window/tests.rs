@@ -4617,6 +4617,52 @@ fn typing_selects_by_name_and_space_continues_a_name(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn type_select_shows_its_prefix_and_clears(cx: &mut TestAppContext) {
+    let root = fixture("typeselect-bar");
+    let executor = cx.executor();
+    let (view, mut cx) = open(cx, &root);
+
+    cx.simulate_keystrokes("n o");
+    assert_eq!(bar_state(&view, &mut cx).type_select.as_deref(), Some("no"), "the bar shows what was typed");
+    assert!(cx.debug_bounds("bar-type-select").is_some(), "the query is drawn in the transient slot");
+
+    // Escape dismisses the query and keeps the row it selected, as Finder does.
+    cx.simulate_keystrokes("escape");
+    assert_eq!(bar_state(&view, &mut cx).type_select, None);
+    assert!(cx.debug_bounds("bar-type-select").is_none(), "the query is gone");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "Escape keeps the selection");
+
+    // The run expires on its own.
+    cx.simulate_keystrokes("n o");
+    assert_eq!(bar_state(&view, &mut cx).type_select.as_deref(), Some("no"));
+    executor.advance_clock(crow_core::TypeSelect::TIMEOUT + Duration::from_millis(10));
+    cx.run_until_parked();
+    assert_eq!(bar_state(&view, &mut cx).type_select, None, "the prefix clears after the timeout");
+    assert!(cx.debug_bounds("bar-type-select").is_none());
+}
+
+#[gpui::test]
+fn type_select_query_stays_out_of_the_filter_and_vim(cx: &mut TestAppContext) {
+    let root = fixture("typeselect-quiet");
+    let (view, mut cx) = open(cx, &root);
+
+    // Starting the filter dismisses a run that was already going.
+    cx.simulate_keystrokes("n");
+    assert_eq!(bar_state(&view, &mut cx).type_select.as_deref(), Some("n"));
+    cx.simulate_keystrokes("/");
+    assert_eq!(bar_state(&view, &mut cx).type_select, None, "the filter field owns its own query");
+    cx.simulate_input("n");
+    assert_eq!(bar_state(&view, &mut cx).type_select, None, "typing in the field is not type-to-select");
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+
+    // Vim letters are commands, not a prefix.
+    write_config(&view, &mut cx, "settings.toml", "keymap = \"vim\"\n");
+    cx.simulate_keystrokes("j");
+    assert_eq!(bar_state(&view, &mut cx).type_select, None, "the Vim layer does not type-to-select");
+}
+
+#[gpui::test]
 fn filter_narrows_rows_and_escape_restores_focus(cx: &mut TestAppContext) {
     let root = fixture("filter");
     let (view, mut cx) = open(cx, &root);

@@ -35,6 +35,8 @@ pub const HEIGHT: f32 = 30.;
 /// Everything the bar draws this frame, computed on the main thread.
 pub struct BarState {
     pub primary: Primary,
+    /// The type-to-select prefix while a typing run is active, left of the hints.
+    pub type_select: Option<SharedString>,
     pub error: Option<BarError>,
     pub count: Count,
     pub path: Path,
@@ -389,6 +391,12 @@ pub fn fit_to_window(state: &mut BarState, window: &Window) {
         }
         Primary::Hints(_) => px(0.),
     };
+    if let Some(query) = &state.type_select {
+        if other > px(0.) {
+            other += px(GAP);
+        }
+        other += measure(query);
+    }
     if let Some(error) = &state.error {
         if other > px(0.) {
             other += px(GAP);
@@ -687,6 +695,17 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
     };
 
     let idle_text = color(theme.role("fg-subtle"));
+    let type_select_el = state.type_select.as_ref().map(|query| {
+        div()
+            .id("bar-type-select")
+            .debug_selector(|| "bar-type-select".into())
+            .role(Role::Group)
+            .aria_label(format!("Type to select: {query}"))
+            .flex_none()
+            .text_color(fg)
+            .child(query.clone())
+            .into_any_element()
+    });
     let (primary_aria, primary_el) = match &state.primary {
         Primary::Hints(hints) if hints.is_empty() => (None, None),
         Primary::Hints(hints) => {
@@ -756,6 +775,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, cx: &mut App) -> impl IntoEle
         .flex()
         .items_center()
         .gap(px(14.))
+        .children(type_select_el)
         .children(primary_el)
         .children(error_el);
     // A new message or error fades in; hints appear at once (they follow focus).
