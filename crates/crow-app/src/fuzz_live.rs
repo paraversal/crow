@@ -517,10 +517,20 @@ fn is_bulk_step(step: &Step, handle: WindowHandle<CrowWindow>, cx: &mut AsyncApp
     };
     match step {
         Step::Keys(keys) if keys == "cmd-a" => rows > BULK_PATHS,
-        Step::Keys(keys) if keys == "cmd-v" => clipboard > BULK_PATHS,
+        Step::Keys(keys) if keys == "cmd-v" || keys == "cmd-option-v" || keys == "p" => clipboard > BULK_PATHS,
         Step::Keys(keys) if keys == "cmd-z" => undo > BULK_PATHS,
         Step::Keys(keys) if keys == "cmd-shift-z" => redo > BULK_PATHS,
-        _ => selected > BULK_PATHS,
+        // Only the keys that act on the whole selection are bulk. Navigation,
+        // typing and clicks keep the 50 ms budget even with a 100k selection.
+        Step::Keys(keys)
+            if matches!(
+                keys.as_str(),
+                "cmd-c" | "cmd-x" | "cmd-d" | "cmd-backspace" | "cmd-alt-backspace" | "y y" | "d d"
+            ) =>
+        {
+            selected > BULK_PATHS
+        }
+        _ => false,
     }
 }
 

@@ -8515,6 +8515,11 @@ fn selection_totals_follow_every_selection_change(cx: &mut TestAppContext) {
     let changed = vec![(root.join("a.txt"), Some(bigger[0].clone()))];
     apply(cx, bigger, Some(&changed));
     assert_eq!(totals(cx), (99, 0), "a changed file size updates the totals");
+    // Deselecting the changed file must subtract its new size once, not the old one.
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.toggle(1, cx)));
+    assert_eq!(totals(cx), (119, 0), "cmd-click adds a file after the change");
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.toggle(0, cx)));
+    assert_eq!(totals(cx), (20, 0), "deselecting the changed file leaves the rest");
 }
 
 /// H4 batch 6: a watcher batch that removes the selected row drops it from the
