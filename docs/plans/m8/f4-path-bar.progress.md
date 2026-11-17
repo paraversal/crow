@@ -1,5 +1,5 @@
 # F4 path bar progress
-Branch: m8-f4-path-bar · PR: none · Last updated: 2026-11-17 · State: Ready for critique
+Branch: m8-f4-path-bar · PR: none · Last updated: 2026-11-17 · State: Ready for test
 
 ## Status
 | Item | State | Notes |
@@ -47,3 +47,22 @@ Branch: m8-f4-path-bar · PR: none · Last updated: 2026-11-17 · State: Ready f
 
 ## Next
 Ready for critique. The critic builds the branch and walks the hand checks above, especially dragging a segment to Finder and dropping one on a pane/sidebar row.
+
+## Critique
+Critic session: 2026-11-17 · Base: `main` @ 4c0a4b7 · Head reviewed: 143fbbe
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | The empty space fills `surface-raised` as one large slab with a hard left edge; hovering any segment fills it too (one `group_hover` on `bar-path`), so the bar has two hover languages | `img/f4-current-hover.png`; `crates/crow-app/src/bottom_bar.rs:735-745` | UX / UI | ask | fixed by the V2 build: the hover pill around the path, no empty-space fill |
+| C2 | The pencil sits at the far right of the path slot, next to the counts; it reads as a bar-level action, not "edit this path" | `img/f4-current-hover.png`; `bottom_bar.rs:706-735` | UX | ask | fixed by the V2 build: the pencil at the end of the path |
+| C3 | A single click on the empty space edits the path; the empty space is most of the bar and nothing says so at rest (F4 Q3, user) | `bottom_bar.rs:750-760` | UX | ask | user kept "edits"; the V2 pill shows the target on hover |
+| C4 | The separator is inside the segment's hover/click box; hovering a segment paints the chevron with it | `bottom_bar.rs:668-680` | UI | note | fixed by the V2 build: the separator is a sibling |
+| C5 | The edit field is 24 px, 5 px radius, 6 px padding with a 2 px ring; next to the 32 px, 8 px search field it reads like a command line | `target/shots/f4-path-edit-firebox.png`; `bottom_bar.rs:614-638` | UI | note | fixed by the V2 build: 32 px, 8 px radius, 12 px padding, the left section with the hints inside |
+| C6 | The hover test checks the pencil's bounds and click, not that it is hidden at rest; `debug_bounds` cannot read opacity | `crates/crow-app/src/window/tests.rs:5790-5815` | code / test | note | fixed by the V2 build: the pencil is always visible; the test checks its bounds and click |
+| C7 | The drag test asserts the `DraggedSelection` entries, not the external file URLs (`promote_drag` is shared with rows and hand-checked) | `window/tests.rs:5740-5760` | code / test | note | left; the hand check covers Finder |
+| C8 | The last segment drags the file it shows; the plan says "folder". Recorded as a Decision (code convention), and it matches the segment's click | `bottom_bar.rs:671-690`; progress Decisions | plan | note | ask if folder-only is wanted |
+| C9 | The bar shows the cursor's path, so the last segment is the selected item, not the current folder (H6 C-Q1, user). The design's `fg` last segment can read as "you are here" | `crates/crow-app/src/window.rs:1173`; H6 C-Q1 | UX | note | keep the user decision; the V2 keeps the last segment `fg`; hand check |
+
+Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (500 app + 1 ignored, 99 core, 44 search, 6 fs, 20 macos, 6 theme) · bench on `target/fixture-100k`: cold 156 ms, warm 11 ms, p99 8.63 ms (main 143 / 11 / 8.64; the F4 branch 153 / 11 / 8.59); within the AGENTS.md budgets and run-to-run noise · `./scripts/bundle.sh` built `target/bundle/Crow.app`.
+Looked at: the design mockups (six options in `docs/plans/m8/img/`), the V2 build's tests at 1280 and 640, the bench. Not hand-driven yet: the user tests the bundle; the drag-to-Finder, VoiceOver and light/dark checks are on the hand-check list.
+Verdict: the drag work is solid; the V2 build replaces the slab/pencil/field with the pill, the path-end pencil and the left-section field. The user's test decides whether the shape is right.

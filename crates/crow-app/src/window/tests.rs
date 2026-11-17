@@ -73,7 +73,7 @@ fn assembled_layout_matches_boards(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert_eq!(cx.debug_bounds("toolbar").expect("band").size.height, px(52.), "band");
     assert_eq!(cx.debug_bounds("sidebar").expect("sidebar").size.width, px(210.), "sidebar");
-    assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(30.), "bottom bar");
+    assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(38.), "bottom bar");
     assert_eq!(cx.debug_bounds("column-0-row-alpha").expect("a column row").size.height, px(24.), "row");
     cx.simulate_keystrokes("/");
     cx.simulate_input("vi");
@@ -2021,7 +2021,7 @@ fn error_and_progress_leave_the_path_its_ends(cx: &mut TestAppContext) {
     let last: &'static str = format!("path-segment-{}", state.path.parts.len() - 1).leak();
     let first = cx.debug_bounds("path-segment-0").expect("the first segment is drawn");
     let tail = cx.debug_bounds(last).expect("the last segment is drawn");
-    assert!(first.size.width > px(20.), "the first segment keeps its room: {first:?}");
+    assert!(first.size.width > px(14.), "the first segment keeps its icon: {first:?}");
     assert!(tail.size.width > px(20.), "the last segment keeps its room: {tail:?}");
     let counts = cx.debug_bounds("bar-cancel").expect("Cancel is drawn");
     assert!(counts.right() <= px(700.), "the transient stays inside the window: {counts:?}");
@@ -5594,13 +5594,13 @@ fn path_bar_edits_the_path_with_cmd_l(cx: &mut TestAppContext) {
         Some(root.join("alpha").display().to_string()),
         "the cursor's path, all selected"
     );
-    assert_eq!(cx.debug_bounds("path-bar").expect("bar").size.height, px(30.), "the bar keeps its height");
+    assert_eq!(cx.debug_bounds("path-bar").expect("bar").size.height, px(38.), "the bar keeps its height");
     assert_eq!(
         cx.debug_bounds("bar-path").expect("path slot").size.height,
         slot_height,
         "the path slot keeps its height"
     );
-    assert_eq!(cx.debug_bounds("bar-path-field").expect("field").size.height, px(24.), "the field fits inside it");
+    assert_eq!(cx.debug_bounds("bar-path-field").expect("field").size.height, px(28.), "the field fits inside it");
     let state = bar_state(&view, &mut cx);
     assert_eq!(hint_labels(&state), ["go", "complete", "cancel"]);
     assert_eq!(hint_keys(&state), ["↩", "⇥", "esc"]);
@@ -5806,12 +5806,13 @@ fn path_bar_hover_offers_the_edit_affordance(cx: &mut TestAppContext) {
     let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
     let bar = cx.debug_bounds("bar-path").expect("path slot");
     let pencil = cx.debug_bounds("path-edit").expect("the pencil is laid out");
-    assert_eq!(pencil.size, gpui::size(px(18.), px(18.)), "the affordance is small");
+    assert_eq!(pencil.size, gpui::size(px(20.), px(20.)), "the affordance is a 20 px target");
     assert!(pencil.right() <= bar.right(), "it sits inside the path slot");
     let last = bar_state(&view, &mut cx).path.parts.len() - 1;
     let selector: &'static str = format!("path-segment-{last}").leak();
     let segment = cx.debug_bounds(selector).expect("last segment");
-    assert!(pencil.left() >= segment.right(), "it sits in the empty space, not on a segment");
+    assert!(pencil.left() >= segment.right(), "it sits at the end of the path, not on a segment");
+    assert!(pencil.right() < bar.right() - px(100.), "it sits at the path's end, not the far right");
 
     // Hovering the empty space keeps it laid out; a click on it edits.
     let empty = gpui::point(bar.right() - px(8.), bar.center().y);
@@ -5830,8 +5831,8 @@ fn path_bar_edit_affordance_does_not_shift_the_segments(cx: &mut TestAppContext)
     let (_view, mut cx) = open_sized(cx, &root, 1280., 800.);
     let bar = cx.debug_bounds("bar-path").expect("path slot");
     let first = cx.debug_bounds("path-segment-0").expect("first segment");
-    assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(30.), "the bar keeps its height");
-    assert_eq!(first.left(), bar.left(), "the first segment starts at the slot's edge");
+    assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(38.), "the bar keeps its height");
+    assert_eq!(first.left(), bar.left() + px(13.), "the first segment sits inside the pill's padding");
 
     cx.simulate_mouse_move(gpui::point(bar.right() - px(8.), bar.center().y), None, Default::default());
     cx.run_until_parked();
@@ -5840,8 +5841,8 @@ fn path_bar_edit_affordance_does_not_shift_the_segments(cx: &mut TestAppContext)
     cx.simulate_resize(gpui::size(px(640.), px(800.)));
     cx.run_until_parked();
     let bar = cx.debug_bounds("bar-path").expect("path slot");
-    assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(30.), "640 px keeps the bar's height");
-    assert_eq!(cx.debug_bounds("path-segment-0").expect("first segment").left(), bar.left());
+    assert_eq!(cx.debug_bounds("path-bar").expect("bottom bar").size.height, px(38.), "640 px keeps the bar's height");
+    assert_eq!(cx.debug_bounds("path-segment-0").expect("first segment").left(), bar.left() + px(13.));
 }
 
 #[gpui::test]

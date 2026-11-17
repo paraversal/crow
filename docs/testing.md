@@ -28,7 +28,7 @@ tabs closing search, the Tab cycle while searching, ↓ into the results and ↑
 the bottom bar
 (its type-to-select prefix, hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
 path folding and hint dropping, messages that retire, the editable path bar: ⌘L, a single click on empty
-space, the hover pencil, Tab completion, Return to a folder or a file, a missing path's beep and bar error,
+space, the always-visible pencil at the end of the path, Tab completion, Return to a folder or a file, a missing path's beep and bar error,
 Escape and a click-away, segment drags (a click still navigates, a drag does not; the folded "…" drags its
 deepest folder; the path field has no drag), and the path slot keeping its height), the contextual tips (a long-folder scroll, two
 zero-match filters, a typed path for a recent folder, Got it, `hints = "off"`, one at a time, closing on a
@@ -367,7 +367,7 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 
 | Check | How |
 | --- | --- |
-| Path bar | Click a folder segment to go there (Back returns); click the selected file's segment to open it. Hover the path area: a pencil appears at the right edge and the empty space fills; click either to edit (⌘L and a double-click still do). Drag a segment to Finder: the folder arrives, not text and not the selection; the drag does not also navigate. Drop a segment on a pane or sidebar favorite: the folder moves like a row drag. While the path field is open, dragging selects text and starts no file drag. VoiceOver reads the pencil as "Edit path". |
+| Path bar | Click a folder segment to go there (Back returns); click the selected file's segment to open it. The pencil sits at the end of the path and is always visible; the path is a 32 px pill in the 38 px bar. Hover the path: the pill appears around the path and pencil. Click the empty space or the pencil to edit (⌘L and a double-click still do); the field spans the path and the hints up to the counts' divider, with 12 px padding and the text vertically centered. Drag a segment to Finder: the folder arrives, not text and not the selection; the drag does not also navigate. Drop a segment on a pane or sidebar favorite: the folder moves like a row drag. While the path field is open, dragging selects text and starts no file drag. VoiceOver reads the pencil as "Edit path". |
 | Bottom bar hints | Fresh state dir (`CROW_STATE_DIR=$(mktemp -d)`): idle hint `/ filter` only. Press `/` and Esc three times (or Edit ▸ Filter This Folder): it disappears; relaunch: still gone. Focus the sidebar, a filter, search results: the hint set changes each time. `hints = "always"` brings them back; `"off"` hides all. Vim layer: same, and `m` shows "Mark this folder…". |
 | Bottom bar counts | Column view: hover the count, the tooltip names the focused column's folder. Filter: the bar keeps "N items" (the field says "n of N"). Select several files: "n selected · size". |
 | Progress and cancel | Copy a large folder to another disk: a 2 px accent line along the bottom bar's top edge and "Copying … · n %" with Cancel esc replace the hints; the path and count stay. Esc or Cancel stops it with nothing half-copied. |
