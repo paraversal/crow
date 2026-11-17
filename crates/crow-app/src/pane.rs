@@ -1322,6 +1322,14 @@ impl Pane {
     }
 
     fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
+        // Rename edits one name; the context menu disables it for a multi-selection,
+        // and the key says why instead of doing nothing.
+        if self.focused_folder().read(cx).selected_count() > 1 {
+            crate::feedback::refuse(crate::feedback::RefuseTarget::None, window, cx);
+            crate::operations::message("Select one item to rename", false, cx);
+            cx.notify();
+            return;
+        }
         if let Some(entry) = self.cursor_entry(cx) {
             self.begin_rename(entry.path, entry.is_dir, window, cx);
         }

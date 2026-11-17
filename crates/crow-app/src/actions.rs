@@ -229,6 +229,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-a", SelectAll, Some("SearchResults")),
         KeyBinding::new("cmd-c", CopyFiles, Some("SearchResults")),
         KeyBinding::new("cmd-x", CutFiles, Some("SearchResults")),
+        KeyBinding::new("cmd-alt-c", CopyPath, Some("SearchResults")),
         KeyBinding::new("cmd-backspace", MoveToTrash, Some("SearchResults")),
         KeyBinding::new("cmd-alt-backspace", DeletePermanently, Some("SearchResults")),
         KeyBinding::new("up", MoveUp, Some("Palette")),
