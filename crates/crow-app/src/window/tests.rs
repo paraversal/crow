@@ -5841,6 +5841,41 @@ fn path_bar_hover_offers_the_edit_affordance(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn path_bar_field_clears_the_hover(cx: &mut TestAppContext) {
+    let root = fixture("path-hover-field");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    let bar = cx.debug_bounds("bar-path").expect("path slot");
+    let empty = gpui::point(bar.right() - px(8.), bar.center().y);
+    cx.simulate_mouse_move(empty, None, Default::default());
+    cx.run_until_parked();
+    assert!(view.read_with(&cx, |w, _| w.path_hovered), "hovering the path sets the pill");
+    cx.simulate_click(empty, Default::default());
+    settle(&view, &mut cx);
+    assert!(path_edit_text(&view, &cx).is_some(), "the click opens the field");
+    let counts = gpui::point(bar.right() + px(20.), bar.center().y);
+    cx.simulate_mouse_move(counts, None, Default::default());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(!view.read_with(&cx, |w, _| w.path_hovered), "the pill does not stick after the field closes");
+}
+
+#[gpui::test]
+fn path_bar_hover_clears_when_the_window_deactivates(cx: &mut TestAppContext) {
+    let root = fixture("path-hover-deactivate");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let bar = cx.debug_bounds("bar-path").expect("path slot");
+    let empty = gpui::point(bar.right() - px(8.), bar.center().y);
+    cx.simulate_mouse_move(empty, None, Default::default());
+    cx.run_until_parked();
+    assert!(view.read_with(&cx, |w, _| w.path_hovered), "hovering the path sets the pill");
+    cx.deactivate_window();
+    assert!(!view.read_with(&cx, |w, _| w.path_hovered), "deactivation clears the pill");
+}
+
+#[gpui::test]
 fn path_bar_edit_affordance_does_not_shift_the_segments(cx: &mut TestAppContext) {
     let root = fixture("path-affordance-layout");
     let (_view, mut cx) = open_sized(cx, &root, 1280., 800.);

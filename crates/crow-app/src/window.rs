@@ -363,9 +363,13 @@ impl CrowWindow {
             cx.observe_window_appearance(window, |_, _, cx| reload_theme(cx)),
             // Another window coming to the front mid-drag must be able to receive it,
             // even while the pointer stays inside Crow's bounds.
-            cx.observe_window_activation(window, |_, window, cx| {
+            cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
                     window.promote_active_drag_to_platform(cx);
+                    // The pointer can stay over the path while another app is active;
+                    // the pill must not stay on screen with it.
+                    this.path_hovered = false;
+                    cx.notify();
                 }
             }),
             // Focus on an element that left the tree (an emptied results list, a hidden pane)
@@ -621,6 +625,9 @@ impl CrowWindow {
     /// was; a click elsewhere and a focus loss leave focus where the user put it.
     fn close_path_edit(&mut self, restore_focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(edit) = self.path_edit.take() else { return };
+        // The field replaced the path area, so its hover state is stale; the pill
+        // fades back in on the next hover instead of sticking where the pointer left.
+        self.path_hovered = false;
         // The refusal described the typed path; it goes with the field, unless
         // something newer replaced it.
         if let Some(generation) = edit.refused

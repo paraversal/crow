@@ -61,6 +61,9 @@ Whole-window fit: the bar is one 30 px strip under sidebar, columns and preview.
 Search mode: result hints and a result count; the path shows the selected result.
 
 ### Layout (left to right, one row)
+
+> **M8 F4 (2026-11-17):** the bar is 38 px now, with a 32 px hover pill around the path and a 32 px path field; the 30 px below is the U5 target, kept as history.
+
 - Bar: height **30 px** (boards; today 28, ask Q12), `px(12)`, gap 14 px between slots, `border_t_1` `border`, background `bg`, 12 px text, `relative` (for the progress line), `overflow_hidden`. Root keeps id `path-bar`; it becomes `Role::Group` aria "Status bar" containing three children (the path keeps `Role::Navigation`).
 - **Path slot** `id("bar-path")`: exactly today's segments (icons, `›`, hover `surface-raised`, click behavior, ids/selectors, aria "Path: …"). `flex_1 min_w_0 overflow_hidden`. Never shrinks below the width needed for the last segment while hints are visible: hints go first (see Narrow).
 - **Transient slot** `id("bar-transient")`, `flex_none`, gap 14 px. Content, in this order, each part optional:

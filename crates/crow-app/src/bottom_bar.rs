@@ -608,6 +608,15 @@ fn folded_segment(parts: &[(String, PathBuf)], pane: &Entity<Pane>, hover: gpui:
     with_tooltip(part, names, None)
 }
 
+/// The path area's hover, so the pill fades in and out.
+fn hover_path(hovered: &bool, window: &mut Window, cx: &mut App) {
+    if *hovered {
+        window.dispatch_action(Box::new(PathHover), cx);
+    } else {
+        window.dispatch_action(Box::new(PathUnhover), cx);
+    }
+}
+
 /// One bar: path · transient · counts.
 pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) -> impl IntoElement + use<> {
     let ui = cx.global::<Ui>();
@@ -708,7 +717,6 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
                 .ml_1()
                 .size(px(20.))
                 .rounded(px(4.))
-                .group("path-edit")
                 .hover(move |s| s.bg(hover))
                 .on_click(|_, window, cx| {
                     cx.stop_propagation();
@@ -720,13 +728,15 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
                     if ui.feedback.mode == Effective::Off {
                         pencil.into_any_element()
                     } else {
+                        let rest = color(pencil_theme.role("fg-subtle"));
+                        let hot = color(pencil_theme.role("fg"));
                         pencil
                             .with_animation(
                                 SharedString::from(format!("path-pencil-{hovered}")),
                                 Animation::new(Duration::from_millis(motion::ms::HOVER)),
                                 move |el, t| {
                                     let t = motion::ease_out(if hovered { t } else { 1.0 - t });
-                                    el.text_color(color_alpha(pencil_theme.role("fg"), (t * 255.) as u8))
+                                    el.text_color(rest.blend(hot.alpha(t)))
                                 },
                             )
                             .into_any_element()
@@ -787,7 +797,6 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
             .overflow_hidden()
             .flex()
             .items_center()
-            .group("path-area")
             .child(pill)
             .child(empty)
             // A click on the pill's padding or the empty space edits the path; ⌘L
@@ -795,13 +804,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
             .on_click(|_, window, cx| {
                 window.dispatch_action(Box::new(EditPath), cx);
             })
-            .on_hover(move |hovered, window, cx| {
-                if *hovered {
-                    window.dispatch_action(Box::new(PathHover), cx);
-                } else {
-                    window.dispatch_action(Box::new(PathUnhover), cx);
-                }
-            })
+            .on_hover(hover_path)
     };
 
     let idle_text = color(theme.role("fg-subtle"));
@@ -963,6 +966,21 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
     // the transient (up to the counts' divider) while editing.
     let mut bar_children: Vec<AnyElement> = Vec::new();
     if let Some(input) = state.editing.clone() {
+        // The hints fade in with the field instead of popping in at full opacity.
+        let field_hints = if ui.feedback.mode == Effective::Off {
+            transient
+        } else {
+            div()
+                .flex_none()
+                .min_w_0()
+                .child(transient)
+                .with_animation(
+                    "bar-path-field-hints",
+                    Animation::new(Duration::from_millis(motion::ms::FIELD)),
+                    |el, t| el.opacity(motion::ease_out(t)),
+                )
+                .into_any_element()
+        };
         let field = div()
             .id("bar-path")
             .debug_selector(|| "bar-path".into())
@@ -993,7 +1011,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
                     .items_center()
                     .child(input),
             )
-            .child(transient);
+            .child(field_hints);
         let field = if ui.feedback.mode == Effective::Off {
             field.into_any_element()
         } else {
