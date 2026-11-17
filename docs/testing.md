@@ -138,7 +138,7 @@ fn regression(cx: &mut TestAppContext) {
 }
 ```
 
-The runner prints the row for `docs/plans/m7/findings.md`. Deduplicate by violation
+The runner prints the row for `docs/plans/done/m7/findings.md`. Deduplicate by violation
 and place, not by seed; H4 fixes rows and adds the named regression test. For an
 edge-tree or churn finding, replay with the same tree and churn setting:
 `replay_with(cx, &tree, 200, &EdgeTree::single(EdgeKind::LongName), seed, churn, script)`.
@@ -233,7 +233,7 @@ step, a violation or a freeze removes the tree and keeps the support folder (`ke
 for replay:`). A paused run, a `HANG` and a killed run leave both (`crow-fuzz-*` in
 the system temp folder); remove them by hand, with `chmod -R u+rwx` first because
 the edge tree has an unreadable folder. Slow steps go into
-`docs/plans/m7/findings.md` with their replay command; `findings.md` is the input
+`docs/plans/done/m7/findings.md` with their replay command; `findings.md` is the input
 to the next H4 batch. This runner needs a real GUI session, so it is local only;
 the scheduled workflow runs H1's `fuzz_long`.
 

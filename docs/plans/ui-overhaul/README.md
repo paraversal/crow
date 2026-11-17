@@ -96,4 +96,4 @@ Not in the overhaul, roughly in order of payoff:
   preview with line numbers, 196 px columns, a darker focused-column tint, a scope token inside the
   search field.
 - Theme-index roles that miss contrast in Solarized Light (recorded in `u11-finish.progress.md`).
-- UI fuzzing and the rest of the inbox: [`../after-ui-overhaul.md`](../after-ui-overhaul.md).
+- UI fuzzing and the rest of the inbox: [`../done/after-ui-overhaul.md`](../done/after-ui-overhaul.md).

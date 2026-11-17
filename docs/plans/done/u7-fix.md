@@ -7,7 +7,7 @@ PR title: "UI U7 fix: palette spacing, caret, search ↓, New File, hide preview
 
 ## Where this list comes from (2026-11-14)
 The user's notes after using the app during U7, tagged f (feature), p (performance), ui, b (bug), d (direction). The items that make sense to do now are here. Two went elsewhere:
-- **d: a fuzzing script for UI robustness** (erratic input, long names, huge folders, what slows things down) is too big for a fix list: `docs/plans/after-ui-overhaul.md` D1.
+- **d: a fuzzing script for UI robustness** (erratic input, long names, huge folders, what slows things down) is too big for a fix list: `docs/plans/done/after-ui-overhaul.md` D1.
 - **Edge-case layout tests** (long names, deep paths, huge folders), the "could be tests" half of that note: `u10-finish.md` I4.
 
 X6 and X7 start with finding the cause. If the fix turns out large, ASK whether to move the item to `after-ui-overhaul.md` rather than growing this PR.

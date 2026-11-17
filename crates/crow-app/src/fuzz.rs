@@ -267,7 +267,7 @@ impl Failure {
         )
     }
 
-    /// The row for `docs/plans/m7/findings.md`; the agent fills the `#` and status.
+    /// The row for the milestone's `findings.md` (M7's is `docs/plans/done/m7/findings.md`); the agent fills the `#` and status.
     pub fn finding_row(&self) -> String {
         format!(
             "| | H2 | {} / {} / {} | {}: {} ({} steps; without churn: {}) | `{}` | open |",

@@ -177,7 +177,7 @@ Each state also in `solarized-light` (the two Vim states in FireBox only). Repea
 - U9: the tip floats over the list's bottom-right rows (plan position).
 - U10: the sidebar's current-folder fill does not glide (user deferred).
 - `recent.rs` zoxide discovery ignores `PATH` (absolute candidates), so a shot harness needs a stub; a product switch (e.g. `[recent] zoxide = false`) is a later decision.
-- `docs/plans/after-ui-overhaul.md`: UI fuzzing (D1) and the rest of the inbox.
+- `docs/plans/done/after-ui-overhaul.md`: UI fuzzing (D1) and the rest of the inbox.
 
 ## I10 PR body (for the critic)
 Title: "UI U11: Whole-window pass, docs and bench"
