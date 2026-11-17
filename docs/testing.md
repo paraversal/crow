@@ -61,11 +61,16 @@ round trip, and a broken file starting empty; and the tip state: round trip with
 a broken file starting empty, showing once, the key-use and `hints = "off"` refusals, the cooldown,
 and the zero-match streak.
 
-`crates/crow-search` tests the engine on temp trees: dev rules and sentinels skip and are counted,
-Search everything walks them, hidden files follow the setting, fuzzy names score, literal and
-`/regex/` contents report the first matching line, text and ranges with the rest counted, batches
-stay bounded (one excerpt per file, 256 hits at most), binary files are not read, and cancelling stops
-the stream. The search panel adds keystroke tests for names and contents, Search everything and its switch,
+`crates/crow-search` tests the engine on temp trees: dev rules and sentinels skip and are counted
+with typed reasons, Search everything walks them, hidden files follow the setting, fuzzy names score,
+literal and `/regex/` contents report the first matching line, text and ranges with the rest counted,
+batches stay bounded (one excerpt per file, 256 hits at most) and the first hit leaves at once, a name
+hit arrives before its own content read, a FIFO does not stall the walk, an unreadable folder is
+reported as a skip, binary files are not read, and cancelling stops the stream. `corpus_cases.rs`
+builds the deterministic corpus (`crow_search::corpus`) and runs its 20 named cases through the real
+engine — the user's `.backu` case, hidden on and off, the exclusion sets, Search everything, the
+symlink and its child, the package, the unreadable folder and the FIFO — each under a 10 s deadline.
+The search panel adds keystroke tests for names and contents, Search everything and its switch,
 scope buttons, Cmd-Shift-M cycling, idle examples, footer counts and errors, the skipped list,
 name-before-contents order, preview loading and the hit line, navigating and revealing results,
 copy and trash, and Vim j/k in the results.
@@ -265,8 +270,14 @@ cargo run --release -p crow-app -- --bench target/fixture-100k
 cargo run --release -p crow-app -- --bench-filter e target/fixture-100k
 cargo run --release -p crow-fs --example list_bench -- target/fixture-100k
 cargo run --release -p crow-app -- --make-search-fixture target/fixture-search-200k 200000
+cargo run --release -p crow-app -- --make-search-corpus target/fixture-search-corpus
 cargo run --release -p crow-app -- --bench-search target/fixture-search-200k
+cargo run --release -p crow-app -- --bench-search target/fixture-search-200k backup
 ```
+
+`--bench-search DIR [QUERY]` times the walk, fuzzy names and content reads; `QUERY` defaults to
+`needle`. `--make-search-corpus` writes the deterministic tree the `crow-search` corpus cases use;
+the unreadable folder in it is mode 000, so remove it with `chmod -R u+rwx` first.
 
 `--bench` scrolls 600 frames and prints first paint, load time and frame times.
 `--bench-filter <query>` applies the name filter first, so the scroll times are for
@@ -279,6 +290,35 @@ and sizes; the files are empty) is `b659b9a8…`, unchanged since before H2.
 | First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms; U1: 10 ms; U4: 10–11 ms, filtered 10–17 ms; U5: 10–11 ms; U11: 8 ms warm, 39–70 ms cold; H2: 7 ms warm, 132 ms cold) |
 | Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms; U4: 8.85–8.95 ms, main on the same machine 8.84–8.86 ms, filtered 8.82–9.03 ms; U5: 8.87–9.06 ms, main on the same machine 8.86–8.95 ms; U10: Full 9.73–9.83 ms, Off 9.83 ms, Low 9.97 ms; warm first paint 8–10 ms in all three; UI overhaul as a whole (U11): 8.66–9.86 ms, `main` on the same machine 9.64–9.77 ms, M6 8.66–8.69 ms; H2: 8.70 ms p99, avg 8.42, max 40.00) |
 | Search, 200k nested files, every file matches (names + contents) | first hit 4 ms; total 4.1 s (M6). `--bench-search` includes the walk, fuzzy names and content reads. |
+
+### Search diagnostics
+
+`crow --search-trace DIR QUERY` runs the real engine — the same walk and matcher as Cmd-F, not a
+second implementation — and prints one line per batch, the totals, every skip and, with `--target`,
+one verdict for that path:
+
+```bash
+cargo run --release -p crow-app -- --search-trace ~ .backu --hidden --target ~/.backup_excludes
++4ms batch 1: 1 hits
++9ms batch 2: 11 hits
+first_hit=4ms total=4100ms hits=12 scanned=5137 skipped=3
+skip ~/node_modules (dev: name "node_modules")
+skip ~/Library/SomeFolder (no permission)
+target: name hit at 4ms (batch 2)
+```
+
+The verdict is one of `name hit at Nms (batch N)`, `content hit line N at Nms`, `not found; under
+skipped PATH (REASON)`, `not found; outside DIR`, or `not found; no skipped ancestor, and the name
+does not match` (checked with the engine's own `FuzzyMatcher`). `--names` / `--contents` restrict the
+match, `--hidden` / `--no-hidden` override the setting, and `--everything` ignores the exclusion sets.
+It reads `settings.toml` and `exclude.toml` from the config folder; a broken file prints its error and
+falls back to the defaults.
+
+The app logs one line when a search starts and one when it finishes, both at `debug`:
+`RUST_LOG=crow::search=debug` (the log is `~/Library/Logs/Crow/crow.log`, and stderr when launched
+from a terminal). The start line carries the root, scope, matching and effective match, hidden,
+everything, the skip label and the query's length — never its text, since queries can be private. The
+finish line carries elapsed ms, first-hit ms, scanned, skipped, rows, hits, capped and any error.
 
 ## By hand (each milestone)
 
