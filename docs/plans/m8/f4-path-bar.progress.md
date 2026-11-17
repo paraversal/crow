@@ -1,5 +1,5 @@
 # F4 path bar progress
-Branch: m8-f4-path-bar · PR: none · Last updated: 2026-11-17 · State: In critique
+Branch: m8-f4-path-bar · PR: #52 · Last updated: 2026-11-17 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -54,7 +54,7 @@ Branch: m8-f4-path-bar · PR: none · Last updated: 2026-11-17 · State: In crit
 - 2026-11-17: `./scripts/bundle.sh` built `target/bundle/Crow.app`. Screenshots `target/shots/f4-path-bar-firebox.png` (rest: segments unchanged, bar 30 px), `target/shots/f4-path-bar-hover.png` (Firebox dark) and `target/shots/f4-path-bar-hover-light.png` (Solarized Light): both hover shots show the `surface-raised` fill on the empty space and the pencil at its right edge, with the segments unmoved.
 
 ## Next
-Ready for the user's test; the PR opens now. Q5/Q6 are answered and built; the hand checks above are the test.
+PR open: https://github.com/paraversal/file-crow/pull/52. The user's hand test; then the merge. Q5/Q6 are answered and built.
 
 ## Critique
 Critic session: 2026-11-17 · Base: `main` @ 4c0a4b7 · Head reviewed: 143fbbe

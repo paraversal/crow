@@ -1,6 +1,6 @@
 # F4 fix 2 progress
 
-Branch: `m8-f4-path-bar` (F4, unmerged) · PR: none · Last updated: 2026-11-17 · State: In critique
+Branch: `m8-f4-path-bar` (F4, unmerged) · PR: #52 · Last updated: 2026-11-17 · State: PR open
 
 ## Status
 
