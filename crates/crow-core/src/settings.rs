@@ -61,6 +61,10 @@ app_icon = "refined"
 font_family = ""
 font_size = 13.0
 
+# The app "Open Terminal Here" launches: a name ("Terminal", "iTerm") or a path
+# to an app. The folder is passed as the app's document, the way `open -a` does.
+terminal = "Terminal"
+
 # List dotfiles and other hidden items. View ▸ Show Hidden Files (Shift-Cmd-.) toggles it.
 show_hidden_files = true
 
@@ -244,6 +248,7 @@ pub struct Settings {
     pub app_icon: AppIcon,
     pub font_family: String,
     pub font_size: f32,
+    pub terminal: String,
     pub show_hidden_files: bool,
     pub show_preview: bool,
     pub palette_recent_commands: bool,
@@ -265,6 +270,7 @@ impl Default for Settings {
             app_icon: AppIcon::Refined,
             font_family: String::new(),
             font_size: 13.0,
+            terminal: "Terminal".into(),
             show_hidden_files: true,
             show_preview: true,
             palette_recent_commands: true,

@@ -34,6 +34,7 @@ const ITEMS: &[Slot] = &[
     None,
     Some(CommandId::CopyPath),
     Some(CommandId::ShowInFinder),
+    Some(CommandId::OpenTerminal),
     None,
     // New items always land in the shown folder, as Finder's New Folder does,
     // even when the row under the pointer is a folder (F7.2).
@@ -53,6 +54,7 @@ const FOLDER: &[Slot] = &[
     None,
     Some(CommandId::CopyPath),
     Some(CommandId::ShowInFinder),
+    Some(CommandId::OpenTerminal),
 ];
 
 pub fn slots(kind: MenuKind) -> &'static [Slot] {
@@ -77,6 +79,8 @@ pub fn enabled(id: CommandId, state: MenuState) -> bool {
         CommandId::Rename => state.selected == 1,
         // Only folders go in the sidebar.
         CommandId::AddToSidebar => state.selected_folders > 0,
+        // One row has a folder (a file's parent); a multi-selection has no "here".
+        CommandId::OpenTerminal => state.selected <= 1,
         _ => true,
     }
 }

@@ -230,6 +230,28 @@ pub fn stepper(meta: ControlMeta, input: &Entity<TextInput>, style: ControlStyle
     row(meta, theme, field)
 }
 
+/// A single-line text field. The caller owns the `TextInput` and commits on
+/// Return or when focus leaves; `width` keeps it apart from the numeric steppers.
+pub fn text_field(
+    meta: ControlMeta,
+    input: &Entity<TextInput>,
+    style: ControlStyle,
+    width: f32,
+) -> gpui::Stateful<Div> {
+    let ControlStyle { focused, theme, .. } = style;
+    let control_id = meta.id;
+    let field = div()
+        .id(control_id)
+        .debug_selector(move || format!("{control_id}-control"))
+        .w(px(width))
+        .p(px(2.))
+        .rounded_md()
+        .when(focused, |field| field.shadow(cursor_ring(theme)))
+        .when(!meta.enabled, |field| field.opacity(0.45))
+        .child(input.clone());
+    row(meta, theme, field)
+}
+
 /// An open drop-down's menu: the highlighted entry, its scroll position and
 /// what a click outside the menu does.
 pub struct Menu<'a> {

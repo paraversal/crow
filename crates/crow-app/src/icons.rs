@@ -7,7 +7,7 @@
 use std::borrow::Cow;
 
 use crow_theme::Theme;
-use gpui::{AssetSource, Result, SharedString, Svg, prelude::*, px, svg};
+use gpui::{AssetSource, Result, Rgba, SharedString, Svg, prelude::*, px, svg};
 
 use crate::style::color;
 
@@ -27,6 +27,8 @@ pub enum Glyph {
     AlertCircle,
     Trash,
     Pencil,
+    Folder,
+    Clock,
 }
 
 impl Glyph {
@@ -44,6 +46,8 @@ impl Glyph {
         Glyph::AlertCircle,
         Glyph::Trash,
         Glyph::Pencil,
+        Glyph::Folder,
+        Glyph::Clock,
     ];
 
     pub fn path(self) -> &'static str {
@@ -60,6 +64,8 @@ impl Glyph {
             Glyph::AlertCircle => "icons/alert-circle.svg",
             Glyph::Trash => "icons/trash-2.svg",
             Glyph::Pencil => "icons/pencil.svg",
+            Glyph::Folder => "icons/folder.svg",
+            Glyph::Clock => "icons/clock.svg",
         }
     }
 }
@@ -78,6 +84,8 @@ const FILES: &[(&str, &[u8])] = &[
     ("icons/alert-circle.svg", include_bytes!("../assets/icons/alert-circle.svg")),
     ("icons/trash-2.svg", include_bytes!("../assets/icons/trash-2.svg")),
     ("icons/pencil.svg", include_bytes!("../assets/icons/pencil.svg")),
+    ("icons/folder.svg", include_bytes!("../assets/icons/folder.svg")),
+    ("icons/clock.svg", include_bytes!("../assets/icons/clock.svg")),
     ("icons/LICENSE", include_bytes!("../assets/icons/LICENSE")),
 ];
 
@@ -93,7 +101,13 @@ impl AssetSource for Assets {
 
 /// One icon at `size` points, tinted with `role`.
 pub fn glyph(name: Glyph, size: f32, role: &str, theme: &Theme) -> Svg {
-    svg().path(name.path()).w(px(size)).h(px(size)).flex_none().text_color(color(theme.role(role)))
+    glyph_color(name, size, color(theme.role(role)))
+}
+
+/// One icon in an explicit color, for a row whose own color is a palette slot
+/// rather than a theme role (a sidebar favorite's `color`).
+pub fn glyph_color(name: Glyph, size: f32, tint: Rgba) -> Svg {
+    svg().path(name.path()).w(px(size)).h(px(size)).flex_none().text_color(tint)
 }
 
 #[cfg(test)]

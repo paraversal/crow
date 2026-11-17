@@ -1983,6 +1983,128 @@ fn trash_records_its_sound(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn sidebar_favorites_and_recent_use_the_board_icons(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-line-icons");
+    let (view, mut cx) = open(cx, &root);
+    write_config(
+        &view,
+        &mut cx,
+        "sidebar.toml",
+        &favorites_toml(&[&root.join("alpha")]).replace("show = false", "show = true"),
+    );
+    cx.simulate_keystrokes("down cmd-down");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("sidebar-folder-icon-0").is_some(), "the favorite's folder is a line icon");
+    assert!(cx.debug_bounds("sidebar-clock-icon-1").is_some(), "Recent's clock is a line icon");
+}
+
+#[gpui::test]
+fn columns_are_the_board_width(cx: &mut TestAppContext) {
+    let root = fixture("columns-196");
+    std::fs::create_dir_all(root.join("a very long folder name that used to widen the column"))
+        .expect("create fixture");
+    let (_view, mut cx) = open_sized(cx, &root, 1280.0, 800.0);
+    cx.simulate_keystrokes("cmd-3");
+    cx.run_until_parked();
+    let first = cx.debug_bounds("column-0").expect("first column");
+    assert_eq!(first.size.width, px(196.), "the board's fixed width");
+    let second = cx.debug_bounds("column-1").expect("the selected folder's column");
+    assert_eq!(second.size.width, px(196.), "a long name does not widen the column");
+}
+
+#[gpui::test]
+fn preview_shows_numbered_syntax_lines(cx: &mut TestAppContext) {
+    let root = fixture("preview-syntax");
+    std::fs::write(root.join("code.rs"), "pub fn main() {\n    let n = 42; // note\n}\n").expect("create fixture");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("down down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("code.rs"));
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("preview-code").is_some(), "the code box");
+    assert!(cx.debug_bounds("preview-code-line-0").is_some(), "the gutter is laid out");
+    assert!(cx.debug_bounds("preview-code-line-2").is_some(), "every line of the file is numbered");
+}
+
+#[gpui::test]
+fn open_terminal_opens_the_selected_folder_or_its_parent(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("open-terminal");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<Ui>().settings.terminal = "iTerm".into());
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "a folder row");
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">open terminal");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        effect_calls(&mut cx).contains(&Call::OpenTerminal("iTerm".into(), root.join("alpha"))),
+        "a folder opens itself in the configured terminal"
+    );
+
+    cx.simulate_keystrokes("down down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">open terminal");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        effect_calls(&mut cx).contains(&Call::OpenTerminal("iTerm".into(), root.clone())),
+        "a file opens its parent folder"
+    );
+}
+
+#[gpui::test]
+fn open_terminal_failure_shows_the_status_line(cx: &mut TestAppContext) {
+    let root = fixture("open-terminal-fail");
+    let (_view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| {
+        crate::effects::recording(cx).expect("recording effects").set_open_error(Some("no such app".into()));
+    });
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">open terminal");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let message = cx.read(|cx| cx.global::<crate::operations::Operations>().message.clone());
+    assert!(
+        message.as_ref().is_some_and(|(text, error)| *error && text.contains("no such app")),
+        "the failure reaches the status line: {message:?}"
+    );
+}
+
+#[gpui::test]
+fn terminal_menu_follows_the_selection(cx: &mut TestAppContext) {
+    use crow_macos::ContextMenuEntry;
+    let root = fixture("terminal-menu");
+    let (view, mut cx) = open(cx, &root);
+    let enabled = |cx: &mut VisualTestContext| {
+        let entries = effect_calls(cx)
+            .into_iter()
+            .rev()
+            .find_map(|call| match call {
+                crate::effects::Call::ContextMenu(entries) => Some(entries),
+                _ => None,
+            })
+            .expect("a context menu was built");
+        entries.into_iter().find_map(|entry| match entry {
+            ContextMenuEntry::Item { title, enabled, .. } if title == "Open Terminal Here" => Some(enabled),
+            _ => None,
+        })
+    };
+    let alpha = row_center(&mut cx, "row-alpha");
+    right_click(&mut cx, alpha);
+    assert_eq!(enabled(&mut cx), Some(true), "one folder row enables it");
+
+    let pane = pane(&view, &cx);
+    pane.update_in(&mut cx, |p, window, cx| p.choose_context_item(None, window, cx));
+    cx.simulate_keystrokes("shift-down");
+    assert_eq!(selected_names(&view, &cx), ["alpha", "beta"]);
+    let beta = row_center(&mut cx, "row-beta");
+    right_click(&mut cx, beta);
+    assert_eq!(enabled(&mut cx), Some(false), "a multi-selection has no single here");
+}
+
+#[gpui::test]
 fn context_menu_records_entries_and_runs_a_scripted_choice(cx: &mut TestAppContext) {
     use crate::context_menu::{MenuKind, slots};
     use crate::effects::Call;
@@ -7157,6 +7279,144 @@ fn permanent_delete_needs_confirmation(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-alt-backspace enter");
     settle(&view, &mut cx);
     assert!(!root.join("notes.txt").exists(), "Return confirms");
+}
+
+#[gpui::test]
+fn empty_trash_asks_then_empties_the_temp_trash(cx: &mut TestAppContext) {
+    let root = fixture("empty-trash");
+    let trash = root.join(".Trash");
+    std::fs::create_dir_all(trash.join("folder")).expect("create trash");
+    std::fs::write(trash.join("a.txt"), "a").expect("write trash");
+    std::fs::write(trash.join("folder/b.txt"), "b").expect("write trash");
+    let home = root.clone();
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        cx.global_mut::<Ui>().home = home;
+    });
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("cmd-shift-backspace");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(sheet_open(&view, &cx), "the key asks first");
+    assert_eq!(std::fs::read_dir(&trash).expect("read trash").count(), 2, "nothing is removed before the answer");
+
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(!sheet_open(&view, &cx), "Return confirms and closes the sheet");
+    assert_eq!(std::fs::read_dir(&trash).expect("read trash").count(), 0, "both top-level items are gone");
+    let message = cx.read(|cx| cx.global::<Operations>().message.clone());
+    assert!(
+        message.as_ref().is_some_and(|(text, error)| !error && text == "Emptied the Trash: 2 items."),
+        "{message:?}"
+    );
+    assert!(
+        effect_calls(&mut cx).iter().any(|call| matches!(call, crate::effects::Call::PlaySound(..))),
+        "the empty-trash sound plays"
+    );
+}
+
+#[gpui::test]
+fn empty_trash_cancels_and_reports_an_empty_trash(cx: &mut TestAppContext) {
+    let root = fixture("empty-trash-cancel");
+    let trash = root.join(".Trash");
+    std::fs::create_dir_all(&trash).expect("create trash");
+    std::fs::write(trash.join("keep.txt"), "keep").expect("write trash");
+    let home = root.clone();
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        cx.global_mut::<Ui>().home = home;
+    });
+    cx.simulate_keystrokes("cmd-shift-backspace");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(sheet_open(&view, &cx));
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(trash.join("keep.txt").exists(), "Escape cancels");
+    assert!(!sheet_open(&view, &cx));
+
+    std::fs::remove_file(trash.join("keep.txt")).expect("empty the trash");
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("cmd-shift-backspace");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(!sheet_open(&view, &cx), "an empty Trash needs no sheet");
+    let message = cx.read(|cx| cx.global::<Operations>().message.clone());
+    assert!(
+        message.as_ref().is_some_and(|(text, error)| !error && text == "The Trash is already empty."),
+        "{message:?}"
+    );
+    assert!(
+        !effect_calls(&mut cx).iter().any(|call| matches!(call, crate::effects::Call::PlaySound(..))),
+        "nothing to hear"
+    );
+}
+
+#[gpui::test]
+fn empty_trash_reports_what_it_could_not_remove(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = fixture("empty-trash-locked");
+    let trash = root.join(".Trash");
+    std::fs::create_dir_all(trash.join("locked")).expect("create trash");
+    std::fs::write(trash.join("gone.txt"), "a").expect("write trash");
+    std::fs::write(trash.join("locked/inside.txt"), "b").expect("write trash");
+    std::fs::set_permissions(trash.join("locked"), std::fs::Permissions::from_mode(0o000)).expect("lock folder");
+    let home = root.clone();
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        cx.global_mut::<Ui>().home = home;
+    });
+    cx.simulate_keystrokes("cmd-shift-backspace");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(!trash.join("gone.txt").exists(), "the unlocked item went");
+    assert!(trash.join("locked").exists(), "the locked folder stayed");
+    let message = cx.read(|cx| cx.global::<Operations>().message.clone());
+    assert!(
+        message.as_ref().is_some_and(|(text, error)| *error
+            && text.contains("Emptied the Trash: 1 item; 1 could not be removed")
+            && text.contains("“locked”")),
+        "{message:?}"
+    );
+    let _ = std::fs::set_permissions(trash.join("locked"), std::fs::Permissions::from_mode(0o755));
+}
+
+#[gpui::test]
+fn empty_trash_does_nothing_in_a_text_field(cx: &mut TestAppContext) {
+    let root = fixture("empty-trash-field");
+    let trash = root.join(".Trash");
+    std::fs::create_dir_all(&trash).expect("create trash");
+    std::fs::write(trash.join("keep.txt"), "keep").expect("write trash");
+    let home = root.clone();
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        cx.global_mut::<Ui>().home = home;
+    });
+    cx.simulate_keystrokes("/");
+    cx.simulate_keystrokes("cmd-shift-backspace");
+    cx.run_until_parked();
+    assert!(!sheet_open(&view, &cx), "the filter field owns the key");
+    assert!(trash.join("keep.txt").exists());
+}
+
+#[gpui::test]
+fn palette_empty_trash_asks_first(cx: &mut TestAppContext) {
+    let root = fixture("empty-trash-palette");
+    let trash = root.join(".Trash");
+    std::fs::create_dir_all(&trash).expect("create trash");
+    std::fs::write(trash.join("keep.txt"), "keep").expect("write trash");
+    let home = root.clone();
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        cx.global_mut::<Ui>().home = home;
+    });
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">empty trash");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(sheet_open(&view, &cx), "the palette path asks too");
+    assert!(trash.join("keep.txt").exists(), "and does not remove before the answer");
 }
 
 /// Drag `paths` in from outside the window and drop them on the element `selector`.

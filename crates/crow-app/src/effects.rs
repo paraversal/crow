@@ -27,6 +27,8 @@ pub trait Effects: Send + Sync {
     fn open_folder_in_finder(&self, path: &Path) -> bool;
     /// Show `paths` selected in Finder windows.
     fn reveal_in_finder(&self, paths: &[PathBuf]);
+    /// Open `path` in the terminal app `app` (`open -a`); the folder is its document.
+    fn open_terminal(&self, app: &str, path: &Path) -> Result<(), String>;
 
     /// Toggle Quick Look on `path`.
     fn toggle_quick_look(&self, path: &Path);
@@ -106,6 +108,22 @@ impl Effects for SystemEffects {
 
     fn reveal_in_finder(&self, paths: &[PathBuf]) {
         crow_macos::reveal_in_finder(paths);
+    }
+
+    fn open_terminal(&self, app: &str, path: &Path) -> Result<(), String> {
+        // Waits, unlike `open_path`: the status line names an app that is missing
+        // or a folder the app refused. Callers run this off the main thread.
+        let output = std::process::Command::new("/usr/bin/open")
+            .arg("-a")
+            .arg(app)
+            .arg(path)
+            .output()
+            .map_err(|e| format!("Terminal: {e}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if detail.is_empty() { format!("Terminal: could not open “{app}”") } else { detail })
     }
 
     fn toggle_quick_look(&self, path: &Path) {
@@ -254,6 +272,7 @@ pub enum Call {
     OpenInDefaultApp(PathBuf),
     OpenFolderInFinder(PathBuf),
     RevealInFinder(Vec<PathBuf>),
+    OpenTerminal(String, PathBuf),
     ToggleQuickLook(PathBuf),
     UpdateQuickLook(PathBuf),
     SetQuickLookKeyHandler,
@@ -432,6 +451,10 @@ impl Effects for RecordingEffects {
 
     fn reveal_in_finder(&self, paths: &[PathBuf]) {
         self.record(Call::RevealInFinder(paths.to_vec()));
+    }
+
+    fn open_terminal(&self, app: &str, path: &Path) -> Result<(), String> {
+        self.open_result(Call::OpenTerminal(app.to_owned(), path.to_path_buf()))
     }
 
     fn toggle_quick_look(&self, path: &Path) {

@@ -117,6 +117,7 @@ enum ControlId {
     AppIcon,
     FontFamily,
     FontSize,
+    Terminal,
     Keymap,
     Enter,
     Hints,
@@ -141,7 +142,7 @@ enum ControlId {
 
 impl ControlId {
     /// Reading order: the order Tab visits and the order the page draws.
-    const ALL: [ControlId; 24] = [
+    const ALL: [ControlId; 25] = [
         ControlId::Theme,
         ControlId::AppIcon,
         ControlId::FontFamily,
@@ -151,6 +152,7 @@ impl ControlId {
         ControlId::Hints,
         ControlId::Tips,
         ControlId::FolderSizes,
+        ControlId::Terminal,
         ControlId::ShowHidden,
         ControlId::ShowPreview,
         ControlId::ViewPerFolder,
@@ -174,6 +176,7 @@ impl ControlId {
             ControlId::AppIcon => "settings-app-icon",
             ControlId::FontFamily => "settings-font-family",
             ControlId::FontSize => "settings-font-size",
+            ControlId::Terminal => "settings-terminal",
             ControlId::Keymap => "settings-keymap",
             ControlId::Enter => "settings-enter",
             ControlId::Hints => "settings-hints",
@@ -206,6 +209,7 @@ impl ControlId {
             | ControlId::AppIcon
             | ControlId::FontFamily
             | ControlId::FontSize
+            | ControlId::Terminal
             | ControlId::Keymap
             | ControlId::Enter
             | ControlId::Hints
@@ -229,6 +233,7 @@ impl ControlId {
             ControlId::AppIcon => "App icon",
             ControlId::FontFamily => "Font",
             ControlId::FontSize => "Font size",
+            ControlId::Terminal => "Terminal app",
             ControlId::Keymap => "Keymap",
             ControlId::Enter => "What Return does",
             ControlId::Hints => "Key hints",
@@ -268,6 +273,7 @@ impl ControlId {
                 Role::Switch
             }
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => Role::SpinButton,
+            ControlId::Terminal => Role::TextInput,
             ControlId::PlaySound
             | ControlId::EditSettings
             | ControlId::ShowConfig
@@ -284,6 +290,9 @@ impl ControlId {
             ControlId::AppIcon => "The Dock switches now; Finder after the next scripts/bundle.sh.",
             ControlId::FontFamily => "Installed families; System follows macOS.",
             ControlId::FontSize => "10 to 24 points.",
+            ControlId::Terminal => {
+                "The app Open Terminal Here opens: a name like Terminal or iTerm, or a path to an app."
+            }
             ControlId::Keymap => "Vim adds hjkl, gg/G, yy/p and marks on top of the Finder keys.",
             ControlId::Enter => "Rename edits the name in place; Open opens the item. F2 always renames.",
             ControlId::Hints => "Auto retires idle hints after you use their key three times.",
@@ -351,6 +360,7 @@ pub struct SettingsWindow {
     focus: FocusHandle,
     handles: HashMap<ControlId, FocusHandle>,
     font_size: Entity<TextInput>,
+    terminal: Entity<TextInput>,
     window_width: Entity<TextInput>,
     window_height: Entity<TextInput>,
     theme: ThemeChoice,
@@ -381,6 +391,11 @@ impl SettingsWindow {
                 .with_aria_label("Font size")
                 .with_numeric_range(f64::from(settings.font_size), 10.0, 24.0, 1.0)
         });
+        let terminal = cx.new(|cx| {
+            TextInput::new(settings.terminal.clone(), "", cx)
+                .with_id("settings-terminal")
+                .with_aria_label("Terminal app")
+        });
         let window_width = cx.new(|cx| {
             TextInput::new(settings.window.width.to_string(), "", cx)
                 .with_id("settings-window-width")
@@ -406,11 +421,15 @@ impl SettingsWindow {
                 this.on_stepper_event(id, event, window, cx);
             }));
         }
+        subscriptions.push(cx.subscribe_in(&terminal, window, |this, _, event, window, cx| {
+            this.on_terminal_event(event, window, cx);
+        }));
 
         let mut handles = HashMap::new();
         for (index, id) in ControlId::ALL.iter().copied().enumerate() {
             let handle = match id {
                 ControlId::FontSize => font_size.read(cx).focus_handle(cx),
+                ControlId::Terminal => terminal.read(cx).focus_handle(cx),
                 ControlId::WindowWidth => window_width.read(cx).focus_handle(cx),
                 ControlId::WindowHeight => window_height.read(cx).focus_handle(cx),
                 _ => cx.focus_handle(),
@@ -424,6 +443,7 @@ impl SettingsWindow {
             ControlId::Theme,
             ControlId::FontFamily,
             ControlId::FontSize,
+            ControlId::Terminal,
             ControlId::WindowWidth,
             ControlId::WindowHeight,
         ] {
@@ -488,6 +508,7 @@ impl SettingsWindow {
             focus: cx.focus_handle(),
             handles,
             font_size,
+            terminal,
             window_width,
             window_height,
             theme,
@@ -683,7 +704,42 @@ impl SettingsWindow {
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => {
                 self.commit_stepper(id, window, cx);
             }
+            ControlId::Terminal => self.commit_terminal(window, cx),
             _ => {}
+        }
+    }
+
+    /// Put the saved terminal in the field. The render-time sync skips a focused
+    /// field so an external settings edit never overwrites typing.
+    fn sync_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_focused(ControlId::Terminal, window) {
+            return;
+        }
+        let text = cx.global::<Ui>().settings.terminal.clone();
+        if self.terminal.read(cx).text() != text {
+            self.terminal.update(cx, |input, cx| input.set_text(text, window, cx));
+        }
+    }
+
+    fn commit_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.terminal.read(cx).text().trim().to_owned();
+        // An empty app would make `open -a` fail; the setting's default stands in.
+        let text = if text.is_empty() { "Terminal".to_owned() } else { text };
+        ui::set_setting(SettingChange::Terminal(text), cx);
+        self.sync_terminal(window, cx);
+        cx.notify();
+    }
+
+    fn on_terminal_event(&mut self, event: &TextInputEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            TextInputEvent::Confirmed => self.commit_terminal(window, cx),
+            TextInputEvent::Cancelled => self.close(window, cx),
+            TextInputEvent::CompletionRequested => {
+                self.commit_terminal(window, cx);
+                window.focus_next(cx);
+                cx.notify();
+            }
+            TextInputEvent::Changed | TextInputEvent::BackspaceAtStart => {}
         }
     }
 
@@ -719,7 +775,8 @@ impl SettingsWindow {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::Motion
-            | ControlId::Sound => {}
+            | ControlId::Sound
+            | ControlId::Terminal => {}
         }
     }
 
@@ -1000,6 +1057,7 @@ impl SettingsWindow {
         self.close_menu(window, cx);
         match self.focused_control(window) {
             Some(ControlId::FontSize) => self.commit_stepper(ControlId::FontSize, window, cx),
+            Some(ControlId::Terminal) => self.commit_terminal(window, cx),
             Some(ControlId::WindowWidth) => self.commit_stepper(ControlId::WindowWidth, window, cx),
             Some(ControlId::WindowHeight) => self.commit_stepper(ControlId::WindowHeight, window, cx),
             _ => {}
@@ -1136,6 +1194,7 @@ impl Render for SettingsWindow {
         for id in [ControlId::FontSize, ControlId::WindowWidth, ControlId::WindowHeight] {
             self.sync_stepper(id, window, cx);
         }
+        self.sync_terminal(window, cx);
         for id in ControlId::ALL {
             let tab_stop = if id == ControlId::EditSettingsBanner { broken.is_some() } else { id.enabled(cx) };
             self.handle(id).tab_stop(tab_stop);
@@ -1165,6 +1224,13 @@ impl Render for SettingsWindow {
             self.meta(ControlId::FontSize, cx),
             &self.font_size,
             self.style(ControlId::FontSize, window, &theme),
+        );
+
+        let terminal_row = controls::text_field(
+            self.meta(ControlId::Terminal, cx),
+            &self.terminal,
+            self.style(ControlId::Terminal, window, &theme),
+            220.0,
         );
 
         let keymap_select =
@@ -1349,6 +1415,7 @@ impl Render for SettingsWindow {
                 (ControlId::Hints, hints_row.into_any_element()),
                 (ControlId::Tips, tips_row.into_any_element()),
                 (ControlId::FolderSizes, folder_sizes_row.into_any_element()),
+                (ControlId::Terminal, terminal_row.into_any_element()),
                 (ControlId::ShowHidden, show_hidden.into_any_element()),
                 (ControlId::ShowPreview, show_preview.into_any_element()),
                 (ControlId::ViewPerFolder, view_per_folder.into_any_element()),
@@ -1876,6 +1943,17 @@ mod tests {
         assert_eq!(state(&view, &vcx, ControlId::FontSize).value, Some(20.0));
         assert_eq!(stepper_text(&view, &vcx, ControlId::FontSize), "20");
         wait_for(&vcx, "font_size = 20.0");
+    }
+
+    #[gpui::test]
+    fn terminal_field_writes_the_app(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::Terminal);
+        vcx.simulate_keystrokes("cmd-a");
+        vcx.simulate_input("iTerm");
+        vcx.simulate_keystrokes("enter");
+        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.terminal.clone()), "iTerm");
+        wait_for(&vcx, "terminal = \"iTerm\"");
     }
 
     fn set_two_themes(view: &Entity<SettingsWindow>, vcx: &mut VisualTestContext) {

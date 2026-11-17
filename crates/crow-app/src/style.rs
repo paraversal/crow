@@ -55,6 +55,16 @@ pub fn current_location(theme: &Theme) -> Rgba {
     color(theme.role("selection"))
 }
 
+/// The focused column's tint: its theme background a shade darker, so the
+/// column the keys act on reads apart from its neighbors without a border.
+pub fn focused_column(theme: &Theme) -> Rgba {
+    let mut tint = color(theme.role("bg"));
+    tint.r *= 0.9;
+    tint.g *= 0.9;
+    tint.b *= 0.9;
+    tint
+}
+
 /// An error token's fill: the error role, faint.
 pub fn error_soft(theme: &Theme) -> Rgba {
     color_alpha(theme.role("error"), 0x24)
@@ -430,6 +440,10 @@ mod tests {
         assert_eq!(active_selection(&theme), color_alpha(theme.role("accent"), 0x55));
         assert_eq!(inactive_selection(&theme), color(theme.role("selection")));
         assert_eq!(current_location(&theme), color(theme.role("selection")));
+        let base = color(theme.role("bg"));
+        let focused = focused_column(&theme);
+        assert!(focused.r < base.r && focused.g < base.g && focused.b < base.b, "a shade darker");
+        assert_eq!(focused.a, 1.0);
         let ring = cursor_ring(&theme);
         assert_eq!(ring.len(), 1);
         assert!(ring[0].inset);

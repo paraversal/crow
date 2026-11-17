@@ -7,9 +7,10 @@ use std::sync::Arc;
 use crow_core::{Excerpt, Extensions, KnownSize, PreviewContent, text_excerpt};
 use crow_fs::Entry;
 use crow_theme::Theme;
-use gpui::{Div, FontWeight, Image, ImageFormat, div, img, prelude::*, px};
+use gpui::{Div, FontWeight, HighlightStyle, Image, ImageFormat, Rgba, StyledText, div, img, prelude::*, px};
 
 use crate::style::{color, color_alpha, display_text, format_time, icon, kind};
+use crate::syntax::{self, Language};
 
 /// What the preview shows for one item, loaded off the main thread.
 #[derive(Clone)]
@@ -61,6 +62,57 @@ pub fn spoken(entry: &Entry, preview: Option<&Preview>, folder_size: Option<Know
     )
 }
 
+/// How many lines of a text file the preview draws: the box clips the rest, so
+/// a large file costs a page, not the whole file.
+const PREVIEW_TEXT_LINES: usize = 80;
+
+/// One numbered line, its tokens in the syntax roles. A search hit's line gets
+/// the accent wash; the excerpt's numbers start where the file's line does.
+fn code_line(index: usize, number: u64, text: &str, hit: Option<u64>, language: Language, theme: &Theme) -> Div {
+    let runs = syntax::spans(text, language).into_iter().map(|(range, kind)| {
+        let color: gpui::Hsla = color(theme.role(kind.role())).into();
+        (range, HighlightStyle { color: Some(color), ..Default::default() })
+    });
+    div()
+        .debug_selector(move || format!("preview-code-line-{index}"))
+        .flex()
+        .gap_1()
+        .when(hit == Some(number), |row| row.bg(color_alpha(theme.role("accent"), 0x1a)))
+        .child(
+            div()
+                .w(px(32.))
+                .flex_none()
+                .text_right()
+                .text_color(color(theme.role("fg-subtle")))
+                .child(format!("{number}")),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(StyledText::new(text.to_owned()).with_highlights(runs)),
+        )
+}
+
+fn code_box(theme: &Theme, border: Rgba) -> gpui::Stateful<Div> {
+    div()
+        .id("preview-code")
+        .debug_selector(|| "preview-code".into())
+        .h(px(220.))
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(border)
+        .bg(color(theme.role("bg-inset")))
+        .overflow_hidden()
+        .font_family("Menlo")
+        .text_size(px(11.))
+        .flex()
+        .flex_col()
+}
+
 /// The preview's contents for `entry`, stacked top to bottom. `folder_size` is
 /// the service's measured size for a folder or package; a file uses its own.
 pub fn contents(entry: &Entry, preview: Option<&Preview>, theme: &Theme, folder_size: Option<KnownSize>) -> Div {
@@ -72,61 +124,39 @@ pub fn contents(entry: &Entry, preview: Option<&Preview>, theme: &Theme, folder_
     let kind = kind(entry);
     let tags = preview.map(|p| p.tags.join(", ")).filter(|t| !t.is_empty());
     let excerpt = preview.and_then(|p| p.excerpt.as_ref());
-    let picture = match (preview.and_then(|p| p.image.clone()), preview.and_then(|p| p.content.clone())) {
-        (Some(image), _) => {
-            div().h(px(220.)).flex().items_center().justify_center().child(img(image).max_w_full().max_h(px(220.)))
-        }
-        (None, Some(PreviewContent::Text(_))) if excerpt.is_some() => {
-            let excerpt = excerpt.expect("checked");
-            let accent = color_alpha(theme.role("accent"), 0x1a);
-            let lines = excerpt.text.lines().enumerate().map(|(i, line)| {
-                let number = excerpt.first_line + i as u64;
-                div()
-                    .flex()
-                    .gap_1()
-                    .when(number == excerpt.hit, |row| row.bg(accent))
-                    .child(
-                        div()
-                            .w(px(28.))
-                            .flex_none()
-                            .text_right()
-                            .text_color(color(theme.role("fg-subtle")))
-                            .child(format!("{number}")),
-                    )
-                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().child(line.to_owned()))
-            });
-            div()
+    let language = Language::from_path(&entry.path);
+    let picture: gpui::AnyElement =
+        match (preview.and_then(|p| p.image.clone()), preview.and_then(|p| p.content.clone())) {
+            (Some(image), _) => div()
                 .h(px(220.))
-                .p_2()
-                .rounded_md()
-                .border_1()
-                .border_color(border)
-                .bg(color(theme.role("bg-inset")))
-                .overflow_hidden()
-                .font_family("Menlo")
-                .text_size(px(11.))
                 .flex()
-                .flex_col()
-                .children(lines)
-        }
-        (None, Some(PreviewContent::Text(text))) => div()
-            .h(px(220.))
-            .p_2()
-            .rounded_md()
-            .border_1()
-            .border_color(border)
-            .bg(color(theme.role("bg-inset")))
-            .overflow_hidden()
-            .font_family("Menlo")
-            .text_size(px(11.))
-            .child(text),
-        _ => div()
-            .h(px(220.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .children(icon(&entry.path, entry.is_dir, 128).map(|i| img(i).size(px(128.)))),
-    };
+                .items_center()
+                .justify_center()
+                .child(img(image).max_w_full().max_h(px(220.)))
+                .into_any_element(),
+            (None, Some(PreviewContent::Text(_))) if excerpt.is_some() => {
+                let excerpt = excerpt.expect("checked");
+                let lines = excerpt.text.lines().take(PREVIEW_TEXT_LINES).enumerate().map(|(i, line)| {
+                    code_line(i, excerpt.first_line + i as u64, line, Some(excerpt.hit), language, theme)
+                });
+                code_box(theme, border).children(lines).into_any_element()
+            }
+            (None, Some(PreviewContent::Text(text))) => {
+                let lines = text
+                    .lines()
+                    .take(PREVIEW_TEXT_LINES)
+                    .enumerate()
+                    .map(|(i, line)| code_line(i, i as u64 + 1, line, None, language, theme));
+                code_box(theme, border).children(lines).into_any_element()
+            }
+            _ => div()
+                .h(px(220.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .children(icon(&entry.path, entry.is_dir, 128).map(|i| img(i).size(px(128.))))
+                .into_any_element(),
+        };
     let info_row = |label: &str, value: String| {
         div()
             .flex()
