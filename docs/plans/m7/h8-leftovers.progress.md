@@ -35,7 +35,7 @@ Branch: m7-h8-leftovers · PR: none · Last updated: 2026-11-17 · State: Ready 
 - 2026-11-17: asked Q1–Q3. Q1 groups first; Q2 re-asked after checking Finder (File ▸ Open is ⌘O, not ⌘↓), user chose the Finder split; Q3 short name.
 - 2026-11-17: L2 rounding + boundary tests. L5 palette j/k removed, `!TextInput` on the Vim list/column contexts, four-field keystroke test.
 - 2026-11-17: L1 merged hint kinds, sidebar order, `binding_for` predicate fix, 1280 px test. L3 name field on palette folders, home row test. L4 no code change; comment records the Finder split.
-- 2026-11-17: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (449 app, 94 core, 44 fs, 6 macos, 20 search, 6 theme). Bench not run: no listing, scroll or first-paint path changed (palette name field and hint text only). `./scripts/bundle.sh` ✓; hand checks above.
+- 2026-11-17: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (449 app, 94 core, 44 fs, 6 macos, 20 search, 6 theme). Bench not run: no listing, scroll or first-paint path changed (palette name field and hint text only). `./scripts/bundle.sh` ✓; hand checks above. README's Hints and tips line now names the sidebar's groups and to-list keys.
 
 ## Next
 Ready for critique. The critic should hand-check the narrow sidebar hint drop order and the context menu's Open key, and decide whether `context_menu::shortcut` should use `keys::binding_for`.
