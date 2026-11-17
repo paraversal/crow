@@ -140,6 +140,18 @@ pub struct Operations {
 }
 
 impl Operations {
+    /// The fuzz tree every path must stay under; production has no jail.
+    pub fn jail(&self) -> Option<&std::path::Path> {
+        #[cfg(any(test, feature = "fuzz"))]
+        {
+            self.jail.as_deref()
+        }
+        #[cfg(not(any(test, feature = "fuzz")))]
+        {
+            None
+        }
+    }
+
     /// The paths Cmd-C/Cmd-X put on the clipboard, for the fuzz runner's bulk tag.
     #[cfg(feature = "fuzz")]
     pub fn clipboard_paths(&self) -> usize {

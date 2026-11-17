@@ -27,6 +27,8 @@ pub trait Effects: Send + Sync {
     fn open_folder_in_finder(&self, path: &Path) -> bool;
     /// Show `paths` selected in Finder windows.
     fn reveal_in_finder(&self, paths: &[PathBuf]);
+    /// Open `path` in the terminal app `app` (`open -a`); the folder is its document.
+    fn open_terminal(&self, app: &str, path: &Path) -> Result<(), String>;
 
     /// Toggle Quick Look on `path`.
     fn toggle_quick_look(&self, path: &Path);
@@ -61,6 +63,10 @@ pub trait Effects: Send + Sync {
     fn set_app_icon(&self, png: &[u8]);
     /// Start a native drag of `drag`'s items; false to let GPUI's own drag run.
     fn begin_drag(&self, window: &mut Window, drag: &ComboDrag<'_>) -> bool;
+    /// Move the window from an app-owned titlebar drag (`app_owns_titlebar_drag`).
+    fn start_window_move(&self, window: &mut Window);
+    /// The titlebar's double-click action, as the system's preference chooses it.
+    fn titlebar_double_click(&self, window: &mut Window);
 
     /// Eject the volume at `path`.
     fn eject(&self, path: &Path) -> Result<(), String>;
@@ -102,6 +108,22 @@ impl Effects for SystemEffects {
 
     fn reveal_in_finder(&self, paths: &[PathBuf]) {
         crow_macos::reveal_in_finder(paths);
+    }
+
+    fn open_terminal(&self, app: &str, path: &Path) -> Result<(), String> {
+        // Waits, unlike `open_path`: the status line names an app that is missing
+        // or a folder the app refused. Callers run this off the main thread.
+        let output = std::process::Command::new("/usr/bin/open")
+            .arg("-a")
+            .arg(app)
+            .arg(path)
+            .output()
+            .map_err(|e| format!("Terminal: {e}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if detail.is_empty() { format!("Terminal: could not open “{app}”") } else { detail })
     }
 
     fn toggle_quick_look(&self, path: &Path) {
@@ -167,6 +189,14 @@ impl Effects for SystemEffects {
 
     fn begin_drag(&self, window: &mut Window, drag: &ComboDrag<'_>) -> bool {
         crow_macos::begin_drag(window, drag)
+    }
+
+    fn start_window_move(&self, window: &mut Window) {
+        window.start_window_move();
+    }
+
+    fn titlebar_double_click(&self, window: &mut Window) {
+        window.titlebar_double_click();
     }
 
     fn eject(&self, path: &Path) -> Result<(), String> {
@@ -242,6 +272,7 @@ pub enum Call {
     OpenInDefaultApp(PathBuf),
     OpenFolderInFinder(PathBuf),
     RevealInFinder(Vec<PathBuf>),
+    OpenTerminal(String, PathBuf),
     ToggleQuickLook(PathBuf),
     UpdateQuickLook(PathBuf),
     SetQuickLookKeyHandler,
@@ -259,6 +290,8 @@ pub enum Call {
     AboutPanel,
     AppIcon(usize),
     BeginDrag(Vec<PathBuf>),
+    StartWindowMove,
+    TitlebarDoubleClick,
     Eject(PathBuf),
     Spotlight(String),
 }
@@ -420,6 +453,10 @@ impl Effects for RecordingEffects {
         self.record(Call::RevealInFinder(paths.to_vec()));
     }
 
+    fn open_terminal(&self, app: &str, path: &Path) -> Result<(), String> {
+        self.open_result(Call::OpenTerminal(app.to_owned(), path.to_path_buf()))
+    }
+
     fn toggle_quick_look(&self, path: &Path) {
         self.record(Call::ToggleQuickLook(path.to_path_buf()));
     }
@@ -498,6 +535,14 @@ impl Effects for RecordingEffects {
     fn begin_drag(&self, _window: &mut Window, drag: &ComboDrag<'_>) -> bool {
         self.record(Call::BeginDrag(drag.paths.iter().map(|(path, _)| path.clone()).collect()));
         self.script.lock().expect("the effect script is not poisoned").begin_drag
+    }
+
+    fn start_window_move(&self, _window: &mut Window) {
+        self.record(Call::StartWindowMove);
+    }
+
+    fn titlebar_double_click(&self, _window: &mut Window) {
+        self.record(Call::TitlebarDoubleClick);
     }
 
     fn eject(&self, path: &Path) -> Result<(), String> {

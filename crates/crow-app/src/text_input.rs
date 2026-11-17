@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     App, Bounds, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Role, ShapedLine, SharedString, Style, TextRun,
+    MouseMoveEvent, MouseUpEvent, NoAction, PaintQuad, Pixels, Point, Role, ShapedLine, SharedString, Style, TextRun,
     UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::*;
@@ -82,6 +82,8 @@ pub fn keymap() -> Vec<KeyBinding> {
         KeyBinding::new("alt-backspace", DeleteWordLeft, c),
         KeyBinding::new("alt-delete", DeleteWordRight, c),
         KeyBinding::new("cmd-backspace", DeleteToStart, c),
+        // The window's Empty Trash must not fire while a field has the keys.
+        KeyBinding::new("cmd-shift-backspace", NoAction {}, c),
         KeyBinding::new("cmd-a", SelectAll, c),
         KeyBinding::new("home", Home, c),
         KeyBinding::new("cmd-left", Home, c),

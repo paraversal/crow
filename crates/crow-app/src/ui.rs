@@ -449,6 +449,7 @@ pub enum SettingChange {
     AppIcon(AppIcon),
     FontFamily(String),
     FontSize(f32),
+    Terminal(String),
     ShowHiddenFiles(bool),
     ShowPreview(bool),
     PaletteRecentCommands(bool),
@@ -474,6 +475,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             SettingChange::AppIcon(value) => replace(&mut settings.app_icon, *value),
             SettingChange::FontFamily(value) => replace(&mut settings.font_family, value.clone()),
             SettingChange::FontSize(value) => replace(&mut settings.font_size, *value),
+            SettingChange::Terminal(value) => replace(&mut settings.terminal, value.clone()),
             SettingChange::ShowHiddenFiles(value) => replace(&mut settings.show_hidden_files, *value),
             SettingChange::ShowPreview(value) => replace(&mut settings.show_preview, *value),
             SettingChange::PaletteRecentCommands(value) => replace(&mut settings.palette_recent_commands, *value),
@@ -546,6 +548,9 @@ fn write_setting(change: SettingChange, cx: &mut App) {
                 move |config, _| crow_core::save_number_setting(config, "font_size", f64::from(value)),
                 cx,
             );
+        }
+        SettingChange::Terminal(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "terminal", &value), cx);
         }
         SettingChange::ShowHiddenFiles(value) => {
             write_config(
@@ -903,7 +908,7 @@ mod tests {
     fn each_setting_writes_only_its_key(cx: &mut gpui::TestAppContext) {
         let config = cx.update(crate::ui::init_for_tests);
         cx.update(crate::menus::init_for_tests);
-        let before = "# mine\n\ntheme = \"system\" # theme\nkeymap = \"finder\"\nhints = \"auto\"\ntips = \"auto\"\nmotion = \"auto\"\nsound = \"crow\"\napp_icon = \"refined\"\nfont_family = \"\"\nfont_size = 13.0\nshow_hidden_files = true\nshow_preview = true\npalette_recent_commands = true\nview_per_folder = true\n\n[window]\nwidth = 1200\nheight = 760\n";
+        let before = "# mine\n\ntheme = \"system\" # theme\nkeymap = \"finder\"\nhints = \"auto\"\ntips = \"auto\"\nmotion = \"auto\"\nsound = \"crow\"\napp_icon = \"refined\"\nfont_family = \"\"\nfont_size = 13.0\nterminal = \"Terminal\"\nshow_hidden_files = true\nshow_preview = true\npalette_recent_commands = true\nview_per_folder = true\n\n[window]\nwidth = 1200\nheight = 760\n";
         let changes = [
             SettingChange::Theme("gruvbox-dark-hard".into()),
             SettingChange::Keymap(KeymapLayer::Vim),
@@ -914,6 +919,7 @@ mod tests {
             SettingChange::AppIcon(AppIcon::Sun),
             SettingChange::FontFamily("Menlo".into()),
             SettingChange::FontSize(14.0),
+            SettingChange::Terminal("iTerm".into()),
             SettingChange::ShowHiddenFiles(false),
             SettingChange::ShowPreview(false),
             SettingChange::PaletteRecentCommands(false),

@@ -6,14 +6,14 @@ use std::sync::Arc;
 use crow_core::motion::Fx;
 use crow_core::{SidebarEdit, Tabs, TipId, TipsMode, ViewMode, ZeroMatchStreak};
 use gpui::{
-    App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, Render, Role,
-    ScrollHandle, SharedString, Subscription, TitlebarOptions, Toggled, Window, WindowBounds, WindowOptions, div, img,
-    point, prelude::*, px, size, transparent_black,
+    App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, Render,
+    Role, ScrollHandle, SharedString, Subscription, TitlebarOptions, Toggled, Window, WindowBounds, WindowOptions, div,
+    img, point, prelude::*, px, size, transparent_black,
 };
 
 use crate::actions::{
-    AddToSidebar, ApplyThemeEverywhere, CalculateFolderSizes, CloseTab, EditPath, GoBack, GoForward, GoToFolder,
-    KeyboardShortcuts, Minimize, MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent,
+    AddToSidebar, ApplyThemeEverywhere, CalculateFolderSizes, CloseTab, EditPath, EmptyTrash, GoBack, GoForward,
+    GoToFolder, KeyboardShortcuts, Minimize, MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent,
     PaletteOpenInTab, PathHover, PathUnhover, PreviousTab, ResetFolderView, SearchEverything, ShowCommandPalette,
     ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, TogglePreview, UseViewAsDefaults,
     ViewAsColumns, ViewAsList, WhyThisView, Zoom,
@@ -73,6 +73,9 @@ pub fn open(
             appears_transparent: true,
             traffic_light_position: Some(point(px(14.), px(19.))),
         }),
+        // The band draws its own titlebar and starts the move itself, so a drag on
+        // a toolbar control never moves the window (D3).
+        app_owns_titlebar_drag: true,
         // Sidebar 210 plus a usable center; below this the band's parts no longer fit.
         window_min_size: Some(size(px(640.), px(400.))),
         ..Default::default()
@@ -960,6 +963,7 @@ impl CrowWindow {
 
         let title_label = div()
             .id("title")
+            .debug_selector(|| "band-drag".into())
             .role(Role::Heading)
             .aria_level(1)
             .aria_label(title.to_owned())
@@ -971,6 +975,20 @@ impl CrowWindow {
             .font_weight(FontWeight::SEMIBOLD)
             .text_size(px(15.))
             .text_color(fg)
+            // The band's empty area is the title's flex box. AppKit no longer
+            // drags the titlebar (app_owns_titlebar_drag), so a press here moves
+            // the window, and a double-click does what the system setting says.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
+                    let effects = crate::effects::effects(cx);
+                    if event.click_count > 1 {
+                        effects.titlebar_double_click(window);
+                    } else {
+                        effects.start_window_move(window);
+                    }
+                }),
+            )
             .child(title.to_owned());
         let views = div()
             .id("view-switcher")
@@ -1469,6 +1487,11 @@ enum Sheet {
         paths: Arc<[PathBuf]>,
         focus: FocusHandle,
     },
+    /// Emptying is permanent and covers the home Trash and every volume.
+    ConfirmEmptyTrash {
+        folders: Vec<PathBuf>,
+        focus: FocusHandle,
+    },
     /// Quitting would stop the running operation partway.
     StopOperation {
         focus: FocusHandle,
@@ -1486,6 +1509,7 @@ impl Sheet {
         match self {
             Sheet::Conflicts { focus, .. }
             | Sheet::ConfirmDelete { focus, .. }
+            | Sheet::ConfirmEmptyTrash { focus, .. }
             | Sheet::StopOperation { focus, .. }
             | Sheet::Onboarding { focus, .. } => focus,
         }
@@ -1718,6 +1742,62 @@ impl CrowWindow {
         cx.notify();
     }
 
+    /// ⌘⇧⌫, File ▸ Empty Trash…, or the palette. Counts off the main thread
+    /// first: an empty Trash says so without asking.
+    fn empty_trash(&mut self, _: &EmptyTrash, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sheet.is_some() {
+            return;
+        }
+        let home = cx.global::<Ui>().home.clone();
+        let volumes: Vec<PathBuf> = cx.global::<Ui>().volumes.iter().map(|volume| volume.path.clone()).collect();
+        // A fuzz run must never reach the user's real Trash on a mounted volume.
+        let jail = cx.global::<Operations>().jail().map(Path::to_path_buf);
+        cx.spawn_in(window, async move |this, cx| {
+            let (folders, count) = cx
+                .background_spawn(async move {
+                    let folders = crate::trash::in_jail(crate::trash::folders(&home, &volumes), jail.as_deref());
+                    let count = crow_fs::trash::count(&folders);
+                    (folders, count)
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                if this.sheet.is_some() {
+                    return;
+                }
+                if count == 0 {
+                    operations::message("The Trash is already empty.", false, cx);
+                    cx.notify();
+                    return;
+                }
+                let focus = cx.focus_handle();
+                window.focus(&focus, cx);
+                this.sheet = Some(Sheet::ConfirmEmptyTrash { folders, focus });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Remove every folder's items in the background, then report and play the
+    /// sound. Failures leave the rest removed and name what stayed.
+    fn run_empty_trash(&mut self, folders: Vec<PathBuf>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let report = cx.background_spawn(async move { crow_fs::trash::empty(&folders) }).await;
+            let (text, is_error) = crate::trash::message(&report);
+            let play = report.removed > 0;
+            this.update(cx, |_, cx| {
+                operations::message(text, is_error, cx);
+                if play {
+                    crate::feedback::play(crow_core::motion::Event::EmptyTrash, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn confirm_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.sheet.take() {
             Some(Sheet::Conflicts { plan, choices, .. }) => {
@@ -1731,6 +1811,7 @@ impl CrowWindow {
                     Err(e) => operations::message(e.to_string(), true, cx),
                 }
             }
+            Some(Sheet::ConfirmEmptyTrash { folders, .. }) => self.run_empty_trash(folders, cx),
             Some(Sheet::StopOperation { .. }) => {
                 stop_then_quit(cx);
                 return;
@@ -1819,6 +1900,31 @@ impl CrowWindow {
                         .into_any_element(),
                 )
             }
+            Sheet::ConfirmEmptyTrash { .. } => (
+                "Empty the Trash?".to_owned(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(div().text_color(color(muted)).child(
+                        "Every item in the Trash, on this Mac and your other disks, will be deleted. This can't be undone.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                button("sheet-cancel", "Cancel".into(), false, None)
+                                    .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
+                            )
+                            .child(
+                                button("sheet-confirm", "Empty Trash".into(), true, None)
+                                    .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
+                            ),
+                    )
+                    .into_any_element(),
+            ),
             Sheet::StopOperation { .. } => {
                 let label = cx
                     .global::<Operations>()
@@ -2966,6 +3072,7 @@ impl CrowWindow {
                 let dir = self.pane().read(cx).current_dir(cx);
                 open(dir, false, None, cx);
             }
+            CommandId::EmptyTrash => self.empty_trash(&EmptyTrash, window, cx),
             CommandId::SwitchFocus => self.switch_focus(&SwitchFocus, window, cx),
             CommandId::ToggleHiddenFiles => self.toggle_hidden(&ToggleHiddenFiles, window, cx),
             CommandId::TogglePreview => self.toggle_preview(&TogglePreview, window, cx),
@@ -3660,6 +3767,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::minimize))
             .on_action(cx.listener(Self::zoom))
+            .on_action(cx.listener(Self::empty_trash))
             .on_action(cx.listener(Self::keyboard_shortcuts))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))

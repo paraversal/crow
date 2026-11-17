@@ -229,10 +229,12 @@ mod tests {
                 "Quick Look",
                 "Move to Trash",
                 "Delete Permanently…",
+                "Empty Trash…",
                 "—",
                 "Add to Sidebar",
                 "Eject",
                 "Show in Finder",
+                "Open Terminal Here",
             ]
         );
         assert_eq!(

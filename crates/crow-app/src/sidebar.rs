@@ -1038,9 +1038,17 @@ impl Render for Sidebar {
             let path = row.path().map(Path::to_path_buf).unwrap_or_default();
             let cursor = i == self.cursor;
             let look = looks.next().expect("one look per selectable row");
-            let (glyph, tint) = match &row {
-                Row::Favorite(_, f) => (f.icon.clone(), f.color.as_deref().and_then(|c| favorite_color(c, &theme))),
-                _ => (None, None),
+            // Favorites and Recent use the board's line icons; a favorite's
+            // custom text icon and its palette color still win. Volumes and the
+            // file list keep Finder's icons.
+            let (glyph, line_icon, tint) = match &row {
+                Row::Favorite(_, f) => (
+                    f.icon.clone(),
+                    f.icon.is_none().then_some(crate::icons::Glyph::Folder),
+                    f.color.as_deref().and_then(|c| favorite_color(c, &theme)),
+                ),
+                Row::Recent(_) => (None, Some(crate::icons::Glyph::Clock), None),
+                _ => (None, None, None),
             };
             let volume_label = match &row {
                 Row::Volume(v) => Some(format!("{} free of {}", human_bytes(v.free_bytes), human_bytes(v.total_bytes))),
@@ -1147,9 +1155,27 @@ impl Render for Sidebar {
                     .text_color(color(tint.unwrap_or(muted)))
                     .child(text)
                     .into_any_element(),
-                None => {
-                    div().w(px(16.)).children(icon(&path, true, 16).map(|i| img(i).size(px(16.)))).into_any_element()
-                }
+                None => match line_icon {
+                    Some(glyph) => {
+                        let icon_tint = tint.map(color).unwrap_or_else(|| color(theme.role("link")));
+                        let name = match glyph {
+                            crate::icons::Glyph::Folder => "folder-icon",
+                            crate::icons::Glyph::Clock => "clock-icon",
+                            _ => "line-icon",
+                        };
+                        div()
+                            .w(px(16.))
+                            .flex()
+                            .justify_center()
+                            .debug_selector(move || format!("sidebar-{name}-{i}"))
+                            .child(crate::icons::glyph_color(glyph, 15., icon_tint))
+                            .into_any_element()
+                    }
+                    None => div()
+                        .w(px(16.))
+                        .children(icon(&path, true, 16).map(|i| img(i).size(px(16.))))
+                        .into_any_element(),
+                },
             };
             let mut line = div().flex().items_center().h(px(20.)).child(div().mr(px(8.)).child(icon_element)).child(
                 div()
@@ -1179,9 +1205,6 @@ impl Render for Sidebar {
                     );
                 }
                 None => line = line.child(div().flex_1()),
-            }
-            if let (Some(tint), Row::Favorite(_, Favorite { icon: None, .. })) = (tint, &row) {
-                line = line.child(div().ml(px(8.)).size(px(7.)).rounded_full().bg(color(tint)));
             }
             if let Some(right) = &look.right {
                 line = line.child(

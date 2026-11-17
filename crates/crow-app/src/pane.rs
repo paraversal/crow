@@ -33,8 +33,8 @@ use gpui::{
 use crate::actions::{
     BeginJump, BeginMark, ClearFilter, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, EnterRow,
     ExtendDown, ExtendUp, FilterFocusField, FilterFocusResults, MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast,
-    MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection, PasteFiles, PasteMoveFiles, QuickLook, Rename, SelectAll,
-    ShowInFinder, StartFilter,
+    MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection, OpenTerminal, PasteFiles, PasteMoveFiles, QuickLook,
+    Rename, SelectAll, ShowInFinder, StartFilter,
 };
 use crate::context_menu::{MenuKind, MenuState};
 use crate::extensions::Ext;
@@ -48,7 +48,8 @@ use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
     active_selection, color, color_alpha, content_opacity, cut_outline, display_text, drop_outline, effect_tint,
-    format_time, highlight_text, icon, inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
+    focused_column, format_time, highlight_text, icon, inactive_selection, kind, map_range, truncate_middle,
+    truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -74,9 +75,8 @@ const NAME_INSET: f32 = 4.0;
 const INDENT: f32 = 18.0;
 const TRIANGLE_WIDTH: f32 = 20.0;
 const CELL_PADDING: f32 = 8.0;
-/// Column view: every column starts this wide; one with long names widens up to the cap.
-const COLUMN_WIDTH: f32 = 220.0;
-const COLUMN_WIDTH_CAP: f32 = 360.0;
+/// Every column in column view is the board's fixed 196 px; long names truncate.
+const COLUMN_WIDTH: f32 = 196.0;
 const PREVIEW_COLUMN_WIDTH: f32 = 300.0;
 
 /// Requests the pane can't carry out alone: operations may need a sheet (conflicts,
@@ -983,6 +983,7 @@ impl Pane {
             CommandId::PasteMove => self.paste_move_files(&PasteMoveFiles, window, cx),
             CommandId::CopyPath => self.copy_path(&CopyPath, window, cx),
             CommandId::ShowInFinder => self.show_in_finder(&ShowInFinder, window, cx),
+            CommandId::OpenTerminal => self.open_terminal(&OpenTerminal, window, cx),
             CommandId::SelectAll => self.select_all(&SelectAll, window, cx),
             CommandId::StartFilter => self.start_filter(&StartFilter, window, cx),
             _ => {}
@@ -1957,6 +1958,35 @@ impl Pane {
         }
     }
 
+    /// Open a terminal at the selected folder, a selected file's parent, or the
+    /// shown folder. A multi-selection has no single "here": the shown folder.
+    fn open_terminal(&mut self, _: &OpenTerminal, _: &mut Window, cx: &mut Context<Self>) {
+        let folder = if self.selected_count(cx) > 1 {
+            self.current_dir(cx)
+        } else {
+            match self.cursor_entry(cx) {
+                Some(entry) if entry.is_dir => entry.path,
+                Some(entry) => entry.path.parent().map_or_else(|| self.current_dir(cx), Path::to_path_buf),
+                None => self.current_dir(cx),
+            }
+        };
+        let app = cx.global::<Ui>().settings.terminal.trim().to_owned();
+        let app = if app.is_empty() { "Terminal".to_owned() } else { app };
+        let effects = crate::effects::effects(cx);
+        // `open -a` waits for Launch Services, so it runs off the main thread.
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { effects.open_terminal(&app, &folder) }).await;
+            if let Err(error) = result {
+                this.update(cx, |_, cx| {
+                    crate::operations::message(error, true, cx);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     // ----- scroll -----
 
     /// A pointer or touch scroll in folder `k`'s list: suggest `/` once a long
@@ -2607,7 +2637,7 @@ impl Pane {
         let subtle = color(theme.role("fg-subtle"));
         let rule = color_alpha(theme.role("fg"), 0x30);
         let Some(folder) = self.folders.get(k).map(|f| f.read(cx)) else { return Vec::new() };
-        let width = column_width(folder.entries());
+        let width = COLUMN_WIDTH;
         let name_room = px(width - 16.0 - 8.0 - 16.0 - 2.0 * CELL_PADDING - 8.0);
         let total = folder.row_count();
         let cursor = folder.cursor_ix();
@@ -2844,7 +2874,7 @@ impl Pane {
                 (
                     f.entries().len(),
                     f.row_count(),
-                    column_width(f.entries()),
+                    COLUMN_WIDTH,
                     f.scroll().clone(),
                     f.dir().file_name().map_or_else(|| "/".to_owned(), |n| n.to_string_lossy().into_owned()),
                     f.filter().is_some(),
@@ -2957,7 +2987,7 @@ impl Pane {
                         .py_1()
                         .border_r_1()
                         .border_color(border)
-                        .when(k == focused, |c| c.bg(color_alpha(theme.role("surface"), 0x40)))
+                        .when(k == focused, |c| c.bg(focused_column(&theme)))
                         .relative()
                         .when(self.drop_target.as_ref().is_some_and(|t| t.column == k && t.rows.is_none()), |c| {
                             c.child(drop_outline(&theme).left(px(4.)).right(px(4.)).top(px(2.)).bottom(px(2.)))
@@ -3252,13 +3282,6 @@ impl Ghosts<'_> {
             })
             .collect()
     }
-}
-
-/// Column view: the shared width, widened for long names up to a cap. Estimated from
-/// name lengths (about 7 pt per character) so it costs nothing per frame.
-fn column_width(entries: &[Entry]) -> f32 {
-    let longest = entries.iter().take(2000).map(|e| e.name.chars().count()).max().unwrap_or(0) as f32;
-    (longest * 7.0 + 16.0 + 8.0 + 16.0 + 2.0 * CELL_PADDING + 8.0).clamp(COLUMN_WIDTH, COLUMN_WIDTH_CAP)
 }
 
 /// The name column plus the shown columns, at their default widths.

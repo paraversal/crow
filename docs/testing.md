@@ -11,7 +11,10 @@ cargo fmt --check
 The keystroke tests (`crates/crow-app/src/window.rs`) drive a real window through
 GPUI's test platform: key contexts, history, tabs, hidden files, multiple
 selection, type-to-select (its bottom-bar prefix, timeout, Escape, and staying out of the filter and Vim), sorting, Go to Folder (Shift-Cmd-G into the palette), views kept per window, the column view's focus rules, file operations
-(new folder and new file with inline rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete),
+(new folder and new file with inline rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete,
+New File/Folder with a folder or file selected, Open Terminal Here and its failure, Empty Trash and its sheet,
+cancel, empty, partial failure and text-field block), the sidebar's line icons, 196 px columns, the syntax
+preview's numbered lines,
 drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent,
 twin hints across Favorites and Recent, the current-folder fill and cursor ring, mark letters, the disk
 row's free space and warning tone, arrows showing the folder in the center, Option-Up/Down group jumps),
@@ -288,6 +291,7 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | --- | --- |
 | Toolbar | Hover Back, Forward, both view buttons, Go to and the search field: each shows a tooltip with its name and key ("Back to <folder> ⌘["); the same for a path segment, the disk row, Search everything and Cancel during a copy. At the start of history Back is the same icon at 40 %. Icons are drawn, crisp at 1× and 2×; traffic lights sit centred on the band. Light and dark themes. VoiceOver still reads each control's label, not the tooltip. |
 | Band, narrow | Shrink the window: the title truncates, then the field shrinks, then Go to loses its label. In search mode the field shrinks but the match control and Done stay whole. |
+| Window drag | Drag the band's empty area (the title): the window moves. Drag Back, Forward, either view button, Go to or the search field: the window stays put and the control still works (Back still goes back). Double-click the empty band: the system's titlebar action (zoom unless System Settings says otherwise). Traffic lights stay at (14, 19) and the titlebar looks transparent, at 640 px and wide, light and dark. |
 | Menu bar | Open each of File, Edit, View, Go, Window and Help: every item shows the key it has in the list (⌘F, ⇧⌘A, ⌘K, ⇧⌘G, ⌘[ …). Rename shows ↩, Filter This Folder `/` and Quick Look Space. Items without a key are the ones the README names. |
 | Menus follow focus | With the list focused, Edit ▸ Filter This Folder, Cut, Copy, Paste and Select All and File ▸ Rename are enabled; Tab to the sidebar: they grey out, Go ▸ Back stays enabled. In search results, Copy, Move to Trash and Quick Look are enabled, Paste is not. With the rename field focused, the list's items (Rename, Quick Look, Filter This Folder, Move to Trash …) grey out; Cut, Copy, Paste, Select All, Undo and Redo act on the text. |
 | Menus act | Choose Go ▸ Enclosing Folder, Back, Go to…, Go to Folder…; Edit ▸ Find…, Filter This Folder; View ▸ Show Activity: each does what its key does. File ▸ New Window opens the current folder; ⌘N with no window opens Home. |
@@ -301,6 +305,7 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | --- | --- |
 | Favorites | Drag a favorite up and down: one insertion line shows the exact target (under a group title for that group's start), the line never shifts rows, and the end of a group is reachable; dropping on a group title still moves the favorite to its start. Drag a folder from the list onto a group title, and between two favorites (from the list and from Finder): the line shows at the row's upper or lower edge with no row fill, and the folder is added there, not moved; over the middle of a favorite the row fills instead and the drop moves into it. Drop a file onto a favorite. Check `sidebar.toml` keeps your comments. Add `icon = "🚀"` and `color = "blue"` to one. |
 | Recent | Visit a few folders (and `cd` around with zoxide): they appear under Recent, favorites excluded. |
+| Line icons | Favorites show the line folder icon and Recent the clock; a favorite's `icon = "🚀"` still shows the emoji and `color = "blue"` tints its line icon. Locations keeps Finder's disk icon, and the file list its Finder icons. Light and dark, 640 px and wide. |
 | Locations | Mount a disk image: it appears without a restart, with free space and a bar; ⏏ ejects it. |
 | Sidebar twins | Visit two folders with the same name (e.g. `~/a/git`, `~/b/git`): Recent shows "git a" and "git b" with the hint dimmer; with a long name (the sidebar is a fixed 210 px) the hint truncates and goes before the name does. VoiceOver reads "git, in a". |
 | Sidebar follows the cursor | Tab into the sidebar: nothing navigates. Arrow down through favorites: each shows in the center, focus stays in the sidebar (ring moves, the list has no focus). Tab or → (or Return): the list has focus on that folder. With a search open, Tab to the sidebar and arrow: search closes, the folder shows. Back after an arrow walk returns to the folder you were in before the walk. List and column view. |
@@ -317,6 +322,9 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Column view | Cmd-3: arrows move within a column, Right moves into the selected folder, Left moves back; Left in the leftmost column goes up a folder. Only the focused column's selection is in the accent color. Selecting a file shows its preview as the last column. Cmd-2 returns to the list in the folder you were in. |
 | Preview column | Column view: the preview takes the rest of the strip, never narrower than 300 px; with a folder under the cursor it shows the folder icon, name, "Folder · n items" and modified; with no matches the folder you are filtering shows the same summary. ⇧⌘P hides it and the columns keep their widths. |
 | Preview pane | Select an image, a PDF, a text file and a folder: thumbnail, text, icon. Tags show for tagged files. |
+| Syntax preview | Select a `.rs`, `.toml`, `.json`, `.js`, `.py` and `.sh` file: the preview shows line numbers and coloured keywords, strings, numbers, types and comments. A search hit still shows its excerpt with the hit line washed. Text previews stop at 80 lines and clip; a 100k folder's scroll is unchanged. |
+| Columns and tint | Cmd-3 at 1280 and 640: every column is 196 px wide and long names truncate. The focused column is tinted with the surface role (lighter in dark themes, darker in light ones) at the board's strength; moving the selection never changes a width. |
+| Open Terminal Here | Palette `>open terminal`, right-click a folder, a file and empty space: Terminal opens at the folder (a file's parent; empty space the shown folder). A multi-selection disables the menu line. Set `terminal = "iTerm"` (or a missing app): iTerm opens, or the status line names the failure. |
 | Table | Drag header dividers to resize; click headers to sort and reverse. |
 | List width | List view: widen and narrow the window: Name grows and shrinks, Date/Size/Kind keep their widths; past Name's minimum, Kind and then Size shrink; at the 640 px minimum whole columns hide from the right, so no cell is cut at the edge (names end in “…”). Drag Name's divider: Date gives up or takes the width. |
 | Inline folders | In the list, the chevron (›/⌄) opens and closes a folder inline; Right opens a folder indented under it (Right again goes in), Left steps to the containing row, Left again closes it. Option-click is a normal click. Select across levels (Cmd-click or Shift-click a nested row) and copy or trash: every selected row is included. Navigate away and back: expansions are gone. |
@@ -366,7 +374,8 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Recently used | Run two commands from the palette, quit, relaunch: `>` lists them under Recently used. Set `palette_recent_commands = false`: the section disappears without a restart, and new runs aren't recorded. |
 | Palette themes | FireBox and Solarized Light: token, highlights, chip and keycaps readable, the input and footer dividers visible; narrow window keeps the sheet inside with 16 px margins. |
 | Go to Folder | Shift-Cmd-G opens Cmd-K with this folder's path and `/` typed and its subfolders listed; type a few letters, Tab, Return goes there; a file's full path selects it in its folder; a missing path beeps and stays open. Typing a capitalised name (`Docs`) never crashes. |
-| Sheets | Open Shift-Cmd-G, Cmd-J, the theme picker, Cmd-K and a permanent delete: each sits on a darkened window (check a dark and a light theme); clicking outside closes it like Esc (picker reverts, delete does nothing), clicking inside doesn't. The window can still be dragged. |
+| Sheets | Open Shift-Cmd-G, Cmd-J, the theme picker, Cmd-K, a permanent delete and Empty Trash: each sits on a darkened window (check a dark and a light theme); clicking outside closes it like Esc (picker reverts, delete and Empty Trash do nothing), clicking inside doesn't. The window can still be dragged. |
+| Empty Trash | Put one disposable item in the Trash. ⌘⇧⌫, File ▸ Empty Trash… and palette `>empty trash` all ask "Empty the Trash?"; Cancel/Esc leaves the item, Empty Trash removes it with Finder's empty-trash sound and the status says how many. An empty Trash says "The Trash is already empty." with no sheet or sound. ⌘⇧⌫ does nothing while a filter, rename, search or palette field has focus. A disk image with an item in `.Trashes/<uid>` is emptied too; a locked item is named in the status. |
 | Theme picker | Cmd-Option-T, arrow through themes (each shows at once), Esc returns; Return keeps one and writes it to `settings.toml`. Apply to All Apps changes `~/.local/state/themes/current.json`. |
 
 ### Bottom bar and tips
@@ -414,7 +423,7 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | --- | --- |
 | Window | ⌘, (or Crow ▸ Settings…) opens one titled Settings window; a second ⌘, brings it forward instead of opening another. ⌘W and Esc close it. With it open, a browser window's ⌘, still works. It is not a tab and reopening Crow does not reopen it. |
 | Appearance, dark and light | FireBox and Solarized Light: the Theme drop-down opens (click, Space, Return or ↓) a menu over the page, with no scroll box on the page itself: System then the index's themes, dark before light; ↓/↑ previews each in every window, Return or a click keeps it, Esc or a click outside reverts. The menu sits under its button and stays inside the window. The four app-icon tiles show at 64 px; the Dock switches when one is chosen. The Font drop-down starts with System and lists installed families (the menu scrolls); typing opens it at the match; nothing changes until Return or a click. The font-size stepper goes 10–24 with ↑↓ and typed digits. |
-| Behaviour | Keymap Finder/Vim, key hints Auto/Always/Off, tips Auto/Off, Show hidden files, Show preview, Folders keep their own view, Remember recent commands: each changes at once and writes only its line. |
+| Behaviour | Keymap Finder/Vim, key hints Auto/Always/Off, tips Auto/Off, folder sizes, the terminal app, Show hidden files, Show preview, Folders keep their own view, Remember recent commands: each changes at once and writes only its line. Type `iTerm` in Terminal app and Return: `terminal = "iTerm"` and Open Terminal Here uses it; clear it and Return: `terminal = "Terminal"`. |
 | Motion & sound | Motion Auto/Off/Low/Full; Auto's line says which mode it resolves to now and whether Reduce Motion is on. Sounds Crow/Finder/Off; Play plays the trash sound in the chosen set. |
 | New windows | Width and height steppers, 600–4000; a new window (⌘N) opens at the chosen size. |
 | Files | Edit settings.toml… opens the file (with the old failure message when no app owns `.toml`); Show config folder in Finder opens `~/.config/crow`; the `sidebar.toml`, `views.toml` and `exclude.toml` links open their files. |
@@ -424,6 +433,14 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | VoiceOver | The window reads "Settings"; each section heading is a heading. One of each kind: the Show preview switch reads its label and on/off; Motion reads "Motion, Auto, 1 of 4, selected"; an app-icon tile reads its name and selected; the font-size stepper reads its value and 10–24; the Theme drop-down reads as a pop-up button with its value, and its open menu reads its options and the highlighted one; Play and the Files buttons read as buttons. |
 | Palette | ⌘K, type `settings`: Settings opens/focuses the window. Type `edit settings`: Edit settings.toml opens the file. |
 | Tab and focus | Tab and ⇧Tab walk the controls in reading order and scroll the page to the focused control; the focus ring is the sidebar's inset ring and never moves the layout. |
+
+### NSSound volume (U10 R3, F7.5)
+
+Set the macOS alert slider low and the output volume normal. With `sound = "finder"` and then
+`sound = "crow"`, trash a file and empty the Trash in Crow, then do the same in Finder. If Crow's
+sounds are louder than Finder's, report the measurement before changing the sound path: the
+root-cause option (`AudioServicesPlaySystemSoundWithCompletion` plus a trimmed cache copy) cannot
+fade the trash tail.
 
 ## Motion and sound (U10)
 
