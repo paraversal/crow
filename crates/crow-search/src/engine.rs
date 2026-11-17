@@ -369,8 +369,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                         let mut content_hits = Vec::new();
                         let matches = content.search(entry.path(), modified, size, &mut content_hits, &cancel);
                         if matches > 1
-                            && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) =
-                                content_hits.first_mut()
+                            && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) = content_hits.first_mut()
                         {
                             *more = matches - 1;
                         }
@@ -400,7 +399,9 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                 break;
             }
         }
-        if !cancel.load(Ordering::Relaxed) && let Some(rest) = batcher.finish() {
+        if !cancel.load(Ordering::Relaxed)
+            && let Some(rest) = batcher.finish()
+        {
             sink(rest);
         }
     });
@@ -439,10 +440,7 @@ fn build_walker(
             let name = name.to_string_lossy();
             if let Some(rule) = rules.skip(entry.path(), name.as_ref(), true) {
                 if let Ok(mut list) = skipped.lock() {
-                    list.push(Skip {
-                        path: entry.path().to_path_buf(),
-                        reason: SkipReason::Rule(rule),
-                    });
+                    list.push(Skip { path: entry.path().to_path_buf(), reason: SkipReason::Rule(rule) });
                 }
                 return false;
             }
@@ -924,8 +922,7 @@ mod tests {
             let summary = search(&search_root, &query, |batch| hits.extend(batch), &cancel);
             let _ = tx.send((hits, summary));
         });
-        let (hits, summary) =
-            rx.recv_timeout(Duration::from_secs(10)).expect("the search finishes despite the FIFO");
+        let (hits, summary) = rx.recv_timeout(Duration::from_secs(10)).expect("the search finishes despite the FIFO");
         assert!(summary.error.is_none(), "{:?}", summary.error);
         assert_eq!(paths(&hits), [root.join("file.txt")], "the FIFO is never opened");
     }

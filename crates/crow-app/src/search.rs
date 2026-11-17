@@ -478,11 +478,8 @@ impl SearchView {
                 let skipped = summary.skipped.len();
                 // B1 shows only the exclude.toml skips the footer already describes;
                 // B3 shows unreadable folders and the other reasons.
-                self.skipped = summary
-                    .skipped
-                    .into_iter()
-                    .filter(|skip| matches!(skip.reason, SkipReason::Rule(_)))
-                    .collect();
+                self.skipped =
+                    summary.skipped.into_iter().filter(|skip| matches!(skip.reason, SkipReason::Rule(_))).collect();
                 if let Some(error) = summary.error {
                     self.error = Some(error.into());
                 }
