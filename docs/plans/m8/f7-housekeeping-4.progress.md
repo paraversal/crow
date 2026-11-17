@@ -1,5 +1,5 @@
 # f7-housekeeping-4 progress
-Branch: m8-f7-housekeeping · PR: none · Last updated: 2026-11-17 · State: in progress (code done; bundle hand checks next)
+Branch: m8-f7-housekeeping · PR: none · Last updated: 2026-11-17 · State: Ready for critique
 
 ## Status
 | Item | State | Notes |
@@ -25,6 +25,8 @@ Branch: m8-f7-housekeeping · PR: none · Last updated: 2026-11-17 · State: in 
 - 196 px is a constant, not a setting (user, 2026-11-17).
 - Terminal app is a free-text setting (name or app path), not a list of installed apps: the user wants to choose any app, and `open -a` already accepts both. The path is passed as the app's document; a file selection passes its parent.
 - No key for Open Terminal Here. Custom keybind infrastructure (detect, display, persist) is a future inbox item, per the user.
+- Open Terminal Here also joins the File menu: the context-menu invariant requires every row-menu command to be a menu-bar command, and the product principle wants every feature reachable from the menu bar.
+- The line icons use the `link` theme role (the cool hue closest to the board's blue); a favorite's own `color` overrides it.
 - The favorite color dot is gone; the line folder icon now carries the favorite's `color` (the board shows only the icon).
 - Empty Trash lives in `crow_fs::trash`, not the undoable `ops` engine: emptying is permanent by definition and has no undo record. It is called off the main thread.
 - Empty Trash counts before the sheet so an empty Trash says so without a pointless confirmation; a partial failure is reported as an error and does not stop the rest.
@@ -49,6 +51,8 @@ Branch: m8-f7-housekeeping · PR: none · Last updated: 2026-11-17 · State: in 
 - 2026-11-17: Items 1, 4, 6 in 7e79bc5. All four board details except the deferred scope token; Open Terminal Here with its setting and Settings field; Empty Trash with the crow-fs backend, sheet, key and jail guard. `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (567 crow-app tests among the workspace) pass.
 - 2026-11-17: Bench on the 100k fixture: branch p99 8.52 ms, avg 8.36, warm first paint 10 ms; `main` in a `vendor`-symlinked worktree p99 8.58 ms, avg 8.36, warm 8 ms. No regression beyond run-to-run noise.
 - 2026-11-17: Hand checks remain for the bundle: window drag/AppKit, NSSound alert volume, Empty Trash on the real Trash and a disk image, Open Terminal Here, the board details, and the Settings terminal field.
+- 2026-11-17: `./scripts/bundle.sh` built and signed. `scripts/shot.sh` screenshots: `target/shots/f7-details-firebox.png` (line icons, clock, 196 px columns, focused tint), `target/shots/f7-syntax-firebox.png` and `target/shots/f7-syntax-light-solarized-light.png` (numbered, coloured syntax preview in dark and light). The shots are build artifacts, not committed.
+- 2026-11-17: State Ready for critique. Not pushed (AGENTS.md: the executing agent commits locally; the critic opens the PR).
 
 ## Next
-Build `./scripts/bundle.sh`, attempt the board screenshots with `scripts/shot.sh`, then set Ready for critique and report the hand checks. Do not push; the critic opens the PR (AGENTS.md wins over the plan's "push").
+Critique this branch. Hand checks still owed by the user/critic: window drag in AppKit, NSSound alert volume, Empty Trash on the real Trash and a disk image, Open Terminal Here, the board details at 640 px/wide, VoiceOver for the new menu items and sheet, and the Settings terminal field.
