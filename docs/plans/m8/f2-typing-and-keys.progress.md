@@ -1,6 +1,6 @@
 # F2 — Typing and keys progress
 
-Branch: `m8-f2-typing` · PR: none · Last updated: 2026-11-17 · State: In critique
+Branch: `m8-f2-typing` · PR: [#50](https://github.com/paraversal/file-crow/pull/50) · Last updated: 2026-11-17 · State: PR open
 
 ## Status
 
@@ -59,7 +59,7 @@ Branch: `m8-f2-typing` · PR: none · Last updated: 2026-11-17 · State: In crit
 
 ## Next
 
-Critique: build the branch and `main` with `scripts/bundle.sh`, walk the hand checks (especially the search menu by mouse and VoiceOver), fix what is clearly wrong, then open the PR.
+PR #50 is open for the user to hand-test and merge. Next piece in the M8 order: **F5** (tips and first launch); the executing agent request is `execute plan F5`.
 
 ## Critique
 
@@ -81,3 +81,4 @@ Looked at: the branch and `main` bundles on `/tmp/crow-f2-fixture`; the type-to-
 
 Verdict: Better. The four items do what the plan asks, the new tests cover the paths, the search menu has one active row for the bar, preview and actions, and a multi-selection Rename now says why it refuses. Both critique questions were answered and fixed; nothing blocks the PR.
 - 2026-11-17: Critique. Read the whole diff against `main` (`40c5339`), re-ran fmt/clippy/`cargo test --workspace`, built the branch and `main` bundles and drove both on `/tmp/crow-f2-fixture`. Fixed C1: a right-click on a selected search result now sets the selection cursor and reloads the preview, so the bar, preview and single-row actions name the same row (`d4fd652`, test). Asked Q1 (Copy Path key) and Q2 (multi-selection Rename); answers: add ⌥⌘C in search results, and disable Rename with more than one selected. Fixed both (`8fe226c`): `cmd-alt-c` in `SearchResults`; `Pane::rename` refuses with a beep and the info message `Select one item to rename`. Tests: the menu entry's shortcut, the key copying the cursor row, and the refusal message. Checks pass (481 app, 96 core, 44 fs, 6 macos, 20 search, 6 theme); bundle rebuilt and the two states checked in it.
+- 2026-11-17: Pushed `m8-f2-typing` and opened PR #50; the progress file is at PR open. Next: the user hand-tests and merges; then F5.
