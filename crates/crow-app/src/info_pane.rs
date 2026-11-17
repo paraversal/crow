@@ -15,6 +15,7 @@ use gpui::{
     prelude::*, px,
 };
 
+use crate::folder_sizes::SizeService;
 use crate::style::{color, color_alpha, display_path, display_text, format_time, kind};
 use crate::ui::Ui;
 
@@ -127,10 +128,19 @@ pub struct InfoPane {
     loader: Loader,
 }
 
+fn observe_sizes(cx: &mut Context<InfoPane>) {
+    if let Some(service) = cx.try_global::<SizeService>() {
+        let service = service.0.clone();
+        cx.observe(&service, |_, _, cx| cx.notify()).detach();
+    }
+}
+
 impl InfoPane {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let default = cx.global::<Ui>().settings.show_preview;
-        Self::with_default(default, Arc::new(real_load))
+        let pane = Self::with_default(default, Arc::new(real_load));
+        observe_sizes(cx);
+        pane
     }
 
     fn with_default(default: bool, loader: Loader) -> Self {
@@ -150,7 +160,9 @@ impl InfoPane {
     #[cfg(test)]
     pub fn with_loader(cx: &mut Context<Self>, loader: Loader) -> Self {
         let default = cx.global::<Ui>().settings.show_preview;
-        Self::with_default(default, loader)
+        let pane = Self::with_default(default, loader);
+        observe_sizes(cx);
+        pane
     }
 
     pub fn tab(&self) -> InfoTab {
@@ -367,8 +379,20 @@ fn single_body(
     let created = entry.created.or_else(|| fresh.and_then(|e| e.created));
     let modified = entry.modified.or_else(|| fresh.and_then(|e| e.modified));
     let added = entry.added.or_else(|| fresh.and_then(|e| e.added));
-    let folder = entry.is_dir && !entry.is_package();
-    let size = if entry.is_dir { "--".to_owned() } else { crow_fs::human_size(shown_size(entry, loaded)) };
+    let folder = entry.is_dir && !entry.is_package() && !entry.is_symlink;
+    let (size, size_stale) = if entry.is_dir && !entry.is_symlink {
+        if cx.global::<crate::ui::Ui>().settings.folder_sizes != crow_core::FolderSizesMode::Visible {
+            ("--".to_owned(), false)
+        } else {
+            cx.try_global::<SizeService>()
+                .and_then(|service| service.0.read(cx).size(&entry.path))
+                .map_or_else(|| ("--".to_owned(), false), |size| (crow_fs::human_size(size.bytes), size.stale))
+        }
+    } else if entry.is_dir {
+        ("--".to_owned(), false)
+    } else {
+        (crow_fs::human_size(shown_size(entry, loaded)), false)
+    };
     let tags = match loaded {
         Some(l) if l.tags_partial => "—".to_owned(),
         Some(l) if l.tags.is_empty() => "No tags".to_owned(),
@@ -393,7 +417,7 @@ fn single_body(
             theme,
         ))
         .child(field("Kind", div().child(kind(entry).to_string()), theme))
-        .child(field("Size", div().child(size), theme))
+        .child(field("Size", div().when(size_stale, |size| size.opacity(0.5)).child(size), theme))
         .child(field("Where", where_value(entry.path.parent(), home, theme, cx), theme))
         .child(field("Created", div().child(format_time(created)), theme))
         .child(field("Modified", div().child(format_time(modified)), theme));
@@ -591,6 +615,7 @@ mod tests {
             name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
             path,
             is_dir: false,
+            is_symlink: false,
             hidden: false,
             size: 12,
             modified: None,

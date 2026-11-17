@@ -250,6 +250,10 @@ because the app's file-system calls run off the main thread (`crates/crow-app/sr
 fails the tests on a new unmarked one). iCloud Drive placeholders (download on open,
 eviction) are out of scope for the test platform; check a cloud-backed folder by hand.
 
+## Folder sizes
+
+Set `folder_sizes = "visible"` in `settings.toml` (or Settings ▸ Folder sizes) and open a folder with subfolders in list view: the Size column shows `--`, then sizes fill in top first and fade in; a stale value dims until it is re-measured. Compare a folder with Finder's Get Info (logical size). Edit a file deep in a measured folder: the folder and its parents update within a couple of seconds. Quit Crow, change something, relaunch: the change shows. With the setting off, View ▸ Calculate Folder Sizes measures the current folder once. Scroll a 100k folder of folders quickly: no stutter, and Activity Monitor shows the workers stop for rows that scrolled away. No permission prompt appears just from viewing `~`; an iCloud folder's not-downloaded files stay not downloaded.
+
 ## Performance
 
 ```bash

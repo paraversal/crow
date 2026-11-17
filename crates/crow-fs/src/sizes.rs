@@ -57,7 +57,7 @@ fn measure_with(root: &Path, cancel: &Cancel, on_dir: &mut dyn FnMut(&Path)) -> 
     if cancel.is_cancelled() {
         return None;
     }
-    let meta = std::fs::metadata(root).ok()?;
+    let meta = std::fs::symlink_metadata(root).ok()?;
     if !meta.is_dir() {
         return None;
     }

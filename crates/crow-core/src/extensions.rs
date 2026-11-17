@@ -12,6 +12,34 @@ use crow_fs::{Entry, SortKey};
 pub struct ColumnContext<'a> {
     pub kind: &'a dyn Fn(&Entry) -> Arc<str>,
     pub time: &'a dyn Fn(Option<SystemTime>) -> String,
+    /// A folder's measured size, when the size service has one.
+    pub size: &'a dyn Fn(&Entry) -> Option<KnownSize>,
+}
+
+/// A folder size the service knows: bytes, whether they are stale, and a version
+/// that changes when a new measurement arrives (the fade key).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KnownSize {
+    pub bytes: u64,
+    pub stale: bool,
+    pub version: u64,
+}
+
+/// One column's value for one row. `opacity` dims a stale folder size; `fade`
+/// is the version to animate when a new value arrives; `spoken` overrides the
+/// text for VoiceOver (a folder with no size says "size not calculated").
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColumnCell {
+    pub text: String,
+    pub spoken: Option<String>,
+    pub opacity: f32,
+    pub fade: Option<u64>,
+}
+
+impl ColumnCell {
+    pub fn plain(text: String) -> Self {
+        Self { text, spoken: None, opacity: 1.0, fade: None }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +69,10 @@ pub trait Column: Send + Sync {
     /// The sort this column's header applies, if it is sortable.
     fn sort_key(&self) -> Option<SortKey>;
     fn text(&self, entry: &Entry, cx: &ColumnContext) -> String;
+    /// The styled value; plain text unless a column has a transient (the Size column).
+    fn cell(&self, entry: &Entry, cx: &ColumnContext) -> ColumnCell {
+        ColumnCell::plain(self.text(entry, cx))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,8 +147,31 @@ impl Column for SizeColumn {
     fn sort_key(&self) -> Option<SortKey> {
         Some(SortKey::Size)
     }
-    fn text(&self, entry: &Entry, _: &ColumnContext) -> String {
-        if entry.is_dir { "--".into() } else { crow_fs::human_size(entry.size) }
+    fn text(&self, entry: &Entry, cx: &ColumnContext) -> String {
+        self.cell(entry, cx).text
+    }
+    fn cell(&self, entry: &Entry, cx: &ColumnContext) -> ColumnCell {
+        if entry.is_dir && !entry.is_symlink {
+            match (cx.size)(entry) {
+                None => ColumnCell {
+                    text: "--".into(),
+                    spoken: Some("size not calculated".into()),
+                    opacity: 1.0,
+                    fade: None,
+                },
+                Some(size) if size.stale => {
+                    ColumnCell { text: crow_fs::human_size(size.bytes), spoken: None, opacity: 0.5, fade: None }
+                }
+                Some(size) => ColumnCell {
+                    text: crow_fs::human_size(size.bytes),
+                    spoken: None,
+                    opacity: 1.0,
+                    fade: (size.version > 0).then_some(size.version),
+                },
+            }
+        } else {
+            ColumnCell::plain(crow_fs::human_size(entry.size))
+        }
     }
 }
 

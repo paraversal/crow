@@ -246,6 +246,7 @@ mod tests {
                 "Show Hidden Files",
                 "Hide Preview",
                 "Show Info",
+                "Calculate Folder Sizes",
                 "Show Activity",
                 "Theme…",
             ]

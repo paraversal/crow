@@ -7,8 +7,7 @@ use std::ffi::{CStr, OsStr, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::ptr::NonNull;
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use dispatch2::{DispatchQueue, DispatchRetained};
@@ -78,7 +77,7 @@ pub fn volume_uuid(dev: u64) -> Option<String> {
 }
 
 struct Callback {
-    tx: Mutex<Sender<Vec<Event>>>,
+    on_events: Box<dyn Fn(Vec<Event>) + Send + Sync>,
 }
 
 unsafe extern "C-unwind" fn event_callback(
@@ -115,9 +114,7 @@ unsafe extern "C-unwind" fn event_callback(
             id: ids[i],
         });
     }
-    if let Ok(tx) = callback.tx.lock() {
-        tx.send(events).ok();
-    }
+    (callback.on_events)(events);
 }
 
 /// A running stream; dropping it stops delivery.
@@ -145,8 +142,12 @@ impl Drop for FsEvents {
 
 /// Watch the boot volume from `since`, delivering folder-level events after
 /// `latency`. `None` when FSEvents cannot create or start the stream.
-pub fn watch(since: u64, latency: Duration, tx: Sender<Vec<Event>>) -> Option<FsEvents> {
-    let callback = Arc::new(Callback { tx: Mutex::new(tx) });
+pub fn watch(
+    since: u64,
+    latency: Duration,
+    on_events: impl Fn(Vec<Event>) + Send + Sync + 'static,
+) -> Option<FsEvents> {
+    let callback = Arc::new(Callback { on_events: Box::new(on_events) });
     let context = Arc::into_raw(callback) as *mut c_void;
     let mut stream_context = objc2_core_services::FSEventStreamContext {
         version: 0,
@@ -241,7 +242,10 @@ mod tests {
         }
         let (tx, rx) = channel();
         let since = current_event_id();
-        let _events = watch(since, Duration::from_millis(100), tx).expect("start stream");
+        let _events = watch(since, Duration::from_millis(100), move |events| {
+            tx.send(events).ok();
+        })
+        .expect("start stream");
         std::fs::write(deep.join("file.txt"), b"x").expect("write file");
         let events = wait_for(&rx, &deep, Duration::from_secs(5));
         assert!(!events.is_empty(), "an event for {deep:?}");
@@ -262,7 +266,10 @@ mod tests {
         let since = current_event_id();
         std::fs::write(deep.join("file.txt"), b"x").expect("write file");
         let (tx, rx) = channel();
-        let _events = watch(since, Duration::from_millis(100), tx).expect("start stream");
+        let _events = watch(since, Duration::from_millis(100), move |events| {
+            tx.send(events).ok();
+        })
+        .expect("start stream");
         assert!(!wait_for(&rx, &deep, Duration::from_secs(5)).is_empty(), "the history replays the write");
         std::fs::remove_dir_all(&root).ok();
     }

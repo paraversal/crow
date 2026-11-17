@@ -22,7 +22,8 @@ mod views;
 pub use config::{abbreviate_home, cache_dir, edit_toml, expand_home, home, state_dir, write_atomic};
 pub use exclude::{DEFAULT_EXCLUDE, Exclude, ExcludeSet, SetName, SetRules, exclude_path, load_exclude};
 pub use extensions::{
-    Align, Column, ColumnContext, Excerpt, Extensions, PreviewContent, Previewer, TextPreviewer, text_excerpt,
+    Align, Column, ColumnCell, ColumnContext, Excerpt, Extensions, KnownSize, PreviewContent, Previewer, TextPreviewer,
+    text_excerpt,
 };
 pub use history::History;
 pub use onboarding::{ONBOARDING_FILE, OnboardingState};
@@ -31,8 +32,8 @@ pub use recent::{Recent, parse_zoxide, query_zoxide};
 pub use recent_commands::RecentCommands;
 pub use selection::{Selection, TypeSelect};
 pub use settings::{
-    AppIcon, DEFAULT_SETTINGS, EnterAction, HintsMode, KeymapLayer, Settings, SettingsError, TipsMode, ViewMode,
-    config_dir, load_settings, save_bool_setting, save_number_setting, save_setting, save_table_number,
+    AppIcon, DEFAULT_SETTINGS, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, Settings, SettingsError, TipsMode,
+    ViewMode, config_dir, load_settings, save_bool_setting, save_number_setting, save_setting, save_table_number,
 };
 pub use sidebar::{
     DEFAULT_SIDEBAR, Favorite, FavoriteItem, Group, SidebarConfig, SidebarEdit, Slot, TwinInput, edit_sidebar,

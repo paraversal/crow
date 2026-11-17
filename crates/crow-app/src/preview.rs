@@ -159,26 +159,37 @@ pub struct FolderSummary<'a> {
     pub name: &'a str,
     pub modified: Option<std::time::SystemTime>,
     pub items: Option<usize>,
+    pub size: Option<crow_core::KnownSize>,
 }
 
 /// What VoiceOver reads for the folder summary.
-pub fn folder_spoken(name: &str, items: Option<usize>) -> String {
+pub fn folder_spoken(name: &str, items: Option<usize>, size: Option<crow_core::KnownSize>) -> String {
     let name = display_text(name);
-    match items {
-        Some(n) => format!("{name}, Folder, {n} item{}", if n == 1 { "" } else { "s" }),
-        None => format!("{name}, Folder"),
-    }
+    let items = match items {
+        Some(n) => format!(", {n} item{}", if n == 1 { "" } else { "s" }),
+        None => String::new(),
+    };
+    let size = match size {
+        Some(size) => format!(", {}", crow_fs::human_size(size.bytes)),
+        None => String::new(),
+    };
+    format!("{name}, Folder{items}{size}")
 }
 
 /// The preview column when the cursor is a folder (or the focused folder has no
-/// rows): its icon, name, "Folder · n items" and the modified date.
+/// rows): its icon, name, "Folder · n items · size" and the modified date.
 pub fn folder_summary(summary: FolderSummary<'_>, theme: &Theme) -> Div {
     let muted = color(theme.role("fg-muted"));
-    let detail = match summary.items {
+    let items = match summary.items {
         Some(1) => "Folder · 1 item".to_owned(),
         Some(n) => format!("Folder · {n} items"),
         None => "Folder".to_owned(),
     };
+    let detail = div().text_color(muted).flex().items_center().child(items).when_some(summary.size, |detail, size| {
+        detail
+            .child(" · ")
+            .child(div().when(size.stale, |size| size.opacity(0.5)).child(crow_fs::human_size(size.bytes)))
+    });
     div()
         .flex()
         .flex_col()
@@ -196,7 +207,7 @@ pub fn folder_summary(summary: FolderSummary<'_>, theme: &Theme) -> Div {
                 .flex()
                 .flex_col()
                 .child(div().text_size(px(15.)).child(display_text(summary.name).into_owned()))
-                .child(div().text_color(muted).child(detail)),
+                .child(detail),
         )
         .when(summary.modified.is_some(), |panel| {
             panel.child(

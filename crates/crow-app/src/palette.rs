@@ -11,12 +11,12 @@ use crow_search::FuzzyMatcher;
 use gpui::{Action, SharedString};
 
 use crate::actions::{
-    AddToSidebar, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, EditPath, EditSettings, Eject,
-    GoBack, GoForward, GoToFolder, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab,
-    NewWindow, OpenParent, OpenSelection, OpenSettings, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo,
-    RemoveFromSidebar, Rename, ResetFolderView, SearchEverything, SearchReveal, SelectAll, ShowCommandPalette,
-    ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles,
-    TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
+    AddToSidebar, CalculateFolderSizes, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate,
+    EditPath, EditSettings, Eject, GoBack, GoForward, GoToFolder, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash,
+    NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, OpenSettings, PasteFiles, PasteMoveFiles,
+    QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView, SearchEverything, SearchReveal, SelectAll,
+    ShowCommandPalette, ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity,
+    ToggleHiddenFiles, TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -75,6 +75,7 @@ pub enum CommandId {
     ToggleHiddenFiles,
     TogglePreview,
     ShowInfo,
+    CalculateFolderSizes,
     OpenParent,
     GoBack,
     GoForward,
@@ -147,6 +148,7 @@ impl CommandId {
             CommandId::ToggleHiddenFiles => "toggle-hidden-files",
             CommandId::TogglePreview => "toggle-preview",
             CommandId::ShowInfo => "show-info",
+            CommandId::CalculateFolderSizes => "calculate-folder-sizes",
             CommandId::OpenParent => "open-parent",
             CommandId::GoBack => "go-back",
             CommandId::GoForward => "go-forward",
@@ -469,6 +471,14 @@ pub const COMMANDS: &[Command] = &[
         action: &ShowInfo,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Info" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::CalculateFolderSizes,
+        label: "Calculate Folder Sizes",
+        action: &CalculateFolderSizes,
+        scope: KeyScope::List,
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Calculate Folder Sizes" }),
         palette: true,
     },
     Command {

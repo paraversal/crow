@@ -1,5 +1,5 @@
 # F6 — Folder sizes progress
-Branch: m8-f6-folder-sizes · PR: none · Last updated: 2026-11-17 · State: in progress
+Branch: m8-f6-folder-sizes · PR: none · Last updated: 2026-11-17 · State: Ready for critique (bench and hand checks blocked: no app window in this session)
 
 ## Status
 | Item | State | Notes |
@@ -8,11 +8,11 @@ Branch: m8-f6-folder-sizes · PR: none · Last updated: 2026-11-17 · State: in 
 | S2 The sizer (`crow-fs`) | done | `crow_fs::sizes::{measure, Measured, Cancel}`; 12 tests (nested, hard links, symlink loop, fake device boundary, unreadable subfolder/root, cancellation, packages, bulk/portable agreement); totals match S1 |
 | S3 The cache | done | `crow_fs::sizes::Cache` (versioned JSON, inode, `used_at` bound, `mark_stale`/`mark_subtree_stale`, `combined_size`); `crow_core::cache_dir()` = `~/Library/Caches/crow`; 11 tests |
 | S4 FSEvents history (`crow-macos`) | done | `crow_macos::fsevents::{watch, Event, EventFlags, current_event_id, volume_uuid}`; one boot-volume stream, folder-level, IDs, `WatchRoot`; 3 macOS tests (live stale, restart replay, UUID) |
-| S5 Scheduling (`crow-app`) | todo | |
-| S6 Showing sizes | todo | |
-| S7 Sorting by size | todo | |
-| S8 Setting and command | todo | |
-| S9 Docs, tests, bench | todo | |
+| S5 Scheduling (`crow-app`) | done | `folder_sizes::{FolderSizes, SizeService, Scheduler}`: visible-range sources, two low-QoS workers, dedupe/order/cancel, cache load/save, FSEvents consumer, UUID check; 7 scheduler/worker tests |
+| S6 Showing sizes | done | Size column cells (dim stale, fade fresh, `size not calculated` spoken), preview folder summary, bottom-bar selection bytes, Info pane Size row; keystroke test `a_folder_size_appears_after_the_measure` |
+| S7 Sorting by size | done | `apply_folder_sizes` patches folder rows before `sort_entries`; `Pane::sizes_changed` re-sorts once when every visible size is in (Q3); test `size_sort_uses_known_unknown_and_stale_folders` |
+| S8 Setting and command | done | `folder_sizes = "off" \| "visible"` (default off), live reload, Settings window segmented control, View ▸ Calculate Folder Sizes + palette; parse test and `palette_calculate_folder_sizes_measures_when_off`; README/testing updated |
+| S9 Docs, tests, bench | blocked (bench/hand checks) | fmt/clippy/workspace tests pass (528 app, 100 core, 66 fs, 11 macos, 20 search, 6 theme); README/testing updated; bundle built. The app bench and hand checks could not run: this session's app creates no window (verified with the service on and off, direct binary and bundle; the installed Crow.app also has no window). Listing bench (no GUI): first batch 4.3 ms, 100k listed 184 ms, sorted 5 ms. |
 
 ## S1 measurements (2026-11-17, arm64 macOS 27.2.1)
 Throwaway `crates/crow-fs/examples/walk_bench.rs` (deleted after the run). All walks: no symlinks followed, hard links counted once by `(dev, inode)`, no device crossing.
@@ -58,6 +58,10 @@ Throwaway `crates/crow-fs/examples/walk_bench.rs` (deleted after the run). All w
 - The cache file is `crow_core::cache_dir().join("folder-sizes.json")`; `$CROW_CACHE_DIR` overrides it for tests (Q4 + repo config convention).
 - FSEvents uses `objc2-core-services` (already in the lock through `notify`) with `dispatch2`; one stream on `/`, folder-level events (no `FileEvents`), `WatchRoot`, 1 s latency in the app (100 ms in tests). The callback sends `Vec<Event>` over an `mpsc` channel; the `Arc<Callback>` context makes drop safe while a callback is queued (plan's S4).
 - The UUID check is a binding (`volume_uuid`) plus `Cache::reset_history`; the app service compares them at startup (S5), because only it owns the cache and the stream (plan's S4).
+- The service is not initialized in `ui::init_for_tests`: its worker threads wake the GPUI test scheduler from a non-test thread. Tests that need sizes call `folder_sizes::init_for_tests` with a fake sizer and `measure_now`; the pane tests draw twice (S5/S6).
+- Unknown folder sizes sort as 0; a stale size keeps its known bytes and is dimmed. The list re-sorts once when every visible size is in (Q3); scrolling in more rows repeats it when their sizes arrive.
+- The one-off command's sizes show in the Size column even when `folder_sizes = "off"` (that is the command's point); the preview, Info pane and bottom bar stay off until the setting is `"visible"` (plan's S8 + "off behaves as today").
+- The Settings window gets a Folder sizes segmented control (`Off` / `Visible`); the plan only asked for the file, but every setting has a control there and the variant would otherwise be dead code (code convention).
 
 ## Hand checks
 - [ ] Home in list view with the setting on: sizes fill in top first, fade in, and match Finder's Get Info (logical) within rounding.
@@ -65,6 +69,7 @@ Throwaway `crates/crow-fs/examples/walk_bench.rs` (deleted after the run). All w
 - [ ] Scroll a 100k folder of folders quickly: no stutter, and no work continues for rows that scrolled away (Activity Monitor CPU).
 - [ ] No permission prompt appears just from viewing `~`.
 - [ ] An iCloud Drive folder with files not downloaded: they stay not downloaded.
+- Session 2026-11-17: the app creates no window in this session (direct binary and bundle, with and without the size service; the installed Crow.app also has no window), so none of these could be walked. The critic/user must run them when a window opens.
 
 ## Found along the way
 - (none yet)
@@ -75,6 +80,8 @@ Throwaway `crates/crow-fs/examples/walk_bench.rs` (deleted after the run). All w
 - 2026-11-17: S2 done. Refactored `listing::bulk` to a shared `list_raw` (extra `dev`/`file id`/`link count`; times optional) and added `sizes.rs`. `cargo fmt --check`, `clippy -p crow-fs --all-targets -D warnings`, `cargo test -p crow-fs` (55) pass. The sizer's totals on the fixture/repo/home match S1. Note: the fixture's absolute walk time is now ~230 ms for both the old spike code and the sizer; the S1 86 ms was a cache state, not a code difference.
 - 2026-11-17: S3 done. Added `sizes::Cache` (serde JSON, version 1, atomic save, inode check, LRU bound, stale marking, child combining) and `crow_core::cache_dir()`. `cargo test -p crow-fs` is 66 tests.
 - 2026-11-17: S4 done. Added `crow_macos::fsevents` with `objc2-core-services`/`dispatch2`; one boot-volume stream, folder-level events, IDs, `WatchRoot`, `volume_uuid`. Three tests pass repeatedly: a live write marks the folder and ancestors stale, a restart replays a write made while off, and the boot volume has a UUID. `cargo test -p crow-macos` is 11 tests.
+- 2026-11-17: S5–S8 done. Added the app service (visible sources, two low-QoS workers, cache load/save, FSEvents consumer), the Size column/preview/Info/bottom-bar display, size sorting with the once-only re-sort, and the setting + View ▸ Calculate Folder Sizes. `cargo test -p crow-app` is 528 tests; the settings window has the new control.
+- 2026-11-17: S9 checks. `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` pass. README settings table and `docs/testing.md` updated. Bundle built. The app bench could not run: `target/release/crow --bench target/fixture-100k` starts ("starting theme") but creates no window, so it never reaches a frame; the same happens with the size service disabled, with the bundle (`open -n`), and with the installed Crow.app. The listing bench (no GUI) is 4.3 ms first batch, 184 ms for 100k, 5 ms sorted. The app bench and hand checks are left for the critic/user when the GUI session can open a window.
 
 ## Next
-S5: the app's size service (visible ranges, two low-QoS workers, cancel on scroll, cache load/save, FSEvents consumer), with a fake sizer.
+Ready for critique. The critic should run the app bench with `folder_sizes = "off"` and `"visible"` and the hand checks once the GUI session opens a window, then open the PR.

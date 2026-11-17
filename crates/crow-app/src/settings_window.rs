@@ -8,7 +8,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{Event, MotionMode, SoundSet};
-use crow_core::{AppIcon, EnterAction, HintsMode, KeymapLayer, TipsMode};
+use crow_core::{AppIcon, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, TipsMode};
 use crow_theme::Theme;
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, Image, ImageFormat, IntoElement, KeyBinding,
@@ -121,6 +121,7 @@ enum ControlId {
     Enter,
     Hints,
     Tips,
+    FolderSizes,
     ShowHidden,
     ShowPreview,
     ViewPerFolder,
@@ -140,7 +141,7 @@ enum ControlId {
 
 impl ControlId {
     /// Reading order: the order Tab visits and the order the page draws.
-    const ALL: [ControlId; 23] = [
+    const ALL: [ControlId; 24] = [
         ControlId::Theme,
         ControlId::AppIcon,
         ControlId::FontFamily,
@@ -149,6 +150,7 @@ impl ControlId {
         ControlId::Enter,
         ControlId::Hints,
         ControlId::Tips,
+        ControlId::FolderSizes,
         ControlId::ShowHidden,
         ControlId::ShowPreview,
         ControlId::ViewPerFolder,
@@ -176,6 +178,7 @@ impl ControlId {
             ControlId::Enter => "settings-enter",
             ControlId::Hints => "settings-hints",
             ControlId::Tips => "settings-tips",
+            ControlId::FolderSizes => "settings-folder-sizes",
             ControlId::ShowHidden => "settings-show-hidden",
             ControlId::ShowPreview => "settings-show-preview",
             ControlId::ViewPerFolder => "settings-view-per-folder",
@@ -207,6 +210,7 @@ impl ControlId {
             | ControlId::Enter
             | ControlId::Hints
             | ControlId::Tips
+            | ControlId::FolderSizes
             | ControlId::ShowHidden
             | ControlId::ShowPreview
             | ControlId::ViewPerFolder
@@ -229,6 +233,7 @@ impl ControlId {
             ControlId::Enter => "What Return does",
             ControlId::Hints => "Key hints",
             ControlId::Tips => "Tips",
+            ControlId::FolderSizes => "Folder sizes",
             ControlId::ShowHidden => "Show hidden files",
             ControlId::ShowPreview => "Show preview",
             ControlId::ViewPerFolder => "Folders keep their own view",
@@ -256,6 +261,7 @@ impl ControlId {
             | ControlId::Enter
             | ControlId::Hints
             | ControlId::Tips
+            | ControlId::FolderSizes
             | ControlId::Motion
             | ControlId::Sound => Role::RadioGroup,
             ControlId::ShowHidden | ControlId::ShowPreview | ControlId::ViewPerFolder | ControlId::PaletteRecent => {
@@ -282,6 +288,7 @@ impl ControlId {
             ControlId::Enter => "Rename edits the name in place; Open opens the item. F2 always renames.",
             ControlId::Hints => "Auto retires idle hints after you use their key three times.",
             ControlId::Tips => "Point out a key the first time it matters; off mutes every tip.",
+            ControlId::FolderSizes => "Measure the folders on screen in the background; off leaves them as --.",
             ControlId::ShowHidden => "List dotfiles and other hidden items.",
             ControlId::ShowPreview => "The right column's default in list and column view: Preview and Info tabs.",
             ControlId::ViewPerFolder => "Each folder opens in its saved view; off keeps the window's view.",
@@ -710,6 +717,7 @@ impl SettingsWindow {
             | ControlId::Enter
             | ControlId::Hints
             | ControlId::Tips
+            | ControlId::FolderSizes
             | ControlId::Motion
             | ControlId::Sound => {}
         }
@@ -723,6 +731,7 @@ impl SettingsWindow {
             | ControlId::Enter
             | ControlId::Hints
             | ControlId::Tips
+            | ControlId::FolderSizes
             | ControlId::Motion
             | ControlId::Sound => {
                 self.move_segment(id, delta, window, cx);
@@ -762,6 +771,7 @@ impl SettingsWindow {
             ControlId::Enter => (enter_index(cx.global::<Ui>().settings.enter), 2),
             ControlId::Hints => (hints_index(cx.global::<Ui>().settings.hints), 3),
             ControlId::Tips => (tips_index(cx.global::<Ui>().settings.tips), 2),
+            ControlId::FolderSizes => (folder_sizes_index(cx.global::<Ui>().settings.folder_sizes), 2),
             ControlId::Motion => (motion_index(cx.global::<Ui>().settings.motion), 4),
             ControlId::Sound => (sound_index(cx.global::<Ui>().settings.sound), 3),
             _ => return,
@@ -782,6 +792,9 @@ impl SettingsWindow {
                 _ => HintsMode::Off,
             }),
             ControlId::Tips => SettingChange::Tips(if index == 0 { TipsMode::Auto } else { TipsMode::Off }),
+            ControlId::FolderSizes => {
+                SettingChange::FolderSizes(if index == 0 { FolderSizesMode::Off } else { FolderSizesMode::Visible })
+            }
             ControlId::Motion => SettingChange::Motion(match index {
                 0 => MotionMode::Auto,
                 1 => MotionMode::Off,
@@ -1071,6 +1084,7 @@ impl SettingsWindow {
                 ControlId::Enter => Some(enter_index(settings.enter)),
                 ControlId::Hints => Some(hints_index(settings.hints)),
                 ControlId::Tips => Some(tips_index(settings.tips)),
+                ControlId::FolderSizes => Some(folder_sizes_index(settings.folder_sizes)),
                 ControlId::Motion => Some(motion_index(settings.motion)),
                 ControlId::Sound => Some(sound_index(settings.sound)),
                 _ => None,
@@ -1194,6 +1208,18 @@ impl Render for SettingsWindow {
             tips_index(settings.tips),
             self.style(ControlId::Tips, window, &theme),
             tips_select,
+            None,
+        );
+
+        let folder_sizes_select = select_callback(cx, |this, index, window, cx| {
+            this.select_segment(ControlId::FolderSizes, index, window, cx)
+        });
+        let folder_sizes_row = controls::segmented(
+            self.meta(ControlId::FolderSizes, cx),
+            &["Off", "Visible"],
+            folder_sizes_index(settings.folder_sizes),
+            self.style(ControlId::FolderSizes, window, &theme),
+            folder_sizes_select,
             None,
         );
 
@@ -1322,6 +1348,7 @@ impl Render for SettingsWindow {
                 (ControlId::Enter, enter_row.into_any_element()),
                 (ControlId::Hints, hints_row.into_any_element()),
                 (ControlId::Tips, tips_row.into_any_element()),
+                (ControlId::FolderSizes, folder_sizes_row.into_any_element()),
                 (ControlId::ShowHidden, show_hidden.into_any_element()),
                 (ControlId::ShowPreview, show_preview.into_any_element()),
                 (ControlId::ViewPerFolder, view_per_folder.into_any_element()),
@@ -1572,6 +1599,13 @@ fn tips_index(value: TipsMode) -> usize {
     match value {
         TipsMode::Auto => 0,
         TipsMode::Off => 1,
+    }
+}
+
+fn folder_sizes_index(value: FolderSizesMode) -> usize {
+    match value {
+        FolderSizesMode::Off => 0,
+        FolderSizesMode::Visible => 1,
     }
 }
 

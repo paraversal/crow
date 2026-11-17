@@ -83,6 +83,10 @@ impl Cache {
         self.entries.get(path)
     }
 
+    pub fn entries(&self) -> impl Iterator<Item = (&Path, &CachedSize)> {
+        self.entries.iter().map(|(path, entry)| (path.as_path(), entry))
+    }
+
     /// A usable entry: not stale, and the folder still has the inode it had when
     /// measured.
     pub fn fresh(&self, path: &Path, inode: u64) -> Option<&CachedSize> {
@@ -330,7 +334,7 @@ mod tests {
             .expect("both children are fresh");
         assert_eq!(combined.bytes, 35);
         assert_eq!(combined.items, 1 + 2 + 3, "own file, two child folders, their items");
-        assert_eq!(combined.folders, 0 + 2 + 1, "two child folders and b's child");
+        assert_eq!(combined.folders, 2 + 1, "two child folders and b's child");
     }
 
     #[test]

@@ -34,6 +34,12 @@ hints = "auto"
 # time it matters. "off" mutes every tip; key hints stay as set above.
 tips = "auto"
 
+# Folder sizes in the Size column: "off" (default) leaves folders as "--";
+# "visible" measures the folders on screen in the background and keeps the
+# cache fresh with FSEvents. View ▸ Calculate Folder Sizes measures the current
+# folder's folders once even when this is off.
+folder_sizes = "off"
+
 # Motion: "auto" (default) follows macOS Reduce Motion (full when it is off, low
 # when it is on); "off" changes state in one frame; "low" fades opacity and color
 # only; "full" also moves and resizes (trash swallows the row, the gap closes).
@@ -169,6 +175,25 @@ impl TipsMode {
     }
 }
 
+/// Whether Crow measures the folder rows on screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FolderSizesMode {
+    #[default]
+    Off,
+    Visible,
+}
+
+impl FolderSizesMode {
+    /// The value in `settings.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            FolderSizesMode::Off => "off",
+            FolderSizesMode::Visible => "visible",
+        }
+    }
+}
+
 /// Which of Crow's icons the Dock shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -213,6 +238,7 @@ pub struct Settings {
     pub enter: EnterAction,
     pub hints: HintsMode,
     pub tips: TipsMode,
+    pub folder_sizes: FolderSizesMode,
     pub motion: MotionMode,
     pub sound: SoundSet,
     pub app_icon: AppIcon,
@@ -233,6 +259,7 @@ impl Default for Settings {
             enter: EnterAction::Rename,
             hints: HintsMode::Auto,
             tips: TipsMode::Auto,
+            folder_sizes: FolderSizesMode::Off,
             motion: MotionMode::Auto,
             sound: SoundSet::Crow,
             app_icon: AppIcon::Refined,
@@ -470,6 +497,14 @@ mod tests {
         assert!(err.contains("settings.toml"), "{err}");
         assert!(err.contains("line 1"), "{err}");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn folder_sizes_values_parse() {
+        let parse = |text: &str| toml::from_str::<Settings>(text).expect("parses");
+        assert_eq!(parse("folder_sizes = \"off\"").folder_sizes, FolderSizesMode::Off);
+        assert_eq!(parse("folder_sizes = \"visible\"").folder_sizes, FolderSizesMode::Visible);
+        assert_eq!(parse("theme = \"system\"").folder_sizes, FolderSizesMode::Off, "a missing line is off");
     }
 
     #[test]

@@ -103,6 +103,8 @@ actions!(
         TogglePreview,
         /// ⌘I: open the right column on its Info tab, or close it when Info shows.
         ShowInfo,
+        /// View ▸ Calculate Folder Sizes: measure the current folder's folders once.
+        CalculateFolderSizes,
         Minimize,
         Zoom,
         KeyboardShortcuts,

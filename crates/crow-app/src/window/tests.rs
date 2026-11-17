@@ -38,6 +38,75 @@ fn first_row_sits_below_the_header_line(cx: &mut TestAppContext) {
     assert_eq!(row.top() - header.bottom(), px(crate::pane::LIST_TOP_INSET));
 }
 
+struct FixedSizer;
+
+impl crate::folder_sizes::Sizer for FixedSizer {
+    fn measure(&self, _: &Path, _: &crow_fs::sizes::Cancel) -> Option<crow_fs::sizes::Measured> {
+        Some(crow_fs::sizes::Measured { bytes: 1_500_000, ..Default::default() })
+    }
+}
+
+#[gpui::test]
+fn a_folder_size_appears_after_the_measure(cx: &mut TestAppContext) {
+    let root = fixture("folder-size-column");
+    let (_view, mut cx) = open(cx, &root);
+    let label = |cx: &mut VisualTestContext, name: &str| {
+        let selector = format!("row-{name}");
+        cx.update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec())
+            .into_iter()
+            .find(|element| element.selector.as_deref() == Some(selector.as_str()))
+            .and_then(|element| element.label)
+            .unwrap_or_default()
+    };
+    let before = label(&mut cx, "alpha");
+    assert!(before.contains("size not calculated"), "before the measure: {before}");
+    cx.update(|_, cx| crate::folder_sizes::init_for_tests(cx, std::sync::Arc::new(FixedSizer)));
+    cx.update(|_, cx| {
+        cx.global_mut::<crate::ui::Ui>().settings.folder_sizes = crow_core::FolderSizesMode::Visible;
+    });
+    // The draw that reports the visible rows still shows the old value; the test
+    // runs the queued measure, and the next draw sees the result.
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    let measuring = label(&mut cx, "alpha");
+    assert!(measuring.contains("size not calculated"), "the measuring draw: {measuring}");
+    cx.update(|_, cx| {
+        let service = cx.global::<crate::folder_sizes::SizeService>().0.clone();
+        service.update(cx, |service, cx| service.measure_now(cx));
+    });
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    let after = label(&mut cx, "alpha");
+    assert!(after.contains("1.5 MB"), "after the measure: {after}");
+}
+
+#[gpui::test]
+fn palette_calculate_folder_sizes_measures_when_off(cx: &mut TestAppContext) {
+    let root = fixture("calculate-sizes");
+    let (_view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| crate::folder_sizes::init_for_tests(cx, std::sync::Arc::new(FixedSizer)));
+    let label = |cx: &mut VisualTestContext, name: &str| {
+        let selector = format!("row-{name}");
+        cx.update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec())
+            .into_iter()
+            .find(|element| element.selector.as_deref() == Some(selector.as_str()))
+            .and_then(|element| element.label)
+            .unwrap_or_default()
+    };
+    assert!(label(&mut cx, "alpha").contains("size not calculated"), "the setting is off");
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">calculate folder sizes");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        let service = cx.global::<crate::folder_sizes::SizeService>().0.clone();
+        service.update(cx, |service, cx| service.measure_now(cx));
+    });
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    assert!(label(&mut cx, "alpha").contains("1.5 MB"), "the one-off command shows the size");
+}
+
 #[gpui::test]
 fn filter_count_is_announced(cx: &mut TestAppContext) {
     let root = fixture("filter-announce");
@@ -9558,6 +9627,7 @@ fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
                 name: format!("file-{i:06}.txt"),
                 path: root.join(format!("file-{i:06}.txt")),
                 is_dir: false,
+                is_symlink: false,
                 hidden: false,
                 size: 0,
                 modified: None,
@@ -9605,6 +9675,7 @@ fn selection_totals_follow_every_selection_change(cx: &mut TestAppContext) {
         name: name.to_owned(),
         path: root.join(name),
         is_dir,
+        is_symlink: false,
         hidden: false,
         size,
         modified: None,
@@ -9677,6 +9748,7 @@ fn a_removed_selected_row_does_not_keep_the_cursor(cx: &mut TestAppContext) {
         name: name.to_owned(),
         path: root.join(name),
         is_dir: false,
+        is_symlink: false,
         hidden: false,
         size: 1,
         modified: None,
@@ -9718,6 +9790,7 @@ fn synthetic_folder(
             name: (*name).to_owned(),
             path: root.join(name),
             is_dir: false,
+            is_symlink: false,
             hidden: false,
             size: 1,
             modified: None,
@@ -10034,6 +10107,7 @@ fn a_large_select_when_present_applies_quickly(cx: &mut TestAppContext) {
             name: format!("file-{i:06}.txt"),
             path: root.join(format!("file-{i:06}.txt")),
             is_dir: false,
+            is_symlink: false,
             hidden: false,
             size: 0,
             modified: None,

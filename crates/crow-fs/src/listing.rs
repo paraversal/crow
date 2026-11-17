@@ -10,6 +10,8 @@ pub struct Entry {
     pub name: String,
     pub path: PathBuf,
     pub is_dir: bool,
+    /// The entry itself is a symbolic link (its target may be a folder).
+    pub is_symlink: bool,
     /// Starts with a dot, or carries the Finder "hidden" flag (like ~/Library).
     pub hidden: bool,
     pub size: u64,
@@ -75,6 +77,7 @@ pub fn stat_entry(path: &Path) -> std::io::Result<Option<Entry>> {
         path: path.to_path_buf(),
         name,
         is_dir,
+        is_symlink: meta.file_type().is_symlink(),
         size: if is_dir { 0 } else { meta.len() },
         modified: meta.modified().ok(),
         created: meta.created().ok(),
@@ -228,12 +231,14 @@ mod bulk {
                 return None;
             }
             let is_dir = self.is_dir();
+            let is_symlink = self.is_symlink();
             let path = self.path();
             Some(Entry {
                 hidden,
                 name: self.name,
                 path,
                 is_dir,
+                is_symlink,
                 size: if is_dir { 0 } else { self.size },
                 modified: self.modified,
                 created: self.created,

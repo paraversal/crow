@@ -1066,6 +1066,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
+ "libc",
  "notify",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
