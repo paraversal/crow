@@ -28,7 +28,7 @@ tabs closing search, the Tab cycle while searching, ↓ into the results and ↑
 the bottom bar
 (its type-to-select prefix, hints by focus, retiring idle hints, progress with Cancel, a config error beside progress, counts, narrow-window
 path folding and hint dropping, messages that retire, the editable path bar: ⌘L, a single click on empty
-space, the always-visible pencil at the end of the path, Tab completion, Return to a folder or a file, a missing path's beep and bar error,
+space, the always-visible pencil at the end of the path, the pill fading in on hover and clearing when the pointer leaves the window, the field expanding across the path and hints, the muted completion suffix after the text (hidden mid-text), Tab completion, Return to a folder or a file, a missing path's beep and bar error,
 Escape and a click-away, segment drags (a click still navigates, a drag does not; the folded "…" drags its
 deepest folder; the path field has no drag), and the path slot keeping its height), the contextual tips (a long-folder scroll, two
 zero-match filters, a typed path for a recent folder, Got it, `hints = "off"`, one at a time, closing on a

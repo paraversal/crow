@@ -5565,6 +5565,12 @@ fn path_edit_text(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Option<S
     view.read_with(cx, |w, cx| w.path_edit.as_ref().map(|edit| edit.input.read(cx).text().to_owned()))
 }
 
+fn path_edit_completion(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Option<String> {
+    view.read_with(cx, |w, cx| {
+        w.path_edit.as_ref().and_then(|edit| edit.input.read(cx).completion_visible().map(str::to_owned))
+    })
+}
+
 fn double_click(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
     cx.simulate_event(gpui::MouseDownEvent {
         position: at,
@@ -5608,9 +5614,18 @@ fn path_bar_edits_the_path_with_cmd_l(cx: &mut TestAppContext) {
     // Typing replaces the selection; Tab completes from disk like ⌘K.
     cx.simulate_input(&format!("{}/al", root.display()));
     settle(&view, &mut cx);
+    // The muted completion preview: the suffix Tab would apply, hidden mid-text.
+    assert_eq!(path_edit_completion(&view, &cx).as_deref(), Some("pha/"));
+    cx.simulate_keystrokes("left");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_completion(&view, &cx), None, "a mid-text caret shows no suffix");
+    cx.simulate_keystrokes("right");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_completion(&view, &cx).as_deref(), Some("pha/"));
     cx.simulate_keystrokes("tab");
     settle(&view, &mut cx);
     assert_eq!(path_edit_text(&view, &cx), Some(format!("{}/alpha/", root.display())));
+    assert_eq!(path_edit_completion(&view, &cx).as_deref(), Some("inner/"), "the preview moves to the next level");
 
     cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);

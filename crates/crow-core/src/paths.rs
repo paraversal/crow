@@ -146,6 +146,7 @@ mod tests {
 
         assert_eq!(at("Doc").as_deref(), Some("Documents/"), "one folder: completed with a slash");
         assert_eq!(at("do").as_deref(), Some("Do"), "several: their shared prefix, in their spelling");
+        assert_eq!(at("des").as_deref(), Some("Desktop/"), "the typed tail matches case-insensitively");
         assert_eq!(at("no").as_deref(), Some("notes.txt"), "a file gets no slash");
         assert_eq!(at("zz"), None);
         assert_eq!(at(".h").as_deref(), Some(".hidden/"), "hidden names only when asked for");

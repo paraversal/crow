@@ -603,7 +603,8 @@ impl CrowWindow {
             TextInputEvent::Confirmed => this.confirm_path_edit(window, cx),
             TextInputEvent::Cancelled => this.close_path_edit(true, window, cx),
             TextInputEvent::CompletionRequested => this.complete_path_edit(window, cx),
-            TextInputEvent::Changed | TextInputEvent::BackspaceAtStart => {}
+            TextInputEvent::Changed => this.complete_path_preview(window, cx),
+            TextInputEvent::BackspaceAtStart => {}
         });
         let focus = input.read(cx).focus_handle(cx);
         let blur = cx.on_focus_out(&focus, window, |this, _event, window, cx| {
@@ -707,8 +708,36 @@ impl CrowWindow {
                     return;
                 }
                 if let Some(completed) = completed {
-                    input.update(cx, |input, cx| input.set_text(completed, window, cx));
+                    input.update(cx, |input, cx| {
+                        input.set_text(completed, window, cx);
+                        input.set_completion(None, cx);
+                    });
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Recompute the field's muted completion preview as the typed path changes.
+    fn complete_path_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = &self.path_edit else { return };
+        let input = edit.input.clone();
+        let typed = input.read(cx).text().to_owned();
+        let task = self.complete_typed_path(typed.clone(), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let completed = task.await;
+            this.update_in(cx, |this, window, cx| {
+                let Some(edit) = &this.path_edit else { return };
+                if edit.input.read(cx).text() != typed {
+                    return;
+                }
+                let suffix = completed.and_then(|completed| {
+                    let prefix = completed.get(..typed.len())?;
+                    prefix.eq_ignore_ascii_case(&typed).then(|| SharedString::from(&completed[typed.len()..]))
+                });
+                input.update(cx, |input, cx| input.set_completion(suffix, cx));
+                let _ = window;
             })
             .ok();
         })

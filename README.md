@@ -102,8 +102,9 @@ cancels it exactly like Esc.
 ## Hints and tips
 
 The bottom bar has three slots: the path (⌘L, a click on its empty space or the pencil at the end
-of the path edits it in place; the path's pill appears on hover, and the field spans the path and
-the hints up to the counts; each segment drags the folder it shows), a transient
+of the path edits it in place; the path's pill fades in on hover and clears when the pointer leaves
+the window, and the field expands across the path and the hints up to the counts; while editing, the
+suffix Tab would complete shows muted after the text; each segment drags the folder it shows), a transient
 one (type-to-select letters, hints, operation progress, messages, errors) and counts. While you type a name, the transient slot shows the letters so far, left of the hints. Hints follow
 focus: the path field (`↩` go, `⇥` complete, `esc` cancel), the filter field (Return to matches,
 Esc clear, `⌘F` search deeper), the sidebar (`⌥↑↓` groups, `⇥`/`→` to list, `⌘⌥↑↓` reorder,
