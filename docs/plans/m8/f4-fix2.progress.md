@@ -7,7 +7,7 @@ Branch: `m8-f4-path-bar` (F4, unmerged) · PR: none · Last updated: 2026-11-17 
 | Item | State | Notes |
 | --- | --- | --- |
 | 1 Hover clears on window exit | done | GPUI patch + test; test passes; patch re-applies in `fetch-gpui.sh` |
-| 2 The pill fades, the field expands | done | pill/pencil fade 120 ms; field expands 160 ms; motion Off instant |
+| 2 The pill fades, the field expands | done | pill/pencil use springs (critique Q6); the field expands from the pill's width (Q5); motion Off instant |
 | 3 The inline completion preview | done | muted suffix, case-insensitive, caret-at-end; Tab applies; tests |
 
 ## Questions (user)
@@ -37,6 +37,10 @@ Branch: `m8-f4-path-bar` (F4, unmerged) · PR: none · Last updated: 2026-11-17 
 - 2026-11-17: item 2: `PathHover`/`PathUnhover` carry the bar's hover into `CrowWindow`; the pill and pencil fade over 120 ms `ease_out`; the field expands over 160 ms via `max_w` from 0 to the full width (not the pill's width — the plan's wording; the user's test decides); motion Off skips all three.
 - 2026-11-17: item 3: `TextInput` carries a completion suffix and paints it muted after the text when the caret is at the end; the path edit recomputes `complete_typed` on `Changed` (stale results dropped) and sets the case-insensitive suffix; Tab applies it and the preview moves to the next level. Tests: the lowercase tail in `complete_typed`, the field's suffix/mid-text/Tab in `path_bar_edits_the_path_with_cmd_l`; README and `docs/testing.md` updated.
 - 2026-11-17: bench on `target/fixture-100k`: cold 122 ms, warm 16 ms, p99 33.68 ms, max 55.9 s. The 56 s first frame is the Metal shaders compiling at runtime (this machine has no `metal` tool, so the build uses `runtime_shaders`); p99 is over the 12.5 ms budget and needs a re-run with the shader compile out of the window. Bundle built.
+
+## Critique
+
+Critique 2 in `f4-path-bar.progress.md`: the pencil rest, hints fade, field hover reset, deactivation hover and docs are fixed (779e493); Q5/Q6 chose the pill start and the springs (b3fc089).
 
 ## Next
 
