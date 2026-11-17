@@ -1,6 +1,6 @@
 # F4 fix 2 progress
 
-Branch: `m8-f4-path-bar` (F4, unmerged) · PR: none · Last updated: 2026-11-17 · State: in progress
+Branch: `m8-f4-path-bar` (F4, unmerged) · PR: none · Last updated: 2026-11-17 · State: Ready for test
 
 ## Status
 
@@ -36,7 +36,8 @@ Branch: `m8-f4-path-bar` (F4, unmerged) · PR: none · Last updated: 2026-11-17 
 - 2026-11-17: item 1: `MouseExited` now moves `mouse_position` out and clears `mouse_hit_test` after the exit dispatch; `window::tests::mouse_exit_clears_the_hover_hit_test` passes (the test div needs `.hover(|s| s)` to get a hitbox); patch regenerated and verified through `fetch-gpui.sh`; fmt, clippy, workspace tests pass.
 - 2026-11-17: item 2: `PathHover`/`PathUnhover` carry the bar's hover into `CrowWindow`; the pill and pencil fade over 120 ms `ease_out`; the field expands over 160 ms via `max_w` from 0 to the full width (not the pill's width — the plan's wording; the user's test decides); motion Off skips all three.
 - 2026-11-17: item 3: `TextInput` carries a completion suffix and paints it muted after the text when the caret is at the end; the path edit recomputes `complete_typed` on `Changed` (stale results dropped) and sets the case-insensitive suffix; Tab applies it and the preview moves to the next level. Tests: the lowercase tail in `complete_typed`, the field's suffix/mid-text/Tab in `path_bar_edits_the_path_with_cmd_l`; README and `docs/testing.md` updated.
+- 2026-11-17: bench on `target/fixture-100k`: cold 122 ms, warm 16 ms, p99 33.68 ms, max 55.9 s. The 56 s first frame is the Metal shaders compiling at runtime (this machine has no `metal` tool, so the build uses `runtime_shaders`); p99 is over the 12.5 ms budget and needs a re-run with the shader compile out of the window. Bundle built.
 
 ## Next
 
-The bench and bundle, then the commit and the user's test.
+The user's test of the bundle; then the bench re-run with the shader compile warm.
