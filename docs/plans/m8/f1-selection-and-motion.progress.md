@@ -1,6 +1,6 @@
 # F1 — Selection and motion progress
 
-Branch: `m8-f1-selection` · PR: none · Last updated: 2026-11-17 · State: In critique
+Branch: `m8-f1-selection` (merged [#48](https://github.com/paraversal/file-crow/pull/48)) · Follow-up: `m8-f1-island-rule` ([#49](https://github.com/paraversal/file-crow/pull/49)) · Last updated: 2026-11-17 · State: PR open
 
 ## Status
 
@@ -85,4 +85,4 @@ Verdict: better — a cut item no longer reads as a hidden one, the outline hold
 
 ## Next
 
-Critique: the second agent runs the critique skill and opens the PR.
+Follow-up PR [#49](https://github.com/paraversal/file-crow/pull/49) is open; the user hand-tests and squash-merges. Next piece: F2 (`execute plan F2`).
