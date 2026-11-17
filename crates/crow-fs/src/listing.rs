@@ -26,8 +26,21 @@ impl Entry {
 
     /// Application bundles and other packages open rather than navigate.
     pub fn is_package(&self) -> bool {
-        self.is_dir && matches!(self.ext(), "app" | "bundle" | "framework" | "photoslibrary")
+        self.is_dir && is_package_name(&self.name)
     }
+}
+
+/// Application bundles and other packages open rather than navigate.
+pub fn is_package_name(name: &str) -> bool {
+    matches!(
+        Path::new(name).extension().and_then(|e| e.to_str()),
+        Some("app" | "bundle" | "framework" | "photoslibrary")
+    )
+}
+
+/// The same test for a path, for the size walk.
+pub fn is_package_path(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()).is_some_and(is_package_name)
 }
 
 /// List `dir`, calling `on_batch` with entries as they are read (unsorted).
@@ -91,26 +104,34 @@ mod portable {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) use bulk::list_raw;
+
+#[cfg(target_os = "macos")]
 mod bulk {
     use super::Entry;
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     // Attribute bits, in the order the kernel lays them out (ascending bit value,
     // except RETURNED_ATTRS first and ERROR right after it).
-    const COMMON: u32 = libc::ATTR_CMN_RETURNED_ATTRS
-        | ATTR_CMN_ERROR
-        | libc::ATTR_CMN_NAME
-        | libc::ATTR_CMN_OBJTYPE
-        | libc::ATTR_CMN_CRTIME
-        | libc::ATTR_CMN_MODTIME
-        | libc::ATTR_CMN_FLAGS
-        | libc::ATTR_CMN_ADDEDTIME;
+    fn common(times: bool) -> u32 {
+        let mut common = libc::ATTR_CMN_RETURNED_ATTRS
+            | ATTR_CMN_ERROR
+            | libc::ATTR_CMN_NAME
+            | libc::ATTR_CMN_DEVID
+            | libc::ATTR_CMN_OBJTYPE
+            | libc::ATTR_CMN_FLAGS
+            | libc::ATTR_CMN_FILEID;
+        if times {
+            common |= libc::ATTR_CMN_CRTIME | libc::ATTR_CMN_MODTIME | libc::ATTR_CMN_ADDEDTIME;
+        }
+        common
+    }
     /// From <sys/attr.h>; not exported by the libc crate.
     const ATTR_CMN_ERROR: u32 = 0x2000_0000;
-    const FILE: u32 = libc::ATTR_FILE_TOTALSIZE;
+    const FILE: u32 = libc::ATTR_FILE_TOTALSIZE | libc::ATTR_FILE_LINKCOUNT;
     const BUFFER: usize = 256 * 1024;
     const VDIR: u32 = 2;
     const VLNK: u32 = 5;
@@ -144,6 +165,9 @@ mod bulk {
         fn u32(&mut self) -> Option<u32> {
             self.take::<4>().map(u32::from_ne_bytes)
         }
+        fn u64(&mut self) -> Option<u64> {
+            self.take::<8>().map(u64::from_ne_bytes)
+        }
         fn i64(&mut self) -> Option<i64> {
             self.take::<8>().map(i64::from_ne_bytes)
         }
@@ -164,7 +188,61 @@ mod bulk {
         }
     }
 
-    fn parse(entry: &[u8], dir: &Path) -> Option<Entry> {
+    /// One directory entry as the kernel returned it, before the listing turns it
+    /// into an `Entry`. The sizer uses the same walk without the listing's fields.
+    pub(crate) struct RawEntry<'a> {
+        pub name: String,
+        dir: &'a Path,
+        pub objtype: u32,
+        pub dev: u64,
+        pub fileid: u64,
+        pub nlink: u32,
+        pub size: u64,
+        pub flags: u32,
+        pub created: Option<SystemTime>,
+        pub modified: Option<SystemTime>,
+        pub added: Option<SystemTime>,
+    }
+
+    impl RawEntry<'_> {
+        pub fn path(&self) -> PathBuf {
+            self.dir.join(&self.name)
+        }
+
+        pub fn hidden(&self) -> bool {
+            self.name.starts_with('.') || self.flags & UF_HIDDEN != 0
+        }
+
+        /// Links are listed as links; only those need a second look to learn if they point at a folder.
+        pub fn is_dir(&self) -> bool {
+            self.objtype == VDIR || (self.objtype == VLNK && self.path().is_dir())
+        }
+
+        pub fn is_symlink(&self) -> bool {
+            self.objtype == VLNK
+        }
+
+        fn into_entry(self, show_hidden: bool) -> Option<Entry> {
+            let hidden = self.hidden();
+            if hidden && !show_hidden {
+                return None;
+            }
+            let is_dir = self.is_dir();
+            let path = self.path();
+            Some(Entry {
+                hidden,
+                name: self.name,
+                path,
+                is_dir,
+                size: if is_dir { 0 } else { self.size },
+                modified: self.modified,
+                created: self.created,
+                added: self.added,
+            })
+        }
+    }
+
+    fn parse<'a>(entry: &[u8], dir: &'a Path) -> Option<RawEntry<'a>> {
         let mut c = Cursor { entry, at: 4 };
         let returned = [c.u32()?, c.u32()?, c.u32()?, c.u32()?, c.u32()?];
         let (common, file) = (returned[0], returned[3]);
@@ -172,42 +250,51 @@ mod bulk {
             return None;
         }
         let name = if common & libc::ATTR_CMN_NAME != 0 { c.name()? } else { return None };
+        let dev = if common & libc::ATTR_CMN_DEVID != 0 { c.u32()? as u64 } else { 0 };
         let objtype = if common & libc::ATTR_CMN_OBJTYPE != 0 { c.u32()? } else { 0 };
         let created = if common & libc::ATTR_CMN_CRTIME != 0 { c.time() } else { None };
         let modified = if common & libc::ATTR_CMN_MODTIME != 0 { c.time() } else { None };
         let flags = if common & libc::ATTR_CMN_FLAGS != 0 { c.u32()? } else { 0 };
+        let fileid = if common & libc::ATTR_CMN_FILEID != 0 { c.u64()? } else { 0 };
         let added = if common & libc::ATTR_CMN_ADDEDTIME != 0 { c.time() } else { None };
+        let nlink = if file & libc::ATTR_FILE_LINKCOUNT != 0 { c.u32()? } else { 1 };
         let size = if file & libc::ATTR_FILE_TOTALSIZE != 0 { c.i64().map_or(0, |s| s.max(0) as u64) } else { 0 };
-        let path = dir.join(&name);
-        // Links are listed as links; only those need a second look to learn if they point at a folder.
-        let is_dir = objtype == VDIR || (objtype == VLNK && path.is_dir());
-        Some(Entry {
-            hidden: name.starts_with('.') || flags & UF_HIDDEN != 0,
-            name,
-            path,
-            is_dir,
-            size: if is_dir { 0 } else { size },
-            modified,
-            created,
-            added,
-        })
+        Some(RawEntry { name, dir, objtype, dev, fileid, nlink, size, flags, created, modified, added })
     }
 
     pub fn list(dir: &Path, show_hidden: bool, on_batch: &mut dyn FnMut(Vec<Entry>)) -> std::io::Result<()> {
+        list_raw(dir, true, &mut |raw| {
+            let batch: Vec<Entry> = raw.into_iter().filter_map(|entry| entry.into_entry(show_hidden)).collect();
+            if !batch.is_empty() {
+                on_batch(batch);
+            }
+        })
+    }
+
+    pub(crate) fn list_raw<'a>(
+        dir: &'a Path,
+        times: bool,
+        on_batch: &mut dyn FnMut(Vec<RawEntry<'a>>),
+    ) -> std::io::Result<()> {
         let c_dir = CString::new(dir.as_os_str().as_bytes())?;
         // SAFETY: c_dir is a valid NUL-terminated path; the fd is closed below on every path.
         let fd = unsafe { libc::open(c_dir.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        let result = read_all(fd, dir, show_hidden, on_batch);
+        let result = read_all(fd, dir, times, on_batch);
         // SAFETY: fd is ours and still open.
         unsafe { libc::close(fd) };
         result
     }
 
-    fn read_all(fd: i32, dir: &Path, show_hidden: bool, on_batch: &mut dyn FnMut(Vec<Entry>)) -> std::io::Result<()> {
-        let mut attrs = attr_list(COMMON, FILE);
+    fn read_all<'a>(
+        fd: i32,
+        dir: &'a Path,
+        times: bool,
+        on_batch: &mut dyn FnMut(Vec<RawEntry<'a>>),
+    ) -> std::io::Result<()> {
+        let mut attrs = attr_list(common(times), FILE);
         let mut buffer = vec![0u8; BUFFER];
         loop {
             // SAFETY: attrs and buffer are valid for the call and buffer.len() is its size.
@@ -228,7 +315,7 @@ mod bulk {
                     break;
                 };
                 let Some(entry) = buffer.get(at..at + len) else { break };
-                if let Some(e) = parse(entry, dir).filter(|e| show_hidden || !e.hidden) {
+                if let Some(e) = parse(entry, dir) {
                     batch.push(e);
                 }
                 if len == 0 {

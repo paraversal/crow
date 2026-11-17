@@ -4,6 +4,7 @@
 
 mod listing;
 pub mod ops;
+pub mod sizes;
 mod snapshot;
 mod sort;
 #[cfg(any(test, feature = "testing"))]
