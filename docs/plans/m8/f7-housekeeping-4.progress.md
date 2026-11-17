@@ -1,15 +1,15 @@
 # f7-housekeeping-4 progress
-Branch: m8-f7-housekeeping · PR: none · Last updated: 2026-11-17 · State: in progress
+Branch: m8-f7-housekeeping · PR: none · Last updated: 2026-11-17 · State: in progress (code done; bundle hand checks next)
 
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| 1 Open Terminal Here | done (commit pending) | `settings.terminal` (default `Terminal`) and a Settings ▸ Behaviour ▸ Terminal app field; `Effects::open_terminal` via `/usr/bin/open -a`, waiting so failures reach the status line; File menu, row/empty-space menus and palette; a file opens its parent, a multi-selection disables the line; no key. Tests: recorder path, palette, menu enable/disable, failure, Settings write. |
+| 1 Open Terminal Here | done (7e79bc5) | `settings.terminal` (default `Terminal`) and a Settings ▸ Behaviour ▸ Terminal app field; `Effects::open_terminal` via `/usr/bin/open -a`, waiting so failures reach the status line; File menu, row/empty-space menus and palette; a file opens its parent, a multi-selection disables the line; no key. Tests: recorder path, palette, menu enable/disable, failure, Settings write. |
 | 2 New File/Folder with a row selected | done (b048682) | user: shown folder. Confirmed `current_dir` is the focused column's folder, so the key/dialog/palette already agree; added New Folder/New File to the row menu (`context_menu::ITEMS`); tests: folder and file selections, row menu, palette; the existing filter test covers the visible new row |
 | 3 Window drag | done (f551c0a) | `app_owns_titlebar_drag: true` plus a title-box drag surface routed through the two new `Effects` methods (`start_window_move`, `titlebar_double_click`), so the GPUI test platform never hits its `unimplemented!`; test presses the band, a toolbar button and a double-click. No toolbar control sits inside the surface, so controls no longer move the window |
-| 4 Board-only details | done (commit pending) | Line folder/clock SVGs (`Glyph::Folder`/`Clock`) for favorites and Recent, tinted `link` or the favorite's color (the redundant color dot is gone); `style::focused_column` darkens the focused column by 10%; columns are a fixed 196 px; the text preview has numbered, syntax-coloured lines (new dependency-free `syntax.rs`, 80-line page). Tests: icon bounds, column width, preview lines, tokenizer. Scope token deferred. |
+| 4 Board-only details | done (7e79bc5) | Line folder/clock SVGs (`Glyph::Folder`/`Clock`) for favorites and Recent, tinted `link` or the favorite's color (the redundant color dot is gone); `style::focused_column` darkens the focused column by 10%; columns are a fixed 196 px; the text preview has numbered, syntax-coloured lines (new dependency-free `syntax.rs`, 80-line page). Tests: icon bounds, column width, preview lines, tokenizer. Scope token deferred. |
 | 5 NSSound volume hand check | todo (hand check) | no code; needs the bundle, the alert slider low and the user's ears. Steps in `docs/testing.md` ▸ NSSound volume. |
-| 6 Empty Trash | done (commit pending) | ⌘⇧⌫ (Crow), File ▸ Empty Trash…, palette; counts off the main thread first, then the sheet; `crow_fs::trash` removes home + every volume `.Trashes/<uid>`, reports failures, plays `Event::EmptyTrash`; fuzz jailed. Tests: crow-fs removal/symlink/missing/failure, sheet/cancel/empty/partial/text-field/palette, sound. |
+| 6 Empty Trash | done (7e79bc5) | ⌘⇧⌫ (Crow), File ▸ Empty Trash…, palette; counts off the main thread first, then the sheet; `crow_fs::trash` removes home + every volume `.Trashes/<uid>`, reports failures, plays `Event::EmptyTrash`; fuzz jailed. Tests: crow-fs removal/symlink/missing/failure, sheet/cancel/empty/partial/text-field/palette, sound. |
 
 ## Questions
 - Q1 (asked 2026-11-17): Terminal.app or iTerm when installed; does a file selection open its parent folder; does it get a key? → answer: "choose a terminal in settings, default Terminal.app (could be any app theoretically …)"; file selection: "parent"; key: "bindable in settings, we need infrastructure for creating custom keybinds anyway … maybe this could be a future action item?" So: a `terminal` setting, no key in F7.
@@ -46,6 +46,9 @@ Branch: m8-f7-housekeeping · PR: none · Last updated: 2026-11-17 · State: in 
 - 2026-11-17: Read the plan, M8 index, AGENTS.md, testing doc, effects, actions, palette, context menu, pane new-item/delete paths, sheets and the GPUI titlebar drag API. Branch created. Questions batched.
 - 2026-11-17: Item 3: set `app_owns_titlebar_drag` and put the move/double-click on the title's flex box (the band's empty area), through `Effects` so tests record it. `cargo test -p crow-app band_drag` passes. Real AppKit drag, traffic lights and double-click still need the hand check.
 - 2026-11-17: Item 2: the shown-folder parent was already the behavior; added New Folder/New File to the row context menu. `cargo test -p crow-app new_items_go_to_the_shown_folder`, `items_menu_offers_new_folder`, `palette_new_folder_runs` pass.
+- 2026-11-17: Items 1, 4, 6 in 7e79bc5. All four board details except the deferred scope token; Open Terminal Here with its setting and Settings field; Empty Trash with the crow-fs backend, sheet, key and jail guard. `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (567 crow-app tests among the workspace) pass.
+- 2026-11-17: Bench on the 100k fixture: branch p99 8.52 ms, avg 8.36, warm first paint 10 ms; `main` in a `vendor`-symlinked worktree p99 8.58 ms, avg 8.36, warm 8 ms. No regression beyond run-to-run noise.
+- 2026-11-17: Hand checks remain for the bundle: window drag/AppKit, NSSound alert volume, Empty Trash on the real Trash and a disk image, Open Terminal Here, the board details, and the Settings terminal field.
 
 ## Next
-Run the before-commit checks, commit items 2 and 3, then start item 1 (Open Terminal Here with the new terminal setting).
+Build `./scripts/bundle.sh`, attempt the board screenshots with `scripts/shot.sh`, then set Ready for critique and report the hand checks. Do not push; the critic opens the PR (AGENTS.md wins over the plan's "push").
