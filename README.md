@@ -104,7 +104,8 @@ cancels it exactly like Esc.
 The bottom bar has three slots: the path (⌘L or a double-click on its empty space edits it in
 place), a transient one (hints, operation progress, messages, errors) and counts. Hints follow
 focus: the path field (`↩` go, `⇥` complete, `esc` cancel), the filter field (Return to matches,
-Esc clear, `⌘F` search deeper), the sidebar (`⌘⌥↑↓` reorder, `⌘⌫` remove, `⌘E` eject a disk),
+Esc clear, `⌘F` search deeper), the sidebar (`⌥↑↓` groups, `⇥`/`→` to list, `⌘⌥↑↓` reorder,
+`⌘⌫` remove, `⌘E` eject a disk),
 search results and the search field. The idle hint shows `/` filter (Search and Go to carry their
 keys on the toolbar); after you have used it three times it retires (`hints = "always"` keeps every
 hint, `"off"` hides hints and tips). While an operation runs, a 2 px accent line along the bar's

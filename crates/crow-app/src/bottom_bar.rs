@@ -12,8 +12,8 @@ use gpui::{
 };
 
 use crate::actions::{
-    CancelOperation, ClearFilter, EditPath, Eject, MoveFavoriteDown, MoveFavoriteUp, OpenSelection, QuickLook,
-    RemoveFromSidebar, SearchReveal, ShowSearch, StartFilter, SwitchFocus,
+    CancelOperation, ClearFilter, EditPath, Eject, MoveFavoriteDown, MoveFavoriteUp, NextGroup, OpenSelection,
+    PreviousGroup, QuickLook, RemoveFromSidebar, SearchReveal, ShowSearch, StartFilter, SwitchFocus,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_tooltip};
 use crate::icons::{self, Glyph};
@@ -194,8 +194,8 @@ pub enum BarFocus {
 #[derive(Clone, Copy)]
 enum HintKind {
     Action(&'static dyn Action),
-    /// ⌥⌘↑↓ as one cap: the shared modifiers once, then both keys.
-    Reorder,
+    /// Two bindings in one hint: the shared modifier prefix once, then both keys.
+    Merged(&'static dyn Action, &'static dyn Action),
 }
 
 #[derive(Clone, Copy)]
@@ -221,10 +221,13 @@ const OPEN: Spec = Spec { kind: HintKind::Action(&OpenSelection), label: "open",
 const CLEAR: Spec = Spec { kind: HintKind::Action(&ClearFilter), label: "clear", idle: false };
 const FILTERED_HINTS: &[Spec] = &[OPEN, CLEAR, SEARCH_DEEPER];
 
-const REORDER: Spec = Spec { kind: HintKind::Reorder, label: "reorder", idle: false };
+const GROUPS: Spec = Spec { kind: HintKind::Merged(&PreviousGroup, &NextGroup), label: "groups", idle: false };
+const REORDER: Spec =
+    Spec { kind: HintKind::Merged(&MoveFavoriteUp, &MoveFavoriteDown), label: "reorder", idle: false };
 const REMOVE: Spec = Spec { kind: HintKind::Action(&RemoveFromSidebar), label: "remove", idle: false };
 const EJECT: Spec = Spec { kind: HintKind::Action(&Eject), label: "eject", idle: false };
-const TO_LIST: Spec = Spec { kind: HintKind::Action(&SwitchFocus), label: "to list", idle: false };
+// Tab and → both leave the sidebar for the list; one hint shows both keys.
+const TO_LIST: Spec = Spec { kind: HintKind::Merged(&SwitchFocus, &OpenSelection), label: "to list", idle: false };
 
 const REVEAL: Spec = Spec { kind: HintKind::Action(&SearchReveal), label: "reveal", idle: false };
 const QUICK_LOOK: Spec = Spec { kind: HintKind::Action(&QuickLook), label: "Quick Look", idle: false };
@@ -247,17 +250,12 @@ fn hint_set(focus: BarFocus, sidebar: Option<CursorKind>) -> Vec<Spec> {
         BarFocus::FilterField => FILTER_FIELD_HINTS.to_vec(),
         BarFocus::ListFiltered => FILTERED_HINTS.to_vec(),
         BarFocus::PathEdit => PATH_EDIT_HINTS.to_vec(),
-        BarFocus::Sidebar => {
-            let mut specs = Vec::new();
-            match sidebar {
-                Some(CursorKind::Favorite) => specs.extend([REORDER, REMOVE]),
-                Some(CursorKind::Recent) => specs.push(REMOVE),
-                Some(CursorKind::Volume) => specs.push(EJECT),
-                None => {}
-            }
-            specs.push(TO_LIST);
-            specs
-        }
+        BarFocus::Sidebar => match sidebar {
+            Some(CursorKind::Favorite) => vec![GROUPS, TO_LIST, REORDER, REMOVE],
+            Some(CursorKind::Recent) => vec![GROUPS, TO_LIST, REMOVE],
+            Some(CursorKind::Volume) => vec![EJECT, GROUPS, TO_LIST],
+            None => vec![GROUPS, TO_LIST],
+        },
         BarFocus::SearchResults => RESULT_HINTS.to_vec(),
         BarFocus::SearchField => FIELD_HINTS.to_vec(),
         BarFocus::Overlay => Vec::new(),
@@ -437,14 +435,21 @@ pub fn hints(focus: BarFocus, scope: KeyScope, sidebar: Option<CursorKind>, cx: 
                     idle: spec.idle,
                 });
             }
-            HintKind::Reorder => {
-                let (Some(up), Some(down)) =
-                    (keys::binding_for(&MoveFavoriteUp, scope, cx), keys::binding_for(&MoveFavoriteDown, scope, cx))
-                else {
-                    continue;
-                };
-                let (keys, spoken) = merged_keys(&up, &down);
-                out.push(Hint { keys, spoken: spoken.into(), label: spec.label, idle: spec.idle });
+            HintKind::Merged(first_action, second_action) => {
+                match (keys::binding_for(first_action, scope, cx), keys::binding_for(second_action, scope, cx)) {
+                    (Some(first), Some(second)) => {
+                        let (keys, spoken) = merged_keys(&first, &second);
+                        out.push(Hint { keys, spoken: spoken.into(), label: spec.label, idle: spec.idle });
+                    }
+                    // One key is still a usable hint if the other is unbound.
+                    (Some(only), None) | (None, Some(only)) => out.push(Hint {
+                        keys: keys::chord_text(&only),
+                        spoken: keys::spoken(&only).into(),
+                        label: spec.label,
+                        idle: spec.idle,
+                    }),
+                    (None, None) => {}
+                }
             }
         }
     }

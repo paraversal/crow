@@ -126,7 +126,9 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("escape", ClearFilter, Some(LIST_FILTERED)),
         KeyBinding::new("up", MoveUp, Some("Filter")),
         KeyBinding::new("down", MoveDown, Some("Filter")),
-        // cmd-o is added first so cmd-down stays the shown key (the last binding wins).
+        // Finder's File > Open is ⌘O, while its list views open with ⌘↓. GPUI's
+        // native menu takes the first binding (⌘O) and the hints take the last
+        // (⌘↓), so both surfaces match Finder; keep cmd-o first.
         KeyBinding::new("cmd-o", OpenSelection, Some(LIST)),
         KeyBinding::new("cmd-down", OpenSelection, Some(LIST)),
         KeyBinding::new("enter", Rename, Some(LIST)),
@@ -164,8 +166,9 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("up", MoveUp, Some("Sidebar")),
         KeyBinding::new("down", MoveDown, Some("Sidebar")),
         KeyBinding::new("enter", OpenSelection, Some("Sidebar")),
-        KeyBinding::new("right", OpenSelection, Some("Sidebar")),
         KeyBinding::new("cmd-down", OpenSelection, Some("Sidebar")),
+        // Last, so the sidebar's "to list" hint shows → (the last binding wins).
+        KeyBinding::new("right", OpenSelection, Some("Sidebar")),
         KeyBinding::new("cmd-up", OpenParent, Some("Crow")),
         KeyBinding::new("cmd-[", GoBack, Some("Crow")),
         KeyBinding::new("cmd-]", GoForward, Some("Crow")),
@@ -261,9 +264,11 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
 
 /// The optional Vim layer, on top of the Finder keys.
 pub fn vim_keymap() -> Vec<KeyBinding> {
-    const LIST: &str = "FileList && vim && !ColumnView && !Filter";
-    const COLUMNS: &str = "ColumnView && vim && !Filter";
-    const ANY: &str = "FileList && vim && !Filter";
+    // `!TextInput` keeps plain letters for a rename field inside the list. The
+    // filter field also carries `Filter`, but a rename does not.
+    const LIST: &str = "FileList && vim && !ColumnView && !Filter && !TextInput";
+    const COLUMNS: &str = "ColumnView && vim && !Filter && !TextInput";
+    const ANY: &str = "FileList && vim && !Filter && !TextInput";
     vec![
         KeyBinding::new("j", MoveDown, Some(ANY)),
         KeyBinding::new("k", MoveUp, Some(ANY)),
@@ -290,8 +295,7 @@ pub fn vim_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("l", OpenSelection, Some("Sidebar && vim")),
         KeyBinding::new("j", MoveDown, Some("ThemePicker && vim")),
         KeyBinding::new("k", MoveUp, Some("ThemePicker && vim")),
-        KeyBinding::new("j", MoveDown, Some("Palette && vim")),
-        KeyBinding::new("k", MoveUp, Some("Palette && vim")),
+        // No j/k in the palette: its input always has focus, and plain letters must type.
         KeyBinding::new("j", MoveDown, Some("SearchResults && vim")),
         KeyBinding::new("k", MoveUp, Some("SearchResults && vim")),
     ]

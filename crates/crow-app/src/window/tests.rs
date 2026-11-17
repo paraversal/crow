@@ -1440,8 +1440,8 @@ fn hints_follow_focus(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("tab");
     settle(&view, &mut cx);
     let state = bar_state(&view, &mut cx);
-    assert_eq!(hint_labels(&state), ["reorder", "remove", "to list"]);
-    assert_eq!(hint_keys(&state), ["⌥⌘↑↓", "⌘⌫", "⇥"]);
+    assert_eq!(hint_labels(&state), ["groups", "to list", "reorder", "remove"]);
+    assert_eq!(hint_keys(&state), ["⌥↑↓", "⇥→", "⌥⌘↑↓", "⌘⌫"]);
 
     cx.simulate_keystrokes("tab");
     settle(&view, &mut cx);
@@ -1452,6 +1452,19 @@ fn hints_follow_focus(cx: &mut TestAppContext) {
     let state = bar_state(&view, &mut cx);
     assert_eq!(hint_labels(&state), ["open", "reveal", "Quick Look"]);
     assert_eq!(hint_keys(&state), ["↩", "⌘R", "Space"]);
+}
+
+#[gpui::test]
+fn sidebar_hints_at_1280_show_groups_and_the_right_arrow(cx: &mut TestAppContext) {
+    let root = fixture("bar-hints-sidebar-1280");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+
+    let state = bar_state(&view, &mut cx);
+    assert_eq!(hint_labels(&state), ["groups", "to list", "reorder", "remove"]);
+    assert_eq!(hint_keys(&state), ["⌥↑↓", "⇥→", "⌥⌘↑↓", "⌘⌫"]);
 }
 
 #[gpui::test]
@@ -1466,7 +1479,8 @@ fn vim_layer_hints_use_the_vim_context(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("tab");
     settle(&view, &mut cx);
     let state = bar_state(&view, &mut cx);
-    assert_eq!(hint_labels(&state), ["reorder", "remove", "to list"]);
+    assert_eq!(hint_labels(&state), ["groups", "to list", "reorder", "remove"]);
+    assert_eq!(hint_keys(&state), ["⌥↑↓", "⇥l", "⌥⌘↑↓", "⌘⌫"], "the Vim layer's l opens the list");
 
     cx.simulate_keystrokes("tab m");
     settle(&view, &mut cx);
@@ -3522,27 +3536,45 @@ fn command_palette_keys_follow_the_layer(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn command_palette_vim_keys_move_the_cursor(cx: &mut TestAppContext) {
-    let root = fixture("palette-vim");
+fn vim_letters_type_in_every_text_field(cx: &mut TestAppContext) {
+    let root = fixture("vim-typing");
     let (view, mut cx) = open(cx, &root);
     use_vim(&view, &mut cx);
-    // Visit alpha so Recent has a row above the "In" header.
-    pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.join("alpha"), cx));
-    settle(&view, &mut cx);
-    pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.clone(), cx));
-    settle(&view, &mut cx);
+
+    // The palette's input always has focus; j/k must type, not move its cursor.
     cx.simulate_keystrokes("cmd-k");
     settle(&view, &mut cx);
-    let cursor = |cx: &VisualTestContext| view.read_with(cx, |w, _| w.palette.as_ref().map(|p| p.cursor));
-    assert_eq!(cursor(&cx), Some(0));
-    let rows = view.read_with(&cx, |w, _| w.palette_rows());
-    assert!(rows[2].starts_with("# "), "a section header sits after the first item: {rows:?}");
-    cx.simulate_keystrokes("j");
-    assert_eq!(cursor(&cx), Some(1), "j moves down across the header");
-    cx.simulate_keystrokes("k");
-    assert_eq!(cursor(&cx), Some(0), "k moves up");
+    cx.simulate_input("jk");
+    let palette =
+        view.read_with(&cx, |w, cx| w.palette.as_ref().map(|p| (p.input.read(cx).text().to_owned(), p.cursor)));
+    assert_eq!(palette, Some(("jk".to_owned(), 0)), "j and k type in the palette");
     cx.simulate_keystrokes("escape");
-    assert!(view.read_with(&cx, |w, _| w.palette.is_none()));
+    settle(&view, &mut cx);
+
+    // The filter field already excludes the Vim layer via `!Filter`.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("jk");
+    let filter = pane(&view, &cx).read_with(&cx, |p, cx| p.filter_text(cx));
+    assert_eq!(filter.as_deref(), Some("jk"), "j and k type in the filter");
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+
+    // A rename field sits inside the list's context, so it needs `!TextInput`.
+    cx.simulate_keystrokes("g g");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_input("jk");
+    let name = pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx));
+    assert_eq!(name.as_deref(), Some("jk"), "j and k type in a rename");
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+
+    // The search field is its own context and never had a Vim binding.
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("jk");
+    let query = view.read_with(&cx, |w, cx| w.search.as_ref().map(|s| s.read(cx).query_text(cx)));
+    assert_eq!(query.as_deref(), Some("jk"), "j and k type in the search field");
 }
 
 #[gpui::test]
@@ -3569,6 +3601,23 @@ fn palette_lists_sections_in_order(cx: &mut TestAppContext) {
     assert_eq!(rows.iter().filter(|row| row.ends_with("/beta")).count(), 1, "beta once only: {rows:?}");
     assert!(rows[favorites + 1..here].iter().any(|row| row.ends_with("/beta")), "under Favorites: {rows:?}");
     assert!(rows[here + 1..].iter().any(|row| row.ends_with("/gamma")), "gamma is In: {rows:?}");
+}
+
+#[gpui::test]
+fn palette_home_row_names_the_account_and_keeps_the_tilde_path(cx: &mut TestAppContext) {
+    let root = fixture("palette-home");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-k");
+    settle(&view, &mut cx);
+
+    let (rows, names) = view.read_with(&cx, |w, _| (w.palette_rows(), w.palette_row_names()));
+    let home = rows.iter().position(|row| row == "~").expect("the home row");
+    let home_path = cx.read(|cx| cx.global::<Ui>().home.clone());
+    let expected = crate::style::display_name(&home_path);
+    let expected = if expected.is_empty() { "Home".to_owned() } else { expected };
+    assert_eq!(names[home], expected, "the name line is the account's short name");
+    assert_ne!(names[home], "~", "the name is not the path");
+    assert_eq!(rows[home], "~", "the path line stays ~");
 }
 
 #[gpui::test]
