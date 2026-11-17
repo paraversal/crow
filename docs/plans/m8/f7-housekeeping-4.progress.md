@@ -5,8 +5,8 @@ Branch: m8-f7-housekeeping · PR: none · Last updated: 2026-11-17 · State: in 
 | Item | State | Notes |
 | --- | --- | --- |
 | 1 Open Terminal Here | todo | user: terminal chosen by a setting, default Terminal.app; a file selection opens its parent; no key (custom keybinds are a future item) |
-| 2 New File/Folder with a row selected | done (commit pending) | user: shown folder. Confirmed `current_dir` is the focused column's folder, so the key/dialog/palette already agree; added New Folder/New File to the row menu (`context_menu::ITEMS`); tests: folder and file selections, row menu, palette; the existing filter test covers the visible new row |
-| 3 Window drag | done (commit pending) | `app_owns_titlebar_drag: true` plus a title-box drag surface routed through the two new `Effects` methods (`start_window_move`, `titlebar_double_click`), so the GPUI test platform never hits its `unimplemented!`; test presses the band, a toolbar button and a double-click. No toolbar control sits inside the surface, so controls no longer move the window |
+| 2 New File/Folder with a row selected | done (b048682) | user: shown folder. Confirmed `current_dir` is the focused column's folder, so the key/dialog/palette already agree; added New Folder/New File to the row menu (`context_menu::ITEMS`); tests: folder and file selections, row menu, palette; the existing filter test covers the visible new row |
+| 3 Window drag | done (f551c0a) | `app_owns_titlebar_drag: true` plus a title-box drag surface routed through the two new `Effects` methods (`start_window_move`, `titlebar_double_click`), so the GPUI test platform never hits its `unimplemented!`; test presses the band, a toolbar button and a double-click. No toolbar control sits inside the surface, so controls no longer move the window |
 | 4 Board-only details | todo | user: line icons, darker focused tint, 196 px fixed columns, syntax preview; scope token deferred (duplicates the scope bar) |
 | 5 NSSound volume hand check | todo | needs the bundle and the user's ears; no code |
 | 6 Empty Trash | todo | user: confirm sheet; every mounted volume; any focus except sheets/text; not undoable |
