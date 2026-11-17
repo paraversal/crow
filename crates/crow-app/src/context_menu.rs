@@ -34,6 +34,12 @@ const ITEMS: &[Slot] = &[
     None,
     Some(CommandId::CopyPath),
     Some(CommandId::ShowInFinder),
+    None,
+    // New items always land in the shown folder, as Finder's New Folder does,
+    // even when the row under the pointer is a folder (F7.2).
+    Some(CommandId::NewFolder),
+    Some(CommandId::NewFile),
+    None,
     Some(CommandId::AddToSidebar),
     None,
     Some(CommandId::MoveToTrash),

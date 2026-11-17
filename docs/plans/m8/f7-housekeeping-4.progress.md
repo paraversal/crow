@@ -5,8 +5,8 @@ Branch: m8-f7-housekeeping · PR: none · Last updated: 2026-11-17 · State: in 
 | Item | State | Notes |
 | --- | --- | --- |
 | 1 Open Terminal Here | todo | user: terminal chosen by a setting, default Terminal.app; a file selection opens its parent; no key (custom keybinds are a future item) |
-| 2 New File/Folder with a row selected | todo | user: shown folder; both already create in `current_dir`; menu and palette use the same actions |
-| 3 Window drag | in progress | GPUI already has `WindowOptions::app_owns_titlebar_drag` and `Window::start_window_move`; no vendor patch needed |
+| 2 New File/Folder with a row selected | done (commit pending) | user: shown folder. Confirmed `current_dir` is the focused column's folder, so the key/dialog/palette already agree; added New Folder/New File to the row menu (`context_menu::ITEMS`); tests: folder and file selections, row menu, palette; the existing filter test covers the visible new row |
+| 3 Window drag | done (commit pending) | `app_owns_titlebar_drag: true` plus a title-box drag surface routed through the two new `Effects` methods (`start_window_move`, `titlebar_double_click`), so the GPUI test platform never hits its `unimplemented!`; test presses the band, a toolbar button and a double-click. No toolbar control sits inside the surface, so controls no longer move the window |
 | 4 Board-only details | todo | user: line icons, darker focused tint, 196 px fixed columns, syntax preview; scope token deferred (duplicates the scope bar) |
 | 5 NSSound volume hand check | todo | needs the bundle and the user's ears; no code |
 | 6 Empty Trash | todo | user: confirm sheet; every mounted volume; any focus except sheets/text; not undoable |
@@ -34,6 +34,8 @@ Branch: m8-f7-housekeeping · PR: none · Last updated: 2026-11-17 · State: in 
 
 ## Log
 - 2026-11-17: Read the plan, M8 index, AGENTS.md, testing doc, effects, actions, palette, context menu, pane new-item/delete paths, sheets and the GPUI titlebar drag API. Branch created. Questions batched.
+- 2026-11-17: Item 3: set `app_owns_titlebar_drag` and put the move/double-click on the title's flex box (the band's empty area), through `Effects` so tests record it. `cargo test -p crow-app band_drag` passes. Real AppKit drag, traffic lights and double-click still need the hand check.
+- 2026-11-17: Item 2: the shown-folder parent was already the behavior; added New Folder/New File to the row context menu. `cargo test -p crow-app new_items_go_to_the_shown_folder`, `items_menu_offers_new_folder`, `palette_new_folder_runs` pass.
 
 ## Next
-Ask Q1–Q5, then start item 3 (window drag) while the answers are pending.
+Run the before-commit checks, commit items 2 and 3, then start item 1 (Open Terminal Here with the new terminal setting).

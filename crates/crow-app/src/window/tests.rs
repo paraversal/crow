@@ -6375,6 +6375,77 @@ fn new_file_creates_and_renames(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn new_items_go_to_the_shown_folder_with_a_row_selected(cx: &mut TestAppContext) {
+    let root = fixture("new-item-parent");
+    let (view, mut cx) = open(cx, &root);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "a folder row starts selected");
+    cx.simulate_keystrokes("cmd-shift-n");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(root.join("untitled folder").is_dir(), "it lands in the shown folder, not the selected alpha");
+    assert!(!root.join("alpha/untitled folder").exists());
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx)).as_deref(),
+        Some("untitled folder"),
+        "the rename still starts"
+    );
+    cx.simulate_input("From Folder");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+
+    assert_eq!(selected(&view, &cx).as_deref(), Some("From Folder"), "the renamed folder stays selected");
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+    cx.simulate_keystrokes("cmd-alt-n");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(root.join("untitled").is_file(), "a file selection also creates in the shown folder");
+    assert!(!root.join("notes.txt/untitled").exists());
+    cx.simulate_input("From File");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("From File").is_file());
+}
+
+#[gpui::test]
+fn items_menu_offers_new_folder_in_the_shown_folder(cx: &mut TestAppContext) {
+    use crate::context_menu::MenuKind;
+    let root = fixture("context-new-folder");
+    let (view, mut cx) = open(cx, &root);
+    let alpha = row_center(&mut cx, "row-alpha");
+    right_click(&mut cx, alpha);
+    assert_eq!(open_menu(&view, &cx), Some(MenuKind::Items), "the folder row's menu");
+    choose(&view, &mut cx, CommandId::NewFolder);
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(root.join("untitled folder").is_dir(), "in the shown folder");
+    assert!(!root.join("alpha/untitled folder").exists(), "not inside the right-clicked folder");
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx)).as_deref(),
+        Some("untitled folder"),
+        "the rename starts, as with the key"
+    );
+}
+
+#[gpui::test]
+fn palette_new_folder_runs_the_same_action(cx: &mut TestAppContext) {
+    let root = fixture("palette-new-folder");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">new folder");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(root.join("untitled folder").is_dir());
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |p, cx| p.rename_text(cx)).as_deref(),
+        Some("untitled folder"),
+        "the palette path starts the same rename"
+    );
+}
+
+#[gpui::test]
 fn renaming_a_folder_with_a_dot_selects_the_whole_name(cx: &mut TestAppContext) {
     let root = fixture("rename-folder-dot");
     std::fs::create_dir_all(root.join("a.b")).expect("create fixture");
