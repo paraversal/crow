@@ -1177,12 +1177,14 @@ impl CrowWindow {
         }
         if crate::tips::request(id, cx.entity_id(), cx) {
             self.tip = Some(id);
+            self.pane().update(cx, |pane, cx| pane.set_tip_inset(true, cx));
             cx.notify();
         }
     }
 
     fn close_tip(&mut self, cx: &mut Context<Self>) {
         if self.tip.take().is_some() {
+            self.pane().update(cx, |pane, cx| pane.set_tip_inset(false, cx));
             crate::tips::closed(cx.entity_id(), cx);
             cx.notify();
         }
@@ -1361,6 +1363,7 @@ impl CrowWindow {
                 }
                 if cut {
                     cx.global_mut::<Operations>().clipboard = None;
+                    self.notify_views(cx);
                 }
                 let into = into.clone();
                 let request =
@@ -1453,6 +1456,11 @@ impl CrowWindow {
     }
 
     fn undo(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        // Undo ends the cut mark; the clipboard itself stays for a later paste.
+        if let Some(clipboard) = &mut cx.global_mut::<Operations>().clipboard {
+            clipboard.marked = false;
+        }
+        self.notify_views(cx);
         let pane = self.pane().downgrade();
         operations::undo(index, cx, move |restored, cx| {
             pane.update(cx, |pane, cx| pane.show_results(restored, false, cx)).ok();
@@ -2207,6 +2215,17 @@ impl CrowWindow {
         }
     }
 
+    /// Redraw every pane and the search results after app-wide clipboard state
+    /// changes (a copy's flash, a cut's mark, Escape/undo clearing it).
+    fn notify_views(&self, cx: &mut App) {
+        for (_, pane) in self.tabs.iter() {
+            pane.update(cx, |_, cx| cx.notify());
+        }
+        if let Some(search) = &self.search {
+            search.update(cx, |_, cx| cx.notify());
+        }
+    }
+
     fn copy_paths(&mut self, paths: Arc<[PathBuf]>, cut: bool, cx: &mut Context<Self>) {
         /// Above this many paths the system pasteboard write blocks the main
         /// thread for seconds and 100k items wedge the pasteboard server; Crow's
@@ -2221,7 +2240,7 @@ impl CrowWindow {
             // another app copies (its count differs, so the pasteboard is read).
             (effects.pasteboard_change_count(), true)
         };
-        cx.global_mut::<Operations>().clipboard = Some(Clipboard { paths, cut, change_count });
+        cx.global_mut::<Operations>().clipboard = Some(Clipboard::new(paths, cut, change_count));
         let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
         let message = match (cut, crow_only) {
             (false, false) => format!("Copied {what}"),
@@ -2230,6 +2249,7 @@ impl CrowWindow {
             (true, true) => format!("Cut {what}: paste to move (Crow only)"),
         };
         operations::message(message, false, cx);
+        self.notify_views(cx);
         cx.notify();
     }
 
@@ -3299,6 +3319,7 @@ impl Render for CrowWindow {
                 || crate::tips::owner(cx) != Some(cx.entity_id()))
         {
             self.tip = None;
+            self.pane().update(cx, |pane, cx| pane.set_tip_inset(false, cx));
             crate::tips::closed(cx.entity_id(), cx);
         }
         let tip = match self.tip {
@@ -3380,6 +3401,12 @@ impl Render for CrowWindow {
                         pane.update(cx, |pane, cx| {
                             pane.clear_selection(cx);
                         });
+                        // Escape also ends the cut mark; the clipboard itself stays,
+                        // so Cmd-V still moves the cut items.
+                        if let Some(clipboard) = &mut cx.global_mut::<Operations>().clipboard {
+                            clipboard.marked = false;
+                        }
+                        this.notify_views(cx);
                     }
                 } else {
                     this.close_search(window, cx);

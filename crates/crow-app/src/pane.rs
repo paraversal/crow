@@ -40,11 +40,12 @@ use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
 use crate::icons::{Glyph, glyph};
 use crate::keys::KeyScope;
+use crate::operations::Operations;
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, content_opacity, display_text, drop_outline, effect_tint, format_time,
-    highlight_text, icon, inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
+    active_selection, color, color_alpha, content_opacity, cut_outline, display_text, drop_outline, effect_tint,
+    format_time, highlight_text, icon, inactive_selection, kind, map_range, truncate_middle, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -279,6 +280,8 @@ pub struct Pane {
     mark_pending: Option<MarkPending>,
     /// The `/` filter field, while open.
     filtering: Option<Filtering>,
+    /// Reserve the list's bottom inset while a tip card covers it.
+    tip_inset: bool,
     /// The filter count VoiceOver hears: the live count, but only once typing
     /// stops, so fast typing does not queue one announcement per keystroke.
     filter_announce: SharedString,
@@ -350,6 +353,7 @@ impl Pane {
             drop_column: None,
             mark_pending: None,
             filtering: None,
+            tip_inset: false,
             filter_announce: SharedString::default(),
             filter_announce_gen: 0,
             focus_list_after_filter: false,
@@ -409,6 +413,14 @@ impl Pane {
     /// Whether the `/` filter field is open.
     pub fn is_filtering(&self) -> bool {
         self.filtering.is_some()
+    }
+
+    /// Reserve the list's bottom inset while a tip card covers it.
+    pub fn set_tip_inset(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.tip_inset != visible {
+            self.tip_inset = visible;
+            cx.notify();
+        }
     }
 
     /// The filter field's focus handle while it is open.
@@ -1894,6 +1906,7 @@ impl Pane {
         let now = Instant::now();
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
+        let rule = color_alpha(theme.role("border"), 0x40);
         let active = self.focus.is_focused(window) || self.filtering.is_some();
         let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
@@ -1906,6 +1919,32 @@ impl Pane {
         let selected_entries = folder.selected_entries();
         let total = folder.row_count();
         let cursor = folder.cursor_ix();
+        let range_start = range.start;
+        let (flags_first, edges) = {
+            let (first, flags) = island_flags(folder, range.clone());
+            (first, island_edges(&flags))
+        };
+        let (flash, cut_edges, flash_flags) = {
+            let clipboard = cx.global::<Operations>().clipboard.as_ref();
+            let flash = clipboard
+                .and_then(|clipboard| clipboard.flash)
+                .map(|started| crow_core::motion::copy_flash(mode, started, now))
+                .unwrap_or(0.0);
+            let cut = clipboard.is_some_and(|clipboard| clipboard.cut && clipboard.marked);
+            let last = (range.end + 1).min(folder.row_count());
+            let cut_flags: Vec<bool> = (flags_first..last)
+                .map(|ix| {
+                    cut && folder.row(ix).is_some_and(|(entry, _)| clipboard.is_some_and(|c| c.contains(&entry.path)))
+                })
+                .collect();
+            let flash_flags: Vec<bool> = (range.start..range.end)
+                .map(|ix| {
+                    flash > 0.0
+                        && folder.row(ix).is_some_and(|(entry, _)| clipboard.is_some_and(|c| c.contains(&entry.path)))
+                })
+                .collect();
+            (flash, island_edges(&cut_flags), flash_flags)
+        };
         let rows: Vec<(usize, Entry, usize, bool)> = range
             .filter_map(|ix| {
                 folder.row(ix).map(|(entry, depth)| (ix, entry.clone(), depth, folder.is_selected(&entry.path)))
@@ -1940,12 +1979,16 @@ impl Pane {
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
                 let tint = effect_tint(look, theme);
+                let is_flash = flash_flags[ix - range_start];
+                let cut_edge = cut_edges.get(ix - flags_first).copied().flatten();
                 let dim = content_opacity(
                     entry.hidden,
                     self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
                 );
+                let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
                 let reveal = folder.disclosure_opacity(ix, now);
                 let turn = folder.chevron_turn(&entry.path, now).unwrap_or(if expanded { 1.0 } else { 0.0 });
+                let island = edges.get(ix - flags_first).copied().flatten();
                 let row = div()
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
@@ -1957,15 +2000,61 @@ impl Pane {
                     .when(cursor == Some(ix), |row| row.aria_active_descendant())
                     .h(px(ROW_HEIGHT))
                     .mx_2()
-                    .rounded_md()
                     .relative()
                     .flex()
                     .items_center()
+                    .when_some(island, |row, island| with_island_rounding(row, Some(island)))
+                    .when(island.is_some_and(|island| island.rule_above), |row| {
+                        row.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(1.))
+                                .bg(rule)
+                                .debug_selector(|| format!("island-rule-{}", entry.name)),
+                        )
+                    })
+                    .when(island.is_some_and(|island| island.top), |row| {
+                        row.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size(px(1.))
+                                .debug_selector(|| format!("island-top-{}", entry.name)),
+                        )
+                    })
+                    .when(island.is_some_and(|island| island.bottom), |row| {
+                        row.child(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left_0()
+                                .size(px(1.))
+                                .debug_selector(|| format!("island-bottom-{}", entry.name)),
+                        )
+                    })
                     .when(shift != 0.0, |row| row.top(px(shift)))
                     .when(look.opacity * reveal < 1.0, |row| row.opacity(look.opacity * reveal))
                     .when(ix % 2 == 1 && !(selected && glide && cursor == Some(ix)), |row| row.bg(stripe))
                     .when(draws_selection_fill(selected, glide, cursor == Some(ix)), |row| row.bg(selection_bg))
-                    .when_some(tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
+                    .when_some(tint, |row, tint| {
+                        row.child(with_island_rounding(div().absolute().inset_0().bg(tint), island))
+                    })
+                    .when_some(flash_tint, |row, tint| {
+                        row.child(
+                            with_island_rounding(div().absolute().inset_0().bg(tint), island)
+                                .debug_selector(|| format!("flash-{}", entry.name)),
+                        )
+                    })
+                    .when_some(cut_edge, |row, edge| {
+                        row.child(
+                            cut_outline(theme, edge.top, edge.bottom)
+                                .debug_selector(|| format!("cut-outline-{}", entry.name)),
+                        )
+                    })
                     .debug_selector(|| format!("row-{}", entry.name))
                     .on_drag(DraggedSelection { entries: drag_entries }, {
                         let handoff = handoff.clone();
@@ -2083,7 +2172,7 @@ impl Pane {
                             } else {
                                 div().w(px(TRIANGLE_WIDTH)).flex_none().into_any_element()
                             })
-                            .child(row_icon(&entry, look, theme))
+                            .child(row_icon(&entry, look, theme, dim))
                             .child(
                                 div()
                                     .debug_selector(|| format!("row-name-{}", entry.name))
@@ -2241,11 +2330,38 @@ impl Pane {
         let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let subtle = color(theme.role("fg-subtle"));
+        let rule = color_alpha(theme.role("border"), 0x40);
         let Some(folder) = self.folders.get(k).map(|f| f.read(cx)) else { return Vec::new() };
         let width = column_width(folder.entries());
         let name_room = px(width - 16.0 - 8.0 - 16.0 - 2.0 * CELL_PADDING - 8.0);
         let total = folder.row_count();
         let cursor = folder.cursor_ix();
+        let range_start = range.start;
+        let (flags_first, edges) = {
+            let (first, flags) = island_flags(folder, range.clone());
+            (first, island_edges(&flags))
+        };
+        let (flash, cut_edges, flash_flags) = {
+            let clipboard = cx.global::<Operations>().clipboard.as_ref();
+            let flash = clipboard
+                .and_then(|clipboard| clipboard.flash)
+                .map(|started| crow_core::motion::copy_flash(mode, started, now))
+                .unwrap_or(0.0);
+            let cut = clipboard.is_some_and(|clipboard| clipboard.cut && clipboard.marked);
+            let last = (range.end + 1).min(folder.row_count());
+            let cut_flags: Vec<bool> = (flags_first..last)
+                .map(|ix| {
+                    cut && folder.row(ix).is_some_and(|(entry, _)| clipboard.is_some_and(|c| c.contains(&entry.path)))
+                })
+                .collect();
+            let flash_flags: Vec<bool> = (range.start..range.end)
+                .map(|ix| {
+                    flash > 0.0
+                        && folder.row(ix).is_some_and(|(entry, _)| clipboard.is_some_and(|c| c.contains(&entry.path)))
+                })
+                .collect();
+            (flash, island_edges(&cut_flags), flash_flags)
+        };
         let selected_entries = folder.selected_entries();
         let rows: Vec<(usize, Entry, bool)> =
             range.filter_map(|ix| folder.row(ix).map(|(e, _)| (ix, e.clone(), folder.is_selected(&e.path)))).collect();
@@ -2270,10 +2386,14 @@ impl Pane {
                 let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
                 let shift = folder.row_shift(ix, mode, now, ROW_HEIGHT);
                 let tint = effect_tint(look, theme);
+                let is_flash = flash_flags[ix - range_start];
+                let cut_edge = cut_edges.get(ix - flags_first).copied().flatten();
                 let dim = content_opacity(
                     entry.hidden,
                     self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
                 );
+                let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
+                let island = edges.get(ix - flags_first).copied().flatten();
                 div()
                     .id(ix)
                     .role(Role::ListBoxOption)
@@ -2285,15 +2405,61 @@ impl Pane {
                     .h(px(ROW_HEIGHT))
                     .w_full()
                     .px(px(CELL_PADDING))
-                    .rounded_md()
                     .relative()
                     .flex()
                     .items_center()
                     .gap_2()
+                    .when_some(island, |row, island| with_island_rounding(row, Some(island)))
+                    .when(island.is_some_and(|island| island.rule_above), |row| {
+                        row.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(1.))
+                                .bg(rule)
+                                .debug_selector(|| format!("column-{k}-island-rule-{}", entry.name)),
+                        )
+                    })
+                    .when(island.is_some_and(|island| island.top), |row| {
+                        row.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size(px(1.))
+                                .debug_selector(|| format!("column-{k}-island-top-{}", entry.name)),
+                        )
+                    })
+                    .when(island.is_some_and(|island| island.bottom), |row| {
+                        row.child(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left_0()
+                                .size(px(1.))
+                                .debug_selector(|| format!("column-{k}-island-bottom-{}", entry.name)),
+                        )
+                    })
                     .when(shift != 0.0, |row| row.top(px(shift)))
                     .when(look.opacity < 1.0, |row| row.opacity(look.opacity))
                     .when(draws_selection_fill(selected, glide, cursor == Some(ix)), |row| row.bg(selection_bg))
-                    .when_some(tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))
+                    .when_some(tint, |row, tint| {
+                        row.child(with_island_rounding(div().absolute().inset_0().bg(tint), island))
+                    })
+                    .when_some(flash_tint, |row, tint| {
+                        row.child(
+                            with_island_rounding(div().absolute().inset_0().bg(tint), island)
+                                .debug_selector(|| format!("column-{k}-flash-{}", entry.name)),
+                        )
+                    })
+                    .when_some(cut_edge, |row, edge| {
+                        row.child(
+                            cut_outline(theme, edge.top, edge.bottom)
+                                .debug_selector(|| format!("column-{k}-cut-outline-{}", entry.name)),
+                        )
+                    })
                     .debug_selector(|| format!("column-{k}-row-{}", entry.name))
                     .on_drag(DraggedSelection { entries: drag_entries }, {
                         let handoff = handoff.clone();
@@ -2374,7 +2540,7 @@ impl Pane {
                             this.open_selected(cx);
                         }
                     }))
-                    .child(row_icon(&entry, look, theme))
+                    .child(row_icon(&entry, look, theme, dim))
                     .child(
                         div()
                             .debug_selector(|| format!("column-{k}-row-name-{}", entry.name))
@@ -2407,7 +2573,11 @@ impl Pane {
                                 },
                             }),
                     )
-                    .child(div().w(px(10.)).flex_none().text_color(subtle).child(if navigable { "›" } else { "" }))
+                    .child(div().w(px(10.)).flex_none().opacity(dim).text_color(subtle).child(if navigable {
+                        "›"
+                    } else {
+                        ""
+                    }))
             })
             .collect()
     }
@@ -2472,16 +2642,17 @@ impl Pane {
                     };
                     let glide_fill = if glide {
                         let f = folder.read(cx);
+                        let edges = cursor_island_edges(f);
                         f.cursor_ix().map(|ix| {
                             let offset = shown_offset(&scroll);
                             let y = ix as f32 * ROW_HEIGHT;
-                            div()
+                            let fill = div()
                                 .absolute()
                                 .left(px(4.))
                                 .right(px(4.))
                                 .h(px(ROW_HEIGHT))
-                                .rounded_md()
-                                .bg(active_selection(&theme))
+                                .bg(active_selection(&theme));
+                            with_island_rounding(fill, edges)
                                 .debug_selector(move || format!("column-glide-{k}"))
                                 .with_spring(
                                     ("glide", k),
@@ -2500,6 +2671,7 @@ impl Pane {
                         .flex()
                         .flex_col()
                         .overflow_hidden()
+                        .when(self.tip_inset, |body| body.pb(px(crate::tips::INSET)))
                         .children(glide_fill)
                         .child(
                             uniform_list(
@@ -2660,15 +2832,87 @@ fn draws_selection_fill(selected: bool, glide: bool, is_cursor: bool) -> bool {
     selected && !(glide && is_cursor)
 }
 
+/// Contiguous runs of selected rows in display order: one rounded box per run.
+fn selection_islands(rows: usize, selected: impl Fn(usize) -> bool) -> Vec<Range<usize>> {
+    let mut islands = Vec::new();
+    let mut start = None;
+    for ix in 0..rows {
+        if selected(ix) {
+            start.get_or_insert(ix);
+        } else if let Some(from) = start.take() {
+            islands.push(from..ix);
+        }
+    }
+    if let Some(from) = start {
+        islands.push(from..rows);
+    }
+    islands
+}
+
+/// A selected row's place in its island: the first row rounds its top, the last
+/// its bottom, and every row after the first draws the faint rule above it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct IslandEdges {
+    pub(crate) top: bool,
+    pub(crate) bottom: bool,
+    rule_above: bool,
+}
+
+/// Per-row island edges for `flags` (`None` for an unselected row).
+pub(crate) fn island_edges(flags: &[bool]) -> Vec<Option<IslandEdges>> {
+    let mut edges = vec![None; flags.len()];
+    for island in selection_islands(flags.len(), |ix| flags[ix]) {
+        for ix in island.clone() {
+            edges[ix] = Some(IslandEdges {
+                top: ix == island.start,
+                bottom: ix + 1 == island.end,
+                rule_above: ix > island.start,
+            });
+        }
+    }
+    edges
+}
+
+/// The selected flags for `range`, plus one row on each side so the first and
+/// last visible rows know whether their island continues off screen.
+fn island_flags(folder: &Folder, range: Range<usize>) -> (usize, Vec<bool>) {
+    let first = range.start.saturating_sub(1);
+    let last = (range.end + 1).min(folder.row_count());
+    let flags =
+        (first..last).map(|ix| folder.row(ix).is_some_and(|(entry, _)| folder.is_selected(&entry.path))).collect();
+    (first, flags)
+}
+
+/// The cursor row's place in its island, for the glide fill's rounding.
+fn cursor_island_edges(folder: &Folder) -> Option<IslandEdges> {
+    let ix = folder.cursor_ix()?;
+    let selected = |ix: usize| folder.row(ix).is_some_and(|(entry, _)| folder.is_selected(&entry.path));
+    selected(ix).then(|| IslandEdges {
+        top: ix == 0 || !selected(ix - 1),
+        bottom: ix + 1 >= folder.row_count() || !selected(ix + 1),
+        rule_above: ix > 0 && selected(ix - 1),
+    })
+}
+
+/// Apply an island's rounding to a row or a fill inside it.
+fn with_island_rounding<E: Styled>(element: E, island: Option<IslandEdges>) -> E {
+    match island {
+        Some(IslandEdges { top: true, bottom: true, .. }) => element.rounded_md(),
+        Some(IslandEdges { top: true, .. }) => element.rounded_t_md(),
+        Some(IslandEdges { bottom: true, .. }) => element.rounded_b_md(),
+        _ => element,
+    }
+}
+
 /// The file icon with the trash glyph drawn over it while a row is swallowed.
-fn row_icon(entry: &Entry, look: Look, theme: &Theme) -> Div {
+fn row_icon(entry: &Entry, look: Look, theme: &Theme, dim: f32) -> Div {
     div()
         .relative()
         .size(px(16.))
         .flex_none()
         .child(
             div()
-                .opacity((1.0 - look.trash) * content_opacity(entry.hidden, false))
+                .opacity((1.0 - look.trash) * dim)
                 .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
         )
         .when(look.trash > 0.0, |slot| {
@@ -2693,7 +2937,7 @@ fn ghost_row(entry: &Entry, look: Look, theme: &Theme, font_size: Pixels) -> Div
         .gap_2()
         .px(px(CELL_PADDING))
         .opacity(look.opacity)
-        .child(row_icon(entry, look, theme))
+        .child(row_icon(entry, look, theme, content_opacity(entry.hidden, false)))
         .child(
             div()
                 .relative()
@@ -2719,7 +2963,9 @@ struct Ghosts<'a> {
 
 impl Ghosts<'_> {
     fn render(&self) -> Vec<AnyElement> {
-        if self.mode != Effective::Full {
+        // Off changes state in one frame. Low fades the removed row in place;
+        // Full plays the swallow here while the rows below wait to close.
+        if self.mode == Effective::Off {
             return Vec::new();
         }
         let offset = shown_offset(self.scroll);
@@ -2737,6 +2983,7 @@ impl Ghosts<'_> {
                     .top(px(top))
                     .h(px(ROW_HEIGHT))
                     .overflow_hidden()
+                    .debug_selector(|| format!("ghost-{}", effect.entry.name))
                     .child(ghost_row(&effect.entry, look, self.theme, self.font_size))
                     .into_any_element()
             })
@@ -2811,6 +3058,15 @@ impl Render for Pane {
             (ui.feedback.mode, px(ui.settings.font_size), ui.theme.clone())
         };
         let now = Instant::now();
+        if cx
+            .global::<Operations>()
+            .clipboard
+            .as_ref()
+            .and_then(|clipboard| clipboard.flash)
+            .is_some_and(|started| crow_core::motion::copy_flash(mode, started, now) > 0.0)
+        {
+            window.request_animation_frame();
+        }
         let glide = mode == Effective::Full && (self.focus.is_focused(window) || self.filtering.is_some());
         // The field is inside the list now: while it has focus, the list's actions must be
         // off the focus path so AppKit's menu equivalents let those keys through.
@@ -2865,27 +3121,26 @@ impl Render for Pane {
                                 };
                                 let glide_fill = if glide {
                                     let folder = self.folders[0].read(cx);
+                                    let edges = cursor_island_edges(folder);
                                     folder.cursor_ix().map(|ix| {
                                         let offset = shown_offset(&scroll);
                                         let y = ix as f32 * ROW_HEIGHT;
-                                        div()
+                                        let fill = div()
                                             .absolute()
                                             .left(px(8.))
                                             .right(px(8.))
                                             .h(px(ROW_HEIGHT))
-                                            .rounded_md()
-                                            .bg(active_selection(&theme))
-                                            .debug_selector(|| "glide".into())
-                                            .with_spring(
-                                                "glide",
-                                                SpringAnimation::new(SpringConfig::new(
-                                                    2500.0,
-                                                    2.0 * 2500.0f32.sqrt(),
-                                                    1.0,
-                                                ))
-                                                .to(px(y)),
-                                                move |el, y| el.top(px(f32::from(y) + offset + LIST_TOP_INSET)),
-                                            )
+                                            .bg(active_selection(&theme));
+                                        with_island_rounding(fill, edges).debug_selector(|| "glide".into()).with_spring(
+                                            "glide",
+                                            SpringAnimation::new(SpringConfig::new(
+                                                2500.0,
+                                                2.0 * 2500.0f32.sqrt(),
+                                                1.0,
+                                            ))
+                                            .to(px(y)),
+                                            move |el, y| el.top(px(f32::from(y) + offset + LIST_TOP_INSET)),
+                                        )
                                     })
                                 } else {
                                     None
@@ -2907,6 +3162,7 @@ impl Render for Pane {
                                     .flex()
                                     .flex_col()
                                     .overflow_hidden()
+                                    .when(self.tip_inset, |body| body.pb(px(crate::tips::INSET)))
                                     .children(glide_fill)
                                     .child(
                                         uniform_list("entries", rows, cx.processor(Self::render_table_rows))
@@ -3247,7 +3503,27 @@ impl Pane {
 
 #[cfg(test)]
 mod tests {
-    use super::{drag_combo_left, draws_selection_fill};
+    use super::{IslandEdges, drag_combo_left, draws_selection_fill, island_edges, selection_islands};
+
+    #[test]
+    fn selection_islands_are_contiguous_runs() {
+        let flags = [false, true, true, false, true, false, true, true, true];
+        assert_eq!(selection_islands(flags.len(), |ix| flags[ix]), vec![1..3, 4..5, 6..9]);
+        assert!(selection_islands(0, |_| true).is_empty());
+        assert_eq!(selection_islands(3, |_| true), vec![0..3]);
+        assert!(selection_islands(2, |_| false).is_empty());
+    }
+
+    #[test]
+    fn island_edges_round_the_ends_and_rule_the_middle() {
+        let edges = island_edges(&[false, true, true, true, false, true]);
+        assert_eq!(edges[0], None, "an unselected row has no island");
+        assert_eq!(edges[1], Some(IslandEdges { top: true, bottom: false, rule_above: false }));
+        assert_eq!(edges[2], Some(IslandEdges { top: false, bottom: false, rule_above: true }));
+        assert_eq!(edges[3], Some(IslandEdges { top: false, bottom: true, rule_above: true }));
+        assert_eq!(edges[4], None);
+        assert_eq!(edges[5], Some(IslandEdges { top: true, bottom: true, rule_above: false }));
+    }
 
     #[test]
     fn gliding_hands_only_the_cursor_rows_fill_to_the_glide() {

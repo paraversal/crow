@@ -68,6 +68,12 @@ impl<K: Clone + Eq + Hash> Selection<K> {
         }
     }
 
+    /// Move the cursor without changing the selection. The caller keeps the
+    /// cursor row selected (the pane's invariant).
+    pub fn set_cursor(&mut self, key: K) {
+        self.cursor = Some(key);
+    }
+
     /// Drop one item. The cursor moves only when it named the removed item, so a
     /// file vanishing elsewhere in the selection does not yank the highlight.
     pub fn remove(&mut self, key: &K) {
@@ -214,6 +220,16 @@ mod tests {
         s.retain(|k| *k != "d");
         assert_eq!(sorted(&s), ["b"]);
         assert_eq!(s.cursor(), Some(&"b"));
+    }
+
+    #[test]
+    fn set_cursor_moves_only_the_cursor() {
+        let mut s = Selection::default();
+        s.select_only("a");
+        s.toggle("c");
+        s.set_cursor("a");
+        assert_eq!(sorted(&s), ["a", "c"], "the selected set is unchanged");
+        assert_eq!(s.cursor(), Some(&"a"));
     }
 
     #[test]

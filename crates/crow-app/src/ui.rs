@@ -329,11 +329,31 @@ fn poll(cx: &mut App) {
     }
     // Reduce Motion and the UI-sounds switch can change without a config edit.
     refresh_feedback(cx);
+    refresh_clipboard(cx);
     if config_changed || theme_changed {
         reload_theme(cx);
     }
     if mounts_changed {
         refresh_volumes(cx);
+    }
+}
+
+/// Drop Crow's clipboard when another app copied since: the cut rows stop dimming
+/// and a paste uses the new pasteboard contents.
+fn refresh_clipboard(cx: &mut App) {
+    let count = crate::effects::effects(cx).pasteboard_change_count();
+    let changed = {
+        let ops = cx.global_mut::<crate::operations::Operations>();
+        match &ops.clipboard {
+            Some(clipboard) if clipboard.change_count != count => {
+                ops.clipboard = None;
+                true
+            }
+            _ => false,
+        }
+    };
+    if changed {
+        cx.refresh_windows();
     }
 }
 

@@ -350,6 +350,20 @@ pub fn phases(mode: Effective, fx: Fx) -> Vec<Duration> {
     }
 }
 
+/// A copy's tint pulse: 1 at the start, fading to 0 over `COPY_FADE`. Off has
+/// none; Low keeps the tint (it is color, not movement).
+pub fn copy_flash(mode: Effective, started: Instant, now: Instant) -> f32 {
+    if mode == Effective::Off {
+        return 0.0;
+    }
+    let duration = Duration::from_millis(ms::COPY_FADE);
+    let elapsed = now.saturating_duration_since(started);
+    if elapsed >= duration {
+        return 0.0;
+    }
+    1.0 - ease_in(elapsed.as_secs_f32() / duration.as_secs_f32())
+}
+
 // ----- disclosure: a folder opening or closing inline (list view) -----
 
 /// At most this many rows slide when a folder opens or closes; the rest are off
@@ -390,6 +404,18 @@ pub fn disclose_opacity(mode: Effective, k: usize, rows: usize, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_flash_fades_and_off_has_none() {
+        let start = Instant::now();
+        assert_eq!(copy_flash(Effective::Off, start, start), 0.0);
+        assert_eq!(copy_flash(Effective::Full, start, start), 1.0);
+        let mid = start + Duration::from_millis(ms::COPY_FADE / 2);
+        let value = copy_flash(Effective::Full, start, mid);
+        assert!(value > 0.0 && value < 1.0, "mid-flash: {value}");
+        assert_eq!(copy_flash(Effective::Full, start, start + Duration::from_millis(ms::COPY_FADE)), 0.0);
+        assert_eq!(copy_flash(Effective::Low, start, start), 1.0, "Low keeps the tint");
+    }
 
     #[test]
     fn disclosure_slides_in_full_and_fades_in_low() {

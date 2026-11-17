@@ -790,6 +790,57 @@ fn sidebar_cursor_is_a_ring_and_only_the_current_folder_is_filled(cx: &mut TestA
 }
 
 #[gpui::test]
+fn sidebar_fill_glides_in_full_and_jumps_in_off(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-fill-glide");
+    let (view, mut cx) = open(cx, &root.join("alpha"));
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+    set_motion(&mut cx, "full");
+    // The config reload changed the sidebar rows; redraw it and let the fill
+    // settle on the new favorite row before measuring.
+    let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+    sidebar.update(&mut cx, |_, cx| cx.notify());
+    for _ in 0..30 {
+        cx.executor().advance_clock(Duration::from_millis(32));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+    let alpha = cx.debug_bounds("sidebar-0").expect("alpha row");
+    let beta = cx.debug_bounds("sidebar-1").expect("beta row");
+    let fill = cx.debug_bounds("sidebar-fill").expect("the fill");
+    assert!((fill.top() - alpha.top()).abs() <= px(1.), "the fill starts on alpha: {fill:?} vs {alpha:?}");
+
+    // Full: the fill springs from alpha to beta.
+    cx.simulate_keystrokes("tab down");
+    let fill = cx.debug_bounds("sidebar-fill").expect("the fill");
+    assert!((fill.top() - alpha.top()).abs() <= px(1.), "the glide starts on alpha: {fill:?}");
+    for _ in 0..30 {
+        cx.executor().advance_clock(Duration::from_millis(32));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+    let fill = cx.debug_bounds("sidebar-fill").expect("the fill");
+    assert!((fill.top() - beta.top()).abs() <= px(1.), "the glide lands on beta: {fill:?} vs {beta:?}");
+    assert_eq!(fill.size.height, beta.size.height, "the fill matches the row's height");
+
+    // A fast sequence still leaves one fill, on the last folder.
+    cx.simulate_keystrokes("up down up");
+    let fill = cx.debug_bounds("sidebar-fill").expect("one fill");
+    assert!(fill.top() >= alpha.top() - px(1.) && fill.top() <= beta.top() + px(1.), "one fill: {fill:?}");
+
+    // Off: the fill jumps to alpha.
+    set_motion(&mut cx, "off");
+    cx.simulate_keystrokes("up");
+    let fill = cx.debug_bounds("sidebar-fill").expect("the fill");
+    assert!((fill.top() - alpha.top()).abs() <= px(1.), "Off jumps to alpha: {fill:?} vs {alpha:?}");
+
+    // Low: no glide; the fill appears on the new row and fades.
+    set_motion(&mut cx, "low");
+    cx.simulate_keystrokes("down");
+    let fill = cx.debug_bounds("sidebar-fill").expect("the fill");
+    assert!((fill.top() - beta.top()).abs() <= px(1.), "Low jumps to beta: {fill:?} vs {beta:?}");
+}
+
+#[gpui::test]
 fn sidebar_vim_j_moves_the_ring(cx: &mut TestAppContext) {
     let root = fixture("ring-vim");
     let (view, mut cx) = open(cx, &root);
@@ -1723,6 +1774,84 @@ fn a_huge_copy_keeps_the_clipboard_in_crow(cx: &mut TestAppContext) {
     assert!(!cut, "a copy does not move");
     let message = cx.read(|cx| cx.global::<Operations>().message.clone());
     assert_eq!(message.map(|(text, _)| text.to_string()).as_deref(), Some("Copied 1004 items (Crow only)"));
+}
+
+#[gpui::test]
+fn copy_flashes_and_cut_is_marked(cx: &mut TestAppContext) {
+    let root = fixture("copy-feedback");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-c");
+    let (flash, cut, marked) = cx.read(|cx| {
+        let clipboard = cx.global::<Operations>().clipboard.as_ref().expect("clipboard");
+        (clipboard.flash, clipboard.cut, clipboard.marked)
+    });
+    assert!(flash.is_some(), "a copy starts a flash");
+    assert!(!cut && !marked, "a copy is not marked");
+    assert!(cx.debug_bounds("flash-alpha").is_some(), "the copied row flashes");
+    let first = flash.expect("flash");
+    // Age the flash past COPY_FADE (the clock is the real one, not the test clock).
+    cx.update(|_, cx| {
+        if let Some(clipboard) = &mut cx.global_mut::<Operations>().clipboard {
+            clipboard.flash = Some(Instant::now() - Duration::from_millis(crow_core::motion::ms::COPY_FADE + 1));
+        }
+    });
+    pane(&view, &cx).update(&mut cx, |_, cx| cx.notify());
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("flash-alpha").is_none(), "the flash is one pulse");
+    cx.simulate_keystrokes("cmd-x");
+    let (flash, cut, marked) = cx.read(|cx| {
+        let clipboard = cx.global::<Operations>().clipboard.as_ref().expect("clipboard");
+        (clipboard.flash, clipboard.cut, clipboard.marked)
+    });
+    assert!(flash.is_none() && cut && marked, "a cut is marked without a flash");
+    assert!(cx.debug_bounds("cut-outline-alpha").is_some(), "the cut row is outlined");
+    assert!(cx.debug_bounds("cut-outline-beta").is_none(), "an uncut row is not");
+    std::thread::sleep(Duration::from_millis(2));
+    cx.simulate_keystrokes("cmd-c");
+    let (flash, cut, marked) = cx.read(|cx| {
+        let clipboard = cx.global::<Operations>().clipboard.as_ref().expect("clipboard");
+        (clipboard.flash, clipboard.cut, clipboard.marked)
+    });
+    assert!(flash.is_some_and(|flash| flash > first), "a new copy starts a new flash");
+    assert!(!cut && !marked, "the new copy replaces the cut");
+    assert!(cx.debug_bounds("cut-outline-alpha").is_none(), "the outline is gone");
+}
+
+#[gpui::test]
+fn escape_undo_and_paste_clear_the_cut_mark(cx: &mut TestAppContext) {
+    let root = fixture("cut-mark-clear");
+    let (_view, mut cx) = open(cx, &root);
+    let state = |cx: &VisualTestContext| {
+        cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|clipboard| (clipboard.cut, clipboard.marked)))
+    };
+    cx.simulate_keystrokes("cmd-x");
+    assert_eq!(state(&cx), Some((true, true)));
+    cx.simulate_keystrokes("escape");
+    assert_eq!(state(&cx), Some((true, false)), "Escape clears the mark, keeps the cut");
+    cx.simulate_keystrokes("down cmd-x");
+    assert_eq!(state(&cx), Some((true, true)), "a new cut marks again");
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(state(&cx), Some((true, false)), "undo clears the mark");
+    cx.simulate_keystrokes("cmd-x cmd-v");
+    assert_eq!(state(&cx), None, "a cut paste consumes the clipboard");
+}
+
+#[gpui::test]
+fn search_results_flash_and_mark_with_the_clipboard(cx: &mut TestAppContext) {
+    let root = fixture("search-copy-feedback");
+    std::fs::write(root.join("needle.txt"), "needle\n").expect("create fixture");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("needle");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("tab cmd-c");
+    assert!(cx.debug_bounds("search-flash-0").is_some(), "the result row flashes");
+    cx.simulate_keystrokes("cmd-x");
+    let state =
+        cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|clipboard| (clipboard.cut, clipboard.marked)));
+    assert_eq!(state, Some((true, true)), "the result row is marked");
+    assert!(cx.debug_bounds("search-cut-outline-0").is_some(), "the result row is outlined");
 }
 
 #[gpui::test]
@@ -4425,6 +4554,53 @@ fn shift_arrows_extend_and_cmd_a_selects_all(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn selection_islands_round_the_ends_and_rule_the_middle(cx: &mut TestAppContext) {
+    let root = fixture("islands");
+    let (view, mut cx) = open(cx, &root);
+    let rows_before =
+        ["row-alpha", "row-beta", "row-notes.txt"].map(|selector| cx.debug_bounds(selector).expect("row"));
+    // One row: alpha is the first load's selection.
+    assert!(cx.debug_bounds("island-top-alpha").is_some());
+    assert!(cx.debug_bounds("island-bottom-alpha").is_some());
+    assert!(cx.debug_bounds("island-rule-alpha").is_none());
+    assert!(cx.debug_bounds("island-top-beta").is_none());
+
+    // Two adjacent rows: one box, one rule.
+    cx.simulate_keystrokes("shift-down");
+    assert_eq!(selected_names(&view, &cx), ["alpha", "beta"]);
+    assert!(cx.debug_bounds("island-top-alpha").is_some());
+    assert!(cx.debug_bounds("island-bottom-alpha").is_none(), "alpha continues into beta");
+    assert!(cx.debug_bounds("island-top-beta").is_none(), "beta continues alpha's island");
+    assert!(cx.debug_bounds("island-bottom-beta").is_some());
+    assert!(cx.debug_bounds("island-rule-beta").is_some(), "one rule inside the island");
+    assert!(cx.debug_bounds("island-rule-notes.txt").is_none());
+
+    // Three adjacent rows: two rules, one box.
+    cx.simulate_keystrokes("shift-down");
+    assert_eq!(selected_names(&view, &cx), ["alpha", "beta", "notes.txt"]);
+    assert!(cx.debug_bounds("island-rule-notes.txt").is_some(), "the second rule");
+    assert!(cx.debug_bounds("island-top-notes.txt").is_none());
+    assert!(cx.debug_bounds("island-bottom-notes.txt").is_some());
+
+    // Two islands separated by an unselected row: each gets its own box, no rule.
+    cx.simulate_keystrokes("escape");
+    click_selector(&mut cx, "row-alpha");
+    let notes = cx.debug_bounds("row-notes.txt").expect("notes row");
+    cx.simulate_click(notes.center(), gpui::Modifiers::command());
+    assert_eq!(selected_names(&view, &cx), ["alpha", "notes.txt"]);
+    assert!(cx.debug_bounds("island-bottom-alpha").is_some());
+    assert!(cx.debug_bounds("island-top-notes.txt").is_some());
+    assert!(cx.debug_bounds("island-rule-notes.txt").is_none(), "separate islands have no rule");
+    assert!(cx.debug_bounds("island-top-beta").is_none());
+
+    let rows_after = ["row-alpha", "row-beta", "row-notes.txt"].map(|selector| cx.debug_bounds(selector).expect("row"));
+    for (before, after) in rows_before.iter().zip(rows_after.iter()) {
+        assert_eq!(before.top(), after.top(), "selection never moves a row");
+        assert_eq!(after.size.height, px(crate::pane::ROW_HEIGHT), "row height is unchanged");
+    }
+}
+
+#[gpui::test]
 fn typing_selects_by_name_and_space_continues_a_name(cx: &mut TestAppContext) {
     let root = fixture("typeselect");
     std::fs::write(root.join("my file.txt"), "").expect("create fixture");
@@ -5737,7 +5913,7 @@ fn cmd_z_in_a_text_field_undoes_typing_not_files(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert!(!root.join("notes.txt").exists());
 
-    // Rename beta: nothing is selected after the trash, so ↓ ↓ lands on beta.
+    // Rename beta: the trash selected the previous row (beta), so it is already the cursor.
     cx.simulate_keystrokes("down down");
     assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
     cx.simulate_keystrokes("enter");
@@ -5795,7 +5971,7 @@ fn trash_in_mode(mode: &str, cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert!(!root.join("notes.txt").exists(), "{mode}: trashed");
     assert!(!names(&view, &cx).contains(&"notes.txt".to_owned()), "{mode}: gone from the list");
-    assert_eq!(selected(&view, &cx), None, "{mode}: nothing is selected afterwards, as in Finder");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "{mode}: the previous row is selected, as in Finder");
     assert!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.error(cx).is_none()), "{mode}: no error");
 }
 
@@ -5826,9 +6002,35 @@ fn trash_in_full_motion_in_columns_leaves_the_listing(cx: &mut TestAppContext) {
     assert!(!root.join("notes.txt").exists(), "trashed from the column");
     assert!(!names(&view, &cx).contains(&"notes.txt".to_owned()), "gone from the column");
     assert!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.error(cx).is_none()), "no error");
-    assert_eq!(selected(&view, &cx), None, "nothing is selected afterwards, as in Finder");
-    cx.simulate_keystrokes("down");
-    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "↓ from nothing starts at the top");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "the previous row is selected, as in Finder");
+    cx.simulate_keystrokes("up");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "↑ moves from the selected row");
+}
+
+#[gpui::test]
+fn trashing_a_middle_row_selects_the_next_row(cx: &mut TestAppContext) {
+    let root = fixture("trash-middle-next");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("down"); // beta
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+    cx.simulate_keystrokes("cmd-backspace");
+    settle(&view, &mut cx);
+    assert!(!root.join("beta").exists(), "trashed");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "the next row");
+    assert_eq!(selected_names(&view, &cx), ["notes.txt"], "only the next row");
+}
+
+#[gpui::test]
+fn trashing_a_multi_selection_selects_the_row_after_it(cx: &mut TestAppContext) {
+    let root = fixture("trash-multi-next");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("shift-down"); // alpha and beta, cursor beta
+    assert_eq!(selected_names(&view, &cx), ["alpha", "beta"]);
+    cx.simulate_keystrokes("cmd-backspace");
+    settle(&view, &mut cx);
+    assert!(!root.join("alpha").exists() && !root.join("beta").exists(), "both trashed");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "the row after the selection");
+    assert_eq!(selected_names(&view, &cx), ["notes.txt"], "only the next row");
 }
 
 #[gpui::test]
@@ -6470,7 +6672,7 @@ fn dropping_on_a_folder_row_moves_into_that_folder(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn moving_the_selected_item_away_in_columns_leaves_nothing_selected(cx: &mut TestAppContext) {
+fn moving_the_selected_item_away_in_columns_selects_the_previous_row(cx: &mut TestAppContext) {
     let root = fixture("move-columns-selection");
     let (view, mut cx) = open(cx, &root);
     cx.simulate_keystrokes("cmd-3");
@@ -6480,7 +6682,7 @@ fn moving_the_selected_item_away_in_columns_leaves_nothing_selected(cx: &mut Tes
     drop_on(&mut cx, "column-0-row-alpha", vec![root.join("notes.txt")]);
     settle(&view, &mut cx);
     assert!(root.join("alpha/notes.txt").exists(), "moved into alpha");
-    assert_eq!(selected(&view, &cx), None, "the moved item was the selection: nothing is selected, as in Finder");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "the previous row is selected, as in Finder");
 }
 
 #[gpui::test]
@@ -6566,6 +6768,21 @@ fn tip_got_it_retires_it(cx: &mut TestAppContext) {
     scroll(&mut cx, "file-list", 60.);
     settle(&view, &mut cx);
     assert_eq!(tip(&view, &cx), None, "shown once, never again");
+}
+
+#[gpui::test]
+fn tip_does_not_cover_the_last_row(cx: &mut TestAppContext) {
+    let root = long_fixture("tip-inset", 250);
+    let (view, mut cx) = open(cx, &root);
+    scroll(&mut cx, "file-list", 60.);
+    settle(&view, &mut cx);
+    assert_eq!(tip(&view, &cx), Some(TipId::Filter), "the scroll offers the tip");
+    // Reach the bottom: the last row is the list's bottom row.
+    scroll(&mut cx, "file-list", 1000.);
+    settle(&view, &mut cx);
+    let tip = cx.debug_bounds("tip").expect("the tip card");
+    let last = cx.debug_bounds("row-f249.txt").expect("the last row");
+    assert!(last.bottom() <= tip.top() + px(1.), "last row {last:?} is above the tip {tip:?}");
 }
 
 #[gpui::test]
@@ -8604,6 +8821,273 @@ fn a_removed_selected_row_does_not_keep_the_cursor(cx: &mut TestAppContext) {
     });
     assert_ne!(cursor, Some(root.join("a.txt")), "the cursor left the removed row");
     assert!(cursor.as_ref().is_none_or(|path| selected.contains(path)), "the cursor row is selected");
+    assert_eq!(cursor, Some(root.join("b.txt")), "the row now at the removed row's index is selected");
+    assert_eq!(selected, vec![root.join("b.txt")], "the next row is the whole selection");
+}
+
+/// Build a folder over synthetic entries, without touching the disk (the watcher
+/// still watches `root`; the tests apply their own listings).
+fn synthetic_folder(
+    cx: &mut TestAppContext,
+    root: &std::path::Path,
+    names: &[&str],
+) -> (Entity<crate::folder::Folder>, Vec<crow_fs::Entry>) {
+    cx.update(crate::ui::init_for_tests);
+    let folder = cx.update(|cx| {
+        cx.new(|cx| crate::folder::Folder::new(root.to_path_buf(), false, crow_fs::Sort::default(), false, cx))
+    });
+    let entries: Vec<crow_fs::Entry> = names
+        .iter()
+        .map(|name| crow_fs::Entry {
+            name: (*name).to_owned(),
+            path: root.join(name),
+            is_dir: false,
+            hidden: false,
+            size: 1,
+            modified: None,
+            created: None,
+            added: None,
+        })
+        .collect();
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries.clone(), None, cx)));
+    (folder, entries)
+}
+
+fn cursor_and_selection(
+    cx: &mut TestAppContext,
+    folder: &Entity<crate::folder::Folder>,
+) -> (Option<PathBuf>, Vec<PathBuf>) {
+    cx.update(|cx| {
+        let folder = folder.read(cx);
+        (folder.cursor_entry().map(|entry| entry.path.clone()), folder.selection_paths())
+    })
+}
+
+#[gpui::test]
+fn a_watcher_removal_of_the_last_row_selects_the_previous_row(cx: &mut TestAppContext) {
+    let root = fixture("removed-last-cursor");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt", "c.txt"]);
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_only(2, cx)));
+    let removed = vec![(root.join("c.txt"), None)];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries[..2].to_vec(), Some(&removed), cx))
+    });
+    let (cursor, selected) = cursor_and_selection(cx, &folder);
+    assert_eq!(cursor, Some(root.join("b.txt")), "the new last row is selected");
+    assert_eq!(selected, vec![root.join("b.txt")]);
+}
+
+#[gpui::test]
+fn a_watcher_removal_of_another_row_does_not_move_the_cursor(cx: &mut TestAppContext) {
+    let root = fixture("removed-other-cursor");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt", "c.txt"]);
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_only(0, cx)));
+    let removed = vec![(root.join("b.txt"), None)];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(vec![entries[0].clone(), entries[2].clone()], Some(&removed), cx)
+        })
+    });
+    let (cursor, selected) = cursor_and_selection(cx, &folder);
+    assert_eq!(cursor, Some(root.join("a.txt")), "a file vanishing elsewhere leaves the cursor");
+    assert_eq!(selected, vec![root.join("a.txt")]);
+}
+
+#[gpui::test]
+fn an_empty_folder_after_a_removal_has_no_selection(cx: &mut TestAppContext) {
+    let root = fixture("removed-empty-cursor");
+    let (folder, _entries) = synthetic_folder(cx, &root, &["a.txt"]);
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_only(0, cx)));
+    let removed = vec![(root.join("a.txt"), None)];
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(Vec::new(), Some(&removed), cx)));
+    let (cursor, selected) = cursor_and_selection(cx, &folder);
+    assert_eq!(cursor, None, "nothing is left to select");
+    assert!(selected.is_empty());
+}
+
+#[gpui::test]
+fn a_watcher_removal_in_a_filtered_listing_selects_the_next_visible_row(cx: &mut TestAppContext) {
+    let root = fixture("removed-filtered-cursor");
+    let (folder, entries) = synthetic_folder(cx, &root, &["apple.txt", "banana.txt", "cherry.txt", "date.txt"]);
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.set_filter(Some("e".into()), cx)));
+    // Filtered rows: apple.txt, cherry.txt, date.txt (banana.txt has no e). Select cherry.txt.
+    let shown: Vec<String> = cx.update(|cx| {
+        let folder = folder.read(cx);
+        (0..folder.row_count()).map(|ix| folder.row(ix).expect("row").0.name.clone()).collect()
+    });
+    assert_eq!(shown, ["apple.txt", "cherry.txt", "date.txt"], "the filter shows three rows");
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.select_only(1, cx)));
+    let removed = vec![(root.join("cherry.txt"), None)];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(
+                vec![entries[0].clone(), entries[1].clone(), entries[3].clone()],
+                Some(&removed),
+                cx,
+            )
+        })
+    });
+    let (cursor, selected) = cursor_and_selection(cx, &folder);
+    assert_eq!(cursor, Some(root.join("date.txt")), "the next row the filter shows");
+    assert_eq!(selected, vec![root.join("date.txt")]);
+}
+
+/// A watcher removal with no operation effect starts a leaving effect, and the
+/// rows below close the gap in Full motion.
+#[gpui::test]
+fn a_watcher_removal_starts_a_leaving_effect_that_closes_the_gap(cx: &mut TestAppContext) {
+    use crow_core::motion::{Effective, Fx};
+    let root = fixture("watcher-removal-effect");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt", "c.txt"]);
+    cx.update(|cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Full);
+    let removed = vec![(root.join("b.txt"), None)];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(vec![entries[0].clone(), entries[2].clone()], Some(&removed), cx)
+        })
+    });
+    let (fx, removed_flag, started, row_index) = cx.update(|cx| {
+        let effects = folder.read(cx).effects();
+        assert_eq!(effects.len(), 1, "one effect for the removed row");
+        let effect = &effects[0];
+        (effect.fx, effect.removed, effect.started, effect.row_index)
+    });
+    assert_eq!(fx, Fx::Trash, "the removal uses the trash look");
+    assert!(removed_flag, "the effect knows the listing dropped the row");
+    assert_eq!(row_index, 1, "the effect keeps the row's old index");
+    let phases = crow_core::motion::phases(Effective::Full, Fx::Trash);
+    let mid = started + phases[0] + Duration::from_millis(1);
+    let shift = cx.update(|cx| folder.read(cx).row_shift(1, Effective::Full, mid, crate::pane::ROW_HEIGHT));
+    assert!(shift > 0.0, "the row below closes the gap");
+    let end = started + phases[0] + phases[1] + Duration::from_millis(1);
+    let shift = cx.update(|cx| folder.read(cx).row_shift(1, Effective::Full, end, crate::pane::ROW_HEIGHT));
+    assert_eq!(shift, 0.0, "the shift reaches zero");
+}
+
+/// A sort or a reload with the same entries is a reorder, not a removal.
+#[gpui::test]
+fn a_reorder_starts_no_leaving_effect(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    let root = fixture("watcher-reorder-effect");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt", "c.txt"]);
+    cx.update(|cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Full);
+    // A watcher batch with no removals (a sort's apply).
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries.clone(), Some(&[]), cx)));
+    assert!(folder.read_with(cx, |folder, _| folder.effects().is_empty()), "no effect for a reorder");
+    let shift =
+        folder.read_with(cx, |folder, _| folder.row_shift(1, Effective::Full, Instant::now(), crate::pane::ROW_HEIGHT));
+    assert_eq!(shift, 0.0, "no gap to close");
+    // A full reload with the same entries.
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries.clone(), None, cx)));
+    assert!(folder.read_with(cx, |folder, _| folder.effects().is_empty()), "no effect for a reload");
+}
+
+/// A rename is a removal plus an addition in one batch, not a removal to animate.
+#[gpui::test]
+fn a_rename_batch_starts_no_leaving_effect(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    let root = fixture("watcher-rename-effect");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt"]);
+    cx.update(|cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Full);
+    let mut renamed = entries[1].clone();
+    renamed.name = "c.txt".into();
+    renamed.path = root.join("c.txt");
+    let stats = vec![(root.join("b.txt"), None), (root.join("c.txt"), Some(renamed.clone()))];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(vec![entries[0].clone(), renamed], Some(&stats), cx)
+        })
+    });
+    assert!(folder.read_with(cx, |folder, _| folder.effects().is_empty()), "a rename is not a removal");
+}
+
+/// A trash operation already started the effect; the watcher batch must not add
+/// a second one, and the existing effect must close the gap.
+#[gpui::test]
+fn a_watcher_removal_keeps_the_operation_effect(cx: &mut TestAppContext) {
+    use crow_core::motion::{Effective, Fx};
+    let root = fixture("watcher-existing-effect");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt", "c.txt"]);
+    cx.update(|cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Full);
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| folder.start_effect(&[root.join("b.txt")], Fx::Trash, Effective::Full, cx))
+    });
+    let removed = vec![(root.join("b.txt"), None)];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(vec![entries[0].clone(), entries[2].clone()], Some(&removed), cx)
+        })
+    });
+    let (count, fx, removed_flag) = cx.update(|cx| {
+        let effects = folder.read(cx).effects();
+        (effects.len(), effects[0].fx, effects[0].removed)
+    });
+    assert_eq!(count, 1, "the watcher batch did not add a second effect");
+    assert_eq!(fx, Fx::Trash, "the operation's effect is kept");
+    assert!(removed_flag, "it now closes the gap");
+}
+
+/// Off changes state in one frame: no effect and no ghost.
+#[gpui::test]
+fn a_watcher_removal_in_off_motion_starts_no_effect(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    let root = fixture("watcher-removal-off");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt", "c.txt"]);
+    cx.update(|cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Off);
+    let removed = vec![(root.join("b.txt"), None)];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(vec![entries[0].clone(), entries[2].clone()], Some(&removed), cx)
+        })
+    });
+    assert!(folder.read_with(cx, |folder, _| folder.effects().is_empty()), "Off starts no effect");
+}
+
+/// Low fades the removed row without moving the rows below.
+#[gpui::test]
+fn a_watcher_removal_in_low_motion_fades_without_moving(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    let root = fixture("watcher-removal-low");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt", "c.txt"]);
+    cx.update(|cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Low);
+    let removed = vec![(root.join("b.txt"), None)];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(vec![entries[0].clone(), entries[2].clone()], Some(&removed), cx)
+        })
+    });
+    let (started, opacity) = cx.update(|cx| {
+        let folder = folder.read(cx);
+        let effect = &folder.effects()[0];
+        let look = effect.look(Effective::Low, effect.started + Duration::from_millis(70));
+        (effect.started, look.opacity)
+    });
+    assert!(opacity < 1.0 && opacity > 0.0, "the row fades, got {opacity}");
+    let shift = cx.update(|cx| {
+        folder.read(cx).row_shift(1, Effective::Low, started + Duration::from_millis(70), crate::pane::ROW_HEIGHT)
+    });
+    assert_eq!(shift, 0.0, "Low never moves the rows");
+}
+
+/// A child row vanishing from an inline folder leaves the parent row's cursor alone.
+#[gpui::test]
+fn a_child_removal_keeps_the_parent_cursor(cx: &mut TestAppContext) {
+    let root = fixture("child-removal-parent");
+    let (view, mut cx) = open(cx, &root);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "alpha is the cursor");
+    cx.simulate_keystrokes("right");
+    settle(&view, &mut cx);
+    assert!(names(&view, &cx).contains(&"inner".to_owned()), "alpha is open");
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    let alpha = root.join("alpha");
+    let child = folder.read_with(&cx, |folder, _| folder.child_for_test(&alpha)).expect("alpha is open");
+    let child_entries = child.read_with(&cx, |folder, _| folder.entries().as_ref().clone());
+    let removed = vec![(alpha.join("inner"), None)];
+    let kept: Vec<Entry> = child_entries.iter().filter(|entry| entry.name != "inner").cloned().collect();
+    child.update(&mut cx, |folder, cx| folder.replace_entries_for_test(kept, Some(&removed), cx));
+    settle(&view, &mut cx);
+    assert!(!names(&view, &cx).contains(&"inner".to_owned()), "the child row left");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "the parent row stays the cursor");
 }
 
 /// H4 #22: a staged load shows the rows it has read so far. A partial must not

@@ -2,7 +2,7 @@
 //! cancel, the undo/redo stacks, the activity log and the file clipboard.
 //! The engine itself (planning, safety rules, undo) lives in `crow_fs::ops`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,6 +83,25 @@ pub struct Clipboard {
     pub paths: Arc<[PathBuf]>,
     pub cut: bool,
     pub change_count: Option<isize>,
+    /// When a copy's tint pulse started; `None` for a cut.
+    pub flash: Option<Instant>,
+    /// The cut rows still show their mark. Cleared by Escape, undo, a paste or a
+    /// new copy/cut.
+    pub marked: bool,
+    /// The paths as a set: a visible row is one lookup, never a 100k scan.
+    set: HashSet<PathBuf>,
+}
+
+impl Clipboard {
+    pub fn new(paths: Arc<[PathBuf]>, cut: bool, change_count: Option<isize>) -> Self {
+        let set = paths.iter().cloned().collect();
+        Self { paths, cut, change_count, flash: (!cut).then(Instant::now), marked: cut, set }
+    }
+
+    /// Whether `path` is on the clipboard.
+    pub fn contains(&self, path: &Path) -> bool {
+        self.set.contains(path)
+    }
 }
 
 /// What a paste would bring in, and whether it moves them: our clipboard if the
@@ -493,5 +512,19 @@ mod tests {
         for (label, expected) in cases {
             assert_eq!(running_label(label), expected, "{label}");
         }
+    }
+
+    #[test]
+    fn a_huge_clipboard_looks_up_by_set() {
+        // A visible row is one set lookup, never a scan of the 100k paths.
+        let paths: Arc<[PathBuf]> = (0..100_000).map(|i| PathBuf::from(format!("/tmp/f{i}"))).collect();
+        let clipboard = Clipboard::new(paths, false, None);
+        assert!(clipboard.contains(Path::new("/tmp/f99999")));
+        assert!(!clipboard.contains(Path::new("/tmp/nope")));
+        assert!(clipboard.flash.is_some(), "a copy starts a flash");
+        assert!(!clipboard.marked, "a copy is not marked");
+        let cut = Clipboard::new(vec![PathBuf::from("/tmp/a")].into(), true, None);
+        assert!(cut.flash.is_none(), "a cut does not flash");
+        assert!(cut.marked, "a cut is marked");
     }
 }
