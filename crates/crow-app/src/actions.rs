@@ -72,6 +72,10 @@ actions!(
         // List filter
         StartFilter,
         ClearFilter,
+        /// ↓ in the filter field: focus the matches, leaving the field.
+        FilterFocusResults,
+        /// ↑ on the first filtered row: back to the filter field.
+        FilterFocusField,
         // Command palette
         ShowCommandPalette,
         PaletteOpenInTab,
@@ -126,8 +130,10 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-a", SelectAll, Some(LIST)),
         KeyBinding::new("/", StartFilter, Some(LIST)),
         KeyBinding::new("escape", ClearFilter, Some(LIST_FILTERED)),
-        KeyBinding::new("up", MoveUp, Some("Filter")),
-        KeyBinding::new("down", MoveDown, Some("Filter")),
+        // ↓ in the field enters the matches; ↑ on the first row comes back. The
+        // field's ↑ is unbound, so it never moves the selection behind the caret.
+        KeyBinding::new("down", FilterFocusResults, Some("Filter")),
+        KeyBinding::new("up", FilterFocusField, Some(LIST_FILTERED)),
         // Finder's File > Open is ⌘O, while its list views open with ⌘↓. GPUI's
         // native menu takes the first binding (⌘O) and the hints take the last
         // (⌘↓), so both surfaces match Finder; keep cmd-o first.
@@ -355,19 +361,24 @@ mod tests {
             assert!(!wins(&keymap, input, &field, &MoveToTrash), "{input} must not trash");
             assert!(!wins(&keymap, input, &field, &Duplicate), "{input} must not duplicate");
         }
-        assert!(wins(&keymap, "up", &field, &MoveUp));
+        assert!(wins(&keymap, "down", &field, &FilterFocusResults), "↓ in the field enters the matches");
+        assert!(!wins(&keymap, "up", &field, &MoveUp), "↑ in the field does nothing");
         assert!(wins(&keymap, "cmd-f", &field, &ShowSearch));
         assert!(wins(&keymap, "escape", &field, &crate::text_input::Cancel));
 
-        // List focused while filtering: the M6 keys still work.
+        // List focused while filtering: the M6 keys still work, and ↑ on the first
+        // row returns to the field.
         let list = ["Crow", "FileList vim Filtered"];
         assert!(wins(&keymap, "/", &list, &StartFilter));
         assert!(wins(&keymap, "j", &list, &MoveDown));
+        assert!(wins(&keymap, "down", &list, &MoveDown));
+        assert!(wins(&keymap, "up", &list, &FilterFocusField));
         assert!(wins(&keymap, "escape", &list, &ClearFilter));
 
         // `!Filter` must not match `Filtered`.
         let unfiltered = ["Crow", "FileList vim"];
         assert!(wins(&keymap, "/", &unfiltered, &StartFilter));
         assert!(wins(&keymap, "j", &unfiltered, &MoveDown));
+        assert!(wins(&keymap, "up", &unfiltered, &MoveUp));
     }
 }
