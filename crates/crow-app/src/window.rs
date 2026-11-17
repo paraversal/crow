@@ -1177,12 +1177,14 @@ impl CrowWindow {
         }
         if crate::tips::request(id, cx.entity_id(), cx) {
             self.tip = Some(id);
+            self.pane().update(cx, |pane, cx| pane.set_tip_inset(true, cx));
             cx.notify();
         }
     }
 
     fn close_tip(&mut self, cx: &mut Context<Self>) {
         if self.tip.take().is_some() {
+            self.pane().update(cx, |pane, cx| pane.set_tip_inset(false, cx));
             crate::tips::closed(cx.entity_id(), cx);
             cx.notify();
         }
@@ -3317,6 +3319,7 @@ impl Render for CrowWindow {
                 || crate::tips::owner(cx) != Some(cx.entity_id()))
         {
             self.tip = None;
+            self.pane().update(cx, |pane, cx| pane.set_tip_inset(false, cx));
             crate::tips::closed(cx.entity_id(), cx);
         }
         let tip = match self.tip {

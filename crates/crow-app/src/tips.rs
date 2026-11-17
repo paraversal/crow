@@ -153,6 +153,10 @@ pub fn reload_for_tests(cx: &mut App) {
     tips.owner = None;
 }
 
+/// The list reserves this much bottom space while a tip is on screen, so the
+/// card cannot cover the last rows. The card is at most two lines at 640 px.
+pub const INSET: f32 = 64.0;
+
 /// The tip card: keycap, one sentence, "Got it". Bottom right, above the bar.
 pub fn render_tip(
     id: TipId,

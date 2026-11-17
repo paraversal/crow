@@ -280,6 +280,8 @@ pub struct Pane {
     mark_pending: Option<MarkPending>,
     /// The `/` filter field, while open.
     filtering: Option<Filtering>,
+    /// Reserve the list's bottom inset while a tip card covers it.
+    tip_inset: bool,
     /// The filter count VoiceOver hears: the live count, but only once typing
     /// stops, so fast typing does not queue one announcement per keystroke.
     filter_announce: SharedString,
@@ -351,6 +353,7 @@ impl Pane {
             drop_column: None,
             mark_pending: None,
             filtering: None,
+            tip_inset: false,
             filter_announce: SharedString::default(),
             filter_announce_gen: 0,
             focus_list_after_filter: false,
@@ -410,6 +413,14 @@ impl Pane {
     /// Whether the `/` filter field is open.
     pub fn is_filtering(&self) -> bool {
         self.filtering.is_some()
+    }
+
+    /// Reserve the list's bottom inset while a tip card covers it.
+    pub fn set_tip_inset(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.tip_inset != visible {
+            self.tip_inset = visible;
+            cx.notify();
+        }
     }
 
     /// The filter field's focus handle while it is open.
@@ -2636,6 +2647,7 @@ impl Pane {
                         .flex()
                         .flex_col()
                         .overflow_hidden()
+                        .when(self.tip_inset, |body| body.pb(px(crate::tips::INSET)))
                         .children(glide_fill)
                         .child(
                             uniform_list(
@@ -3126,6 +3138,7 @@ impl Render for Pane {
                                     .flex()
                                     .flex_col()
                                     .overflow_hidden()
+                                    .when(self.tip_inset, |body| body.pb(px(crate::tips::INSET)))
                                     .children(glide_fill)
                                     .child(
                                         uniform_list("entries", rows, cx.processor(Self::render_table_rows))

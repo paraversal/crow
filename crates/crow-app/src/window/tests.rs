@@ -6767,6 +6767,21 @@ fn tip_got_it_retires_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tip_does_not_cover_the_last_row(cx: &mut TestAppContext) {
+    let root = long_fixture("tip-inset", 250);
+    let (view, mut cx) = open(cx, &root);
+    scroll(&mut cx, "file-list", 60.);
+    settle(&view, &mut cx);
+    assert_eq!(tip(&view, &cx), Some(TipId::Filter), "the scroll offers the tip");
+    // Reach the bottom: the last row is the list's bottom row.
+    scroll(&mut cx, "file-list", 1000.);
+    settle(&view, &mut cx);
+    let tip = cx.debug_bounds("tip").expect("the tip card");
+    let last = cx.debug_bounds("row-f249.txt").expect("the last row");
+    assert!(last.bottom() <= tip.top() + px(1.), "last row {last:?} is above the tip {tip:?}");
+}
+
+#[gpui::test]
 fn tip_closes_when_the_folder_changes(cx: &mut TestAppContext) {
     let root = long_fixture("tip-folder-change", 250);
     let (view, mut cx) = open(cx, &root);
