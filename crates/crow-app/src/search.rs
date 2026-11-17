@@ -120,6 +120,10 @@ pub struct SearchView {
     error: Option<SharedString>,
     searching: bool,
     capped: bool,
+    /// When `start_search` began the current search; for the log and first-hit ms.
+    started: Instant,
+    /// Milliseconds from `started` to the first accepted hit.
+    first_hit_ms: Option<u64>,
     cancel: Arc<AtomicBool>,
     generation: u64,
     exclude_generation: u64,
@@ -263,6 +267,8 @@ impl SearchView {
             error: None,
             searching: false,
             capped: false,
+            started: Instant::now(),
+            first_hit_ms: None,
             cancel: Arc::new(AtomicBool::new(false)),
             generation: 0,
             exclude_generation,
@@ -340,6 +346,8 @@ impl SearchView {
         self.skipped.clear();
         self.error = None;
         self.capped = false;
+        self.started = Instant::now();
+        self.first_hit_ms = None;
         self.show_skipped = false;
         self.selection.clear();
         self.selection_generation += 1;
@@ -356,6 +364,23 @@ impl SearchView {
             return;
         }
         self.searching = true;
+        let root = match self.scope {
+            Scope::Folder => &self.folder,
+            Scope::Home | Scope::ThisMac => &self.home,
+        };
+        // The query text stays out of the log: queries can be private.
+        tracing::debug!(
+            target: "crow::search",
+            root = %root.display(),
+            scope = ?self.scope,
+            matching = ?self.matching,
+            effective_match = ?self.effective_match(),
+            show_hidden = self.show_hidden,
+            everything = self.everything,
+            skip_label = ?self.skip_label,
+            query_len = query.len(),
+            "search started"
+        );
 
         let (tx, mut rx) = unbounded();
         if self.scope == Scope::ThisMac {
@@ -449,6 +474,8 @@ impl SearchView {
             Update::Hits(_) if self.capped => {}
             Update::Hits(hits) => self.add_hits(hits, cx),
             Update::Done(summary) => {
+                let scanned = summary.scanned;
+                let skipped = summary.skipped.len();
                 // B1 shows only the exclude.toml skips the footer already describes;
                 // B3 shows unreadable folders and the other reasons.
                 self.skipped = summary
@@ -459,6 +486,18 @@ impl SearchView {
                 if let Some(error) = summary.error {
                     self.error = Some(error.into());
                 }
+                tracing::debug!(
+                    target: "crow::search",
+                    elapsed_ms = self.started.elapsed().as_millis() as u64,
+                    first_hit_ms = ?self.first_hit_ms,
+                    scanned,
+                    skipped,
+                    rows = self.results.len(),
+                    hits = self.hit_count,
+                    capped = self.capped,
+                    error = ?self.error,
+                    "search finished"
+                );
                 self.searching = false;
                 cx.notify();
             }
@@ -467,6 +506,16 @@ impl SearchView {
                 if let Err(error) = result {
                     self.error = Some(error.into());
                 }
+                tracing::debug!(
+                    target: "crow::search",
+                    elapsed_ms = self.started.elapsed().as_millis() as u64,
+                    first_hit_ms = ?self.first_hit_ms,
+                    rows = self.results.len(),
+                    hits = self.hit_count,
+                    capped = self.capped,
+                    error = ?self.error,
+                    "spotlight search finished"
+                );
                 self.searching = false;
                 cx.notify();
             }
@@ -485,6 +534,9 @@ impl SearchView {
                 self.capped = true;
                 self.cancel.store(true, Ordering::Relaxed);
                 break;
+            }
+            if self.first_hit_ms.is_none() {
+                self.first_hit_ms = Some(self.started.elapsed().as_millis() as u64);
             }
             // A content hit carries the file's other matching lines as a count.
             let more = match &hit.kind {
@@ -629,6 +681,9 @@ impl SearchView {
             if self.results.len() >= MAX_RESULTS {
                 self.capped = true;
                 break;
+            }
+            if self.first_hit_ms.is_none() {
+                self.first_hit_ms = Some(self.started.elapsed().as_millis() as u64);
             }
             self.hit_count += 1;
             let row = Row::from_spotlight(hit, &query, &self.home);

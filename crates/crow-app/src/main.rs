@@ -10,6 +10,8 @@
 //! crow --make-search-fixture DIR [N]  create N (default 200,000) nested text files
 //! crow --make-search-corpus DIR   create the deterministic search corpus (fixtures + named cases)
 //! crow --bench-search DIR [QUERY]  time a name+contents walk, print first hit and total
+//! crow --search-trace DIR QUERY [--target PATH] [--names|--contents] [--hidden|--no-hidden] [--everything]
+//!                                  run the real engine and print each batch, the totals and one verdict
 //! crow --motion-lab                a fake folder to try motion modes and feedback sounds
 //! ```
 
@@ -130,6 +132,182 @@ fn bench_search(dir: &std::path::Path, text: &str) -> Result<(), String> {
     Ok(())
 }
 
+struct TraceOptions {
+    dir: PathBuf,
+    query: String,
+    target: Option<PathBuf>,
+    names: bool,
+    contents: bool,
+    show_hidden: bool,
+    everything: bool,
+}
+
+fn parse_search_trace(args: &[String]) -> Result<TraceOptions, String> {
+    let Some(dir) = args.first() else {
+        return Err("usage: crow --search-trace DIR QUERY [--target PATH] [--names|--contents] \
+                    [--hidden|--no-hidden] [--everything]"
+            .to_owned());
+    };
+    let Some(query) = args.get(1) else {
+        return Err("crow --search-trace needs a QUERY".to_owned());
+    };
+    let mut options = TraceOptions {
+        dir: PathBuf::from(dir),
+        query: query.clone(),
+        target: None,
+        names: true,
+        contents: true,
+        show_hidden: false,
+        everything: false,
+    };
+    let mut hidden_set = false;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--target" => {
+                let Some(path) = args.get(index + 1) else {
+                    return Err("--target needs a path".to_owned());
+                };
+                options.target = Some(PathBuf::from(path));
+                index += 2;
+            }
+            "--names" => {
+                options.names = true;
+                options.contents = false;
+                index += 1;
+            }
+            "--contents" => {
+                options.names = false;
+                options.contents = true;
+                index += 1;
+            }
+            "--hidden" => {
+                options.show_hidden = true;
+                hidden_set = true;
+                index += 1;
+            }
+            "--no-hidden" => {
+                options.show_hidden = false;
+                hidden_set = true;
+                index += 1;
+            }
+            "--everything" => {
+                options.everything = true;
+                index += 1;
+            }
+            other => return Err(format!("unknown argument {other}")),
+        }
+    }
+    if !hidden_set {
+        // io-ok: CLI diagnostic, before any window opens
+        match crow_core::load_settings(&crow_core::config_dir()) {
+            Ok(settings) => options.show_hidden = settings.show_hidden_files,
+            Err(error) => eprintln!("{error}; using the hidden default"),
+        }
+    }
+    Ok(options)
+}
+
+/// Run the real engine and print what it did: each batch, the totals, every
+/// skip, and why `--target` was not a hit. No second walk implementation.
+fn search_trace(args: &[String]) -> Result<(), String> {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let options = parse_search_trace(args)?;
+    // io-ok: CLI diagnostic, before any window opens
+    let root = options.dir.canonicalize().map_err(|e| format!("{}: {e}", options.dir.display()))?;
+    let home = crow_core::home();
+    let exclude = match crow_core::load_exclude(&crow_core::config_dir()) {
+        Ok(exclude) => exclude,
+        Err(error) => {
+            eprintln!("{error}; using the default exclude sets");
+            crow_core::Exclude::default()
+        }
+    };
+    let rules = crow_search::RuleSet::from_config(&exclude, &home)?;
+    let query = crow_search::Query {
+        names: options.names.then(|| options.query.clone()),
+        contents: options.contents.then(|| options.query.clone()),
+        show_hidden: options.show_hidden,
+        rules: Arc::new(rules),
+        everything: options.everything,
+    };
+    let target = options.target.as_ref().map(|path| {
+        let path =
+            if path.starts_with("~") { crow_core::expand_home(&path.to_string_lossy(), &home) } else { path.clone() };
+        // io-ok: CLI diagnostic, before any window opens
+        path.canonicalize().unwrap_or(path)
+    });
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let started = std::time::Instant::now();
+    let mut batches = 0usize;
+    let mut hits = 0usize;
+    let mut first_hit = None;
+    // The first matching hit: batch number, elapsed time, and the content line.
+    let mut verdict: Option<(usize, std::time::Duration, Option<u64>)> = None;
+    let summary = crow_search::search(
+        &root,
+        &query,
+        |batch| {
+            batches += 1;
+            let elapsed = started.elapsed();
+            first_hit.get_or_insert(elapsed);
+            println!("+{}ms batch {batches}: {} hits", elapsed.as_millis(), batch.len());
+            if verdict.is_none()
+                && let Some(target) = target.as_ref()
+                && let Some(hit) = batch.iter().find(|hit| &hit.path == target)
+            {
+                let line = match &hit.kind {
+                    crow_search::HitKind::Name { .. } => None,
+                    crow_search::HitKind::Content { line, .. } => Some(*line),
+                };
+                verdict = Some((batches, elapsed, line));
+            }
+            hits += batch.len();
+        },
+        &cancel,
+    );
+    println!(
+        "first_hit={}ms total={}ms hits={hits} scanned={} skipped={}",
+        first_hit.unwrap_or_default().as_millis(),
+        started.elapsed().as_millis(),
+        summary.scanned,
+        summary.skipped.len()
+    );
+    for skip in &summary.skipped {
+        println!("skip {} ({})", skip.path.display(), skip.reason);
+    }
+    let Some(target) = target else { return Ok(()) };
+    match verdict {
+        Some((batch, elapsed, None)) => println!("target: name hit at {}ms (batch {batch})", elapsed.as_millis()),
+        Some((_, elapsed, Some(line))) => println!("target: content hit line {line} at {}ms", elapsed.as_millis()),
+        None => {
+            if !target.starts_with(&root) {
+                println!("target: not found; outside {}", options.dir.display());
+                return Ok(());
+            }
+            if let Some(skip) = summary.skipped.iter().find(|skip| target.starts_with(&skip.path)) {
+                println!("target: not found; under skipped {} ({})", skip.path.display(), skip.reason);
+                return Ok(());
+            }
+            if options.names {
+                let name = target.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
+                let matches = crow_search::FuzzyMatcher::new(&options.query).indices(&name).is_some();
+                if matches {
+                    println!("target: not found; no skipped ancestor, and the name matches (not visited?)");
+                } else {
+                    println!("target: not found; no skipped ancestor, and the name does not match");
+                }
+            } else {
+                println!("target: not found; no skipped ancestor, and names were not searched");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The path in a `file://` URL from LaunchServices, or `None` for other schemes.
 fn path_from_open_url(url: &str) -> Option<PathBuf> {
     let url = url::Url::parse(url).ok()?;
@@ -246,6 +424,16 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{}: {e}", dir.display());
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if args.first().map(String::as_str) == Some("--search-trace") {
+        return match search_trace(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
                 ExitCode::FAILURE
             }
         };
