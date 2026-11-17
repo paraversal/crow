@@ -1937,7 +1937,7 @@ impl Pane {
             (flash, flags)
         };
         let (flags_first, edges) = {
-            let (first, flags) = island_flags(&folder, range.clone());
+            let (first, flags) = island_flags(folder, range.clone());
             (first, island_edges(&flags))
         };
         let rows: Vec<(usize, Entry, usize, bool)> = range
@@ -2618,7 +2618,7 @@ impl Pane {
                     };
                     let glide_fill = if glide {
                         let f = folder.read(cx);
-                        let edges = cursor_island_edges(&f);
+                        let edges = cursor_island_edges(f);
                         f.cursor_ix().map(|ix| {
                             let offset = shown_offset(&scroll);
                             let y = ix as f32 * ROW_HEIGHT;
@@ -3097,7 +3097,7 @@ impl Render for Pane {
                                 };
                                 let glide_fill = if glide {
                                     let folder = self.folders[0].read(cx);
-                                    let edges = cursor_island_edges(&folder);
+                                    let edges = cursor_island_edges(folder);
                                     folder.cursor_ix().map(|ix| {
                                         let offset = shown_offset(&scroll);
                                         let y = ix as f32 * ROW_HEIGHT;
