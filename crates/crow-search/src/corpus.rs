@@ -118,11 +118,13 @@ pub fn build(root: &Path) -> io::Result<()> {
         ("loop-a", "loop-b"),
         ("loop-b", "loop-a"),
     ] {
+        remove_stale(&root.join(name))?;
         symlink(target, root.join(name))?;
     }
 
     let pipe = CString::new(root.join("pipe").as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a NUL in the corpus path"))?;
+    remove_stale(&root.join("pipe"))?;
     // SAFETY: `pipe` is a valid NUL-terminated path under `root`.
     if unsafe { libc::mkfifo(pipe.as_ptr(), 0o644) } != 0 {
         return Err(io::Error::last_os_error());
@@ -131,6 +133,17 @@ pub fn build(root: &Path) -> io::Result<()> {
     // Last: once it is 000, nothing below it can be written.
     fs::set_permissions(root.join("unreadable"), fs::Permissions::from_mode(0o000))?;
     Ok(())
+}
+
+/// Remove a stale entry so `build` can run again over its own output. A
+/// directory there is left alone: these entries must be files, links or a FIFO.
+fn remove_stale(path: &Path) -> io::Result<()> {
+    // io-ok: CLI fixture and tests, never the app's main thread
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Restore the unreadable folder's mode and remove the tree; never follows links.

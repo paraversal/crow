@@ -32,6 +32,15 @@ fn corpus_cases_match_the_engine() {
     assert!(failures.is_empty(), "corpus cases failed:\n{}", failures.join("\n"));
 }
 
+#[test]
+fn corpus_can_be_rebuilt_over_itself() {
+    let root = std::env::temp_dir().join(format!("crow-search-corpus-rebuild-{}", std::process::id()));
+    let _ = corpus::remove(&root);
+    corpus::build(&root).expect("first build");
+    corpus::build(&root).expect("second build over the same folder");
+    let _ = corpus::remove(&root);
+}
+
 fn run_case(root: &Path, case: &Case, rules: &Arc<RuleSet>) -> Result<(), String> {
     let search_root = root.join(case.root);
     let query = Query {

@@ -706,10 +706,12 @@ mod tests {
         let folder = root.join("unreadable");
         fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).expect("chmod 000");
         let (hits, summary) = run(&root, Some("backup"), None, true, true);
-        // Restore before asserting: a failed assertion must not leave a folder
-        // the test cleanup cannot remove.
+        // Check the mode before restoring it: a folder this user cannot read is
+        // the case under test. Restoring first made the check succeed always and
+        // the assertions below never ran.
+        let unreadable = fs::read_dir(&folder).is_err();
         fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).expect("restore mode");
-        if fs::read_dir(&folder).is_ok() {
+        if !unreadable {
             println!("read_dir succeeded on mode 000 (running as root?); skipping the unreadable assertion");
             return;
         }
@@ -939,17 +941,20 @@ mod tests {
             everything: true,
         };
         let cancel = Arc::new(AtomicBool::new(false));
-        let mut is_name = Vec::new();
+        let mut batches: Vec<Vec<bool>> = Vec::new();
         let summary = search(
             &root,
             &query,
-            |batch| is_name.extend(batch.into_iter().map(|hit| matches!(hit.kind, HitKind::Name { .. }))),
+            |batch| batches.push(batch.into_iter().map(|hit| matches!(hit.kind, HitKind::Name { .. })).collect()),
             &cancel,
         );
         assert!(summary.error.is_none(), "{:?}", summary.error);
-        let name = is_name.iter().position(|name| *name).expect("a name hit");
-        let content = is_name.iter().position(|name| !*name).expect("a content hit");
-        assert!(name < content, "the name hit arrives before its own content read: {is_name:?}");
+        let name = batches.iter().position(|batch| batch.iter().any(|is_name| *is_name)).expect("a name hit");
+        let content = batches.iter().position(|batch| batch.iter().any(|is_name| !*is_name)).expect("a content hit");
+        // The name hit leaves before its file is read. The old engine sent both
+        // in one batch, after the content read; the position check alone passed
+        // because the name hit came first inside that shared batch.
+        assert!(name < content, "the name hit arrives before its own content read: {batches:?}");
     }
 
     #[test]

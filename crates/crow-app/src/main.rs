@@ -218,6 +218,7 @@ fn search_trace(args: &[String]) -> Result<(), String> {
     // io-ok: CLI diagnostic, before any window opens
     let root = options.dir.canonicalize().map_err(|e| format!("{}: {e}", options.dir.display()))?;
     let home = crow_core::home();
+    // io-ok: CLI diagnostic, before any window opens
     let exclude = match crow_core::load_exclude(&crow_core::config_dir()) {
         Ok(exclude) => exclude,
         Err(error) => {

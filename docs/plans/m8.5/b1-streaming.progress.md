@@ -1,6 +1,6 @@
 # B1 — Streaming fix, corpus and trace progress
 
-Branch: `m8.5-b1-streaming` · PR: none · Last updated: 2026-11-18 · State: Ready for critique
+Branch: `m8.5-b1-streaming` · PR: none · Last updated: 2026-11-18 · State: In critique
 
 ## Status
 
@@ -50,3 +50,26 @@ None; the plan says there are none and the index's decisions are binding.
 ## Next
 
 Ready for critique. The critic should run the two GUI hand checks (the home repro, and Cmd-F on the corpus hidden on/off) on the bundle.
+
+## Critique
+
+Critic session: 2026-11-18 · Base: `main` @ 111881e · Head reviewed: af1cfdd + the critique fixes
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | `name_hit_arrives_before_its_content_hit` compared positions inside the flattened hit list. On `main` the name and content hits share one batch (`[[true, false]]`), sent after the content read, so the test passed without the fix. It now asserts the name hit's batch comes before the content hit's; the same probe fails on `main`. | `crates/crow-search/src/engine.rs:933` | code (test) | fix | fixed (critique commit 1) |
+| C2 | `unreadable_folder_is_reported` restored the folder to 0755 before checking `read_dir`, so the root check always saw `Ok` and the assertions never ran (the test printed its skip line on every run). The check now happens while the folder is 000; the test asserts the `Unreadable("no permission")` skip and no hit. | `crates/crow-search/src/engine.rs:702` | code (test) | fix | fixed (critique commit 1) |
+| C3 | `crow --make-search-corpus` failed on a second run (`File exists`): `mkfifo` and the five `symlink` calls were unconditional, despite `build`'s "creating or overwriting it" contract. `build` now removes stale links and the pipe first; `corpus_can_be_rebuilt_over_itself` covers it. | `crates/crow-search/src/corpus.rs:121` | code | fix | fixed (critique commit 1) |
+| C4 | `search_trace` loaded `exclude.toml` without the plan's `io-ok: CLI diagnostic, before any window opens` marker; every other read there has one. | `crates/crow-app/src/main.rs:221` | rules / plan | fix | fixed (critique commit 1) |
+| C5 | `--search-trace --target` canonicalizes the target, so a symlink target is compared by its resolved path and can print "not found; … the name matches (not visited?)". | `crates/crow-app/src/main.rs:241` | UX (diagnostic) | note | left |
+| C6 | `--search-trace` prints `first_hit=0ms` for a search with no hits, which reads as an instant hit. | `crates/crow-app/src/main.rs:274` | UX (diagnostic) | note | left |
+| C7 | The 200k bench fixture's names contain neither `back` nor `backup`, so `--bench-search` measures the content path only, not the new per-name send. Measured separately on `target/fixture-100k` with `file`: no regression. | `docs/testing.md` / bench hand check | code sense (coverage) | note | left |
+
+Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (28 crow-search unit tests, both corpus tests) · corpus 20/20 cases ✓ · `--search-trace` on the corpus: 21 hits hidden on / 17 off (same as `main`), the FIFO does not stall, the unreadable folder is a sixth skip; all five verdicts exercised ✓
+
+Budgets: release probes on `target/fixture-search-200k` (`needle`): branch first hit 1–4 ms, total 1719–1906 ms; `main` 4–5 ms, 1695–1757 ms. On `target/fixture-100k` (`file`, names only): branch 50–72 ms first hit, 790–825 ms total; `main` 51–110 ms, 784–837 ms. Within run-to-run noise; first hit same or better.
+
+Looked at: branch bundle (built after af1cfdd), Home (`~`), Cmd-F, Folder, All, hidden on, `.backu`: `.backup-excludes` visible at 0.7 s while the footer says "Searching… 365 results in 85 files"; still streaming at 2.7 s. The machine has `~/.backup-excludes`, not `~/.backup_excludes`. `main` was compared at the engine level (the `[[true, false]]` probe and the trace), not in its GUI. Light/dark, 640 px and VoiceOver were not walked: B1 changes no pixels, roles, labels or copy, and the only UI change is the skip reason type, filtered to `Rule` in B1.
+
+Verdict: right and better. The user's `.backu` case now streams within a second while the walk continues; the FIFO hang and the silent unreadable folder are fixed at the engine level; the corpus and trace make the next four batches testable. The review found no behavior bug in the fix itself — two regression tests did not test their defect and are fixed, and the corpus builder could not be re-run.
+
