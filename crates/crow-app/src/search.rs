@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crow_core::{Exclude, KeymapLayer, Selection, SetName};
 use crow_fs::Entry;
 use crow_fs::ops::Request;
-use crow_search::{Hit, HitKind, Query, RuleSet, Summary};
+use crow_search::{Hit, HitKind, Query, RuleSet, Skip, SkipReason, Summary};
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use gpui::{
@@ -116,7 +116,7 @@ pub struct SearchView {
     focus: FocusHandle,
     results: Vec<Row>,
     by_path: HashMap<PathBuf, usize>,
-    skipped: Vec<(PathBuf, String)>,
+    skipped: Vec<Skip>,
     error: Option<SharedString>,
     searching: bool,
     capped: bool,
@@ -449,7 +449,13 @@ impl SearchView {
             Update::Hits(_) if self.capped => {}
             Update::Hits(hits) => self.add_hits(hits, cx),
             Update::Done(summary) => {
-                self.skipped = summary.skipped;
+                // B1 shows only the exclude.toml skips the footer already describes;
+                // B3 shows unreadable folders and the other reasons.
+                self.skipped = summary
+                    .skipped
+                    .into_iter()
+                    .filter(|skip| matches!(skip.reason, SkipReason::Rule(_)))
+                    .collect();
                 if let Some(error) = summary.error {
                     self.error = Some(error.into());
                 }
@@ -2143,19 +2149,20 @@ impl SearchView {
         }
         let theme = cx.global::<Ui>().theme.clone();
         let muted = color(theme.role("fg-muted"));
-        let rows = self.skipped.iter().enumerate().map(|(i, (path, rule))| {
-            let shown = self.skipped_display(path);
+        let rows = self.skipped.iter().enumerate().map(|(i, skip)| {
+            let shown = self.skipped_display(&skip.path);
+            let reason = skip.reason.to_string();
             div()
                 .id(("search-skipped-row", i))
                 .debug_selector(move || format!("search-skipped-row-{i}"))
                 .role(Role::ListItem)
-                .aria_label(format!("{shown}, {rule}"))
+                .aria_label(format!("{shown}, {reason}"))
                 .px_3()
                 .py_1()
                 .flex()
                 .flex_col()
                 .child(div().text_size(px(12.)).child(shown))
-                .child(div().text_size(px(11.)).text_color(muted).child(rule.clone()))
+                .child(div().text_size(px(11.)).text_color(muted).child(reason))
         });
         Some(
             div()

@@ -137,10 +137,40 @@ pub enum HitKind {
 pub struct Summary {
     /// Directory entries visited (files and folders).
     pub scanned: u64,
-    /// Folders the rules removed, with the rule that removed each one.
-    pub skipped: Vec<(PathBuf, String)>,
+    /// Folders the walk did not enter, and why.
+    pub skipped: Vec<Skip>,
     /// Set when the query itself is invalid (a bad regex); no walk ran.
     pub error: Option<String>,
+}
+
+/// A folder the walk did not enter, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Skip {
+    pub path: PathBuf,
+    pub reason: SkipReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SkipReason {
+    /// An exclude.toml set: `"dev: name \"node_modules\""` (the rule's text).
+    Rule(String),
+    /// The folder could not be read: `"no permission"`, or the error text.
+    Unreadable(String),
+}
+
+impl SkipReason {
+    /// Whether Search everything would walk it.
+    pub fn lifted_by_everything(&self) -> bool {
+        matches!(self, SkipReason::Rule(_))
+    }
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SkipReason::Rule(text) | SkipReason::Unreadable(text) => f.write_str(text),
+        }
+    }
 }
 
 /// A pasted query can be a 100k-file clipboard (~10 MB). Nucleo scans the
@@ -270,12 +300,14 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
     let (tx, rx) = mpsc::channel::<Vec<Hit>>();
 
     let scanned_thread = scanned.clone();
+    let skipped_thread = skipped.clone();
     std::thread::scope(|scope| {
         scope.spawn(move || {
             walker.run(|| {
                 let tx = tx.clone();
                 let cancel = cancel.clone();
                 let scanned = scanned_thread.clone();
+                let skipped = skipped_thread.clone();
                 let names = names.clone();
                 let pattern = content_pattern.clone();
                 let mut fuzzy = names.as_deref().map(FuzzyMatcher::new);
@@ -284,7 +316,22 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                     if cancel.load(Ordering::Relaxed) {
                         return WalkState::Quit;
                     }
-                    let Ok(entry) = result else { return WalkState::Continue };
+                    let entry = match result {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            // A folder the walk could not read is a gap the user must see,
+                            // not silence: record it with its reason.
+                            if let Some(path) = error_path(&error)
+                                && let Ok(mut list) = skipped.lock()
+                            {
+                                list.push(Skip {
+                                    path: path.to_path_buf(),
+                                    reason: SkipReason::Unreadable(error_text(&error)),
+                                });
+                            }
+                            return WalkState::Continue;
+                        }
+                    };
                     if entry.depth() == 0 {
                         return WalkState::Continue;
                     }
@@ -359,7 +406,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
     });
 
     let mut skipped = skipped.lock().map(|mut list| std::mem::take(&mut *list)).unwrap_or_default();
-    skipped.sort_by(|a, b| a.0.cmp(&b.0));
+    skipped.sort_by(|a, b| a.path.cmp(&b.path));
     Summary { scanned: scanned.load(Ordering::Relaxed), skipped, error: None }
 }
 
@@ -367,7 +414,7 @@ fn build_walker(
     root: &Path,
     show_hidden: bool,
     rules: Arc<RuleSet>,
-    skipped: Arc<Mutex<Vec<(PathBuf, String)>>>,
+    skipped: Arc<Mutex<Vec<Skip>>>,
     cancel: Arc<AtomicBool>,
 ) -> WalkParallel {
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
@@ -392,13 +439,35 @@ fn build_walker(
             let name = name.to_string_lossy();
             if let Some(rule) = rules.skip(entry.path(), name.as_ref(), true) {
                 if let Ok(mut list) = skipped.lock() {
-                    list.push((entry.path().to_path_buf(), rule));
+                    list.push(Skip {
+                        path: entry.path().to_path_buf(),
+                        reason: SkipReason::Rule(rule),
+                    });
                 }
                 return false;
             }
             true
         });
     builder.build_parallel()
+}
+
+/// The path an `ignore` walk error is about, when it carries one.
+fn error_path(error: &ignore::Error) -> Option<&Path> {
+    match error {
+        ignore::Error::WithDepth { err, .. } => error_path(err),
+        ignore::Error::WithLineNumber { err, .. } => error_path(err),
+        ignore::Error::WithPath { path, .. } => Some(path),
+        _ => None,
+    }
+}
+
+/// The reason text for a folder the walk could not read.
+fn error_text(error: &ignore::Error) -> String {
+    match error.io_error() {
+        Some(io_error) if io_error.kind() == io::ErrorKind::PermissionDenied => "no permission".to_owned(),
+        Some(io_error) => io_error.to_string(),
+        None => error.to_string(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -613,20 +682,44 @@ mod tests {
         let root = dev_tree("rules");
         let (hits, summary) = run(&root, None, Some("needle"), true, false);
         assert_eq!(paths(&hits), [root.join("keep.txt"), root.join("sub/build/notes.txt")]);
-        let skipped: BTreeSet<_> = summary.skipped.iter().map(|(path, _)| path.clone()).collect();
+        let skipped: BTreeSet<_> = summary.skipped.iter().map(|skip| skip.path.clone()).collect();
         let expected: BTreeSet<_> =
             [".git", ".logicprojects", ".venv", "__pycache__", "build", "dist", "node_modules", "target"]
                 .into_iter()
                 .map(|name| root.join(name))
                 .collect();
         assert_eq!(skipped, expected);
-        assert!(summary.skipped.iter().any(|(path, rule)| {
-            path == &root.join("target") && rule.contains("dev") && rule.contains("Cargo.toml")
+        assert!(summary.skipped.iter().any(|skip| {
+            skip.path == root.join("target")
+                && matches!(&skip.reason, SkipReason::Rule(rule) if rule.contains("dev") && rule.contains("Cargo.toml"))
         }));
-        assert!(
-            summary.skipped.iter().any(|(path, rule)| { path == &root.join("node_modules") && rule.contains("name") })
-        );
+        assert!(summary.skipped.iter().any(|skip| {
+            skip.path == root.join("node_modules")
+                && matches!(&skip.reason, SkipReason::Rule(rule) if rule.contains("name"))
+        }));
         assert!(summary.scanned > 0);
+    }
+
+    #[test]
+    fn unreadable_folder_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = root("unreadable");
+        write(&root, "unreadable/backup-hidden.txt", b"needle\n");
+        let folder = root.join("unreadable");
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        let (hits, summary) = run(&root, Some("backup"), None, true, true);
+        // Restore before asserting: a failed assertion must not leave a folder
+        // the test cleanup cannot remove.
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).expect("restore mode");
+        if fs::read_dir(&folder).is_ok() {
+            println!("read_dir succeeded on mode 000 (running as root?); skipping the unreadable assertion");
+            return;
+        }
+        assert!(hits.is_empty(), "nothing inside an unreadable folder is a hit: {hits:?}");
+        assert_eq!(
+            summary.skipped,
+            [Skip { path: folder, reason: SkipReason::Unreadable("no permission".to_owned()) }]
+        );
     }
 
     #[test]
