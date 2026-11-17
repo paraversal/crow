@@ -9,8 +9,8 @@ Branch: `m8.5-b1-streaming` · PR: none · Last updated: 2026-11-18 · State: in
 | 1 Batcher | done (e6d425f) | `FLUSH` 30 ms, first hit at once, full batches at once. Four pure-clock tests pass; `batches_are_bounded_for_many_files` still passes. |
 | 2 Name before contents, regular files only | done (e6d425f) | Separate `tx.send` for the name hit; contents only for regular files and symlinks to regular files. Tests: `content_search_skips_fifos` (10 s timeout), `name_hit_arrives_before_its_content_hit`, `a_symlink_to_a_file_gets_a_content_hit`. |
 | 3 Typed skips, unreadable folders | todo | |
-| 4 Corpus | todo | |
-| 5 Named cases | todo | |
+| 4 Corpus | done | `crow_search::corpus::{build, remove, cases}`; `crow --make-search-corpus DIR` builds it. Fixed bytes, modes 0644/0755/000, relative symlinks, a FIFO, 300 `crowd/` weak matches. |
+| 5 Named cases | done | `crates/crow-search/tests/corpus_cases.rs` runs all 20 cases through the real engine with a 10 s deadline each; all pass. The `unreadable` case skips itself when `read_dir` succeeds as root. |
 | 6 Trace and log lines | todo | |
 | 7 Docs | todo | |
 

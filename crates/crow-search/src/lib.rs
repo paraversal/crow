@@ -5,5 +5,7 @@
 mod engine;
 mod rules;
 
+pub mod corpus;
+
 pub use engine::{FuzzyMatcher, Hit, HitKind, Query, Skip, SkipReason, Summary, search};
 pub use rules::RuleSet;

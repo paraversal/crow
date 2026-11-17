@@ -8,6 +8,7 @@
 //!                                  with H1's generator and report slow frames (needs --features fuzz)
 //! crow --make-fixture DIR [N]      create N (default 100,000) empty files in DIR
 //! crow --make-search-fixture DIR [N]  create N (default 200,000) nested text files
+//! crow --make-search-corpus DIR   create the deterministic search corpus (fixtures + named cases)
 //! crow --bench-search DIR [QUERY]  time a name+contents walk, print first hit and total
 //! crow --motion-lab                a fake folder to try motion modes and feedback sounds
 //! ```
@@ -209,6 +210,23 @@ fn main() -> ExitCode {
         return match make_search_fixture(&dir, count) {
             Ok(()) => {
                 println!("created {count} files in {}", dir.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{}: {e}", dir.display());
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if args.first().map(String::as_str) == Some("--make-search-corpus") {
+        let Some(dir) = args.get(1).map(PathBuf::from) else {
+            eprintln!("usage: crow --make-search-corpus DIR");
+            return ExitCode::FAILURE;
+        };
+        return match crow_search::corpus::build(&dir) {
+            Ok(()) => {
+                println!("created the search corpus in {}", dir.display());
                 ExitCode::SUCCESS
             }
             Err(e) => {
