@@ -4572,7 +4572,10 @@ fn selection_islands_round_the_ends_and_rule_the_middle(cx: &mut TestAppContext)
     assert!(cx.debug_bounds("island-bottom-alpha").is_none(), "alpha continues into beta");
     assert!(cx.debug_bounds("island-top-beta").is_none(), "beta continues alpha's island");
     assert!(cx.debug_bounds("island-bottom-beta").is_some());
-    assert!(cx.debug_bounds("island-rule-beta").is_some(), "one rule inside the island");
+    let beta = cx.debug_bounds("row-beta").expect("beta row");
+    let rule = cx.debug_bounds("island-rule-beta").expect("one rule inside the island");
+    assert!(rule.left() >= beta.left() + px(4.), "the rule is inset on the left: {rule:?} vs {beta:?}");
+    assert!(rule.right() <= beta.right() - px(4.), "the rule is inset on the right: {rule:?} vs {beta:?}");
     assert!(cx.debug_bounds("island-rule-notes.txt").is_none());
 
     // Three adjacent rows: two rules, one box.
