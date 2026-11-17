@@ -3164,6 +3164,70 @@ fn search_return_in_the_field_moves_to_the_first_result(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn search_result_menu_lists_its_items_and_runs_them(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    use crate::palette::CommandId;
+    let root = fixture("search-menu");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search open");
+    let path = search.read_with(&cx, |s, _| s.result_paths()[0].clone());
+    effect_calls(&mut cx);
+
+    let at = row_center(&mut cx, "search-row-0");
+    right_click(&mut cx, at);
+    cx.run_until_parked();
+    assert_eq!(search.read_with(&cx, |s, _| s.menu()), Some(0), "right-click opens the row's menu");
+    let titles: Vec<String> = effect_calls(&mut cx)
+        .into_iter()
+        .filter_map(|call| match call {
+            Call::ContextMenu(entries) => Some(
+                entries
+                    .into_iter()
+                    .filter_map(|entry| match entry {
+                        crow_macos::ContextMenuEntry::Item { title, .. } => Some(title),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        titles,
+        ["Open", "Reveal in Folder", "Quick Look", "Copy", "Cut", "Copy Path", "Move to Trash"].map(str::to_owned)
+    );
+
+    // Copy Path writes the row's path.
+    let ix = crate::context_menu::search_slots()
+        .iter()
+        .position(|slot| slot.is_some_and(|(id, _)| id == CommandId::CopyPath))
+        .expect("Copy Path is in the menu");
+    search.update_in(&mut cx, |search, window, cx| search.choose_menu_item(Some(ix), window, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text())),
+        Some(path.to_string_lossy().into_owned())
+    );
+
+    // Ctrl-click opens it too, and Move to Trash runs once.
+    let at = row_center(&mut cx, "search-row-0");
+    cx.simulate_click(at, gpui::Modifiers { control: true, ..Default::default() });
+    cx.run_until_parked();
+    assert_eq!(search.read_with(&cx, |s, _| s.menu()), Some(0), "Ctrl-click opens the menu");
+    let ix = crate::context_menu::search_slots()
+        .iter()
+        .position(|slot| slot.is_some_and(|(id, _)| id == CommandId::MoveToTrash))
+        .expect("Move to Trash is in the menu");
+    search.update_in(&mut cx, |search, window, cx| search.choose_menu_item(Some(ix), window, cx));
+    settle(&view, &mut cx);
+    assert!(!root.join("notes.txt").exists(), "the menu's Move to Trash ran once");
+}
+
+#[gpui::test]
 fn cmd_backspace_clears_the_search_field(cx: &mut TestAppContext) {
     let root = fixture("search-cmd-backspace");
     let (view, mut cx) = open(cx, &root);
@@ -4660,6 +4724,56 @@ fn type_select_query_stays_out_of_the_filter_and_vim(cx: &mut TestAppContext) {
     write_config(&view, &mut cx, "settings.toml", "keymap = \"vim\"\n");
     cx.simulate_keystrokes("j");
     assert_eq!(bar_state(&view, &mut cx).type_select, None, "the Vim layer does not type-to-select");
+}
+
+#[gpui::test]
+fn return_renames_by_default_and_f2_renames_in_both_modes(cx: &mut TestAppContext) {
+    let root = fixture("enter-default");
+    let (view, mut cx) = open(cx, &root);
+
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |p, _| p.renaming_path()),
+        Some(root.join("alpha")),
+        "Return renames by default"
+    );
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+
+    write_config(&view, &mut cx, "settings.toml", "enter = \"open\"\n");
+    cx.simulate_keystrokes("f2");
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |p, _| p.renaming_path()),
+        Some(root.join("alpha")),
+        "F2 renames with enter = open too"
+    );
+}
+
+#[gpui::test]
+fn enter_opens_in_open_mode_but_sidebar_and_search_still_open(cx: &mut TestAppContext) {
+    let root = fixture("enter-open");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "settings.toml", "enter = \"open\"\n");
+
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha"), "Return opens the cursor folder");
+    assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()));
+
+    cx.simulate_keystrokes("cmd-[");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("alpha");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("down enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha"), "Return in search results still opens");
+
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("beta")]));
+    cx.simulate_keystrokes("tab");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("beta"), "Return in the sidebar still opens");
 }
 
 #[gpui::test]
@@ -8709,7 +8823,7 @@ fn filter_enter_acts_on_the_highlighted_row(cx: &mut TestAppContext) {
     let cursor = pane(&view, &cx).read_with(&cx, |p, cx| p.cursor_entry(cx).map(|entry| entry.name.clone()));
     assert_eq!(cursor.as_deref(), Some("beta"), "focusing the list keeps the highlighted row");
 
-    // Return in the list renames the cursor row (Crow's Enter is Rename; cmd-down opens).
+    // Return in the list renames the cursor row (the default; cmd-down opens, and `enter` can switch it).
     cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
     let renaming = pane(&view, &cx).read_with(&cx, |p, _| p.renaming_path());

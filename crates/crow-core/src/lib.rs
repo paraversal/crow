@@ -29,7 +29,8 @@ pub use recent::{Recent, parse_zoxide, query_zoxide};
 pub use recent_commands::RecentCommands;
 pub use selection::{Selection, TypeSelect};
 pub use settings::{
-    AppIcon, DEFAULT_SETTINGS, HintsMode, KeymapLayer, Settings, SettingsError, ViewMode, config_dir, load_settings,
+    AppIcon, DEFAULT_SETTINGS, EnterAction, HintsMode, KeymapLayer, Settings, SettingsError, ViewMode, config_dir,
+    load_settings,
     save_bool_setting, save_number_setting, save_setting, save_table_number,
 };
 pub use sidebar::{

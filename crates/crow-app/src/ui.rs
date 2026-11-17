@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crow_core::motion::{Effective, MotionMode, SoundSet};
 use crow_core::{
-    AppIcon, Exclude, HintsMode, KeymapLayer, Recent, RecentCommands, Settings, SidebarConfig, Views, load_settings,
-    load_sidebar, load_views,
+    AppIcon, EnterAction, Exclude, HintsMode, KeymapLayer, Recent, RecentCommands, Settings, SidebarConfig, Views,
+    load_settings, load_sidebar, load_views,
 };
 use crow_theme::Theme;
 use gpui::{App, AppContext, Global, SharedString};
@@ -429,6 +429,7 @@ pub fn refresh_app_icon(cx: &mut App) {
 pub enum SettingChange {
     Theme(String),
     Keymap(KeymapLayer),
+    Enter(EnterAction),
     Hints(HintsMode),
     Motion(MotionMode),
     Sound(SoundSet),
@@ -451,6 +452,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
         match &change {
             SettingChange::Theme(value) => replace(&mut settings.theme, value.clone()),
             SettingChange::Keymap(value) => replace(&mut settings.keymap, *value),
+            SettingChange::Enter(value) => replace(&mut settings.enter, *value),
             SettingChange::Hints(value) => replace(&mut settings.hints, *value),
             SettingChange::Motion(value) => replace(&mut settings.motion, *value),
             SettingChange::Sound(value) => replace(&mut settings.sound, *value),
@@ -498,6 +500,9 @@ fn write_setting(change: SettingChange, cx: &mut App) {
         }
         SettingChange::Keymap(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "keymap", value.key()), cx);
+        }
+        SettingChange::Enter(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "enter", value.key()), cx);
         }
         SettingChange::Hints(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "hints", value.key()), cx);

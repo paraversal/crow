@@ -7,9 +7,9 @@ Branch: `m8-f2-typing` · PR: none · Last updated: 2026-11-17 · State: in prog
 | Item | State | Notes |
 | --- | --- | --- |
 | 1 Show the type-to-select query | done | `TypeSelect::prefix`/`clear`; `Folder::type_select_prefix`/`cancel_type_select`; the bar's transient slot shows the prefix left of the hints. The run expires on a generation-checked `TIMEOUT` task (`FolderEvent::TypeSelect`), not the 100 ms poll. Escape dismisses it and keeps the selection; starting a filter, a rename or another column clears it. Tests: core prefix/clear; bar shows `no`, Escape clears and keeps the row, the timeout clears, the filter field and Vim never show it. |
-| 2 Enter behavior setting | todo | `enter = "rename" \| "open"`, `EnterRow`, Settings segmented control. |
-| 3 Context menus for search results and the sidebar | todo | Sidebar menu already exists (`sidebar.rs:756-790`, tests at `window/tests.rs:601`); only search results remain. |
-| 4 Palette home row matching | todo | Score name and label; highlight whichever matched. |
+| 2 Enter behavior setting | done | `enter = "rename" \| "open"` (default rename), `EnterRow` reads it, `f2` always renames. Settings ▸ Behaviour ▸ What Return does (Rename/Open). Tests: default renames, open mode opens, F2 renames in both, sidebar and search still open, the control writes only its line and survives a reload; the keymap test now expects F2. |
+| 3 Context menus for search results and the sidebar | done | The sidebar menu already existed; verified, not rebuilt. Search results gained `context_menu::search_entries` (Open, Reveal in Folder, Quick Look, Copy, Cut, Copy Path, Move to Trash) and `SearchView` right-click/Ctrl-click, selection-first, action dispatch. `CopyPath` gained a search handler. Test: titles, Copy Path text, Ctrl-click, Move to Trash once. |
+| 4 Palette home row matching | done | The home row's name is scored when it is not a suffix of the label; `name_matched` carries its ranges so `jul` highlights in the name and `~` in the path. Test: both queries, both highlight lines. |
 | 5 Finish: checks, bundle, docs | todo | fmt, clippy, tests, bundle, README + `docs/testing.md`. |
 
 ## Questions
@@ -49,7 +49,10 @@ Branch: `m8-f2-typing` · PR: none · Last updated: 2026-11-17 · State: in prog
 
 - 2026-11-17: Read AGENTS.md, the M8 index, the F2 plan and F1's progress; read `selection.rs`, `folder.rs`, `pane.rs`, `bottom_bar.rs`, `context_menu.rs`, `sidebar.rs`, `search.rs`, `palette.rs`, `settings.rs`, `settings_window.rs`, `ui.rs`, `actions.rs`, `menus.rs`. Created the branch and this progress file. Asked Q1–Q5; answers recorded.
 - 2026-11-17: Item 1. `TypeSelect` gained `prefix`/`clear`; `Folder` gained `type_select_prefix`, `cancel_type_select` and a per-run generation timer that clears the buffer and emits `FolderEvent::TypeSelect`. The bar's transient slot draws the prefix (aria "Type to select: …") only while the list owns the keys; `fit_to_window` gives it room. Escape consumes the run before the Vim mark and the selection; the filter, rename and a column focus change clear it. Tests pass.
+- 2026-11-17: Item 2. `EnterAction` in `settings.toml`; `EnterRow` in `LIST`; `f2` → `Rename`; the pane dispatches by the setting. Settings control "What Return does", description names F2. `keys::is_function_key` displays F2 instead of f2. README and `docs/testing.md` updated. Tests: window modes, sidebar/search, settings write/reload, keymap string.
+- 2026-11-17: Item 3. Search-result menu: `TitledSlot` (renamed from `SidebarSlot`, now shared), `SEARCH` slots, `search_entries` with the SearchResults scope. `SearchView.menu`, `context_press` (selects an unselected row, keeps a selection), right-click and Ctrl-click handlers, `menu_closed` dispatches the command action, `copy_path` handler. Test drives titles, Copy Path, Ctrl-click and Move to Trash.
+- 2026-11-17: Item 4. `Item::Folder.name_matched`; `folder_listing` scores the name only when `name_start` is None; `name_ranges` prefers it. Test for `jul` and `~`.
 
 ## Next
 
-Item 2: `enter = "rename" | "open"`, `EnterRow`, F2 → Rename, the Settings control, README and tests.
+Item 5: `cargo fmt --check`, clippy, `cargo test --workspace`, `./scripts/bundle.sh`, then the hand checks and the progress file's final state.

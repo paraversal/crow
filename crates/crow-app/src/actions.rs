@@ -17,6 +17,8 @@ actions!(
         ExtendDown,
         SelectAll,
         OpenSelection,
+        /// Return in the list: Rename or Open, read from `settings.enter`.
+        EnterRow,
         Rename,
         QuickLook,
         // File operations
@@ -131,7 +133,9 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         // (⌘↓), so both surfaces match Finder; keep cmd-o first.
         KeyBinding::new("cmd-o", OpenSelection, Some(LIST)),
         KeyBinding::new("cmd-down", OpenSelection, Some(LIST)),
-        KeyBinding::new("enter", Rename, Some(LIST)),
+        KeyBinding::new("enter", EnterRow, Some(LIST)),
+        // F2 renames whatever `enter` does (Finder has no F2; the user asked for it).
+        KeyBinding::new("f2", Rename, Some(LIST)),
         KeyBinding::new("space", QuickLook, Some(LIST)),
         KeyBinding::new("cmd-shift-n", NewFolder, Some(LIST)),
         KeyBinding::new("cmd-alt-n", NewFile, Some(LIST)),

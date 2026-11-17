@@ -109,11 +109,11 @@ pub enum SidebarMenuKind {
     Volume,
 }
 
-/// A sidebar menu line: the command and, when the row needs other words than the
-/// menu bar's, its own title. `None` is a separator.
-pub type SidebarSlot = Option<(CommandId, Option<&'static str>)>;
+/// A menu line with its own title when the row needs other words than the menu
+/// bar's. `None` is a separator.
+pub type TitledSlot = Option<(CommandId, Option<&'static str>)>;
 
-const SIDEBAR_FAVORITE: &[SidebarSlot] = &[
+const SIDEBAR_FAVORITE: &[TitledSlot] = &[
     Some((CommandId::Open, None)),
     Some((CommandId::NewTab, Some("Open in New Tab"))),
     None,
@@ -126,7 +126,7 @@ const SIDEBAR_FAVORITE: &[SidebarSlot] = &[
     Some((CommandId::RemoveFromSidebar, None)),
 ];
 
-const SIDEBAR_RECENT: &[SidebarSlot] = &[
+const SIDEBAR_RECENT: &[TitledSlot] = &[
     Some((CommandId::Open, None)),
     Some((CommandId::NewTab, Some("Open in New Tab"))),
     None,
@@ -137,7 +137,7 @@ const SIDEBAR_RECENT: &[SidebarSlot] = &[
     Some((CommandId::RemoveFromSidebar, Some("Remove from Recent"))),
 ];
 
-const SIDEBAR_VOLUME: &[SidebarSlot] = &[
+const SIDEBAR_VOLUME: &[TitledSlot] = &[
     Some((CommandId::Open, None)),
     Some((CommandId::NewTab, Some("Open in New Tab"))),
     None,
@@ -147,7 +147,7 @@ const SIDEBAR_VOLUME: &[SidebarSlot] = &[
     Some((CommandId::Eject, None)),
 ];
 
-pub fn sidebar_slots(kind: SidebarMenuKind) -> &'static [SidebarSlot] {
+pub fn sidebar_slots(kind: SidebarMenuKind) -> &'static [TitledSlot] {
     match kind {
         SidebarMenuKind::Favorite => SIDEBAR_FAVORITE,
         SidebarMenuKind::Recent => SIDEBAR_RECENT,
@@ -186,6 +186,42 @@ pub fn sidebar_entries(kind: SidebarMenuKind, state: SidebarMenuState, cx: &App)
                     title: own_title.unwrap_or_else(|| title(command)).to_owned(),
                     shortcut: row_key.then(|| shortcut(command, KeyScope::Sidebar, cx)).flatten(),
                     enabled: sidebar_enabled(*id, state),
+                }
+            }
+        })
+        .collect()
+}
+
+/// Search results: the row's own menu. Reveal is the search panel's ⌘R, which
+/// closes search and shows the result in its folder; Show in Finder is the list's.
+const SEARCH: &[TitledSlot] = &[
+    Some((CommandId::Open, None)),
+    Some((CommandId::SearchReveal, Some("Reveal in Folder"))),
+    Some((CommandId::QuickLook, None)),
+    None,
+    Some((CommandId::Copy, None)),
+    Some((CommandId::Cut, None)),
+    Some((CommandId::CopyPath, None)),
+    None,
+    Some((CommandId::MoveToTrash, None)),
+];
+
+pub fn search_slots() -> &'static [TitledSlot] {
+    SEARCH
+}
+
+/// The native menu's lines for a search result.
+pub fn search_entries(cx: &App) -> Vec<ContextMenuEntry> {
+    SEARCH
+        .iter()
+        .map(|slot| match slot {
+            None => ContextMenuEntry::Separator,
+            Some((id, own_title)) => {
+                let command = command(*id);
+                ContextMenuEntry::Item {
+                    title: own_title.unwrap_or_else(|| title(command)).to_owned(),
+                    shortcut: shortcut(command, KeyScope::SearchResults, cx),
+                    enabled: true,
                 }
             }
         })

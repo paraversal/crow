@@ -17,13 +17,13 @@ use std::time::Instant;
 
 use crow_core::motion::{Effective, Fx, Look};
 use crow_core::{
-    Align, Column, ColumnContext, ColumnWidth, History, KeymapLayer, ResizeDrag, TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS,
-    TableLayout, TipId, ViewChange, ViewMode,
+    Align, Column, ColumnContext, ColumnWidth, EnterAction, History, KeymapLayer, ResizeDrag, TIP_SCROLL_ENTRIES,
+    TIP_SCROLL_ROWS, TableLayout, TipId, ViewChange, ViewMode,
 };
 use crow_fs::{Entry, Sort, SortKey};
 use crow_theme::Theme;
 use gpui::{
-    Action, AnimationExt, AnyElement, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter,
+    Action, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter,
     ExternalDragPayload, ExternalPaths, FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle,
     SharedString, SpringAnimation, SpringConfig, Subscription, UniformListScrollHandle, Window, canvas, div, img,
@@ -31,7 +31,7 @@ use gpui::{
 };
 
 use crate::actions::{
-    BeginJump, BeginMark, ClearFilter, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, ExtendDown,
+    BeginJump, BeginMark, ClearFilter, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, EnterRow, ExtendDown,
     ExtendUp, MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFile, NewFolder,
     OpenSelection, PasteFiles, PasteMoveFiles, QuickLook, Rename, SelectAll, ShowInFinder, StartFilter,
 };
@@ -1076,6 +1076,8 @@ impl Pane {
     // ----- filter -----
 
     fn start_filter(&mut self, _: &StartFilter, window: &mut Window, cx: &mut Context<Self>) {
+        // The filter field has its own query; a type-to-select run must not linger beside it.
+        self.cancel_type_select(cx);
         if let Some(filtering) = &self.filtering {
             let focus = filtering.input.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
@@ -1311,6 +1313,14 @@ impl Pane {
         self.open_selected(cx);
     }
 
+    /// Return in the list: the setting decides whether it renames or opens.
+    fn enter_row(&mut self, _: &EnterRow, window: &mut Window, cx: &mut Context<Self>) {
+        match cx.global::<Ui>().settings.enter {
+            EnterAction::Rename => self.rename(&Rename, window, cx),
+            EnterAction::Open => self.open_selected(cx),
+        }
+    }
+
     fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(entry) = self.cursor_entry(cx) {
             self.begin_rename(entry.path, entry.is_dir, window, cx);
@@ -1320,6 +1330,7 @@ impl Pane {
     /// Replace the item's name with a text field; the name without its extension is selected.
     /// `is_dir` comes from the listing, so the main thread never stats the path.
     fn begin_rename(&mut self, path: PathBuf, is_dir: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_type_select(cx);
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let stem_end = match name.rfind('.') {
             Some(i) if i > 0 && !is_dir => i,
@@ -1538,6 +1549,7 @@ impl Pane {
         window.focus(&self.focus, cx);
         if k != self.focused {
             self.drop_filter(cx);
+            self.cancel_type_select(cx);
             self.focused = k;
             self.strip_scroll.scroll_to_item(k);
         }
@@ -1576,6 +1588,7 @@ impl Pane {
         }
         if k != self.focused {
             self.drop_filter(cx);
+            self.cancel_type_select(cx);
             self.focused = k;
         }
         // Clearing emits CursorMoved, which closes the columns right of `k`.
@@ -1615,6 +1628,7 @@ impl Pane {
         window.focus(&self.focus, cx);
         if k != self.focused {
             self.drop_filter(cx);
+            self.cancel_type_select(cx);
             self.focused = k;
         }
         let kind = match row {
@@ -3260,6 +3274,7 @@ impl Render for Pane {
                     .on_action(cx.listener(Self::move_left))
                     .on_action(cx.listener(Self::move_right))
                     .on_action(cx.listener(Self::open))
+                    .on_action(cx.listener(Self::enter_row))
                     .on_action(cx.listener(Self::rename))
                     .on_action(cx.listener(Self::quick_look))
                     .on_action(cx.listener(Self::new_folder))
