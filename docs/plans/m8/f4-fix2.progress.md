@@ -40,4 +40,4 @@ Branch: `m8-f4-path-bar` (F4, unmerged) · PR: none · Last updated: 2026-11-17 
 
 ## Next
 
-The critique is in `f4-path-bar.progress.md` (Critique 2): the pencil's rest color, the hints' fade, the field's hover reset and the docs are fixed; Q5-Q7 wait on the user (the field's expansion start, the mount flash, focus loss). The bench re-run and the bundle follow the answers.
+The critique is in `f4-path-bar.progress.md` (Critique 2): the pencil's rest color, the hints' fade, the field's hover reset, focus loss and the docs are fixed (779e493); Q5 (the field's expansion start) and Q6 (the mount flash) wait on the user. The bench re-ran at 8.55 ms p99 and the bundle is built.
