@@ -2872,7 +2872,9 @@ struct Ghosts<'a> {
 
 impl Ghosts<'_> {
     fn render(&self) -> Vec<AnyElement> {
-        if self.mode != Effective::Full {
+        // Off changes state in one frame. Low fades the removed row in place;
+        // Full plays the swallow here while the rows below wait to close.
+        if self.mode == Effective::Off {
             return Vec::new();
         }
         let offset = shown_offset(self.scroll);
@@ -2890,6 +2892,7 @@ impl Ghosts<'_> {
                     .top(px(top))
                     .h(px(ROW_HEIGHT))
                     .overflow_hidden()
+                    .debug_selector(|| format!("ghost-{}", effect.entry.name))
                     .child(ghost_row(&effect.entry, look, self.theme, self.font_size))
                     .into_any_element()
             })

@@ -8788,6 +8788,143 @@ fn a_watcher_removal_in_a_filtered_listing_selects_the_next_visible_row(cx: &mut
     assert_eq!(selected, vec![root.join("date.txt")]);
 }
 
+/// A watcher removal with no operation effect starts a leaving effect, and the
+/// rows below close the gap in Full motion.
+#[gpui::test]
+fn a_watcher_removal_starts_a_leaving_effect_that_closes_the_gap(cx: &mut TestAppContext) {
+    use crow_core::motion::{Effective, Fx};
+    let root = fixture("watcher-removal-effect");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt", "c.txt"]);
+    cx.update(|cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Full);
+    let removed = vec![(root.join("b.txt"), None)];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(vec![entries[0].clone(), entries[2].clone()], Some(&removed), cx)
+        })
+    });
+    let (fx, removed_flag, started, row_index) = cx.update(|cx| {
+        let effects = folder.read(cx).effects();
+        assert_eq!(effects.len(), 1, "one effect for the removed row");
+        let effect = &effects[0];
+        (effect.fx, effect.removed, effect.started, effect.row_index)
+    });
+    assert_eq!(fx, Fx::Trash, "the removal uses the trash look");
+    assert!(removed_flag, "the effect knows the listing dropped the row");
+    assert_eq!(row_index, 1, "the effect keeps the row's old index");
+    let phases = crow_core::motion::phases(Effective::Full, Fx::Trash);
+    let mid = started + phases[0] + Duration::from_millis(1);
+    let shift = cx.update(|cx| folder.read(cx).row_shift(1, Effective::Full, mid, crate::pane::ROW_HEIGHT));
+    assert!(shift > 0.0, "the row below closes the gap");
+    let end = started + phases[0] + phases[1] + Duration::from_millis(1);
+    let shift = cx.update(|cx| folder.read(cx).row_shift(1, Effective::Full, end, crate::pane::ROW_HEIGHT));
+    assert_eq!(shift, 0.0, "the shift reaches zero");
+}
+
+/// A sort or a reload with the same entries is a reorder, not a removal.
+#[gpui::test]
+fn a_reorder_starts_no_leaving_effect(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    let root = fixture("watcher-reorder-effect");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt", "c.txt"]);
+    cx.update(|cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Full);
+    // A watcher batch with no removals (a sort's apply).
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries.clone(), Some(&[]), cx)));
+    assert!(folder.read_with(cx, |folder, _| folder.effects().is_empty()), "no effect for a reorder");
+    let shift =
+        folder.read_with(cx, |folder, _| folder.row_shift(1, Effective::Full, Instant::now(), crate::pane::ROW_HEIGHT));
+    assert_eq!(shift, 0.0, "no gap to close");
+    // A full reload with the same entries.
+    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries.clone(), None, cx)));
+    assert!(folder.read_with(cx, |folder, _| folder.effects().is_empty()), "no effect for a reload");
+}
+
+/// A rename is a removal plus an addition in one batch, not a removal to animate.
+#[gpui::test]
+fn a_rename_batch_starts_no_leaving_effect(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    let root = fixture("watcher-rename-effect");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt"]);
+    cx.update(|cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Full);
+    let mut renamed = entries[1].clone();
+    renamed.name = "c.txt".into();
+    renamed.path = root.join("c.txt");
+    let stats = vec![(root.join("b.txt"), None), (root.join("c.txt"), Some(renamed.clone()))];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(vec![entries[0].clone(), renamed], Some(&stats), cx)
+        })
+    });
+    assert!(folder.read_with(cx, |folder, _| folder.effects().is_empty()), "a rename is not a removal");
+}
+
+/// A trash operation already started the effect; the watcher batch must not add
+/// a second one, and the existing effect must close the gap.
+#[gpui::test]
+fn a_watcher_removal_keeps_the_operation_effect(cx: &mut TestAppContext) {
+    use crow_core::motion::{Effective, Fx};
+    let root = fixture("watcher-existing-effect");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt", "c.txt"]);
+    cx.update(|cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Full);
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| folder.start_effect(&[root.join("b.txt")], Fx::Trash, Effective::Full, cx))
+    });
+    let removed = vec![(root.join("b.txt"), None)];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(vec![entries[0].clone(), entries[2].clone()], Some(&removed), cx)
+        })
+    });
+    let (count, fx, removed_flag) = cx.update(|cx| {
+        let effects = folder.read(cx).effects();
+        (effects.len(), effects[0].fx, effects[0].removed)
+    });
+    assert_eq!(count, 1, "the watcher batch did not add a second effect");
+    assert_eq!(fx, Fx::Trash, "the operation's effect is kept");
+    assert!(removed_flag, "it now closes the gap");
+}
+
+/// Off changes state in one frame: no effect and no ghost.
+#[gpui::test]
+fn a_watcher_removal_in_off_motion_starts_no_effect(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    let root = fixture("watcher-removal-off");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt", "c.txt"]);
+    cx.update(|cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Off);
+    let removed = vec![(root.join("b.txt"), None)];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(vec![entries[0].clone(), entries[2].clone()], Some(&removed), cx)
+        })
+    });
+    assert!(folder.read_with(cx, |folder, _| folder.effects().is_empty()), "Off starts no effect");
+}
+
+/// Low fades the removed row without moving the rows below.
+#[gpui::test]
+fn a_watcher_removal_in_low_motion_fades_without_moving(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    let root = fixture("watcher-removal-low");
+    let (folder, entries) = synthetic_folder(cx, &root, &["a.txt", "b.txt", "c.txt"]);
+    cx.update(|cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Low);
+    let removed = vec![(root.join("b.txt"), None)];
+    cx.update(|cx| {
+        folder.update(cx, |folder, cx| {
+            folder.replace_entries_for_test(vec![entries[0].clone(), entries[2].clone()], Some(&removed), cx)
+        })
+    });
+    let (started, opacity) = cx.update(|cx| {
+        let folder = folder.read(cx);
+        let effect = &folder.effects()[0];
+        let look = effect.look(Effective::Low, effect.started + Duration::from_millis(70));
+        (effect.started, look.opacity)
+    });
+    assert!(opacity < 1.0 && opacity > 0.0, "the row fades, got {opacity}");
+    let shift = cx.update(|cx| {
+        folder.read(cx).row_shift(1, Effective::Low, started + Duration::from_millis(70), crate::pane::ROW_HEIGHT)
+    });
+    assert_eq!(shift, 0.0, "Low never moves the rows");
+}
+
 /// A child row vanishing from an inline folder leaves the parent row's cursor alone.
 #[gpui::test]
 fn a_child_removal_keeps_the_parent_cursor(cx: &mut TestAppContext) {

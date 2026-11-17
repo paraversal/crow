@@ -642,9 +642,7 @@ impl Folder {
     /// Start `fx` on the visible rows among `paths` (at most 20), for `mode`'s
     /// duration. `off` starts nothing: the state changes in one frame.
     pub fn start_effect(&mut self, paths: &[PathBuf], fx: Fx, mode: Effective, cx: &mut Context<Self>) {
-        let phases = motion::phases(mode, fx);
-        let total: Duration = phases.iter().sum();
-        if total.is_zero() {
+        if motion::phases(mode, fx).is_empty() {
             return;
         }
         let wanted: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
@@ -664,11 +662,27 @@ impl Folder {
         if started == 0 {
             return;
         }
+        self.schedule_effect_clear(cx);
+    }
+
+    /// Clear the effects once the longest one has finished (plus the watcher
+    /// grace). A later, shorter effect must not cut an earlier, longer one.
+    fn schedule_effect_clear(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let wait = self
+            .effects
+            .iter()
+            .map(|effect| {
+                let total: Duration = effect.phases.iter().sum();
+                (effect.started + total + WATCH_GRACE).saturating_duration_since(now)
+            })
+            .max()
+            .unwrap_or_default();
         self.effect_generation += 1;
         let generation = self.effect_generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(total + WATCH_GRACE).await;
+            cx.background_executor().timer(wait).await;
             this.update(cx, |this, cx| {
                 if this.effect_generation == generation {
                     this.effects.clear();
@@ -678,6 +692,42 @@ impl Folder {
             .ok();
         })
         .detach();
+    }
+
+    /// Start a leaving effect for each row a watcher batch (or a permanent
+    /// delete) removed without an operation effect, so the rows below close the
+    /// gap. Off starts nothing: the state changes in one frame.
+    fn start_removed_effects(&mut self, stats: &[(PathBuf, Option<Entry>)], cx: &mut Context<Self>) {
+        // A rename arrives as a removal and an addition in the same batch: the
+        // row is still there under its new name, so it is not a removal to animate.
+        if stats.iter().any(|(_, entry)| entry.is_some()) {
+            return;
+        }
+        let mode = cx.try_global::<crate::ui::Ui>().map_or(Effective::Off, |ui| ui.feedback.mode);
+        if motion::phases(mode, Fx::Trash).is_empty() {
+            return;
+        }
+        // The operation may already animate the first visible rows; the cap is
+        // for the rows that move, so count the leaving effects already running.
+        let mut started = self.effects.iter().filter(|effect| effect.fx.leaving()).count();
+        for (path, entry) in stats {
+            if entry.is_some() || started >= MAX_EFFECTS {
+                continue;
+            }
+            if self.effects.iter().any(|effect| effect.path == *path) {
+                continue;
+            }
+            let Some(ix) = self.index_of_path(path) else { continue };
+            let Some((entry, _)) = self.row(ix) else { continue };
+            let mut effect = RowEffect::new(path.clone(), Fx::Trash, mode, ix, entry.clone());
+            effect.removed = true;
+            effect.removed_at = Some(effect.started);
+            self.effects.push(effect);
+            started += 1;
+        }
+        if started > 0 {
+            self.schedule_effect_clear(cx);
+        }
     }
 
     /// How the row at `path` looks right now, if an effect is playing on it.
@@ -1180,6 +1230,9 @@ impl Folder {
                     }
                 }
             }
+        }
+        if let Some(stats) = stats {
+            self.start_removed_effects(stats, cx);
         }
         self.replace_entries_arc(entries, cx);
         if !self.effects.is_empty() {
