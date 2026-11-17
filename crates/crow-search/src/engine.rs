@@ -6,8 +6,9 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::SystemTime;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use grep_matcher::Matcher as _;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
@@ -22,6 +23,79 @@ use crate::rules::RuleSet;
 /// with a great many matching lines can produce more hits than this; sending
 /// them all at once makes the UI freeze while it drains one batch.
 const BATCH: usize = 256;
+
+/// How long a hit may wait in `pending` before it is sent, once the first batch is out.
+const FLUSH: Duration = Duration::from_millis(30);
+
+/// Decides when pending hits go to the sink. The first hit goes at once (time to
+/// first result); after that a batch goes when `BATCH` hits are pending or `FLUSH`
+/// has passed since the last send. Pure: the caller passes the clock.
+struct Batcher {
+    pending: Vec<Hit>,
+    last_sent: Option<Instant>,
+}
+
+impl Batcher {
+    fn new() -> Self {
+        Batcher { pending: Vec::new(), last_sent: None }
+    }
+
+    /// Add hits; returns the batches to send now (each at most `BATCH` long).
+    fn push(&mut self, hits: Vec<Hit>, now: Instant) -> Vec<Vec<Hit>> {
+        self.pending.extend(hits);
+        let mut ready = Vec::new();
+        if self.pending.is_empty() {
+            return ready;
+        }
+        let Some(last_sent) = self.last_sent else {
+            // The first result must not wait for a full batch or a timer.
+            while !self.pending.is_empty() {
+                ready.push(self.take_batch());
+            }
+            self.last_sent = Some(now);
+            return ready;
+        };
+        while self.pending.len() >= BATCH {
+            ready.push(self.take_batch());
+        }
+        if !ready.is_empty() {
+            self.last_sent = Some(now);
+        }
+        if !self.pending.is_empty() && now.saturating_duration_since(last_sent) >= FLUSH {
+            ready.push(std::mem::take(&mut self.pending));
+            self.last_sent = Some(now);
+        }
+        ready
+    }
+
+    /// Called when the receiver times out: the pending hits if `FLUSH` has passed.
+    fn due(&mut self, now: Instant) -> Option<Vec<Hit>> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let due = self.last_sent.is_none_or(|last| now.saturating_duration_since(last) >= FLUSH);
+        if due {
+            self.last_sent = Some(now);
+            Some(std::mem::take(&mut self.pending))
+        } else {
+            None
+        }
+    }
+
+    /// The walk ended: whatever is left.
+    fn finish(self) -> Option<Vec<Hit>> {
+        (!self.pending.is_empty()).then_some(self.pending)
+    }
+
+    /// The first `BATCH` hits: one huge file can make `pending` huge.
+    fn take_batch(&mut self) -> Vec<Hit> {
+        if self.pending.len() <= BATCH {
+            return std::mem::take(&mut self.pending);
+        }
+        let rest = self.pending.split_off(BATCH);
+        std::mem::replace(&mut self.pending, rest)
+    }
+}
 
 /// What to look for. `contents` is literal and case-insensitive unless wrapped
 /// in `/…/`, which makes it a regex. `everything` ignores every exclusion set.
@@ -215,51 +289,62 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                         return WalkState::Continue;
                     }
                     scanned.fetch_add(1, Ordering::Relaxed);
-                    let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+                    let file_type = entry.file_type();
+                    let is_dir = file_type.is_some_and(|kind| kind.is_dir());
                     let metadata = entry.metadata().ok();
                     let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
                     let size = metadata.as_ref().map_or(0, |meta| meta.len());
-                    let mut hits = Vec::new();
                     if let Some(fuzzy) = fuzzy.as_mut() {
                         let name = entry.file_name();
                         let name = name.to_string_lossy();
                         if let Some((score, ranges)) = fuzzy.indices(name.as_ref()) {
-                            hits.push(Hit {
+                            // Send the name hit before this file's contents are read: a large
+                            // file must not delay its own name, or the results that follow it.
+                            let _ = tx.send(vec![Hit {
                                 path: entry.path().to_path_buf(),
                                 is_dir,
                                 score,
                                 kind: HitKind::Name { ranges },
                                 modified,
                                 size,
-                            });
+                            }]);
                         }
                     }
+                    // Contents only from regular files, and symlinks to regular files. A
+                    // FIFO with no writer blocks its reader forever, which would stall the
+                    // whole search; sockets and devices are no better.
+                    let readable = file_type.is_some_and(|kind| kind.is_file())
+                        || (file_type.is_some_and(|kind| kind.is_symlink())
+                            && std::fs::metadata(entry.path()).is_ok_and(|meta| meta.is_file()));
                     if let Some(content) = content.as_mut()
-                        && !is_dir
+                        && readable
                     {
-                        let before = hits.len();
-                        let matches = content.search(entry.path(), modified, size, &mut hits, &cancel);
+                        let mut content_hits = Vec::new();
+                        let matches = content.search(entry.path(), modified, size, &mut content_hits, &cancel);
                         if matches > 1
-                            && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) = hits.get_mut(before)
+                            && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) =
+                                content_hits.first_mut()
                         {
                             *more = matches - 1;
                         }
-                    }
-                    if !hits.is_empty() {
-                        let _ = tx.send(hits);
+                        if !content_hits.is_empty() {
+                            let _ = tx.send(content_hits);
+                        }
                     }
                     WalkState::Continue
                 })
             });
         });
 
-        let mut pending = Vec::new();
-        for batch in rx {
-            pending.extend(batch);
-            while pending.len() >= BATCH {
-                // Hand out a bounded slice; a huge file can make `pending` huge.
-                let rest = pending.split_off(BATCH);
-                sink(std::mem::replace(&mut pending, rest));
+        let mut batcher = Batcher::new();
+        loop {
+            let ready = match rx.recv_timeout(FLUSH) {
+                Ok(hits) => batcher.push(hits, Instant::now()),
+                Err(RecvTimeoutError::Timeout) => batcher.due(Instant::now()).into_iter().collect(),
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+            for batch in ready {
+                sink(batch);
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
@@ -268,8 +353,8 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                 break;
             }
         }
-        if !pending.is_empty() && !cancel.load(Ordering::Relaxed) {
-            sink(pending);
+        if !cancel.load(Ordering::Relaxed) && let Some(rest) = batcher.finish() {
+            sink(rest);
         }
     });
 
@@ -664,6 +749,128 @@ mod tests {
         // One excerpt per file: its first matching line, plus the count of the rest.
         assert_eq!(content(&hits), [(2, "NEEDLE here".to_owned(), ranges(0, 6))]);
         assert_eq!(extra_matches(&hits), 1, "the third line is counted, not carried");
+    }
+
+    fn hit(path: &str) -> Hit {
+        Hit {
+            path: PathBuf::from(path),
+            is_dir: false,
+            score: 1,
+            kind: HitKind::Name { ranges: Vec::new() },
+            modified: None,
+            size: 0,
+        }
+    }
+
+    fn hits(count: usize) -> Vec<Hit> {
+        (0..count).map(|i| hit(&format!("h{i}"))).collect()
+    }
+
+    #[test]
+    fn batcher_sends_the_first_hit_at_once() {
+        let base = Instant::now();
+        let mut batcher = Batcher::new();
+        let ready = batcher.push(vec![hit("first")], base);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].len(), 1);
+    }
+
+    #[test]
+    fn batcher_holds_hits_until_flush() {
+        let base = Instant::now();
+        let mut batcher = Batcher::new();
+        assert_eq!(batcher.push(vec![hit("first")], base).len(), 1);
+        assert!(batcher.push(hits(10), base + Duration::from_millis(5)).is_empty(), "under FLUSH, nothing is due");
+        assert!(batcher.due(base + Duration::from_millis(20)).is_none());
+        assert_eq!(batcher.due(base + Duration::from_millis(36)).map(|batch| batch.len()), Some(10));
+    }
+
+    #[test]
+    fn batcher_sends_full_batches_immediately() {
+        let base = Instant::now();
+        let mut batcher = Batcher::new();
+        assert_eq!(batcher.push(vec![hit("first")], base).len(), 1);
+        let ready = batcher.push(hits(600), base + Duration::from_millis(1));
+        let lengths: Vec<usize> = ready.iter().map(Vec::len).collect();
+        assert_eq!(lengths, [256, 256]);
+        assert_eq!(batcher.finish().map(|batch| batch.len()), Some(88));
+    }
+
+    #[test]
+    fn batcher_never_sends_empty() {
+        let base = Instant::now();
+        let mut batcher = Batcher::new();
+        assert!(batcher.due(base + Duration::from_millis(100)).is_none());
+        assert!(batcher.finish().is_none());
+    }
+
+    #[test]
+    fn content_search_skips_fifos() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let root = root("fifo");
+        write(&root, "file.txt", b"needle\n");
+        let pipe = root.join("pipe");
+        let path = CString::new(pipe.as_os_str().as_bytes()).expect("no NUL in a temp path");
+        // SAFETY: `path` is a valid NUL-terminated path in `root`.
+        let made = unsafe { libc::mkfifo(path.as_ptr(), 0o644) };
+        assert_eq!(made, 0, "mkfifo: {}", io::Error::last_os_error());
+
+        let query = Query {
+            names: None,
+            contents: Some("needle".into()),
+            show_hidden: false,
+            rules: rules(),
+            everything: true,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let search_root = root.clone();
+        std::thread::spawn(move || {
+            let mut hits = Vec::new();
+            let summary = search(&search_root, &query, |batch| hits.extend(batch), &cancel);
+            let _ = tx.send((hits, summary));
+        });
+        let (hits, summary) =
+            rx.recv_timeout(Duration::from_secs(10)).expect("the search finishes despite the FIFO");
+        assert!(summary.error.is_none(), "{:?}", summary.error);
+        assert_eq!(paths(&hits), [root.join("file.txt")], "the FIFO is never opened");
+    }
+
+    #[test]
+    fn name_hit_arrives_before_its_content_hit() {
+        let root = root("name-before-content");
+        write(&root, "needle.txt", b"needle\n");
+        let query = Query {
+            names: Some("needle".into()),
+            contents: Some("needle".into()),
+            show_hidden: false,
+            rules: rules(),
+            everything: true,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut is_name = Vec::new();
+        let summary = search(
+            &root,
+            &query,
+            |batch| is_name.extend(batch.into_iter().map(|hit| matches!(hit.kind, HitKind::Name { .. }))),
+            &cancel,
+        );
+        assert!(summary.error.is_none(), "{:?}", summary.error);
+        let name = is_name.iter().position(|name| *name).expect("a name hit");
+        let content = is_name.iter().position(|name| !*name).expect("a content hit");
+        assert!(name < content, "the name hit arrives before its own content read: {is_name:?}");
+    }
+
+    #[test]
+    fn a_symlink_to_a_file_gets_a_content_hit() {
+        let root = root("symlink-content");
+        write(&root, "target.txt", b"needle\n");
+        std::os::unix::fs::symlink("target.txt", root.join("link.txt")).expect("symlink");
+        let (hits, summary) = run(&root, None, Some("needle"), false, true);
+        assert!(summary.error.is_none(), "{:?}", summary.error);
+        let link = hits.iter().find(|hit| hit.path == root.join("link.txt")).expect("the symlink is read");
+        assert!(matches!(link.kind, HitKind::Content { .. }));
     }
 
     #[test]
