@@ -886,18 +886,21 @@ impl SearchView {
     }
 
     /// A right-click or Ctrl-click on result `ix`. An unselected row is selected
-    /// first; a row in the selection keeps it, as in the list.
+    /// first; a row in the selection keeps it, as in the list, and becomes the
+    /// active row, so the bar, the preview and the single-row actions all name it.
     fn context_press(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         let Some(row) = self.results.get(ix) else { return };
         if !self.selection.contains(&row.path) {
             self.selection.select_only(row.path.clone());
             self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
-            self.load_preview(cx);
+        } else {
+            // The selection stays, so Copy, Cut and Trash still take all of it.
+            self.selection.set_cursor(row.path.clone());
         }
-        // Single-row actions (Open, Reveal, Quick Look) act on the cursor; the
-        // selection stays, so Copy, Cut and Trash still take all of it.
+        // Single-row actions (Open, Reveal, Quick Look) act on the cursor.
         self.cursor = ix;
+        self.load_preview(cx);
         self.user_moved = true;
         cx.notify();
         self.open_menu(ix, window, cx);

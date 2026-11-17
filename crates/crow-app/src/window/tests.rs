@@ -3228,6 +3228,40 @@ fn search_result_menu_lists_its_items_and_runs_them(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn right_click_on_a_selected_search_result_makes_it_the_active_row(cx: &mut TestAppContext) {
+    let root = fixture("search-menu-active");
+    std::fs::write(root.join("a-notes.txt"), "alpha\n").expect("create fixture");
+    std::fs::write(root.join("b-notes.txt"), "beta\n").expect("create fixture");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search open");
+    let paths = search.read_with(&cx, |s, _| s.result_paths());
+    assert!(paths.len() >= 2, "{paths:?}");
+
+    // Click the second row, then Cmd-click the first: both selected, cursor on the second.
+    click_selector(&mut cx, "search-row-1");
+    wait_for_preview(&view, &mut cx, &paths[1]);
+    let at = row_center(&mut cx, "search-row-0");
+    cx.simulate_click(at, gpui::Modifiers { platform: true, ..Default::default() });
+    cx.run_until_parked();
+    assert_eq!(search.read_with(&cx, |s, _| s.cursor()), 1, "Cmd-click keeps the cursor on the second row");
+
+    // Right-click the selected first row: it becomes the active row everywhere.
+    let at = row_center(&mut cx, "search-row-0");
+    right_click(&mut cx, at);
+    cx.run_until_parked();
+    assert_eq!(search.read_with(&cx, |s, _| s.cursor()), 0, "the menu's row is the cursor");
+    wait_for_preview(&view, &mut cx, &paths[0]);
+    assert_eq!(
+        search.read_with(&cx, |s, _| s.selected_entry()).map(|(path, _)| path),
+        Some(paths[0].clone()),
+        "the bar names the row the menu will act on"
+    );
+}
+
+#[gpui::test]
 fn cmd_backspace_clears_the_search_field(cx: &mut TestAppContext) {
     let root = fixture("search-cmd-backspace");
     let (view, mut cx) = open(cx, &root);
