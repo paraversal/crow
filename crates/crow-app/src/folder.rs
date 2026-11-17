@@ -207,6 +207,9 @@ pub struct Folder {
     selection: Selection<PathBuf>,
     /// Row of the selection's cursor in `entries`, kept in step with it.
     cursor_ix: Option<usize>,
+    /// The cursor's row and path before an apply. If the apply dropped it, the
+    /// row now at that index (or the new last row) becomes the cursor, as in Finder.
+    cursor_before_apply: Option<(usize, PathBuf)>,
     /// After going up or back, Finder selects the folder you came from.
     select_after_load: Option<PathBuf>,
     /// Items an operation produced: selected as soon as they appear in the listing.
@@ -316,6 +319,7 @@ impl Folder {
             sort,
             selection: Selection::default(),
             cursor_ix: None,
+            cursor_before_apply: None,
             select_after_load: None,
             select_when_present: Vec::new(),
             arrival_mode: Effective::Off,
@@ -1012,7 +1016,9 @@ impl Folder {
 
     /// Select what a load or an operation asked for, and keep the selection's
     /// totals in step with it. Both the partial and the full apply call this.
-    fn apply_pending_selection(&mut self, cx: &mut Context<Self>) {
+    /// Returns whether it selected something (an operation result, not a removal).
+    fn apply_pending_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut selected = false;
         if let Some(target) = self.select_after_load.clone()
             && let Some(entry) = self.entries.iter().find(|entry| entry.path == target)
         {
@@ -1020,6 +1026,7 @@ impl Folder {
             self.selection_totals = Self::entry_totals(entry);
             self.selection.select_only(target);
             self.selection_changed();
+            selected = true;
         }
         if !self.select_when_present.is_empty() && self.all_present(&self.select_when_present) {
             let wanted = std::mem::take(&mut self.select_when_present);
@@ -1037,9 +1044,11 @@ impl Folder {
             }
             self.selection_totals = totals;
             self.selection_changed();
+            selected = true;
             let mode = self.arrival_mode;
             self.start_effect(&wanted, Fx::Arrive, mode, cx);
         }
+        selected
     }
 
     /// Whether every path is in the listing. A large result set (a 100k
@@ -1105,6 +1114,10 @@ impl Folder {
         sync: bool,
     ) {
         let _span = tracing::debug_span!("listing apply").entered();
+        // Remember the cursor's row before the listing changes: if the apply drops
+        // it, the row now at that index becomes the cursor (Finder's next row).
+        self.cursor_before_apply =
+            self.cursor_ix.and_then(|ix| self.row(ix).map(|(entry, _)| (ix, entry.path.clone())));
         // A watcher batch names the paths it removed; drop the selected ones before
         // the swap, while the old entries (and their sizes) are still here.
         if let Some(stats) = stats {
@@ -1322,6 +1335,10 @@ impl Folder {
 
     /// The rest of an apply, after its rows are in place.
     fn finish_apply(&mut self, kind: ApplyKind, cx: &mut Context<Self>) {
+        let cursor_before = match kind {
+            ApplyKind::Full { .. } => self.cursor_before_apply.take(),
+            ApplyKind::Partial => None,
+        };
         if let ApplyKind::Full { .. } = kind
             && self.load_done
         {
@@ -1331,11 +1348,11 @@ impl Folder {
             self.load_done = false;
             self.loading = false;
         }
-        self.apply_pending_selection(cx);
+        let pending_selected = self.apply_pending_selection(cx);
         if let ApplyKind::Full { prune } = kind {
-            // Only the first full load selects the first item. After that an empty
-            // selection stays empty, as in Finder: trashing or moving the selected
-            // item leaves nothing selected rather than jumping to the top.
+            // Only the first full load selects the first item. After that a removal
+            // selects the row now at the cursor's old index
+            // (`select_next_after_removal`), never the top of the folder.
             if self.auto_select && !self.loading {
                 self.auto_select = false;
                 if self.selection.is_empty()
@@ -1349,6 +1366,9 @@ impl Folder {
             if prune {
                 self.prune_selection();
             }
+        }
+        if !pending_selected && let Some((old_ix, old_path)) = cursor_before {
+            self.select_next_after_removal(old_ix, old_path, cx);
         }
         self.settle_cursor(cx);
         // The drag snapshot is keyed by the selection, not by the rows: a reorder
@@ -1400,6 +1420,37 @@ impl Folder {
         if self.selection.len() != before {
             self.selection_changed();
         }
+    }
+
+    /// After a removal dropped the cursor row, put the cursor on the row now at
+    /// its old index (or the new last row), as Finder does. Other selected rows
+    /// stay selected; the new cursor row joins them, because the cursor row must
+    /// be selected (the pane's invariant).
+    fn select_next_after_removal(&mut self, old_ix: usize, old_path: PathBuf, cx: &mut Context<Self>) {
+        if self.index_of_path(&old_path).is_some() {
+            // A reorder (sort, filter, reload), not a removal.
+            return;
+        }
+        let Some(last) = self.row_count().checked_sub(1) else { return };
+        let ix = old_ix.min(last);
+        let Some((entry, _)) = self.row(ix) else { return };
+        let path = entry.path.clone();
+        let totals = Self::entry_totals(entry);
+        if self.selection.is_empty() {
+            self.selection.select_only(path);
+            self.selection_totals = totals;
+            self.selection_changed();
+        } else if self.selection.contains(&path) {
+            self.selection.set_cursor(path);
+        } else {
+            self.selection.toggle(path);
+            self.selection_totals.0 += totals.0;
+            self.selection_totals.1 += totals.1;
+            self.selection_changed();
+        }
+        self.cursor_ix = Some(ix);
+        self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+        cx.emit(FolderEvent::CursorMoved);
     }
 
     /// Point the cursor row at the selection's cursor; scroll if it moved.
