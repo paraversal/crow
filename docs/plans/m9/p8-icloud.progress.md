@@ -1,6 +1,6 @@
 # M9 P8 — iCloud metadata without hydration — progress
 
-Branch: codex/m9-p8-icloud · PR: none · Last updated: 2026-11-18 · State: **in progress**
+Branch: codex/m9-p8-icloud · PR: none · Last updated: 2026-11-18 · State: **Ready for critique**
 Base: `b035537` (M9 P9C, merged as #64)
 
 ## Status
@@ -8,9 +8,9 @@ Base: `b035537` (M9 P9C, merged as #64)
 | Item | State | Notes |
 | --- | --- | --- |
 | 1 Platform spike | done | Fixtures created and eviction/hydration matrix measured; results below |
-| 2 Typed status, cache and UI | done | `crow-fs::cloud`, `crow-macos::cloud`, app `CloudStatuses`, row badges, Info/Preview/VoiceOver text |
-| 3 Automatic-read audit and gate | done | Previewers, excerpts, Quick Look, icons, search content; folder sizes stay metadata-only |
-| 4 Tests, hand checks and bench | done | 923 workspace tests, fmt/clippy green, local and iCloud benches below; VoiceOver not driven |
+| 2 Typed status, cache and UI | done (`05e3aa8`) | `crow-fs::cloud`, `crow-macos::cloud`, app `CloudStatuses`, row badges, Info/Preview/VoiceOver text |
+| 3 Automatic-read audit and gate | done (`05e3aa8`) | Previewers, excerpts, Quick Look, icons, search content; folder sizes stay metadata-only |
+| 4 Tests, hand checks and bench | done (`05e3aa8`) | 923 workspace tests, fmt/clippy green, local and iCloud benches below; VoiceOver not driven. Plugin race fixed in `fc90e4e` |
 
 ## Spike results (2026-11-18, macOS 27.2.1, build 26B131)
 
@@ -179,8 +179,11 @@ candidates; no unresolved provider behavior blocks the plan.
 - 2026-11-18: Fixed the plugin budget/cancel race reported during the full run, added the regression,
   ran workspace fmt/clippy/tests, local 100k and search benches, and the iCloud hand checks. Removed
   the iCloud scratch trees, bench worktree and throwaway probes.
+- 2026-11-18: Committed `fc90e4e` (plugin cancellation) and `05e3aa8` (P8 implementation plus this
+  progress file). Working tree leaves the user's uncommitted docs reorganisation untouched.
 
 ## Next
 
-Commit the plugin fix separately, then the P8 implementation and this progress file. The code and
-hand checks are complete; leave VoiceOver and the names-mode iCloud visual check for critique/user.
+Ready for critique. Leave VoiceOver and the names-mode iCloud visual check for critique/user; both
+are listed as unticked hand checks. Re-run the iCloud probe only after creating a fresh scratch
+fixture, since the original was removed.
