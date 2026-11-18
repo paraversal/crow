@@ -308,6 +308,7 @@ pub fn run(args: &[String]) -> ExitCode {
             app_outcome.clone(),
             app_options.seed,
             app_replay.clone(),
+            app_options.script.is_none().then(|| script_path.clone()),
             cx,
         );
         let options = app_options.clone();
@@ -725,6 +726,7 @@ fn install_heartbeat(
     outcome: Arc<Mutex<Option<Outcome>>>,
     seed: u64,
     replay: crate::fuzz_events::Replay,
+    generated_script: Option<PathBuf>,
     cx: &mut App,
 ) {
     {
@@ -733,7 +735,7 @@ fn install_heartbeat(
         log.last_beat = Some(Instant::now());
         log.active = true;
     }
-    install_watchdog(frames.clone(), trace.clone(), seed, replay);
+    install_watchdog(frames.clone(), trace.clone(), seed, replay, generated_script);
     cx.spawn(async move |cx| {
         let mut last = Instant::now();
         let mut frozen_steps = std::collections::HashSet::new();
@@ -796,7 +798,13 @@ fn install_heartbeat(
 /// The heartbeat runs on the main thread, so it cannot see a step that never
 /// returns. This thread can: when the heartbeat has not run for `HANG_MS` while
 /// a step is current, it prints `HANG` and exits 1.
-fn install_watchdog(frames: Arc<Mutex<FrameLog>>, trace: Arc<Trace>, seed: u64, replay: crate::fuzz_events::Replay) {
+fn install_watchdog(
+    frames: Arc<Mutex<FrameLog>>,
+    trace: Arc<Trace>,
+    seed: u64,
+    replay: crate::fuzz_events::Replay,
+    generated_script: Option<PathBuf>,
+) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_millis(250));
@@ -820,6 +828,13 @@ fn install_watchdog(frames: Arc<Mutex<FrameLog>>, trace: Arc<Trace>, seed: u64, 
                 let mut replay = replay.clone();
                 replay.command.push("--until".to_owned());
                 replay.command.push(index.to_string());
+                // A generated run's tool-owned script is kept for replay; a
+                // user-supplied --script is not copied into the report.
+                if let Some(path) = &generated_script
+                    && let Ok(text) = std::fs::read_to_string(path)
+                {
+                    replay.script = Some(text);
+                }
                 crate::fuzz_events::seed_failure_without_counts(
                     "fuzz-live",
                     seed,
