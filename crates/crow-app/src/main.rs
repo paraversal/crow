@@ -32,6 +32,8 @@ mod folder;
 mod folder_sizes;
 #[cfg(any(test, feature = "fuzz"))]
 mod fuzz;
+#[cfg(any(test, feature = "fuzz"))]
+mod fuzz_events;
 #[cfg(feature = "fuzz")]
 mod fuzz_live;
 mod icons;

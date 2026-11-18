@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10760,6 +10760,25 @@ fn fuzz_smoke_edge_trees(cx: &mut TestAppContext) {
     let _ = crow_fs::testing::remove_tree(&edge_tree);
 }
 
+/// Replay options for a headless seed. The seed and tree build the same disk,
+/// and the step cap is the one the reported seed ran with.
+fn fuzz_replay(seed: u64, edge: &EdgeTree, churn: bool, steps: usize) -> crate::fuzz_events::Replay {
+    let mut env = BTreeMap::new();
+    env.insert("CROW_FUZZ_SEED".to_owned(), seed.to_string());
+    env.insert("CROW_FUZZ_TREE".to_owned(), edge.spec());
+    env.insert("CROW_FUZZ_CHURN".to_owned(), if churn { "1" } else { "0" }.to_owned());
+    env.insert("CROW_FUZZ_STEPS".to_owned(), steps.to_string());
+    crate::fuzz_events::Replay {
+        command: ["cargo", "test", "-p", "crow-app", "fuzz_long", "--", "--ignored", "--nocapture"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        env,
+        script: None,
+        script_format: crate::fuzz_events::HEADLESS_FORMAT,
+    }
+}
+
 #[gpui::test]
 #[ignore]
 fn fuzz_long(cx: &mut TestAppContext) {
@@ -10774,11 +10793,28 @@ fn fuzz_long(cx: &mut TestAppContext) {
     let explicit = std::env::var("CROW_FUZZ_SEED").ok().and_then(|value| value.parse::<u64>().ok());
     let run = |seed: u64, churn: bool, cx: &mut TestAppContext| {
         println!("CROW_FUZZ_SEED={seed} CROW_FUZZ_TREE={} CROW_FUZZ_CHURN={}", edge.spec(), if churn { 1 } else { 0 });
+        crate::fuzz_events::seed_start("fuzz", seed, &edge.spec(), churn, Some(steps));
+        let started = Instant::now();
         let options = FuzzOptions::new(200, edge.clone(), churn);
-        if let Err(failure) = fuzz_run(seed, steps, &tree, &options, cx) {
-            println!("{}", failure.print());
-            println!("{}", failure.finding_row());
-            panic!("fuzz seed {seed} failed: {}", failure.violation.check);
+        let mut replay = fuzz_replay(seed, &edge, churn, steps);
+        match fuzz_run(seed, steps, &tree, &options, cx) {
+            Ok(()) => crate::fuzz_events::seed_end("fuzz", seed, steps, started.elapsed(), "passed"),
+            Err(failure) => {
+                replay.script = Some(failure.script.print());
+                crate::fuzz_events::seed_failure(
+                    "fuzz",
+                    seed,
+                    failure.step,
+                    failure.step,
+                    failure.violation.check,
+                    &failure.violation.detail,
+                    started.elapsed(),
+                    &replay,
+                );
+                println!("{}", failure.print());
+                println!("{}", failure.finding_row());
+                panic!("fuzz seed {seed} failed: {}", failure.violation.check);
+            }
         }
     };
     if let Some(seed) = explicit {

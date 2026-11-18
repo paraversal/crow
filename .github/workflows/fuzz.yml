@@ -56,16 +56,21 @@ jobs:
           CROW_FUZZ_MINUTES: ${{ inputs.minutes || '20' }}
           CROW_FUZZ_SEED: ${{ inputs.seed }}
           CROW_FUZZ_SHRINK_SECS: '600'
-        run: |
-          set -o pipefail
-          cargo test -p crow-app fuzz_long -- --ignored --nocapture 2>&1 | tee fuzz.log
+        run: python3 scripts/test-report.py run --mode fuzz --out "$RUNNER_TEMP/test-report-fuzz" -- cargo test -p crow-app fuzz_long -- --ignored --nocapture
 
       - name: Summary
         if: always()
         run: |
           {
             echo "## Fuzz run"
-            echo '```'
-            grep -E 'CROW_FUZZ_SEED=|seed [0-9]+ step|^\| \| H1' fuzz.log || true
-            echo '```'
+            echo
+            python3 scripts/test-report.py summary "$RUNNER_TEMP/test-report-fuzz" || true
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload fuzz report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-report-fuzz
+          path: ${{ runner.temp }}/test-report-fuzz
+          if-no-files-found: warn
