@@ -390,6 +390,8 @@ pub struct PluginEntry {
     pub detail: Option<String>,
     pub digest: Option<String>,
     pub requested_fs: FsAccess,
+    /// The approved grant currently allows host-read excerpts.
+    pub read_allowed: bool,
     pub descriptors: Vec<Descriptor>,
     /// Derived from the Running record; empty outside Running.
     pub icon_packs: Vec<RegisteredIconPack>,

@@ -943,14 +943,32 @@ impl SearchView {
             None => (Arc::new(AllowAll) as Arc<dyn ReadGate>, None),
         };
         let requested = path.clone();
+        let configured = cx.global::<Ui>().views.resolve(&self.folder).preview_providers.0.clone();
+        let initial_candidates = crate::plugins::preview_candidates(cx, &configured, &path, row.is_dir, false);
+        let surface = self.plugin_surface;
+        let revision = generation;
         cx.spawn(async move |this, cx| {
-            let loaded = cx
-                .background_spawn(async move {
-                    let entry = crow_fs::stat_entry(&requested).ok().flatten()?;
-                    let preview = preview::fetch_at(&entry, &extensions, line, gate.as_ref(), cloud);
-                    Some(LoadedPreview { entry, preview })
-                })
-                .await;
+            let entry = cx.background_spawn(async move { crow_fs::stat_entry(&requested).ok().flatten() }).await;
+            let Some(entry) = entry else { return };
+            let readable =
+                gate.check(&entry.path, crow_fs::ReadHint::for_path(&entry.path)) == crow_fs::ReadDecision::Readable;
+            let plugin = if initial_candidates.is_empty() || !readable || entry.is_symlink {
+                None
+            } else {
+                preview::plugin_preview(cx, surface, initial_candidates, entry.clone(), gate.clone(), cloud, revision)
+                    .await
+            };
+            let preview = match plugin {
+                Some(preview) => preview,
+                None => {
+                    let fetched_entry = entry.clone();
+                    cx.background_spawn(async move {
+                        preview::fetch_at(&fetched_entry, &extensions, line, gate.as_ref(), cloud)
+                    })
+                    .await
+                }
+            };
+            let loaded = Some(LoadedPreview { entry, preview });
             this.update(cx, |this, cx| {
                 if this.preview_generation == generation
                     && this.results.get(this.cursor).is_some_and(|row| row.path == path)

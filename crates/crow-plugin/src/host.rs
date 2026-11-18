@@ -925,6 +925,10 @@ impl PluginHost {
                 detail,
                 digest,
                 requested_fs,
+                read_allowed: candidate
+                    .id
+                    .as_ref()
+                    .is_some_and(|id| self.runtime.get(id).is_some_and(|record| record.read_allowed)),
                 descriptors,
                 icon_packs,
                 generation,

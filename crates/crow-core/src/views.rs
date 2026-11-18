@@ -35,6 +35,7 @@ pub const DEFAULT_VIEWS: &str = r#"# Crow view settings. Changes apply when you 
 #                                 newest and largest first otherwise)
 #   folders_first = true | false
 #   columns = ["modified", "size", "kind", "added"]   list view columns after Name
+#   preview_providers = ["example.pack.preview"]       plugin previews tried before native
 
 [defaults]
 view = "list"
@@ -64,6 +65,7 @@ pub struct ViewLayer {
     pub ascending: Option<bool>,
     pub folders_first: Option<bool>,
     pub columns: Option<Vec<String>>,
+    pub preview_providers: Option<Vec<String>>,
 }
 
 // `flatten` can't be combined with `deny_unknown_fields`, so a rule repeats the layer's keys.
@@ -77,6 +79,7 @@ struct RuleFile {
     ascending: Option<bool>,
     folders_first: Option<bool>,
     columns: Option<Vec<String>>,
+    preview_providers: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -154,6 +157,7 @@ pub struct ResolvedView {
     pub ascending: (bool, Source),
     pub folders_first: (bool, Source),
     pub columns: (Vec<String>, Source),
+    pub preview_providers: (Vec<String>, Source),
     /// Every rule that matched, in order (for the explanation, even those whose
     /// values were all overridden).
     pub matched_rules: Vec<String>,
@@ -209,6 +213,7 @@ impl Views {
                     ascending: r.ascending,
                     folders_first: r.folders_first,
                     columns: r.columns,
+                    preview_providers: r.preview_providers,
                 };
                 Ok(Rule { pattern: r.path, matchers, layer })
             })
@@ -225,6 +230,7 @@ impl Views {
             ascending: (true, Source::Builtin),
             folders_first: (true, Source::Builtin),
             columns: (vec!["modified".into(), "size".into(), "kind".into()], Source::Builtin),
+            preview_providers: (Vec::new(), Source::Builtin),
             matched_rules: Vec::new(),
         };
         let mut apply = |layer: &ViewLayer, source: Source| {
@@ -243,7 +249,10 @@ impl Views {
                 out.folders_first = (f, source.clone());
             }
             if let Some(c) = &layer.columns {
-                out.columns = (c.clone(), source);
+                out.columns = (c.clone(), source.clone());
+            }
+            if let Some(p) = &layer.preview_providers {
+                out.preview_providers = (p.clone(), source);
             }
         };
         apply(&self.defaults, Source::Defaults);
@@ -404,6 +413,31 @@ view = "list"
         let modules = v.resolve(Path::new("/Users/me/Projects/web/node_modules"));
         assert_eq!(modules.view, (ViewMode::List, Source::Rule("**/node_modules".into())));
         assert_eq!(modules.matched_rules, ["~/Projects/**", "**/node_modules"]);
+    }
+
+    #[test]
+    fn preview_providers_inherit_and_an_empty_folder_list_selects_native_only() {
+        let v = Views::parse(
+            r#"
+[defaults]
+preview_providers = ["example.pack.preview", "example.other.preview"]
+
+[[rule]]
+path = "~/Pictures/**"
+preview_providers = ["example.pictures.preview"]
+
+[folder."~/Pictures/Empty"]
+preview_providers = []
+"#,
+            Path::new(HOME),
+        )
+        .unwrap();
+        assert_eq!(
+            v.resolve(Path::new("/Users/me/Documents")).preview_providers.0,
+            ["example.pack.preview", "example.other.preview"]
+        );
+        assert_eq!(v.resolve(Path::new("/Users/me/Pictures/One")).preview_providers.0, ["example.pictures.preview"]);
+        assert!(v.resolve(Path::new("/Users/me/Pictures/Empty")).preview_providers.0.is_empty());
     }
 
     #[test]

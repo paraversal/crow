@@ -55,6 +55,7 @@ impl ScopeKey {
 pub struct PublishedExtension {
     pub generation: u64,
     pub package: String,
+    pub read_allowed: bool,
     pub descriptor: Descriptor,
 }
 
@@ -290,6 +291,10 @@ struct InfoBinding {
 }
 
 enum TicketKind {
+    Preview {
+        surface: SurfaceId,
+        sender: futures::channel::oneshot::Sender<RequestResult>,
+    },
     Sidebar {
         surface: SurfaceId,
         scope: ScopeKey,
@@ -481,6 +486,7 @@ impl PluginSurfaces {
                     PublishedExtension {
                         generation: entry.generation,
                         package: entry.title().to_owned(),
+                        read_allowed: entry.read_allowed,
                         descriptor: descriptor.clone(),
                     },
                 );
@@ -820,6 +826,44 @@ impl PluginSurfaces {
         }
     }
 
+    /// Submit one preview provider. The caller races the receiver against the
+    /// total plugin deadline and falls through to the next candidate.
+    pub fn request_preview(
+        &mut self,
+        handle: &PluginHandle,
+        surface: SurfaceId,
+        descriptor: &ExtensionId,
+        generation: u64,
+        revision: u64,
+        input: RequestInput,
+    ) -> Option<futures::channel::oneshot::Receiver<RequestResult>> {
+        let published = self.snapshot.extension(descriptor)?.clone();
+        if published.generation != generation
+            || published.descriptor.kind != ExtensionKind::Preview
+            || self.suppressed.contains(&descriptor.plugin)
+            || !self.can_submit(descriptor)
+        {
+            return None;
+        }
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        match handle.try_evaluate(descriptor.clone(), published.generation, revision, input) {
+            Ok(ticket) => {
+                self.counters.submitted_rows += 1;
+                self.tickets.insert(
+                    ticket.stamp(),
+                    PassiveTicket {
+                        stamp: ticket.stamp(),
+                        ticket: TicketProbe::Real(ticket),
+                        extension: descriptor.clone(),
+                        kind: TicketKind::Preview { surface, sender },
+                    },
+                );
+                Some(receiver)
+            }
+            Err(SubmitError::Busy | SubmitError::Stopped) => None,
+        }
+    }
+
     pub fn sidebar_rows(&self, surface: SurfaceId) -> Vec<SidebarRowView> {
         self.sidebar.get(&surface).and_then(|binding| binding.values.values().next()).cloned().unwrap_or_default()
     }
@@ -1058,6 +1102,10 @@ impl PluginSurfaces {
             return false;
         }
         match (ticket.kind, result) {
+            (TicketKind::Preview { sender, .. }, result) => {
+                let _ = sender.send(result);
+                false
+            }
             (
                 TicketKind::Sidebar { surface, scope, revision, descriptor, entries },
                 result @ (RequestResult::Values(_) | RequestResult::Unit),
@@ -1270,7 +1318,8 @@ impl PluginSurfaces {
                 TicketKind::Rows { surface: s, .. }
                     | TicketKind::Status { surface: s, .. }
                     | TicketKind::Info { surface: s, .. }
-                    | TicketKind::Sidebar { surface: s, .. } if *s == surface
+                    | TicketKind::Sidebar { surface: s, .. }
+                    | TicketKind::Preview { surface: s, .. } if *s == surface
             );
             if !keep {
                 ticket.ticket.cancel();
@@ -1524,6 +1573,7 @@ mod tests {
             detail: None,
             digest: Some("a".repeat(64)),
             requested_fs: FsAccess::None,
+            read_allowed: false,
             descriptors,
             icon_packs: vec![],
             generation,

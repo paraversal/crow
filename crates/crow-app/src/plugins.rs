@@ -419,6 +419,84 @@ pub fn sidebar_rows(cx: &App, surface: SurfaceId) -> Vec<SidebarRowView> {
     cx.try_global::<Plugins>().map_or_else(Vec::new, |plugins| plugins.surfaces.sidebar_rows(surface))
 }
 
+#[derive(Clone, Debug)]
+pub struct PreviewCandidate {
+    pub id: crow_core::ExtensionId,
+    pub generation: u64,
+    pub package: String,
+    pub read_allowed: bool,
+}
+
+/// Configured preview descriptor IDs, in config order, whose suffix filter
+/// matches this entry. Folders, symlinks and unregistered IDs are skipped.
+pub fn preview_candidates(
+    cx: &App,
+    configured: &[String],
+    path: &Path,
+    is_dir: bool,
+    is_symlink: bool,
+) -> Vec<PreviewCandidate> {
+    if is_dir || is_symlink {
+        return Vec::new();
+    }
+    let Some(plugins) = cx.try_global::<Plugins>() else { return Vec::new() };
+    let snapshot = plugins.surfaces.snapshot();
+    let mut out = Vec::new();
+    for raw in configured {
+        let Ok(id) = crow_core::ExtensionId::parse(raw) else { continue };
+        if out.iter().any(|candidate: &PreviewCandidate| candidate.id == id) {
+            continue;
+        }
+        let Some(published) = snapshot.extension(&id) else { continue };
+        if published.descriptor.kind != crow_core::ExtensionKind::Preview
+            || plugins.surfaces.is_suppressed(&id.plugin)
+            || !published.descriptor.extensions.as_ref().is_none_or(|suffixes| suffix_matches(path, suffixes))
+        {
+            continue;
+        }
+        out.push(PreviewCandidate {
+            id,
+            generation: published.generation,
+            package: published.package.clone(),
+            read_allowed: published.read_allowed,
+        });
+    }
+    out
+}
+
+pub fn try_preview(
+    cx: &mut App,
+    surface: SurfaceId,
+    candidate: &PreviewCandidate,
+    entry: &crow_fs::Entry,
+    excerpt: Option<crow_plugin::ExcerptInput>,
+    revision: u64,
+) -> Option<futures::channel::oneshot::Receiver<crow_plugin::RequestResult>> {
+    let handle = cx.try_global::<Plugins>().and_then(|plugins| plugins.handle.clone())?;
+    let input = crow_plugin::RequestInput {
+        snapshot: crow_core::Snapshot {
+            scope: entry.path.parent().map_or_else(String::new, |parent| parent.display().to_string()),
+            selection: None,
+            entries: vec![crow_core::EntryData {
+                handle: crow_core::EntryHandle(1),
+                name: crate::style::display_text(&entry.name).into_owned(),
+                is_dir: entry.is_dir,
+                size: entry.size,
+                kind: crate::style::kind(entry).to_string(),
+            }],
+        },
+        excerpt,
+    };
+    cx.global_mut::<Plugins>().surfaces.request_preview(
+        &handle,
+        surface,
+        &candidate.id,
+        candidate.generation,
+        revision,
+        input,
+    )
+}
+
 pub fn decoration_ids(cx: &App) -> Vec<crow_core::ExtensionId> {
     let Some(plugins) = cx.try_global::<Plugins>() else { return Vec::new() };
     let snapshot = plugins.surfaces.snapshot();

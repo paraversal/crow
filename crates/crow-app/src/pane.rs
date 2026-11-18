@@ -1416,6 +1416,10 @@ impl Pane {
         self.preview_generation += 1;
         let generation = self.preview_generation;
         let extensions = cx.global::<Ext>().0.clone();
+        let configured = cx.global::<Ui>().views.resolve(self.dir()).preview_providers.0.clone();
+        let candidates =
+            crate::plugins::preview_candidates(cx, &configured, &entry.path, entry.is_dir, entry.is_symlink);
+        let surface = self.current_plugin_surface(cx);
         let (gate, cloud) = match cx.try_global::<CloudStatusService>() {
             Some(service) => {
                 let service = service.0.read(cx);
@@ -1423,11 +1427,25 @@ impl Pane {
             }
             None => (Arc::new(AllowAll) as Arc<dyn ReadGate>, None),
         };
+        let revision = generation;
         cx.spawn(async move |this, cx| {
             let path = entry.path.clone();
-            let fetched = cx
-                .background_spawn(async move { preview::fetch_at(&entry, &extensions, None, gate.as_ref(), cloud) })
-                .await;
+            let readable =
+                gate.check(&entry.path, crow_fs::ReadHint::for_path(&entry.path)) == crow_fs::ReadDecision::Readable;
+            let plugin = if candidates.is_empty() || !readable {
+                None
+            } else {
+                preview::plugin_preview(cx, surface, candidates, entry.clone(), gate.clone(), cloud, revision).await
+            };
+            let fetched = match plugin {
+                Some(preview) => preview,
+                None => {
+                    cx.background_spawn(
+                        async move { preview::fetch_at(&entry, &extensions, None, gate.as_ref(), cloud) },
+                    )
+                    .await
+                }
+            };
             this.update(cx, |this, cx| {
                 if this.preview_generation == generation && this.cursor_entry(cx).is_some_and(|e| e.path == path) {
                     let mut fetched = fetched;
