@@ -1,6 +1,6 @@
 # M9 P1B — Plugin contributions in the app progress
 
-Branch: `codex/m9-p1b-plugin-surfaces` · PR: none · Last updated: 2026-11-18 · State: **In critique**
+Branch: `codex/m9-p1b-plugin-surfaces` · PR: [#66](https://github.com/paraversal/file-crow/pull/66) · Last updated: 2026-11-18 · State: **PR open**
 Base: `d5cab1e` (M9 P8, merged as #65). Dependencies merged: P1A `083d40c` (#61, includes P1A fix), P8 `d5cab1e` (#65).
 
 ## Status
@@ -103,4 +103,4 @@ Verdict: better. The API, identity checks, section shell, keyboard/viewport sect
 
 ## Next
 
-Hand off in **In critique** with the gaps above. No PR opened; the branch carries commit `0d213fc`. The user should hand-test the bundle and decide whether the palette activation and registration-timing gaps block P1B.
+PR [#66](https://github.com/paraversal/file-crow/pull/66) is open with the gaps above recorded. The user should hand-test the bundle and decide whether the palette activation and registration-timing gaps block P1B.
