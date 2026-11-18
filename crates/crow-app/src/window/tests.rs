@@ -112,7 +112,7 @@ impl AsRef<Path> for TestRoot {
     }
 }
 
-/// `root/{alpha/inner/, beta/, notes.txt}`, canonicalized (macOS temp dirs sit behind /private).
+/// `root/{alpha/inner/, beta/, notes.txt}` under an owned `/tmp` parent.
 fn fixture(name: &str) -> TestRoot {
     let root = TestRoot::new(&format!("crow-app-{name}-"));
     std::fs::create_dir_all(root.join("alpha/inner")).expect("create fixture");
@@ -122,8 +122,8 @@ fn fixture(name: &str) -> TestRoot {
 }
 
 /// The deterministic search corpus (`crow_search::corpus`) at a fresh `/tmp`
-/// path, canonicalized. The guard restores the unreadable folder's mode before
-/// deleting, so a failure cannot leak it into the next run.
+/// path. The guard restores the unreadable folder's mode before deleting, so a
+/// failure cannot leak it into the next run.
 struct CorpusRoot {
     path: PathBuf,
     _guard: TestParent,
@@ -5415,6 +5415,21 @@ fn theme_picker_previews_reverts_and_saves(cx: &mut TestAppContext) {
     let settings = std::fs::read_to_string(config_dir(&cx).join("settings.toml")).unwrap();
     assert!(settings.contains("theme = \"paper\""), "{settings}");
     assert!(view.read_with(&cx, |w, _| w.picker.is_none()));
+}
+
+#[gpui::test]
+fn apply_everywhere_writes_the_test_theme_state(cx: &mut TestAppContext) {
+    let root = fixture("theme-everywhere");
+    let (view, mut cx) = open(cx, &root);
+    let themes = theme_index(&mut cx);
+    cx.simulate_keystrokes("cmd-alt-t");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down down cmd-enter");
+    settle(&view, &mut cx);
+    let current = std::fs::read_to_string(themes.join("state/current.json")).expect("the test theme state");
+    assert!(current.contains("\"light\": \"paper\""), "{current}");
+    assert!(view.read_with(&cx, |w, _| w.picker.is_none()));
+    assert_eq!(cx.read(|cx| cx.global::<Ui>().settings.theme.clone()), "system", "Crow follows System");
 }
 
 #[gpui::test]

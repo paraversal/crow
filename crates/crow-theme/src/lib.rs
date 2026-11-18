@@ -320,10 +320,9 @@ pub fn current(saved: Option<&str>, appearance: Variant) -> Theme {
     resolve_theme_id(saved, appearance, &dir, &state).and_then(|id| load_theme(&dir, &id).ok()).unwrap_or_else(fallback)
 }
 
-/// "Apply to all apps": merge `id` into `current.json` under its variant, atomically.
-pub fn set_global(theme: &Theme) -> std::io::Result<()> {
-    let state = state_dir();
-    fs::create_dir_all(&state)?;
+/// "Apply to all apps": merge `id` into `<state>/current.json` under its variant, atomically.
+pub fn set_global(theme: &Theme, state: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(state)?;
     let target = state.join("current.json");
     let mut current: serde_json::Map<String, serde_json::Value> =
         fs::read_to_string(&target).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();

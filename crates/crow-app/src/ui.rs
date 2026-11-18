@@ -767,7 +767,8 @@ pub fn open_config_folder(cx: &mut App) {
 
 /// "Apply to all apps": make `theme` the global choice for its variant and follow it here.
 pub fn apply_theme_everywhere(theme: &Theme, cx: &mut App) {
-    if let Err(e) = crow_theme::set_global(theme) {
+    let state = cx.global::<Ui>().themes_state_dir.clone();
+    if let Err(e) = crow_theme::set_global(theme, &state) {
         // Not a file problem, so it belongs with the operation messages (no Open button).
         crate::operations::message(format!("Can't apply the theme to all apps: {e}"), true, cx);
         return;
@@ -1042,19 +1043,25 @@ mod tests {
         assert!(!second.exists(), "the app drop removed the second root");
     }
 
-    /// GPUI's test platform ends a test with `quit` and drops the app; a
-    /// fixture-owning scope that unwinds must still remove its directory.
-    #[test]
-    fn a_fixture_root_is_removed_on_unwind() {
-        let root = tempfile::tempdir().expect("fixture root");
-        let path = root.path().to_path_buf();
-        std::fs::write(path.join("file"), "x").expect("fixture file");
+    /// GPUI's test platform ends a test with `quit` and drops the app; a panic
+    /// while that app is alive must still drop the config global's roots.
+    #[gpui::test]
+    fn config_roots_are_removed_when_a_test_unwinds(_outer: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, Mutex};
+
+        let root = Arc::new(Mutex::new(None));
+        let tracked = root.clone();
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _root = root;
+            let test_cx = gpui::TestAppContext::build(gpui::TestDispatcher::new(0), Some("config unwind"));
+            let config = test_cx.update(crate::ui::init_for_tests);
+            let root = config.parent().expect("test root").to_path_buf();
+            std::fs::write(config.join("file"), "x").expect("fixture file");
+            *tracked.lock().unwrap() = Some(root);
             panic!("deliberate fixture panic");
         }));
         assert!(caught.is_err());
-        assert!(!path.exists(), "the guard removed the root during unwinding");
+        let root = root.lock().unwrap().clone().expect("the config root");
+        assert!(!root.exists(), "the global removed the config root during unwinding");
     }
 
     #[gpui::test]
