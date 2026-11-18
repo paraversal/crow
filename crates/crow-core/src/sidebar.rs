@@ -134,7 +134,33 @@ pub struct SectionRow {
     pub text: String,
     pub meta: Option<String>,
     pub badge: Option<String>,
-    pub destination: Option<PathBuf>,
+    pub destination: SectionDestination,
+}
+
+/// Where a section row goes. P1B has one typed navigable destination: a real
+/// folder admitted by the host, with the no-follow identity captured off-thread.
+/// P4 adds typed Saved Query and Tag destinations here rather than encoding
+/// virtual IDs as paths.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SectionDestination {
+    Folder { path: PathBuf, identity: (u64, u64) },
+    DisplayOnly,
+}
+
+impl SectionRow {
+    pub fn folder_path(&self) -> Option<&Path> {
+        match &self.destination {
+            SectionDestination::Folder { path, .. } => Some(path),
+            SectionDestination::DisplayOnly => None,
+        }
+    }
+
+    pub fn folder_identity(&self) -> Option<(u64, u64)> {
+        match &self.destination {
+            SectionDestination::Folder { identity, .. } => Some(*identity),
+            SectionDestination::DisplayOnly => None,
+        }
+    }
 }
 
 /// A favorite ready to show: its path resolved.

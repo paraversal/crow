@@ -39,8 +39,8 @@ pub use settings::{
     save_table_number,
 };
 pub use sidebar::{
-    DEFAULT_SIDEBAR, Favorite, FavoriteItem, Group, Section, SectionRow, SidebarConfig, SidebarEdit, Slot, TwinInput,
-    edit_sidebar, load_sidebar, sidebar_path, twin_hints,
+    DEFAULT_SIDEBAR, Favorite, FavoriteItem, Group, Section, SectionDestination, SectionRow, SidebarConfig,
+    SidebarEdit, Slot, TwinInput, edit_sidebar, load_sidebar, sidebar_path, twin_hints,
 };
 pub use table::{ColumnWidth, ResizeDrag, TableLayout};
 pub use tabs::{TabId, Tabs};

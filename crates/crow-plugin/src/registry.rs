@@ -418,11 +418,9 @@ fn entry_values(
             if decoration { &["handle", "text", "spoken", "tint", "dim"] } else { &["handle", "text", "spoken"] };
         reject_unknown(&map, allowed, &format!("{label} value"))?;
         let Some(handle_value) = map.get("handle") else {
-            if decoration {
-                // An omitted handle contributes nothing.
-                continue;
-            }
-            return Err(CallError::invalid("column value has no handle"));
+            // A unit or an omitted handle contributes no cell; the array shape
+            // still lets a script skip selected rows.
+            continue;
         };
         let handle = EntryHandle(
             handle_value
@@ -1175,6 +1173,11 @@ fn run(ctx) { () }
     #[test]
     fn unit_replies_decline_without_error() {
         assert_eq!(reply(ExtensionKind::Column, "()").unwrap(), Reply::Values(ContributionValues::Column(vec![])));
+        assert_eq!(
+            reply(ExtensionKind::Column, r#"[ #{ text: "ignored" } ]"#).unwrap(),
+            Reply::Values(ContributionValues::Column(vec![])),
+            "an omitted handle contributes no cell"
+        );
         assert_eq!(
             reply(ExtensionKind::Decoration, "()").unwrap(),
             Reply::Values(ContributionValues::Decoration(vec![]))

@@ -188,9 +188,19 @@ impl Default for Views {
     }
 }
 
+fn validate_preview_providers(layer: &ViewLayer, where_: &str) -> Result<(), String> {
+    let Some(ids) = &layer.preview_providers else { return Ok(()) };
+    for id in ids {
+        crate::extensions::ExtensionId::parse(id)
+            .map_err(|error| format!("{where_}: preview provider \"{id}\": {error}"))?;
+    }
+    Ok(())
+}
+
 impl Views {
     pub fn parse(text: &str, home: &Path) -> Result<Views, String> {
         let file: ViewsFile = toml::from_str(text).map_err(|e| crate::config::parse_error(&e, text))?;
+        validate_preview_providers(&file.defaults, "defaults")?;
         let rules = file
             .rule
             .into_iter()
@@ -215,9 +225,13 @@ impl Views {
                     columns: r.columns,
                     preview_providers: r.preview_providers,
                 };
+                validate_preview_providers(&layer, &format!("rule \"{}\"", r.path))?;
                 Ok(Rule { pattern: r.path, matchers, layer })
             })
             .collect::<Result<_, String>>()?;
+        for (path, layer) in &file.folder {
+            validate_preview_providers(layer, &format!("folder \"{path}\""))?;
+        }
         let folders = file.folder.into_iter().map(|(path, layer)| (expand_home(&path, home), layer)).collect();
         Ok(Views { defaults: file.defaults, rules, folders })
     }
@@ -438,6 +452,11 @@ preview_providers = []
         );
         assert_eq!(v.resolve(Path::new("/Users/me/Pictures/One")).preview_providers.0, ["example.pictures.preview"]);
         assert!(v.resolve(Path::new("/Users/me/Pictures/Empty")).preview_providers.0.is_empty());
+
+        assert!(
+            Views::parse("[defaults]\npreview_providers = [\"not-qualified\"]", Path::new(HOME)).is_err(),
+            "a provider ID without plugin.local is a config error, not a runtime skip"
+        );
     }
 
     #[test]

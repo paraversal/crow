@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crow_core::{
     CommandIntent, ContributionValues, Descriptor, EntryData, EntryHandle, ExtensionId, ExtensionKind, HookEvent,
-    PluginId, Snapshot, Tint,
+    PluginId, SectionDestination, SectionRow, Snapshot, Tint,
 };
 use crow_plugin::{
     HostMutation, Inventory, PluginHandle, PluginState, RegisteredIconPack, RequestInput, RequestResult, RequestStamp,
@@ -177,6 +177,16 @@ impl RowCache {
         self.values.get(key).map(|row| &row.value)
     }
 
+    /// Refresh recency from the bounded visible-range pass. Render-time peeks
+    /// stay read-only, but a row the user is looking at counts as used.
+    fn touch(&mut self, key: &RowKey) {
+        self.tick = self.tick.wrapping_add(1);
+        let tick = self.tick;
+        if let Some(row) = self.values.get_mut(key) {
+            row.touch = tick;
+        }
+    }
+
     fn insert(&mut self, key: RowKey, value: RowValue) {
         if let Some(old) = self.values.remove(&key) {
             self.bytes = self.bytes.saturating_sub(old.value.bytes());
@@ -265,21 +275,15 @@ pub struct SidebarDir {
     pub path: PathBuf,
     pub name: String,
     pub version: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SidebarRowView {
-    pub id: String,
-    pub title: String,
-    pub meta: Option<String>,
-    pub badge: Option<String>,
-    pub path: Option<PathBuf>,
+    /// No-follow directory identity captured off the main thread. `None` keeps
+    /// the row out of a request until the host has admitted it.
+    pub identity: Option<(u64, u64)>,
 }
 
 struct SidebarBinding {
     scope: ScopeKey,
     revision: u64,
-    values: BTreeMap<ExtensionId, Vec<SidebarRowView>>,
+    values: BTreeMap<ExtensionId, Vec<SectionRow>>,
     seen: HashSet<ExtensionId>,
 }
 
@@ -300,7 +304,7 @@ enum TicketKind {
         scope: ScopeKey,
         revision: u64,
         descriptor: ExtensionId,
-        entries: HashMap<EntryHandle, PathBuf>,
+        entries: HashMap<EntryHandle, (PathBuf, (u64, u64))>,
     },
     Info {
         surface: SurfaceId,
@@ -575,6 +579,9 @@ impl PluginSurfaces {
         self.status.clear();
         self.info.clear();
         self.sidebar.clear();
+        // Views must drop the package's columns and accepted previews now, before
+        // the host's inventory round trip.
+        self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
     }
 
     pub fn mutation_finished(
@@ -586,7 +593,11 @@ impl PluginSurfaces {
         if mutation != HostMutation::Disable {
             return false;
         }
-        self.suppressed.remove(plugin);
+        if self.suppressed.remove(plugin) {
+            // Disable failed and the authoritative inventory still allows the
+            // package, or it succeeded: re-resolve views either way.
+            self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
+        }
         self.snapshot.extensions.values().any(|extension| &extension.descriptor.id.plugin == plugin)
     }
 
@@ -655,6 +666,12 @@ impl PluginSurfaces {
             };
             match handle.try_evaluate(descriptor.clone(), published.generation, revision, input) {
                 Ok(ticket) => {
+                    // Mark seen when the request is admitted, not when it answers:
+                    // a render loop must not submit the same status again while
+                    // the first reply is in flight.
+                    if let Some(binding) = self.status.get_mut(&surface) {
+                        binding.seen.insert(descriptor.clone());
+                    }
                     self.counters.submitted_rows += 1;
                     self.tickets.insert(
                         ticket.stamp(),
@@ -731,6 +748,9 @@ impl PluginSurfaces {
             };
             match handle.try_evaluate(descriptor.clone(), published.generation, revision, input) {
                 Ok(ticket) => {
+                    if let Some(binding) = self.info.get_mut(&surface) {
+                        binding.seen.insert(descriptor.clone());
+                    }
                     self.counters.submitted_rows += 1;
                     self.tickets.insert(
                         ticket.stamp(),
@@ -789,7 +809,8 @@ impl PluginSurfaces {
         }
         let mut entries = Vec::with_capacity(dirs.len().min(MAX_BATCH));
         let mut table = HashMap::new();
-        for (index, dir) in dirs.iter().take(MAX_BATCH).enumerate() {
+        for (index, dir) in dirs.iter().filter(|dir| dir.identity.is_some()).take(MAX_BATCH).enumerate() {
+            let Some(identity) = dir.identity else { continue };
             let entry_handle = EntryHandle(index as u32 + 1);
             entries.push(EntryData {
                 handle: entry_handle,
@@ -798,13 +819,16 @@ impl PluginSurfaces {
                 size: 0,
                 kind: String::new(),
             });
-            table.insert(entry_handle, dir.path.clone());
+            table.insert(entry_handle, (dir.path.clone(), identity));
             let _ = dir.version;
         }
         let input =
             RequestInput { snapshot: Snapshot { scope: bounded(display), selection: None, entries }, excerpt: None };
         match handle.try_evaluate(descriptor.clone(), published.generation, revision, input) {
             Ok(ticket) => {
+                if let Some(binding) = self.sidebar.get_mut(&surface) {
+                    binding.seen.insert(descriptor.clone());
+                }
                 self.counters.submitted_rows += 1;
                 self.tickets.insert(
                     ticket.stamp(),
@@ -864,7 +888,7 @@ impl PluginSurfaces {
         }
     }
 
-    pub fn sidebar_rows(&self, surface: SurfaceId) -> Vec<SidebarRowView> {
+    pub fn sidebar_rows(&self, surface: SurfaceId) -> Vec<SectionRow> {
         self.sidebar.get(&surface).and_then(|binding| binding.values.values().next()).cloned().unwrap_or_default()
     }
 
@@ -934,6 +958,22 @@ impl PluginSurfaces {
         for row in &rows {
             state.versions.insert(row.path.clone(), row.version);
         }
+        // The bounded row pass is the viewport signal: a value still on screen
+        // is recent even though render-time reads must not schedule work.
+        for descriptor in descriptors {
+            let Some(generation) = self.snapshot.extension(descriptor).map(|published| published.generation) else {
+                continue;
+            };
+            for row in &rows {
+                self.rows.touch(&RowKey {
+                    extension: descriptor.clone(),
+                    generation,
+                    scope: scope.clone(),
+                    path: row.path.clone(),
+                    version: row.version,
+                });
+            }
+        }
         if rows.is_empty() || descriptors.is_empty() {
             return;
         }
@@ -942,7 +982,6 @@ impl PluginSurfaces {
         rows.sort_by_key(|row| !row.selected);
         let mut seen = HashSet::new();
         rows.retain(|row| seen.insert(row.path.clone()));
-        rows.truncate(MAX_BATCH);
         let selection: Option<PathBuf> = rows.iter().filter(|row| row.selected).map(|row| row.path.clone()).next();
 
         for descriptor in descriptors {
@@ -967,11 +1006,26 @@ impl PluginSurfaces {
                 self.counters.coalesced_rows += 1;
                 continue;
             }
-            let mut entries = Vec::with_capacity(rows.len());
-            let mut refs = Vec::with_capacity(rows.len());
+            let mut entries = Vec::with_capacity(rows.len().min(MAX_BATCH));
+            let mut refs = Vec::with_capacity(rows.len().min(MAX_BATCH));
             let mut selection_handle = None;
-            for (index, row) in rows.iter().enumerate() {
-                let handle = EntryHandle(index as u32 + 1);
+            for row in &rows {
+                if refs.len() >= MAX_BATCH {
+                    break;
+                }
+                // Demand is the misses only. A cached value, hit or empty,
+                // already serves this generation, scope, path and version.
+                let key = RowKey {
+                    extension: descriptor.clone(),
+                    generation,
+                    scope: scope.clone(),
+                    path: row.path.clone(),
+                    version: row.version,
+                };
+                if self.rows.peek(&key).is_some() {
+                    continue;
+                }
+                let handle = EntryHandle(refs.len() as u32 + 1);
                 if selection.as_ref() == Some(&row.path) {
                     selection_handle = Some(handle);
                 }
@@ -983,6 +1037,9 @@ impl PluginSurfaces {
                     kind: bounded(&row.kind),
                 });
                 refs.push((handle, row.path.clone(), row.version));
+            }
+            if entries.is_empty() {
+                continue;
             }
             let input = RequestInput {
                 snapshot: Snapshot { scope: bounded(scope_display), selection: selection_handle, entries },
@@ -1070,6 +1127,18 @@ impl PluginSurfaces {
         Some((ticket.window, extension.clone(), effect, ticket.capture))
     }
 
+    /// Cancel every outstanding preview request for one surface. A new preview
+    /// binding or a deadline calls this so the old candidate chain stops.
+    pub fn cancel_previews(&mut self, surface: SurfaceId) {
+        self.tickets.retain(|_, ticket| {
+            let keep = !matches!(&ticket.kind, TicketKind::Preview { surface: s, .. } if *s == surface);
+            if !keep {
+                ticket.ticket.cancel();
+            }
+            keep
+        });
+    }
+
     pub fn cancel_commands_for_surface(&mut self, surface: SurfaceId) {
         self.commands.retain(|_, command| {
             if command.capture.surface == surface {
@@ -1118,14 +1187,18 @@ impl PluginSurfaces {
                         return false;
                     }
                 };
-                let rows: Vec<SidebarRowView> = rows
+                let rows: Vec<SectionRow> = rows
                     .into_iter()
-                    .map(|row| SidebarRowView {
-                        id: row.id,
-                        title: row.title,
-                        meta: row.meta,
-                        badge: row.badge,
-                        path: row.handle.and_then(|handle| entries.get(&handle).cloned()),
+                    .map(|row| {
+                        let destination = row
+                            .handle
+                            .and_then(|handle| entries.get(&handle))
+                            .map(|(path, identity)| SectionDestination::Folder {
+                                path: path.clone(),
+                                identity: *identity,
+                            })
+                            .unwrap_or(SectionDestination::DisplayOnly);
+                        SectionRow { id: row.id, text: row.title, meta: row.meta, badge: row.badge, destination }
                     })
                     .collect();
                 let Some(binding) = self.sidebar.get_mut(&surface) else { return false };
@@ -1464,6 +1537,54 @@ impl PluginSurfaces {
     }
 
     #[cfg(test)]
+    pub fn set_sidebar_rows_for_test(&mut self, surface: SurfaceId, descriptor: ExtensionId, rows: Vec<SectionRow>) {
+        let binding = self.sidebar.entry(surface).or_insert_with(|| SidebarBinding {
+            scope: ScopeKey::Folder(PathBuf::new()),
+            revision: 0,
+            values: BTreeMap::new(),
+            seen: HashSet::new(),
+        });
+        binding.values.insert(descriptor, rows);
+    }
+
+    #[cfg(test)]
+    pub fn queued_scope_hooks(&self) -> usize {
+        self.hooks.keys().filter(|slot| matches!(slot, HookSlot::Scope(_))).count()
+    }
+
+    #[cfg(test)]
+    pub fn clear_hooks_for_test(&mut self) {
+        self.hooks.clear();
+    }
+
+    #[cfg(test)]
+    pub fn track_surface_for_test(&mut self, surface: SurfaceId) {
+        self.surfaces.entry(surface).or_insert_with(|| SurfaceState {
+            scope: ScopeKey::Folder(PathBuf::new()),
+            scope_version: 0,
+            versions: HashMap::new(),
+            seen: Instant::now(),
+        });
+    }
+
+    #[cfg(test)]
+    pub fn has_tracked_surface_for_test(&self, surface: SurfaceId) -> bool {
+        self.surfaces.contains_key(&surface)
+            || self.status.contains_key(&surface)
+            || self.info.contains_key(&surface)
+            || self.sidebar.contains_key(&surface)
+    }
+
+    #[cfg(test)]
+    pub fn tracked_surface_count(&self) -> usize {
+        let mut ids: HashSet<SurfaceId> = self.surfaces.keys().copied().collect();
+        ids.extend(self.status.keys().copied());
+        ids.extend(self.info.keys().copied());
+        ids.extend(self.sidebar.keys().copied());
+        ids.len()
+    }
+
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn track_rows_for_test(
         &mut self,
@@ -1789,6 +1910,19 @@ mod tests {
     }
 
     #[test]
+    fn disable_suppression_bumps_the_view_generation_for_columns_and_previews() {
+        let column = descriptor(ExtensionKind::Column, "lines");
+        let mut surfaces = PluginSurfaces::default();
+        surfaces.publish_inventory(&running(5, vec![column]));
+        let before = surfaces.generation();
+        surfaces.suppress_disable(&plugin());
+        let suppressed = surfaces.generation();
+        assert!(suppressed > before, "views must re-resolve when Disable is queued");
+        surfaces.mutation_finished(&plugin(), HostMutation::Disable, &Ok(()));
+        assert!(surfaces.generation() > suppressed, "views must re-resolve when the host completes");
+    }
+
+    #[test]
     fn owner_close_and_drop_clear_pending_tickets() {
         let column = descriptor(ExtensionKind::Column, "lines");
         let scope = ScopeKey::Folder(PathBuf::from("/tmp"));
@@ -1955,5 +2089,29 @@ mod tests {
         surfaces.track_ticket_for_test(hook.id.clone(), stamp(5, 2), Arc::new(AtomicBool::new(false)), scope.clone());
         assert!(surfaces.finish(&hook.id, stamp(5, 2), RequestResult::Refresh, Instant::now()));
         assert!(surfaces.row_value(&column.id, &scope, &path, 1).is_none());
+    }
+
+    #[test]
+    fn a_visible_row_survives_cache_pressure() {
+        let extension = descriptor(ExtensionKind::Column, "lines").id;
+        let scope = ScopeKey::Folder(PathBuf::from("/tmp"));
+        let key = |i: usize| RowKey {
+            extension: extension.clone(),
+            generation: 1,
+            scope: scope.clone(),
+            path: PathBuf::from(format!("/tmp/{i}")),
+            version: 1,
+        };
+        let value = || RowValue { text: "x".into(), spoken: None, tint: None, dim: false };
+        let mut cache = RowCache::default();
+        for i in 0..MAX_ROW_VALUES - 1 {
+            cache.insert(key(i), value());
+        }
+        cache.touch(&key(0));
+        for i in MAX_ROW_VALUES - 1..MAX_ROW_VALUES + 2 {
+            cache.insert(key(i), value());
+        }
+        assert!(cache.peek(&key(0)).is_some(), "the visible row is recent");
+        assert!(cache.peek(&key(1)).is_none(), "the cold row is evicted first");
     }
 }

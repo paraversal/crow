@@ -8,12 +8,14 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{self, Effective, Fx};
-use crow_core::{Favorite, SidebarEdit, Slot};
+use crow_core::{Favorite, Section, SectionDestination, SectionRow, SidebarEdit, Slot};
 use crow_fs::ops::Request;
 use gpui::{
     Animation, AnimationExt, Bounds, ClickEvent, Context, EventEmitter, ExternalPaths, FocusHandle, Focusable,
@@ -22,8 +24,8 @@ use gpui::{
 };
 
 use crate::actions::{
-    Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, NextGroup, OpenSelection, PreviousGroup,
-    RemoveFromSidebar,
+    CollapseSection, Eject, MoveDown, MoveFavoriteDown, MoveFavoriteUp, MoveUp, NextGroup, OpenSelection,
+    PreviousGroup, RemoveFromSidebar,
 };
 use crate::chrome::with_tooltip;
 use crate::context_menu::{SidebarMenuKind, SidebarMenuState};
@@ -45,11 +47,35 @@ pub enum SidebarEvent {
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarNav {
+    Show,
+    Open,
+    NewTab,
+}
+
+fn emit_nav(nav: SidebarNav, path: PathBuf, cx: &mut Context<Sidebar>) {
+    match nav {
+        SidebarNav::Show => cx.emit(SidebarEvent::Show(path)),
+        SidebarNav::Open => cx.emit(SidebarEvent::Open(path)),
+        SidebarNav::NewTab => cx.emit(SidebarEvent::OpenInNewTab(path)),
+    }
+}
+
 /// What a drag would drop on in the sidebar: a selectable row or a favorite group title.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DropTarget {
     Row(usize),
     Group(usize),
+}
+
+/// The row a sidebar menu was opened on, independent of its display index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MenuTarget {
+    Favorite(PathBuf),
+    Recent(PathBuf),
+    Volume(PathBuf),
+    Plugin { section: String, id: String },
 }
 
 /// The sidebar's direct children as last prepainted: what a drop there does, whether it
@@ -87,19 +113,10 @@ pub enum CursorKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct PluginSectionView {
-    pub id: String,
-    pub title: String,
-    pub collapsed: bool,
-    pub surface: crate::plugins::SurfaceId,
-    pub rows: Vec<crate::plugins::SidebarRowView>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 enum Row {
     /// A section title; `Some(group)` for favorites groups, which accept folders.
     Header(String, Option<usize>),
-    PluginHeader {
+    SectionHeader {
         id: String,
         title: String,
         collapsed: bool,
@@ -109,27 +126,33 @@ enum Row {
     Volume(crow_macos::Volume),
     PluginItem {
         section: String,
-        id: String,
-        title: String,
-        meta: Option<String>,
-        badge: Option<String>,
-        path: Option<PathBuf>,
+        row: SectionRow,
     },
 }
 
 impl Row {
     fn path(&self) -> Option<&Path> {
         match self {
-            Row::Header(..) | Row::PluginHeader { .. } | Row::PluginItem { path: None, .. } => None,
+            Row::Header(..) | Row::SectionHeader { .. } => None,
             Row::Favorite(_, f) => Some(&f.path),
             Row::Recent(p) => Some(p),
             Row::Volume(v) => Some(&v.path),
-            Row::PluginItem { path: Some(path), .. } => Some(path),
+            Row::PluginItem { row, .. } => row.folder_path(),
+        }
+    }
+
+    fn plugin_destination(&self) -> Option<(&Path, (u64, u64))> {
+        match self {
+            Row::PluginItem { row, .. } => match &row.destination {
+                SectionDestination::Folder { path, identity } => Some((path, *identity)),
+                SectionDestination::DisplayOnly => None,
+            },
+            _ => None,
         }
     }
 }
 
-fn section_order(ui: &Ui, sections: &[PluginSectionView]) -> Vec<String> {
+fn section_order(ui: &Ui, sections: &[Section]) -> Vec<String> {
     let mut order = Vec::new();
     for id in &ui.sidebar.sections.order {
         if !order.contains(id) {
@@ -149,7 +172,7 @@ fn section_order(ui: &Ui, sections: &[PluginSectionView]) -> Vec<String> {
     order
 }
 
-fn rows(ui: &Ui, sections: &[PluginSectionView]) -> Vec<Row> {
+fn rows(ui: &Ui, sections: &[Section]) -> Vec<Row> {
     let mut rows = Vec::new();
     for (g, (name, favorites)) in ui.favorites().into_iter().enumerate() {
         rows.push(Row::Header(name, Some(g)));
@@ -158,31 +181,32 @@ fn rows(ui: &Ui, sections: &[PluginSectionView]) -> Vec<Row> {
     for id in section_order(ui, sections) {
         match id.as_str() {
             "recent" if ui.sidebar.section_shown("recent") && ui.sidebar.recent.show && !ui.recent_list.is_empty() => {
-                rows.push(Row::Header("Recent".into(), None));
-                rows.extend(ui.recent_list.iter().cloned().map(Row::Recent));
+                let collapsed = ui.sidebar.section_collapsed("recent");
+                rows.push(Row::SectionHeader { id: "recent".into(), title: "Recent".into(), collapsed });
+                if !collapsed {
+                    rows.extend(ui.recent_list.iter().cloned().map(Row::Recent));
+                }
             }
             "locations"
                 if ui.sidebar.section_shown("locations") && ui.sidebar.locations.show && !ui.volumes.is_empty() =>
             {
-                rows.push(Row::Header("Locations".into(), None));
-                rows.extend(ui.volumes.iter().cloned().map(Row::Volume));
+                let collapsed = ui.sidebar.section_collapsed("locations");
+                rows.push(Row::SectionHeader { id: "locations".into(), title: "Locations".into(), collapsed });
+                if !collapsed {
+                    rows.extend(ui.volumes.iter().cloned().map(Row::Volume));
+                }
             }
             _ => {
                 let Some(section) = sections.iter().find(|section| section.id == id) else { continue };
-                rows.push(Row::PluginHeader {
+                rows.push(Row::SectionHeader {
                     id: section.id.clone(),
                     title: section.title.clone(),
                     collapsed: section.collapsed,
                 });
                 if !section.collapsed {
-                    rows.extend(section.rows.iter().map(|row| Row::PluginItem {
-                        section: section.id.clone(),
-                        id: row.id.clone(),
-                        title: row.title.clone(),
-                        meta: row.meta.clone(),
-                        badge: row.badge.clone(),
-                        path: row.path.clone(),
-                    }));
+                    rows.extend(
+                        section.rows.iter().cloned().map(|row| Row::PluginItem { section: section.id.clone(), row }),
+                    );
                 }
             }
         }
@@ -309,11 +333,25 @@ pub struct Sidebar {
     receive_generation: u64,
     /// The row whose context menu is open (its index and what it is), outlined meanwhile.
     menu: Option<(usize, SidebarMenuKind)>,
-    plugin_sections: Vec<PluginSectionView>,
+    /// The same row by stable identity, so a refresh cannot retarget its menu.
+    menu_target: Option<MenuTarget>,
+    plugin_sections: Vec<Section>,
     plugin_surfaces: HashMap<String, crate::plugins::SurfaceId>,
     plugin_dirs: Vec<crate::plugins::SidebarDir>,
     plugin_dirs_key: Option<(PathBuf, u64)>,
+    plugin_dirs_dir: PathBuf,
     plugin_dirs_revision: u64,
+    /// No-follow identities for the captured directory slice, filled off the
+    /// main thread before a row can become navigable.
+    plugin_identities: HashMap<PathBuf, (u64, u64)>,
+    plugin_identity_generation: u64,
+    plugin_identity_epoch: u64,
+    /// Section headers and rows that intersected the sidebar viewport at the
+    /// last prepaint.
+    visible_sections: Rc<RefCell<HashSet<String>>>,
+    /// Cancels an outdated sidebar destination validation when the cursor moves
+    /// again or the captured section revision changes.
+    navigation_generation: u64,
     /// Stable identity of a plugin row across reorder/refresh.
     cursor_key: Option<(String, String)>,
 }
@@ -339,11 +377,18 @@ impl Sidebar {
             receive: None,
             receive_generation: 0,
             menu: None,
+            menu_target: None,
             plugin_sections: Vec::new(),
             plugin_surfaces: HashMap::new(),
             plugin_dirs: Vec::new(),
             plugin_dirs_key: None,
+            plugin_dirs_dir: PathBuf::new(),
             plugin_dirs_revision: 0,
+            plugin_identities: HashMap::new(),
+            plugin_identity_generation: 0,
+            plugin_identity_epoch: 0,
+            visible_sections: Rc::default(),
+            navigation_generation: 0,
             cursor_key: None,
         }
     }
@@ -353,8 +398,16 @@ impl Sidebar {
     fn update_plugin_sections(&mut self, cx: &mut Context<Self>) {
         let config = cx.global::<Ui>().sidebar.clone();
         let descriptors = crate::plugins::sidebar_descriptors(cx);
-        let scope = crate::plugins::ScopeKey::Folder(self.current.clone());
-        let display = self.current.display().to_string();
+        let scope_dir = if self.plugin_dirs_dir.as_os_str().is_empty() {
+            self.current.clone()
+        } else {
+            self.plugin_dirs_dir.clone()
+        };
+        let scope = crate::plugins::ScopeKey::Folder(scope_dir.clone());
+        let display = scope_dir.display().to_string();
+        let revision = self.section_revision();
+        let dirs = self.dirs_with_identities();
+        let visible = self.visible_sections.borrow().clone();
         let mut sections = Vec::with_capacity(descriptors.len());
         for (id, title) in descriptors {
             let key = id.to_string();
@@ -373,41 +426,45 @@ impl Sidebar {
                 if cx.try_global::<crate::plugins::Plugins>().is_some() {
                     cx.global_mut::<crate::plugins::Plugins>().surfaces.drop_surface(surface);
                 }
-                sections.push(PluginSectionView { id: key, title, collapsed, surface, rows: Vec::new() });
+                sections.push(Section { id: key, title, collapsed, rows: Vec::new() });
                 continue;
             }
-            crate::plugins::request_sidebar(
-                cx,
-                surface,
-                &id,
-                scope.clone(),
-                self.plugin_dirs_revision,
-                display.clone(),
-                &self.plugin_dirs,
-            );
-            sections.push(PluginSectionView {
-                id: key,
-                title,
-                collapsed,
-                surface,
-                rows: crate::plugins::sidebar_rows(cx, surface),
-            });
+            // A section scrolled out of the sidebar viewport keeps its ready
+            // rows but stops asking the plugin for more.
+            if visible.contains(&key) {
+                crate::plugins::request_sidebar(cx, surface, &id, scope.clone(), revision, display.clone(), &dirs);
+            }
+            sections.push(Section { id: key, title, collapsed, rows: crate::plugins::sidebar_rows(cx, surface) });
         }
         self.plugin_sections = sections;
     }
 
+    fn section_revision(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.plugin_dirs_revision.hash(&mut hasher);
+        self.plugin_identity_epoch.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn dirs_with_identities(&self) -> Vec<crate::plugins::SidebarDir> {
+        let mut dirs = self.plugin_dirs.clone();
+        for dir in &mut dirs {
+            dir.identity = self.plugin_identities.get(&dir.path).copied();
+        }
+        dirs
+    }
+
     fn stabilize_plugin_cursor(&mut self, rows: &[Row]) {
-        let selectable: Vec<&Row> =
-            rows.iter().filter(|row| !matches!(row, Row::Header(..) | Row::PluginHeader { .. })).collect();
+        let selectable: Vec<&Row> = rows.iter().filter(|row| !matches!(row, Row::Header(..))).collect();
         if let Some((section, id)) = &self.cursor_key
             && let Some(index) = selectable
                 .iter()
-                .position(|row| matches!(row, Row::PluginItem { section: s, id: i, .. } if s == section && i == id))
+                .position(|row| matches!(row, Row::PluginItem { section: s, row } if s == section && &row.id == id))
         {
             self.cursor = index;
         }
         self.cursor_key = selectable.get(self.cursor).and_then(|row| match row {
-            Row::PluginItem { section, id, .. } => Some((section.clone(), id.clone())),
+            Row::PluginItem { section, row } => Some((section.clone(), row.id.clone())),
             _ => None,
         });
     }
@@ -422,10 +479,72 @@ impl Sidebar {
         if self.plugin_dirs_key.as_ref() == Some(&(dir.clone(), revision)) {
             return;
         }
-        self.plugin_dirs_key = Some((dir, revision));
+        self.plugin_dirs_key = Some((dir.clone(), revision));
+        self.plugin_dirs_dir = dir;
         self.plugin_dirs = dirs;
         self.plugin_dirs_revision = revision;
+        self.plugin_identities.clear();
+        self.plugin_identity_epoch = self.plugin_identity_epoch.wrapping_add(1);
+        self.plugin_identity_generation = self.plugin_identity_generation.wrapping_add(1);
+        let generation = self.plugin_identity_generation;
+        let paths: Vec<PathBuf> = self.plugin_dirs.iter().map(|dir| dir.path.clone()).collect();
+        if paths.is_empty() {
+            cx.notify();
+            return;
+        }
+        let task = cx.background_spawn(async move {
+            paths
+                .into_iter()
+                .map(|path| {
+                    // io-ok: inside background_spawn
+                    let identity = std::fs::symlink_metadata(&path).ok().and_then(|meta| {
+                        // io-ok: inside background_spawn
+                        (meta.file_type().is_dir() && !meta.file_type().is_symlink())
+                            .then_some((meta.dev(), meta.ino()))
+                    });
+                    (path, identity)
+                })
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let identities = task.await;
+            this.update(cx, |this, cx| {
+                if this.plugin_identity_generation != generation {
+                    return;
+                }
+                let mut changed = false;
+                for (path, identity) in identities {
+                    match identity {
+                        Some(identity) => changed |= this.plugin_identities.insert(path, identity).is_none(),
+                        None => changed |= this.plugin_identities.remove(&path).is_some(),
+                    }
+                }
+                if changed {
+                    this.plugin_identity_epoch = this.plugin_identity_epoch.wrapping_add(1);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
+    }
+
+    /// Window teardown: drop every section surface and stop pending work.
+    pub fn release_plugins(&mut self, cx: &mut Context<Self>) {
+        if cx.try_global::<crate::plugins::Plugins>().is_some() {
+            let surfaces: Vec<_> = self.plugin_surfaces.values().copied().collect();
+            let coordinator = &mut cx.global_mut::<crate::plugins::Plugins>().surfaces;
+            for surface in surfaces {
+                coordinator.drop_surface(surface);
+            }
+        }
+        self.plugin_surfaces.clear();
+        self.plugin_sections.clear();
+        self.plugin_dirs.clear();
+        self.plugin_identities.clear();
+        self.visible_sections.borrow_mut().clear();
+        self.navigation_generation = self.navigation_generation.wrapping_add(1);
     }
 
     /// Pulse the row for `path` after a move lands in its folder. Full waits out the
@@ -467,10 +586,7 @@ impl Sidebar {
     }
 
     fn selectable(&self, cx: &gpui::App) -> Vec<Row> {
-        rows(cx.global::<Ui>(), &self.plugin_sections)
-            .into_iter()
-            .filter(|r| !matches!(r, Row::Header(..) | Row::PluginHeader { .. }))
-            .collect()
+        rows(cx.global::<Ui>(), &self.plugin_sections).into_iter().filter(|r| !matches!(r, Row::Header(..))).collect()
     }
 
     /// The selectors a fuzzer can click in the sidebar.
@@ -492,7 +608,7 @@ impl Sidebar {
     pub fn debug_row_bounds(&self, i: usize, cx: &gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {
         let mut selectable = 0;
         for (layout_index, row) in rows(cx.global::<Ui>(), &self.plugin_sections).iter().enumerate() {
-            if matches!(row, Row::Header(..) | Row::PluginHeader { .. }) {
+            if matches!(row, Row::Header(..)) {
                 continue;
             }
             if selectable == i {
@@ -538,8 +654,7 @@ impl Sidebar {
     fn looks(&self, rows: &[Row], focused: bool, ui: &Ui) -> Vec<RowLook> {
         self.prune_names(rows);
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
-        let selectable: Vec<&Row> =
-            rows.iter().filter(|row| !matches!(row, Row::Header(..) | Row::PluginHeader { .. })).collect();
+        let selectable: Vec<&Row> = rows.iter().filter(|row| !matches!(row, Row::Header(..))).collect();
         let labels: Vec<String> = selectable
             .iter()
             .map(|row| match row {
@@ -548,8 +663,9 @@ impl Sidebar {
                 }
                 Row::Recent(path) => self.display_name(path),
                 Row::Volume(v) => display_text(&v.name).into_owned(),
-                Row::PluginItem { title, .. } => display_text(title).into_owned(),
-                Row::Header(..) | Row::PluginHeader { .. } => unreachable!(),
+                Row::SectionHeader { title, .. } => display_text(title).into_owned(),
+                Row::PluginItem { row, .. } => display_text(&row.text).into_owned(),
+                Row::Header(..) => unreachable!(),
             })
             .collect();
 
@@ -557,7 +673,7 @@ impl Sidebar {
         let mut ancestors_for: Vec<Option<Vec<String>>> = Vec::with_capacity(selectable.len());
         for row in &selectable {
             let ancestors = match row {
-                Row::Favorite(..) | Row::Recent(..) | Row::PluginItem { path: Some(_), .. } => {
+                Row::Favorite(..) | Row::Recent(..) | Row::PluginItem { .. } if row.path().is_some() => {
                     let mut names = self.components(row.path().expect("a row with a path")).to_vec();
                     names.reverse();
                     Some(names)
@@ -616,10 +732,10 @@ impl Sidebar {
             let right = match row {
                 Row::Volume(v) if v.total_bytes > 0 => Some(format!("{} free", short_bytes(v.free_bytes))),
                 Row::Favorite(_, f) => f.key.filter(|_| vim).map(|key| key.to_string()),
-                Row::PluginItem { meta, .. } => meta.clone(),
+                Row::PluginItem { row, .. } => row.meta.clone(),
                 _ => None,
             };
-            let (hint, spoken) = match &hint_by_row[i] {
+            let (hint, mut spoken) = match &hint_by_row[i] {
                 Some((shown, name, alias)) => {
                     let alias = if *alias { ", alias" } else { "" };
                     let spoken = match row {
@@ -644,15 +760,25 @@ impl Sidebar {
                             Some(k) if vim => format!("{label}, mark {k}"),
                             _ => label.clone(),
                         },
+                        Row::SectionHeader { collapsed: true, .. } => format!("{label} section, collapsed"),
+                        Row::SectionHeader { .. } => format!("{label} section, expanded"),
                         _ => label.clone(),
                     };
                     (None, spoken)
                 }
             };
             let badge = match row {
-                Row::PluginItem { badge, .. } => badge.clone(),
+                Row::PluginItem { row, .. } => row.badge.clone(),
                 _ => None,
             };
+            if let Row::PluginItem { row, .. } = row {
+                for extra in
+                    [row.meta.as_deref(), row.badge.as_deref()].into_iter().flatten().filter(|text| !text.is_empty())
+                {
+                    spoken.push_str(", ");
+                    spoken.push_str(extra);
+                }
+            }
             looks.push(RowLook {
                 label,
                 hint,
@@ -697,7 +823,7 @@ impl Sidebar {
             Row::Recent(_) => Some(CursorKind::Recent),
             Row::Volume(_) => Some(CursorKind::Volume),
             Row::PluginItem { .. } => Some(CursorKind::Plugin),
-            Row::Header(..) | Row::PluginHeader { .. } => None,
+            Row::Header(..) | Row::SectionHeader { .. } => None,
         }
     }
 
@@ -712,8 +838,35 @@ impl Sidebar {
             Row::Recent(_) => Some(("Recent".into(), cx.global::<Ui>().recent_list.len())),
             Row::Volume(_) => Some(("Locations".into(), cx.global::<Ui>().volumes.len())),
             Row::PluginItem { section, .. } => Some((section.clone(), 1)),
-            Row::Header(..) | Row::PluginHeader { .. } => None,
+            Row::Header(..) | Row::SectionHeader { .. } => None,
         }
+    }
+
+    /// Index of a path in the selectable rows, including section headers.
+    #[cfg(test)]
+    pub fn index_of_path(&self, path: &Path, cx: &gpui::App) -> Option<usize> {
+        self.selectable(cx).iter().position(|row| row.path() == Some(path))
+    }
+
+    #[cfg(test)]
+    pub fn section_surface_for_test(&self, id: &str) -> Option<crate::plugins::SurfaceId> {
+        self.plugin_surfaces.get(id).copied()
+    }
+
+    #[cfg(test)]
+    pub fn add_surface_for_test(&mut self, id: &str, surface: crate::plugins::SurfaceId) {
+        self.plugin_surfaces.insert(id.to_owned(), surface);
+    }
+
+    #[cfg(test)]
+    pub fn set_cursor_for_test(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.cursor = index;
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn index_of_section_for_test(&self, id: &str, cx: &gpui::App) -> Option<usize> {
+        self.selectable(cx).iter().position(|row| matches!(row, Row::SectionHeader { id: actual, .. } if actual == id))
     }
 
     /// Paths of the selectable rows, in order.
@@ -827,8 +980,13 @@ impl Sidebar {
         let mut groups: Vec<Vec<usize>> = Vec::new();
         let mut index = 0;
         for row in rows(cx.global::<Ui>(), &self.plugin_sections) {
-            if matches!(row, Row::Header(..) | Row::PluginHeader { .. }) {
+            if matches!(row, Row::Header(..)) {
                 groups.push(Vec::new());
+            } else if matches!(row, Row::SectionHeader { .. }) {
+                // Section headers are selectable, so they take an index, but an
+                // Option-Up/Down jump moves to content, not to a heading.
+                groups.push(Vec::new());
+                index += 1;
             } else {
                 if let Some(group) = groups.last_mut() {
                     group.push(index);
@@ -862,15 +1020,89 @@ impl Sidebar {
 
     /// Ask the window to show the cursor's folder without leaving the sidebar.
     fn show_cursor(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.cursor_row(cx).and_then(|row| row.path().map(Path::to_path_buf)) {
-            cx.emit(SidebarEvent::Show(path));
-        }
+        self.navigate_row(self.cursor, SidebarNav::Show, cx);
     }
 
     fn open(&mut self, _: &OpenSelection, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(path) = self.cursor_row(cx).and_then(|r| r.path().map(Path::to_path_buf)) {
-            cx.emit(SidebarEvent::Open(path));
+        self.navigate_row(self.cursor, SidebarNav::Open, cx);
+    }
+
+    fn collapse_section(&mut self, _: &CollapseSection, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(Row::SectionHeader { id, collapsed: false, .. }) = self.cursor_row(cx) else { return };
+        ui::edit_sidebar(SidebarEdit::SetSectionCollapsed { id, collapsed: true }, cx);
+    }
+
+    /// Move to `index`, or validate a plugin destination off-thread before the
+    /// window navigates. `navigation_generation` makes a later move discard a
+    /// stale result; the live row and section revision are checked again on the
+    /// main thread.
+    fn navigate_row(&mut self, index: usize, nav: SidebarNav, cx: &mut Context<Self>) {
+        self.navigation_generation = self.navigation_generation.wrapping_add(1);
+        let generation = self.navigation_generation;
+        let Some(row) = self.selectable(cx).into_iter().nth(index) else { return };
+        if let Row::SectionHeader { id, collapsed, .. } = row {
+            if nav == SidebarNav::Open && collapsed {
+                ui::edit_sidebar(SidebarEdit::SetSectionCollapsed { id, collapsed: false }, cx);
+            }
+            return;
         }
+        let Some((path, identity)) = row.plugin_destination().map(|(path, identity)| (path.to_path_buf(), identity))
+        else {
+            if let Some(path) = row.path() {
+                emit_nav(nav, path.to_path_buf(), cx);
+            }
+            return;
+        };
+        let SectionRow { id: row_id, .. } = match &row {
+            Row::PluginItem { row, .. } => row,
+            _ => return,
+        };
+        let row_id = row_id.clone();
+        let section = match &row {
+            Row::PluginItem { section, .. } => section.clone(),
+            _ => return,
+        };
+        let scope = if self.plugin_dirs_dir.as_os_str().is_empty() {
+            self.current.clone()
+        } else {
+            self.plugin_dirs_dir.clone()
+        };
+        let revision = self.section_revision();
+        let expected_path = path.clone();
+        let task = cx.background_spawn(async move {
+            // io-ok: inside background_spawn
+            std::fs::symlink_metadata(&path).ok().is_some_and(|meta| {
+                // io-ok: inside background_spawn
+                meta.file_type().is_dir()
+                    && !meta.file_type().is_symlink()
+                    && (meta.dev(), meta.ino()) == identity
+                    && path.parent() == Some(scope.as_path())
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            let matches = task.await;
+            this.update(cx, |this, cx| {
+                if this.navigation_generation != generation || this.section_revision() != revision {
+                    return;
+                }
+                let live = this.selectable(cx).into_iter().nth(index);
+                let live = matches!(
+                    live,
+                    Some(Row::PluginItem { section: s, row })
+                        if s == section && row.id == row_id && row.folder_path() == Some(expected_path.as_path())
+                );
+                if !live {
+                    return;
+                }
+                if matches {
+                    emit_nav(nav, expected_path, cx);
+                } else if nav != SidebarNav::Show {
+                    cx.emit(SidebarEvent::Message("That folder is no longer available".into(), true));
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn remove(&mut self, _: &RemoveFromSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -939,11 +1171,21 @@ impl Sidebar {
             Row::Volume(v) => {
                 (SidebarMenuKind::Volume, SidebarMenuState { ejectable: v.ejectable, ..SidebarMenuState::default() })
             }
-            Row::PluginItem { path: Some(_), .. } => (SidebarMenuKind::Plugin, SidebarMenuState::default()),
-            Row::Header(..) | Row::PluginHeader { .. } | Row::PluginItem { path: None, .. } => return,
+            Row::PluginItem { row, .. } if row.folder_path().is_some() => {
+                (SidebarMenuKind::Plugin, SidebarMenuState::default())
+            }
+            Row::Header(..) | Row::SectionHeader { .. } | Row::PluginItem { .. } => return,
+        };
+        let target = match &row {
+            Row::Favorite(_, favorite) => MenuTarget::Favorite(favorite.path.clone()),
+            Row::Recent(path) => MenuTarget::Recent(path.clone()),
+            Row::Volume(volume) => MenuTarget::Volume(volume.path.clone()),
+            Row::PluginItem { section, row } => MenuTarget::Plugin { section: section.clone(), id: row.id.clone() },
+            Row::Header(..) | Row::SectionHeader { .. } => return,
         };
         let entries = crate::context_menu::sidebar_entries(kind, state, cx);
         self.menu = Some((i, kind));
+        self.menu_target = Some(target);
         cx.notify();
         let (sender, receiver) = futures::channel::oneshot::channel();
         // Off the main thread (tests) the recorder answers at once; in the app the
@@ -964,24 +1206,42 @@ impl Sidebar {
         .detach();
     }
 
+    /// Resolve the row a menu was opened on after any refresh.
+    fn resolve_menu_target(&self, target: &MenuTarget, cx: &gpui::App) -> Option<(usize, Row)> {
+        self.selectable(cx).into_iter().enumerate().find(|(_, row)| match (target, row) {
+            (MenuTarget::Favorite(path), Row::Favorite(_, actual)) => path == &actual.path,
+            (MenuTarget::Recent(path), Row::Recent(actual)) => path == actual,
+            (MenuTarget::Volume(path), Row::Volume(actual)) => path == &actual.path,
+            (MenuTarget::Plugin { section, id }, Row::PluginItem { section: actual_section, row }) => {
+                section == actual_section && id == &row.id
+            }
+            _ => false,
+        })
+    }
+
     /// The menu closed with the line at `chosen` picked (an index into its slots), or none.
     fn menu_closed(&mut self, chosen: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((i, kind)) = self.menu.take() else { return };
+        let Some((menu_index, kind)) = self.menu.take() else { return };
+        let target = self.menu_target.take();
         cx.notify();
         let Some((id, _)) = chosen.and_then(|ix| crate::context_menu::sidebar_slots(kind).get(ix).copied().flatten())
         else {
             return;
         };
-        let Some(path) = self.selectable(cx).into_iter().nth(i).and_then(|row| row.path().map(Path::to_path_buf))
+        let Some((i, row)) = target
+            .as_ref()
+            .and_then(|target| self.resolve_menu_target(target, cx))
+            .or_else(|| self.selectable(cx).into_iter().enumerate().nth(menu_index))
         else {
             return;
         };
+        let Some(path) = row.path().map(Path::to_path_buf) else { return };
         match id {
             CommandId::Open => {
                 self.cursor = i;
-                cx.emit(SidebarEvent::Open(path));
+                self.navigate_row(i, SidebarNav::Open, cx);
             }
-            CommandId::NewTab => cx.emit(SidebarEvent::OpenInNewTab(path)),
+            CommandId::NewTab => self.navigate_row(i, SidebarNav::NewTab, cx),
             CommandId::CopyPath => {
                 crate::effects::write_text(path.to_string_lossy().into_owned(), cx);
                 crate::operations::message("Copied path", false, cx);
@@ -1100,8 +1360,16 @@ impl Render for Sidebar {
         let rows = rows(ui, &self.plugin_sections);
         self.stabilize_plugin_cursor(&rows);
         let focused = self.focus.is_focused(window);
-        let selectable_count = rows.iter().filter(|r| !matches!(r, Row::Header(..) | Row::PluginHeader { .. })).count();
+        let selectable_count = rows.iter().filter(|r| !matches!(r, Row::Header(..))).count();
         self.cursor = self.cursor.min(selectable_count.saturating_sub(1));
+        let section_of: Vec<Option<String>> = rows
+            .iter()
+            .map(|row| match row {
+                Row::SectionHeader { id, .. } => Some(id.clone()),
+                Row::PluginItem { section, .. } => Some(section.clone()),
+                _ => None,
+            })
+            .collect();
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
         let subtle = theme.role("fg-subtle");
 
@@ -1206,10 +1474,14 @@ impl Render for Sidebar {
                 children.push(header.into_any_element());
                 continue;
             }
-            if let Row::PluginHeader { id, title, collapsed } = &row {
+            if let Row::SectionHeader { id, title, collapsed } = &row {
                 let id = id.clone();
                 let collapsed = *collapsed;
                 kinds.push((None, None));
+                let i = index;
+                index += 1;
+                let cursor = i == self.cursor;
+                let look = looks.next().expect("one look per selectable row");
                 children.push(
                     div()
                         .id(SharedString::from(format!("sidebar-header-{id}")))
@@ -1218,8 +1490,12 @@ impl Render for Sidebar {
                             move || format!("sidebar-header-{id}")
                         })
                         .role(Role::Button)
-                        .aria_label(format!("{title} section"))
+                        .aria_label(look.spoken)
                         .aria_expanded(!collapsed)
+                        .aria_position_in_set(i + 1)
+                        .aria_size_of_set(selectable_count)
+                        .aria_selected(cursor)
+                        .when(cursor, |header| header.aria_active_descendant().shadow(cursor_ring(&theme)))
                         .px_2()
                         .pt_3()
                         .pb_1()
@@ -1232,7 +1508,8 @@ impl Render for Sidebar {
                         .text_color(color(muted))
                         .cursor_pointer()
                         .hover(move |style| style.text_color(color(fg)))
-                        .on_click(cx.listener(move |_, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.cursor = i;
                             ui::edit_sidebar(
                                 SidebarEdit::SetSectionCollapsed { id: id.clone(), collapsed: !collapsed },
                                 cx,
@@ -1250,7 +1527,9 @@ impl Render for Sidebar {
                 Row::Favorite(slot, _) => Some(*slot),
                 _ => None,
             };
-            kinds.push((Some(DropTarget::Row(i)), favorite_slot));
+            // Plugin rows are navigable but never accept favorite or file drops.
+            let droppable = matches!(&row, Row::Favorite(..) | Row::Recent(_) | Row::Volume(_));
+            kinds.push((droppable.then_some(DropTarget::Row(i)), favorite_slot));
             let path = row.path().map(Path::to_path_buf).unwrap_or_default();
             let has_path = row.path().is_some();
             let cursor = i == self.cursor;
@@ -1265,14 +1544,13 @@ impl Render for Sidebar {
                     f.color.as_deref().and_then(|c| favorite_color(c, &theme)),
                 ),
                 Row::Recent(_) => (None, Some(crate::icons::Glyph::Clock), None),
-                Row::PluginItem { path: Some(_), .. } => (None, Some(crate::icons::Glyph::Folder), None),
+                Row::PluginItem { .. } => (None, Some(crate::icons::Glyph::Folder), None),
                 _ => (None, None, None),
             };
             let volume_label = match &row {
                 Row::Volume(v) => Some(format!("{} free of {}", human_bytes(v.free_bytes), human_bytes(v.total_bytes))),
                 _ => None,
             };
-            let target = path.clone();
             let receive_tint = self.receive.as_ref().filter(|(target, _)| target == &path).and_then(|(_, started)| {
                 let phases = motion::phases(mode, Fx::Receive);
                 effect_tint(motion::look_in(&phases, mode, Fx::Receive, *started, now), &theme)
@@ -1308,10 +1586,10 @@ impl Render for Sidebar {
                     }
                     this.cursor = i;
                     if has_path {
-                        cx.emit(SidebarEvent::Open(target.clone()));
+                        this.navigate_row(i, SidebarNav::Open, cx);
                     }
                 }))
-                .when(has_path, |item| {
+                .when(droppable, |item| {
                     item.on_drop({
                         let into = path.clone();
                         cx.listener(move |this, paths: &ExternalPaths, window, cx| match this.insert_slot {
@@ -1497,18 +1775,32 @@ impl Render for Sidebar {
             context.push_str(" vim");
         }
         let layout = self.layout.clone();
+        let visible_sections = self.visible_sections.clone();
         div()
             .on_children_prepainted(move |bounds, window, _| {
                 // The first child is the current-folder fill; the rest are rows.
                 let mut bounds = bounds.into_iter();
                 let _fill = bounds.next();
                 let was_empty = layout.borrow().is_empty();
+                let bounds: Vec<_> = bounds.collect();
                 *layout.borrow_mut() = kinds
                     .iter()
                     .copied()
-                    .zip(bounds)
+                    .zip(bounds.iter().copied())
                     .map(|((target, favorite), bounds)| (target, favorite, bounds))
                     .collect();
+                let mut visible = HashSet::new();
+                let viewport = window.viewport_size().height;
+                for (bounds, section) in bounds.iter().zip(section_of.iter()) {
+                    let Some(section) = section else { continue };
+                    if bounds.bottom() > px(0.) && bounds.top() < viewport {
+                        visible.insert(section.clone());
+                    }
+                }
+                if *visible_sections.borrow() != visible {
+                    *visible_sections.borrow_mut() = visible;
+                    window.on_next_frame(|window, _| window.refresh());
+                }
                 // The fill needs the bounds from this first layout; draw it next frame.
                 if was_empty {
                     window.on_next_frame(|window, _| window.refresh());
@@ -1528,6 +1820,7 @@ impl Render for Sidebar {
             .on_action(cx.listener(Self::favorite_down))
             .on_action(cx.listener(Self::previous_group))
             .on_action(cx.listener(Self::next_group))
+            .on_action(cx.listener(Self::collapse_section))
             .on_action(cx.listener(Self::eject_cursor))
             .debug_selector(|| "sidebar".into())
             .w(px(210.))

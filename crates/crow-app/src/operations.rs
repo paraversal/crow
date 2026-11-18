@@ -443,7 +443,10 @@ pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf
                     crate::ui::refresh_volumes(cx);
                     on_done(restored, cx);
                 }
-                Err(e) => message(e.to_string(), true, cx),
+                Err(e) => {
+                    message(e.to_string(), true, cx);
+                    crate::plugins::notify_operation_done(cx);
+                }
             }
             cx.refresh_windows();
         });
@@ -478,7 +481,10 @@ pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static
                     crate::ui::refresh_volumes(cx);
                     on_done(results, cx);
                 }
-                Err(e) => message(e.to_string(), true, cx),
+                Err(e) => {
+                    message(e.to_string(), true, cx);
+                    crate::plugins::notify_operation_done(cx);
+                }
             }
             cx.refresh_windows();
         });

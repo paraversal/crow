@@ -123,6 +123,7 @@ actions!(
         MoveFavoriteDown,
         PreviousGroup,
         NextGroup,
+        CollapseSection,
         Eject,
         // View settings and themes
         WhyThisView,
@@ -264,6 +265,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("down", MoveDown, Some("Sidebar")),
         KeyBinding::new("enter", OpenSelection, Some("Sidebar")),
         KeyBinding::new("cmd-down", OpenSelection, Some("Sidebar")),
+        KeyBinding::new("left", CollapseSection, Some("Sidebar")),
         // Last, so the sidebar's "to list" hint shows → (the last binding wins).
         KeyBinding::new("right", OpenSelection, Some("Sidebar")),
         KeyBinding::new("cmd-up", OpenParent, Some("Crow")),

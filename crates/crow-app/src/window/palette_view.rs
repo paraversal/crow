@@ -623,13 +623,9 @@ impl CrowWindow {
                 if let Some(context) = plugin_context {
                     crate::plugins::restore_command_context(context, cx);
                 }
-                window.dispatch_action(
-                    Box::new(crate::actions::PluginCommand {
-                        extension: command.extension,
-                        generation: command.generation,
-                    }),
-                    cx,
-                );
+                let action =
+                    crate::actions::PluginCommand { extension: command.extension, generation: command.generation };
+                self.run_plugin_command(&action, window, cx);
             }
             // A file row reveals the file in its folder, in a new tab with Cmd-Return.
             Some(Item::Folder { path, source: Source::File, .. }) => {

@@ -236,6 +236,16 @@ impl InfoPane {
         }
     }
 
+    #[cfg(test)]
+    pub fn plugin_surface_for_test(&self) -> crate::plugins::SurfaceId {
+        self.plugin_surface
+    }
+
+    /// Window teardown: the info surface is no longer observed.
+    pub fn release_plugins(&mut self, cx: &mut Context<Self>) {
+        self.drop_plugin_info(cx);
+    }
+
     fn drop_plugin_info(&self, cx: &mut Context<Self>) {
         if cx.try_global::<crate::plugins::Plugins>().is_some() {
             cx.global_mut::<crate::plugins::Plugins>().surfaces.drop_surface(self.plugin_surface);

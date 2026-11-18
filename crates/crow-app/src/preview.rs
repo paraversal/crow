@@ -2,8 +2,9 @@
 //! Shown as the right-hand pane in list view and as the last column in column view.
 
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crow_core::{EntryHandle, Excerpt, Extensions, KnownSize, PluginPreview, PreviewContent, text_excerpt};
@@ -52,23 +53,29 @@ impl Preview {
 }
 
 /// One bounded host read for a preview provider that holds the read grant.
-pub fn read_plugin_excerpt(path: &Path, gate: &dyn ReadGate) -> Option<ExcerptInput> {
-    if gate.check(path, ReadHint::for_path(path)) != ReadDecision::Readable {
+pub fn read_plugin_excerpt(entry: &Entry, gate: &dyn ReadGate) -> Option<ExcerptInput> {
+    if gate.check(&entry.path, ReadHint::for_path(&entry.path)) != ReadDecision::Readable {
         return None;
     }
     // io-ok: called inside background_spawn before the provider request.
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    // io-ok: metadata from the same background read.
-    if !metadata.is_file() {
+    let metadata = std::fs::symlink_metadata(&entry.path).ok()?;
+    // Compare the live no-follow metadata with the listing's captured version;
+    // a same-path replacement must not be previewed under the old entry.
+    // io-ok: this function runs inside background_spawn.
+    if !metadata.is_file()
+        || metadata.len() != entry.size
+        || entry.modified.is_some_and(|modified| metadata.modified().ok() != Some(modified))
+    {
         return None;
     }
-    let entry = crow_plugin::EntryRef::with_identity(path, metadata.dev(), metadata.ino());
-    let text = crow_plugin::read_excerpt(&entry, 64 * 1024).ok()?;
+    let identity = crow_plugin::EntryRef::with_identity(&entry.path, metadata.dev(), metadata.ino());
+    let text = crow_plugin::read_excerpt(&identity, 64 * 1024).ok()?;
     Some(ExcerptInput { handle: EntryHandle(1), text })
 }
 
 /// Try the configured providers in order for at most 250 ms total. The native
 /// pipeline runs when every candidate declines, fails or is busy.
+#[allow(clippy::too_many_arguments)]
 pub async fn plugin_preview(
     cx: &mut gpui::AsyncApp,
     surface: crate::plugins::SurfaceId,
@@ -77,21 +84,36 @@ pub async fn plugin_preview(
     gate: Arc<dyn ReadGate>,
     cloud: Option<CloudStatus>,
     revision: u64,
+    cancelled: Arc<AtomicBool>,
 ) -> Option<Preview> {
-    if candidates.is_empty() {
+    if candidates.is_empty() || cancelled.load(Ordering::Relaxed) {
         return None;
     }
     let started = Instant::now();
     let excerpt = if candidates.iter().any(|candidate| candidate.read_allowed) {
-        let path = entry.path.clone();
+        let entry = entry.clone();
         let gate = gate.clone();
-        cx.background_spawn(async move { read_plugin_excerpt(&path, gate.as_ref()) }).await
+        let excerpt = cx.background_spawn(async move { read_plugin_excerpt(&entry, gate.as_ref()) }).await;
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        excerpt
     } else {
         None
     };
     for candidate in candidates {
-        let remaining = Duration::from_millis(250).checked_sub(started.elapsed())?;
-        let receiver = cx.update(|cx| {
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        let Some(remaining) = Duration::from_millis(250).checked_sub(started.elapsed()) else {
+            // The deadline owns this binding; stop its outstanding ticket unless a
+            // newer preview has already replaced it.
+            if !cancelled.load(Ordering::Relaxed) {
+                cx.update(|cx| crate::plugins::cancel_previews(surface, cx));
+            }
+            return None;
+        };
+        let receiver = match cx.update(|cx| {
             crate::plugins::try_preview(
                 cx,
                 surface,
@@ -100,7 +122,11 @@ pub async fn plugin_preview(
                 if candidate.read_allowed { excerpt.clone() } else { None },
                 revision,
             )
-        })?;
+        }) {
+            Some(receiver) => receiver,
+            // Busy, stopped or a superseded descriptor: try the next candidate.
+            None => continue,
+        };
         let receive = async move { receiver.await.ok() };
         let timeout = cx.background_executor().timer(remaining);
         futures::pin_mut!(receive, timeout);
@@ -109,11 +135,19 @@ pub async fn plugin_preview(
                 Some(crow_plugin::RequestResult::Values(crow_core::ContributionValues::Preview(preview))),
                 _,
             )) if preview.text.is_some() || preview.table.is_some() => {
+                if cancelled.load(Ordering::Relaxed) {
+                    return None;
+                }
+                let path = entry.path.clone();
+                let tags = cx.background_spawn(async move { crow_macos::tags(&path) }).await;
+                if cancelled.load(Ordering::Relaxed) {
+                    return None;
+                }
                 return Some(Preview {
                     path: entry.path.clone(),
                     content: None,
                     image: None,
-                    tags: crow_macos::tags(&entry.path),
+                    tags,
                     excerpt: None,
                     cloud,
                     blocked: false,
@@ -121,8 +155,16 @@ pub async fn plugin_preview(
                 });
             }
             futures::future::Either::Left(_) => continue,
-            futures::future::Either::Right(_) => continue,
+            futures::future::Either::Right(_) => {
+                if !cancelled.load(Ordering::Relaxed) {
+                    cx.update(|cx| crate::plugins::cancel_previews(surface, cx));
+                }
+                return None;
+            }
         }
+    }
+    if !cancelled.load(Ordering::Relaxed) {
+        cx.update(|cx| crate::plugins::cancel_previews(surface, cx));
     }
     None
 }
@@ -534,6 +576,22 @@ mod tests {
         assert!(ready.blocked, "eviction replaces an already loaded preview with the placeholder");
         assert!(ready.update_cloud(CloudStatus::Downloaded));
         assert!(!ready.update_cloud(CloudStatus::Downloaded), "one transition schedules only one retry");
+    }
+
+    #[test]
+    fn a_read_grant_excerpt_checks_the_captured_entry_version() {
+        let dir = tempfile::tempdir().expect("temp");
+        let path = dir.path().join("note.txt");
+        std::fs::write(&path, "hello\n").unwrap();
+        let entry = crow_fs::stat_entry(&path).expect("stat").expect("entry");
+        assert!(read_plugin_excerpt(&entry, &crow_fs::AllowAll).is_some());
+
+        let mut stale = entry;
+        stale.size = 0;
+        assert!(
+            read_plugin_excerpt(&stale, &crow_fs::AllowAll).is_none(),
+            "a same-path replacement must not be read under the old entry version"
+        );
     }
 
     #[test]

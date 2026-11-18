@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
-use crow_core::CommandTarget;
+use crow_core::{CommandTarget, SectionRow};
 use crow_plugin::{HostEvent, HostMutation, Inventory, Limits, PluginHandle, PluginService};
 use gpui::{App, AppContext as _, Global, Window, WindowId};
 
@@ -24,7 +24,7 @@ pub use columns::PluginColumn;
 pub use coordinator::{
     CommandCapture, HOOK_DEBOUNCE, MAX_BATCH, MAX_PASSIVE_PER_PLUGIN, MAX_PASSIVE_REQUESTS, MAX_ROW_BYTES,
     MAX_ROW_VALUES, PluginCounters, PluginEffect, PluginSurfaces, PublishedExtension, PublishedSurfaces, RowInput,
-    RowValue, ScopeKey, SidebarDir, SidebarRowView, SurfaceId, new_surface,
+    RowValue, ScopeKey, SidebarDir, SurfaceId, new_surface,
 };
 pub use demand::PluginRows;
 /// The file surface the menu/palette would act on. Views update it only while
@@ -51,6 +51,9 @@ pub struct Plugins {
 }
 
 impl Global for Plugins {}
+
+#[cfg(test)]
+impl Plugins {}
 
 /// Start the service for the real config dir. Called once at app startup.
 pub fn init(cx: &mut App) {
@@ -179,8 +182,6 @@ pub fn poll(cx: &mut App) {
     }
 }
 
-/// Settings successfully queued Disable. The package stops contributing until
-/// the host reports the correlated mutation, so a queued reply cannot leak.
 /// All current row-contribution descriptors, in lexical fully qualified order.
 /// Column and decoration renderers filter this by their configured surface.
 pub fn row_descriptors(cx: &App) -> Vec<crow_core::ExtensionId> {
@@ -415,7 +416,7 @@ pub fn request_sidebar(
     cx.global_mut::<Plugins>().surfaces.request_sidebar(handle.as_ref(), surface, id, scope, revision, &display, dirs);
 }
 
-pub fn sidebar_rows(cx: &App, surface: SurfaceId) -> Vec<SidebarRowView> {
+pub fn sidebar_rows(cx: &App, surface: SurfaceId) -> Vec<SectionRow> {
     cx.try_global::<Plugins>().map_or_else(Vec::new, |plugins| plugins.surfaces.sidebar_rows(surface))
 }
 
@@ -462,6 +463,12 @@ pub fn preview_candidates(
         });
     }
     out
+}
+
+pub fn cancel_previews(surface: SurfaceId, cx: &mut App) {
+    if cx.try_global::<Plugins>().is_some() {
+        cx.global_mut::<Plugins>().surfaces.cancel_previews(surface);
+    }
 }
 
 pub fn try_preview(
@@ -610,6 +617,8 @@ pub fn notify_operation_done(cx: &mut App) {
     }
 }
 
+/// Settings successfully queued Disable. The package stops contributing until
+/// the host reports the correlated mutation, so a queued reply cannot leak.
 pub fn suppress_disable(id: crow_core::PluginId, cx: &mut App) {
     if cx.try_global::<Plugins>().is_some() {
         cx.global_mut::<Plugins>().surfaces.suppress_disable(&id);

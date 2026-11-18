@@ -14,6 +14,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{Effective, Fx, Look};
@@ -321,6 +322,11 @@ pub struct Pane {
     resize: Option<ResizeDrag>,
     preview: Option<Preview>,
     preview_generation: u64,
+    /// Plugin/views generations at the last preview load, so registration and
+    /// `preview_providers` edits refresh an already visible preview.
+    preview_plugin_generation: u64,
+    preview_views_generation: u64,
+    preview_cancel: Arc<AtomicBool>,
     /// The window's right column: tab choice and the Info tab's target.
     info: Entity<InfoPane>,
     /// This pane's id in the folder-size service's visible-row sources.
@@ -362,6 +368,9 @@ pub struct Pane {
     focus_list_after_filter: bool,
     /// The sidebar cursor is walking this pane: later moves replace the history step.
     sidebar_walk: bool,
+    /// The folder and directory slice a plugin sidebar section keeps while the
+    /// sidebar cursor walks the pane, so contributed rows do not move under it.
+    plugin_walk_dirs: Option<(PathBuf, u64, Vec<crate::plugins::SidebarDir>)>,
     /// A row took the current mouse-down; the list behind it must not treat it as a
     /// click on empty space. Rows handle the event before the list (deeper hitbox).
     row_pressed: bool,
@@ -428,6 +437,9 @@ impl Pane {
             resize: None,
             preview: None,
             preview_generation: 0,
+            preview_plugin_generation: 0,
+            preview_views_generation: 0,
+            preview_cancel: Arc::new(AtomicBool::new(false)),
             info,
             size_source,
             cloud_source,
@@ -463,6 +475,7 @@ impl Pane {
             plugin_selection: HashMap::new(),
             plugin_scope: None,
             sidebar_walk: false,
+            plugin_walk_dirs: None,
         };
         pane.enter(dir, cx);
         if let Some(mode) = start_mode.filter(|_| !cx.global::<Ui>().settings.view_per_folder) {
@@ -503,9 +516,29 @@ impl Pane {
         self.focused_folder().read(cx).plugin_surface()
     }
 
+    pub fn sidebar_walk(&self) -> bool {
+        self.sidebar_walk
+    }
+
+    /// The sidebar lost focus: the preview walk is over and its frozen section
+    /// slice must start following the shown folder again.
+    pub fn end_sidebar_walk(&mut self) {
+        self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
+    }
+
     /// The first 128 ordinary immediate folders for a sidebar section, with a
-    /// revision that changes on relist or watcher apply.
-    pub fn sidebar_plugin_dirs(&self, cx: &gpui::App) -> (PathBuf, u64, Vec<crate::plugins::SidebarDir>) {
+    /// revision that changes on relist or watcher apply. While the sidebar
+    /// cursor is walking the pane, the slice captured at the walk's start stays
+    /// fixed so moving onto one contributed row does not remove the next one.
+    pub fn sidebar_plugin_dirs(
+        &self,
+        walking: bool,
+        cx: &gpui::App,
+    ) -> (PathBuf, u64, Vec<crate::plugins::SidebarDir>) {
+        if walking && let Some(frozen) = &self.plugin_walk_dirs {
+            return frozen.clone();
+        }
         let folder = self.focused_folder().read(cx);
         let dir = folder.dir().to_path_buf();
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -523,6 +556,7 @@ impl Pane {
                     path: entry.path.clone(),
                     name: crate::style::display_text(&entry.name).into_owned(),
                     version,
+                    identity: None,
                 }
             })
             .collect();
@@ -886,6 +920,7 @@ impl Pane {
     /// Go to `dir` as a new history step.
     pub fn navigate(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
         self.history.visit(dir.clone());
         self.enter(dir, cx);
     }
@@ -900,6 +935,9 @@ impl Pane {
         if self.sidebar_walk {
             self.history.replace_current(dir.clone());
         } else {
+            // Freeze the section's contributing folder before the first preview
+            // changes the focused listing.
+            self.plugin_walk_dirs = Some(self.sidebar_plugin_dirs(false, cx));
             self.history.visit(dir.clone());
             self.sidebar_walk = true;
         }
@@ -910,6 +948,7 @@ impl Pane {
     /// the pane isn't showing it already.
     pub fn open_from_sidebar(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
         if dir != self.history.current() {
             self.navigate(dir, cx);
         }
@@ -925,6 +964,7 @@ impl Pane {
 
     pub fn go_back(&mut self, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
         let from = self.dir().to_path_buf();
         if let Some(dir) = self.history.back().map(Path::to_path_buf) {
             self.enter(dir, cx);
@@ -934,6 +974,7 @@ impl Pane {
 
     pub fn go_forward(&mut self, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
         if let Some(dir) = self.history.forward().map(Path::to_path_buf) {
             self.enter(dir, cx);
         }
@@ -986,6 +1027,7 @@ impl Pane {
         }
         self.plugin_selection.clear();
         self.plugin_scope = None;
+        self.preview_cancel.store(true, Ordering::Relaxed);
         for folder in &self.folders {
             folder.update(cx, |folder, cx| folder.release_listing(cx));
         }
@@ -1303,6 +1345,14 @@ impl Pane {
         self.folders.iter().position(|f| f.entity_id() == id)
     }
 
+    /// Announce the focused folder again even when it did not change in this
+    /// pane. A tab activation or the end of a search is a scope transition for
+    /// consumers even if the same pane already announced that folder.
+    pub fn announce_plugin_scope(&mut self, cx: &mut Context<Self>) {
+        self.plugin_scope = None;
+        self.plugin_scope_changed(cx);
+    }
+
     /// Announce a committed change of the focused column's real folder.
     fn plugin_scope_changed(&mut self, cx: &mut Context<Self>) {
         let Some(folder) = self.folders.get(self.focused).cloned() else { return };
@@ -1405,9 +1455,12 @@ impl Pane {
     }
 
     fn load_preview(&mut self, cx: &mut Context<Self>) {
+        let surface = self.current_plugin_surface(cx);
         let Some(entry) = self.cursor_entry(cx) else {
             self.preview = None;
             self.preview_generation += 1;
+            self.preview_cancel.store(true, Ordering::Relaxed);
+            crate::plugins::cancel_previews(surface, cx);
             return;
         };
         if self.preview.as_ref().is_some_and(|p| p.path == entry.path) {
@@ -1415,11 +1468,14 @@ impl Pane {
         }
         self.preview_generation += 1;
         let generation = self.preview_generation;
+        self.preview_cancel.store(true, Ordering::Relaxed);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.preview_cancel = cancel.clone();
+        crate::plugins::cancel_previews(surface, cx);
         let extensions = cx.global::<Ext>().0.clone();
         let configured = cx.global::<Ui>().views.resolve(self.dir()).preview_providers.0.clone();
         let candidates =
             crate::plugins::preview_candidates(cx, &configured, &entry.path, entry.is_dir, entry.is_symlink);
-        let surface = self.current_plugin_surface(cx);
         let (gate, cloud) = match cx.try_global::<CloudStatusService>() {
             Some(service) => {
                 let service = service.0.read(cx);
@@ -1432,11 +1488,24 @@ impl Pane {
             let path = entry.path.clone();
             let readable =
                 gate.check(&entry.path, crow_fs::ReadHint::for_path(&entry.path)) == crow_fs::ReadDecision::Readable;
-            let plugin = if candidates.is_empty() || !readable {
+            let plugin = if candidates.is_empty() || !readable || cancel.load(Ordering::Relaxed) {
                 None
             } else {
-                preview::plugin_preview(cx, surface, candidates, entry.clone(), gate.clone(), cloud, revision).await
+                preview::plugin_preview(
+                    cx,
+                    surface,
+                    candidates,
+                    entry.clone(),
+                    gate.clone(),
+                    cloud,
+                    revision,
+                    cancel.clone(),
+                )
+                .await
             };
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
             let fetched = match plugin {
                 Some(preview) => preview,
                 None => {
@@ -1447,6 +1516,9 @@ impl Pane {
                 }
             };
             this.update(cx, |this, cx| {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 if this.preview_generation == generation && this.cursor_entry(cx).is_some_and(|e| e.path == path) {
                     let mut fetched = fetched;
                     if this.cloud_status(&path, cx).is_some_and(|status| fetched.update_cloud(status)) {
@@ -3755,6 +3827,15 @@ impl Render for Pane {
             cx.try_global::<crate::plugins::Plugins>().map_or(0, |plugins| plugins.surfaces.generation());
         if self.applied_view.as_ref().is_some_and(|(_, applied, _)| *applied != plugin_generation) {
             self.apply_view(cx);
+        }
+        let views_generation = cx.global::<Ui>().views_generation;
+        if self.preview_plugin_generation != plugin_generation || self.preview_views_generation != views_generation {
+            self.preview_plugin_generation = plugin_generation;
+            self.preview_views_generation = views_generation;
+            // A registration or provider-list change refreshes the visible preview
+            // instead of leaving a withdrawn provider's output on screen.
+            self.preview = None;
+            self.load_preview(cx);
         }
         self.request_plugin_status(cx);
         self.update_plugin_command_context(window, cx);
