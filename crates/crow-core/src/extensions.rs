@@ -200,18 +200,103 @@ pub enum DescriptorSource {
     Asset(String),
 }
 
+/// What a command may act on. A scope command receives no entries; a selection
+/// command requires 1-128 selected rows and may opt into a context menu.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommandTarget {
+    #[default]
+    Scope,
+    Selection,
+}
+
+impl CommandTarget {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Scope => "scope",
+            Self::Selection => "selection",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "scope" => Some(Self::Scope),
+            "selection" => Some(Self::Selection),
+            _ => None,
+        }
+    }
+}
+
+/// A decoration's named color. The app maps these to theme roles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tint {
+    Accent,
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+impl Tint {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Accent => "accent",
+            Self::Info => "info",
+            Self::Success => "success",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "accent" => Some(Self::Accent),
+            "info" => Some(Self::Info),
+            "success" => Some(Self::Success),
+            "warning" => Some(Self::Warning),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+}
+
 /// One validated registration. Data-only kinds (an icon pack) carry a declared
-/// asset instead of a function.
+/// asset instead of a function. Presentation fields are concrete defaults; the
+/// registry rejects fields that do not belong to the descriptor's kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Descriptor {
     pub kind: ExtensionKind,
     pub id: ExtensionId,
     pub title: String,
-    pub applies_to: Option<String>,
     pub source: DescriptorSource,
+    /// Column width in points (32-480).
+    pub width: u16,
+    /// Narrowest a column may be dragged (32-width).
+    pub min_width: u16,
+    pub align: Align,
+    /// Command target; `Scope` for kinds that do not use it.
+    pub applies_to: CommandTarget,
+    /// A selection command also appears in file context menus.
+    pub context_menu: bool,
+    /// Preview/command suffix filter, already ASCII-folded. `None` matches all.
+    pub extensions: Option<Vec<String>>,
 }
 
 impl Descriptor {
+    pub fn new(kind: ExtensionKind, id: ExtensionId, title: String, source: DescriptorSource) -> Self {
+        Self {
+            kind,
+            id,
+            title,
+            source,
+            width: 100,
+            min_width: 50,
+            align: Align::Left,
+            applies_to: CommandTarget::Scope,
+            context_menu: false,
+            extensions: None,
+        }
+    }
+
     pub fn function(&self) -> Option<&str> {
         match &self.source {
             DescriptorSource::Function(function) => Some(function),
@@ -233,11 +318,15 @@ impl Descriptor {
 pub struct EntryHandle(pub u32);
 
 /// One entry's bounded text contribution, keyed by its request-local handle.
+/// `tint` and `dim` are decoration-only and stay `None`/false for columns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryValue {
     pub handle: EntryHandle,
+    /// A column cell or a decoration badge (16 bytes for decorations).
     pub text: String,
     pub spoken: Option<String>,
+    pub tint: Option<Tint>,
+    pub dim: bool,
 }
 
 /// The preview provider's bounded output for v1: plain text or a table.
@@ -253,6 +342,8 @@ pub struct SidebarRow {
     pub title: String,
     pub meta: Option<String>,
     pub badge: Option<String>,
+    /// A request-local directory handle; `None` is a display-only row.
+    pub handle: Option<EntryHandle>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -291,11 +382,14 @@ impl ContributionValues {
     }
 }
 
-/// A checked action a command may request. P1B owns the full allowlist; the
-/// fixture needs only plain-text copy.
+/// A checked action a command may request. The app applies it only while the
+/// activation's captured owner, scope and selection are still current.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandIntent {
+    Message(String),
     CopyText(String),
+    /// A handle from this activation's request table, never a path.
+    Reveal(EntryHandle),
 }
 
 /// The hook events API 1 delivers. `scope` is host-provided display text, never

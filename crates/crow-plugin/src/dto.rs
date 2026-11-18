@@ -116,6 +116,12 @@ impl RequestTicket {
     pub fn cancel(&self) {
         self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+
+    /// Read-only cancellation state. The app uses it to reject a terminal reply
+    /// that raced a superseded binding.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

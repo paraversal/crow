@@ -14,6 +14,11 @@ pub struct Limits {
     pub max_entries_per_call: usize,
     /// One display field (title, label, text, spoken value).
     pub max_display_bytes: usize,
+    /// A decoration badge and a sidebar row badge.
+    pub max_badge_bytes: usize,
+    /// One preview/command suffix filter: count and bytes per suffix.
+    pub max_extensions: usize,
+    pub max_extension_bytes: usize,
     /// Serialized reply payload and the largest script string.
     pub max_result_bytes: usize,
     pub max_operations: u64,
@@ -41,6 +46,9 @@ impl Default for Limits {
             max_registrations: 64,
             max_entries_per_call: 128,
             max_display_bytes: 4 * 1024,
+            max_badge_bytes: 16,
+            max_extensions: 32,
+            max_extension_bytes: 32,
             max_result_bytes: 64 * 1024,
             max_operations: 100_000,
             call_deadline: Duration::from_millis(50),
