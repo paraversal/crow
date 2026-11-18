@@ -3,7 +3,7 @@
 A Finder-style file explorer for macOS, written in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 It keeps Finder's directness and aims to be faster, more predictable and keyboard-first.
 
-Status: Phase 1 (the "daily driver" MVP) is done: M6, the UI overhaul, M6.5 (the settings window) and M7 (hardening) are merged. Next is M8 (Finder parity and polish), then M8.5 (search reliability); Phase 2 follows in M9. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for every milestone and item.
+Status: Phase 1 (the "daily driver" MVP) is done: M6, the UI overhaul, M6.5, M7, M8 (Finder parity) and M8.5 (search reliability) are merged. Next is M9 (Phase 2). See [`docs/ROADMAP.md`](docs/ROADMAP.md) for every milestone and item.
 
 ## Build and run
 

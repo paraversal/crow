@@ -5,6 +5,7 @@
 
 use std::io;
 use std::ops::Range;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -645,9 +646,14 @@ impl ContentSearch {
         hits: &mut Vec<Hit>,
         control: &Control,
     ) -> u64 {
-        let Ok(file) = std::fs::File::open(path) else {
+        // A file or symlink can be replaced after the walk checked its type.
+        // A nonblocking open keeps a replacement FIFO from hanging the walk.
+        let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path) else {
             return 0;
         };
+        if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+            return 0;
+        }
         let reader = ContentReader { inner: file, control };
         let mut sink = ContentSink { matcher: &self.matcher, path, modified, size, hidden, hits, control, matches: 0 };
         let _ = self.searcher.search_reader(&self.matcher, reader, &mut sink);
@@ -1219,12 +1225,17 @@ mod tests {
         let search_root = root.clone();
         std::thread::spawn(move || {
             let mut hits = Vec::new();
+            // Exercise the case where the path became a FIFO after the walk
+            // had already accepted it as a regular file.
+            let pattern = ContentPattern::new("needle").unwrap();
+            let mut content = ContentSearch::new(&pattern).unwrap();
+            assert_eq!(content.search(&pipe, None, 0, false, &mut hits, &control), 0);
             let summary = search(&search_root, &query, |batch| hits.extend(batch), &control);
             let _ = tx.send((hits, summary));
         });
         let (hits, summary) = rx.recv_timeout(Duration::from_secs(10)).expect("the search finishes despite the FIFO");
         assert!(summary.error.is_none(), "{:?}", summary.error);
-        assert_eq!(paths(&hits), [root.join("file.txt")], "the FIFO is never opened");
+        assert_eq!(paths(&hits), [root.join("file.txt")], "the FIFO is never read");
     }
 
     #[test]

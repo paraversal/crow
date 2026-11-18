@@ -112,7 +112,7 @@ Each piece ends with its own "Questions to ASK"; ask those in one batch when tha
 
 - Public Rhai plugin API, git plugin / Projects, icon packs, icon/gallery views, saved queries, Tags, copy queue, batch rename, drop-in/spring-loaded folders, iCloud download status: Phase 2, [`../m9/README.md`](../m9/README.md).
 - Windows Explorer-style path bar: designed in F4.3, built as an M9 setting.
-- Search reliability (the second triage's item 3): its own milestone, [`../m8.5/README.md`](../m8.5/README.md). It needs a repro corpus before it can be split into pieces; it is not part of M8.
+- Search reliability (the second triage's item 3): its own milestone, [`../done/m8.5/README.md`](../done/m8.5/README.md). It needs a repro corpus before it can be split into pieces; it is not part of M8.
 - Rubber-band selection: deferred unless the user says otherwise (index Q2).
 - Remote file systems, desktop icons, Open/Save panels, free icon placement, Mac App Store: the spec's "Not planned" list.
 - Solarized Light contrast: the theme index's palette, not Crow code.

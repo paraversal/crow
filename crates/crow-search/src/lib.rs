@@ -7,5 +7,8 @@ mod rules;
 
 pub mod corpus;
 
+#[cfg(test)]
+mod oracle_tests;
+
 pub use engine::{Control, FuzzyMatcher, Hit, HitKind, Query, Skip, SkipReason, Summary, search};
 pub use rules::RuleSet;

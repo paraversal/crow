@@ -72,6 +72,11 @@ const VIM_KEYS: &[&str] = &["h", "j", "k", "l", "g g", "shift-g", "m a", "' a"];
 const TYPE_ALPHABET: &[&str] =
     &["a", "Z", "0", "9", "/", "~", ".", " ", "-", "_", "'", "\"", "🙂", "e\u{301}", "ש", "م"];
 
+/// Keys that open a mode the rest of the run can then use. Picked more often
+/// than a uniform keymap draw: search and the palette were never reached in a
+/// 120-step smoke run before B5, so their surfaces went unfuzzed.
+const OPEN_MODE_KEYS: &[&str] = &["cmd-f", "cmd-k", "cmd-shift-g", "/"];
+
 /// One more than the longest context menu (the sidebar favorite's, 17 slots),
 /// so every item can be drawn.
 const MENU_SLOTS: usize = 18;
@@ -95,7 +100,8 @@ impl StepGen {
     pub fn next(&mut self, state: &GenState) -> Step {
         let roll = self.rng.random_range(0..100);
         match roll {
-            0..=44 => self.keys(state),
+            0..=39 => self.keys(state),
+            40..=44 => self.mode_key(state),
             45..=59 if state.text_focused => self.type_text(),
             45..=59 => self.keys(state),
             60..=74 if !state.selectors.is_empty() => self.click(state, false),
@@ -126,6 +132,17 @@ impl StepGen {
             85..=94 => Step::Settle,
             _ => Step::AdvanceClock(self.rng.random_range(50..=2000)),
         }
+    }
+
+    /// A key that opens search, the palette, Go to Folder or the filter, when
+    /// one resolves in this focus context; otherwise a normal key.
+    fn mode_key(&mut self, state: &GenState) -> Step {
+        let pool: Vec<&String> =
+            state.active_keys.iter().filter(|key| OPEN_MODE_KEYS.contains(&key.as_str())).collect();
+        if pool.is_empty() {
+            return self.keys(state);
+        }
+        Step::Keys(pool[self.rng.random_range(0..pool.len())].clone())
     }
 
     fn keys(&mut self, state: &GenState) -> Step {
