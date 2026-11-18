@@ -9,6 +9,7 @@ registration runtime; P1B adds the full menu, palette and author-facing surfaces
 
 1. Copy a bundle directory into `~/.config/crow/plugins/`. A bundle is `plugin.toml`, its
    entry script and any declared assets. Discovery only reads files; it never runs a script.
+   If Crow is already open, choose **Reload All** in Settings ▸ Plugins after copying.
 2. Open **Settings** (⌘,) and find **Plugins**. The row shows the package name, version,
    state and requested `fs` capability.
 3. **Approve** the exact snapshot. Crow re-reads the bundle, compares its digest with the
@@ -69,14 +70,15 @@ also bounds expression depth, call levels, arrays, maps, strings and modules.
 
 | Capability | Manifest | Behavior |
 | --- | --- | --- |
-| File read | `fs = "read"` | A script may call `read_excerpt(handle)` for an entry in the current request. The host owns the path, opens it no-follow, verifies a regular file and the listing identity when present, and returns at most 64 KiB of UTF-8 text. A handle is an opaque `u32`; it cannot be created by a script or reused in another request. `fs = "none"` denies the call. |
+| File read | `fs = "read"` | Before a worker call, the Rust host may read at most 64 KiB of UTF-8 text for one eligible entry and pass it as `entries[i].excerpt`. The host opens it no-follow, verifies a regular file and the listing identity when present. A script never receives a path or a read function. `fs = "none"` means no excerpt is supplied. P1B checks P8 content eligibility before asking the host to read. |
 | Spawn | `spawn = []` | Reserved. Any nonempty list is rejected before a worker starts. |
 | Network | `net = false` | Reserved. `true` is rejected before a worker starts. |
 | Bundle assets | `assets = [...]` | `asset(name) -> String` returns a declared asset only. Undeclared names are capability errors. |
 
 No other host capability is exposed. Scripts get no raw filesystem paths, shell, sockets,
 module imports, debugger, print/debug output or mutating host callback. A command's only
-API-1 result is a checked `copy-text` request; P1B owns the larger action allowlist.
+API-1 result is a checked `#{ kind: "copy_text", text }` request; P1B owns the larger action
+allowlist.
 
 ## Script contract
 
@@ -92,7 +94,7 @@ fn register() {
 
 fn relative_path(ctx) {
     let entry = ctx.entries[0];
-    #{ action: "copy-text", text: ctx.scope + "/" + entry.name }
+    #{ kind: "copy_text", text: ctx.scope + "/" + entry.name }
 }
 ```
 
@@ -106,7 +108,8 @@ Computed functions receive one map:
 
 ```text
 #{ api: 1, scope: "/display/scope", selection: 3, entries: [
-    #{ handle: 3, name: "notes.txt", is_dir: false, size: 120, kind: "Text" }
+    #{ handle: 3, name: "notes.txt", is_dir: false, size: 120, kind: "Text",
+       excerpt: "host-read text, when the fs capability allows it" }
 ] }
 ```
 
@@ -115,7 +118,7 @@ Computed functions receive one map:
 
 | Kind | Return |
 | --- | --- |
-| `command` | `#{ action: "copy-text", text: "..." }` |
+| `command` | `#{ kind: "copy_text", text: "..." }` |
 | `column`, `decoration` | `[ #{ handle, text, spoken? } ]`, keyed by input handles |
 | `preview` | `#{ text: "..." }` or `#{ table: [ ["a", "b"] ] }` (not both) |
 | `sidebar` | `[ #{ id, title, meta?, badge? } ]` |

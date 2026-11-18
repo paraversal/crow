@@ -82,7 +82,10 @@ fn apply(event: HostEvent, cx: &mut App) {
             cx.global_mut::<Plugins>().inventory = inventory;
             cx.refresh_windows();
         }
-        HostEvent::Status { message, error, .. } => status(message, error, cx),
+        HostEvent::Status { message, error, .. } => {
+            status(message, error, cx);
+            cx.refresh_windows();
+        }
         // P1B applies command intents and consumes contributions. P1A keeps the
         // validated events on the host boundary; commands remain unapplied.
         HostEvent::CommandIntent { .. } | HostEvent::Refresh { .. } | HostEvent::Contribution { .. } => {}

@@ -726,7 +726,8 @@ pub fn open_plugins_folder(cx: &mut App) {
             Ok(dir) => dir,
             Err(error) => {
                 cx.update(|cx| {
-                    crate::operations::message(format!("Couldn't create the plugins folder: {error}"), true, cx)
+                    crate::operations::message(format!("Couldn't create the plugins folder: {error}"), true, cx);
+                    cx.refresh_windows();
                 });
                 return;
             }
@@ -734,6 +735,7 @@ pub fn open_plugins_folder(cx: &mut App) {
         cx.update(|cx| {
             if !crate::effects::effects(cx).open_folder_in_finder(&dir) {
                 crate::operations::message(format!("Couldn't open {}", dir.display()), true, cx);
+                cx.refresh_windows();
             }
         });
     })

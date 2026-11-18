@@ -929,6 +929,9 @@ impl SettingsWindow {
 
     fn plugin_action(&mut self, action: PluginAction, cx: &mut Context<Self>) {
         let Some(entry) = self.selected_plugin(cx) else { return };
+        if !action.enabled(&entry) {
+            return;
+        }
         let handle = cx.global::<Plugins>().handle.clone();
         send_plugin_action(handle, entry, action, cx);
     }
@@ -2010,22 +2013,39 @@ fn plugin_row(
     if grants_error {
         actions.retain(|action| *action == PluginAction::Reload);
     }
-    let mut action_row = div().flex().items_center().gap(px(4.));
+    let mut action_row = div().flex_none().flex().items_center().gap(px(4.));
     for action in actions {
         action_row =
             action_row.child(plugin_button(index, action, entry, action.enabled(entry), theme, handle.clone()));
     }
 
-    let mut details = div().flex_1().flex().flex_col().gap(px(2.)).child(
+    let mut details = div().flex_1().min_w_0().flex().flex_col().gap(px(2.)).child(
         div()
             .flex()
             .items_center()
             .gap(px(6.))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(entry.title().to_owned()))
+            .min_w_0()
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(entry.title().to_owned()),
+            )
             .when_some(entry.version.clone(), |line, version| {
-                line.child(div().text_size(px(10.)).text_color(muted).child(format!("v{version}")))
+                line.child(
+                    div()
+                        .flex_none()
+                        .max_w(px(140.))
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(10.))
+                        .text_color(muted)
+                        .child(format!("v{version}")),
+                )
             })
-            .child(div().text_size(px(11.)).text_color(state_color).child(entry.state.label())),
+            .child(div().flex_none().text_size(px(11.)).text_color(state_color).child(entry.state.label())),
     );
     let extensions = entry.descriptors.len();
     details = details.child(div().text_size(px(11.)).text_color(muted).child(format!(
@@ -2043,16 +2063,19 @@ fn plugin_row(
     };
     div()
         .id(("plugin-row", index))
-        .role(Role::Group)
+        .role(Role::ListBoxOption)
         .aria_label(format!("{}, {}", entry.title(), entry.state.label()))
         .aria_description(description)
+        .aria_selected(selected)
         .aria_position_in_set(index + 1)
         .aria_size_of_set(count)
+        .when(selected && focused, |row| row.aria_active_descendant())
         .flex()
         .items_center()
         .gap(px(10.))
         .p(px(8.))
         .rounded(px(6.))
+        .overflow_hidden()
         .when(selected, |row| row.bg(if focused { active_selection(theme) } else { inactive_selection(theme) }))
         .child(details)
         .child(action_row)
@@ -2074,6 +2097,7 @@ fn plugin_button(
     let entry = entry.clone();
     let mut button = div()
         .id(id)
+        .debug_selector(move || format!("plugin-action-{index}-{}", action.index()))
         .role(Role::Button)
         .aria_label(aria_label)
         .aria_disabled(!enabled)
@@ -2176,10 +2200,12 @@ fn open_grants_button(theme: &Theme) -> gpui::AnyElement {
 fn send_plugin_action(handle: Option<PluginHandle>, entry: PluginEntry, action: PluginAction, cx: &mut App) {
     let Some(handle) = handle else {
         crate::operations::message("The plugin service is not running.", true, cx);
+        cx.refresh_windows();
         return;
     };
     let Some(id) = entry.id.clone() else {
         crate::operations::message("This package has no valid plugin id.", true, cx);
+        cx.refresh_windows();
         return;
     };
     let result = match action {
@@ -2194,6 +2220,7 @@ fn send_plugin_action(handle: Option<PluginHandle>, entry: PluginEntry, action: 
     };
     if let Err(error) = result {
         crate::operations::message(error, true, cx);
+        cx.refresh_windows();
     }
 }
 
@@ -2786,7 +2813,33 @@ permissions = { fs = "none", spawn = [], net = false }
             dir.join("main.rhai"),
             r#"
 fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run" } ] }
-fn run(ctx) { #{ action: "copy-text", text: "x" } }
+fn run(ctx) { #{ kind: "copy_text", text: "x" } }
+"#,
+        )
+        .unwrap();
+    }
+
+    fn write_long_name_plugin_bundle(config: &std::path::Path) {
+        let dir = config.join("plugins/long-name");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.toml"),
+            r#"
+id = "example.long-name"
+name = "An Extremely Long Plugin Display Name That Should Not Push The Action Buttons Off The Visible Settings Column Or Overlap Them in Any Way Whatsoever"
+version = "0.1.0"
+api = 1
+entry = "main.rhai"
+provides = ["command"]
+permissions = { fs = "none", spawn = [], net = false }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.rhai"),
+            r#"
+fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run" } ] }
+fn run(ctx) { #{ kind: "copy_text", text: "x" } }
 "#,
         )
         .unwrap();
@@ -2836,10 +2889,38 @@ fn run(ctx) { #{ action: "copy-text", text: "x" } }
         assert!(grants.contains(r#"[plugin."example.demo"]"#), "{grants}");
         assert!(grants.contains("enabled = true"), "{grants}");
 
+        vcx.simulate_keystrokes("t");
+        std::thread::sleep(Duration::from_millis(50));
+        vcx.update(|_, cx| crate::plugins::poll(cx));
+        vcx.cx.run_until_parked();
+        assert!(
+            vcx.read_global::<crate::operations::Operations, _>(|operations, _| operations.message.is_none()),
+            "Retry is not an action on a running package, so its key must do nothing"
+        );
+
         vcx.simulate_keystrokes("d");
         wait_plugin_state(&mut vcx, "example.demo", PluginState::Disabled);
         let grants = std::fs::read_to_string(config.join("plugins.toml")).unwrap();
         assert!(grants.contains("enabled = false"), "{grants}");
+    }
+
+    #[gpui::test]
+    fn a_long_plugin_name_keeps_its_actions_inside_the_list(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+            write_long_name_plugin_bundle(&config);
+            cx.update(|cx| crate::plugins::start(cx, config));
+        });
+        wait_plugin_state(&mut vcx, "example.long-name", PluginState::PendingApproval);
+        focus_control(&view, &mut vcx, ControlId::Plugins);
+        draw(&mut vcx);
+
+        let list = vcx.debug_bounds("settings-plugins").expect("the plugin list draws");
+        let approve = vcx.debug_bounds("plugin-action-0-0").expect("Approve draws");
+        let reload = vcx.debug_bounds("plugin-action-0-3").expect("Reload draws");
+        assert!(approve.left() >= list.left(), "Approve stays inside the list: {approve:?} vs {list:?}");
+        assert!(approve.right() <= list.right(), "Approve stays inside the list: {approve:?} vs {list:?}");
+        assert!(reload.right() <= list.right(), "Reload stays inside the list: {reload:?} vs {list:?}");
     }
 
     #[gpui::test]

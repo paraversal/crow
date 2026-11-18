@@ -3,6 +3,7 @@
 //! extension registry. GPUI-free; the app owns presentation and context.
 
 pub mod dto;
+mod excerpt;
 pub mod grants;
 pub mod host;
 pub mod limits;
@@ -11,7 +12,8 @@ pub mod package;
 pub mod registry;
 mod worker;
 
-pub use dto::{HostEvent, Inventory, PluginEntry, PluginState};
+pub use dto::{EntryRef, ExcerptInput, HostEvent, Inventory, PluginEntry, PluginState, RequestInput};
+pub use excerpt::read_excerpt;
 pub use grants::{
     DEFAULT_PLUGINS, Grant, Grants, approve, ensure_grants_file, grants_path, load_grants, parse_grants, set_enabled,
     withdraw,

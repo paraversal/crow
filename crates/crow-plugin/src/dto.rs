@@ -1,6 +1,5 @@
 //! Wire types shared by the host, the worker and (for display) the app.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -37,11 +36,20 @@ impl EntryRef {
     }
 }
 
+/// A capped text excerpt the Rust host read before enqueueing the call. The
+/// script sees it as data on the matching entry; it never gets a path or a
+/// read function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExcerptInput {
+    pub handle: EntryHandle,
+    pub text: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct RequestInput {
     pub snapshot: Snapshot,
-    /// Not converted into the script map; `read_excerpt` consults this table.
-    pub reads: BTreeMap<EntryHandle, EntryRef>,
+    /// At most one host-read excerpt for an entry in this snapshot.
+    pub excerpt: Option<ExcerptInput>,
 }
 
 impl RequestInput {
@@ -68,6 +76,14 @@ impl RequestInput {
             && !handles.contains(&selection)
         {
             return Err(format!("selection handle {} is not in the snapshot", selection.0));
+        }
+        if let Some(excerpt) = &self.excerpt {
+            if !handles.contains(&excerpt.handle) {
+                return Err(format!("excerpt handle {} is not in the snapshot", excerpt.handle.0));
+            }
+            if excerpt.text.len() > limits.max_read_bytes || excerpt.text.contains('\0') {
+                return Err(format!("excerpt for handle {} is not bounded text", excerpt.handle.0));
+            }
         }
         Ok(())
     }

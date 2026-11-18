@@ -55,6 +55,7 @@ impl Default for RuntimeState {
 struct WorkerSlot {
     generation: u64,
     digest: String,
+    read_allowed: bool,
     worker: Worker,
 }
 
@@ -239,17 +240,13 @@ impl PluginHost {
     fn start_worker(&mut self, id: &PluginId, snapshot: std::sync::Arc<PackageSnapshot>, fs: FsAccess) {
         let generation = self.bump_generation(id);
         let digest = snapshot.digest.clone();
-        match Worker::spawn(
-            id.clone(),
-            generation,
-            snapshot,
-            fs.permits_read(),
-            self.limits.clone(),
-            self.inbox.clone(),
-        ) {
+        match Worker::spawn(id.clone(), generation, snapshot, self.limits.clone(), self.inbox.clone()) {
             Ok(worker) => {
                 let mailbox = worker.mailbox.clone();
-                self.workers.insert(id.clone(), WorkerSlot { generation, digest: digest.clone(), worker });
+                self.workers.insert(
+                    id.clone(),
+                    WorkerSlot { generation, digest: digest.clone(), read_allowed: fs.permits_read(), worker },
+                );
                 self.set_state(id, PluginState::Starting, None, Vec::new(), Some(digest));
                 if mailbox.enqueue_command(Call::Register).is_err() {
                     self.worker_failed(id, generation, CallError::new(CallErrorKind::Script, "worker mailbox is full"));
@@ -278,8 +275,10 @@ impl PluginHost {
             return Err("the package changed on disk; review the new snapshot before approving".into());
         }
         grants::approve(&self.grants_path, id, &snapshot).map_err(|error| format!("plugins.toml: {error}"))?;
-        self.grants = grants::load_grants(&self.grants_path).unwrap_or_default();
-        self.grants_error = None;
+        if let Err(error) = self.reload_grants() {
+            self.refresh();
+            return Err(format!("plugins.toml: {error}"));
+        }
         if self.states.get(id).is_some_and(|state| {
             state.state == PluginState::Running && state.digest.as_deref() == Some(expected_digest)
         }) && self.workers.get(id).is_some_and(|slot| slot.digest == expected_digest)
@@ -373,6 +372,9 @@ impl PluginHost {
         };
         if !self.states.get(&extension.plugin).is_some_and(|state| state.state == PluginState::Running) {
             return Err(format!("plugin \"{}\" is not running", extension.plugin));
+        }
+        if input.excerpt.is_some() && !slot.read_allowed {
+            return Err(format!("plugin \"{}\" has no fs read capability", extension.plugin));
         }
         self.next_request += 1;
         let stamp = RequestStamp { generation: slot.generation, request_id: self.next_request, context_revision };
@@ -598,10 +600,11 @@ impl PluginHost {
     }
 
     fn status(&self, id: &PluginId, message: impl Into<String>, error: bool) {
+        let name = self.name_for(id);
         self.send(HostEvent::Status {
             plugin: Some(id.clone()),
-            name: self.name_for(id),
-            message: message.into(),
+            name: name.clone(),
+            message: format!("{name}: {}", message.into()),
             error,
         });
     }
@@ -931,7 +934,7 @@ mod tests {
                         kind: "Text".into(),
                     }],
                 },
-                reads: std::collections::BTreeMap::new(),
+                excerpt: None,
             }
         }
 
@@ -979,7 +982,7 @@ permissions = {permissions}
 
     const COMMAND: &str = r#"
 fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run" } ] }
-fn run(ctx) { #{ action: "copy-text", text: ctx.scope + "/" + ctx.entries[0].name } }
+fn run(ctx) { #{ kind: "copy_text", text: ctx.scope + "/" + ctx.entries[0].name } }
 "#;
 
     const LOOP: &str = r#"
@@ -1126,6 +1129,36 @@ permissions = { fs = "none" }
             harness.inventory().grants_error.is_none() && harness.entry("example.a").state == PluginState::Running
         });
         assert_eq!(harness.entry("example.a").descriptors.len(), 1);
+    }
+
+    #[test]
+    fn excerpt_input_requires_the_read_grant() {
+        let mut harness = Harness::new(&[("example.a", COMMAND)]);
+        harness.approve("example.a");
+        let plugin = PluginId::parse("example.a").unwrap();
+        let extension = ExtensionId::new(plugin, crow_core::LocalId::parse("copy").unwrap());
+        let mut input = Harness::input();
+        input.excerpt = Some(crate::dto::ExcerptInput { handle: EntryHandle(1), text: "hello".into() });
+        let error = harness.host.evaluate(extension.clone(), input.clone(), 1).unwrap_err();
+        assert!(error.contains("fs read capability"), "{error}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let plugins = dir.path().join("plugins");
+        std::fs::create_dir(&plugins).unwrap();
+        write_bundle(
+            &plugins,
+            "example.read",
+            "Read",
+            COMMAND,
+            Permissions { fs: Some(FsAccess::Read), spawn: Vec::new(), net: false },
+        );
+        let mut harness = Harness::from_dir(dir);
+        harness.approve("example.read");
+        let plugin = PluginId::parse("example.read").unwrap();
+        let extension = ExtensionId::new(plugin, crow_core::LocalId::parse("copy").unwrap());
+        let mut input = Harness::input();
+        input.excerpt = Some(crate::dto::ExcerptInput { handle: EntryHandle(1), text: "hello".into() });
+        assert!(harness.host.evaluate(extension, input, 1).is_ok());
     }
 
     #[test]
@@ -1322,7 +1355,7 @@ fn register() {
         #{ kind: "hook", id: "changed", title: "Changed", function: "hook" }
     ]
 }
-fn run(ctx) { #{ action: "copy-text", text: "x" } }
+fn run(ctx) { #{ kind: "copy_text", text: "x" } }
 fn hook(ctx) { #{ refresh: true } }
 "#;
         let mut harness = Harness::new(&[("example.a", script)]);
@@ -1335,6 +1368,21 @@ fn hook(ctx) { #{ refresh: true } }
                 matches!(
                     event,
                     HostEvent::Refresh { plugin: p, .. } if p == &plugin
+                )
+            })
+        });
+    }
+
+    #[test]
+    fn action_errors_name_the_plugin_in_the_status_event() {
+        let mut harness = Harness::new(&[("example.a", COMMAND)]);
+        harness.approve("example.a");
+        harness.host.command(HostCommand::Retry(PluginId::parse("example.a").unwrap()));
+        harness.pump_until(|harness| {
+            harness.seen.iter().any(|event| {
+                matches!(
+                    event,
+                    HostEvent::Status { message, error: true, .. } if message == "a: the package is not paused or failed"
                 )
             })
         });

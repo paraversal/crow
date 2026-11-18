@@ -139,10 +139,10 @@ pub fn reply_for(
 
 fn command_reply(value: Dynamic, limits: &Limits) -> Result<CommandIntent, CallError> {
     let map = as_map(&value).ok_or_else(|| CallError::invalid("a command must return a map"))?;
-    reject_unknown(&map, &["action", "text"], "command reply")?;
-    let action = required_string(&map, "action", "command action")?;
-    if action != "copy-text" {
-        return Err(CallError::invalid(format!("command action \"{action}\" is not in the api 1 allowlist")));
+    reject_unknown(&map, &["kind", "text"], "command reply")?;
+    let kind = required_string(&map, "kind", "command kind")?;
+    if kind != "copy_text" {
+        return Err(CallError::invalid(format!("command kind \"{kind}\" is not in the api 1 allowlist")));
     }
     let text = required_string(&map, "text", "command text")?;
     let text = checked_text(&text, "command text", limits)?;
@@ -472,7 +472,7 @@ fn as_map(value: &Dynamic) -> Option<Map> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::{EntryRef, RequestInput};
+    use crate::dto::RequestInput;
     use crate::manifest::parse_manifest;
     use crow_core::{EntryData, Snapshot};
 
@@ -522,10 +522,7 @@ permissions = { fs = "none" }
                     },
                 ],
             },
-            reads: BTreeMap::from([
-                (EntryHandle(1), EntryRef::new("/tmp/a.txt")),
-                (EntryHandle(2), EntryRef::new("/tmp/b.txt")),
-            ]),
+            excerpt: None,
         }
     }
 
@@ -546,7 +543,7 @@ fn register() {
         #{ kind: "icon-pack", id: "icons", title: "Icons" }
     ]
 }
-fn run(ctx) { #{ action: "copy-text", text: "x" } }
+fn run(ctx) { #{ kind: "copy_text", text: "x" } }
 "#,
         )
         .unwrap();
@@ -634,12 +631,12 @@ fn run(ctx) { [] }
             applies_to: None,
             function: Some("run".into()),
         };
-        let value: Dynamic = rhai::Engine::new().eval::<Dynamic>(r#"#{ action: "copy-text", text: "hello" }"#).unwrap();
+        let value: Dynamic = rhai::Engine::new().eval::<Dynamic>(r#"#{ kind: "copy_text", text: "hello" }"#).unwrap();
         assert_eq!(
             reply_for(&command, value, &input(), &limits()).unwrap(),
             Reply::Intent(CommandIntent::CopyText("hello".into()))
         );
-        let bad: Dynamic = rhai::Engine::new().eval::<Dynamic>(r#"#{ action: "open-url", text: "x" }"#).unwrap();
+        let bad: Dynamic = rhai::Engine::new().eval::<Dynamic>(r#"#{ kind: "open_url", text: "x" }"#).unwrap();
         assert!(reply_for(&command, bad, &input(), &limits()).is_err());
 
         let hook = Descriptor {
@@ -653,6 +650,49 @@ fn run(ctx) { [] }
         assert_eq!(reply_for(&hook, refresh, &input(), &limits()).unwrap(), Reply::Refresh);
         let unit: Dynamic = rhai::Engine::new().eval::<Dynamic>(r#"()"#).unwrap();
         assert_eq!(reply_for(&hook, unit, &input(), &limits()).unwrap(), Reply::Unit);
+    }
+
+    #[test]
+    fn every_other_reply_shape_is_validated() {
+        let shape = |kind: ExtensionKind, source: &str| {
+            let descriptor = Descriptor {
+                kind,
+                id: ExtensionId::new(plugin(), LocalId::parse("shape").unwrap()),
+                title: "Shape".into(),
+                applies_to: None,
+                function: (kind != ExtensionKind::IconPack).then(|| "run".into()),
+            };
+            let value: Dynamic = rhai::Engine::new().eval::<Dynamic>(source).unwrap();
+            reply_for(&descriptor, value, &input(), &limits())
+        };
+
+        match shape(ExtensionKind::Preview, r#"#{ text: "hello" }"#).unwrap() {
+            Reply::Values(ContributionValues::Preview(preview)) => assert_eq!(preview.text.as_deref(), Some("hello")),
+            other => panic!("{other:?}"),
+        }
+        match shape(ExtensionKind::Sidebar, r#"[ #{ id: "a", title: "A" } ]"#).unwrap() {
+            Reply::Values(ContributionValues::Sidebar(rows)) => assert_eq!(rows[0].title, "A"),
+            other => panic!("{other:?}"),
+        }
+        match shape(ExtensionKind::Status, r#"[ #{ text: "S" } ]"#).unwrap() {
+            Reply::Values(ContributionValues::Status(items)) => assert_eq!(items[0].text, "S"),
+            other => panic!("{other:?}"),
+        }
+        match shape(ExtensionKind::Info, r#"[ #{ label: "L", value: "V" } ]"#).unwrap() {
+            Reply::Values(ContributionValues::Info(rows)) => assert_eq!(rows[0].value, "V"),
+            other => panic!("{other:?}"),
+        }
+        match shape(ExtensionKind::IconPack, r#"#{ icons: #{ "rust": #{ icon: "rust", color: "accent" } } }"#).unwrap()
+        {
+            Reply::Values(ContributionValues::IconPack(pack)) => assert!(pack.icons.contains_key("rust")),
+            other => panic!("{other:?}"),
+        }
+
+        assert!(shape(ExtensionKind::Sidebar, r#"[ #{ id: "a", title: "A", extra: 1 } ]"#).is_err());
+        assert!(shape(ExtensionKind::Preview, r#"#{ text: "x", table: [] }"#).is_err());
+        assert!(
+            shape(ExtensionKind::IconPack, r#"#{ icons: #{ "rust": #{ icon: "rust", color: "purple" } } }"#).is_err()
+        );
     }
 
     #[test]

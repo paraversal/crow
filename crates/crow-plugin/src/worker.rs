@@ -1,20 +1,18 @@
 //! One dedicated thread and one Rhai engine per enabled plugin. The worker owns
-//! all script evaluation, the operation/deadline budget and the request-local
-//! read table; the UI only enqueues.
+//! script evaluation and the operation/deadline budget; the UI only enqueues.
+//! File excerpts are read by the host and arrive as immutable request input.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::io::Read;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crow_core::{Descriptor, EntryHandle, ExtensionId, HookEvent, LocalId, PluginId, Snapshot};
+use crow_core::{Descriptor, ExtensionId, HookEvent, LocalId, PluginId, Snapshot};
 use rhai::{AST, Array, Dynamic, Engine, EvalAltResult, Map, Position, Scope};
 
-use crate::dto::{Call, CallError, CallErrorKind, EntryRef, Reply, RequestInput, RequestStamp, WorkerMessage};
+use crate::dto::{Call, CallError, CallErrorKind, Reply, RequestInput, RequestStamp, WorkerMessage};
 use crate::host::Inbox;
 use crate::limits::Limits;
 use crate::manifest::{API_VERSION, Manifest};
@@ -124,7 +122,6 @@ impl Worker {
         plugin: PluginId,
         generation: u64,
         snapshot: Arc<crate::package::PackageSnapshot>,
-        read_allowed: bool,
         limits: Limits,
         inbox: Sender<Inbox>,
     ) -> Result<Self, String> {
@@ -136,17 +133,7 @@ impl Worker {
         let join = thread::Builder::new()
             .name(format!("crow-plugin-{plugin}"))
             .spawn(move || {
-                worker_main(
-                    plugin,
-                    generation,
-                    snapshot,
-                    read_allowed,
-                    limits,
-                    thread_mailbox,
-                    thread_cancel,
-                    runtime,
-                    inbox,
-                );
+                worker_main(plugin, generation, snapshot, limits, thread_mailbox, thread_cancel, runtime, inbox);
             })
             .map_err(|error| format!("could not start worker: {error}"))?;
         Ok(Self { mailbox, cancel, join: Some(join) })
@@ -167,8 +154,6 @@ struct Runtime {
     deadline: Mutex<Option<Instant>>,
     terminate: AtomicU8,
     violation: AtomicBool,
-    read_allowed: AtomicBool,
-    reads: Mutex<BTreeMap<EntryHandle, EntryRef>>,
     call_cancel: Mutex<Option<crate::dto::CancelToken>>,
 }
 
@@ -179,32 +164,20 @@ impl Runtime {
             deadline: Mutex::new(None),
             terminate: AtomicU8::new(0),
             violation: AtomicBool::new(false),
-            read_allowed: AtomicBool::new(false),
-            reads: Mutex::new(BTreeMap::new()),
             call_cancel: Mutex::new(None),
         }
     }
 
-    fn begin(
-        &self,
-        deadline: Instant,
-        reads: &BTreeMap<EntryHandle, EntryRef>,
-        read_allowed: bool,
-        call_cancel: Option<crate::dto::CancelToken>,
-    ) {
+    fn begin(&self, deadline: Instant, call_cancel: Option<crate::dto::CancelToken>) {
         *self.deadline.lock().unwrap() = Some(deadline);
-        *self.reads.lock().unwrap() = reads.clone();
         *self.call_cancel.lock().unwrap() = call_cancel;
-        self.read_allowed.store(read_allowed, Ordering::Relaxed);
         self.terminate.store(0, Ordering::Relaxed);
         self.violation.store(false, Ordering::Relaxed);
     }
 
     fn end(&self) {
         *self.deadline.lock().unwrap() = None;
-        self.reads.lock().unwrap().clear();
         *self.call_cancel.lock().unwrap() = None;
-        self.read_allowed.store(false, Ordering::Relaxed);
     }
 }
 
@@ -213,7 +186,6 @@ fn worker_main(
     plugin: PluginId,
     generation: u64,
     snapshot: Arc<crate::package::PackageSnapshot>,
-    read_allowed: bool,
     limits: Limits,
     mailbox: Arc<Mailbox>,
     cancel: Arc<AtomicBool>,
@@ -242,7 +214,7 @@ fn worker_main(
             .filter_map(|name| snapshot.files.get(name).map(|bytes| (name.clone(), bytes.clone())))
             .collect(),
     );
-    let mut engine = build_engine(&limits, runtime.clone(), assets.clone(), limits.max_read_bytes);
+    let mut engine = build_engine(&limits, runtime.clone(), assets.clone());
     let ast = match engine.compile(source) {
         Ok(ast) => ast,
         Err(error) => {
@@ -288,7 +260,6 @@ fn worker_main(
                 &mut engine,
                 &ast,
                 &snapshot,
-                read_allowed,
                 &limits,
                 &mailbox,
                 &cancel,
@@ -310,7 +281,6 @@ fn run_loop(
     engine: &mut Engine,
     ast: &AST,
     snapshot: &crate::package::PackageSnapshot,
-    read_allowed: bool,
     limits: &Limits,
     mailbox: &Mailbox,
     cancel: &AtomicBool,
@@ -330,7 +300,6 @@ fn run_loop(
                 engine,
                 ast,
                 snapshot,
-                read_allowed,
                 runtime,
                 registered,
                 extension.clone(),
@@ -341,20 +310,10 @@ fn run_loop(
                 limits,
             )
             .map(|(stamp, reply)| (extension, stamp, reply)),
-            Call::Notify { extension, event, stamp, cancel } => notify(
-                engine,
-                ast,
-                read_allowed,
-                runtime,
-                registered,
-                extension.clone(),
-                event,
-                stamp,
-                cancel,
-                deadline,
-                limits,
-            )
-            .map(|(stamp, reply)| (extension, stamp, reply)),
+            Call::Notify { extension, event, stamp, cancel } => {
+                notify(engine, ast, runtime, registered, extension.clone(), event, stamp, cancel, deadline, limits)
+                    .map(|(stamp, reply)| (extension, stamp, reply))
+            }
         };
         match result {
             Ok((extension, stamp, reply)) => {
@@ -383,7 +342,7 @@ fn register_package(
     deadline: Instant,
     limits: &Limits,
 ) -> Result<Vec<Descriptor>, CallError> {
-    runtime.begin(deadline, &BTreeMap::new(), false, None);
+    runtime.begin(deadline, None);
     let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, "register", ());
     let violation = runtime.violation.load(Ordering::Relaxed);
     runtime.end();
@@ -399,7 +358,6 @@ fn evaluate(
     engine: &Engine,
     ast: &AST,
     snapshot: &crate::package::PackageSnapshot,
-    read_allowed: bool,
     runtime: &Runtime,
     registered: &BTreeMap<LocalId, Descriptor>,
     extension: ExtensionId,
@@ -417,8 +375,8 @@ fn evaluate(
         return Err(CallError::invalid(format!("extension \"{extension}\" is not evaluated directly")));
     }
     let function = descriptor.function.as_deref().ok_or_else(|| CallError::invalid("extension has no function"))?;
-    runtime.begin(deadline, &input.reads, read_allowed, Some(cancel));
-    let context = input_map(&input.snapshot);
+    runtime.begin(deadline, Some(cancel));
+    let context = input_map(&input);
     let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, function, (context,));
     let violation = runtime.violation.load(Ordering::Relaxed);
     runtime.end();
@@ -437,7 +395,6 @@ fn evaluate(
 fn notify(
     engine: &Engine,
     ast: &AST,
-    read_allowed: bool,
     runtime: &Runtime,
     registered: &BTreeMap<LocalId, Descriptor>,
     extension: ExtensionId,
@@ -454,7 +411,7 @@ fn notify(
         return Err(CallError::invalid(format!("extension \"{extension}\" is not a hook")));
     }
     let function = descriptor.function.as_deref().ok_or_else(|| CallError::invalid("hook has no function"))?;
-    runtime.begin(deadline, &BTreeMap::new(), read_allowed, Some(cancel));
+    runtime.begin(deadline, Some(cancel));
     let context = event_map(&event);
     let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, function, (context,));
     let violation = runtime.violation.load(Ordering::Relaxed);
@@ -468,18 +425,10 @@ fn notify(
 }
 
 fn empty_input() -> RequestInput {
-    RequestInput {
-        snapshot: Snapshot { scope: String::new(), selection: None, entries: Vec::new() },
-        reads: BTreeMap::new(),
-    }
+    RequestInput { snapshot: Snapshot { scope: String::new(), selection: None, entries: Vec::new() }, excerpt: None }
 }
 
-fn build_engine(
-    limits: &Limits,
-    runtime: Arc<Runtime>,
-    assets: Arc<BTreeMap<String, Arc<[u8]>>>,
-    max_read: usize,
-) -> Engine {
+fn build_engine(limits: &Limits, runtime: Arc<Runtime>, assets: Arc<BTreeMap<String, Arc<[u8]>>>) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(limits.max_operations);
     engine.set_max_expr_depths(limits.max_expression_depth as usize, limits.max_expression_depth as usize);
@@ -504,10 +453,6 @@ fn build_engine(
         }
         None
     });
-    let read_runtime = runtime.clone();
-    engine.register_fn("read_excerpt", move |handle: i64| -> Result<String, Box<EvalAltResult>> {
-        read_excerpt(&read_runtime, handle, max_read)
-    });
     let asset_closure = assets;
     let asset_runtime = runtime.clone();
     engine.register_fn("asset", move |name: &str| -> Result<String, Box<EvalAltResult>> {
@@ -520,14 +465,15 @@ fn build_engine(
     engine
 }
 
-fn input_map(snapshot: &Snapshot) -> Map {
+fn input_map(input: &RequestInput) -> Map {
     let mut map = Map::new();
     map.insert("api".into(), Dynamic::from(API_VERSION as i64));
-    map.insert("scope".into(), Dynamic::from(snapshot.scope.clone()));
-    if let Some(selection) = snapshot.selection {
+    map.insert("scope".into(), Dynamic::from(input.snapshot.scope.clone()));
+    if let Some(selection) = input.snapshot.selection {
         map.insert("selection".into(), Dynamic::from(selection.0 as i64));
     }
-    let entries: Array = snapshot
+    let entries: Array = input
+        .snapshot
         .entries
         .iter()
         .map(|entry| {
@@ -537,6 +483,11 @@ fn input_map(snapshot: &Snapshot) -> Map {
             item.insert("is_dir".into(), Dynamic::from(entry.is_dir));
             item.insert("size".into(), Dynamic::from(entry.size.min(i64::MAX as u64) as i64));
             item.insert("kind".into(), Dynamic::from(entry.kind.clone()));
+            if let Some(excerpt) = &input.excerpt
+                && excerpt.handle == entry.handle
+            {
+                item.insert("excerpt".into(), Dynamic::from(excerpt.text.clone()));
+            }
             Dynamic::from(item)
         })
         .collect();
@@ -552,48 +503,6 @@ fn event_map(event: &HookEvent) -> Map {
         map.insert("scope".into(), Dynamic::from(scope.to_owned()));
     }
     map
-}
-
-fn read_excerpt(runtime: &Runtime, handle: i64, max_bytes: usize) -> Result<String, Box<EvalAltResult>> {
-    if !runtime.read_allowed.load(Ordering::Relaxed) {
-        runtime.violation.store(true, Ordering::Relaxed);
-        return Err(runtime_error("the fs read capability is not granted"));
-    }
-    let Ok(handle) = u32::try_from(handle) else {
-        return Err(runtime_error(format!("entry handle {handle} is out of range")));
-    };
-    let entry = runtime.reads.lock().unwrap().get(&EntryHandle(handle)).cloned();
-    let Some(entry) = entry else {
-        return Err(runtime_error(format!("entry handle {handle} is not in this request")));
-    };
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(&entry.path)
-        .map_err(|error| runtime_error(format!("{}: {error}", entry.path.display())))?;
-    let metadata = file.metadata().map_err(|error| runtime_error(error.to_string()))?;
-    if !metadata.is_file() {
-        runtime.violation.store(true, Ordering::Relaxed);
-        return Err(runtime_error(format!("{} is not a regular file", entry.path.display())));
-    }
-    if let Some((device, inode)) = entry.identity
-        && (metadata.dev() != device || metadata.ino() != inode)
-    {
-        runtime.violation.store(true, Ordering::Relaxed);
-        return Err(runtime_error("entry identity changed since the request was created"));
-    }
-    let mut bytes = Vec::with_capacity(max_bytes.min(metadata.len() as usize));
-    file.take(max_bytes as u64 + 1).read_to_end(&mut bytes).map_err(|error| runtime_error(error.to_string()))?;
-    if bytes.len() > max_bytes {
-        bytes.truncate(max_bytes);
-        if let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') {
-            bytes.truncate(last_newline + 1);
-        }
-    }
-    if bytes.contains(&0) {
-        return Err(runtime_error("file is binary"));
-    }
-    String::from_utf8(bytes).map_err(|_| runtime_error("file is not UTF-8 text"))
 }
 
 fn call_error(error: Box<EvalAltResult>, runtime: &Runtime) -> CallError {
@@ -622,17 +531,15 @@ fn send(inbox: &Sender<Inbox>, message: WorkerMessage) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::{EntryRef, RequestInput};
-    use crate::manifest::FsAccess;
-    use crow_core::{EntryData, ExtensionId};
+    use crate::dto::{ExcerptInput, RequestInput};
+    use crow_core::{EntryData, EntryHandle, ExtensionId};
     use std::sync::mpsc::{Receiver, channel};
 
     fn limits() -> Limits {
         Limits::default()
     }
 
-    fn manifest(fs_read: bool, assets: &[&str]) -> Manifest {
-        let fs = if fs_read { "read" } else { "none" };
+    fn manifest(assets: &[&str]) -> Manifest {
         let assets = if assets.is_empty() {
             String::new()
         } else {
@@ -647,7 +554,7 @@ version = "0.1.0"
 api = 1
 entry = "main.rhai"
 provides = ["command"]
-{assets}permissions = {{ fs = "{fs}" }}
+{assets}permissions = {{ fs = "none" }}
 "#
             ),
             &limits(),
@@ -655,11 +562,8 @@ provides = ["command"]
         .unwrap()
     }
 
-    fn snapshot(source: &str, fs_read: bool, assets: &[(&str, &str)]) -> Arc<crate::package::PackageSnapshot> {
-        let mut manifest = manifest(fs_read, &assets.iter().map(|(name, _)| *name).collect::<Vec<_>>());
-        if fs_read {
-            manifest.permissions.fs = Some(FsAccess::Read);
-        }
+    fn snapshot(source: &str, assets: &[(&str, &str)]) -> Arc<crate::package::PackageSnapshot> {
+        let manifest = manifest(&assets.iter().map(|(name, _)| *name).collect::<Vec<_>>());
         let mut files = BTreeMap::new();
         files.insert("plugin.toml".into(), Arc::from(&b"manifest"[..]));
         files.insert("main.rhai".into(), Arc::from(source.as_bytes()));
@@ -669,7 +573,7 @@ provides = ["command"]
         Arc::new(crate::package::PackageSnapshot { manifest, files, digest: "a".repeat(64) })
     }
 
-    fn input(path: std::path::PathBuf) -> RequestInput {
+    fn input() -> RequestInput {
         RequestInput {
             snapshot: Snapshot {
                 scope: "/tmp".into(),
@@ -682,8 +586,12 @@ provides = ["command"]
                     kind: "Text".into(),
                 }],
             },
-            reads: BTreeMap::from([(EntryHandle(1), EntryRef::new(path))]),
+            excerpt: None,
         }
+    }
+
+    fn input_with_excerpt(text: &str) -> RequestInput {
+        RequestInput { excerpt: Some(ExcerptInput { handle: EntryHandle(1), text: text.into() }), ..input() }
     }
 
     fn next(rx: &Receiver<Inbox>, timeout: Duration) -> WorkerMessage {
@@ -700,23 +608,10 @@ provides = ["command"]
         }
     }
 
-    fn spawn(
-        source: &str,
-        fs_read: bool,
-        read_allowed: bool,
-        assets: &[(&str, &str)],
-        limits: Limits,
-    ) -> (Worker, Receiver<Inbox>) {
+    fn spawn(source: &str, assets: &[(&str, &str)], limits: Limits) -> (Worker, Receiver<Inbox>) {
         let (tx, rx) = channel();
-        let worker = Worker::spawn(
-            PluginId::parse("example.test").unwrap(),
-            1,
-            snapshot(source, fs_read, assets),
-            read_allowed,
-            limits,
-            tx,
-        )
-        .unwrap();
+        let worker =
+            Worker::spawn(PluginId::parse("example.test").unwrap(), 1, snapshot(source, assets), limits, tx).unwrap();
         worker.mailbox.enqueue_command(Call::Register).unwrap();
         match next(&rx, Duration::from_secs(2)) {
             WorkerMessage::Registered { result: Ok(_), .. } => {}
@@ -734,17 +629,17 @@ fn run(ctx) {{ {body} }}
         )
     }
 
-    fn evaluate(worker: &Worker, path: std::path::PathBuf) {
-        evaluate_with_cancel(worker, path, Arc::new(AtomicBool::new(false)));
+    fn evaluate(worker: &Worker, input: RequestInput) {
+        evaluate_with_cancel(worker, input, Arc::new(AtomicBool::new(false)));
     }
 
-    fn evaluate_with_cancel(worker: &Worker, path: std::path::PathBuf, cancel: Arc<AtomicBool>) {
+    fn evaluate_with_cancel(worker: &Worker, input: RequestInput, cancel: Arc<AtomicBool>) {
         let extension = ExtensionId::new(PluginId::parse("example.test").unwrap(), LocalId::parse("copy").unwrap());
         worker
             .mailbox
             .enqueue_command(Call::Evaluate {
                 extension,
-                input: input(path),
+                input,
                 stamp: RequestStamp { generation: 1, request_id: 1, context_revision: 4 },
                 cancel,
             })
@@ -752,18 +647,10 @@ fn run(ctx) {{ {body} }}
     }
 
     #[test]
-    fn granted_read_is_scoped_to_the_request_handle() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.txt");
-        std::fs::write(&path, "hello").unwrap();
-        let (mut worker, rx) = spawn(
-            &command_source(r#"#{ action: "copy-text", text: read_excerpt(ctx.selection) }"#),
-            true,
-            true,
-            &[],
-            limits(),
-        );
-        evaluate(&worker, path);
+    fn a_host_read_excerpt_arrives_as_entry_input() {
+        let (mut worker, rx) =
+            spawn(&command_source(r#"#{ kind: "copy_text", text: ctx.entries[0].excerpt }"#), &[], limits());
+        evaluate(&worker, input_with_excerpt("hello"));
         match next(&rx, Duration::from_secs(2)) {
             WorkerMessage::Replied { reply: Reply::Intent(crow_core::CommandIntent::CopyText(text)), .. } => {
                 assert_eq!(text, "hello");
@@ -774,31 +661,10 @@ fn run(ctx) {{ {body} }}
     }
 
     #[test]
-    fn denied_read_and_undeclared_asset_are_capability_failures() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.txt");
-        std::fs::write(&path, "hello").unwrap();
-        let (worker, rx) = spawn(
-            &command_source(r#"#{ action: "copy-text", text: read_excerpt(ctx.selection) }"#),
-            false,
-            false,
-            &[],
-            limits(),
-        );
-        evaluate(&worker, path.clone());
-        match next(&rx, Duration::from_secs(2)) {
-            WorkerMessage::Failed { error, .. } => assert_eq!(error.kind, CallErrorKind::Capability),
-            other => panic!("{other:?}"),
-        }
-
-        let (worker, rx) = spawn(
-            &command_source(r#"#{ action: "copy-text", text: asset("missing.txt") }"#),
-            false,
-            false,
-            &[],
-            limits(),
-        );
-        evaluate(&worker, path);
+    fn undeclared_asset_is_a_capability_failure() {
+        let (worker, rx) =
+            spawn(&command_source(r#"#{ kind: "copy_text", text: asset("missing.txt") }"#), &[], limits());
+        evaluate(&worker, input());
         match next(&rx, Duration::from_secs(2)) {
             WorkerMessage::Failed { error, .. } => assert_eq!(error.kind, CallErrorKind::Capability),
             other => panic!("{other:?}"),
@@ -807,17 +673,12 @@ fn run(ctx) {{ {body} }}
 
     #[test]
     fn declared_asset_is_readable_and_undeclared_is_not() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.txt");
-        std::fs::write(&path, "hello").unwrap();
         let (mut worker, rx) = spawn(
-            &command_source(r#"#{ action: "copy-text", text: asset("note.txt") }"#),
-            false,
-            false,
+            &command_source(r#"#{ kind: "copy_text", text: asset("note.txt") }"#),
             &[("note.txt", "declared")],
             limits(),
         );
-        evaluate(&worker, path);
+        evaluate(&worker, input());
         match next(&rx, Duration::from_secs(2)) {
             WorkerMessage::Replied { reply: Reply::Intent(crow_core::CommandIntent::CopyText(text)), .. } => {
                 assert_eq!(text, "declared");
@@ -829,25 +690,25 @@ fn run(ctx) {{ {body} }}
 
     #[test]
     fn deadline_and_operation_budget_terminate_and_report_budget() {
-        let (worker, rx) = spawn(&command_source("while true { }"), false, false, &[], {
+        let (worker, rx) = spawn(&command_source("while true { }"), &[], {
             let mut limits = limits();
             limits.max_operations = 0;
             limits.call_deadline = Duration::from_millis(20);
             limits
         });
-        evaluate(&worker, std::path::PathBuf::from("/tmp/a.txt"));
+        evaluate(&worker, input());
         match next(&rx, Duration::from_secs(2)) {
             WorkerMessage::Failed { error, .. } => assert_eq!(error.kind, CallErrorKind::Budget),
             other => panic!("{other:?}"),
         }
 
-        let (worker, rx) = spawn(&command_source("while true { }"), false, false, &[], {
+        let (worker, rx) = spawn(&command_source("while true { }"), &[], {
             let mut limits = limits();
             limits.max_operations = 2_000;
             limits.call_deadline = Duration::from_secs(5);
             limits
         });
-        evaluate(&worker, std::path::PathBuf::from("/tmp/a.txt"));
+        evaluate(&worker, input());
         match next(&rx, Duration::from_secs(2)) {
             WorkerMessage::Failed { error, .. } => assert_eq!(error.kind, CallErrorKind::Budget),
             other => panic!("{other:?}"),
@@ -858,13 +719,11 @@ fn run(ctx) {{ {body} }}
     fn per_call_cancel_stops_the_evaluation_and_keeps_the_worker() {
         let (mut worker, rx) = spawn(
             &command_source("while true { }"),
-            false,
-            false,
             &[],
             Limits { max_operations: 0, call_deadline: Duration::from_secs(5), ..limits() },
         );
         let cancel = Arc::new(AtomicBool::new(false));
-        evaluate_with_cancel(&worker, std::path::PathBuf::from("/tmp/a.txt"), cancel.clone());
+        evaluate_with_cancel(&worker, input(), cancel.clone());
         std::thread::sleep(Duration::from_millis(10));
         cancel.store(true, Ordering::Relaxed);
         match next(&rx, Duration::from_secs(2)) {
@@ -902,7 +761,7 @@ fn run(ctx) {{ {body} }}
         mailbox
             .enqueue_command(Call::Evaluate {
                 extension,
-                input: input(std::path::PathBuf::from("/tmp/a.txt")),
+                input: input(),
                 stamp: RequestStamp { generation: 1, request_id: 4, context_revision: 1 },
                 cancel: Arc::new(AtomicBool::new(false)),
             })
