@@ -26,7 +26,6 @@ import json
 import os
 import platform
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -312,15 +311,13 @@ def write_replay(out_dir, run_id, seed, index, replay, warnings):
 
 
 def rewrite_script_command(command, artifact):
-    if not command:
+    """Point a generated script at its report artifact; keep a caller's path."""
+    if not command or artifact is None:
         return command
     rewritten = list(command)
     for index, value in enumerate(rewritten):
         if value == "--script" and index + 1 < len(rewritten):
-            if artifact is None:
-                del rewritten[index : index + 2]
-            else:
-                rewritten[index + 1] = artifact
+            rewritten[index + 1] = artifact
             return rewritten
     return rewritten
 
@@ -461,10 +458,13 @@ def classify(exit_code, seeds, tests, failures, collector_error, mode):
             return "incomplete"
         return "passed" if seeds else "empty"
     if tests:
-        failed = any(test.get("failed") for test in tests) or bool(failures)
+        failed = any(type(test.get("failed")) is int and test["failed"] > 0 for test in tests) or bool(failures)
         if failed or shell_exit != 0:
             return "failed"
-        return "passed"
+        known = any(
+            type(test.get("passed")) is int and type(test.get("failed")) is int for test in tests
+        )
+        return "passed" if known else "empty"
     if shell_exit != 0:
         return "failed"
     return "empty"
@@ -548,11 +548,13 @@ def run_command(args):
                     returncode = -signal.SIGINT
                 command_status = "signaled" if returncode is not None and returncode < 0 else "exited"
             except OSError as error:
-                collector_error = "could not start command: %s" % error
-                returncode = 127
+                collector_error = "could not run command: %s" % error
+                returncode = None
+                command_status = "unknown" if "process" in locals() else "spawn-error"
     except OSError as error:
         collector_error = "could not write %s: %s" % (log_path, error)
-        returncode = 2
+        returncode = None
+        command_status = "spawn-error"
 
     duration_ms = int(round((time.monotonic() - started_monotonic) * 1000))
     raw = b"".join(chunks).decode("utf-8", "replace")
@@ -660,16 +662,39 @@ def validate_report(report):
             raise ValueError("%s is missing or not a string" % key)
     if report["result"] not in RESULTS:
         raise ValueError("unknown result %r" % report["result"])
-    if not isinstance(report.get("duration_ms"), int) or report["duration_ms"] < 0:
+    if type(report.get("duration_ms")) is not int or report["duration_ms"] < 0:
         raise ValueError("duration_ms is not a non-negative integer")
     if report.get("revision") is not None and not isinstance(report["revision"], str):
         raise ValueError("revision is not a string or null")
-    if not isinstance(report.get("tests"), list):
+    if report.get("revision_dirty") is not None and not isinstance(report["revision_dirty"], bool):
+        raise ValueError("revision_dirty is not a boolean or null")
+    if report.get("collector_error") is not None and not isinstance(report["collector_error"], str):
+        raise ValueError("collector_error is not a string or null")
+    tests = report.get("tests")
+    if not isinstance(tests, list):
         raise ValueError("tests is not an array")
-    if not isinstance(report.get("seeds"), list):
+    if not all(isinstance(test, dict) for test in tests):
+        raise ValueError("tests has a non-object entry")
+    seeds = report.get("seeds")
+    if not isinstance(seeds, list):
         raise ValueError("seeds is not an array")
+    for seed in seeds:
+        if not isinstance(seed, dict):
+            raise ValueError("seeds has a non-object entry")
+        if seed.get("frames") is not None and not isinstance(seed["frames"], dict):
+            raise ValueError("seed frames is not an object or null")
+        if seed.get("replay") is not None and not isinstance(seed["replay"], dict):
+            raise ValueError("seed replay is not an object or null")
     if report.get("frame_summary") is not None and not isinstance(report["frame_summary"], dict):
         raise ValueError("frame_summary is not an object or null")
+    totals = report.get("totals")
+    if totals is not None:
+        if not isinstance(totals, dict):
+            raise ValueError("totals is not an object or null")
+        for key in ("binaries", "passed", "failed", "ignored", "measured", "filtered_out"):
+            value = totals.get(key)
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError("totals.%s is not a non-negative integer" % key)
     parse_started(report["started_utc"])
     return report
 

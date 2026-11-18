@@ -159,12 +159,15 @@ cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --tree small
 ```
 
 Add `--pause-ms 2000` to pause before that step for a profiler. The human
-`replay:` line in `run.log` remains the same.
+`replay:` line in `run.log` remains the same. A user-supplied `--script` is not
+copied into the report; the replay command keeps its path, so run it where that
+file lives.
 
 The collector fixtures cover a pass, a failing test, a lost subprocess, a GPUI
-failure after a seed start, a start without an end, malformed events, an unknown
-schema, two revisions in one table, environment non-copying and absent live
-frame fields:
+failure after a seed start, a start without an end, a missing command,
+zero-output evidence, malformed events and nested fields, an unknown schema, two
+revisions in one table, environment non-copying, a user-supplied script and
+absent live frame fields:
 
 ```bash
 python3 scripts/test_report_test.py

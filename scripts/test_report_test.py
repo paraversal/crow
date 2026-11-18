@@ -145,6 +145,32 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(report["result"], "empty")
         self.assertEqual(report["tests"], [])
 
+    def test_zero_exit_with_a_running_header_but_no_counts_is_empty(self):
+        result = collect(
+            "workspace",
+            self.out,
+            "print('     Running unittests src/lib.rs (target/debug/deps/crow_core-0123456789abcdef)')",
+        )
+        self.assertEqual(result.returncode, 0)
+        report = load(self.out)
+        self.assertEqual(report["result"], "empty")
+        self.assertIsNone(report["tests"][0]["passed"])
+        self.assertIsNone(report["totals"])
+
+    def test_missing_command_is_a_collector_error(self):
+        result = subprocess.run(
+            [PYTHON, SCRIPT, "run", "--mode", "workspace", "--out", self.out, "--", "crow-no-such-command-xyz"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        report = load(self.out)
+        self.assertEqual(report["result"], "collector-error")
+        self.assertIsNone(report["exit_code"])
+        self.assertEqual(report["command_status"], "spawn-error")
+        self.assertIn("could not run command", report["collector_error"])
+
     def test_signaled_child_is_interrupted_and_keeps_status(self):
         result = collect("workspace", self.out, "import os, signal; os.kill(os.getpid(), signal.SIGKILL)")
         self.assertEqual(result.returncode, 137)
@@ -201,6 +227,30 @@ class CollectorTests(unittest.TestCase):
         with open(os.path.join(self.out, artifact), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), script)
         self.assertEqual(seed["replay"]["command"][seed["replay"]["command"].index("--script") + 1], artifact)
+
+    def test_user_supplied_script_keeps_its_path_without_an_artifact(self):
+        script = os.path.join(self.temp.name, "user-script.txt")
+        with open(script, "w", encoding="utf-8") as handle:
+            handle.write("Keys cmd-k\n")
+        replay = {
+            "command": ["cargo", "run", "--", "--fuzz", "--script", script, "--until", "3"],
+            "env": {},
+            "script": None,
+            "script_format": "step-lines",
+        }
+        code = "\n".join(
+            [
+                "print(%r)" % event(event="seed-start", mode="fuzz-live", seed=42, tree="small", churn=False, requested_steps=None),
+                "print(%r)" % event(event="seed-failure", mode="fuzz-live", seed=42, failing_index=3, invariant="listing", detail="bad", executed_steps=3, duration_ms=500, replay=replay),
+                "raise SystemExit(101)",
+            ]
+        )
+        result = collect("fuzz-live", self.out, code)
+        self.assertEqual(result.returncode, 101)
+        seed = load(self.out)["seeds"][0]
+        self.assertIsNone(seed["replay"]["artifact"])
+        self.assertEqual(seed["replay"]["command"][seed["replay"]["command"].index("--script") + 1], script)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "replays")))
 
     def test_seed_start_without_end_is_incomplete(self):
         code = "print(%r)" % event(event="seed-start", mode="fuzz", seed=1, tree="small", churn=False, requested_steps=1)
@@ -289,6 +339,23 @@ class CollectorTests(unittest.TestCase):
         self.assertIn("malformed", result.stderr)
         self.assertTrue(os.path.exists(os.path.join(one, "run.json")))
         self.assertTrue(os.path.exists(os.path.join(two, "run.json")))
+
+    def test_summary_skips_nested_malformed_reports_and_keeps_valid_ones(self):
+        root = self.temp.name
+        write_report(root, "good", base_report())
+        write_report(root, "bad-totals", base_report(totals={"passed": "many"}))
+        write_report(root, "bad-seeds", base_report(seeds=[None]))
+        result = subprocess.run(
+            [PYTHON, SCRIPT, "summary", root],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("0123456789ab", result.stdout)
+        self.assertIn("skipping", result.stderr)
+        self.assertIn("totals.passed", result.stderr)
+        self.assertIn("seeds has a non-object entry", result.stderr)
 
     def test_summary_keeps_live_frames_separate_and_marks_absent_as_dash(self):
         root = self.temp.name
