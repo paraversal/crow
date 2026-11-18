@@ -503,6 +503,32 @@ impl Pane {
         self.focused_folder().read(cx).plugin_surface()
     }
 
+    /// The first 128 ordinary immediate folders for a sidebar section, with a
+    /// revision that changes on relist or watcher apply.
+    pub fn sidebar_plugin_dirs(&self, cx: &gpui::App) -> (PathBuf, u64, Vec<crate::plugins::SidebarDir>) {
+        let folder = self.focused_folder().read(cx);
+        let dir = folder.dir().to_path_buf();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        folder.plugin_scope_version().hash(&mut hasher);
+        dir.hash(&mut hasher);
+        let dirs = folder
+            .entries()
+            .iter()
+            .filter(|entry| entry.is_dir && !entry.is_symlink && !entry.is_package())
+            .take(128)
+            .map(|entry| {
+                let version = folder.plugin_entry_version(entry);
+                version.hash(&mut hasher);
+                crate::plugins::SidebarDir {
+                    path: entry.path.clone(),
+                    name: crate::style::display_text(&entry.name).into_owned(),
+                    version,
+                }
+            })
+            .collect();
+        (dir, hasher.finish(), dirs)
+    }
+
     pub fn item_count(&self, cx: &gpui::App) -> usize {
         self.focused_folder().read(cx).entries().len()
     }

@@ -24,7 +24,7 @@ pub use columns::PluginColumn;
 pub use coordinator::{
     CommandCapture, HOOK_DEBOUNCE, MAX_BATCH, MAX_PASSIVE_PER_PLUGIN, MAX_PASSIVE_REQUESTS, MAX_ROW_BYTES,
     MAX_ROW_VALUES, PluginCounters, PluginEffect, PluginSurfaces, PublishedExtension, PublishedSurfaces, RowInput,
-    RowValue, ScopeKey, SurfaceId, new_surface,
+    RowValue, ScopeKey, SidebarDir, SidebarRowView, SurfaceId, new_surface,
 };
 pub use demand::PluginRows;
 /// The file surface the menu/palette would act on. Views update it only while
@@ -377,6 +377,46 @@ pub fn request_info(
 
 pub fn info_rows(cx: &App, surface: SurfaceId) -> Vec<crow_core::InfoRow> {
     cx.try_global::<Plugins>().map_or_else(Vec::new, |plugins| plugins.surfaces.info_rows(surface))
+}
+
+pub fn has_sidebar(cx: &App) -> bool {
+    let Some(plugins) = cx.try_global::<Plugins>() else { return false };
+    if !plugins.surfaces.snapshot().has_kind(crow_core::ExtensionKind::Sidebar) {
+        return false;
+    }
+    plugins
+        .surfaces
+        .snapshot()
+        .of_kind(crow_core::ExtensionKind::Sidebar)
+        .any(|(id, _)| !plugins.surfaces.is_suppressed(&id.plugin))
+}
+
+pub fn sidebar_descriptors(cx: &App) -> Vec<(crow_core::ExtensionId, String)> {
+    let Some(plugins) = cx.try_global::<Plugins>() else { return Vec::new() };
+    let snapshot = plugins.surfaces.snapshot();
+    snapshot
+        .of_kind(crow_core::ExtensionKind::Sidebar)
+        .filter(|(id, _)| !plugins.surfaces.is_suppressed(&id.plugin))
+        .map(|(id, published)| (id.clone(), published.descriptor.title.clone()))
+        .collect()
+}
+
+pub fn request_sidebar(
+    cx: &mut App,
+    surface: SurfaceId,
+    id: &crow_core::ExtensionId,
+    scope: ScopeKey,
+    revision: u64,
+    display: String,
+    dirs: &[SidebarDir],
+) {
+    let Some(plugins) = cx.try_global::<Plugins>() else { return };
+    let handle = plugins.handle.clone();
+    cx.global_mut::<Plugins>().surfaces.request_sidebar(handle.as_ref(), surface, id, scope, revision, &display, dirs);
+}
+
+pub fn sidebar_rows(cx: &App, surface: SurfaceId) -> Vec<SidebarRowView> {
+    cx.try_global::<Plugins>().map_or_else(Vec::new, |plugins| plugins.surfaces.sidebar_rows(surface))
 }
 
 pub fn decoration_ids(cx: &App) -> Vec<crow_core::ExtensionId> {

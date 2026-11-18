@@ -1,8 +1,6 @@
 //! One plugin column after Name. The descriptor owns the width, minimum and
 //! alignment; the ready cell comes from the coordinator's row cache.
 
-use std::path::{Path, PathBuf};
-
 use crow_core::{Align, Column, ColumnCell, ColumnContext, Descriptor, ExtensionId};
 use crow_fs::{Entry, SortKey};
 
@@ -28,8 +26,53 @@ impl PluginColumn {
     }
 }
 
+impl Column for PluginColumn {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn title(&self) -> &str {
+        &self.title
+    }
+
+    fn width(&self) -> f32 {
+        self.width
+    }
+
+    fn min_width(&self) -> f32 {
+        self.min_width
+    }
+
+    fn visible_by_default(&self) -> bool {
+        false
+    }
+
+    fn align(&self) -> Align {
+        self.align
+    }
+
+    fn sort_key(&self) -> Option<SortKey> {
+        None
+    }
+
+    fn text(&self, _: &Entry, _: &ColumnContext) -> String {
+        String::new()
+    }
+
+    fn cell(&self, entry: &Entry, cx: &ColumnContext) -> ColumnCell {
+        let value = (|| {
+            let plugin_value = cx.plugin_value?;
+            let version = cx.plugin_version?(entry);
+            plugin_value(&self.extension, &entry.path, version)
+        })();
+        value.unwrap_or_else(|| ColumnCell::plain(String::new()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
     use crow_core::{ExtensionKind, LocalId, PluginId};
 
@@ -94,48 +137,5 @@ mod tests {
         let cell = column.cell(&entry(), &cx);
         assert_eq!(cell.text, "3");
         assert_eq!(cell.spoken.as_deref(), Some("three"));
-    }
-}
-
-impl Column for PluginColumn {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn title(&self) -> &str {
-        &self.title
-    }
-
-    fn width(&self) -> f32 {
-        self.width
-    }
-
-    fn min_width(&self) -> f32 {
-        self.min_width
-    }
-
-    fn visible_by_default(&self) -> bool {
-        false
-    }
-
-    fn align(&self) -> Align {
-        self.align
-    }
-
-    fn sort_key(&self) -> Option<SortKey> {
-        None
-    }
-
-    fn text(&self, _: &Entry, _: &ColumnContext) -> String {
-        String::new()
-    }
-
-    fn cell(&self, entry: &Entry, cx: &ColumnContext) -> ColumnCell {
-        let value = (|| {
-            let plugin_value = cx.plugin_value?;
-            let version = cx.plugin_version?(entry);
-            plugin_value(&self.extension, &entry.path, version)
-        })();
-        value.unwrap_or_else(|| ColumnCell::plain(String::new()))
     }
 }

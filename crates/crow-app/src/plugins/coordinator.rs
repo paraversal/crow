@@ -259,6 +259,29 @@ struct StatusBinding {
     seen: HashSet<ExtensionId>,
 }
 
+#[derive(Clone, Debug)]
+pub struct SidebarDir {
+    pub path: PathBuf,
+    pub name: String,
+    pub version: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarRowView {
+    pub id: String,
+    pub title: String,
+    pub meta: Option<String>,
+    pub badge: Option<String>,
+    pub path: Option<PathBuf>,
+}
+
+struct SidebarBinding {
+    scope: ScopeKey,
+    revision: u64,
+    values: BTreeMap<ExtensionId, Vec<SidebarRowView>>,
+    seen: HashSet<ExtensionId>,
+}
+
 struct InfoBinding {
     scope: ScopeKey,
     revision: u64,
@@ -267,6 +290,13 @@ struct InfoBinding {
 }
 
 enum TicketKind {
+    Sidebar {
+        surface: SurfaceId,
+        scope: ScopeKey,
+        revision: u64,
+        descriptor: ExtensionId,
+        entries: HashMap<EntryHandle, PathBuf>,
+    },
     Info {
         surface: SurfaceId,
         scope: ScopeKey,
@@ -366,6 +396,7 @@ pub struct PluginSurfaces {
     commands: HashMap<RequestStamp, CommandTicket>,
     status: HashMap<SurfaceId, StatusBinding>,
     info: HashMap<SurfaceId, InfoBinding>,
+    sidebar: HashMap<SurfaceId, SidebarBinding>,
     hooks: HashMap<HookSlot, PendingHook>,
     suppressed: HashSet<PluginId>,
     retry_at: Option<Instant>,
@@ -384,6 +415,7 @@ impl Default for PluginSurfaces {
             commands: HashMap::new(),
             status: HashMap::new(),
             info: HashMap::new(),
+            sidebar: HashMap::new(),
             hooks: HashMap::new(),
             suppressed: HashSet::new(),
             retry_at: None,
@@ -507,6 +539,7 @@ impl PluginSurfaces {
         });
         self.status.clear();
         self.info.clear();
+        self.sidebar.clear();
         self.snapshot = std::sync::Arc::new(next);
         self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
         true
@@ -535,6 +568,7 @@ impl PluginSurfaces {
         });
         self.status.clear();
         self.info.clear();
+        self.sidebar.clear();
     }
 
     pub fn mutation_finished(
@@ -710,6 +744,84 @@ impl PluginSurfaces {
     pub fn info_rows(&self, surface: SurfaceId) -> Vec<crow_core::InfoRow> {
         let Some(binding) = self.info.get(&surface) else { return Vec::new() };
         binding.values.values().flat_map(|rows| rows.iter().take(16)).take(16).cloned().collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_sidebar(
+        &mut self,
+        handle: Option<&PluginHandle>,
+        surface: SurfaceId,
+        descriptor: &ExtensionId,
+        scope: ScopeKey,
+        revision: u64,
+        display: &str,
+        dirs: &[SidebarDir],
+    ) {
+        let Some(handle) = handle else { return };
+        let current =
+            self.sidebar.get(&surface).is_some_and(|binding| binding.scope == scope && binding.revision == revision);
+        if !current {
+            self.tickets.retain(|_, ticket| {
+                let keep = !matches!(&ticket.kind, TicketKind::Sidebar { surface: s, .. } if *s == surface);
+                if !keep {
+                    ticket.ticket.cancel();
+                }
+                keep
+            });
+            self.sidebar.insert(
+                surface,
+                SidebarBinding { scope: scope.clone(), revision, values: BTreeMap::new(), seen: HashSet::new() },
+            );
+        }
+        let Some(binding) = self.sidebar.get(&surface) else { return };
+        if binding.seen.contains(descriptor) || !self.can_submit(descriptor) {
+            return;
+        }
+        let Some(published) = self.snapshot.extension(descriptor).cloned() else { return };
+        if published.descriptor.kind != ExtensionKind::Sidebar || self.suppressed.contains(&descriptor.plugin) {
+            return;
+        }
+        let mut entries = Vec::with_capacity(dirs.len().min(MAX_BATCH));
+        let mut table = HashMap::new();
+        for (index, dir) in dirs.iter().take(MAX_BATCH).enumerate() {
+            let entry_handle = EntryHandle(index as u32 + 1);
+            entries.push(EntryData {
+                handle: entry_handle,
+                name: bounded(&dir.name),
+                is_dir: true,
+                size: 0,
+                kind: String::new(),
+            });
+            table.insert(entry_handle, dir.path.clone());
+            let _ = dir.version;
+        }
+        let input =
+            RequestInput { snapshot: Snapshot { scope: bounded(display), selection: None, entries }, excerpt: None };
+        match handle.try_evaluate(descriptor.clone(), published.generation, revision, input) {
+            Ok(ticket) => {
+                self.counters.submitted_rows += 1;
+                self.tickets.insert(
+                    ticket.stamp(),
+                    PassiveTicket {
+                        stamp: ticket.stamp(),
+                        ticket: TicketProbe::Real(ticket),
+                        extension: descriptor.clone(),
+                        kind: TicketKind::Sidebar {
+                            surface,
+                            scope,
+                            revision,
+                            descriptor: descriptor.clone(),
+                            entries: table,
+                        },
+                    },
+                );
+            }
+            Err(SubmitError::Busy | SubmitError::Stopped) => {}
+        }
+    }
+
+    pub fn sidebar_rows(&self, surface: SurfaceId) -> Vec<SidebarRowView> {
+        self.sidebar.get(&surface).and_then(|binding| binding.values.values().next()).cloned().unwrap_or_default()
     }
 
     /// Record the latest visible-row demand for a surface. The coordinator
@@ -947,6 +1059,38 @@ impl PluginSurfaces {
         }
         match (ticket.kind, result) {
             (
+                TicketKind::Sidebar { surface, scope, revision, descriptor, entries },
+                result @ (RequestResult::Values(_) | RequestResult::Unit),
+            ) => {
+                let rows = match result {
+                    RequestResult::Unit => Vec::new(),
+                    RequestResult::Values(ContributionValues::Sidebar(rows)) => rows,
+                    _ => {
+                        self.counters.rejected_tickets += 1;
+                        return false;
+                    }
+                };
+                let rows: Vec<SidebarRowView> = rows
+                    .into_iter()
+                    .map(|row| SidebarRowView {
+                        id: row.id,
+                        title: row.title,
+                        meta: row.meta,
+                        badge: row.badge,
+                        path: row.handle.and_then(|handle| entries.get(&handle).cloned()),
+                    })
+                    .collect();
+                let Some(binding) = self.sidebar.get_mut(&surface) else { return false };
+                if binding.scope != scope || binding.revision != revision {
+                    self.counters.rejected_tickets += 1;
+                    return false;
+                }
+                binding.seen.insert(descriptor.clone());
+                let changed = binding.values.get(&descriptor) != Some(&rows);
+                binding.values.insert(descriptor, rows);
+                changed
+            }
+            (
                 TicketKind::Info { surface, scope, revision, descriptor },
                 result @ (RequestResult::Values(_) | RequestResult::Unit),
             ) => {
@@ -1118,13 +1262,15 @@ impl PluginSurfaces {
         self.pending_rows.remove(&surface);
         self.status.remove(&surface);
         self.info.remove(&surface);
+        self.sidebar.remove(&surface);
         self.cancel_commands_for_surface(surface);
         self.tickets.retain(|_, ticket| {
             let keep = !matches!(
                 &ticket.kind,
                 TicketKind::Rows { surface: s, .. }
                     | TicketKind::Status { surface: s, .. }
-                    | TicketKind::Info { surface: s, .. } if *s == surface
+                    | TicketKind::Info { surface: s, .. }
+                    | TicketKind::Sidebar { surface: s, .. } if *s == surface
             );
             if !keep {
                 ticket.ticket.cancel();

@@ -266,6 +266,7 @@ fn hint_set(focus: BarFocus, sidebar: Option<CursorKind>) -> Vec<Spec> {
             Some(CursorKind::Favorite) => vec![GROUPS, TO_LIST, REORDER, REMOVE],
             Some(CursorKind::Recent) => vec![GROUPS, TO_LIST, REMOVE],
             Some(CursorKind::Volume) => vec![EJECT, GROUPS, TO_LIST],
+            Some(CursorKind::Plugin) => vec![GROUPS, TO_LIST],
             None => vec![GROUPS, TO_LIST],
         },
         BarFocus::SearchResults => RESULT_HINTS.to_vec(),

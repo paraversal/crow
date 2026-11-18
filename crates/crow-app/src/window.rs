@@ -2178,6 +2178,10 @@ impl Render for CrowWindow {
         let tab_bar = (self.tabs.len() > 1).then(|| self.render_tab_bar(cx));
         let current = self.pane().read(cx).current_dir(cx);
         self.sidebar.update(cx, |s, cx| s.set_current(current, cx));
+        if crate::plugins::has_sidebar(cx) {
+            let (dir, revision, dirs) = self.pane().read(cx).sidebar_plugin_dirs(cx);
+            self.sidebar.update(cx, |s, cx| s.set_plugin_dirs(dir, dirs, revision, cx));
+        }
         let sidebar = self.sidebar.clone();
         let search_preview = self.search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);
