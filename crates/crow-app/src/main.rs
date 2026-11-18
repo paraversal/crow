@@ -95,7 +95,6 @@ fn make_search_fixture(dir: &std::path::Path, count: usize) -> std::io::Result<(
 
 fn bench_search(dir: &std::path::Path, text: &str) -> Result<(), String> {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
 
     // io-ok: CLI bench, before any window opens
     let root = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -108,7 +107,7 @@ fn bench_search(dir: &std::path::Path, text: &str) -> Result<(), String> {
         rules: Arc::new(rules),
         everything: false,
     };
-    let cancel = Arc::new(AtomicBool::new(false));
+    let control = crow_search::Control::new();
     let started = std::time::Instant::now();
     let mut first_hit = None;
     let mut hits = 0;
@@ -121,7 +120,7 @@ fn bench_search(dir: &std::path::Path, text: &str) -> Result<(), String> {
             }
             hits += batch.len();
         },
-        &cancel,
+        &control,
     );
     println!(
         "SEARCH first_hit={:.0}ms total={:.0}ms hits={hits} scanned={} skipped={}",
@@ -223,7 +222,6 @@ fn parse_search_trace(args: &[String]) -> Result<TraceOptions, String> {
 /// skip, and why `--target` was not a hit. No second walk implementation.
 fn search_trace(args: &[String]) -> Result<(), String> {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
 
     let options = parse_search_trace(args)?;
     // io-ok: CLI diagnostic, before any window opens
@@ -253,7 +251,7 @@ fn search_trace(args: &[String]) -> Result<(), String> {
         path.canonicalize().unwrap_or(path)
     });
 
-    let cancel = Arc::new(AtomicBool::new(false));
+    let control = crow_search::Control::new();
     let started = std::time::Instant::now();
     let mut batches = 0usize;
     let mut hits = 0usize;
@@ -280,7 +278,7 @@ fn search_trace(args: &[String]) -> Result<(), String> {
             }
             hits += batch.len();
         },
-        &cancel,
+        &control,
     );
     println!(
         "first_hit={}ms total={}ms hits={hits} scanned={} skipped={}",

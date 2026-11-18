@@ -4,7 +4,7 @@ Branch: m8.5-b4-cap · PR: none · Last updated: 2026-11-18 · State: in progres
 ## Status
 | Item | State | Notes |
 | --- | --- | --- |
-| 1 Control: cancel, or stop reading contents | todo | |
+| 1 Control: cancel, or stop reading contents | done (this commit) | `Control` (cancel + stop-contents, `cancel_flag` for Spotlight's `mdfind`), `Summary.contents_stopped`; every caller ported. Engine tests: `stop_contents_keeps_names_streaming`, `contents_stopped_before_the_walk_reads_no_contents`, both cancellation tests; corpus test updated. `cargo test -p crow-search` 35 + 2 pass. |
 | 2 Two budgets | todo | |
 | 3 Footer | todo | |
 | 4 Selection stays put under late strong names | todo | |
@@ -29,6 +29,7 @@ Branch: m8.5-b4-cap · PR: none · Last updated: 2026-11-18 · State: in progres
 
 ## Log
 - 2026-11-18: read the plan, M8.5 index decisions 9, AGENTS.md and the current engine/search code. Created the branch and this file.
+- 2026-11-18: item 1 done. `Control` shares two relaxed flags; the walker and receive loop check cancel, the walker and `ContentSink` check stop-contents. `Summary.contents_stopped` reports it. Spotlight takes `Control::cancel_flag()` because `mdfind` takes a bare `&AtomicBool`. Test tree note: the plan's streaming test keeps 50 content + 50 name files; the deterministic "stopped before the walk" test proves no content reads, since a 256-hit batch can legitimately carry every content hit from the 50-file tree before the sink gets to call stop.
 
 ## Next
-Item 1: add `Control` to `crates/crow-search/src/engine.rs`, export it from `lib.rs`, and port every caller.
+Item 2: two budgets, explicit `weak_count`, per-hit strong/other decisions in `add_hits`, and the GPUI cap tests.

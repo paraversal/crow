@@ -7,13 +7,12 @@ use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use crow_core::{Exclude, KeymapLayer, SearchMatch, Selection, SetName};
 use crow_fs::Entry;
 use crow_fs::ops::Request;
-use crow_search::{Hit, HitKind, Query, RuleSet, Skip, SkipReason, Summary};
+use crow_search::{Control, Hit, HitKind, Query, RuleSet, Skip, SkipReason, Summary};
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use gpui::{
@@ -155,7 +154,7 @@ pub struct SearchView {
     started: Instant,
     /// Milliseconds from `started` to the first accepted hit.
     first_hit_ms: Option<u64>,
-    cancel: Arc<AtomicBool>,
+    control: Control,
     generation: u64,
     exclude_generation: u64,
     /// The compiled rules for `exclude_generation`; the glob compile is ~14 ms.
@@ -230,7 +229,7 @@ enum Update {
 
 impl Drop for SearchView {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.control.cancel();
     }
 }
 
@@ -310,7 +309,7 @@ impl SearchView {
             capped: false,
             started: Instant::now(),
             first_hit_ms: None,
-            cancel: Arc::new(AtomicBool::new(false)),
+            control: Control::new(),
             generation: 0,
             exclude_generation,
             rules: None,
@@ -360,7 +359,7 @@ impl SearchView {
     }
 
     pub fn cancel(&mut self, _: &mut App) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.control.cancel();
         self.generation += 1;
     }
 
@@ -388,11 +387,11 @@ impl SearchView {
     }
 
     fn start_search(&mut self, query: &str, cx: &mut Context<Self>) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.control.cancel();
         self.generation += 1;
         let generation = self.generation;
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel = cancel.clone();
+        let control = Control::new();
+        self.control = control.clone();
 
         self.results.clear();
         self.by_path.clear();
@@ -439,6 +438,7 @@ impl SearchView {
         if self.scope == Scope::ThisMac {
             let query = query.to_owned();
             let effects = crate::effects::effects(cx);
+            let cancel = control.cancel_flag();
             cx.background_spawn(async move {
                 let hits = tx.clone();
                 let result = effects.spotlight_names(
@@ -495,7 +495,7 @@ impl SearchView {
                     |batch| {
                         let _ = tx.unbounded_send(Update::Hits(batch));
                     },
-                    &cancel,
+                    &control,
                 );
                 let _ = tx.unbounded_send(Update::Done(summary));
             })
@@ -588,7 +588,7 @@ impl SearchView {
             let known = self.by_path.contains_key(&hit.path) || fresh_at.contains_key(&hit.path);
             if !known && self.results.len() + fresh.len() >= MAX_RESULTS {
                 self.capped = true;
-                self.cancel.store(true, Ordering::Relaxed);
+                self.control.cancel();
                 break;
             }
             if self.first_hit_ms.is_none() {
