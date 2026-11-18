@@ -13,6 +13,7 @@ raw-window-handle = "0.6"
 crow-core = { path = "crates/crow-core" }
 crow-fs = { path = "crates/crow-fs" }
 crow-macos = { path = "crates/crow-macos" }
+crow-plugin = { path = "crates/crow-plugin" }
 crow-search = { path = "crates/crow-search" }
 crow-theme = { path = "crates/crow-theme" }
 

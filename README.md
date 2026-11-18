@@ -47,11 +47,12 @@ macOS privacy prompts naming Crow.
 | `crates/crow-fs` | Fast folder listing (`getattrlistbulk`), sorting, change diffs; file operations from M4 |
 | `crates/crow-macos` | The only AppKit code: icons, kinds, tags, thumbnails, Finder names, Quick Look |
 | `crates/crow-search` | Search and exclusion rules (M6) |
+| `crates/crow-plugin` | Versioned Rhai plugin packages, grants and workers (M9) |
 | `crates/crow-theme` | Reader for the global theme index in `~/.config/themes` |
 
 ## Configuration
 
-Four files in `~/.config/crow/`, each created on first launch with every option documented.
+Five files in `~/.config/crow/`, each created on first launch with every option documented.
 Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
@@ -59,9 +60,10 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 | `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), folder sizes (`folder_sizes`: `"off"` or `"visible"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, the terminal app Open Terminal Here uses (`terminal`: a name like `"Terminal"` or `"iTerm"`, or a path to an app), hidden files (shown by default), whether search still matches hidden items while they are hidden (`search_includes_hidden`, default on), the mode new searches start in (`search_match`: `"all"`, `"names"` or `"contents"`), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
+| `plugins.toml` | One approval record per installed plugin: `enabled`, package `digest` and the API-1 `fs` capability. Bundles live in `plugins/`; see [docs/plugins.md](docs/plugins.md). |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
 
-⌘, (or Crow ▸ Settings…) opens one Settings window. It edits `settings.toml` only: the file stays the single source of truth, every change writes just that key (comments survive), and edits made in a text editor appear in the window. Its Files section opens `settings.toml`, the config folder, and the other three files. ⌘K's "Settings" opens the window and "Edit settings.toml" opens the file directly.
+⌘, (or Crow ▸ Settings…) opens one Settings window. It edits `settings.toml` only: the file stays the single source of truth, every change writes just that key (comments survive), and edits made in a text editor appear in the window. Its Files section opens `settings.toml`, the config folder, and the other config files; its Plugins section opens the bundle folder and `plugins.toml`. ⌘K's "Settings" opens the window and "Edit settings.toml" opens the file directly.
 
 Themes come from the global index in `~/.config/themes`. View ▸ Theme… (Cmd-Option-T)
 previews each theme as you move through the list; Apply to All Apps (Cmd-Return) sets it for every app that reads the index.

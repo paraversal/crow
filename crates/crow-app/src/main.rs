@@ -46,6 +46,7 @@ mod onboarding;
 mod operations;
 mod palette;
 mod pane;
+mod plugins;
 mod preview;
 mod search;
 mod settings_window;
@@ -555,6 +556,7 @@ fn main() -> ExitCode {
         cx.set_global(window::LaunchFolder(start.clone()));
         extensions::init(cx);
         operations::init(cx, std::sync::Arc::new(crow_macos::SystemTrash));
+        plugins::init(cx);
         cx.bind_keys(actions::finder_keymap());
         cx.bind_keys(actions::vim_keymap());
         cx.bind_keys(text_input::keymap());

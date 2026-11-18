@@ -238,6 +238,9 @@ pub fn validate_relative(name: &str) -> Result<(), String> {
     if name.contains('\0') || name.contains('\\') {
         return Err(format!("\"{name}\" is not a portable bundle path"));
     }
+    if name.split('/').any(str::is_empty) {
+        return Err(format!("\"{name}\" has an empty path segment"));
+    }
     let path = Path::new(name);
     let mut components = path.components();
     let Some(Component::Normal(_)) = components.next() else {

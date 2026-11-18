@@ -1117,6 +1117,7 @@ dependencies = [
  "crow-core",
  "crow-fs",
  "crow-macos",
+ "crow-plugin",
  "crow-search",
  "crow-theme",
  "futures",
@@ -1186,7 +1187,6 @@ name = "crow-plugin"
 version = "0.1.0"
 dependencies = [
  "crow-core",
- "futures",
  "libc",
  "rhai",
  "serde",

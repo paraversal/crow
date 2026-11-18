@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crow_core::{
     CommandIntent, ContributionValues, Descriptor, EntryData, EntryHandle, ExtensionId, ExtensionKind, HookEvent,
@@ -71,11 +73,15 @@ impl RequestInput {
     }
 }
 
+/// Per-call cancellation. The host sets it when a selection, context or plugin
+/// generation is superseded; `on_progress` observes it between Rhai operations.
+pub type CancelToken = Arc<AtomicBool>;
+
 #[derive(Clone, Debug)]
 pub enum Call {
     Register,
-    Evaluate { extension: ExtensionId, input: RequestInput, stamp: RequestStamp },
-    Notify { extension: ExtensionId, event: HookEvent, stamp: RequestStamp },
+    Evaluate { extension: ExtensionId, input: RequestInput, stamp: RequestStamp, cancel: CancelToken },
+    Notify { extension: ExtensionId, event: HookEvent, stamp: RequestStamp, cancel: CancelToken },
 }
 
 impl Call {
@@ -86,8 +92,21 @@ impl Call {
         }
     }
 
+    pub fn cancel_token(&self) -> Option<&CancelToken> {
+        match self {
+            Self::Register => None,
+            Self::Evaluate { cancel, .. } | Self::Notify { cancel, .. } => Some(cancel),
+        }
+    }
+
+    pub fn cancel(&self) {
+        if let Some(token) = self.cancel_token() {
+            token.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     pub fn coalesce_key(&self) -> Option<NotifyKey> {
-        let Self::Notify { extension, event, stamp } = self else {
+        let Self::Notify { extension, event, stamp, .. } = self else {
             return None;
         };
         Some(NotifyKey {
@@ -161,7 +180,7 @@ impl CallError {
 pub enum WorkerMessage {
     Registered { plugin: PluginId, generation: u64, result: Result<Vec<Descriptor>, CallError> },
     Replied { plugin: PluginId, generation: u64, extension: ExtensionId, stamp: RequestStamp, reply: Reply },
-    Failed { plugin: PluginId, generation: u64, error: CallError },
+    Failed { plugin: PluginId, generation: u64, request: Option<RequestStamp>, error: CallError },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

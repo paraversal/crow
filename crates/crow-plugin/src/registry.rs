@@ -331,10 +331,54 @@ fn icon_pack_reply(value: Dynamic, limits: &Limits) -> Result<IconPack, CallErro
         reject_unknown(&mapping, &["icon", "color"], "icon mapping")?;
         let icon = checked_line(&required_string(&mapping, "icon", "icon id")?, "icon id", limits)?;
         let color = optional_line(&mapping, "color", "icon color", limits, &mut payload)?;
+        if let Some(color) = &color
+            && !valid_icon_color(color)
+        {
+            return Err(CallError::invalid(format!("icon color \"{color}\" is not a theme role or palette hue")));
+        }
         add_payload(&mut payload, icon.len(), limits)?;
         out.insert(key.to_string(), IconMapping { icon, color });
     }
     Ok(IconPack { icons: out })
+}
+
+fn valid_icon_color(color: &str) -> bool {
+    const ROLES: [&str; 16] = [
+        "bg",
+        "bg-inset",
+        "surface",
+        "surface-raised",
+        "border",
+        "selection",
+        "fg",
+        "fg-muted",
+        "fg-subtle",
+        "accent",
+        "on-accent",
+        "link",
+        "info",
+        "success",
+        "warning",
+        "error",
+    ];
+    ROLES.contains(&color)
+        || matches!(
+            color,
+            "base08"
+                | "base09"
+                | "base0A"
+                | "base0B"
+                | "base0C"
+                | "base0D"
+                | "base0E"
+                | "base0F"
+                | "base12"
+                | "base13"
+                | "base14"
+                | "base15"
+                | "base16"
+                | "base17"
+        )
 }
 
 fn checked_function(name: &str, ast: &AST) -> Result<String, CallError> {
@@ -609,6 +653,23 @@ fn run(ctx) { [] }
         assert_eq!(reply_for(&hook, refresh, &input(), &limits()).unwrap(), Reply::Refresh);
         let unit: Dynamic = rhai::Engine::new().eval::<Dynamic>(r#"()"#).unwrap();
         assert_eq!(reply_for(&hook, unit, &input(), &limits()).unwrap(), Reply::Unit);
+    }
+
+    #[test]
+    fn oversized_nested_tables_are_rejected_before_the_host_sees_them() {
+        let descriptor = Descriptor {
+            kind: ExtensionKind::Preview,
+            id: ExtensionId::new(plugin(), LocalId::parse("preview").unwrap()),
+            title: "Preview".into(),
+            applies_to: None,
+            function: Some("run".into()),
+        };
+        let rows = vec!["[\"x\"]"; 129].join(",");
+        let value: Dynamic = rhai::Engine::new().eval::<Dynamic>(&format!("#{{ table: [{rows}] }}")).unwrap();
+        assert_eq!(
+            reply_for(&descriptor, value, &input(), &limits()).unwrap_err().kind,
+            crate::dto::CallErrorKind::InvalidReply
+        );
     }
 
     #[test]

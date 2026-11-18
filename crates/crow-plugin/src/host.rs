@@ -4,11 +4,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread::{self, JoinHandle};
 
 use crow_core::{Descriptor, ExtensionId, PluginId};
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
 use crate::dto::{
     Call, CallError, CallErrorKind, HostEvent, Inventory, PluginEntry, PluginState, Reply, RequestInput, RequestStamp,
@@ -69,7 +72,8 @@ pub struct PluginHost {
     generations: HashMap<PluginId, u64>,
     next_generation: u64,
     next_request: u64,
-    events: UnboundedSender<HostEvent>,
+    requests: HashMap<u64, (PluginId, crate::dto::CancelToken)>,
+    events: Sender<HostEvent>,
     inbox: Sender<Inbox>,
     reported: HashMap<String, String>,
     reported_grants: Option<String>,
@@ -77,12 +81,7 @@ pub struct PluginHost {
 }
 
 impl PluginHost {
-    pub(crate) fn new(
-        config_dir: &Path,
-        limits: Limits,
-        events: UnboundedSender<HostEvent>,
-        inbox: Sender<Inbox>,
-    ) -> Self {
+    pub(crate) fn new(config_dir: &Path, limits: Limits, events: Sender<HostEvent>, inbox: Sender<Inbox>) -> Self {
         Self {
             plugins_dir: config_dir.join("plugins"),
             grants_path: grants::grants_path(config_dir),
@@ -97,6 +96,7 @@ impl PluginHost {
             generations: HashMap::new(),
             next_generation: 0,
             next_request: 0,
+            requests: HashMap::new(),
             events,
             inbox,
             reported: HashMap::new(),
@@ -298,7 +298,10 @@ impl PluginHost {
     pub fn disable(&mut self, id: &PluginId) -> Result<(), String> {
         if self.grants.get(id).is_some() {
             grants::set_enabled(&self.grants_path, id, false).map_err(|error| format!("plugins.toml: {error}"))?;
-            self.grants = grants::load_grants(&self.grants_path).unwrap_or_default();
+            if let Err(error) = self.reload_grants() {
+                self.refresh();
+                return Err(format!("plugins.toml: {error}"));
+            }
         }
         if self.workers.contains_key(id) {
             self.stop_worker(id);
@@ -320,7 +323,10 @@ impl PluginHost {
         };
         if !grant.enabled {
             grants::set_enabled(&self.grants_path, id, true).map_err(|error| format!("plugins.toml: {error}"))?;
-            self.grants = grants::load_grants(&self.grants_path).unwrap_or_default();
+            if let Err(error) = self.reload_grants() {
+                self.refresh();
+                return Err(format!("plugins.toml: {error}"));
+            }
         }
         self.refresh();
         Ok(())
@@ -370,10 +376,13 @@ impl PluginHost {
         }
         self.next_request += 1;
         let stamp = RequestStamp { generation: slot.generation, request_id: self.next_request, context_revision };
+        let cancel = Arc::new(AtomicBool::new(false));
         slot.worker
             .mailbox
-            .enqueue_command(Call::Evaluate { extension, input, stamp })
+            .enqueue_command(Call::Evaluate { extension: extension.clone(), input, stamp, cancel: cancel.clone() })
             .map_err(|EnqueueError::Busy| "plugin is busy".to_owned())?;
+        self.requests.insert(stamp.request_id, (extension.plugin, cancel));
+        self.prune_cancelled_requests();
         Ok(stamp)
     }
 
@@ -386,7 +395,15 @@ impl PluginHost {
         }
         self.next_request += 1;
         let stamp = RequestStamp { generation: slot.generation, request_id: self.next_request, context_revision };
-        slot.worker.mailbox.enqueue_refresh(Call::Notify { extension, event, stamp });
+        let cancel = Arc::new(AtomicBool::new(false));
+        slot.worker.mailbox.enqueue_refresh(Call::Notify {
+            extension: extension.clone(),
+            event,
+            stamp,
+            cancel: cancel.clone(),
+        });
+        self.requests.insert(stamp.request_id, (extension.plugin, cancel));
+        self.prune_cancelled_requests();
     }
 
     pub(crate) fn handle_inbox(&mut self, message: Inbox) {
@@ -458,6 +475,7 @@ impl PluginHost {
                 }
             }
             WorkerMessage::Replied { plugin, generation, extension, stamp, reply } => {
+                self.requests.remove(&stamp.request_id);
                 if !self.is_current(&plugin, generation) {
                     return;
                 }
@@ -477,7 +495,10 @@ impl PluginHost {
                     Reply::Unit | Reply::Registered(_) => {}
                 }
             }
-            WorkerMessage::Failed { plugin, generation, error } => {
+            WorkerMessage::Failed { plugin, generation, request, error } => {
+                if let Some(request) = request {
+                    self.requests.remove(&request.request_id);
+                }
                 if !self.is_current(&plugin, generation) {
                     return;
                 }
@@ -489,7 +510,6 @@ impl PluginHost {
 
     fn worker_failed(&mut self, id: &PluginId, _generation: u64, error: CallError) {
         if error.kind == CallErrorKind::Cancelled {
-            self.stop_worker(id);
             return;
         }
         let digest = self.states.get(id).and_then(|state| state.digest.clone());
@@ -505,6 +525,13 @@ impl PluginHost {
     }
 
     fn stop_worker(&mut self, id: &PluginId) {
+        let requests: Vec<u64> =
+            self.requests.iter().filter(|(_, (plugin, _))| plugin == id).map(|(request, _)| *request).collect();
+        for request in requests {
+            if let Some((_, token)) = self.requests.remove(&request) {
+                token.store(true, Ordering::Relaxed);
+            }
+        }
         if let Some(mut slot) = self.workers.remove(id) {
             slot.worker.stop();
             if let Some(join) = slot.worker.take_join() {
@@ -547,6 +574,21 @@ impl PluginHost {
         self.states.insert(id.clone(), RuntimeState { state, detail, descriptors, digest });
     }
 
+    fn reload_grants(&mut self) -> Result<(), String> {
+        match grants::load_grants(&self.grants_path) {
+            Ok(grants) => {
+                self.grants = grants;
+                self.grants_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.grants = Grants::default();
+                self.grants_error = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+
     fn candidate(&self, id: &PluginId) -> Option<&PackageCandidate> {
         self.candidates.iter().find(|candidate| candidate.id.as_ref() == Some(id))
     }
@@ -565,7 +607,7 @@ impl PluginHost {
     }
 
     fn send(&self, event: HostEvent) {
-        let _ = self.events.unbounded_send(event);
+        let _ = self.events.send(event);
     }
 
     fn reap(&mut self) {
@@ -641,6 +683,8 @@ impl PluginHost {
 
     fn publish(&mut self) {
         let inventory = self.build_inventory();
+        let present: HashSet<String> = inventory.plugins.iter().map(|entry| entry.dir_name.clone()).collect();
+        self.reported.retain(|dir, _| present.contains(dir));
         let mut statuses = Vec::new();
         for entry in &inventory.plugins {
             if entry.state.is_error() {
@@ -672,9 +716,24 @@ impl PluginHost {
             self.reported_scan = inventory.scan_error.clone();
         }
         for (plugin, name, message) in statuses {
+            match &plugin {
+                Some(id) => tracing::error!(plugin = %id, %name, %message, "plugin error"),
+                None => tracing::error!(%name, %message, "plugin error"),
+            }
             self.send(HostEvent::Status { plugin, name, message, error: true });
         }
         self.send(HostEvent::Inventory(inventory));
+    }
+
+    fn prune_cancelled_requests(&mut self) {
+        self.requests.retain(|_, (_, token)| !token.load(Ordering::Relaxed));
+    }
+
+    /// Cancel one in-flight or queued request without disturbing the plugin.
+    pub fn cancel_request(&mut self, request_id: u64) {
+        if let Some((_, token)) = self.requests.remove(&request_id) {
+            token.store(true, Ordering::Relaxed);
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -703,9 +762,9 @@ pub struct PluginService {
 }
 
 impl PluginService {
-    pub fn start(config_dir: PathBuf, limits: Limits) -> Result<(Self, UnboundedReceiver<HostEvent>), String> {
+    pub fn start(config_dir: PathBuf, limits: Limits) -> Result<(Self, Receiver<HostEvent>), String> {
         let (command_tx, command_rx) = mpsc::channel::<Inbox>();
-        let (event_tx, event_rx) = unbounded::<HostEvent>();
+        let (event_tx, event_rx) = mpsc::channel::<HostEvent>();
         let inbox = command_tx.clone();
         let join = thread::Builder::new()
             .name("crow-plugins".into())
@@ -785,7 +844,7 @@ mod tests {
     struct Harness {
         host: PluginHost,
         inbox: Receiver<Inbox>,
-        events: UnboundedReceiver<HostEvent>,
+        events: Receiver<HostEvent>,
         last: Inventory,
         seen: Vec<HostEvent>,
         _dir: tempfile::TempDir,
@@ -805,7 +864,7 @@ mod tests {
 
         fn from_dir(dir: tempfile::TempDir) -> Self {
             let (inbox_tx, inbox) = mpsc::channel::<Inbox>();
-            let (event_tx, events) = unbounded::<HostEvent>();
+            let (event_tx, events) = mpsc::channel::<HostEvent>();
             let mut host = PluginHost::new(dir.path(), test_limits(), event_tx, inbox_tx);
             host.refresh();
             let mut harness = Self { host, inbox, events, last: Inventory::default(), seen: Vec::new(), _dir: dir };
@@ -952,6 +1011,9 @@ fn run(ctx) { while true { } }
         let mut harness = Harness::new(&[("example.a", COMMAND)]);
         harness.approve("example.a");
         let old_generation = harness.entry("example.a").generation;
+        let a = PluginId::parse("example.a").unwrap();
+        let extension = ExtensionId::new(a.clone(), crow_core::LocalId::parse("copy").unwrap());
+        let in_flight = harness.host.evaluate(extension, Harness::input(), 2).unwrap();
         let bundle = harness._dir.path().join("plugins/example-a/main.rhai");
         std::fs::write(&bundle, LOOP).unwrap();
         harness.host.refresh();
@@ -961,6 +1023,87 @@ fn run(ctx) { while true { } }
         assert!(entry.generation > old_generation, "old replies cannot match the new generation");
         assert!(entry.digest.is_some(), "the new snapshot is displayed for approval");
         assert!(entry.detail.as_deref().unwrap().contains("changed"));
+        std::thread::sleep(Duration::from_millis(60));
+        harness.pump_until(|_| true);
+        assert!(!harness.seen.iter().any(|event| matches!(
+            event,
+            HostEvent::CommandIntent { stamp, .. } if stamp.request_id == in_flight.request_id
+        )));
+    }
+
+    #[test]
+    fn package_errors_have_distinct_inventory_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let write = |name: &str, manifest: &str| {
+            let bundle = plugins.join(name);
+            std::fs::create_dir_all(&bundle).unwrap();
+            std::fs::write(bundle.join("plugin.toml"), manifest).unwrap();
+            std::fs::write(bundle.join("main.rhai"), "fn register() { [] }").unwrap();
+        };
+        write(
+            "unknown",
+            r#"id = "example.unknown"
+name = "Unknown"
+version = "0.1.0"
+api = 1
+entry = "main.rhai"
+provides = ["command"]
+colour = "red"
+permissions = { fs = "none" }
+"#,
+        );
+        write(
+            "api",
+            r#"id = "example.api"
+name = "Api"
+version = "0.1.0"
+api = 2
+entry = "main.rhai"
+provides = ["command"]
+permissions = { fs = "none" }
+"#,
+        );
+        write(
+            "spawn",
+            r#"id = "example.spawn"
+name = "Spawn"
+version = "0.1.0"
+api = 1
+entry = "main.rhai"
+provides = ["command"]
+permissions = { spawn = ["git"] }
+"#,
+        );
+        write_bundle(&plugins, "example.dup", "Dup A", COMMAND, Permissions::default());
+        let second = plugins.join("second-dup");
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(
+            second.join("plugin.toml"),
+            r#"id = "example.dup"
+name = "Dup B"
+version = "0.1.0"
+api = 1
+entry = "main.rhai"
+provides = ["command", "hook"]
+permissions = { fs = "none" }
+"#,
+        )
+        .unwrap();
+        std::fs::write(second.join("main.rhai"), COMMAND).unwrap();
+        let (inbox_tx, inbox) = mpsc::channel::<Inbox>();
+        let (event_tx, events) = mpsc::channel::<HostEvent>();
+        let mut host = PluginHost::new(dir.path(), test_limits(), event_tx, inbox_tx);
+        host.refresh();
+        let mut harness = Harness { host, inbox, events, last: Inventory::default(), seen: Vec::new(), _dir: dir };
+        harness.pump_until(|harness| harness.last.plugins.len() == 5);
+        let states: Vec<PluginState> = harness.last.plugins.iter().map(|entry| entry.state).collect();
+        assert!(states.contains(&PluginState::InvalidManifest), "{states:?}");
+        assert!(states.contains(&PluginState::IncompatibleApi), "{states:?}");
+        assert!(states.contains(&PluginState::UnsupportedCapability), "{states:?}");
+        assert_eq!(states.iter().filter(|state| **state == PluginState::DuplicateId).count(), 2, "{states:?}");
+        assert!(harness.last.plugins.iter().all(|entry| entry.descriptors.is_empty()));
     }
 
     #[test]
@@ -998,7 +1141,7 @@ fn run(ctx) { while true { } }
             Permissions { fs: Some(FsAccess::Read), spawn: Vec::new(), net: false },
         );
         let (inbox_tx, inbox) = mpsc::channel::<Inbox>();
-        let (event_tx, events) = unbounded::<HostEvent>();
+        let (event_tx, events) = mpsc::channel::<HostEvent>();
         let mut host = PluginHost::new(dir.path(), test_limits(), event_tx, inbox_tx);
         host.refresh();
         let grants_path = dir.path().join("plugins.toml");
@@ -1038,7 +1181,7 @@ permissions = { spawn = ["git"], net = false }
         .unwrap();
         std::fs::write(bundle.join("main.rhai"), COMMAND).unwrap();
         let (inbox_tx, inbox) = mpsc::channel::<Inbox>();
-        let (event_tx, events) = unbounded::<HostEvent>();
+        let (event_tx, events) = mpsc::channel::<HostEvent>();
         let mut host = PluginHost::new(dir.path(), test_limits(), event_tx, inbox_tx);
         host.refresh();
         let mut harness = Harness { host, inbox, events, last: Inventory::default(), seen: Vec::new(), _dir: dir };
@@ -1073,6 +1216,7 @@ permissions = { spawn = ["git"], net = false }
             extension,
             input: Harness::input(),
             stamp: RequestStamp { generation: 1, request_id: 1, context_revision: 1 },
+            cancel: Arc::new(AtomicBool::new(false)),
         };
         mailbox.enqueue_command(call.clone()).unwrap();
         assert_eq!(mailbox.enqueue_command(call), Err(EnqueueError::Busy));
@@ -1135,7 +1279,7 @@ permissions = { spawn = ["git"], net = false }
         std::fs::create_dir(&plugins).unwrap();
         write_bundle(&plugins, "example.a", "A", COMMAND, Permissions::default());
         let (inbox_tx, inbox) = mpsc::channel::<Inbox>();
-        let (event_tx, events) = unbounded::<HostEvent>();
+        let (event_tx, events) = mpsc::channel::<HostEvent>();
         let mut host = PluginHost::new(dir.path(), test_limits(), event_tx, inbox_tx);
         host.refresh();
         let mut harness = Harness { host, inbox, events, last: Inventory::default(), seen: Vec::new(), _dir: dir };
@@ -1146,6 +1290,27 @@ permissions = { spawn = ["git"], net = false }
         assert!(error.contains("changed"), "{error}");
         harness.pump_until(|harness| harness.entry("example.a").state == PluginState::PendingApproval);
         assert_eq!(harness.entry("example.a").descriptors.len(), 0);
+    }
+
+    #[test]
+    fn cancelling_one_request_keeps_the_plugin_running() {
+        let mut harness = Harness::new(&[("example.a", LOOP)]);
+        harness.host.limits.call_deadline = Duration::from_secs(5);
+        harness.approve("example.a");
+        let a = PluginId::parse("example.a").unwrap();
+        let extension = ExtensionId::new(a.clone(), crow_core::LocalId::parse("copy").unwrap());
+        let stamp = harness.host.evaluate(extension, Harness::input(), 1).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        harness.host.cancel_request(stamp.request_id);
+        std::thread::sleep(Duration::from_millis(60));
+        harness.pump_until(|_| true);
+        assert!(!harness.seen.iter().any(|event| matches!(
+            event,
+            HostEvent::CommandIntent { stamp: event_stamp, .. } if event_stamp.request_id == stamp.request_id
+        )));
+        assert_eq!(harness.entry("example.a").state, PluginState::Running);
+        harness.host.disable(&a).unwrap();
+        harness.pump_until(|harness| harness.entry("example.a").state == PluginState::Disabled);
     }
 
     #[test]

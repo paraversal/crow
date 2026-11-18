@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crow_core::motion::{Event, MotionMode, SoundSet};
 use crow_core::{AppIcon, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, SearchMatch, TipsMode};
+use crow_plugin::{PluginEntry, PluginHandle, PluginState};
 use crow_theme::Theme;
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, Image, ImageFormat, IntoElement, KeyBinding,
@@ -18,7 +19,8 @@ use gpui::{
 
 use crate::actions::OpenSettings;
 use crate::controls::{self, ControlMeta};
-use crate::style::{color, error_soft, ui_font};
+use crate::plugins::Plugins;
+use crate::style::{active_selection, color, cursor_ring, error_soft, inactive_selection, ui_font};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme_choice::{self, ThemeChoice};
 use crate::ui::{self, SettingChange, Ui};
@@ -134,6 +136,7 @@ enum ControlId {
     PlaySound,
     WindowWidth,
     WindowHeight,
+    Plugins,
     EditSettings,
     ShowConfig,
     OpenSidebarToml,
@@ -144,7 +147,7 @@ enum ControlId {
 
 impl ControlId {
     /// Reading order: the order Tab visits and the order the page draws.
-    const ALL: [ControlId; 27] = [
+    const ALL: [ControlId; 28] = [
         ControlId::Theme,
         ControlId::AppIcon,
         ControlId::FontFamily,
@@ -166,6 +169,7 @@ impl ControlId {
         ControlId::PlaySound,
         ControlId::WindowWidth,
         ControlId::WindowHeight,
+        ControlId::Plugins,
         ControlId::EditSettings,
         ControlId::ShowConfig,
         ControlId::OpenSidebarToml,
@@ -197,6 +201,7 @@ impl ControlId {
             ControlId::PlaySound => "settings-play-sound",
             ControlId::WindowWidth => "settings-window-width",
             ControlId::WindowHeight => "settings-window-height",
+            ControlId::Plugins => "settings-plugins",
             ControlId::EditSettings => "settings-edit-file",
             ControlId::ShowConfig => "settings-show-config",
             ControlId::OpenSidebarToml => "settings-open-sidebar",
@@ -258,6 +263,7 @@ impl ControlId {
             ControlId::PlaySound => "Play",
             ControlId::WindowWidth => "Width",
             ControlId::WindowHeight => "Height",
+            ControlId::Plugins => "Plugins",
             ControlId::EditSettings => "Edit settings.toml…",
             ControlId::ShowConfig => "Show config folder in Finder",
             ControlId::OpenSidebarToml => "sidebar.toml",
@@ -287,6 +293,7 @@ impl ControlId {
             | ControlId::PaletteRecent => Role::Switch,
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => Role::SpinButton,
             ControlId::Terminal => Role::TextInput,
+            ControlId::Plugins => Role::ListBox,
             ControlId::PlaySound
             | ControlId::EditSettings
             | ControlId::ShowConfig
@@ -342,6 +349,7 @@ impl ControlId {
             ControlId::Sound => "Crow adds soft ticks to Finder's sounds; Off is silent.",
             ControlId::PlaySound => "Play the trash sound in the chosen set.",
             ControlId::WindowWidth | ControlId::WindowHeight => "600 to 4000 points.",
+            ControlId::Plugins => return None,
             ControlId::EditSettings => "Open settings.toml in its default app.",
             ControlId::ShowConfig => "Open ~/.config/crow in Finder.",
             ControlId::OpenSidebarToml
@@ -359,10 +367,62 @@ impl ControlId {
             ControlId::EditSettings
             | ControlId::EditSettingsBanner
             | ControlId::ShowConfig
+            | ControlId::Plugins
             | ControlId::OpenSidebarToml
             | ControlId::OpenViewsToml
             | ControlId::OpenExcludeToml => true,
             _ => cx.global::<Ui>().settings_error().is_none(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PluginAction {
+    Approve,
+    Enable,
+    Disable,
+    Reload,
+    Retry,
+}
+
+impl PluginAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Approve => "Approve",
+            Self::Enable => "Enable",
+            Self::Disable => "Disable",
+            Self::Reload => "Reload",
+            Self::Retry => "Retry",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Approve => 0,
+            Self::Enable => 1,
+            Self::Disable => 2,
+            Self::Reload => 3,
+            Self::Retry => 4,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Approve => "A",
+            Self::Enable => "E",
+            Self::Disable => "D",
+            Self::Reload => "R",
+            Self::Retry => "T",
+        }
+    }
+
+    fn enabled(self, entry: &PluginEntry) -> bool {
+        match self {
+            Self::Approve => entry.can_approve() && entry.digest.is_some(),
+            Self::Enable => entry.can_enable(),
+            Self::Disable => entry.can_disable(),
+            Self::Reload => entry.can_reload(),
+            Self::Retry => entry.can_retry(),
         }
     }
 }
@@ -384,6 +444,7 @@ pub struct SettingsWindow {
     theme_scroll: ScrollHandle,
     fonts: Vec<String>,
     font_cursor: usize,
+    plugin_cursor: usize,
     font_scroll: ScrollHandle,
     /// The drop-down whose menu is open (Theme or FontFamily).
     menu: Option<ControlId>,
@@ -532,6 +593,7 @@ impl SettingsWindow {
             theme_scroll: ScrollHandle::new(),
             fonts,
             font_cursor,
+            plugin_cursor: 0,
             font_scroll: ScrollHandle::new(),
             menu: None,
             dismissed_by_mouse: None,
@@ -780,6 +842,7 @@ impl SettingsWindow {
             | ControlId::PaletteRecent => self.toggle_bool(id, cx),
             ControlId::PlaySound => crate::feedback::play(Event::Trash, cx),
             ControlId::EditSettings | ControlId::EditSettingsBanner => ui::edit_settings_file(cx),
+            ControlId::Plugins => self.activate_plugin(cx),
             ControlId::ShowConfig => ui::open_config_folder(cx),
             ControlId::OpenSidebarToml => ui::open_config_file("sidebar.toml", cx),
             ControlId::OpenViewsToml => ui::open_config_file("views.toml", cx),
@@ -832,8 +895,141 @@ impl SettingsWindow {
                 // ↑ is -1 in reading order but +1 for a stepper.
                 self.adjust_stepper(id, -(delta as f64), window, cx);
             }
+            ControlId::Plugins => self.move_plugin_cursor(delta, cx),
             _ => {}
         }
+    }
+
+    fn move_plugin_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = cx.global::<Plugins>().inventory.plugins.len();
+        if count == 0 {
+            return;
+        }
+        let next = (self.plugin_cursor as isize + delta).clamp(0, count as isize - 1) as usize;
+        if next != self.plugin_cursor {
+            self.plugin_cursor = next;
+            cx.notify();
+        }
+    }
+
+    fn selected_plugin(&self, cx: &App) -> Option<PluginEntry> {
+        cx.global::<Plugins>().inventory.plugins.get(self.plugin_cursor).cloned()
+    }
+
+    fn activate_plugin(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_plugin(cx) else { return };
+        let action = match entry.state {
+            PluginState::PendingApproval => PluginAction::Approve,
+            PluginState::Disabled => PluginAction::Enable,
+            PluginState::Paused | PluginState::Failed => PluginAction::Retry,
+            _ => PluginAction::Reload,
+        };
+        self.plugin_action(action, cx);
+    }
+
+    fn plugin_action(&mut self, action: PluginAction, cx: &mut Context<Self>) {
+        let Some(entry) = self.selected_plugin(cx) else { return };
+        let handle = cx.global::<Plugins>().handle.clone();
+        send_plugin_action(handle, entry, action, cx);
+    }
+
+    fn plugin_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "a" => self.plugin_action(PluginAction::Approve, cx),
+            "e" => self.plugin_action(PluginAction::Enable, cx),
+            "d" => self.plugin_action(PluginAction::Disable, cx),
+            "r" => self.plugin_action(PluginAction::Reload, cx),
+            "t" => self.plugin_action(PluginAction::Retry, cx),
+            "o" => ui::open_plugins_folder(cx),
+            "g" => ui::open_config_file("plugins.toml", cx),
+            "l" => crate::plugins::reload(cx),
+            _ => {}
+        }
+    }
+
+    fn plugin_section(&mut self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let inventory = cx.global::<Plugins>().inventory.clone();
+        let handle = cx.global::<Plugins>().handle.clone();
+        let count = inventory.plugins.len();
+        let grants_error = inventory.grants_error.is_some();
+        if self.plugin_cursor >= count {
+            self.plugin_cursor = count.saturating_sub(1);
+        }
+        let selected = self.plugin_cursor;
+        let focus = self.handle(ControlId::Plugins);
+        let focused = focus.is_focused(window);
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        if let Some(error) = &inventory.grants_error {
+            rows.push(
+                div()
+                    .id("plugins-grants-error")
+                    .role(Role::Alert)
+                    .aria_label(error.clone())
+                    .text_size(px(11.))
+                    .text_color(color(theme.role("error")))
+                    .child(error.clone())
+                    .into_any_element(),
+            );
+        }
+        if let Some(error) = &inventory.scan_error {
+            rows.push(
+                div()
+                    .id("plugins-scan-error")
+                    .role(Role::Alert)
+                    .aria_label(error.clone())
+                    .text_size(px(11.))
+                    .text_color(color(theme.role("error")))
+                    .child(error.clone())
+                    .into_any_element(),
+            );
+        }
+        if count == 0 {
+            rows.push(
+                div()
+                    .id("plugins-empty")
+                    .role(Role::Status)
+                    .aria_label("No plugins installed")
+                    .text_size(px(12.))
+                    .text_color(color(theme.role("fg-muted")))
+                    .child("No plugins installed.")
+                    .into_any_element(),
+            );
+        }
+        for (index, entry) in inventory.plugins.iter().enumerate() {
+            rows.push(
+                plugin_row(index, count, entry, index == selected, focused, grants_error, theme, handle.clone())
+                    .into_any_element(),
+            );
+        }
+        rows.push(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(open_plugins_button(theme))
+                .child(open_grants_button(theme))
+                .child(reload_all_button(theme))
+                .into_any_element(),
+        );
+        let mut list = div()
+            .id("settings-plugins")
+            .debug_selector(|| "settings-plugins".to_owned())
+            .role(Role::ListBox)
+            .aria_label(format!("Plugins, {count} installed"))
+            .track_focus(&focus)
+            .when(focused, |list| list.shadow(cursor_ring(theme)))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .p(px(8.))
+            .rounded(px(7.))
+            .bg(color(theme.role("surface")))
+            .on_key_down(cx.listener(|this, event, _, cx| this.plugin_key(event, cx)));
+        list = list.children(rows);
+        list.into_any_element()
     }
 
     fn adjust_focused(&mut self, amount: f64, window: &mut Window, cx: &mut Context<Self>) {
@@ -1174,6 +1370,7 @@ impl SettingsWindow {
                 ControlId::SearchMatch => Some(search_match_index(settings.search_match)),
                 ControlId::Motion => Some(motion_index(settings.motion)),
                 ControlId::Sound => Some(sound_index(settings.sound)),
+                ControlId::Plugins => Some(self.plugin_cursor),
                 _ => None,
             },
             toggled: match id {
@@ -1433,6 +1630,7 @@ impl Render for SettingsWindow {
                 .child(edit)
         });
 
+        let plugin_row = self.plugin_section(&theme, window, cx);
         let mut page_items: Vec<gpui::AnyElement> = Vec::new();
         let mut control_items: HashMap<ControlId, usize> = HashMap::new();
         add_section(
@@ -1494,6 +1692,7 @@ impl Render for SettingsWindow {
                 (ControlId::WindowHeight, height_row.into_any_element()),
             ],
         );
+        add_section(&mut page_items, &mut control_items, "Plugins", &theme, vec![(ControlId::Plugins, plugin_row)]);
         add_section(
             &mut page_items,
             &mut control_items,
@@ -1778,6 +1977,224 @@ fn app_icon_image(icon: AppIcon) -> Arc<Image> {
             .map(|icon| Arc::new(Image::from_bytes(ImageFormat::Png, ui::app_icon_png(icon).to_vec())))
     });
     ICONS[app_icon_index(icon)].clone()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plugin_row(
+    index: usize,
+    count: usize,
+    entry: &PluginEntry,
+    selected: bool,
+    focused: bool,
+    grants_error: bool,
+    theme: &Theme,
+    handle: Option<PluginHandle>,
+) -> gpui::Stateful<gpui::Div> {
+    let muted = color(theme.role("fg-muted"));
+    let error_color = color(theme.role("error"));
+    let state_color = if entry.state.is_error() { error_color } else { muted };
+    let mut actions = Vec::new();
+    match entry.state {
+        PluginState::PendingApproval => actions.push(PluginAction::Approve),
+        PluginState::Disabled => actions.push(PluginAction::Enable),
+        PluginState::Paused | PluginState::Failed => {
+            actions.push(PluginAction::Retry);
+            actions.push(PluginAction::Disable);
+        }
+        PluginState::Running | PluginState::Starting => actions.push(PluginAction::Disable),
+        _ => {}
+    }
+    if entry.can_reload() {
+        actions.push(PluginAction::Reload);
+    }
+    if grants_error {
+        actions.retain(|action| *action == PluginAction::Reload);
+    }
+    let mut action_row = div().flex().items_center().gap(px(4.));
+    for action in actions {
+        action_row =
+            action_row.child(plugin_button(index, action, entry, action.enabled(entry), theme, handle.clone()));
+    }
+
+    let mut details = div().flex_1().flex().flex_col().gap(px(2.)).child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(entry.title().to_owned()))
+            .when_some(entry.version.clone(), |line, version| {
+                line.child(div().text_size(px(10.)).text_color(muted).child(format!("v{version}")))
+            })
+            .child(div().text_size(px(11.)).text_color(state_color).child(entry.state.label())),
+    );
+    let extensions = entry.descriptors.len();
+    details = details.child(div().text_size(px(11.)).text_color(muted).child(format!(
+        "{} · {extensions} {}",
+        entry.permissions_summary(),
+        if extensions == 1 { "extension" } else { "extensions" }
+    )));
+    if let Some(detail) = &entry.detail {
+        details = details.child(div().text_size(px(11.)).text_color(error_color).child(detail.clone()));
+    }
+
+    let description = match &entry.detail {
+        Some(detail) => format!("{detail}. {}", entry.permissions_summary()),
+        None => entry.permissions_summary(),
+    };
+    div()
+        .id(("plugin-row", index))
+        .role(Role::Group)
+        .aria_label(format!("{}, {}", entry.title(), entry.state.label()))
+        .aria_description(description)
+        .aria_position_in_set(index + 1)
+        .aria_size_of_set(count)
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .p(px(8.))
+        .rounded(px(6.))
+        .when(selected, |row| row.bg(if focused { active_selection(theme) } else { inactive_selection(theme) }))
+        .child(details)
+        .child(action_row)
+}
+
+fn plugin_button(
+    index: usize,
+    action: PluginAction,
+    entry: &PluginEntry,
+    enabled: bool,
+    theme: &Theme,
+    handle: Option<PluginHandle>,
+) -> gpui::Stateful<gpui::Div> {
+    let label = action.label().to_owned();
+    let aria_label = format!("{} {}", action.label(), entry.title());
+    let id = ("plugin-action", index * 8 + action.index());
+    let surface = color(theme.role("surface"));
+    let raised = color(theme.role("surface-raised"));
+    let entry = entry.clone();
+    let mut button = div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(aria_label)
+        .aria_disabled(!enabled)
+        .aria_keyshortcuts(action.key())
+        .px(px(8.))
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded(px(5.))
+        .border_1()
+        .border_color(color(theme.role("border")))
+        .bg(surface)
+        .text_color(color(theme.role("fg")))
+        .text_size(px(11.))
+        .when(!enabled, |button| button.opacity(0.45))
+        .child(label);
+    if enabled && handle.is_some() {
+        button = button.cursor_pointer().hover(move |style| style.bg(raised)).on_click(move |_, _, cx| {
+            send_plugin_action(handle.clone(), entry.clone(), action, cx);
+        });
+    }
+    button
+}
+
+fn open_plugins_button(theme: &Theme) -> gpui::AnyElement {
+    let surface = color(theme.role("surface"));
+    let raised = color(theme.role("surface-raised"));
+    div()
+        .id("plugins-open-folder")
+        .role(Role::Button)
+        .aria_label("Open Plugins Folder")
+        .aria_keyshortcuts("O")
+        .px(px(8.))
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded(px(5.))
+        .border_1()
+        .border_color(color(theme.role("border")))
+        .bg(surface)
+        .text_color(color(theme.role("fg")))
+        .text_size(px(11.))
+        .cursor_pointer()
+        .hover(move |style| style.bg(raised))
+        .on_click(|_, _, cx| ui::open_plugins_folder(cx))
+        .child("Open Plugins Folder")
+        .into_any_element()
+}
+
+fn reload_all_button(theme: &Theme) -> gpui::AnyElement {
+    let surface = color(theme.role("surface"));
+    let raised = color(theme.role("surface-raised"));
+    div()
+        .id("plugins-reload-all")
+        .role(Role::Button)
+        .aria_label("Reload all plugins")
+        .aria_keyshortcuts("L")
+        .px(px(8.))
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded(px(5.))
+        .border_1()
+        .border_color(color(theme.role("border")))
+        .bg(surface)
+        .text_color(color(theme.role("fg")))
+        .text_size(px(11.))
+        .cursor_pointer()
+        .hover(move |style| style.bg(raised))
+        .on_click(|_, _, cx| crate::plugins::reload(cx))
+        .child("Reload All")
+        .into_any_element()
+}
+
+fn open_grants_button(theme: &Theme) -> gpui::AnyElement {
+    let surface = color(theme.role("surface"));
+    let raised = color(theme.role("surface-raised"));
+    div()
+        .id("plugins-open-grants")
+        .role(Role::Button)
+        .aria_label("Open plugins.toml")
+        .aria_keyshortcuts("G")
+        .px(px(8.))
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .rounded(px(5.))
+        .border_1()
+        .border_color(color(theme.role("border")))
+        .bg(surface)
+        .text_color(color(theme.role("fg")))
+        .text_size(px(11.))
+        .cursor_pointer()
+        .hover(move |style| style.bg(raised))
+        .on_click(|_, _, cx| ui::open_config_file("plugins.toml", cx))
+        .child("Open plugins.toml")
+        .into_any_element()
+}
+
+fn send_plugin_action(handle: Option<PluginHandle>, entry: PluginEntry, action: PluginAction, cx: &mut App) {
+    let Some(handle) = handle else {
+        crate::operations::message("The plugin service is not running.", true, cx);
+        return;
+    };
+    let Some(id) = entry.id.clone() else {
+        crate::operations::message("This package has no valid plugin id.", true, cx);
+        return;
+    };
+    let result = match action {
+        PluginAction::Approve => match entry.digest.clone() {
+            Some(digest) => handle.approve(id, digest),
+            None => Err("This package has no readable snapshot.".to_owned()),
+        },
+        PluginAction::Enable => handle.enable(id),
+        PluginAction::Disable => handle.disable(id),
+        PluginAction::Reload => handle.reload(id),
+        PluginAction::Retry => handle.retry(id),
+    };
+    if let Err(error) = result {
+        crate::operations::message(error, true, cx);
+    }
 }
 
 #[cfg(test)]
@@ -2347,6 +2764,112 @@ mod tests {
         vcx.run_until_parked();
         assert_eq!(state(&view, &vcx, ControlId::Keymap).selected, Some(1));
         assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.keymap), KeymapLayer::Vim);
+    }
+
+    fn write_plugin_bundle(config: &std::path::Path) {
+        let dir = config.join("plugins/demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.toml"),
+            r#"
+id = "example.demo"
+name = "Demo"
+version = "0.1.0"
+api = 1
+entry = "main.rhai"
+provides = ["command"]
+permissions = { fs = "none", spawn = [], net = false }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.rhai"),
+            r#"
+fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run" } ] }
+fn run(ctx) { #{ action: "copy-text", text: "x" } }
+"#,
+        )
+        .unwrap();
+    }
+
+    fn plugin_state(vcx: &VisualTestContext, id: &str) -> Option<PluginState> {
+        vcx.read_global::<crate::plugins::Plugins, _>(|plugins, _| {
+            plugins
+                .inventory
+                .plugins
+                .iter()
+                .find(|entry| entry.id.as_ref().is_some_and(|plugin| plugin.as_str() == id))
+                .map(|entry| entry.state)
+        })
+    }
+
+    fn wait_plugin_state(vcx: &mut VisualTestContext, id: &str, wanted: PluginState) {
+        for _ in 0..500 {
+            vcx.update(|_, cx| crate::plugins::poll(cx));
+            vcx.cx.run_until_parked();
+            vcx.run_until_parked();
+            if plugin_state(vcx, id) == Some(wanted) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("plugin {id} never reached {wanted:?}; got {:?}", plugin_state(vcx, id));
+    }
+
+    #[gpui::test]
+    fn plugins_inventory_approves_and_disables_from_settings(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+            write_plugin_bundle(&config);
+            cx.update(|cx| crate::plugins::start(cx, config));
+        });
+        wait_plugin_state(&mut vcx, "example.demo", PluginState::PendingApproval);
+        assert!(view.read_with(&vcx, |view, _| view.debug_selectors()).iter().any(|id| id == "settings-plugins"));
+        let violations = vcx.update(|window, cx| view.read(cx).check_invariants(window));
+        assert!(violations.is_empty(), "{violations:?}");
+
+        focus_control(&view, &mut vcx, ControlId::Plugins);
+        vcx.simulate_keystrokes("enter");
+        wait_plugin_state(&mut vcx, "example.demo", PluginState::Running);
+        let config = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+        let grants = std::fs::read_to_string(config.join("plugins.toml")).unwrap();
+        assert!(grants.contains(r#"[plugin."example.demo"]"#), "{grants}");
+        assert!(grants.contains("enabled = true"), "{grants}");
+
+        vcx.simulate_keystrokes("d");
+        wait_plugin_state(&mut vcx, "example.demo", PluginState::Disabled);
+        let grants = std::fs::read_to_string(config.join("plugins.toml")).unwrap();
+        assert!(grants.contains("enabled = false"), "{grants}");
+    }
+
+    #[gpui::test]
+    fn plugins_invalid_package_names_itself_in_the_status_line(cx: &mut TestAppContext) {
+        let (_view, mut vcx) = open_settings_after(cx, |cx| {
+            let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+            let dir = config.join("plugins/broken");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("plugin.toml"),
+                r#"
+id = "example.broken"
+name = "Broken Example"
+version = "0.1.0"
+api = 9
+entry = "main.rhai"
+provides = ["command"]
+permissions = { fs = "none" }
+"#,
+            )
+            .unwrap();
+            std::fs::write(dir.join("main.rhai"), "fn register() { [] }").unwrap();
+            cx.update(|cx| crate::plugins::start(cx, config));
+        });
+        wait_plugin_state(&mut vcx, "example.broken", PluginState::IncompatibleApi);
+        let message = vcx.read_global::<crate::operations::Operations, _>(|operations, _| operations.message.clone());
+        let (text, is_error) = message.expect("an error in the status line");
+        assert!(is_error);
+        assert!(text.contains("Broken Example"), "{text}");
+        assert!(text.contains("API"), "{text}");
     }
 
     #[gpui::test]

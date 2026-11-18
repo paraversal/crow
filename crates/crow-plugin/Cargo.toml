@@ -8,7 +8,6 @@ description = "Versioned Rhai plugin packages, grants and workers (M9)"
 
 [dependencies]
 crow-core.workspace = true
-futures = "0.3"
 libc = "0.2"
 rhai = "1.27"
 serde.workspace = true

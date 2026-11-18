@@ -71,11 +71,15 @@ impl Mailbox {
         if let Some(key) = call.coalesce_key()
             && let Some(index) = state.refreshes.iter().position(|queued| queued.coalesce_key().as_ref() == Some(&key))
         {
+            if let Some(replaced) = state.refreshes.get(index) {
+                replaced.cancel();
+            }
             state.refreshes[index] = call;
             self.ready.notify_one();
             return;
         }
         if state.refreshes.len() >= self.refresh_capacity {
+            call.cancel();
             return;
         }
         state.refreshes.push_back(call);
@@ -102,6 +106,9 @@ impl Mailbox {
     pub fn close(&self) {
         let mut state = self.state.lock().unwrap();
         state.closed = true;
+        for call in state.commands.iter().chain(state.refreshes.iter()) {
+            call.cancel();
+        }
         self.ready.notify_all();
     }
 }
@@ -162,6 +169,7 @@ struct Runtime {
     violation: AtomicBool,
     read_allowed: AtomicBool,
     reads: Mutex<BTreeMap<EntryHandle, EntryRef>>,
+    call_cancel: Mutex<Option<crate::dto::CancelToken>>,
 }
 
 impl Runtime {
@@ -173,12 +181,20 @@ impl Runtime {
             violation: AtomicBool::new(false),
             read_allowed: AtomicBool::new(false),
             reads: Mutex::new(BTreeMap::new()),
+            call_cancel: Mutex::new(None),
         }
     }
 
-    fn begin(&self, deadline: Instant, reads: &BTreeMap<EntryHandle, EntryRef>, read_allowed: bool) {
+    fn begin(
+        &self,
+        deadline: Instant,
+        reads: &BTreeMap<EntryHandle, EntryRef>,
+        read_allowed: bool,
+        call_cancel: Option<crate::dto::CancelToken>,
+    ) {
         *self.deadline.lock().unwrap() = Some(deadline);
         *self.reads.lock().unwrap() = reads.clone();
+        *self.call_cancel.lock().unwrap() = call_cancel;
         self.read_allowed.store(read_allowed, Ordering::Relaxed);
         self.terminate.store(0, Ordering::Relaxed);
         self.violation.store(false, Ordering::Relaxed);
@@ -187,6 +203,7 @@ impl Runtime {
     fn end(&self) {
         *self.deadline.lock().unwrap() = None;
         self.reads.lock().unwrap().clear();
+        *self.call_cancel.lock().unwrap() = None;
         self.read_allowed.store(false, Ordering::Relaxed);
     }
 }
@@ -306,9 +323,10 @@ fn run_loop(
             break;
         }
         let deadline = Instant::now() + limits.call_deadline;
+        let request = call.stamp();
         let result: Result<(ExtensionId, RequestStamp, Reply), CallError> = match call {
             Call::Register => Err(CallError::script("register() ran twice")),
-            Call::Evaluate { extension, input, stamp } => evaluate(
+            Call::Evaluate { extension, input, stamp, cancel } => evaluate(
                 engine,
                 ast,
                 snapshot,
@@ -318,11 +336,12 @@ fn run_loop(
                 extension.clone(),
                 input,
                 stamp,
+                cancel,
                 deadline,
                 limits,
             )
             .map(|(stamp, reply)| (extension, stamp, reply)),
-            Call::Notify { extension, event, stamp } => notify(
+            Call::Notify { extension, event, stamp, cancel } => notify(
                 engine,
                 ast,
                 read_allowed,
@@ -331,6 +350,7 @@ fn run_loop(
                 extension.clone(),
                 event,
                 stamp,
+                cancel,
                 deadline,
                 limits,
             )
@@ -341,7 +361,10 @@ fn run_loop(
                 send(inbox, WorkerMessage::Replied { plugin: plugin.clone(), generation, extension, stamp, reply });
             }
             Err(error) => {
-                send(inbox, WorkerMessage::Failed { plugin: plugin.clone(), generation, error: error.clone() });
+                send(
+                    inbox,
+                    WorkerMessage::Failed { plugin: plugin.clone(), generation, request, error: error.clone() },
+                );
                 if error.kind != CallErrorKind::Cancelled {
                     break;
                 }
@@ -360,9 +383,13 @@ fn register_package(
     deadline: Instant,
     limits: &Limits,
 ) -> Result<Vec<Descriptor>, CallError> {
-    runtime.begin(deadline, &BTreeMap::new(), false);
+    runtime.begin(deadline, &BTreeMap::new(), false, None);
     let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, "register", ());
+    let violation = runtime.violation.load(Ordering::Relaxed);
     runtime.end();
+    if violation {
+        return Err(CallError::capability("script attempted a denied host capability"));
+    }
     let value = value.map_err(|error| call_error(error, runtime))?;
     registry::validate_registration(plugin, manifest, ast, value, limits)
 }
@@ -378,6 +405,7 @@ fn evaluate(
     extension: ExtensionId,
     input: RequestInput,
     stamp: RequestStamp,
+    cancel: crate::dto::CancelToken,
     deadline: Instant,
     limits: &Limits,
 ) -> Result<(RequestStamp, Reply), CallError> {
@@ -389,10 +417,14 @@ fn evaluate(
         return Err(CallError::invalid(format!("extension \"{extension}\" is not evaluated directly")));
     }
     let function = descriptor.function.as_deref().ok_or_else(|| CallError::invalid("extension has no function"))?;
-    runtime.begin(deadline, &input.reads, read_allowed);
+    runtime.begin(deadline, &input.reads, read_allowed, Some(cancel));
     let context = input_map(&input.snapshot);
     let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, function, (context,));
+    let violation = runtime.violation.load(Ordering::Relaxed);
     runtime.end();
+    if violation {
+        return Err(CallError::capability("script attempted a denied host capability"));
+    }
     let value = value.map_err(|error| call_error(error, runtime))?;
     let reply = registry::reply_for(descriptor, value, &input, limits)?;
     if snapshot.manifest.id != extension.plugin {
@@ -411,6 +443,7 @@ fn notify(
     extension: ExtensionId,
     event: HookEvent,
     stamp: RequestStamp,
+    cancel: crate::dto::CancelToken,
     deadline: Instant,
     limits: &Limits,
 ) -> Result<(RequestStamp, Reply), CallError> {
@@ -421,10 +454,14 @@ fn notify(
         return Err(CallError::invalid(format!("extension \"{extension}\" is not a hook")));
     }
     let function = descriptor.function.as_deref().ok_or_else(|| CallError::invalid("hook has no function"))?;
-    runtime.begin(deadline, &BTreeMap::new(), read_allowed);
+    runtime.begin(deadline, &BTreeMap::new(), read_allowed, Some(cancel));
     let context = event_map(&event);
     let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, function, (context,));
+    let violation = runtime.violation.load(Ordering::Relaxed);
     runtime.end();
+    if violation {
+        return Err(CallError::capability("script attempted a denied host capability"));
+    }
     let value = value.map_err(|error| call_error(error, runtime))?;
     let reply = registry::reply_for(descriptor, value, &empty_input(), limits)?;
     Ok((stamp, reply))
@@ -455,7 +492,9 @@ fn build_engine(
     engine.on_debug(|_, _, _| {});
     let progress = runtime.clone();
     engine.on_progress(move |_| {
-        if progress.cancel.load(Ordering::Relaxed) {
+        let call_cancelled =
+            progress.call_cancel.lock().unwrap().as_ref().is_some_and(|token| token.load(Ordering::Relaxed));
+        if progress.cancel.load(Ordering::Relaxed) || call_cancelled {
             progress.terminate.store(2, Ordering::Relaxed);
             return Some(Dynamic::UNIT);
         }
@@ -529,7 +568,7 @@ fn read_excerpt(runtime: &Runtime, handle: i64, max_bytes: usize) -> Result<Stri
     };
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(&entry.path)
         .map_err(|error| runtime_error(format!("{}: {error}", entry.path.display())))?;
     let metadata = file.metadata().map_err(|error| runtime_error(error.to_string()))?;
@@ -696,6 +735,10 @@ fn run(ctx) {{ {body} }}
     }
 
     fn evaluate(worker: &Worker, path: std::path::PathBuf) {
+        evaluate_with_cancel(worker, path, Arc::new(AtomicBool::new(false)));
+    }
+
+    fn evaluate_with_cancel(worker: &Worker, path: std::path::PathBuf, cancel: Arc<AtomicBool>) {
         let extension = ExtensionId::new(PluginId::parse("example.test").unwrap(), LocalId::parse("copy").unwrap());
         worker
             .mailbox
@@ -703,6 +746,7 @@ fn run(ctx) {{ {body} }}
                 extension,
                 input: input(path),
                 stamp: RequestStamp { generation: 1, request_id: 1, context_revision: 4 },
+                cancel,
             })
             .unwrap();
     }
@@ -811,6 +855,26 @@ fn run(ctx) {{ {body} }}
     }
 
     #[test]
+    fn per_call_cancel_stops_the_evaluation_and_keeps_the_worker() {
+        let (mut worker, rx) = spawn(
+            &command_source("while true { }"),
+            false,
+            false,
+            &[],
+            Limits { max_operations: 0, call_deadline: Duration::from_secs(5), ..limits() },
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        evaluate_with_cancel(&worker, std::path::PathBuf::from("/tmp/a.txt"), cancel.clone());
+        std::thread::sleep(Duration::from_millis(10));
+        cancel.store(true, Ordering::Relaxed);
+        match next(&rx, Duration::from_secs(2)) {
+            WorkerMessage::Failed { error, .. } => assert_eq!(error.kind, CallErrorKind::Cancelled),
+            other => panic!("{other:?}"),
+        }
+        worker.stop();
+    }
+
+    #[test]
     fn mailbox_coalesces_refreshes_and_prioritizes_commands() {
         let mut limits = limits();
         limits.command_mailbox = 1;
@@ -821,6 +885,7 @@ fn run(ctx) {{ {body} }}
             extension: extension.clone(),
             event: crow_core::HookEvent::FilesChanged { scope: "/tmp".into() },
             stamp: RequestStamp { generation: 1, request_id, context_revision: 1 },
+            cancel: Arc::new(AtomicBool::new(false)),
         };
         mailbox.enqueue_refresh(notify(1));
         mailbox.enqueue_refresh(notify(2));
@@ -839,6 +904,7 @@ fn run(ctx) {{ {body} }}
                 extension,
                 input: input(std::path::PathBuf::from("/tmp/a.txt")),
                 stamp: RequestStamp { generation: 1, request_id: 4, context_revision: 1 },
+                cancel: Arc::new(AtomicBool::new(false)),
             })
             .unwrap();
         match mailbox.recv(&cancel).unwrap() {

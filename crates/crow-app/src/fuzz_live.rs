@@ -223,6 +223,7 @@ pub fn run(args: &[String]) -> ExitCode {
         );
         extensions::init(cx);
         operations::init(cx, Arc::new(FolderTrash(app_setup.trash_dir.clone())));
+        crate::plugins::init(cx);
         cx.global_mut::<Operations>().jail = Some(app_setup.root.clone());
         cx.bind_keys(actions::finder_keymap());
         cx.bind_keys(actions::vim_keymap());
