@@ -1,5 +1,6 @@
 //! Wire types shared by the host, the worker and (for display) the app.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -10,6 +11,7 @@ use crow_core::{
 };
 
 use crate::manifest::{FsAccess, PackageErrorKind, Permissions};
+use crate::package::PackageSnapshot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RequestStamp {
@@ -93,6 +95,81 @@ impl RequestInput {
 /// generation is superseded; `on_progress` observes it between Rhai operations.
 pub type CancelToken = Arc<AtomicBool>;
 
+/// The caller's handle on one admitted-or-pending request. The stamp is fixed
+/// when the handle submits it; cancellation is visible to the service and the
+/// app immediately, even if a terminal event is already queued.
+#[derive(Clone, Debug)]
+pub struct RequestTicket {
+    stamp: RequestStamp,
+    cancel: CancelToken,
+}
+
+impl RequestTicket {
+    pub(crate) fn new(stamp: RequestStamp, cancel: CancelToken) -> Self {
+        Self { stamp, cancel }
+    }
+
+    pub fn stamp(&self) -> RequestStamp {
+        self.stamp
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubmitError {
+    Busy,
+    Stopped,
+}
+
+/// Why a request ended without a contribution. Every failure category P1B has
+/// to distinguish is typed, never inferred from a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestErrorKind {
+    /// The worker's explicit command or hook lane was full.
+    Busy,
+    /// The ticket was cancelled, including a superseded hook.
+    Cancelled,
+    /// The caller used a generation that is no longer current.
+    StaleGeneration,
+    /// No Running record or no registered extension with that ID.
+    Unavailable,
+    /// Malformed input, or an Evaluate/Notify call for the wrong kind.
+    InvalidInput,
+    /// The input needed a capability the grant does not authorize.
+    Capability,
+    /// The worker failed the call or was withdrawn while it ran.
+    WorkerFailed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestError {
+    pub kind: RequestErrorKind,
+    pub message: String,
+}
+
+impl RequestError {
+    pub fn new(kind: RequestErrorKind, message: impl Into<String>) -> Self {
+        Self { kind, message: message.into() }
+    }
+
+    pub fn cancelled() -> Self {
+        Self::new(RequestErrorKind::Cancelled, "cancelled")
+    }
+}
+
+/// The one terminal result of an admitted request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RequestResult {
+    Values(ContributionValues),
+    Intent(CommandIntent),
+    Refresh,
+    Unit,
+    Error(RequestError),
+}
+
 #[derive(Clone, Debug)]
 pub enum Call {
     Register,
@@ -144,7 +221,6 @@ pub struct NotifyKey {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reply {
-    Registered(Vec<Descriptor>),
     Values(ContributionValues),
     Intent(CommandIntent),
     Refresh,
@@ -248,8 +324,57 @@ impl PluginState {
     }
 }
 
+/// One data-only icon pack published by a Running package. The snapshot keeps
+/// the exact approved bytes alive; P1B discards held packs when the generation
+/// is withdrawn, and P3A validates the TOML and glyph references.
+#[derive(Clone, Debug)]
+pub struct RegisteredIconPack {
+    id: ExtensionId,
+    generation: u64,
+    asset: String,
+    snapshot: Arc<PackageSnapshot>,
+}
+
+impl RegisteredIconPack {
+    pub(crate) fn new(id: ExtensionId, generation: u64, asset: String, snapshot: Arc<PackageSnapshot>) -> Self {
+        Self { id, generation, asset, snapshot }
+    }
+
+    pub fn id(&self) -> &ExtensionId {
+        &self.id
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn asset(&self) -> &str {
+        &self.asset
+    }
+
+    pub fn pack_bytes(&self) -> Option<Arc<[u8]>> {
+        self.snapshot.files.get(&self.asset).cloned()
+    }
+
+    /// A glyph reference is readable only when the manifest declared that exact
+    /// bundle-relative asset. The returned bytes belong to the approved
+    /// snapshot, never to a later disk read.
+    pub fn declared_asset(&self, name: &str) -> Option<Arc<[u8]>> {
+        self.snapshot
+            .manifest
+            .assets
+            .iter()
+            .any(|asset| asset == name)
+            .then(|| self.snapshot.files.get(name).cloned())
+            .flatten()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PluginEntry {
+    /// Raw immediate child directory name; the row identity Settings stores.
+    pub bundle: OsString,
+    /// Display-only lossy name.
     pub dir_name: String,
     pub id: Option<PluginId>,
     pub name: String,
@@ -260,6 +385,8 @@ pub struct PluginEntry {
     pub digest: Option<String>,
     pub requested_fs: FsAccess,
     pub descriptors: Vec<Descriptor>,
+    /// Derived from the Running record; empty outside Running.
+    pub icon_packs: Vec<RegisteredIconPack>,
     pub generation: u64,
 }
 
@@ -321,10 +448,19 @@ pub struct Inventory {
 #[derive(Clone, Debug)]
 pub enum HostEvent {
     Inventory(Inventory),
-    Status { plugin: Option<PluginId>, name: String, message: String, error: bool },
-    CommandIntent { plugin: PluginId, stamp: RequestStamp, intent: CommandIntent },
-    Refresh { plugin: PluginId, stamp: RequestStamp },
-    Contribution { extension: ExtensionId, stamp: RequestStamp, values: ContributionValues },
+    Status {
+        plugin: Option<PluginId>,
+        name: String,
+        message: String,
+        error: bool,
+    },
+    /// Exactly one terminal event for a ticket accepted at ingress while the
+    /// service is alive. A stopped service closes the receiver instead.
+    RequestFinished {
+        extension: ExtensionId,
+        stamp: RequestStamp,
+        result: RequestResult,
+    },
 }
 
 /// The manifest's requested capabilities in a displayable form.

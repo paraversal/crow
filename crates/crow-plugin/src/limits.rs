@@ -26,8 +26,11 @@ pub struct Limits {
     pub max_read_bytes: usize,
     /// Explicit commands; full means busy.
     pub command_mailbox: usize,
-    /// Refresh notifications; coalesced, full drops the newest.
+    /// Refresh notifications; coalesced, a full lane reports busy.
     pub refresh_mailbox: usize,
+    /// Pending handle submissions. One bound for the service; the default is
+    /// the sum of the per-worker command and refresh lanes.
+    pub service_mailbox: usize,
 }
 
 impl Default for Limits {
@@ -48,6 +51,7 @@ impl Default for Limits {
             max_read_bytes: 64 * 1024,
             command_mailbox: 16,
             refresh_mailbox: 16,
+            service_mailbox: 32,
         }
     }
 }

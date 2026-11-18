@@ -3,6 +3,7 @@
 //! render, and every change writes only its key through `ui::set_setting`.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -425,6 +426,53 @@ impl PluginAction {
             Self::Retry => entry.can_retry(),
         }
     }
+
+    fn allowed(self, entry: &PluginEntry, grants_error: bool) -> bool {
+        plugin_actions(entry, grants_error).contains(&self) && self.enabled(entry)
+    }
+}
+
+/// One action policy for buttons, Return and action keys. During a grants
+/// error only Reload can recover; approve/enable/disable/retry are blocked.
+fn plugin_actions(entry: &PluginEntry, grants_error: bool) -> Vec<PluginAction> {
+    let mut actions = match entry.state {
+        PluginState::PendingApproval => vec![PluginAction::Approve],
+        PluginState::Disabled => vec![PluginAction::Enable],
+        PluginState::Paused | PluginState::Failed => vec![PluginAction::Retry, PluginAction::Disable],
+        PluginState::Running | PluginState::Starting => vec![PluginAction::Disable],
+        _ => Vec::new(),
+    };
+    if entry.can_reload() {
+        actions.push(PluginAction::Reload);
+    }
+    if grants_error {
+        actions.retain(|action| *action == PluginAction::Reload);
+    }
+    actions
+}
+
+fn primary_plugin_action(entry: &PluginEntry) -> PluginAction {
+    match entry.state {
+        PluginState::PendingApproval => PluginAction::Approve,
+        PluginState::Disabled => PluginAction::Enable,
+        PluginState::Paused | PluginState::Failed => PluginAction::Retry,
+        _ => PluginAction::Reload,
+    }
+}
+
+/// The rendered row an approval may act on. A keyboard approval must match the
+/// latest inventory on all three fields before dispatch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PluginTarget {
+    bundle: OsString,
+    id: crow_core::PluginId,
+    digest: String,
+}
+
+impl PluginTarget {
+    fn for_entry(entry: &PluginEntry) -> Option<Self> {
+        Some(Self { bundle: entry.bundle.clone(), id: entry.id.clone()?, digest: entry.digest.clone()? })
+    }
 }
 
 #[derive(Default)]
@@ -444,7 +492,12 @@ pub struct SettingsWindow {
     theme_scroll: ScrollHandle,
     fonts: Vec<String>,
     font_cursor: usize,
-    plugin_cursor: usize,
+    /// Stable row identity; never an inventory index.
+    selected_plugin: Option<OsString>,
+    /// Last rendered position, used only for Up/Down and disappearance fallback.
+    plugin_position: usize,
+    /// The approval target captured when the selected row was rendered.
+    plugin_target: Option<PluginTarget>,
     font_scroll: ScrollHandle,
     /// The drop-down whose menu is open (Theme or FontFamily).
     menu: Option<ControlId>,
@@ -593,7 +646,9 @@ impl SettingsWindow {
             theme_scroll: ScrollHandle::new(),
             fonts,
             font_cursor,
-            plugin_cursor: 0,
+            selected_plugin: None,
+            plugin_position: 0,
+            plugin_target: None,
             font_scroll: ScrollHandle::new(),
             menu: None,
             dismissed_by_mouse: None,
@@ -901,36 +956,59 @@ impl SettingsWindow {
     }
 
     fn move_plugin_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let count = cx.global::<Plugins>().inventory.plugins.len();
+        let plugins = cx.global::<Plugins>().inventory.plugins.clone();
+        let count = plugins.len();
         if count == 0 {
+            self.selected_plugin = None;
+            self.plugin_position = 0;
             return;
         }
-        let next = (self.plugin_cursor as isize + delta).clamp(0, count as isize - 1) as usize;
-        if next != self.plugin_cursor {
-            self.plugin_cursor = next;
+        if self.selected_plugin.is_none() {
+            self.selected_plugin = Some(plugins[0].bundle.clone());
+            self.plugin_position = 0;
+            cx.notify();
+            return;
+        }
+        let current = self.selected_plugin_index(&plugins).unwrap_or(self.plugin_position.min(count - 1));
+        let next = (current as isize + delta).clamp(0, count as isize - 1) as usize;
+        if next != current || self.selected_plugin.is_none() {
+            self.selected_plugin = Some(plugins[next].bundle.clone());
+            self.plugin_position = next;
             cx.notify();
         }
     }
 
+    fn selected_plugin_index(&self, plugins: &[PluginEntry]) -> Option<usize> {
+        let selected = self.selected_plugin.as_ref()?;
+        plugins.iter().position(|entry| &entry.bundle == selected)
+    }
+
     fn selected_plugin(&self, cx: &App) -> Option<PluginEntry> {
-        cx.global::<Plugins>().inventory.plugins.get(self.plugin_cursor).cloned()
+        let plugins = &cx.global::<Plugins>().inventory.plugins;
+        let index = self.selected_plugin_index(plugins)?;
+        plugins.get(index).cloned()
     }
 
     fn activate_plugin(&mut self, cx: &mut Context<Self>) {
         let Some(entry) = self.selected_plugin(cx) else { return };
-        let action = match entry.state {
-            PluginState::PendingApproval => PluginAction::Approve,
-            PluginState::Disabled => PluginAction::Enable,
-            PluginState::Paused | PluginState::Failed => PluginAction::Retry,
-            _ => PluginAction::Reload,
-        };
-        self.plugin_action(action, cx);
+        self.plugin_action(primary_plugin_action(&entry), cx);
     }
 
     fn plugin_action(&mut self, action: PluginAction, cx: &mut Context<Self>) {
+        let grants_error = cx.global::<Plugins>().inventory.grants_error.is_some();
         let Some(entry) = self.selected_plugin(cx) else { return };
-        if !action.enabled(&entry) {
+        if !action.allowed(&entry, grants_error) {
             return;
+        }
+        if action == PluginAction::Approve {
+            // The keyboard approval must act on the row that was rendered, not
+            // on whatever moved into its place before the refresh was drawn.
+            let (Some(target), Some(latest)) = (self.plugin_target.as_ref(), PluginTarget::for_entry(&entry)) else {
+                return;
+            };
+            if *target != latest {
+                return;
+            }
         }
         let handle = cx.global::<Plugins>().handle.clone();
         send_plugin_action(handle, entry, action, cx);
@@ -958,10 +1036,26 @@ impl SettingsWindow {
         let handle = cx.global::<Plugins>().handle.clone();
         let count = inventory.plugins.len();
         let grants_error = inventory.grants_error.is_some();
-        if self.plugin_cursor >= count {
-            self.plugin_cursor = count.saturating_sub(1);
-        }
-        let selected = self.plugin_cursor;
+        let selected = if count == 0 {
+            self.selected_plugin = None;
+            self.plugin_position = 0;
+            self.plugin_target = None;
+            None
+        } else {
+            let index = match self.selected_plugin_index(&inventory.plugins) {
+                Some(index) => index,
+                None => {
+                    // The selected bundle disappeared: use its previous
+                    // position, or the previous row when it was last.
+                    let index = self.plugin_position.min(count - 1);
+                    self.selected_plugin = Some(inventory.plugins[index].bundle.clone());
+                    index
+                }
+            };
+            self.plugin_position = index;
+            self.plugin_target = PluginTarget::for_entry(&inventory.plugins[index]);
+            Some(index)
+        };
         let focus = self.handle(ControlId::Plugins);
         let focused = focus.is_focused(window);
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
@@ -1003,7 +1097,7 @@ impl SettingsWindow {
         }
         for (index, entry) in inventory.plugins.iter().enumerate() {
             rows.push(
-                plugin_row(index, count, entry, index == selected, focused, grants_error, theme, handle.clone())
+                plugin_row(index, count, entry, Some(index) == selected, focused, grants_error, theme, handle.clone())
                     .into_any_element(),
             );
         }
@@ -1373,7 +1467,7 @@ impl SettingsWindow {
                 ControlId::SearchMatch => Some(search_match_index(settings.search_match)),
                 ControlId::Motion => Some(motion_index(settings.motion)),
                 ControlId::Sound => Some(sound_index(settings.sound)),
-                ControlId::Plugins => Some(self.plugin_cursor),
+                ControlId::Plugins => self.selected_plugin_index(&cx.global::<Plugins>().inventory.plugins),
                 _ => None,
             },
             toggled: match id {
@@ -1996,23 +2090,7 @@ fn plugin_row(
     let muted = color(theme.role("fg-muted"));
     let error_color = color(theme.role("error"));
     let state_color = if entry.state.is_error() { error_color } else { muted };
-    let mut actions = Vec::new();
-    match entry.state {
-        PluginState::PendingApproval => actions.push(PluginAction::Approve),
-        PluginState::Disabled => actions.push(PluginAction::Enable),
-        PluginState::Paused | PluginState::Failed => {
-            actions.push(PluginAction::Retry);
-            actions.push(PluginAction::Disable);
-        }
-        PluginState::Running | PluginState::Starting => actions.push(PluginAction::Disable),
-        _ => {}
-    }
-    if entry.can_reload() {
-        actions.push(PluginAction::Reload);
-    }
-    if grants_error {
-        actions.retain(|action| *action == PluginAction::Reload);
-    }
+    let actions = plugin_actions(entry, grants_error);
     let mut action_row = div().flex_none().flex().items_center().gap(px(4.));
     for action in actions {
         action_row =
@@ -2793,6 +2871,34 @@ mod tests {
         assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.keymap), KeymapLayer::Vim);
     }
 
+    fn write_named_plugin_bundle(config: &std::path::Path, dir_name: &str, id: &str, name: &str) {
+        let dir = config.join("plugins").join(dir_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.toml"),
+            format!(
+                r#"
+id = "{id}"
+name = "{name}"
+version = "0.1.0"
+api = 1
+entry = "main.rhai"
+provides = ["command"]
+permissions = {{ fs = "none", spawn = [], net = false }}
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.rhai"),
+            r#"
+fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run" } ] }
+fn run(ctx) { #{ kind: "copy_text", text: "x" } }
+"#,
+        )
+        .unwrap();
+    }
+
     fn write_plugin_bundle(config: &std::path::Path) {
         let dir = config.join("plugins/demo");
         std::fs::create_dir_all(&dir).unwrap();
@@ -2867,6 +2973,29 @@ fn run(ctx) { #{ kind: "copy_text", text: "x" } }
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("plugin {id} never reached {wanted:?}; got {:?}", plugin_state(vcx, id));
+    }
+
+    fn wait_plugin_count(vcx: &mut VisualTestContext, wanted: usize) {
+        for _ in 0..500 {
+            vcx.update(|_, cx| crate::plugins::poll(cx));
+            vcx.cx.run_until_parked();
+            vcx.run_until_parked();
+            if vcx.read_global::<crate::plugins::Plugins, _>(|plugins, _| plugins.inventory.plugins.len()) == wanted {
+                draw(vcx);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let count = vcx.read_global::<crate::plugins::Plugins, _>(|plugins, _| plugins.inventory.plugins.len());
+        panic!("plugin inventory stayed at {count}, wanted {wanted}");
+    }
+
+    fn selected_bundle(view: &Entity<SettingsWindow>, vcx: &VisualTestContext) -> Option<std::ffi::OsString> {
+        view.read_with(vcx, |view, _| view.selected_plugin.clone())
+    }
+
+    fn grants_error(vcx: &VisualTestContext) -> bool {
+        vcx.read_global::<crate::plugins::Plugins, _>(|plugins, _| plugins.inventory.grants_error.is_some())
     }
 
     #[gpui::test]
@@ -2951,6 +3080,146 @@ permissions = { fs = "none" }
         assert!(is_error);
         assert!(text.contains("Broken Example"), "{text}");
         assert!(text.contains("API"), "{text}");
+    }
+
+    #[gpui::test]
+    fn keyboard_approval_stays_with_the_rendered_bundle_after_an_insertion(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+            write_named_plugin_bundle(&config, "a", "example.a", "A");
+            write_named_plugin_bundle(&config, "b", "example.b", "B");
+            cx.update(|cx| crate::plugins::start(cx, config));
+        });
+        wait_plugin_count(&mut vcx, 2);
+        focus_control(&view, &mut vcx, ControlId::Plugins);
+        draw(&mut vcx);
+        vcx.simulate_keystrokes("down");
+        draw(&mut vcx);
+        assert_eq!(selected_bundle(&view, &vcx).as_deref(), Some(std::ffi::OsStr::new("b")));
+
+        let config = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+        write_named_plugin_bundle(&config, "a0", "example.a0", "A0");
+        vcx.update(|_, cx| crate::plugins::reload(cx));
+        wait_plugin_count(&mut vcx, 3);
+        assert_eq!(
+            selected_bundle(&view, &vcx).as_deref(),
+            Some(std::ffi::OsStr::new("b")),
+            "the selected key survives an insertion ahead of it"
+        );
+
+        vcx.simulate_keystrokes("a");
+        wait_plugin_state(&mut vcx, "example.b", PluginState::Running);
+        let grants = std::fs::read_to_string(config.join("plugins.toml")).unwrap();
+        assert!(grants.contains(r#"[plugin."example.b"]"#), "{grants}");
+        assert!(!grants.contains(r#"[plugin."example.a"]"#), "{grants}");
+        assert!(!grants.contains(r#"[plugin."example.a0"]"#), "{grants}");
+    }
+
+    #[gpui::test]
+    fn a_removed_selected_row_chooses_a_successor_or_the_previous_row(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+            write_named_plugin_bundle(&config, "a", "example.a", "A");
+            write_named_plugin_bundle(&config, "b", "example.b", "B");
+            write_named_plugin_bundle(&config, "c", "example.c", "C");
+            cx.update(|cx| crate::plugins::start(cx, config));
+        });
+        wait_plugin_count(&mut vcx, 3);
+        focus_control(&view, &mut vcx, ControlId::Plugins);
+        draw(&mut vcx);
+        vcx.simulate_keystrokes("down");
+        draw(&mut vcx);
+        assert_eq!(selected_bundle(&view, &vcx).as_deref(), Some(std::ffi::OsStr::new("b")));
+
+        let config = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+        std::fs::remove_dir_all(config.join("plugins/b")).unwrap();
+        vcx.update(|_, cx| crate::plugins::reload(cx));
+        wait_plugin_count(&mut vcx, 2);
+        assert_eq!(
+            selected_bundle(&view, &vcx).as_deref(),
+            Some(std::ffi::OsStr::new("c")),
+            "the row at the previous position is the successor"
+        );
+
+        std::fs::remove_dir_all(config.join("plugins/c")).unwrap();
+        vcx.update(|_, cx| crate::plugins::reload(cx));
+        wait_plugin_count(&mut vcx, 1);
+        assert_eq!(
+            selected_bundle(&view, &vcx).as_deref(),
+            Some(std::ffi::OsStr::new("a")),
+            "removing the last row falls back to the previous row"
+        );
+    }
+
+    #[gpui::test]
+    fn duplicate_id_rows_keep_distinct_bundle_keys_and_block_approval(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+            write_named_plugin_bundle(&config, "dup-one", "example.dup", "Dup One");
+            write_named_plugin_bundle(&config, "dup-two", "example.dup", "Dup Two");
+            cx.update(|cx| crate::plugins::start(cx, config));
+        });
+        wait_plugin_count(&mut vcx, 2);
+        focus_control(&view, &mut vcx, ControlId::Plugins);
+        draw(&mut vcx);
+        vcx.simulate_keystrokes("down");
+        draw(&mut vcx);
+        assert_eq!(selected_bundle(&view, &vcx).as_deref(), Some(std::ffi::OsStr::new("dup-two")));
+
+        vcx.update(|_, cx| crate::operations::clear_message(cx));
+        vcx.simulate_keystrokes("a");
+        vcx.update(|_, cx| crate::plugins::poll(cx));
+        vcx.cx.run_until_parked();
+        assert!(
+            vcx.read_global::<crate::operations::Operations, _>(|operations, _| operations.message.is_none()),
+            "a duplicate-ID row has no approvable snapshot"
+        );
+        let config = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+        let grants = std::fs::read_to_string(config.join("plugins.toml")).unwrap_or_default();
+        assert!(!grants.contains(r#"[plugin."example.dup"]"#), "{grants}");
+    }
+
+    #[gpui::test]
+    fn a_grants_error_blocks_every_keyboard_action_except_reload(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+            write_named_plugin_bundle(&config, "a", "example.a", "A");
+            cx.update(|cx| crate::plugins::start(cx, config));
+        });
+        wait_plugin_count(&mut vcx, 1);
+        let config = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+        std::fs::write(
+            config.join("plugins.toml"),
+            "[plugin.\"example.a\"]\nenabled = true\ndigest = \"short\"\nfs = \"none\"\n",
+        )
+        .unwrap();
+        vcx.update(|_, cx| crate::plugins::reload(cx));
+        for _ in 0..500 {
+            vcx.update(|_, cx| crate::plugins::poll(cx));
+            vcx.run_until_parked();
+            if grants_error(&vcx) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(grants_error(&vcx));
+        focus_control(&view, &mut vcx, ControlId::Plugins);
+        draw(&mut vcx);
+        vcx.update(|_, cx| crate::operations::clear_message(cx));
+
+        for key in ["a", "e", "d", "t"] {
+            vcx.simulate_keystrokes(key);
+            vcx.update(|_, cx| crate::plugins::poll(cx));
+            vcx.cx.run_until_parked();
+            assert!(
+                vcx.read_global::<crate::operations::Operations, _>(|operations, _| operations.message.is_none()),
+                "{key} must be blocked while grants are invalid"
+            );
+        }
+        vcx.simulate_keystrokes("r");
+        vcx.update(|_, cx| crate::plugins::poll(cx));
+        vcx.cx.run_until_parked();
+        assert!(grants_error(&vcx), "Reload is still allowed and reads the same bad file");
     }
 
     #[gpui::test]

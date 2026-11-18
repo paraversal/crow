@@ -22,8 +22,8 @@ mod views;
 pub use config::{abbreviate_home, cache_dir, edit_toml, expand_home, home, state_dir, write_atomic};
 pub use exclude::{DEFAULT_EXCLUDE, Exclude, ExcludeSet, SetName, SetRules, exclude_path, load_exclude};
 pub use extensions::{
-    Align, Column, ColumnCell, ColumnContext, CommandIntent, ContributionValues, Descriptor, EntryData, EntryHandle,
-    EntryValue, Excerpt, ExtensionId, ExtensionKind, Extensions, HookEvent, IconMapping, IconPack, InfoRow, KnownSize,
+    Align, Column, ColumnCell, ColumnContext, CommandIntent, ContributionValues, Descriptor, DescriptorSource,
+    EntryData, EntryHandle, EntryValue, Excerpt, ExtensionId, ExtensionKind, Extensions, HookEvent, InfoRow, KnownSize,
     LocalId, PluginId, PluginPreview, PreviewContent, Previewer, SidebarRow, Snapshot, StatusItem, TextPreviewer,
     text_excerpt,
 };

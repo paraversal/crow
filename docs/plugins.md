@@ -98,11 +98,31 @@ fn relative_path(ctx) {
 }
 ```
 
-Each descriptor has `kind`, `id`, `title`, optional `applies_to` and, for every kind except
-`icon-pack`, a `function` defined with one parameter. Registrations are namespaced as
-`plugin_id.local_id`; local IDs are unique, one segment, lowercase letters/digits/hyphens.
-The whole batch is rejected on an unknown field, duplicate ID, undeclared kind or missing
-function. Nothing is published until registration succeeds.
+Each descriptor has `kind`, `id`, `title`, optional `applies_to` and exactly one source.
+Computed kinds name a `function` defined with one parameter. An `icon-pack` names an `asset`
+instead: a bundle-relative file declared in the manifest's `assets`. The two are not
+interchangeable. Registrations are namespaced as `plugin_id.local_id`; local IDs are unique,
+one segment, lowercase letters/digits/hyphens. The whole batch is rejected on an unknown
+field, duplicate ID, undeclared kind, missing function, a missing or undeclared pack asset,
+or a pack asset that is not in the approved snapshot. Nothing is published until
+registration succeeds.
+
+An icon pack is data-only; it has no computed reply:
+
+```toml
+assets = ["icons/pack.toml", "icons/rust.svg"]
+provides = ["icon-pack"]
+```
+
+```rhai
+fn register() {
+    [ #{ kind: "icon-pack", id: "theme", title: "Theme", asset: "icons/pack.toml" } ]
+}
+```
+
+The pack file and its glyph references must be declared bundle assets. Changing the pack
+TOML or a declared glyph changes the package digest, withdraws the old generation and
+returns the package to pending approval. P3A validates the pack format and glyph contents.
 
 Computed functions receive one map:
 
@@ -124,7 +144,7 @@ Computed functions receive one map:
 | `sidebar` | `[ #{ id, title, meta?, badge? } ]` |
 | `status` | `[ #{ text: "..." } ]` |
 | `info` | `[ #{ label, value } ]` |
-| `icon-pack` | `#{ icons: #{ "rust": #{ icon: "rust", color: "accent" } } }` |
+| `icon-pack` | Registration only (see above); never evaluated for a reply |
 | `hook` | `()` or `#{ refresh: true }`; hooks cannot invoke a command |
 
 Unknown fields, unknown or duplicate handles, oversized fields and malformed batches reject

@@ -1,21 +1,23 @@
 //! Registration and reply validation. One malformed descriptor or field rejects
 //! the whole batch; nothing partial reaches the host.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use crow_core::{
-    CommandIntent, ContributionValues, Descriptor, EntryHandle, EntryValue, ExtensionId, ExtensionKind, IconMapping,
-    IconPack, InfoRow, LocalId, PluginId, PluginPreview, SidebarRow, StatusItem,
+    CommandIntent, ContributionValues, Descriptor, DescriptorSource, EntryHandle, EntryValue, ExtensionId,
+    ExtensionKind, InfoRow, LocalId, PluginId, PluginPreview, SidebarRow, StatusItem,
 };
 use rhai::{AST, Array, Dynamic, Map};
 
 use crate::dto::{CallError, Reply, RequestInput};
 use crate::limits::Limits;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, validate_relative};
+use crate::package::PackageSnapshot;
 
 pub fn validate_registration(
     plugin: &PluginId,
     manifest: &Manifest,
+    snapshot: &PackageSnapshot,
     ast: &AST,
     value: Dynamic,
     limits: &Limits,
@@ -32,7 +34,7 @@ pub fn validate_registration(
     let mut locals = HashSet::new();
     for (index, item) in array.into_iter().enumerate() {
         let map = as_map(&item).ok_or_else(|| CallError::invalid(format!("descriptor {index} is not a map")))?;
-        reject_unknown(&map, &["kind", "id", "title", "applies_to", "function"], "descriptor")?;
+        reject_unknown(&map, &["kind", "id", "title", "applies_to", "function", "asset"], "descriptor")?;
         let kind_key = required_string(&map, "kind", "descriptor kind")?;
         let kind = ExtensionKind::parse(&kind_key)
             .ok_or_else(|| CallError::invalid(format!("descriptor {index} has unknown kind \"{kind_key}\"")))?;
@@ -64,27 +66,64 @@ pub fn validate_registration(
             None => None,
             Some(value) => Some(checked_function(&value_string(value, "descriptor function")?, ast)?),
         };
-        match (kind, &function) {
-            (ExtensionKind::IconPack, Some(_)) => {
+        let asset = match map.get("asset") {
+            None => None,
+            Some(value) => Some(value_string(value, "descriptor asset")?),
+        };
+        let source = match (kind, function, asset) {
+            (ExtensionKind::IconPack, Some(_), _) => {
                 return Err(CallError::invalid(format!(
                     "icon-pack \"{local}\" is data-only and cannot name a function"
                 )));
             }
-            (ExtensionKind::IconPack, None) => {}
-            (_, None) => {
+            (ExtensionKind::IconPack, None, None) => {
+                return Err(CallError::invalid(format!("icon-pack \"{local}\" needs a declared asset")));
+            }
+            (ExtensionKind::IconPack, None, Some(asset)) => {
+                DescriptorSource::Asset(checked_pack_asset(&asset, &local, manifest, snapshot)?)
+            }
+            (_, _, Some(_)) => {
+                return Err(CallError::invalid(format!(
+                    "descriptor \"{local}\" can name an asset only when kind is icon-pack"
+                )));
+            }
+            (_, Some(function), None) => DescriptorSource::Function(function),
+            (_, None, None) => {
                 return Err(CallError::invalid(format!("descriptor \"{local}\" needs a named function")));
             }
-            (_, Some(_)) => {}
-        }
-        descriptors.push(Descriptor { kind, id: ExtensionId::new(plugin.clone(), local), title, applies_to, function });
+        };
+        descriptors.push(Descriptor { kind, id: ExtensionId::new(plugin.clone(), local), title, applies_to, source });
     }
     Ok(descriptors)
+}
+
+/// An icon-pack asset must be a manifest-declared bundle file and present in
+/// the exact approved snapshot. A path that only exists on disk now is not
+/// enough.
+fn checked_pack_asset(
+    asset: &str,
+    local: &LocalId,
+    manifest: &Manifest,
+    snapshot: &PackageSnapshot,
+) -> Result<String, CallError> {
+    validate_relative(asset).map_err(|error| CallError::invalid(format!("icon-pack \"{local}\" asset: {error}")))?;
+    if !manifest.assets.iter().any(|declared| declared == asset) {
+        return Err(CallError::invalid(format!(
+            "icon-pack \"{local}\" asset \"{asset}\" is not declared in plugin.toml assets"
+        )));
+    }
+    if !snapshot.files.contains_key(asset) {
+        return Err(CallError::invalid(format!(
+            "icon-pack \"{local}\" asset \"{asset}\" is missing from the approved snapshot"
+        )));
+    }
+    Ok(asset.to_owned())
 }
 
 /// Host-side defence in depth after the worker returns descriptors.
 pub fn validate_published(
     plugin: &PluginId,
-    provides: &[ExtensionKind],
+    snapshot: &PackageSnapshot,
     descriptors: &[Descriptor],
     limits: &Limits,
 ) -> Result<(), String> {
@@ -96,7 +135,7 @@ pub fn validate_published(
         if &descriptor.id.plugin != plugin {
             return Err(format!("descriptor {} escaped its plugin namespace", descriptor.id));
         }
-        if !provides.contains(&descriptor.kind) {
+        if !snapshot.manifest.provides.contains(&descriptor.kind) {
             return Err(format!("descriptor {} is not declared in provides", descriptor.id));
         }
         if !locals.insert(descriptor.id.local.clone()) {
@@ -105,8 +144,22 @@ pub fn validate_published(
         if descriptor.title.is_empty() || descriptor.title.len() > limits.max_display_bytes {
             return Err(format!("descriptor {} has an invalid title", descriptor.id));
         }
-        if descriptor.kind != ExtensionKind::IconPack && descriptor.function.as_deref().is_none_or(str::is_empty) {
-            return Err(format!("descriptor {} has no function", descriptor.id));
+        match (descriptor.kind, &descriptor.source) {
+            (ExtensionKind::IconPack, DescriptorSource::Asset(asset)) => {
+                checked_pack_asset(asset, &descriptor.id.local, &snapshot.manifest, snapshot)
+                    .map_err(|error| format!("descriptor {}: {}", descriptor.id, error.message))?;
+            }
+            (ExtensionKind::IconPack, DescriptorSource::Function(_)) => {
+                return Err(format!("descriptor {} is an icon pack with a function", descriptor.id));
+            }
+            (_, DescriptorSource::Asset(_)) => {
+                return Err(format!("descriptor {} is not an icon pack but names an asset", descriptor.id));
+            }
+            (_, DescriptorSource::Function(function)) => {
+                if function.is_empty() {
+                    return Err(format!("descriptor {} has no function", descriptor.id));
+                }
+            }
         }
     }
     Ok(())
@@ -133,7 +186,9 @@ pub fn reply_for(
         ExtensionKind::Sidebar => Ok(Reply::Values(ContributionValues::Sidebar(sidebar_reply(value, limits)?))),
         ExtensionKind::Status => Ok(Reply::Values(ContributionValues::Status(status_reply(value, limits)?))),
         ExtensionKind::Info => Ok(Reply::Values(ContributionValues::Info(info_reply(value, limits)?))),
-        ExtensionKind::IconPack => Ok(Reply::Values(ContributionValues::IconPack(icon_pack_reply(value, limits)?))),
+        ExtensionKind::IconPack => {
+            Err(CallError::invalid("icon-pack is registered from an approved asset, not evaluated"))
+        }
     }
 }
 
@@ -313,74 +368,6 @@ fn info_reply(value: Dynamic, limits: &Limits) -> Result<Vec<InfoRow>, CallError
     Ok(rows)
 }
 
-fn icon_pack_reply(value: Dynamic, limits: &Limits) -> Result<IconPack, CallError> {
-    let map = as_map(&value).ok_or_else(|| CallError::invalid("icon-pack reply must be a map"))?;
-    reject_unknown(&map, &["icons"], "icon-pack reply")?;
-    let icons_value = map.get("icons").ok_or_else(|| CallError::invalid("icon-pack reply has no icons map"))?;
-    let icons = as_map(icons_value).ok_or_else(|| CallError::invalid("icons must be a map"))?;
-    if icons.len() > 1024 {
-        return Err(CallError::invalid("icon pack has more than 1024 icons"));
-    }
-    let mut payload = 0;
-    let mut out = BTreeMap::new();
-    for (key, value) in icons {
-        if key.is_empty() || key.len() > 256 || key.chars().any(char::is_control) {
-            return Err(CallError::invalid("icon key must be 1-256 printable bytes"));
-        }
-        let mapping = as_map(&value).ok_or_else(|| CallError::invalid(format!("icon \"{key}\" is not a map")))?;
-        reject_unknown(&mapping, &["icon", "color"], "icon mapping")?;
-        let icon = checked_line(&required_string(&mapping, "icon", "icon id")?, "icon id", limits)?;
-        let color = optional_line(&mapping, "color", "icon color", limits, &mut payload)?;
-        if let Some(color) = &color
-            && !valid_icon_color(color)
-        {
-            return Err(CallError::invalid(format!("icon color \"{color}\" is not a theme role or palette hue")));
-        }
-        add_payload(&mut payload, icon.len(), limits)?;
-        out.insert(key.to_string(), IconMapping { icon, color });
-    }
-    Ok(IconPack { icons: out })
-}
-
-fn valid_icon_color(color: &str) -> bool {
-    const ROLES: [&str; 16] = [
-        "bg",
-        "bg-inset",
-        "surface",
-        "surface-raised",
-        "border",
-        "selection",
-        "fg",
-        "fg-muted",
-        "fg-subtle",
-        "accent",
-        "on-accent",
-        "link",
-        "info",
-        "success",
-        "warning",
-        "error",
-    ];
-    ROLES.contains(&color)
-        || matches!(
-            color,
-            "base08"
-                | "base09"
-                | "base0A"
-                | "base0B"
-                | "base0C"
-                | "base0D"
-                | "base0E"
-                | "base0F"
-                | "base12"
-                | "base13"
-                | "base14"
-                | "base15"
-                | "base16"
-                | "base17"
-        )
-}
-
 fn checked_function(name: &str, ast: &AST) -> Result<String, CallError> {
     if !is_identifier(name) {
         return Err(CallError::invalid(format!("\"{name}\" is not a function name")));
@@ -471,6 +458,9 @@ fn as_map(value: &Dynamic) -> Option<Map> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
     use super::*;
     use crate::dto::RequestInput;
     use crate::manifest::parse_manifest;
@@ -488,12 +478,27 @@ name = "Test"
 version = "0.1.0"
 api = 1
 entry = "main.rhai"
+assets = ["icons/pack.toml", "icons/rust.svg"]
 provides = ["column", "command", "hook", "icon-pack"]
 permissions = { fs = "none" }
 "#,
             &limits(),
         )
         .unwrap()
+    }
+
+    fn snapshot() -> PackageSnapshot {
+        let manifest = manifest();
+        let files = [
+            ("plugin.toml", "manifest".as_bytes()),
+            ("main.rhai", "fn register() { [] }".as_bytes()),
+            ("icons/pack.toml", "api = 1".as_bytes()),
+            ("icons/rust.svg", "<svg/>".as_bytes()),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| (name.to_owned(), Arc::from(bytes)))
+        .collect::<BTreeMap<_, _>>();
+        PackageSnapshot { manifest, files, digest: "0".repeat(64) }
     }
 
     fn plugin() -> PluginId {
@@ -530,7 +535,8 @@ permissions = { fs = "none" }
         let engine = rhai::Engine::new();
         let ast = engine.compile(source).unwrap();
         let value = engine.call_fn::<Dynamic>(&mut rhai::Scope::new(), &ast, "register", ()).unwrap();
-        validate_registration(&plugin(), &manifest(), &ast, value, &limits())
+        let snapshot = snapshot();
+        validate_registration(&plugin(), &snapshot.manifest, &snapshot, &ast, value, &limits())
     }
 
     #[test]
@@ -540,7 +546,7 @@ permissions = { fs = "none" }
 fn register() {
     [
         #{ kind: "command", id: "relative", title: "Copy Relative Path", applies_to: "selection", function: "run" },
-        #{ kind: "icon-pack", id: "icons", title: "Icons" }
+        #{ kind: "icon-pack", id: "icons", title: "Icons", asset: "icons/pack.toml" }
     ]
 }
 fn run(ctx) { #{ kind: "copy_text", text: "x" } }
@@ -551,7 +557,54 @@ fn run(ctx) { #{ kind: "copy_text", text: "x" } }
         assert_eq!(descriptors[0].id.to_string(), "example.test.relative");
         assert_eq!(descriptors[0].kind, ExtensionKind::Command);
         assert_eq!(descriptors[1].kind, ExtensionKind::IconPack);
-        assert!(descriptors[1].function.is_none());
+        assert!(descriptors[1].function().is_none());
+        assert_eq!(descriptors[1].asset(), Some("icons/pack.toml"));
+    }
+
+    #[test]
+    fn icon_pack_assets_must_be_declared_and_present() {
+        let missing = registration(
+            r#"
+fn register() { [ #{ kind: "icon-pack", id: "icons", title: "Icons" } ] }
+"#,
+        );
+        assert!(missing.unwrap_err().message.contains("needs a declared asset"));
+
+        let undeclared = registration(
+            r#"
+fn register() { [ #{ kind: "icon-pack", id: "icons", title: "Icons", asset: "icons/other.toml" } ] }
+"#,
+        );
+        assert!(undeclared.unwrap_err().message.contains("not declared"));
+
+        let traversal = registration(
+            r#"
+fn register() { [ #{ kind: "icon-pack", id: "icons", title: "Icons", asset: "../pack.toml" } ] }
+"#,
+        );
+        assert!(traversal.unwrap_err().message.contains("relative file path"));
+
+        let wrong_kind = registration(
+            r#"
+fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run", asset: "icons/pack.toml" } ] }
+fn run(ctx) { #{ kind: "copy_text", text: "x" } }
+"#,
+        );
+        assert!(wrong_kind.unwrap_err().message.contains("only when kind is icon-pack"));
+
+        let mut snapshot = snapshot();
+        snapshot.files.remove("icons/pack.toml");
+        let engine = rhai::Engine::new();
+        let ast = engine
+            .compile(r#"fn register() { [ #{ kind: "icon-pack", id: "icons", title: "Icons", asset: "icons/pack.toml" } ] }"#)
+            .unwrap();
+        let value = engine.call_fn::<Dynamic>(&mut rhai::Scope::new(), &ast, "register", ()).unwrap();
+        assert!(
+            validate_registration(&plugin(), &snapshot.manifest, &snapshot, &ast, value, &limits())
+                .unwrap_err()
+                .message
+                .contains("missing from the approved snapshot")
+        );
     }
 
     #[test]
@@ -598,7 +651,7 @@ fn run(ctx) { [] }
             id: ExtensionId::new(plugin(), LocalId::parse("lines").unwrap()),
             title: "Lines".into(),
             applies_to: None,
-            function: Some("run".into()),
+            source: DescriptorSource::Function("run".into()),
         };
         let value: Dynamic = rhai::Engine::new()
             .eval::<Dynamic>(r#"[ #{ handle: 1, text: "3" }, #{ handle: 2, text: "4", spoken: "four" } ]"#)
@@ -629,7 +682,7 @@ fn run(ctx) { [] }
             id: ExtensionId::new(plugin(), LocalId::parse("copy").unwrap()),
             title: "Copy".into(),
             applies_to: None,
-            function: Some("run".into()),
+            source: DescriptorSource::Function("run".into()),
         };
         let value: Dynamic = rhai::Engine::new().eval::<Dynamic>(r#"#{ kind: "copy_text", text: "hello" }"#).unwrap();
         assert_eq!(
@@ -644,7 +697,7 @@ fn run(ctx) { [] }
             id: ExtensionId::new(plugin(), LocalId::parse("hook").unwrap()),
             title: "Hook".into(),
             applies_to: None,
-            function: Some("run".into()),
+            source: DescriptorSource::Function("run".into()),
         };
         let refresh: Dynamic = rhai::Engine::new().eval::<Dynamic>(r#"#{ refresh: true }"#).unwrap();
         assert_eq!(reply_for(&hook, refresh, &input(), &limits()).unwrap(), Reply::Refresh);
@@ -660,7 +713,11 @@ fn run(ctx) { [] }
                 id: ExtensionId::new(plugin(), LocalId::parse("shape").unwrap()),
                 title: "Shape".into(),
                 applies_to: None,
-                function: (kind != ExtensionKind::IconPack).then(|| "run".into()),
+                source: if kind == ExtensionKind::IconPack {
+                    DescriptorSource::Asset("icons/pack.toml".into())
+                } else {
+                    DescriptorSource::Function("run".into())
+                },
             };
             let value: Dynamic = rhai::Engine::new().eval::<Dynamic>(source).unwrap();
             reply_for(&descriptor, value, &input(), &limits())
@@ -682,17 +739,13 @@ fn run(ctx) { [] }
             Reply::Values(ContributionValues::Info(rows)) => assert_eq!(rows[0].value, "V"),
             other => panic!("{other:?}"),
         }
-        match shape(ExtensionKind::IconPack, r#"#{ icons: #{ "rust": #{ icon: "rust", color: "accent" } } }"#).unwrap()
-        {
-            Reply::Values(ContributionValues::IconPack(pack)) => assert!(pack.icons.contains_key("rust")),
-            other => panic!("{other:?}"),
-        }
+        assert!(
+            shape(ExtensionKind::IconPack, r#"#{ icons: #{} }"#).unwrap_err().message.contains("approved asset"),
+            "an icon pack is registered from an asset, never evaluated"
+        );
 
         assert!(shape(ExtensionKind::Sidebar, r#"[ #{ id: "a", title: "A", extra: 1 } ]"#).is_err());
         assert!(shape(ExtensionKind::Preview, r#"#{ text: "x", table: [] }"#).is_err());
-        assert!(
-            shape(ExtensionKind::IconPack, r#"#{ icons: #{ "rust": #{ icon: "rust", color: "purple" } } }"#).is_err()
-        );
     }
 
     #[test]
@@ -702,7 +755,7 @@ fn run(ctx) { [] }
             id: ExtensionId::new(plugin(), LocalId::parse("preview").unwrap()),
             title: "Preview".into(),
             applies_to: None,
-            function: Some("run".into()),
+            source: DescriptorSource::Function("run".into()),
         };
         let rows = vec!["[\"x\"]"; 129].join(",");
         let value: Dynamic = rhai::Engine::new().eval::<Dynamic>(&format!("#{{ table: [{rows}] }}")).unwrap();
@@ -721,7 +774,7 @@ fn run(ctx) { [] }
             id: ExtensionId::new(plugin(), LocalId::parse("lines").unwrap()),
             title: "Lines".into(),
             applies_to: None,
-            function: Some("run".into()),
+            source: DescriptorSource::Function("run".into()),
         };
         let value: Dynamic = rhai::Engine::new().eval::<Dynamic>(r#"[ #{ handle: 1, text: "0123456789" } ]"#).unwrap();
         assert!(reply_for(&descriptor, value, &input(), &limits).is_err());

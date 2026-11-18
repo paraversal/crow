@@ -2,7 +2,7 @@
 //! background I/O: reads are bounded, bundle-relative and no-follow.
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -47,6 +47,10 @@ impl PackageSnapshot {
 /// display values even when validation failed.
 #[derive(Clone, Debug)]
 pub struct PackageCandidate {
+    /// The immediate child directory name exactly as the OS gave it. This is
+    /// the stable selection key; it is never a lossy display string.
+    pub bundle: OsString,
+    /// Display-only lossy form of `bundle`.
     pub dir_name: String,
     pub id: Option<PluginId>,
     pub name: Option<String>,
@@ -81,18 +85,22 @@ pub fn discover(plugins_dir: &Path, limits: &Limits) -> Discovery {
         }
     };
     for entry in entries.flatten() {
-        let dir_name = entry.file_name().to_string_lossy().into_owned();
+        let bundle = entry.file_name();
+        let dir_name = bundle.to_string_lossy().into_owned();
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(error) => {
-                discovery
-                    .candidates
-                    .push(invalid(dir_name, PackageError::new(PackageErrorKind::Read, error.to_string())));
+                discovery.candidates.push(invalid(
+                    bundle,
+                    dir_name,
+                    PackageError::new(PackageErrorKind::Read, error.to_string()),
+                ));
                 continue;
             }
         };
         if file_type.is_symlink() {
             discovery.candidates.push(invalid(
+                bundle,
                 dir_name,
                 PackageError::new(PackageErrorKind::Read, "bundle is a symbolic link; install a real directory"),
             ));
@@ -101,9 +109,16 @@ pub fn discover(plugins_dir: &Path, limits: &Limits) -> Discovery {
         if !file_type.is_dir() {
             continue;
         }
-        discovery.candidates.push(load_candidate(&root, &dir_name, limits));
+        let name = match loadable_name(&bundle) {
+            Ok(name) => name,
+            Err(error) => {
+                discovery.candidates.push(invalid(bundle, dir_name, error));
+                continue;
+            }
+        };
+        discovery.candidates.push(load_candidate(&root, &bundle, name, &dir_name, limits));
     }
-    discovery.candidates.sort_by(|a, b| a.dir_name.cmp(&b.dir_name));
+    discovery.candidates.sort_by(|a, b| a.bundle.cmp(&b.bundle));
     reject_duplicate_ids(&mut discovery.candidates);
     discovery
 }
@@ -132,9 +147,16 @@ pub fn load_package(dir: &Path, limits: &Limits) -> Result<Arc<PackageSnapshot>,
     load_snapshot(&root, ".", limits)
 }
 
-fn load_candidate(root: &OwnedFd, dir_name: &str, limits: &Limits) -> PackageCandidate {
+fn load_candidate(
+    root: &OwnedFd,
+    bundle: &OsString,
+    dir_name: &str,
+    display_name: &str,
+    limits: &Limits,
+) -> PackageCandidate {
     let mut candidate = PackageCandidate {
-        dir_name: dir_name.to_owned(),
+        bundle: bundle.clone(),
+        dir_name: display_name.to_owned(),
         id: None,
         name: None,
         version: None,
@@ -212,8 +234,13 @@ fn read_relative_with_len(root: &OwnedFd, rel: &str, max_bytes: usize) -> Result
     for (index, component) in components.iter().enumerate() {
         let final_component = index + 1 == components.len();
         let dir_fd = current.as_ref().map_or_else(|| root.as_raw_fd(), |fd| fd.as_raw_fd());
-        let flags =
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | if final_component { 0 } else { libc::O_DIRECTORY };
+        // A FIFO or device opened without O_NONBLOCK would park the one service
+        // thread before its type is checked. Open nonblocking, then verify the
+        // regular-file type and size on the descriptor before any read.
+        let flags = libc::O_RDONLY
+            | libc::O_CLOEXEC
+            | libc::O_NOFOLLOW
+            | if final_component { libc::O_NONBLOCK } else { libc::O_DIRECTORY };
         let fd = open_at(dir_fd, component, flags)
             .map_err(|error| PackageError::new(PackageErrorKind::Read, format!("{rel}: {}", friendly_open(error))))?;
         if final_component {
@@ -323,8 +350,16 @@ fn probe_identity(text: &str, limits: &Limits) -> (Option<PluginId>, Option<Stri
     (id, name, version)
 }
 
-fn invalid(dir_name: String, error: PackageError) -> PackageCandidate {
-    PackageCandidate { dir_name, id: None, name: None, version: None, snapshot: Err(error) }
+/// A bundle is opened by its UTF-8 name. A raw name the loader cannot
+/// represent becomes a named unreadable row instead of a lossy open.
+fn loadable_name(bundle: &OsString) -> Result<&str, PackageError> {
+    bundle.to_str().ok_or_else(|| {
+        PackageError::new(PackageErrorKind::Read, "bundle name is not UTF-8; rename it to a portable directory name")
+    })
+}
+
+fn invalid(bundle: OsString, dir_name: String, error: PackageError) -> PackageCandidate {
+    PackageCandidate { bundle, dir_name, id: None, name: None, version: None, snapshot: Err(error) }
 }
 
 fn placeholder() -> PackageError {
@@ -342,6 +377,7 @@ pub fn bundle_path(plugins_dir: &Path, dir_name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::symlink;
 
     const MANIFEST: &str = r#"
@@ -432,6 +468,68 @@ permissions = { fs = "none", spawn = [], net = false }
         assert_eq!(discovery.candidates.len(), 1);
         assert_eq!(discovery.candidates[0].dir_name, "linked");
         assert_eq!(discovery.candidates[0].snapshot.as_ref().unwrap_err().kind, PackageErrorKind::Read);
+    }
+
+    #[test]
+    fn a_non_utf8_bundle_name_is_rejected_instead_of_opened_lossily() {
+        // macOS file systems reject invalid UTF-8 names, so the classification
+        // is exercised directly; the raw key is still an OsString end to end.
+        let raw = std::ffi::OsString::from_vec(vec![b'b', 0xff, b'x']);
+        let error = loadable_name(&raw).unwrap_err();
+        assert_eq!(error.kind, PackageErrorKind::Read);
+        assert!(error.message.contains("not UTF-8"), "{}", error.message);
+        let candidate = invalid(raw.clone(), raw.to_string_lossy().into_owned(), error);
+        assert_eq!(candidate.bundle, raw);
+        assert_eq!(candidate.dir_name, "b\u{fffd}x");
+        assert_eq!(loadable_name(&std::ffi::OsString::from("plain")).unwrap(), "plain");
+    }
+
+    #[test]
+    fn duplicate_ids_keep_distinct_raw_bundle_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugins = temp.path().join("plugins");
+        std::fs::create_dir(&plugins).unwrap();
+        write_bundle(&plugins, "one", MANIFEST, "fn register() { [] }");
+        write_bundle(&plugins, "two", MANIFEST, "fn register() { [] }");
+        let discovery = discover(&plugins, &limits());
+        assert_eq!(discovery.candidates.len(), 2);
+        assert_ne!(discovery.candidates[0].bundle, discovery.candidates[1].bundle);
+        assert_eq!(discovery.candidates[0].id, discovery.candidates[1].id);
+        for candidate in &discovery.candidates {
+            assert_eq!(candidate.snapshot.as_ref().unwrap_err().kind, PackageErrorKind::DuplicateId);
+        }
+    }
+
+    #[test]
+    fn a_nonregular_bundle_member_is_rejected_without_blocking() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = write_bundle(temp.path(), "fifo", MANIFEST, "");
+        std::fs::remove_file(dir.join("main.rhai")).unwrap();
+        let name = std::ffi::CString::new(dir.join("main.rhai").as_os_str().as_encoded_bytes()).unwrap();
+        let result = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(result, 0, "mkfifo: {}", std::io::Error::last_os_error());
+        let started = std::time::Instant::now();
+        let error = load_package(&dir, &limits()).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "opening the FIFO must not block");
+        assert_eq!(error.kind, PackageErrorKind::Read);
+        assert!(error.message.contains("main.rhai"), "{}", error.message);
+        assert!(error.message.contains("not a regular file"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_nonregular_asset_is_rejected_with_its_relative_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest =
+            MANIFEST.replace("provides = [\"command\"]", "assets = [\"icons/pack.toml\"]\nprovides = [\"command\"]");
+        let dir = write_bundle(temp.path(), "fifo-asset", &manifest, "fn register() { [] }");
+        std::fs::create_dir(dir.join("icons")).unwrap();
+        let name = std::ffi::CString::new(dir.join("icons/pack.toml").as_os_str().as_encoded_bytes()).unwrap();
+        let result = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(result, 0, "mkfifo: {}", std::io::Error::last_os_error());
+        let error = load_package(&dir, &limits()).unwrap_err();
+        assert_eq!(error.kind, PackageErrorKind::Read);
+        assert!(error.message.contains("icons/pack.toml"), "{}", error.message);
+        assert!(error.message.contains("not a regular file"), "{}", error.message);
     }
 
     #[test]

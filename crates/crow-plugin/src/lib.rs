@@ -12,7 +12,10 @@ pub mod package;
 pub mod registry;
 mod worker;
 
-pub use dto::{EntryRef, ExcerptInput, HostEvent, Inventory, PluginEntry, PluginState, RequestInput};
+pub use dto::{
+    EntryRef, ExcerptInput, HostEvent, Inventory, PluginEntry, PluginState, RegisteredIconPack, RequestError,
+    RequestErrorKind, RequestInput, RequestResult, RequestStamp, RequestTicket, SubmitError,
+};
 pub use excerpt::read_excerpt;
 pub use grants::{
     DEFAULT_PLUGINS, Grant, Grants, approve, ensure_grants_file, grants_path, load_grants, parse_grants, set_enabled,

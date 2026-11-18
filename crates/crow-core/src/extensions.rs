@@ -1,7 +1,6 @@
 //! Extension points. Built-in columns and previewers register through the same
 //! API plugins will use, so it is exercised from the start.
 
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
@@ -192,15 +191,40 @@ impl ExtensionKind {
     }
 }
 
-/// One validated registration. `function` names the script entry the host calls
-/// for a computed result; data-only kinds (an icon pack) leave it empty.
+/// Where a descriptor gets its data. Computed kinds name one script function;
+/// an icon pack names a manifest-declared bundle asset. The two are distinct so
+/// a contract bug cannot turn one into the other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DescriptorSource {
+    Function(String),
+    Asset(String),
+}
+
+/// One validated registration. Data-only kinds (an icon pack) carry a declared
+/// asset instead of a function.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Descriptor {
     pub kind: ExtensionKind,
     pub id: ExtensionId,
     pub title: String,
     pub applies_to: Option<String>,
-    pub function: Option<String>,
+    pub source: DescriptorSource,
+}
+
+impl Descriptor {
+    pub fn function(&self) -> Option<&str> {
+        match &self.source {
+            DescriptorSource::Function(function) => Some(function),
+            DescriptorSource::Asset(_) => None,
+        }
+    }
+
+    pub fn asset(&self) -> Option<&str> {
+        match &self.source {
+            DescriptorSource::Asset(asset) => Some(asset),
+            DescriptorSource::Function(_) => None,
+        }
+    }
 }
 
 /// A request-local entry identity. It is never persisted and cannot be minted by
@@ -242,17 +266,6 @@ pub struct InfoRow {
     pub value: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IconMapping {
-    pub icon: String,
-    pub color: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct IconPack {
-    pub icons: BTreeMap<String, IconMapping>,
-}
-
 /// A closed reply shape keyed to the descriptor kind. A decoded value never
 /// carries a path or a fresh handle to another invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,7 +276,6 @@ pub enum ContributionValues {
     Sidebar(Vec<SidebarRow>),
     Status(Vec<StatusItem>),
     Info(Vec<InfoRow>),
-    IconPack(IconPack),
 }
 
 impl ContributionValues {
@@ -275,7 +287,6 @@ impl ContributionValues {
             Self::Sidebar(_) => ExtensionKind::Sidebar,
             Self::Status(_) => ExtensionKind::Status,
             Self::Info(_) => ExtensionKind::Info,
-            Self::IconPack(_) => ExtensionKind::IconPack,
         }
     }
 }

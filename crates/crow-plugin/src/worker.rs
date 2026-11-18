@@ -15,12 +15,21 @@ use rhai::{AST, Array, Dynamic, Engine, EvalAltResult, Map, Position, Scope};
 use crate::dto::{Call, CallError, CallErrorKind, Reply, RequestInput, RequestStamp, WorkerMessage};
 use crate::host::Inbox;
 use crate::limits::Limits;
-use crate::manifest::{API_VERSION, Manifest};
+use crate::manifest::API_VERSION;
 use crate::registry;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnqueueError {
     Busy,
+}
+
+/// The result of queueing a hook. The host, not the mailbox, owns the terminal
+/// event for a displaced or rejected call.
+pub(crate) enum RefreshEnqueue {
+    Queued,
+    Replaced(Call),
+    Full,
+    Closed,
 }
 
 pub(crate) struct Mailbox {
@@ -59,29 +68,27 @@ impl Mailbox {
         Ok(())
     }
 
-    /// Refresh work coalesces by extension/event/scope/context. A full refresh
-    /// lane drops the newest request; explicit commands report busy instead.
-    pub fn enqueue_refresh(&self, call: Call) {
+    /// Refresh work coalesces by extension/event/scope/context. A displaced or
+    /// rejected call goes back to the host so it can release the request record
+    /// and emit exactly one terminal event. Explicit commands report busy.
+    pub fn enqueue_refresh(&self, call: Call) -> RefreshEnqueue {
         let mut state = self.state.lock().unwrap();
         if state.closed {
-            return;
+            return RefreshEnqueue::Closed;
         }
         if let Some(key) = call.coalesce_key()
             && let Some(index) = state.refreshes.iter().position(|queued| queued.coalesce_key().as_ref() == Some(&key))
         {
-            if let Some(replaced) = state.refreshes.get(index) {
-                replaced.cancel();
-            }
-            state.refreshes[index] = call;
+            let displaced = std::mem::replace(&mut state.refreshes[index], call);
             self.ready.notify_one();
-            return;
+            return RefreshEnqueue::Replaced(displaced);
         }
         if state.refreshes.len() >= self.refresh_capacity {
-            call.cancel();
-            return;
+            return RefreshEnqueue::Full;
         }
         state.refreshes.push_back(call);
         self.ready.notify_one();
+        RefreshEnqueue::Queued
     }
 
     fn recv(&self, cancel: &AtomicBool) -> Option<Call> {
@@ -245,7 +252,7 @@ fn worker_main(
         return;
     };
     let deadline = Instant::now() + limits.call_deadline;
-    let registered = register_package(&engine, &ast, &plugin, &snapshot.manifest, &runtime, deadline, &limits);
+    let registered = register_package(&engine, &ast, &plugin, &snapshot, &runtime, deadline, &limits);
     match registered {
         Ok(descriptors) => {
             send(
@@ -292,8 +299,18 @@ fn run_loop(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let deadline = Instant::now() + limits.call_deadline;
         let request = call.stamp();
+        // The host also checks the token at admission. This second check covers
+        // a call that was queued first and cancelled before dequeue: it still
+        // gets one terminal result without running the script.
+        if call.cancel_token().is_some_and(|token| token.load(Ordering::Relaxed)) {
+            send(
+                inbox,
+                WorkerMessage::Failed { plugin: plugin.clone(), generation, request, error: CallError::cancelled() },
+            );
+            continue;
+        }
+        let deadline = Instant::now() + limits.call_deadline;
         let result: Result<(ExtensionId, RequestStamp, Reply), CallError> = match call {
             Call::Register => Err(CallError::script("register() ran twice")),
             Call::Evaluate { extension, input, stamp, cancel } => evaluate(
@@ -337,7 +354,7 @@ fn register_package(
     engine: &Engine,
     ast: &AST,
     plugin: &PluginId,
-    manifest: &Manifest,
+    snapshot: &crate::package::PackageSnapshot,
     runtime: &Runtime,
     deadline: Instant,
     limits: &Limits,
@@ -350,7 +367,7 @@ fn register_package(
         return Err(CallError::capability("script attempted a denied host capability"));
     }
     let value = value.map_err(|error| call_error(error, runtime))?;
-    registry::validate_registration(plugin, manifest, ast, value, limits)
+    registry::validate_registration(plugin, &snapshot.manifest, snapshot, ast, value, limits)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -374,7 +391,7 @@ fn evaluate(
     if descriptor.kind == crow_core::ExtensionKind::Hook || descriptor.kind == crow_core::ExtensionKind::IconPack {
         return Err(CallError::invalid(format!("extension \"{extension}\" is not evaluated directly")));
     }
-    let function = descriptor.function.as_deref().ok_or_else(|| CallError::invalid("extension has no function"))?;
+    let function = descriptor.function().ok_or_else(|| CallError::invalid("extension has no function"))?;
     runtime.begin(deadline, Some(cancel));
     let context = input_map(&input);
     let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, function, (context,));
@@ -410,7 +427,7 @@ fn notify(
     if descriptor.kind != crow_core::ExtensionKind::Hook {
         return Err(CallError::invalid(format!("extension \"{extension}\" is not a hook")));
     }
-    let function = descriptor.function.as_deref().ok_or_else(|| CallError::invalid("hook has no function"))?;
+    let function = descriptor.function().ok_or_else(|| CallError::invalid("hook has no function"))?;
     runtime.begin(deadline, Some(cancel));
     let context = event_map(&event);
     let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, function, (context,));
@@ -452,6 +469,10 @@ fn build_engine(limits: &Limits, runtime: Arc<Runtime>, assets: Arc<BTreeMap<Str
             return Some(Dynamic::UNIT);
         }
         None
+    });
+    #[cfg(test)]
+    engine.register_fn("hold_worker", |name: &str| {
+        test_gate::hold(name);
     });
     let asset_closure = assets;
     let asset_runtime = runtime.clone();
@@ -532,6 +553,7 @@ fn send(inbox: &Sender<Inbox>, message: WorkerMessage) {
 mod tests {
     use super::*;
     use crate::dto::{ExcerptInput, RequestInput};
+    use crate::manifest::Manifest;
     use crow_core::{EntryData, EntryHandle, ExtensionId};
     use std::sync::mpsc::{Receiver, channel};
 
@@ -599,7 +621,7 @@ provides = ["command"]
         loop {
             match rx.recv_timeout(Duration::from_millis(10)) {
                 Ok(Inbox::Worker(message)) => return message,
-                Ok(Inbox::Command(_)) => continue,
+                Ok(Inbox::Command(_)) | Ok(Inbox::Submission) => continue,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     assert!(started.elapsed() < timeout, "worker reply timed out");
                 }
@@ -746,8 +768,13 @@ fn run(ctx) {{ {body} }}
             stamp: RequestStamp { generation: 1, request_id, context_revision: 1 },
             cancel: Arc::new(AtomicBool::new(false)),
         };
-        mailbox.enqueue_refresh(notify(1));
-        mailbox.enqueue_refresh(notify(2));
+        assert!(matches!(mailbox.enqueue_refresh(notify(1)), RefreshEnqueue::Queued));
+        match mailbox.enqueue_refresh(notify(2)) {
+            RefreshEnqueue::Replaced(Call::Notify { stamp, .. }) => {
+                assert_eq!(stamp.request_id, 1, "the host receives the displaced call");
+            }
+            _ => panic!("a coalesced hook must return the displaced call"),
+        }
         let cancel = AtomicBool::new(false);
         match mailbox.recv(&cancel).unwrap() {
             Call::Notify { stamp, .. } => assert_eq!(stamp.request_id, 2, "same key keeps the newest stamp"),
@@ -772,5 +799,67 @@ fn run(ctx) {{ {body} }}
         }
         assert!(mailbox.enqueue_command(Call::Register).is_ok());
         assert_eq!(mailbox.enqueue_command(Call::Register), Err(EnqueueError::Busy));
+    }
+}
+
+/// A deterministic test-only barrier callable from a fixture script. It holds
+/// the worker inside a host function so the test can saturate the command lane
+/// without racing a short script.
+#[cfg(test)]
+pub(crate) mod test_gate {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Condvar, LazyLock, Mutex};
+    use std::time::{Duration, Instant};
+
+    struct Gate {
+        entered: bool,
+        released: bool,
+    }
+
+    type GateHandle = Arc<(Mutex<Gate>, Condvar)>;
+    type GateMap = Mutex<HashMap<String, GateHandle>>;
+
+    fn gates() -> &'static GateMap {
+        static GATES: LazyLock<GateMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
+        &GATES
+    }
+
+    fn gate(name: &str) -> GateHandle {
+        gates()
+            .lock()
+            .unwrap()
+            .entry(name.to_owned())
+            .or_insert_with(|| Arc::new((Mutex::new(Gate { entered: false, released: false }), Condvar::new())))
+            .clone()
+    }
+
+    pub(crate) fn hold(name: &str) {
+        let pair = gate(name);
+        let (lock, ready) = &*pair;
+        let mut state = lock.lock().unwrap();
+        state.entered = true;
+        ready.notify_all();
+        while !state.released {
+            state = ready.wait(state).unwrap();
+        }
+    }
+
+    pub(crate) fn wait_until_entered(name: &str) {
+        let pair = gate(name);
+        let (lock, ready) = &*pair;
+        let mut state = lock.lock().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !state.entered {
+            assert!(Instant::now() < deadline, "worker never reached gate {name}");
+            let (next, _) = ready.wait_timeout(state, Duration::from_millis(10)).unwrap();
+            state = next;
+        }
+    }
+
+    pub(crate) fn release(name: &str) {
+        let pair = gate(name);
+        let (lock, ready) = &*pair;
+        lock.lock().unwrap().released = true;
+        ready.notify_all();
     }
 }

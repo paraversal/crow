@@ -86,9 +86,9 @@ fn apply(event: HostEvent, cx: &mut App) {
             status(message, error, cx);
             cx.refresh_windows();
         }
-        // P1B applies command intents and consumes contributions. P1A keeps the
-        // validated events on the host boundary; commands remain unapplied.
-        HostEvent::CommandIntent { .. } | HostEvent::Refresh { .. } | HostEvent::Contribution { .. } => {}
+        // P1B matches the stamp, generation and captured context on this
+        // terminal event before applying an intent or publishing values.
+        HostEvent::RequestFinished { .. } => {}
     }
 }
 
