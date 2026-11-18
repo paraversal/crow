@@ -173,6 +173,7 @@ mod sort_tests {
             is_dir,
             is_symlink: false,
             hidden: false,
+            dataless: false,
             size,
             modified: Some(UNIX_EPOCH + Duration::from_secs(secs)),
             created: None,

@@ -20,7 +20,7 @@ use crow_core::{
     Align, Column, ColumnCell, ColumnContext, ColumnWidth, EnterAction, History, KeymapLayer, KnownSize, ResizeDrag,
     TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS, TableLayout, TipId, ViewChange, ViewMode,
 };
-use crow_fs::{Entry, Sort, SortKey};
+use crow_fs::{AllowAll, CloudStatus, Entry, ReadGate, Sort, SortKey};
 use crow_theme::Theme;
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter,
@@ -36,6 +36,7 @@ use crate::actions::{
     MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection, OpenTerminal, PasteFiles, PasteMoveFiles, QuickLook,
     Rename, SelectAll, ShowInFinder, StartFilter,
 };
+use crate::cloud_status::{CloudSource, CloudStatusService};
 use crate::context_menu::{MenuKind, MenuState};
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
@@ -47,9 +48,9 @@ use crate::operations::Operations;
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, content_opacity, cut_outline, display_text, drop_outline, effect_tint,
-    focused_column, format_time, highlight_text, icon, inactive_selection, kind, map_range, truncate_middle,
-    truncate_middle_parts,
+    active_selection, cloud_icon, color, color_alpha, content_opacity, cut_outline, display_text, drop_outline,
+    effect_tint, focused_column, format_time, highlight_text, icon, inactive_selection, kind, map_range,
+    truncate_middle, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -307,6 +308,9 @@ pub struct Pane {
     /// List view: just the folder shown. Column view: the chain from the root rightwards.
     folders: Vec<Entity<Folder>>,
     subscriptions: Vec<Subscription>,
+    /// Observers of app-wide services (sizes, cloud status). Kept apart from
+    /// `subscriptions`, which is per open folder and is rewritten on navigation.
+    _service_subscriptions: Vec<Subscription>,
     /// Which folder has keyboard focus (always 0 in list view).
     focused: usize,
     focus: FocusHandle,
@@ -319,6 +323,8 @@ pub struct Pane {
     info: Entity<InfoPane>,
     /// This pane's id in the folder-size service's visible-row sources.
     size_source: u64,
+    /// This pane's id in the cloud-status service's visible-row sources.
+    cloud_source: u64,
     /// The service generation whose visible sizes were already sorted (Q3).
     size_sort_generation: u64,
     /// `folder_sizes = "visible"` at the last render; turning it off pauses the service.
@@ -388,9 +394,15 @@ impl Pane {
         let columns = cx.global::<Ext>().0.default_columns();
         let size_service = cx.try_global::<SizeService>().map(|service| service.0.clone());
         let size_source = size_service.as_ref().map(|service| service.read(cx).source()).unwrap_or(0);
-        let mut subscriptions = Vec::new();
+        let cloud_service = cx.try_global::<CloudStatusService>().map(|service| service.0.clone());
+        let cloud_source = cloud_service.as_ref().map(|service| service.read(cx).source()).unwrap_or(0);
+        let subscriptions = Vec::new();
+        let mut service_subscriptions = Vec::new();
         if let Some(service) = size_service {
-            subscriptions.push(cx.observe(&service, |pane, _, cx| pane.sizes_changed(cx)));
+            service_subscriptions.push(cx.observe(&service, |pane, _, cx| pane.sizes_changed(cx)));
+        }
+        if let Some(service) = cloud_service {
+            service_subscriptions.push(cx.observe(&service, |pane, _, cx| pane.cloud_changed(cx)));
         }
         let mut pane = Self {
             history: History::new(dir.clone()),
@@ -399,6 +411,7 @@ impl Pane {
             sort: Sort::default(),
             folders: Vec::new(),
             subscriptions,
+            _service_subscriptions: service_subscriptions,
             focused: 0,
             focus: cx.focus_handle(),
             table: default_table(&columns),
@@ -407,6 +420,7 @@ impl Pane {
             preview: None,
             info,
             size_source,
+            cloud_source,
             size_sort_generation: 0,
             size_enabled: cx.global::<Ui>().settings.folder_sizes == crow_core::FolderSizesMode::Visible,
             strip_scroll: ScrollHandle::new(),
@@ -523,6 +537,17 @@ impl Pane {
             let service = service.0.clone();
             service.update(cx, |service, cx| service.observe(source, paths, cx));
         }
+    }
+
+    fn observe_cloud(&mut self, source: CloudSource, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if let Some(service) = cx.try_global::<CloudStatusService>() {
+            let service = service.0.clone();
+            service.update(cx, |service, cx| service.observe(source, paths, cx));
+        }
+    }
+
+    fn cloud_status(&self, path: &Path, cx: &gpui::App) -> Option<CloudStatus> {
+        cx.try_global::<CloudStatusService>().and_then(|service| service.0.read(cx).status(path))
     }
 
     /// Whether the `/` filter field is open.
@@ -753,6 +778,7 @@ impl Pane {
                 is_dir: true,
                 is_symlink: false,
                 hidden: false,
+                dataless: false,
                 size: 0,
                 modified: None,
                 created: None,
@@ -774,7 +800,7 @@ impl Pane {
         if entry.is_dir && !entry.is_package() {
             Some(preview::folder_spoken(&entry.name, items, size))
         } else {
-            Some(preview::spoken(&entry, self.preview(cx), size))
+            Some(preview::spoken(&entry, self.preview(cx), size, self.cloud_status(&entry.path, cx)))
         }
     }
 
@@ -1033,6 +1059,26 @@ impl Pane {
         true
     }
 
+    /// The cloud-status service changed: repaint, and re-arm a blocked preview
+    /// once the cursor item is positively local/downloaded. It does not open the
+    /// explicit Quick Look panel.
+    fn cloud_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.cursor_entry(cx) else {
+            cx.notify();
+            return;
+        };
+        if let Some(status) = self.cloud_status(&entry.path, cx)
+            && let Some(preview) = self.preview.as_mut().filter(|preview| preview.path == entry.path)
+        {
+            preview.cloud = Some(status);
+            if preview.blocked && status.is_local() {
+                self.preview = None;
+                self.load_preview(cx);
+            }
+        }
+        cx.notify();
+    }
+
     /// The size service changed: once every visible size is in, re-sort by size
     /// once (Q3). Scrolling in more rows repeats this when their sizes arrive.
     fn sizes_changed(&mut self, cx: &mut Context<Self>) {
@@ -1190,6 +1236,13 @@ impl Pane {
 
     fn on_folder_event(&mut self, folder: Entity<Folder>, event: &FolderEvent, cx: &mut Context<Self>) {
         let Some(k) = self.index_of(folder.entity_id()) else { return };
+        if matches!(event, FolderEvent::Loaded | FolderEvent::Changed)
+            && let Some(service) = cx.try_global::<CloudStatusService>()
+        {
+            let dir = folder.read(cx).dir().to_path_buf();
+            let service = service.0.clone();
+            service.update(cx, |service, cx| service.invalidate_under(&dir, cx));
+        }
         if let FolderEvent::CursorMoved = event {
             if self.mode == ViewMode::Columns {
                 self.update_chain(k, cx);
@@ -1230,11 +1283,22 @@ impl Pane {
             return;
         }
         let extensions = cx.global::<Ext>().0.clone();
+        let (gate, cloud) = match cx.try_global::<CloudStatusService>() {
+            Some(service) => {
+                let service = service.0.read(cx);
+                (service.gate(), service.status(&entry.path))
+            }
+            None => (Arc::new(AllowAll) as Arc<dyn ReadGate>, None),
+        };
         cx.spawn(async move |this, cx| {
             let path = entry.path.clone();
-            let fetched = cx.background_spawn(async move { preview::fetch(&entry, &extensions) }).await;
+            let fetched = cx
+                .background_spawn(async move { preview::fetch_at(&entry, &extensions, None, gate.as_ref(), cloud) })
+                .await;
             this.update(cx, |this, cx| {
                 if this.cursor_entry(cx).is_some_and(|e| e.path == path) {
+                    let mut fetched = fetched;
+                    fetched.cloud = this.cloud_status(&path, cx).or(fetched.cloud);
                     this.preview = Some(fetched);
                     cx.notify();
                 }
@@ -2184,6 +2248,11 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<impl IntoElement + use<>> {
+        let cloud_visible: Vec<PathBuf> = {
+            let folder = self.folders[0].read(cx);
+            range.clone().filter_map(|ix| folder.row(ix)).map(|(entry, _)| entry.path.clone()).collect()
+        };
+        self.observe_cloud((self.cloud_source, 0), &cloud_visible, cx);
         let visible: Vec<PathBuf> = {
             let folder = self.folders[0].read(cx);
             range
@@ -2297,6 +2366,9 @@ impl Pane {
                     entry.hidden,
                     self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
                 );
+                let cloud = self.cloud_status(&entry.path, cx);
+                let cloud_spoken =
+                    cloud.and_then(CloudStatus::spoken_suffix).map(|suffix| format!(", {suffix}")).unwrap_or_default();
                 let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
                 let reveal = folder.disclosure_opacity(ix, now);
                 let turn = folder.chevron_turn(&entry.path, now).unwrap_or(if expanded { 1.0 } else { 0.0 });
@@ -2305,7 +2377,7 @@ impl Pane {
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
                     .role(Role::ListBoxOption)
-                    .aria_label(format!("{}, {spoken}", display_text(&entry.name)))
+                    .aria_label(format!("{}, {spoken}{cloud_spoken}", display_text(&entry.name)))
                     .aria_position_in_set(ix + 1)
                     .aria_size_of_set(total)
                     .aria_selected(selected)
@@ -2449,7 +2521,7 @@ impl Pane {
                             } else {
                                 div().w(px(TRIANGLE_WIDTH)).flex_none().into_any_element()
                             })
-                            .child(row_icon(&entry, look, theme, dim))
+                            .child(row_icon(&entry, look, theme, dim, cloud))
                             .child(
                                 div()
                                     .debug_selector(|| format!("row-name-{}", entry.name))
@@ -2460,6 +2532,9 @@ impl Pane {
                                     // has no intrinsic width and collapses to zero.
                                     .flex_1()
                                     .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
                                     .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
                                         Some(r) => div()
                                             .flex_1()
@@ -2481,7 +2556,8 @@ impl Pane {
                                                 .into_any_element(),
                                             _ => div().whitespace_nowrap().child(name.text.clone()).into_any_element(),
                                         },
-                                    }),
+                                    })
+                                    .children(crate::cloud_status::badge(cloud, theme)),
                             ),
                     );
                 row.children(cells.into_iter().enumerate().filter(|(i, _)| widths[i + 1] > 0.0).map(
@@ -2611,6 +2687,15 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<impl IntoElement + use<>> {
+        let cloud_visible: Vec<PathBuf> = self
+            .folders
+            .get(k)
+            .map(|folder| {
+                let folder = folder.read(cx);
+                range.clone().filter_map(|ix| folder.row(ix)).map(|(entry, _)| entry.path.clone()).collect()
+            })
+            .unwrap_or_default();
+        self.observe_cloud((self.cloud_source, k + 1), &cloud_visible, cx);
         let visible: Vec<PathBuf> = self
             .folders
             .get(k)
@@ -2697,12 +2782,15 @@ impl Pane {
                     entry.hidden,
                     self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
                 );
+                let cloud = self.cloud_status(&entry.path, cx);
+                let cloud_spoken =
+                    cloud.and_then(CloudStatus::spoken_suffix).map(|suffix| format!(", {suffix}")).unwrap_or_default();
                 let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
                 let island = edges.get(ix - flags_first).copied().flatten();
                 div()
                     .id(ix)
                     .role(Role::ListBoxOption)
-                    .aria_label(format!("{}, {}", display_text(&entry.name), kind(&entry)))
+                    .aria_label(format!("{}, {}{cloud_spoken}", display_text(&entry.name), kind(&entry)))
                     .aria_position_in_set(ix + 1)
                     .aria_size_of_set(total)
                     .aria_selected(selected)
@@ -2810,7 +2898,7 @@ impl Pane {
                             this.open_selected(cx);
                         }
                     }))
-                    .child(row_icon(&entry, look, theme, dim))
+                    .child(row_icon(&entry, look, theme, dim, cloud))
                     .child(
                         div()
                             .debug_selector(|| format!("column-{k}-row-name-{}", entry.name))
@@ -2818,6 +2906,9 @@ impl Pane {
                             .left(px(look.dx))
                             .flex_1()
                             .opacity(dim)
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
                                 Some(r) => div()
                                     .flex_1()
@@ -2841,7 +2932,8 @@ impl Pane {
                                         .child(name.text.clone())
                                         .into_any_element(),
                                 },
-                            }),
+                            })
+                            .children(crate::cloud_status::badge(cloud, theme)),
                     )
                     .child(div().w(px(10.)).flex_none().opacity(dim).text_color(subtle).child(if navigable {
                         "›"
@@ -3025,7 +3117,7 @@ impl Pane {
             let tab = self.info.read(cx).tab();
             let label = match tab {
                 InfoTab::Preview => self.preview_label(cx).unwrap_or_default(),
-                InfoTab::Info => self.info.read(cx).label(),
+                InfoTab::Info => self.info.read(cx).label(cx),
             };
             let body = match tab {
                 InfoTab::Preview => {
@@ -3050,7 +3142,8 @@ impl Pane {
                         };
                         preview::folder_summary(summary, &theme).into_any_element()
                     } else {
-                        preview::contents(&entry, self.preview(cx), &theme, size).into_any_element()
+                        preview::contents(&entry, self.preview(cx), &theme, size, self.cloud_status(&entry.path, cx))
+                            .into_any_element()
                     }
                 }
                 InfoTab::Info => self.info.clone().into_any_element(),
@@ -3198,7 +3291,7 @@ fn with_island_rounding<E: Styled>(element: E, island: Option<IslandEdges>) -> E
 }
 
 /// The file icon with the trash glyph drawn over it while a row is swallowed.
-fn row_icon(entry: &Entry, look: Look, theme: &Theme, dim: f32) -> Div {
+fn row_icon(entry: &Entry, look: Look, theme: &Theme, dim: f32, cloud: Option<CloudStatus>) -> Div {
     div()
         .relative()
         .size(px(16.))
@@ -3206,7 +3299,7 @@ fn row_icon(entry: &Entry, look: Look, theme: &Theme, dim: f32) -> Div {
         .child(
             div()
                 .opacity((1.0 - look.trash) * dim)
-                .children(icon(&entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
+                .children(cloud_icon(cloud, &entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
         )
         .when(look.trash > 0.0, |slot| {
             slot.child(
@@ -3230,7 +3323,7 @@ fn ghost_row(entry: &Entry, look: Look, theme: &Theme, font_size: Pixels) -> Div
         .gap_2()
         .px(px(CELL_PADDING))
         .opacity(look.opacity)
-        .child(row_icon(entry, look, theme, content_opacity(entry.hidden, false)))
+        .child(row_icon(entry, look, theme, content_opacity(entry.hidden, false), None))
         .child(
             div()
                 .relative()

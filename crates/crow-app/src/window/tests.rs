@@ -2924,6 +2924,7 @@ fn search_corpus_matrix(cx: &mut TestAppContext) {
                         include_hidden: true,
                         rules: rules.clone(),
                         everything,
+                        read_gate: None,
                     };
                     let control = Control::new();
                     let mut hits = Vec::new();
@@ -7494,7 +7495,7 @@ fn cmd_i_opens_info_and_a_second_closes_it(cx: &mut TestAppContext) {
     let preview_tab = elements.iter().find(|e| e.selector.as_deref() == Some("info-tab-preview")).expect("Preview tab");
     assert_eq!(preview_tab.role, Some(Role::Tab));
     assert_eq!(preview_tab.label.as_deref(), Some("Preview"));
-    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label(cx));
     assert!(label.starts_with("Info: alpha, Folder"), "{label}");
 
     // Clicking Preview brings the old preview back without closing the column.
@@ -7552,7 +7553,7 @@ fn info_tab_survives_a_folder_change(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert_eq!(dir(&view, &cx), root.join("alpha"));
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info, "the tab choice survives");
-    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label(cx));
     assert!(label.contains("inner"), "the pane follows the new cursor: {label}");
 
     cx.simulate_keystrokes("cmd-[");
@@ -7579,8 +7580,92 @@ fn info_multi_selection_is_a_summary(cx: &mut TestAppContext) {
     assert_eq!(summary.parent.as_deref(), Some(&*root));
     assert!(summary.kind.is_none(), "a folder and a file have no common kind");
     assert_eq!(summary.tag_paths.len(), 3);
-    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label(cx));
     assert!(label.starts_with("Info: 3 items"), "{label}");
+}
+
+fn wait_for_cloud(cx: &mut VisualTestContext, path: &Path, status: crow_fs::CloudStatus) {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        let current = cx.update(|_, cx| {
+            cx.try_global::<crate::cloud_status::CloudStatusService>()
+                .and_then(|service| service.0.read(cx).status(path))
+        });
+        if current == Some(status) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("cloud status for {path:?} never became {status:?}");
+}
+
+fn refresh_cloud(cx: &mut VisualTestContext) {
+    cx.update(|_, cx| {
+        let service = cx.global::<crate::cloud_status::CloudStatusService>().0.clone();
+        service.update(cx, |service, cx| service.force_refresh(cx));
+    });
+}
+
+#[gpui::test]
+fn cloud_placeholder_turns_into_downloading_then_ready(cx: &mut TestAppContext) {
+    use crow_fs::CloudStatus;
+    let root = fixture("cloud-preview");
+    let note = root.join("notes.txt");
+    let prepared = note.clone();
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), move |cx| {
+        crate::cloud_status::set_test_status(cx, prepared, CloudStatus::NotDownloaded);
+    });
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.reveal(note.clone(), cx));
+    settle(&view, &mut cx);
+    wait_for_cloud(&mut cx, &note, CloudStatus::NotDownloaded);
+    for _ in 0..400 {
+        cx.run_until_parked();
+        let ready = view.read_with(&cx, |w, cx| {
+            w.pane().read(cx).preview(cx).is_some_and(|preview| preview.cloud == Some(CloudStatus::NotDownloaded))
+        });
+        if ready {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let blocked = view.read_with(&cx, |w, cx| w.pane().read(cx).preview(cx).cloned()).expect("preview");
+    assert!(blocked.blocked, "not downloaded shows a metadata-only placeholder");
+    assert!(blocked.content.is_none());
+    assert_eq!(blocked.cloud, Some(CloudStatus::NotDownloaded));
+    assert!(cx.debug_bounds("cloud-badge-not-downloaded").is_some(), "the row reports the status");
+
+    cx.update(|_, cx| crate::cloud_status::set_test_status(cx, note.clone(), CloudStatus::Downloading));
+    refresh_cloud(&mut cx);
+    wait_for_cloud(&mut cx, &note, CloudStatus::Downloading);
+    let mut downloading = None;
+    for _ in 0..400 {
+        cx.run_until_parked();
+        downloading = view.read_with(&cx, |w, cx| w.pane().read(cx).preview(cx).cloned());
+        if downloading.as_ref().is_some_and(|preview| preview.cloud == Some(CloudStatus::Downloading)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let downloading = downloading.expect("preview");
+    assert!(downloading.blocked);
+    assert_eq!(downloading.cloud, Some(CloudStatus::Downloading));
+    assert!(cx.debug_bounds("cloud-badge-downloading").is_some());
+
+    cx.update(|_, cx| crate::cloud_status::set_test_status(cx, note.clone(), CloudStatus::Downloaded));
+    refresh_cloud(&mut cx);
+    wait_for_cloud(&mut cx, &note, CloudStatus::Downloaded);
+    for _ in 0..400 {
+        cx.run_until_parked();
+        let ready = view.read_with(&cx, |w, cx| w.pane().read(cx).preview(cx).cloned());
+        if ready.as_ref().is_some_and(|preview| !preview.blocked && preview.content.is_some()) {
+            let ready = ready.expect("checked");
+            assert_eq!(ready.cloud, Some(CloudStatus::Downloaded));
+            assert!(cx.debug_bounds("cloud-badge-downloaded").is_none(), "downloaded has no badge");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the preview never re-armed after the download");
 }
 
 #[gpui::test]
@@ -7591,9 +7676,52 @@ fn info_file_shows_its_size(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-i");
     settle(&view, &mut cx);
-    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label(cx));
     assert!(label.starts_with("Info: notes.txt"), "{label}");
     assert!(label.contains("6 bytes"), "{label}");
+}
+
+#[gpui::test]
+fn info_shows_the_cloud_status_and_speaks_it(cx: &mut TestAppContext) {
+    use crow_fs::CloudStatus;
+    let root = fixture("info-cloud");
+    let note = root.join("notes.txt");
+    let prepared = note.clone();
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), move |cx| {
+        crate::cloud_status::set_test_status(cx, prepared, CloudStatus::NotDownloaded);
+    });
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.reveal(note.clone(), cx));
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    wait_for_cloud(&mut cx, &note, CloudStatus::NotDownloaded);
+    for _ in 0..400 {
+        cx.run_until_parked();
+        let label = view.read_with(&cx, |w, cx| w.info.read(cx).label(cx));
+        if label.contains("not downloaded from iCloud") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label(cx));
+    assert!(label.contains("not downloaded from iCloud"), "{label}");
+
+    cx.update(|_, cx| crate::cloud_status::set_test_status(cx, note.clone(), CloudStatus::Downloading));
+    cx.update(|_, cx| {
+        let service = cx.global::<crate::cloud_status::CloudStatusService>().0.clone();
+        service.update(cx, |service, cx| service.force_refresh(cx));
+    });
+    wait_for_cloud(&mut cx, &note, CloudStatus::Downloading);
+    for _ in 0..400 {
+        cx.run_until_parked();
+        let label = view.read_with(&cx, |w, cx| w.info.read(cx).label(cx));
+        if label.contains("downloading from iCloud") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label(cx));
+    assert!(label.contains("downloading from iCloud"), "{label}");
 }
 
 #[gpui::test]
@@ -7605,7 +7733,7 @@ fn info_package_is_not_a_folder(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-i");
     settle(&view, &mut cx);
-    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label(cx));
     assert!(label.to_lowercase().contains("application"), "{label}");
     assert!(!label.contains("Folder"), "a package is not a folder: {label}");
 }
@@ -7640,7 +7768,7 @@ fn info_shows_in_column_view(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview-column").is_some(), "the last column is the Info tab");
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
-    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
+    let label = view.read_with(&cx, |w, cx| w.info.read(cx).label(cx));
     assert!(label.starts_with("Info: alpha, Folder"), "{label}");
 }
 
@@ -10885,6 +11013,7 @@ fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
                 is_dir: false,
                 is_symlink: false,
                 hidden: false,
+                dataless: false,
                 size: 0,
                 modified: None,
                 created: None,
@@ -10934,6 +11063,7 @@ fn selection_totals_follow_every_selection_change(cx: &mut TestAppContext) {
         is_dir,
         is_symlink: false,
         hidden: false,
+        dataless: false,
         size,
         modified: None,
         created: None,
@@ -11008,6 +11138,7 @@ fn a_removed_selected_row_does_not_keep_the_cursor(cx: &mut TestAppContext) {
         is_dir: false,
         is_symlink: false,
         hidden: false,
+        dataless: false,
         size: 1,
         modified: None,
         created: None,
@@ -11050,6 +11181,7 @@ fn synthetic_folder(
             is_dir: false,
             is_symlink: false,
             hidden: false,
+            dataless: false,
             size: 1,
             modified: None,
             created: None,
@@ -11368,6 +11500,7 @@ fn a_large_select_when_present_applies_quickly(cx: &mut TestAppContext) {
             is_dir: false,
             is_symlink: false,
             hidden: false,
+            dataless: false,
             size: 0,
             modified: None,
             created: None,

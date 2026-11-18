@@ -540,6 +540,7 @@ impl CrowWindow {
             is_dir: true,
             is_symlink: false,
             hidden: false,
+            dataless: false,
             size: 0,
             modified: None,
             created: None,
@@ -894,15 +895,19 @@ impl CrowWindow {
                 .and_then(|service| service.0.read(cx).size(&entry.path))
                 .map(Into::into)
         });
+        let cloud = entry.and_then(|entry| {
+            cx.try_global::<crate::cloud_status::CloudStatusService>()
+                .and_then(|service| service.0.read(cx).status(&entry.path))
+        });
         let label = match tab {
             InfoTab::Preview => {
-                entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview, folder_size))
+                entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview, folder_size, cloud))
             }
-            InfoTab::Info => self.info.read(cx).label(),
+            InfoTab::Info => self.info.read(cx).label(cx),
         };
         let body = match tab {
             InfoTab::Preview => match entry {
-                Some(entry) => preview::contents(entry, preview, theme, folder_size).into_any_element(),
+                Some(entry) => preview::contents(entry, preview, theme, folder_size, cloud).into_any_element(),
                 None => div().into_any_element(),
             },
             InfoTab::Info => self.info.clone().into_any_element(),

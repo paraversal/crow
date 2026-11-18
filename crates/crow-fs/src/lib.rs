@@ -2,6 +2,7 @@
 //!
 //! No UI types here: everything is plain data so it can be tested without a window.
 
+mod cloud;
 mod listing;
 pub mod ops;
 pub mod sizes;
@@ -12,6 +13,10 @@ pub mod testing;
 pub mod trash;
 mod watch;
 
+pub use cloud::{
+    AllowAll, CloudStatus, ReadDecision, ReadGate, ReadHint, dataless_flags, dataless_metadata, is_cloud_candidate,
+    status_age_limit,
+};
 pub use listing::{Entry, is_package_name, list_dir, stat_entry};
 pub use snapshot::{KindOf, Snapshot, apply_changes, apply_stats, read_dir, stat_changes};
 pub use sort::{Sort, SortKey, compare, natural_cmp, sort_entries};

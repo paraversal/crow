@@ -4,6 +4,7 @@
 //! background task by mistake) every function here degrades instead of
 //! crashing: no icon, plain path names, no panel, no drag.
 
+mod cloud;
 mod context_menu;
 mod drag;
 mod files;
@@ -17,12 +18,13 @@ mod sound;
 mod spotlight;
 mod volumes;
 
+pub use cloud::{SystemReadGate, status as cloud_status, status_batch as cloud_status_batch};
 pub use context_menu::{ContextMenuEntry, MenuShortcut, show_context_menu};
 pub use drag::{ComboDrag, begin_drag, remember_mouse_down};
 pub use files::{SystemTrash, open_path, pasteboard_change_count, read_file_urls, write_file_urls};
 pub use fonts::available_font_families;
 pub use fsevents::{Event, EventFlags, FsEvents, current_event_id, volume_uuid, watch};
-pub use icons::icon_png;
+pub use icons::{icon_png, type_icon_png};
 pub use metadata::{Permissions, kind_name, permissions, tags, thumbnail_png};
 pub use names::display_components;
 pub use quick_look::{QuickLookKey, set_quick_look_key_handler, toggle_quick_look, update_quick_look};

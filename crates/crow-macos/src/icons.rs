@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use objc2::AnyThread;
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSWorkspace};
-use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
+use objc2_uniform_type_identifiers::{UTType, UTTypeFolder};
 
 use crate::{main_thread, ns_string};
 
@@ -28,6 +29,29 @@ fn cache_key(path: &Path, is_dir: bool) -> String {
         || path.starts_with("/Volumes")
         || home.as_deref().is_some_and(|h| path == h || path.parent() == Some(h));
     if special || !ext.is_empty() { format!("path:{}", path.display()) } else { "dir".to_owned() }
+}
+
+/// Finder's icon for a content type rather than a path. Used when a cloud
+/// placeholder must not make AppKit inspect the item's custom icon resource.
+pub fn type_icon_png(ext: &str, is_dir: bool, points: u32) -> Option<Arc<Vec<u8>>> {
+    main_thread()?;
+    let key = (format!("type:{}", if is_dir { "dir" } else { ext }), points);
+    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    // SAFETY: the UTType constants are immutable for the process lifetime.
+    let identifier = if is_dir {
+        unsafe { UTTypeFolder }.identifier().to_string()
+    } else {
+        UTType::typeWithFilenameExtension(&NSString::from_str(ext))
+            .map(|content_type| content_type.identifier().to_string())
+            .unwrap_or_else(|| "public.data".into())
+    };
+    #[allow(deprecated)]
+    let image = NSWorkspace::sharedWorkspace().iconForFileType(&NSString::from_str(&identifier));
+    let png = png_of(&image, points * 2).map(Arc::new);
+    CACHE.with(|c| c.borrow_mut().insert(key, png.clone()));
+    png
 }
 
 /// Finder's icon for `path` as PNG bytes, rendered at `points` × 2 for Retina.

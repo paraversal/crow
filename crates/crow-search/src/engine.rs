@@ -19,6 +19,8 @@ use ignore::{WalkBuilder, WalkParallel, WalkState};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crow_fs::{ReadDecision, ReadGate, ReadHint};
+
 use crate::rules::RuleSet;
 
 /// Hits are handed to the sink in batches of at most this many. A single file
@@ -152,6 +154,9 @@ pub struct Query {
     /// that starts from it: the glob compile is ~14 ms on the main thread.
     pub rules: Arc<RuleSet>,
     pub everything: bool,
+    /// The app's fresh automatic-read policy. `None` uses the cheap file flags
+    /// only (the engine's own tests and the CLI benches).
+    pub read_gate: Option<Arc<dyn ReadGate>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,6 +195,10 @@ pub struct Summary {
     pub contents_stopped: bool,
     /// Set when the query itself is invalid (a bad regex); no walk ran.
     pub error: Option<String>,
+    /// Content-capable files skipped because a cloud placeholder (or an
+    /// ambiguous cloud symlink) could not be read without hydrating it. Name
+    /// hits for these files are still delivered.
+    pub cloud_skipped: u64,
 }
 
 /// A folder the walk did not enter, and why.
@@ -357,11 +366,14 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
     let enter_packages = query.everything;
     let skipped = Arc::new(Mutex::new(Vec::new()));
     let scanned = Arc::new(AtomicU64::new(0));
+    let cloud_skipped = Arc::new(AtomicU64::new(0));
     let walker = build_walker(root, visit_hidden, rules, skipped.clone(), control.clone());
     let (tx, rx) = mpsc::channel::<Vec<Hit>>();
 
     let scanned_thread = scanned.clone();
     let skipped_thread = skipped.clone();
+    let cloud_skipped_thread = cloud_skipped.clone();
+    let read_gate = query.read_gate.clone();
     std::thread::scope(|scope| {
         scope.spawn(move || {
             walker.run(|| {
@@ -369,6 +381,8 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                 let control = control.clone();
                 let scanned = scanned_thread.clone();
                 let skipped = skipped_thread.clone();
+                let cloud_skipped = cloud_skipped_thread.clone();
+                let gate = read_gate.clone();
                 let names = names.clone();
                 let pattern = content_pattern.clone();
                 let mut fuzzy = names.as_deref().map(FuzzyMatcher::new);
@@ -430,15 +444,39 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                         && readable
                         && !control.contents_stopped()
                     {
-                        let mut content_hits = Vec::new();
-                        let matches = content.search(entry.path(), modified, size, hidden, &mut content_hits, &control);
-                        if matches > 1
-                            && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) = content_hits.first_mut()
-                        {
-                            *more = matches - 1;
-                        }
-                        if !content_hits.is_empty() {
-                            let _ = tx.send(content_hits);
+                        let hint = ReadHint::from_metadata(entry.path(), metadata.as_ref());
+                        let decision = match gate.as_ref() {
+                            Some(gate) => gate.check(entry.path(), hint),
+                            None => hint.cheap_decision(),
+                        };
+                        if decision != ReadDecision::Readable {
+                            cloud_skipped.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            let mut content_hits = Vec::new();
+                            match content.search(
+                                entry.path(),
+                                modified,
+                                size,
+                                hidden,
+                                &mut content_hits,
+                                &control,
+                                gate.as_deref(),
+                            ) {
+                                ContentOutcome::Matches(matches) => {
+                                    if matches > 1
+                                        && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) =
+                                            content_hits.first_mut()
+                                    {
+                                        *more = matches - 1;
+                                    }
+                                    if !content_hits.is_empty() {
+                                        let _ = tx.send(content_hits);
+                                    }
+                                }
+                                ContentOutcome::CloudSkipped => {
+                                    cloud_skipped.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
                         }
                     }
                     // A dot folder is visited, so its name matches, but not descended
@@ -494,6 +532,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
         skipped,
         contents_stopped: control.contents_stopped(),
         error: None,
+        cloud_skipped: cloud_skipped.load(Ordering::Relaxed),
     }
 }
 
@@ -621,6 +660,13 @@ impl<R: io::Read> io::Read for ContentReader<'_, R> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ContentOutcome {
+    Matches(u64),
+    /// The fresh gate refused the open; this file contributes no content hit.
+    CloudSkipped,
+}
+
 struct ContentSearch {
     matcher: RegexMatcher,
     searcher: Searcher,
@@ -645,19 +691,30 @@ impl ContentSearch {
         hidden: bool,
         hits: &mut Vec<Hit>,
         control: &Control,
-    ) -> u64 {
+        gate: Option<&dyn ReadGate>,
+    ) -> ContentOutcome {
+        // Check afresh immediately before the open: a visible row's cached
+        // status may be an entire scroll old, and an open can start a download.
+        let hint = ReadHint::for_path(path);
+        let decision = match gate {
+            Some(gate) => gate.check(path, hint),
+            None => hint.cheap_decision(),
+        };
+        if decision != ReadDecision::Readable {
+            return ContentOutcome::CloudSkipped;
+        }
         // A file or symlink can be replaced after the walk checked its type.
         // A nonblocking open keeps a replacement FIFO from hanging the walk.
         let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path) else {
-            return 0;
+            return ContentOutcome::Matches(0);
         };
         if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
-            return 0;
+            return ContentOutcome::Matches(0);
         }
         let reader = ContentReader { inner: file, control };
         let mut sink = ContentSink { matcher: &self.matcher, path, modified, size, hidden, hits, control, matches: 0 };
         let _ = self.searcher.search_reader(&self.matcher, reader, &mut sink);
-        sink.matches
+        ContentOutcome::Matches(sink.matches)
     }
 }
 
@@ -783,7 +840,7 @@ mod tests {
         let path = root.join("next.txt");
         write(&root, "next.txt", b"needle\n");
         let control = Control::new();
-        assert_eq!(content.search(&path, None, 7, false, &mut hits, &control), 1);
+        assert_eq!(content.search(&path, None, 7, false, &mut hits, &control, None), ContentOutcome::Matches(1));
         assert_eq!(hits[0].path, path);
         fs::remove_dir_all(root).expect("remove fixture");
     }
@@ -816,6 +873,7 @@ mod tests {
             include_hidden: true,
             rules: rules(),
             everything,
+            read_gate: None,
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -894,6 +952,73 @@ mod tests {
                 && matches!(&skip.reason, SkipReason::Rule(rule) if rule.contains("name"))
         }));
         assert!(summary.scanned > 0);
+    }
+
+    struct SkipPath(PathBuf);
+    impl ReadGate for SkipPath {
+        fn check(&self, path: &Path, hint: ReadHint) -> ReadDecision {
+            if path == self.0 { ReadDecision::SkipCloud } else { hint.cheap_decision() }
+        }
+    }
+
+    struct CountGate(std::sync::atomic::AtomicUsize);
+    impl ReadGate for CountGate {
+        fn check(&self, _: &Path, _: ReadHint) -> ReadDecision {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            ReadDecision::Readable
+        }
+    }
+
+    #[test]
+    fn a_cloud_placeholder_keeps_name_hits_and_counts_skipped_contents() {
+        let root = root("cloud-placeholder");
+        write(&root, "blocked.txt", b"needle\n");
+        write(&root, "allowed.txt", b"needle\n");
+        let blocked = root.join("blocked.txt");
+        let gate = Arc::new(SkipPath(blocked.clone()));
+        let query = Query {
+            names: Some("blocked".into()),
+            contents: Some("needle".into()),
+            enter_hidden_folders: true,
+            include_hidden: true,
+            rules: rules(),
+            everything: true,
+            read_gate: Some(gate),
+        };
+        let control = Control::new();
+        let mut hits = Vec::new();
+        let summary = search(&root, &query, |batch| hits.extend(batch), &control);
+        assert_eq!(summary.cloud_skipped, 1, "the blocked content read is reported");
+        assert!(
+            hits.iter().any(|hit| hit.path == blocked && matches!(hit.kind, HitKind::Name { .. })),
+            "the name hit survives"
+        );
+        let content: Vec<&Path> = hits
+            .iter()
+            .filter(|hit| matches!(hit.kind, HitKind::Content { .. }))
+            .map(|hit| hit.path.as_path())
+            .collect();
+        assert_eq!(content, [root.join("allowed.txt").as_path()], "only the eligible file was read");
+    }
+
+    #[test]
+    fn names_mode_never_calls_the_read_gate() {
+        let root = root("cloud-names");
+        write(&root, "allowed.txt", b"needle\n");
+        let gate = Arc::new(CountGate(Default::default()));
+        let query = Query {
+            names: Some("allowed".into()),
+            contents: None,
+            enter_hidden_folders: true,
+            include_hidden: true,
+            rules: rules(),
+            everything: true,
+            read_gate: Some(gate.clone()),
+        };
+        let control = Control::new();
+        let summary = search(&root, &query, |_| {}, &control);
+        assert_eq!(summary.cloud_skipped, 0);
+        assert_eq!(gate.0.load(std::sync::atomic::Ordering::Relaxed), 0, "Names mode reads no content");
     }
 
     #[test]
@@ -1016,6 +1141,7 @@ mod tests {
             include_hidden: false,
             rules: rules(),
             everything: false,
+            read_gate: None,
         };
         let control = Control::new();
         let summary = search(&root, &query, |batch| hits.extend(batch), &control);
@@ -1031,6 +1157,7 @@ mod tests {
             include_hidden: false,
             rules: rules(),
             everything: true,
+            read_gate: None,
         };
         let summary = search(&root, &query, |batch| hits.extend(batch), &control);
         assert_eq!(paths(&hits), [root.join("visible.txt")], "Search everything keeps dot entries out");
@@ -1216,6 +1343,7 @@ mod tests {
             include_hidden: true,
             rules: rules(),
             everything: true,
+            read_gate: None,
         };
         let control = Control::new();
         let (tx, rx) = mpsc::channel();
@@ -1226,7 +1354,7 @@ mod tests {
             // had already accepted it as a regular file.
             let pattern = ContentPattern::new("needle").unwrap();
             let mut content = ContentSearch::new(&pattern).unwrap();
-            assert_eq!(content.search(&pipe, None, 0, false, &mut hits, &control), 0);
+            assert_eq!(content.search(&pipe, None, 0, false, &mut hits, &control, None), ContentOutcome::Matches(0));
             let summary = search(&search_root, &query, |batch| hits.extend(batch), &control);
             let _ = tx.send((hits, summary));
         });
@@ -1246,6 +1374,7 @@ mod tests {
             include_hidden: true,
             rules: rules(),
             everything: true,
+            read_gate: None,
         };
         let control = Control::new();
         let mut batches: Vec<Vec<bool>> = Vec::new();
@@ -1290,6 +1419,7 @@ mod tests {
             include_hidden: true,
             rules: rules(),
             everything: true,
+            read_gate: None,
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -1312,6 +1442,7 @@ mod tests {
             include_hidden: true,
             rules: rules(),
             everything: true,
+            read_gate: None,
         };
         let control = Control::new();
         let mut batches = Vec::new();
@@ -1365,6 +1496,7 @@ mod tests {
             include_hidden: true,
             rules: rules(),
             everything: false,
+            read_gate: None,
         };
         let control = Control::new();
         control.cancel();
@@ -1387,6 +1519,7 @@ mod tests {
             include_hidden: true,
             rules: rules(),
             everything: true,
+            read_gate: None,
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -1425,6 +1558,7 @@ mod tests {
             include_hidden: true,
             rules: rules(),
             everything: true,
+            read_gate: None,
         };
         (root, query)
     }

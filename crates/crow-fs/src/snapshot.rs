@@ -124,6 +124,7 @@ mod tests {
             is_dir: false,
             is_symlink: false,
             hidden: false,
+            dataless: false,
             size,
             modified: None,
             created: None,
