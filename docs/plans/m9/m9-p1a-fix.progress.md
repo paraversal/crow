@@ -1,6 +1,6 @@
 # M9 P1A fix — Plugin runtime foundations progress
 
-Branch: `codex/m9-p1a-plugin-runtime` (same branch as PR https://github.com/paraversal/file-crow/pull/61, per user decision) · Base: `c4482bd` · Last updated: 2026-11-18 · State: In critique
+Branch: `codex/m9-p1a-plugin-runtime` (same branch as PR https://github.com/paraversal/file-crow/pull/61, per user decision) · Base: `c4482bd` · Last updated: 2026-11-18 · State: PR open — https://github.com/paraversal/file-crow/pull/61
 
 ## Status
 
@@ -52,10 +52,12 @@ Branch: `codex/m9-p1a-plugin-runtime` (same branch as PR https://github.com/para
 
 ## Next
 
-Commit the fix list, set Ready for critique, and hand the two human checks to the user/critic.
+PR #61 now carries the fix commits and the critique fixes. The user hand-tests it and squash-merges. Next in the M9 index: execute plan P9A; P1B waits for P8 after P9C. The two bundled-app hand checks (active row after Reload All, VoiceOver speech) are still the user's.
 
 ## Critique
-Critic session: 2026-11-18 · Base: `codex/m9-p1a-plugin-runtime` @ `c4482bd` · Head reviewed: `62dadb7`
+Critic session: 2026-11-18 · Base: `codex/m9-p1a-plugin-runtime` @ `c4482bd` · Head reviewed: `62dadb7` plus critique commits `747297a`, `06021fe`
+
+Fixes: C1-C5 and C10 in `747297a` · C6 in `06021fe`.
 
 | # | Finding | Where | Area | Kind | Outcome |
 | --- | --- | --- | --- | --- | --- |
