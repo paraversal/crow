@@ -1,5 +1,5 @@
 # B4 — Cap and performance progress
-Branch: m8.5-b4-cap · PR: none · Last updated: 2026-11-18 · State: In critique
+Branch: m8.5-b4-cap · PR: https://github.com/paraversal/file-crow/pull/59 · Last updated: 2026-11-18 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -61,9 +61,12 @@ it, the names row has nothing comparable on `main`.
 - 2026-11-18: finish. `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo test --workspace` green (73.6 s). Bundle built with `./scripts/bundle.sh`; hand checks captured under `target/shots/`. `agent-job` could not update: its `meta.json` says "Extra data" (the job still appeared at start); progress-file writes are the source of truth.
 
 ## Next
-Commit the reviewed fixes and open the B4 PR. After user hand tests and squash-merge, next is `execute plan B5` (`docs/plans/m8.5/b5-regression.md`).
+User: hand-test PR #59's signed bundle, including the remaining VoiceOver checks, then squash-merge when CI is green. After B4 is merged, next is `execute plan B5` (`docs/plans/m8.5/b5-regression.md`).
 
 ## Critique
+
+Fixes C1, C2, C3 and the approved Q1/C5 are committed as `84157b8` (`M8.5 B4 critique: interrupt reads and report caps accurately`).
+
 Critic session: 2026-11-18 · Base: main @ d7ffb5d · Head reviewed: 575d65e
 
 | # | Finding | Where | Area | Kind | Outcome |
@@ -101,3 +104,5 @@ Matching hit counts: 200000, 0, 0, 18799; 200544 entries scanned in every run. R
 - [ ] Human final pass on the signed bundle: All `needle` → exact file name, Names `file`, and Names `f0`; light/dark, 640 px and wide. The automated visual pass covers these surfaces, but cannot establish spoken timing.
 
 Final review verification: after Q1, fmt/clippy clean and workspace tests green again (821 passed, 1 ignored, 12 suites); signed bundle rebuilt. Actual Names-only weak-cap footer inspected in dark/wide and light/640 px. Benchmark engine/CLI unchanged by Q1, so the recorded final-engine medians remain applicable. Temporary baseline worktree and smoke-driver scripts removed; local screenshots and raw benchmark evidence retained. Publication scan of the actual `origin/main..HEAD` range and selective added lines is clean; an earlier scan without an upstream included already-published history, not just this branch.
+
+- 2026-11-18: critique complete; fixes committed as `84157b8`, branch pushed, PR #59 opened with per-item verification, literal/semantic findings, the user decision, remaining hand checks and the B5 handoff. No merge performed.
