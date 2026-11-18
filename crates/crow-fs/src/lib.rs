@@ -67,3 +67,69 @@ mod tests {
 #[cfg(test)]
 #[path = "ops_tests.rs"]
 mod ops_tests;
+
+/// Owned temporary folders for tests: the directory is removed when the guard
+/// drops, including during unwinding.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::ops::Deref;
+    use std::path::{Path, PathBuf};
+
+    pub(crate) struct TempDir {
+        path: PathBuf,
+        _guard: tempfile::TempDir,
+    }
+
+    impl TempDir {
+        pub(crate) fn new(prefix: &str) -> Self {
+            let guard = tempfile::Builder::new().prefix(prefix).tempdir().expect("temp dir");
+            let path = guard.path().canonicalize().expect("canonical temp dir");
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self { path, _guard: guard }
+        }
+    }
+
+    impl Deref for TempDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl AsRef<Path> for TempDir {
+        fn as_ref(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    /// For trees that may hold a mode-000 folder: restores permissions before
+    /// the parent guard deletes the tree.
+    pub(crate) struct CleanTree(TempDir);
+
+    impl CleanTree {
+        pub(crate) fn new(prefix: &str) -> Self {
+            Self(TempDir::new(prefix))
+        }
+    }
+
+    impl Drop for CleanTree {
+        fn drop(&mut self) {
+            let _ = crate::testing::remove_tree(&self.0.path);
+        }
+    }
+
+    impl Deref for CleanTree {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0.path
+        }
+    }
+
+    impl AsRef<Path> for CleanTree {
+        fn as_ref(&self) -> &Path {
+            &self.0.path
+        }
+    }
+}

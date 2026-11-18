@@ -169,10 +169,8 @@ impl ZeroMatchStreak {
 mod tests {
     use super::*;
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("crow-tips-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+    fn temp_dir(name: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::new(&format!("crow-tips-{name}-"))
     }
 
     #[test]
@@ -192,7 +190,6 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("a-later-tip"), "a newer Crow's tip survives: {text}");
         assert!(TipState::load(&path).is_retired(TipId::Search));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -203,7 +200,6 @@ mod tests {
         assert_eq!(TipState::load(&path), TipState::default(), "missing");
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(TipState::load(&path), TipState::default(), "broken");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

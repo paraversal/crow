@@ -199,11 +199,8 @@ fn inode(_: &std::fs::Metadata) -> u64 {
 mod tests {
     use super::*;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("crow-fs-cache-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        dir
+    fn temp_dir(name: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::new(&format!("crow-fs-cache-{name}-"))
     }
 
     fn measured(bytes: u64, items: u64, folders: u64) -> Measured {
@@ -224,7 +221,6 @@ mod tests {
         assert_eq!(loaded, cache);
         assert_eq!(loaded.last_event_id(), 43);
         assert_eq!(loaded.volume_uuid(), Some("uuid"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -235,7 +231,6 @@ mod tests {
         let cache = Cache::load(&path);
         assert!(cache.is_empty());
         assert_eq!(cache.last_event_id(), 0);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -244,7 +239,6 @@ mod tests {
         let path = dir.join("folder-sizes.json");
         std::fs::write(&path, "{not json").unwrap();
         assert!(Cache::load(&path).is_empty());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -266,7 +260,6 @@ mod tests {
         missing.insert(&dir.join("gone"), 1, &measured(10, 1, 0), 0, 1);
         missing.validate_inodes();
         assert!(missing.get(&dir.join("gone")).unwrap().stale, "a missing folder");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -322,7 +315,6 @@ mod tests {
         let loaded = Cache::load(&path);
         assert_eq!(loaded.len(), 1);
         assert!(loaded.get(Path::new("/ok")).is_some());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

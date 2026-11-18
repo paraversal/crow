@@ -116,14 +116,12 @@ mod tests {
 
     #[test]
     fn folders_cover_home_and_every_volume_for_this_user() {
-        let home = std::env::temp_dir().join(format!("crow-trash-home-{}", std::process::id()));
-        std::fs::create_dir_all(&home).expect("create home");
-        let uid = std::fs::metadata(&home).expect("stat home").uid();
-        let folders = folders(&home, &[PathBuf::from("/Volumes/One"), PathBuf::from("/Volumes/Two")]);
-        assert_eq!(folders[0], home.join(".Trash"));
+        let home = tempfile::Builder::new().prefix("crow-trash-home-").tempdir().expect("create home");
+        let uid = std::fs::metadata(home.path()).expect("stat home").uid();
+        let folders = folders(home.path(), &[PathBuf::from("/Volumes/One"), PathBuf::from("/Volumes/Two")]);
+        assert_eq!(folders[0], home.path().join(".Trash"));
         assert!(folders.contains(&PathBuf::from(format!("/Volumes/One/.Trashes/{uid}"))), "{folders:?}");
         assert!(folders.contains(&PathBuf::from(format!("/Volumes/Two/.Trashes/{uid}"))), "{folders:?}");
         assert_eq!(folders.len(), 3, "no duplicates");
-        let _ = std::fs::remove_dir_all(&home);
     }
 }

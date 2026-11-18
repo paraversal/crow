@@ -18,3 +18,6 @@ libc = "0.2"
 nucleo-matcher = "0.3"
 regex-syntax = "0.8"
 unicode-segmentation = "1"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -336,6 +336,12 @@ struct TreeSetup {
 
 fn prepare(options: &Options) -> Result<TreeSetup, String> {
     let support = std::env::temp_dir().join(format!("crow-fuzz-support-{}-{}", std::process::id(), options.seed));
+    // The support folder and a tool-built tree are removed if `prepare` fails
+    // halfway; after a successful return `TreeSetup` and `cleanup` own them.
+    // A forced kill runs no destructors, so `crow-fuzz-*` can still be left
+    // behind; clean those by exact name, never with a prefix sweep.
+    let mut scratch = ScratchGuard::default();
+    scratch.paths.push(support.clone());
     let config_dir = support.join("config");
     let state_dir = support.join("state");
     let trash_dir = support.join("trash");
@@ -354,6 +360,7 @@ fn prepare(options: &Options) -> Result<TreeSetup, String> {
         }
         None => {
             let root = std::env::temp_dir().join(format!("crow-fuzz-tree-{}-{}", std::process::id(), options.seed));
+            scratch.paths.push(root.clone());
             build_tree(&root, &options.tree, options.seed)?;
             let root = root.canonicalize().map_err(|error| format!("{}: {error}", root.display()))?;
             let cleanup = root.clone();
@@ -368,7 +375,22 @@ fn prepare(options: &Options) -> Result<TreeSetup, String> {
     std::fs::write(state_dir.join(crow_core::ONBOARDING_FILE), "{\"tips_choice\": true}\n")
         .map_err(|error| format!("{}: {error}", state_dir.join(crow_core::ONBOARDING_FILE).display()))?;
 
+    scratch.paths.clear();
     Ok(TreeSetup { root, config_dir, state_dir, trash_dir, log_dir, tree_label, support, tree: cleanup_tree })
+}
+
+/// Removes tool-created scratch paths unless disarmed on a successful return.
+#[derive(Default)]
+struct ScratchGuard {
+    paths: Vec<PathBuf>,
+}
+
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = remove_tree(path);
+        }
+    }
 }
 
 /// The H1 tree: alpha/beta/notes, 200 files, 20 folders, then the edge kinds.

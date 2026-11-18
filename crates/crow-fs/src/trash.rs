@@ -81,47 +81,31 @@ mod tests {
 
     use super::*;
 
-    fn trash(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("crow-trash-{name}-{}", std::process::id()));
-        remove_tree(&dir);
-        fs::create_dir_all(&dir).expect("create trash");
-        dir
-    }
-
-    fn remove_tree(path: &Path) {
-        if let Ok(meta) = fs::metadata(path) {
-            let mut permissions = meta.permissions();
-            permissions.set_mode(0o755);
-            let _ = fs::set_permissions(path, permissions);
-        }
-        let _ = fs::remove_dir_all(path);
+    fn trash(name: &str) -> crate::test_support::CleanTree {
+        crate::test_support::CleanTree::new(&format!("crow-trash-{name}-"))
     }
 
     #[test]
     fn empties_files_folders_and_symlinks_without_following_them() {
         let dir = trash("all");
-        let outside = std::env::temp_dir().join(format!("crow-trash-outside-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&outside);
-        fs::create_dir_all(&outside).expect("create outside");
+        let outside = crate::test_support::TempDir::new("crow-trash-outside-");
         fs::write(outside.join("keep.txt"), "keep").expect("write outside");
         std::os::unix::fs::symlink(&outside, dir.join("link")).expect("create symlink");
         fs::write(dir.join("a.txt"), "a").expect("write file");
         fs::create_dir_all(dir.join("nested/deep")).expect("create folder");
         fs::write(dir.join("nested/deep/b.txt"), "b").expect("write nested");
 
-        assert_eq!(count(std::slice::from_ref(&dir)), 3);
-        let report = empty(std::slice::from_ref(&dir));
+        assert_eq!(count(std::slice::from_ref(&dir.to_path_buf())), 3);
+        let report = empty(std::slice::from_ref(&dir.to_path_buf()));
         assert_eq!(report, Report { removed: 3, failed: Vec::new() });
         assert!(read_dir_empty(&dir));
         assert!(outside.join("keep.txt").exists(), "the symlink's target is untouched");
-        remove_tree(&outside);
-        remove_tree(&dir);
     }
 
     #[test]
     fn a_missing_folder_is_not_a_failure() {
-        let missing = std::env::temp_dir().join(format!("crow-trash-missing-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&missing);
+        let root = crate::test_support::TempDir::new("crow-trash-missing-");
+        let missing = root.join("missing");
         let report = empty(std::slice::from_ref(&missing));
         assert!(report.is_empty(), "{report:?}");
         assert_eq!(count(std::slice::from_ref(&missing)), 0);
@@ -136,7 +120,7 @@ mod tests {
         fs::write(locked.join("inside.txt"), "b").expect("write nested");
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("lock folder");
 
-        let report = empty(std::slice::from_ref(&dir));
+        let report = empty(std::slice::from_ref(&dir.to_path_buf()));
         assert_eq!(report.removed, 1, "the unlocked item went: {report:?}");
         assert_eq!(report.failed.len(), 1, "{report:?}");
         assert_eq!(report.failed[0].path, locked);
@@ -144,7 +128,6 @@ mod tests {
         assert!(locked.exists(), "the locked folder stayed");
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock");
-        remove_tree(&dir);
     }
 
     fn read_dir_empty(dir: &Path) -> bool {

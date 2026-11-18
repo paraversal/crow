@@ -38,6 +38,7 @@ unicode-segmentation = "1"
 url = "2"
 
 [dev-dependencies]
+tempfile.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 rand = "0.9"
 rand_chacha = "0.9"

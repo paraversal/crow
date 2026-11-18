@@ -204,11 +204,11 @@ mod tests {
     use std::sync::mpsc::{Receiver, channel};
     use std::time::Instant;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("crow-macos-fsevents-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        dir.canonicalize().expect("canonical")
+    fn temp_dir(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new().prefix(&format!("crow-macos-fsevents-{name}-")).tempdir().expect("temp dir");
+        let path = dir.path().canonicalize().expect("canonical");
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        (dir, path)
     }
 
     fn wait_for(tx: &Receiver<Vec<Event>>, path: &Path, timeout: Duration) -> Vec<Event> {
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn an_event_marks_the_folder_and_its_ancestors_stale() {
-        let root = temp_dir("live");
+        let (_root, root) = temp_dir("live");
         let deep = root.join("a/b");
         std::fs::create_dir_all(&deep).expect("create deep");
         let mut cache = Cache::default();
@@ -255,12 +255,11 @@ mod tests {
         assert!(cache.get(&deep).expect("deep cached").stale, "the changed folder");
         assert!(cache.get(&root.join("a")).expect("a cached").stale, "its parent");
         assert!(cache.get(&root).expect("root cached").stale, "the root");
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn a_restart_replays_an_event_that_happened_while_off() {
-        let root = temp_dir("restart");
+        let (_root, root) = temp_dir("restart");
         let deep = root.join("a/b");
         std::fs::create_dir_all(&deep).expect("create deep");
         let since = current_event_id();
@@ -271,6 +270,5 @@ mod tests {
         })
         .expect("start stream");
         assert!(!wait_for(&rx, &deep, Duration::from_secs(5)).is_empty(), "the history replays the write");
-        std::fs::remove_dir_all(&root).ok();
     }
 }

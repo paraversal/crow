@@ -364,11 +364,8 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("crow-fs-list-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        dir.canonicalize().expect("canonical")
+    fn temp_dir(name: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::new(&format!("crow-fs-list-{name}-"))
     }
 
     fn collect(dir: &Path, hidden: bool) -> BTreeMap<String, Entry> {
@@ -400,7 +397,6 @@ mod tests {
         assert!(!listed["dangling"].is_dir);
         assert_eq!(listed["ünïcødé 名前.md"].size, 5000);
         assert!(!collect(&dir, false).contains_key(".dot"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -415,7 +411,6 @@ mod tests {
         .unwrap();
         assert_eq!(total, 5000);
         assert!(batches >= 1);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

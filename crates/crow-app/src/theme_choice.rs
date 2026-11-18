@@ -74,7 +74,7 @@ fn entry_id(entry: &Option<ThemeInfo>) -> String {
 
 /// List the index off the main thread.
 pub fn load(cx: &mut App) -> Task<Vec<ThemeInfo>> {
-    let dir = crow_theme::themes_dir();
+    let dir = cx.global::<Ui>().themes_dir.clone();
     cx.background_spawn(async move { crow_theme::list_theme_infos(&dir) })
 }
 

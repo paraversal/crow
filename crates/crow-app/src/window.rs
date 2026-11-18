@@ -2494,7 +2494,7 @@ impl CrowWindow {
             self.cancel_picker(window, cx);
             return;
         }
-        let dir = crow_theme::themes_dir();
+        let dir = cx.global::<Ui>().themes_dir.clone();
         let task = cx.background_spawn(async move { crow_theme::list_theme_infos(&dir) });
         cx.spawn_in(window, async move |this, cx| {
             let infos = task.await;
@@ -2546,8 +2546,9 @@ impl CrowWindow {
     /// and Crow follows "System" from then on.
     fn apply_everywhere(&mut self, _: &ApplyThemeEverywhere, window: &mut Window, cx: &mut Context<Self>) {
         let Some(picker) = self.picker.take() else { return };
+        let dir = cx.global::<Ui>().themes_dir.clone();
         match picker.choice.entries.get(picker.choice.cursor) {
-            Some(Some(info)) => match crow_theme::load_theme(&crow_theme::themes_dir(), &info.id) {
+            Some(Some(info)) => match crow_theme::load_theme(&dir, &info.id) {
                 Ok(theme) => ui::apply_theme_everywhere(&theme, cx),
                 Err(e) => operations::message(e, true, cx),
             },

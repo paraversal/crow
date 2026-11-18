@@ -108,11 +108,8 @@ mod tests {
         Arc::from(if e.is_dir { "Folder" } else { e.ext() })
     }
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("crow-fs-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create temp dir");
-        dir.canonicalize().expect("canonical")
+    fn temp_dir(name: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::new(&format!("crow-fs-{name}-"))
     }
 
     fn names(entries: &[Entry]) -> Vec<&str> {
@@ -148,10 +145,11 @@ mod tests {
 
     #[test]
     fn changes_through_a_symlinked_ancestor_still_match() {
-        let dir = temp_dir("symlink-change");
+        let parent = crate::test_support::TempDir::new("crow-fs-symlink-change-");
+        let dir = parent.join("dir");
+        fs::create_dir_all(&dir).expect("mkdir");
         fs::write(dir.join("a.txt"), "a").expect("write");
-        let alias = dir.parent().unwrap().join(format!("alias-{}", std::process::id()));
-        let _ = fs::remove_file(&alias);
+        let alias = parent.join("alias");
         std::os::unix::fs::symlink(&dir, &alias).expect("symlink");
         let canonical = dir.canonicalize().expect("canonical");
 
@@ -172,11 +170,9 @@ mod tests {
         assert_eq!(twice.len(), 1, "{twice:?}");
 
         // A sibling folder's change is ignored.
-        let other = dir.parent().unwrap().join(format!("other-{}", std::process::id()));
+        let other = parent.join("other");
         fs::create_dir_all(&other).expect("mkdir");
         assert!(stat_changes(&canonical, &[other.join("b.txt")], false).is_empty());
-        fs::remove_file(&alias).ok();
-        fs::remove_dir_all(&other).ok();
     }
 
     #[test]
@@ -190,7 +186,6 @@ mod tests {
         let listing = |hidden| read_dir(&dir, hidden, &sort, &kind).expect("read").entries;
         assert_eq!(names(&listing(false)), ["alpha", "b2.txt", "b10.txt", "Zeta"]);
         assert!(names(&listing(true)).contains(&".hidden"));
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -212,7 +207,6 @@ mod tests {
         assert_eq!(after[0].size, 5, "updated entries are re-read");
         let relisted = read_dir(&dir, false, &sort, &kind).unwrap().entries;
         assert_eq!(after, *relisted, "a diff gives the same result as a full listing");
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -225,6 +219,5 @@ mod tests {
         fs::write(dir.join("medium"), "1234").unwrap();
         let after = apply_changes(&before, &dir, &[dir.join("medium")], false, &sort, &kind);
         assert_eq!(names(&after), ["large", "medium", "small"]);
-        fs::remove_dir_all(&dir).ok();
     }
 }

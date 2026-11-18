@@ -38,29 +38,141 @@ fn weak_hit(path: PathBuf) -> Hit {
     test_hit(path, HitKind::Name { ranges: vec![0..1, 2..3] }, 10)
 }
 
+/// The parent of a `/tmp` fixture, so its `.trash-*` sibling dies with it.
+/// Every child is removed through `remove_tree`, which restores a mode-000
+/// folder before deleting, even when a test failed before its own restore.
+struct TestParent {
+    dir: tempfile::TempDir,
+}
+
+impl Drop for TestParent {
+    fn drop(&mut self) {
+        let Ok(entries) = std::fs::read_dir(self.dir.path()) else { return };
+        for entry in entries.flatten() {
+            let _ = crow_fs::testing::remove_tree(&entry.path());
+        }
+    }
+}
+
+/// A `/tmp` parent with a named child. The parent guard also owns the sibling
+/// `.trash-*` folder `open_with` creates, so a test cannot leak either.
+fn temp_root(prefix: &str) -> (TestParent, PathBuf) {
+    let guard = tempfile::Builder::new().prefix("crow-test-").tempdir_in("/tmp").expect("create fixture root");
+    let path = guard.path().join(prefix.trim_end_matches('-'));
+    std::fs::create_dir_all(&path).expect("create fixture child");
+    (TestParent { dir: guard }, path)
+}
+
+/// An owned `/tmp` fixture. The base stays `/tmp`, not `std::env::temp_dir()`:
+/// the palette scores a folder's whole path, so a random `$TMPDIR` prefix can
+/// make a query match an unrelated sibling. The guard removes the tree when the
+/// test and every clone finish.
+#[derive(Clone)]
+struct TestRoot {
+    path: PathBuf,
+    _guard: Arc<TestParent>,
+}
+
+impl TestRoot {
+    fn new(prefix: &str) -> Self {
+        let (guard, path) = temp_root(prefix);
+        Self { path, _guard: Arc::new(guard) }
+    }
+}
+
+impl std::fmt::Debug for TestRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.path.fmt(f)
+    }
+}
+
+impl PartialEq<TestRoot> for PathBuf {
+    fn eq(&self, other: &TestRoot) -> bool {
+        self == &other.path
+    }
+}
+
+impl PartialEq<PathBuf> for TestRoot {
+    fn eq(&self, other: &PathBuf) -> bool {
+        &self.path == other
+    }
+}
+
+impl std::ops::Deref for TestRoot {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TestRoot {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// `root/{alpha/inner/, beta/, notes.txt}`, canonicalized (macOS temp dirs sit behind /private).
-///
-/// The base is `/tmp`, not `std::env::temp_dir()`: the palette scores a folder's
-/// whole path, so a random `$TMPDIR` prefix can make a query match an unrelated
-/// sibling. `palette_count_says_places` flaked on CI when the runner's temp path
-/// happened to contain `a-l-p-h-a` in order and `beta` matched `alpha`.
-fn fixture(name: &str) -> PathBuf {
-    let root = PathBuf::from("/tmp").join(format!("crow-app-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+fn fixture(name: &str) -> TestRoot {
+    let root = TestRoot::new(&format!("crow-app-{name}-"));
     std::fs::create_dir_all(root.join("alpha/inner")).expect("create fixture");
     std::fs::create_dir_all(root.join("beta")).expect("create fixture");
     std::fs::write(root.join("notes.txt"), "hello\n").expect("create fixture");
-    root.canonicalize().expect("canonical fixture path")
+    root
 }
 
 /// The deterministic search corpus (`crow_search::corpus`) at a fresh `/tmp`
-/// path, canonicalized. `remove` restores the unreadable folder's mode first,
-/// so a previous run's leftover cannot block the rebuild.
-fn corpus_fixture(name: &str) -> PathBuf {
-    let root = PathBuf::from("/tmp").join(format!("crow-app-{name}-{}", std::process::id()));
-    let _ = crow_search::corpus::remove(&root);
-    crow_search::corpus::build(&root).expect("build the search corpus");
-    root.canonicalize().expect("canonical corpus path")
+/// path, canonicalized. The guard restores the unreadable folder's mode before
+/// deleting, so a failure cannot leak it into the next run.
+struct CorpusRoot {
+    path: PathBuf,
+    _guard: TestParent,
+}
+
+impl std::ops::Deref for CorpusRoot {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for CorpusRoot {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for CorpusRoot {
+    fn drop(&mut self) {
+        let _ = crow_search::corpus::remove(&self.path);
+    }
+}
+
+fn corpus_fixture(name: &str) -> CorpusRoot {
+    let (guard, path) = temp_root(&format!("crow-app-{name}-"));
+    crow_search::corpus::build(&path).expect("build the search corpus");
+    CorpusRoot { path, _guard: guard }
+}
+
+/// A fixture-owning test that unwinds still removes its tree and the sibling
+/// trash folder.
+#[test]
+fn a_window_fixture_is_removed_on_unwind() {
+    use std::sync::{Arc, Mutex};
+
+    let path = Arc::new(Mutex::new(None));
+    let tracked = path.clone();
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let root = fixture("unwind");
+        *tracked.lock().unwrap() = Some(root.to_path_buf());
+        assert!(root.join("notes.txt").exists());
+        panic!("deliberate fixture panic");
+    }));
+    assert!(caught.is_err());
+    let path = path.lock().unwrap().clone().expect("the fixture path");
+    assert!(!path.exists(), "the fixture guard removed the tree");
+    assert!(!path.parent().unwrap().exists(), "and its parent with the trash folder");
 }
 
 #[gpui::test]
@@ -240,7 +352,7 @@ fn long_names_stay_in_their_rows(cx: &mut TestAppContext) {
     ] {
         std::fs::write(root.join(name), "x").expect("create fixture");
     }
-    let mut deep = root.clone();
+    let mut deep = root.to_path_buf();
     for level in 0..20 {
         deep = deep.join(format!("level-{level}"));
     }
@@ -882,7 +994,7 @@ fn sidebar_twin_in_home_shows_a_tilde(cx: &mut TestAppContext) {
     std::fs::create_dir_all(root.join("git")).expect("create fixture");
     std::fs::create_dir_all(root.join("other/git")).expect("create fixture");
     let (view, mut cx) = open(cx, &root);
-    cx.update(|_, cx| cx.global_mut::<Ui>().home = root.clone());
+    cx.update(|_, cx| cx.global_mut::<Ui>().home = root.to_path_buf());
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("git"), &root.join("other/git")]));
     let looks = sidebar_looks(&view, &mut cx);
     assert_eq!(looks[0].hint.as_deref(), Some("~"));
@@ -987,7 +1099,7 @@ fn disk_row_shows_free_space_and_keeps_its_aria_label(cx: &mut TestAppContext) {
     cx.update(|_, cx| {
         cx.global_mut::<Ui>().volumes = vec![crow_macos::Volume {
             name: "Test HD".into(),
-            path: root.clone(),
+            path: root.to_path_buf(),
             total_bytes: 494_384_795_648,
             free_bytes: 182_400_000_000,
             ejectable: true,
@@ -1174,7 +1286,11 @@ fn option_arrows_jump_between_sidebar_groups(cx: &mut TestAppContext) {
         root.join("beta").display()
     );
     write_config(&view, &mut cx, "sidebar.toml", &toml);
-    assert_eq!(sidebar_paths(&cx), [root.join("alpha"), root.join("beta"), root.clone()], "two groups, then Recent");
+    assert_eq!(
+        sidebar_paths(&cx),
+        [root.join("alpha"), root.join("beta"), root.to_path_buf()],
+        "two groups, then Recent"
+    );
 
     cx.simulate_keystrokes("tab alt-down");
     settle(&view, &mut cx);
@@ -1205,16 +1321,20 @@ fn walking_recent_keeps_the_cursor_on_the_shown_folder(cx: &mut TestAppContext) 
         pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.join(d), cx));
         settle(&view, &mut cx);
     }
-    assert_eq!(sidebar_paths(&cx), [root.join("beta"), root.join("alpha"), root.clone()]);
+    assert_eq!(sidebar_paths(&cx), [root.join("beta"), root.join("alpha"), root.to_path_buf()]);
     cx.simulate_keystrokes("tab");
-    for (step, want) in [root.join("alpha"), root.clone()].into_iter().enumerate() {
+    for (step, want) in [root.join("alpha"), root.to_path_buf()].into_iter().enumerate() {
         cx.simulate_keystrokes("down");
         settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), want);
         let looks = sidebar_looks(&view, &mut cx);
         assert!(looks[step + 1].ring && looks[step + 1].current, "Recent kept its order under the cursor: {looks:?}");
     }
-    assert_eq!(sidebar_paths(&cx), [root.join("beta"), root.join("alpha"), root.clone()], "the walk re-ranked nothing");
+    assert_eq!(
+        sidebar_paths(&cx),
+        [root.join("beta"), root.join("alpha"), root.to_path_buf()],
+        "the walk re-ranked nothing"
+    );
 }
 
 #[gpui::test]
@@ -1576,7 +1696,7 @@ fn back_button_tooltip_names_the_folder(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-down");
     settle(&view, &mut cx);
     let back = view.read_with(&cx, |w, cx| w.pane().read(cx).back_target().map(Path::to_path_buf));
-    assert_eq!(back.as_deref(), Some(root.as_path()), "Back points at the folder we came from");
+    assert_eq!(back.as_deref(), Some(&*root), "Back points at the folder we came from");
 
     let bounds = cx.debug_bounds("back").expect("the back button is laid out");
     cx.simulate_mouse_move(bounds.center(), None, gpui::Modifiers::default());
@@ -2096,7 +2216,7 @@ fn open_terminal_opens_the_selected_folder_or_its_parent(cx: &mut TestAppContext
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(
-        effect_calls(&mut cx).contains(&Call::OpenTerminal("iTerm".into(), root.clone())),
+        effect_calls(&mut cx).contains(&Call::OpenTerminal("iTerm".into(), root.to_path_buf())),
         "a file opens its parent folder"
     );
 }
@@ -2634,24 +2754,25 @@ fn vim_marks_set_favorites_and_jump(cx: &mut TestAppContext) {
     assert_eq!(dir(&view, &cx), root.join("alpha"), "an unknown mark goes nowhere");
 }
 
-/// Two themes in a temp theme index, shared by every test (the variable is process-wide).
-fn theme_index() -> &'static Path {
-    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("crow-app-theme-index-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("schemes")).unwrap();
-        let base = include_str!("../../../crow-theme/src/fallback.json");
-        std::fs::write(dir.join("schemes/firebox.json"), base).unwrap();
-        let light = base.replace("\"dark\"", "\"light\"").replace("FireBox", "Paper").replace("#111111", "#fafafa");
-        std::fs::write(dir.join("schemes/paper.json"), light).unwrap();
-        std::fs::write(dir.join("defaults.json"), r#"{"dark":"firebox","light":"paper"}"#).unwrap();
-        // SAFETY: set once, before any test reads it; all tests see the same value.
-        unsafe {
-            std::env::set_var("THEMES_DIR", &dir);
-            std::env::set_var("THEMES_STATE_DIR", dir.join("state"));
-        }
-        dir
-    })
+/// A per-test theme index, installed on the `Ui` so tests never mutate
+/// process-wide environment variables or share one temporary folder.
+fn theme_index(cx: &mut VisualTestContext) -> TestRoot {
+    let root = TestRoot::new("crow-app-theme-index-");
+    let dir = root.join("themes");
+    std::fs::create_dir_all(dir.join("schemes")).unwrap();
+    let base = include_str!("../../../crow-theme/src/fallback.json");
+    std::fs::write(dir.join("schemes/firebox.json"), base).unwrap();
+    let light = base.replace("\"dark\"", "\"light\"").replace("FireBox", "Paper").replace("#111111", "#fafafa");
+    std::fs::write(dir.join("schemes/paper.json"), light).unwrap();
+    std::fs::write(dir.join("defaults.json"), r#"{"dark":"firebox","light":"paper"}"#).unwrap();
+    let state = root.join("state");
+    cx.update(|_, cx| {
+        let ui = cx.global_mut::<Ui>();
+        ui.themes_dir = dir;
+        ui.themes_state_dir = state;
+        crate::ui::reload_theme(cx);
+    });
+    root
 }
 
 fn wait_for_search(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
@@ -2691,7 +2812,7 @@ fn search_empty_offers_search_home(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root.join("backup"));
     // Home is the corpus, so the widened walk stays off the developer's folder.
     cx.update(|_, cx| {
-        cx.global_mut::<crate::ui::Ui>().home = root.clone();
+        cx.global_mut::<crate::ui::Ui>().home = root.to_path_buf();
     });
     cx.simulate_keystrokes("cmd-f");
     cx.simulate_input("savegame");
@@ -2934,7 +3055,7 @@ fn search_home_key_switches_scope(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root);
     // Home is the fixture, so ⇧⌘H never walks the developer's home folder.
     cx.update(|_, cx| {
-        cx.global_mut::<crate::ui::Ui>().home = root.clone();
+        cx.global_mut::<crate::ui::Ui>().home = root.to_path_buf();
     });
 
     cx.simulate_keystrokes("cmd-f");
@@ -3231,7 +3352,7 @@ fn search_keeps_the_users_row_when_better_rows_arrive(cx: &mut TestAppContext) {
 #[gpui::test]
 fn search_contiguous_name_hits_come_before_contents_and_weak_names(cx: &mut TestAppContext) {
     let root = fixture("search-weak-names");
-    let outside = root.parent().expect("temp parent").join(format!("crow-qqzz-order-{}", std::process::id()));
+    let outside = TestRoot::new("crow-qqzz-order-");
     std::fs::create_dir_all(&outside).expect("create fixture");
     let (view, mut cx) = open(cx, &root);
     cx.simulate_keystrokes("cmd-f");
@@ -3286,7 +3407,7 @@ fn open_search(
     let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
     cx.simulate_input("qqzz");
     wait_for_search(&view, &mut cx);
-    (root, view, search, cx)
+    (root.to_path_buf(), view, search, cx)
 }
 
 fn fill_other_rows(search: &Entity<crate::search::SearchView>, root: &Path, cx: &mut VisualTestContext) {
@@ -4316,7 +4437,7 @@ fn open_search_with_a_query_runs_it(cx: &mut TestAppContext) {
     cx.update_window(window, |_, window, cx| {
         view.update(cx, |view, cx| {
             view.open_search(
-                SearchStart { folder: root.clone(), query: "needle".to_owned(), everything: false },
+                SearchStart { folder: root.to_path_buf(), query: "needle".to_owned(), everything: false },
                 window,
                 cx,
             );
@@ -4730,7 +4851,7 @@ fn palette_twins_get_distinct_labels(cx: &mut TestAppContext) {
         settle(&view, &mut cx);
     }
     // Back to root: the folder you are in is left out of the palette.
-    pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.clone(), cx));
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.to_path_buf(), cx));
     settle(&view, &mut cx);
 
     cx.simulate_keystrokes("cmd-k");
@@ -4749,7 +4870,10 @@ fn palette_leaves_out_the_current_folder(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-up");
     settle(&view, &mut cx);
-    assert!(cx.read(|cx| cx.global::<Ui>().palette_recents.contains(&root)), "the folder we are in is a recent visit");
+    assert!(
+        cx.read(|cx| cx.global::<Ui>().palette_recents.contains(&root.to_path_buf())),
+        "the folder we are in is a recent visit"
+    );
 
     cx.simulate_keystrokes("cmd-k");
     settle(&view, &mut cx);
@@ -5268,9 +5392,9 @@ fn palette_recent_commands_setting_false_hides_and_stops_recording(cx: &mut Test
 
 #[gpui::test]
 fn theme_picker_previews_reverts_and_saves(cx: &mut TestAppContext) {
-    theme_index();
     let root = fixture("themes");
     let (view, mut cx) = open(cx, &root);
+    let _themes = theme_index(&mut cx);
     let theme = |cx: &VisualTestContext| cx.read(|cx| cx.global::<Ui>().theme.name.clone());
     let start = theme(&cx);
 
@@ -5387,9 +5511,9 @@ fn sheets_block_every_window_key(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn tab_stays_in_the_theme_picker(cx: &mut TestAppContext) {
-    theme_index();
     let root = fixture("picker-tab");
     let (view, mut cx) = open(cx, &root);
+    let _themes = theme_index(&mut cx);
     cx.simulate_keystrokes("cmd-alt-t");
     settle(&view, &mut cx);
     let focus = view.read_with(&cx, |w, _| w.picker.as_ref().map(|p| p.focus.clone())).expect("picker open");
@@ -5470,7 +5594,7 @@ fn closing_the_last_window_leaves_the_app_running(app: &mut TestAppContext) {
 fn quitting_with_no_window_opens_one_and_asks(app: &mut TestAppContext) {
     let root = fixture("quit-resident");
     let (_view, mut cx) = open(app, &root);
-    app.update(|cx| cx.set_global(LaunchFolder(root.clone())));
+    app.update(|cx| cx.set_global(LaunchFolder(root.to_path_buf())));
     let cancel = inject_running(&mut cx);
 
     cx.simulate_keystrokes("cmd-w");
@@ -6376,9 +6500,9 @@ fn exclude_config_reloads_live_and_keeps_the_last_good_rules(cx: &mut TestAppCon
 
 #[gpui::test]
 fn clicking_the_scrim_closes_every_overlay(cx: &mut TestAppContext) {
-    theme_index();
     let root = fixture("scrim");
     let (view, mut cx) = open(cx, &root);
+    let _themes = theme_index(&mut cx);
     let start_theme = cx.read(|cx| cx.global::<Ui>().theme.name.clone());
     let pane_focus = view.read_with(&cx, |w, cx| w.pane().read(cx).focus_handle().clone());
     let click_scrim = |cx: &mut VisualTestContext| {
@@ -6932,7 +7056,7 @@ fn column_view_left_on_the_leftmost_column_goes_up(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root);
     cx.simulate_keystrokes("cmd-3");
     settle(&view, &mut cx);
-    assert_eq!(columns(&view, &cx, 0).2, Some(root.clone()));
+    assert_eq!(columns(&view, &cx, 0).2, Some(root.to_path_buf()));
 
     let parent = root.parent().expect("the fixture has a parent").to_path_buf();
     cx.simulate_keystrokes("left");
@@ -7433,7 +7557,7 @@ fn info_multi_selection_is_a_summary(cx: &mut TestAppContext) {
     assert_eq!(summary.count, 3);
     assert_eq!(summary.folders, 2);
     assert_eq!(summary.bytes, Some(6), "notes.txt is 6 bytes; folders add none");
-    assert_eq!(summary.parent.as_deref(), Some(root.as_path()));
+    assert_eq!(summary.parent.as_deref(), Some(&*root));
     assert!(summary.kind.is_none(), "a folder and a file have no common kind");
     assert_eq!(summary.tag_paths.len(), 3);
     let label = view.read_with(&cx, |w, cx| w.info.read(cx).label());
@@ -7857,13 +7981,10 @@ fn trash_three_items_in_full_motion(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn trash_five_hundred_items_in_full_motion(cx: &mut TestAppContext) {
-    let root = std::env::temp_dir().join(format!("crow-app-trash-500-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("create fixture");
+    let root = TestRoot::new("crow-app-trash-500-");
     for i in 0..500 {
         std::fs::write(root.join(format!("file-{i:03}.txt")), "x").expect("create fixture");
     }
-    let root = root.canonicalize().expect("canonical fixture path");
     let (view, mut cx) = open(cx, &root);
     set_motion(&mut cx, "full");
     cx.simulate_keystrokes("cmd-a cmd-backspace");
@@ -7977,7 +8098,7 @@ fn empty_trash_asks_then_empties_the_temp_trash(cx: &mut TestAppContext) {
     std::fs::create_dir_all(trash.join("folder")).expect("create trash");
     std::fs::write(trash.join("a.txt"), "a").expect("write trash");
     std::fs::write(trash.join("folder/b.txt"), "b").expect("write trash");
-    let home = root.clone();
+    let home = root.to_path_buf();
     let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
         cx.global_mut::<Ui>().home = home;
     });
@@ -8010,7 +8131,7 @@ fn empty_trash_cancels_and_reports_an_empty_trash(cx: &mut TestAppContext) {
     let trash = root.join(".Trash");
     std::fs::create_dir_all(&trash).expect("create trash");
     std::fs::write(trash.join("keep.txt"), "keep").expect("write trash");
-    let home = root.clone();
+    let home = root.to_path_buf();
     let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
         cx.global_mut::<Ui>().home = home;
     });
@@ -8049,7 +8170,7 @@ fn empty_trash_reports_what_it_could_not_remove(cx: &mut TestAppContext) {
     std::fs::write(trash.join("gone.txt"), "a").expect("write trash");
     std::fs::write(trash.join("locked/inside.txt"), "b").expect("write trash");
     std::fs::set_permissions(trash.join("locked"), std::fs::Permissions::from_mode(0o000)).expect("lock folder");
-    let home = root.clone();
+    let home = root.to_path_buf();
     let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
         cx.global_mut::<Ui>().home = home;
     });
@@ -8077,7 +8198,7 @@ fn empty_trash_does_nothing_in_a_text_field(cx: &mut TestAppContext) {
     let trash = root.join(".Trash");
     std::fs::create_dir_all(&trash).expect("create trash");
     std::fs::write(trash.join("keep.txt"), "keep").expect("write trash");
-    let home = root.clone();
+    let home = root.to_path_buf();
     let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
         cx.global_mut::<Ui>().home = home;
     });
@@ -8094,7 +8215,7 @@ fn palette_empty_trash_asks_first(cx: &mut TestAppContext) {
     let trash = root.join(".Trash");
     std::fs::create_dir_all(&trash).expect("create trash");
     std::fs::write(trash.join("keep.txt"), "keep").expect("write trash");
-    let home = root.clone();
+    let home = root.to_path_buf();
     let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
         cx.global_mut::<Ui>().home = home;
     });
@@ -8482,7 +8603,7 @@ fn a_drop_into_the_shown_folder_outlines_the_list(cx: &mut TestAppContext) {
     let pane = pane(&view, &cx);
     let none = gpui::point(px(0.), px(0.));
     let below = gpui::point(px(0.), px(120.));
-    let shown = Some(crate::pane::DropTarget { folder: root.clone(), column: 0, rows: None });
+    let shown = Some(crate::pane::DropTarget { folder: root.to_path_buf(), column: 0, rows: None });
 
     assert_eq!(
         hover_target(&mut cx, &pane, "row-notes.txt", none, vec![root.join("alpha/inner")]),
@@ -8524,7 +8645,7 @@ fn column_view_outlines_the_column_or_the_folder_row(cx: &mut TestAppContext) {
 
     assert_eq!(
         hover_target(&mut cx, &pane, "column-0-row-notes.txt", none, vec![root.join("alpha/inner")]),
-        (Some(crate::pane::DropTarget { folder: root.clone(), column: 0, rows: None }), true),
+        (Some(crate::pane::DropTarget { folder: root.to_path_buf(), column: 0, rows: None }), true),
         "a file row in a column drops into that column's folder"
     );
     assert_eq!(
@@ -8662,14 +8783,12 @@ fn dropping_in_column_view_targets_the_folder_under_the_pointer(cx: &mut TestApp
 // ----- U9: contextual tips -----
 
 /// `root/` with `n` files, for the scroll trigger.
-fn long_fixture(name: &str, n: usize) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("crow-app-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("create fixture");
+fn long_fixture(name: &str, n: usize) -> TestRoot {
+    let root = TestRoot::new(&format!("crow-app-{name}-"));
     for i in 0..n {
         std::fs::write(root.join(format!("f{i:03}.txt")), "").expect("create fixture");
     }
-    root.canonicalize().expect("canonical fixture path")
+    root
 }
 
 fn tip(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Option<TipId> {
@@ -9211,7 +9330,7 @@ fn disclose(mode: &str, cx: &mut TestAppContext) -> (Entity<CrowWindow>, VisualT
     cx.simulate_keystrokes("right");
     settle(&view, &mut cx);
     assert_eq!(names(&view, &cx), ["alpha", "inner", "beta", "notes.txt"], "{mode}: alpha is open");
-    (view, cx, root)
+    (view, cx, root.to_path_buf())
 }
 
 #[gpui::test]
@@ -9724,10 +9843,37 @@ fn fuzz_sidebar_toml(root: &Path) -> String {
     )
 }
 
-fn fuzz_tree(name: &str, files: usize) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("crow-app-{name}-{}", std::process::id()));
+/// A fuzz tree that restores mode-000 entries before deleting, including when a
+/// run fails or unwinds.
+struct FuzzRoot {
+    path: PathBuf,
+    _guard: TestParent,
+}
+
+impl std::ops::Deref for FuzzRoot {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for FuzzRoot {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for FuzzRoot {
+    fn drop(&mut self) {
+        let _ = crow_fs::testing::remove_tree(&self.path);
+    }
+}
+
+fn fuzz_tree(name: &str, files: usize) -> FuzzRoot {
+    let (guard, root) = temp_root(&format!("crow-app-{name}-"));
     reset_tree(&root, files, &EdgeTree::default(), 0);
-    root.canonicalize().expect("canonical fuzz tree")
+    FuzzRoot { path: root, _guard: guard }
 }
 
 /// What a run builds and how it behaves. The seed stays a separate argument so
@@ -10672,8 +10818,9 @@ fn filter_enter_acts_on_the_highlighted_row(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
     let root = fixture("fuzz-apply-batch");
-    let folder = cx
-        .update(|cx| cx.new(|cx| crate::folder::Folder::new(root.clone(), false, crow_fs::Sort::default(), false, cx)));
+    let folder = cx.update(|cx| {
+        cx.new(|cx| crate::folder::Folder::new(root.to_path_buf(), false, crow_fs::Sort::default(), false, cx))
+    });
     let entries = |skip: Option<usize>| -> Vec<crow_fs::Entry> {
         (0..100_000)
             .filter(|i| Some(*i) != skip)
@@ -10723,8 +10870,9 @@ fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
 fn selection_totals_follow_every_selection_change(cx: &mut TestAppContext) {
     let root = fixture("selection-totals");
     cx.update(crate::ui::init_for_tests);
-    let folder = cx
-        .update(|cx| cx.new(|cx| crate::folder::Folder::new(root.clone(), false, crow_fs::Sort::default(), false, cx)));
+    let folder = cx.update(|cx| {
+        cx.new(|cx| crate::folder::Folder::new(root.to_path_buf(), false, crow_fs::Sort::default(), false, cx))
+    });
     let entry = |name: &str, size: u64, is_dir: bool| crow_fs::Entry {
         name: name.to_owned(),
         path: root.join(name),
@@ -10796,8 +10944,9 @@ fn selection_totals_follow_every_selection_change(cx: &mut TestAppContext) {
 fn a_removed_selected_row_does_not_keep_the_cursor(cx: &mut TestAppContext) {
     let root = fixture("removed-cursor");
     cx.update(crate::ui::init_for_tests);
-    let folder = cx
-        .update(|cx| cx.new(|cx| crate::folder::Folder::new(root.clone(), false, crow_fs::Sort::default(), false, cx)));
+    let folder = cx.update(|cx| {
+        cx.new(|cx| crate::folder::Folder::new(root.to_path_buf(), false, crow_fs::Sort::default(), false, cx))
+    });
     let entry = |name: &str| crow_fs::Entry {
         name: name.to_owned(),
         path: root.join(name),
@@ -11154,8 +11303,9 @@ fn collapsing_an_inline_folder_releases_its_listing(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_large_select_when_present_applies_quickly(cx: &mut TestAppContext) {
     let root = fixture("select-when-present");
-    let folder = cx
-        .update(|cx| cx.new(|cx| crate::folder::Folder::new(root.clone(), false, crow_fs::Sort::default(), false, cx)));
+    let folder = cx.update(|cx| {
+        cx.new(|cx| crate::folder::Folder::new(root.to_path_buf(), false, crow_fs::Sort::default(), false, cx))
+    });
     let entries: Vec<Entry> = (0..100_000)
         .map(|i| Entry {
             name: format!("file-{i:06}.txt"),
@@ -11192,8 +11342,9 @@ fn watcher_batches_apply_one_at_a_time(cx: &mut TestAppContext) {
     let root = fixture("fuzz-apply-coalesce");
     std::fs::write(root.join("a.txt"), "a").expect("write a");
     std::fs::write(root.join("b.txt"), "b").expect("write b");
-    let folder = cx
-        .update(|cx| cx.new(|cx| crate::folder::Folder::new(root.clone(), false, crow_fs::Sort::default(), false, cx)));
+    let folder = cx.update(|cx| {
+        cx.new(|cx| crate::folder::Folder::new(root.to_path_buf(), false, crow_fs::Sort::default(), false, cx))
+    });
     cx.update(|cx| folder.update(cx, |folder, _| folder.set_apply_delay(Duration::from_millis(300))));
     cx.update(|cx| folder.update(cx, |folder, _| folder.queue_changes(vec![root.join("a.txt")])));
     cx.executor().advance_clock(Duration::from_millis(150));
@@ -11380,7 +11531,7 @@ fn first_launch_asks_once_and_show_tips_writes_auto(cx: &mut TestAppContext) {
     let window: WindowHandle<CrowWindow> = cx
         .update(|_, cx| {
             cx.open_window(Default::default(), |window, cx| {
-                cx.new(|cx| CrowWindow::new(root.clone(), false, None, window, cx))
+                cx.new(|cx| CrowWindow::new(root.to_path_buf(), false, None, window, cx))
             })
         })
         .expect("second window");

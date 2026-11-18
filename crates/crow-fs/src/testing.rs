@@ -640,10 +640,8 @@ fn move_to(rng: &mut ChaCha8Rng, path: &Path, dir: &Path, folders: &[PathBuf], n
 mod tests {
     use super::*;
 
-    fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("crow-fs-testing-{name}-{}", std::process::id()));
-        let _ = remove_tree(&dir);
-        dir
+    fn temp(name: &str) -> crate::test_support::CleanTree {
+        crate::test_support::CleanTree::new(&format!("crow-fs-testing-{name}-"))
     }
 
     fn listed(root: &Path) -> Vec<String> {
@@ -815,7 +813,7 @@ mod tests {
     fn deep_has_twenty_levels() {
         let root = temp("deep");
         let tree = make_tree(&root, &EdgeTree::single(EdgeKind::Deep(20)), 1).unwrap();
-        let mut path = root.clone();
+        let mut path = root.to_path_buf();
         for level in 0..20 {
             path.push(format!("level-{level:02}"));
         }

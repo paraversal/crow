@@ -10,3 +10,6 @@ description = "Reader for the global theme index in ~/.config/themes"
 serde.workspace = true
 serde_json.workspace = true
 notify.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

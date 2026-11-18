@@ -22,3 +22,6 @@ objc2-quick-look-ui = { version = "0.3", features = ["QLPreviewPanel", "QLPrevie
 objc2-uniform-type-identifiers = { version = "0.3", features = ["UTType"] }
 objc2-quick-look-thumbnailing = { version = "0.3", features = ["QLThumbnailGenerator", "QLThumbnailGenerationRequest", "QLThumbnailRepresentation", "block2", "objc2-core-graphics"] }
 block2 = "0.6"
+
+[dev-dependencies]
+tempfile.workspace = true

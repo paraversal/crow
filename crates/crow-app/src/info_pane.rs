@@ -627,7 +627,8 @@ mod tests {
     #[test]
     fn loaded_fields_match_stat() {
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join(format!("crow-info-stat-{}", std::process::id()));
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let path = file.path().to_path_buf();
         std::fs::write(&path, vec![b'x'; 1234]).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let entry = crow_fs::stat_entry(&path).unwrap().unwrap();
@@ -635,14 +636,13 @@ mod tests {
         let fresh = loaded.entry.expect("a fresh stat");
         assert_eq!(fresh.size, 1234, "the size matches stat");
         assert_eq!(loaded.permissions.expect("permissions").mode_string(), "-rw-r-----");
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn a_symlink_reports_its_target_and_a_dangling_one_survives() {
         use std::os::unix::fs::symlink;
-        let dir = std::env::temp_dir().join(format!("crow-info-link-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let guard = tempfile::Builder::new().prefix("crow-info-link-").tempdir().expect("temp dir");
+        let dir = guard.path();
         let target = dir.join("target.txt");
         std::fs::write(&target, vec![b'x'; 42]).unwrap();
         let link = dir.join("link.txt");
@@ -660,7 +660,6 @@ mod tests {
         let loaded = real_load(&InfoTarget::Single { entry, items: None });
         assert!(loaded.entry.is_some(), "the link itself still stats");
         assert!(loaded.permissions.is_some(), "the dangling link keeps its own mode");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[gpui::test]

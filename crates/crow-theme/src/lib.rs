@@ -381,19 +381,15 @@ mod tests {
         fs::write(p, body).unwrap();
     }
 
-    fn fixture() -> (PathBuf, PathBuf) {
-        let root = env::temp_dir().join(format!("crow-theme-test-{}-{}", std::process::id(), rand_suffix()));
-        let (dir, state) = (root.join("themes"), root.join("state"));
+    fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::Builder::new().prefix("crow-theme-test-").tempdir().expect("theme fixture");
+        let (dir, state) = (root.path().join("themes"), root.path().join("state"));
         write(&dir, "roles.json", FALLBACK_ROLES);
         write(&dir, "schemes/firebox.json", FALLBACK_SCHEME);
         let light = FALLBACK_SCHEME.replace("\"dark\"", "\"light\"").replace("FireBox", "Light One");
         write(&dir, "schemes/light-one.json", &light);
         write(&dir, "defaults.json", r#"{"dark":"firebox","light":"light-one"}"#);
-        (dir, state)
-    }
-
-    fn rand_suffix() -> u128 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        (root, dir, state)
     }
 
     #[test]
@@ -409,7 +405,7 @@ mod tests {
 
     #[test]
     fn resolution_order() {
-        let (dir, state) = fixture();
+        let (_root, dir, state) = fixture();
         assert_eq!(resolve_theme_id(Some("light-one"), Variant::Dark, &dir, &state).as_deref(), Some("light-one"));
         assert_eq!(resolve_theme_id(Some("system"), Variant::Light, &dir, &state).as_deref(), Some("light-one"));
         assert_eq!(resolve_theme_id(Some("missing"), Variant::Dark, &dir, &state).as_deref(), Some("firebox"));
@@ -419,7 +415,7 @@ mod tests {
 
     #[test]
     fn broken_scheme_is_an_error_not_a_panic() {
-        let (dir, _) = fixture();
+        let (_root, dir, _) = fixture();
         write(&dir, "schemes/broken.json", "{ not json");
         assert!(load_theme(&dir, "broken").is_err());
         assert!(list_themes(&dir).contains(&"broken".to_owned()));
@@ -427,7 +423,7 @@ mod tests {
 
     #[test]
     fn mixing_runs_from_one_theme_to_the_other() {
-        let (dir, _) = fixture();
+        let (_root, dir, _) = fixture();
         let (from, to) = (fallback(), load_theme(&dir, "light-one").unwrap());
         let mut to = to;
         to.roles.insert("bg".into(), Rgb(0xffffff));
@@ -443,7 +439,7 @@ mod tests {
 
     #[test]
     fn theme_infos_have_names_and_variants() {
-        let (dir, _) = fixture();
+        let (_root, dir, _) = fixture();
         write(&dir, "schemes/broken.json", "{");
         let infos = list_theme_infos(&dir);
         let names: Vec<_> = infos.iter().map(|i| (i.name.as_str(), i.variant)).collect();
