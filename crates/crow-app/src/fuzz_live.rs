@@ -157,13 +157,7 @@ pub fn run(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let setup = match prepare(&options) {
-        Ok(setup) => setup,
-        Err(error) => {
-            eprintln!("crow --fuzz: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
+    // Read the replay before building a tree, so a missing script leaves nothing behind.
     let replay = match &options.script {
         Some(path) => match read_script(path) {
             Ok(steps) => Some(Arc::new(steps)),
@@ -174,6 +168,13 @@ pub fn run(args: &[String]) -> ExitCode {
         },
         None => None,
     };
+    let setup = match prepare(&options) {
+        Ok(setup) => setup,
+        Err(error) => {
+            eprintln!("crow --fuzz: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     // A replay keeps its file; a generated run saves the steps it sends.
     let script_path = options.script.clone().unwrap_or_else(|| setup.support.join("script.txt"));
     let script_log = match &replay {
@@ -182,6 +183,7 @@ pub fn run(args: &[String]) -> ExitCode {
             Ok(log) => Some(log),
             Err(error) => {
                 eprintln!("crow --fuzz: {error}");
+                setup.discard();
                 return ExitCode::FAILURE;
             }
         },
@@ -241,11 +243,13 @@ pub fn run(args: &[String]) -> ExitCode {
         let Some(handle) = window::open(app_setup.root.clone(), false, None, cx) else {
             eprintln!("crow --fuzz: could not open the window");
             set_outcome(&app_outcome, Outcome { failed: true });
+            app_setup.discard();
             exit_failure();
         };
         if let Err(error) = handle.entity(cx) {
             eprintln!("crow --fuzz: {error}");
             set_outcome(&app_outcome, Outcome { failed: true });
+            app_setup.discard();
             exit_failure();
         }
         let frames = Arc::new(Mutex::new(FrameLog::default()));
@@ -315,7 +319,10 @@ pub fn run(args: &[String]) -> ExitCode {
     match outcome.lock().expect("outcome").take() {
         Some(outcome) if outcome.failed => ExitCode::FAILURE,
         Some(_) => ExitCode::SUCCESS,
-        None => ExitCode::FAILURE,
+        None => {
+            setup.discard();
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -332,6 +339,18 @@ struct TreeSetup {
     /// The temp tree, removed after a finished run; a paused run leaves it for
     /// profiling. `None` for a given folder.
     tree: Option<PathBuf>,
+}
+
+impl TreeSetup {
+    /// Remove the tool-created support folder and tree when a run fails before
+    /// its normal `cleanup` can take ownership. A supplied `--dir-is-scratch`
+    /// folder has no `tree` entry and is never touched.
+    fn discard(&self) {
+        let _ = remove_tree(&self.support);
+        if let Some(tree) = &self.tree {
+            let _ = remove_tree(tree);
+        }
+    }
 }
 
 fn prepare(options: &Options) -> Result<TreeSetup, String> {
@@ -1285,6 +1304,36 @@ mod tests {
         let error = Options::parse(&["--dir-is-scratch".into(), "--tree".into(), "none".into(), "/tmp/fuzz".into()])
             .expect_err("the tree option builds the temp tree");
         assert!(error.contains("--tree"), "{error}");
+    }
+
+    #[test]
+    fn discard_removes_tool_paths_but_not_a_supplied_tree() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::Builder::new().prefix("crow-fuzz-discard-").tempdir().expect("discard parent");
+        let support = parent.path().join("support");
+        let tree = parent.path().join("tree");
+        let supplied = parent.path().join("supplied");
+        for path in [&support, &tree, &supplied] {
+            std::fs::create_dir_all(path).expect("create discard fixture");
+        }
+        let locked = tree.join("locked");
+        std::fs::create_dir_all(&locked).expect("create locked folder");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("lock folder");
+        let setup = TreeSetup {
+            root: supplied.clone(),
+            config_dir: support.join("config"),
+            state_dir: support.join("state"),
+            trash_dir: support.join("trash"),
+            log_dir: support.join("logs"),
+            tree_label: "discard".into(),
+            support: support.clone(),
+            tree: Some(tree.clone()),
+        };
+        setup.discard();
+        assert!(!support.exists(), "the tool-created support folder is removed");
+        assert!(!tree.exists(), "the mode-000 tree is restored and removed");
+        assert!(supplied.exists(), "a supplied scratch folder is never touched");
     }
 
     #[test]
