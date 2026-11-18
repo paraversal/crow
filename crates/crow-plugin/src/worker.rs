@@ -1,0 +1,851 @@
+//! One dedicated thread and one Rhai engine per enabled plugin. The worker owns
+//! all script evaluation, the operation/deadline budget and the request-local
+//! read table; the UI only enqueues.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::io::Read;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use crow_core::{Descriptor, EntryHandle, ExtensionId, HookEvent, LocalId, PluginId, Snapshot};
+use rhai::{AST, Array, Dynamic, Engine, EvalAltResult, Map, Position, Scope};
+
+use crate::dto::{Call, CallError, CallErrorKind, EntryRef, Reply, RequestInput, RequestStamp, WorkerMessage};
+use crate::host::Inbox;
+use crate::limits::Limits;
+use crate::manifest::{API_VERSION, Manifest};
+use crate::registry;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnqueueError {
+    Busy,
+}
+
+pub(crate) struct Mailbox {
+    state: Mutex<MailboxState>,
+    ready: Condvar,
+    command_capacity: usize,
+    refresh_capacity: usize,
+}
+
+struct MailboxState {
+    commands: VecDeque<Call>,
+    refreshes: VecDeque<Call>,
+    closed: bool,
+}
+
+impl Mailbox {
+    pub fn new(limits: &Limits) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(MailboxState { commands: VecDeque::new(), refreshes: VecDeque::new(), closed: false }),
+            ready: Condvar::new(),
+            command_capacity: limits.command_mailbox,
+            refresh_capacity: limits.refresh_mailbox,
+        })
+    }
+
+    pub fn enqueue_command(&self, call: Call) -> Result<(), EnqueueError> {
+        let mut state = self.state.lock().unwrap();
+        if state.closed {
+            return Err(EnqueueError::Busy);
+        }
+        if state.commands.len() >= self.command_capacity {
+            return Err(EnqueueError::Busy);
+        }
+        state.commands.push_back(call);
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    /// Refresh work coalesces by extension/event/scope/context. A full refresh
+    /// lane drops the newest request; explicit commands report busy instead.
+    pub fn enqueue_refresh(&self, call: Call) {
+        let mut state = self.state.lock().unwrap();
+        if state.closed {
+            return;
+        }
+        if let Some(key) = call.coalesce_key()
+            && let Some(index) = state.refreshes.iter().position(|queued| queued.coalesce_key().as_ref() == Some(&key))
+        {
+            state.refreshes[index] = call;
+            self.ready.notify_one();
+            return;
+        }
+        if state.refreshes.len() >= self.refresh_capacity {
+            return;
+        }
+        state.refreshes.push_back(call);
+        self.ready.notify_one();
+    }
+
+    fn recv(&self, cancel: &AtomicBool) -> Option<Call> {
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if let Some(call) = state.commands.pop_front() {
+                return Some(call);
+            }
+            if let Some(call) = state.refreshes.pop_front() {
+                return Some(call);
+            }
+            if state.closed || cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            let (guard, _) = self.ready.wait_timeout(state, Duration::from_millis(10)).unwrap();
+            state = guard;
+        }
+    }
+
+    pub fn close(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.closed = true;
+        self.ready.notify_all();
+    }
+}
+
+pub(crate) struct Worker {
+    pub mailbox: Arc<Mailbox>,
+    cancel: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl Worker {
+    pub fn spawn(
+        plugin: PluginId,
+        generation: u64,
+        snapshot: Arc<crate::package::PackageSnapshot>,
+        read_allowed: bool,
+        limits: Limits,
+        inbox: Sender<Inbox>,
+    ) -> Result<Self, String> {
+        let mailbox = Mailbox::new(&limits);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let runtime = Arc::new(Runtime::new(cancel.clone()));
+        let thread_mailbox = mailbox.clone();
+        let thread_cancel = cancel.clone();
+        let join = thread::Builder::new()
+            .name(format!("crow-plugin-{plugin}"))
+            .spawn(move || {
+                worker_main(
+                    plugin,
+                    generation,
+                    snapshot,
+                    read_allowed,
+                    limits,
+                    thread_mailbox,
+                    thread_cancel,
+                    runtime,
+                    inbox,
+                );
+            })
+            .map_err(|error| format!("could not start worker: {error}"))?;
+        Ok(Self { mailbox, cancel, join: Some(join) })
+    }
+
+    pub fn stop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        self.mailbox.close();
+    }
+
+    pub fn take_join(&mut self) -> Option<JoinHandle<()>> {
+        self.join.take()
+    }
+}
+
+struct Runtime {
+    cancel: Arc<AtomicBool>,
+    deadline: Mutex<Option<Instant>>,
+    terminate: AtomicU8,
+    violation: AtomicBool,
+    read_allowed: AtomicBool,
+    reads: Mutex<BTreeMap<EntryHandle, EntryRef>>,
+}
+
+impl Runtime {
+    fn new(cancel: Arc<AtomicBool>) -> Self {
+        Self {
+            cancel,
+            deadline: Mutex::new(None),
+            terminate: AtomicU8::new(0),
+            violation: AtomicBool::new(false),
+            read_allowed: AtomicBool::new(false),
+            reads: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn begin(&self, deadline: Instant, reads: &BTreeMap<EntryHandle, EntryRef>, read_allowed: bool) {
+        *self.deadline.lock().unwrap() = Some(deadline);
+        *self.reads.lock().unwrap() = reads.clone();
+        self.read_allowed.store(read_allowed, Ordering::Relaxed);
+        self.terminate.store(0, Ordering::Relaxed);
+        self.violation.store(false, Ordering::Relaxed);
+    }
+
+    fn end(&self) {
+        *self.deadline.lock().unwrap() = None;
+        self.reads.lock().unwrap().clear();
+        self.read_allowed.store(false, Ordering::Relaxed);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn worker_main(
+    plugin: PluginId,
+    generation: u64,
+    snapshot: Arc<crate::package::PackageSnapshot>,
+    read_allowed: bool,
+    limits: Limits,
+    mailbox: Arc<Mailbox>,
+    cancel: Arc<AtomicBool>,
+    runtime: Arc<Runtime>,
+    inbox: Sender<Inbox>,
+) {
+    let source = match std::str::from_utf8(snapshot.entry_source()) {
+        Ok(source) => source,
+        Err(_) => {
+            send(
+                &inbox,
+                WorkerMessage::Registered {
+                    plugin,
+                    generation,
+                    result: Err(CallError::script("entry script is not UTF-8")),
+                },
+            );
+            return;
+        }
+    };
+    let assets: Arc<BTreeMap<String, Arc<[u8]>>> = Arc::new(
+        snapshot
+            .manifest
+            .assets
+            .iter()
+            .filter_map(|name| snapshot.files.get(name).map(|bytes| (name.clone(), bytes.clone())))
+            .collect(),
+    );
+    let mut engine = build_engine(&limits, runtime.clone(), assets.clone(), limits.max_read_bytes);
+    let ast = match engine.compile(source) {
+        Ok(ast) => ast,
+        Err(error) => {
+            send(
+                &inbox,
+                WorkerMessage::Registered {
+                    plugin,
+                    generation,
+                    result: Err(CallError::script(format!("compile error: {error}"))),
+                },
+            );
+            return;
+        }
+    };
+    if !ast.iter_functions().any(|function| function.name == "register" && function.params.is_empty()) {
+        send(
+            &inbox,
+            WorkerMessage::Registered {
+                plugin,
+                generation,
+                result: Err(CallError::invalid("script has no register() entry point")),
+            },
+        );
+        return;
+    }
+
+    let Some(Call::Register) = mailbox.recv(&cancel) else {
+        return;
+    };
+    let deadline = Instant::now() + limits.call_deadline;
+    let registered = register_package(&engine, &ast, &plugin, &snapshot.manifest, &runtime, deadline, &limits);
+    match registered {
+        Ok(descriptors) => {
+            send(
+                &inbox,
+                WorkerMessage::Registered { plugin: plugin.clone(), generation, result: Ok(descriptors.clone()) },
+            );
+            let mut by_local: BTreeMap<LocalId, Descriptor> =
+                descriptors.into_iter().map(|descriptor| (descriptor.id.local.clone(), descriptor)).collect();
+            run_loop(
+                &plugin,
+                generation,
+                &mut engine,
+                &ast,
+                &snapshot,
+                read_allowed,
+                &limits,
+                &mailbox,
+                &cancel,
+                &runtime,
+                &inbox,
+                &mut by_local,
+            );
+        }
+        Err(error) => {
+            send(&inbox, WorkerMessage::Registered { plugin, generation, result: Err(error) });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_loop(
+    plugin: &PluginId,
+    generation: u64,
+    engine: &mut Engine,
+    ast: &AST,
+    snapshot: &crate::package::PackageSnapshot,
+    read_allowed: bool,
+    limits: &Limits,
+    mailbox: &Mailbox,
+    cancel: &AtomicBool,
+    runtime: &Runtime,
+    inbox: &Sender<Inbox>,
+    registered: &mut BTreeMap<LocalId, Descriptor>,
+) {
+    while let Some(call) = mailbox.recv(cancel) {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let deadline = Instant::now() + limits.call_deadline;
+        let result: Result<(ExtensionId, RequestStamp, Reply), CallError> = match call {
+            Call::Register => Err(CallError::script("register() ran twice")),
+            Call::Evaluate { extension, input, stamp } => evaluate(
+                engine,
+                ast,
+                snapshot,
+                read_allowed,
+                runtime,
+                registered,
+                extension.clone(),
+                input,
+                stamp,
+                deadline,
+                limits,
+            )
+            .map(|(stamp, reply)| (extension, stamp, reply)),
+            Call::Notify { extension, event, stamp } => notify(
+                engine,
+                ast,
+                read_allowed,
+                runtime,
+                registered,
+                extension.clone(),
+                event,
+                stamp,
+                deadline,
+                limits,
+            )
+            .map(|(stamp, reply)| (extension, stamp, reply)),
+        };
+        match result {
+            Ok((extension, stamp, reply)) => {
+                send(inbox, WorkerMessage::Replied { plugin: plugin.clone(), generation, extension, stamp, reply });
+            }
+            Err(error) => {
+                send(inbox, WorkerMessage::Failed { plugin: plugin.clone(), generation, error: error.clone() });
+                if error.kind != CallErrorKind::Cancelled {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_package(
+    engine: &Engine,
+    ast: &AST,
+    plugin: &PluginId,
+    manifest: &Manifest,
+    runtime: &Runtime,
+    deadline: Instant,
+    limits: &Limits,
+) -> Result<Vec<Descriptor>, CallError> {
+    runtime.begin(deadline, &BTreeMap::new(), false);
+    let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, "register", ());
+    runtime.end();
+    let value = value.map_err(|error| call_error(error, runtime))?;
+    registry::validate_registration(plugin, manifest, ast, value, limits)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate(
+    engine: &Engine,
+    ast: &AST,
+    snapshot: &crate::package::PackageSnapshot,
+    read_allowed: bool,
+    runtime: &Runtime,
+    registered: &BTreeMap<LocalId, Descriptor>,
+    extension: ExtensionId,
+    input: RequestInput,
+    stamp: RequestStamp,
+    deadline: Instant,
+    limits: &Limits,
+) -> Result<(RequestStamp, Reply), CallError> {
+    input.validate(limits).map_err(CallError::invalid)?;
+    let descriptor = registered
+        .get(&extension.local)
+        .ok_or_else(|| CallError::invalid(format!("unknown extension \"{extension}\"")))?;
+    if descriptor.kind == crow_core::ExtensionKind::Hook || descriptor.kind == crow_core::ExtensionKind::IconPack {
+        return Err(CallError::invalid(format!("extension \"{extension}\" is not evaluated directly")));
+    }
+    let function = descriptor.function.as_deref().ok_or_else(|| CallError::invalid("extension has no function"))?;
+    runtime.begin(deadline, &input.reads, read_allowed);
+    let context = input_map(&input.snapshot);
+    let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, function, (context,));
+    runtime.end();
+    let value = value.map_err(|error| call_error(error, runtime))?;
+    let reply = registry::reply_for(descriptor, value, &input, limits)?;
+    if snapshot.manifest.id != extension.plugin {
+        return Err(CallError::invalid("extension plugin does not match the package"));
+    }
+    Ok((stamp, reply))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn notify(
+    engine: &Engine,
+    ast: &AST,
+    read_allowed: bool,
+    runtime: &Runtime,
+    registered: &BTreeMap<LocalId, Descriptor>,
+    extension: ExtensionId,
+    event: HookEvent,
+    stamp: RequestStamp,
+    deadline: Instant,
+    limits: &Limits,
+) -> Result<(RequestStamp, Reply), CallError> {
+    let descriptor = registered
+        .get(&extension.local)
+        .ok_or_else(|| CallError::invalid(format!("unknown extension \"{extension}\"")))?;
+    if descriptor.kind != crow_core::ExtensionKind::Hook {
+        return Err(CallError::invalid(format!("extension \"{extension}\" is not a hook")));
+    }
+    let function = descriptor.function.as_deref().ok_or_else(|| CallError::invalid("hook has no function"))?;
+    runtime.begin(deadline, &BTreeMap::new(), read_allowed);
+    let context = event_map(&event);
+    let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, function, (context,));
+    runtime.end();
+    let value = value.map_err(|error| call_error(error, runtime))?;
+    let reply = registry::reply_for(descriptor, value, &empty_input(), limits)?;
+    Ok((stamp, reply))
+}
+
+fn empty_input() -> RequestInput {
+    RequestInput {
+        snapshot: Snapshot { scope: String::new(), selection: None, entries: Vec::new() },
+        reads: BTreeMap::new(),
+    }
+}
+
+fn build_engine(
+    limits: &Limits,
+    runtime: Arc<Runtime>,
+    assets: Arc<BTreeMap<String, Arc<[u8]>>>,
+    max_read: usize,
+) -> Engine {
+    let mut engine = Engine::new();
+    engine.set_max_operations(limits.max_operations);
+    engine.set_max_expr_depths(limits.max_expression_depth as usize, limits.max_expression_depth as usize);
+    engine.set_max_call_levels(limits.max_call_levels);
+    engine.set_max_array_size(limits.max_array_size);
+    engine.set_max_map_size(limits.max_map_size);
+    engine.set_max_string_size(limits.max_result_bytes);
+    engine.set_max_modules(0);
+    engine.on_print(|_| {});
+    engine.on_debug(|_, _, _| {});
+    let progress = runtime.clone();
+    engine.on_progress(move |_| {
+        if progress.cancel.load(Ordering::Relaxed) {
+            progress.terminate.store(2, Ordering::Relaxed);
+            return Some(Dynamic::UNIT);
+        }
+        if progress.deadline.lock().unwrap().is_some_and(|deadline| Instant::now() >= deadline) {
+            progress.terminate.store(1, Ordering::Relaxed);
+            return Some(Dynamic::UNIT);
+        }
+        None
+    });
+    let read_runtime = runtime.clone();
+    engine.register_fn("read_excerpt", move |handle: i64| -> Result<String, Box<EvalAltResult>> {
+        read_excerpt(&read_runtime, handle, max_read)
+    });
+    let asset_closure = assets;
+    let asset_runtime = runtime.clone();
+    engine.register_fn("asset", move |name: &str| -> Result<String, Box<EvalAltResult>> {
+        let Some(bytes) = asset_closure.get(name) else {
+            asset_runtime.violation.store(true, Ordering::Relaxed);
+            return Err(runtime_error(format!("asset \"{name}\" is not declared in plugin.toml")));
+        };
+        String::from_utf8(bytes.to_vec()).map_err(|_| runtime_error(format!("asset \"{name}\" is not UTF-8 text")))
+    });
+    engine
+}
+
+fn input_map(snapshot: &Snapshot) -> Map {
+    let mut map = Map::new();
+    map.insert("api".into(), Dynamic::from(API_VERSION as i64));
+    map.insert("scope".into(), Dynamic::from(snapshot.scope.clone()));
+    if let Some(selection) = snapshot.selection {
+        map.insert("selection".into(), Dynamic::from(selection.0 as i64));
+    }
+    let entries: Array = snapshot
+        .entries
+        .iter()
+        .map(|entry| {
+            let mut item = Map::new();
+            item.insert("handle".into(), Dynamic::from(entry.handle.0 as i64));
+            item.insert("name".into(), Dynamic::from(entry.name.clone()));
+            item.insert("is_dir".into(), Dynamic::from(entry.is_dir));
+            item.insert("size".into(), Dynamic::from(entry.size.min(i64::MAX as u64) as i64));
+            item.insert("kind".into(), Dynamic::from(entry.kind.clone()));
+            Dynamic::from(item)
+        })
+        .collect();
+    map.insert("entries".into(), Dynamic::from(entries));
+    map
+}
+
+fn event_map(event: &HookEvent) -> Map {
+    let mut map = Map::new();
+    map.insert("api".into(), Dynamic::from(API_VERSION as i64));
+    map.insert("kind".into(), Dynamic::from(event.kind().to_owned()));
+    if let Some(scope) = event.scope() {
+        map.insert("scope".into(), Dynamic::from(scope.to_owned()));
+    }
+    map
+}
+
+fn read_excerpt(runtime: &Runtime, handle: i64, max_bytes: usize) -> Result<String, Box<EvalAltResult>> {
+    if !runtime.read_allowed.load(Ordering::Relaxed) {
+        runtime.violation.store(true, Ordering::Relaxed);
+        return Err(runtime_error("the fs read capability is not granted"));
+    }
+    let Ok(handle) = u32::try_from(handle) else {
+        return Err(runtime_error(format!("entry handle {handle} is out of range")));
+    };
+    let entry = runtime.reads.lock().unwrap().get(&EntryHandle(handle)).cloned();
+    let Some(entry) = entry else {
+        return Err(runtime_error(format!("entry handle {handle} is not in this request")));
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&entry.path)
+        .map_err(|error| runtime_error(format!("{}: {error}", entry.path.display())))?;
+    let metadata = file.metadata().map_err(|error| runtime_error(error.to_string()))?;
+    if !metadata.is_file() {
+        runtime.violation.store(true, Ordering::Relaxed);
+        return Err(runtime_error(format!("{} is not a regular file", entry.path.display())));
+    }
+    if let Some((device, inode)) = entry.identity
+        && (metadata.dev() != device || metadata.ino() != inode)
+    {
+        runtime.violation.store(true, Ordering::Relaxed);
+        return Err(runtime_error("entry identity changed since the request was created"));
+    }
+    let mut bytes = Vec::with_capacity(max_bytes.min(metadata.len() as usize));
+    file.take(max_bytes as u64 + 1).read_to_end(&mut bytes).map_err(|error| runtime_error(error.to_string()))?;
+    if bytes.len() > max_bytes {
+        bytes.truncate(max_bytes);
+        if let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') {
+            bytes.truncate(last_newline + 1);
+        }
+    }
+    if bytes.contains(&0) {
+        return Err(runtime_error("file is binary"));
+    }
+    String::from_utf8(bytes).map_err(|_| runtime_error("file is not UTF-8 text"))
+}
+
+fn call_error(error: Box<EvalAltResult>, runtime: &Runtime) -> CallError {
+    if runtime.violation.load(Ordering::Relaxed) {
+        return CallError::capability(error.to_string());
+    }
+    match *error {
+        EvalAltResult::ErrorTooManyOperations(_) => CallError::budget("operation budget exhausted"),
+        EvalAltResult::ErrorTerminated(_, _) => match runtime.terminate.load(Ordering::Relaxed) {
+            2 => CallError::cancelled(),
+            _ => CallError::budget("evaluation deadline exceeded"),
+        },
+        EvalAltResult::ErrorDataTooLarge(_, _) => CallError::invalid(error.to_string()),
+        other => CallError::script(other.to_string()),
+    }
+}
+
+fn runtime_error(message: impl Into<String>) -> Box<EvalAltResult> {
+    Box::new(EvalAltResult::ErrorRuntime(Dynamic::from(message.into()), Position::NONE))
+}
+
+fn send(inbox: &Sender<Inbox>, message: WorkerMessage) {
+    let _ = inbox.send(Inbox::Worker(message));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dto::{EntryRef, RequestInput};
+    use crate::manifest::FsAccess;
+    use crow_core::{EntryData, ExtensionId};
+    use std::sync::mpsc::{Receiver, channel};
+
+    fn limits() -> Limits {
+        Limits::default()
+    }
+
+    fn manifest(fs_read: bool, assets: &[&str]) -> Manifest {
+        let fs = if fs_read { "read" } else { "none" };
+        let assets = if assets.is_empty() {
+            String::new()
+        } else {
+            format!("assets = [{}]\n", assets.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", "))
+        };
+        crate::manifest::parse_manifest(
+            &format!(
+                r#"
+id = "example.test"
+name = "Test"
+version = "0.1.0"
+api = 1
+entry = "main.rhai"
+provides = ["command"]
+{assets}permissions = {{ fs = "{fs}" }}
+"#
+            ),
+            &limits(),
+        )
+        .unwrap()
+    }
+
+    fn snapshot(source: &str, fs_read: bool, assets: &[(&str, &str)]) -> Arc<crate::package::PackageSnapshot> {
+        let mut manifest = manifest(fs_read, &assets.iter().map(|(name, _)| *name).collect::<Vec<_>>());
+        if fs_read {
+            manifest.permissions.fs = Some(FsAccess::Read);
+        }
+        let mut files = BTreeMap::new();
+        files.insert("plugin.toml".into(), Arc::from(&b"manifest"[..]));
+        files.insert("main.rhai".into(), Arc::from(source.as_bytes()));
+        for (name, content) in assets {
+            files.insert((*name).to_owned(), Arc::from(content.as_bytes()));
+        }
+        Arc::new(crate::package::PackageSnapshot { manifest, files, digest: "a".repeat(64) })
+    }
+
+    fn input(path: std::path::PathBuf) -> RequestInput {
+        RequestInput {
+            snapshot: Snapshot {
+                scope: "/tmp".into(),
+                selection: Some(EntryHandle(1)),
+                entries: vec![EntryData {
+                    handle: EntryHandle(1),
+                    name: "a.txt".into(),
+                    is_dir: false,
+                    size: 5,
+                    kind: "Text".into(),
+                }],
+            },
+            reads: BTreeMap::from([(EntryHandle(1), EntryRef::new(path))]),
+        }
+    }
+
+    fn next(rx: &Receiver<Inbox>, timeout: Duration) -> WorkerMessage {
+        let started = Instant::now();
+        loop {
+            match rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(Inbox::Worker(message)) => return message,
+                Ok(Inbox::Command(_)) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    assert!(started.elapsed() < timeout, "worker reply timed out");
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("worker channel closed"),
+            }
+        }
+    }
+
+    fn spawn(
+        source: &str,
+        fs_read: bool,
+        read_allowed: bool,
+        assets: &[(&str, &str)],
+        limits: Limits,
+    ) -> (Worker, Receiver<Inbox>) {
+        let (tx, rx) = channel();
+        let worker = Worker::spawn(
+            PluginId::parse("example.test").unwrap(),
+            1,
+            snapshot(source, fs_read, assets),
+            read_allowed,
+            limits,
+            tx,
+        )
+        .unwrap();
+        worker.mailbox.enqueue_command(Call::Register).unwrap();
+        match next(&rx, Duration::from_secs(2)) {
+            WorkerMessage::Registered { result: Ok(_), .. } => {}
+            other => panic!("registration failed: {other:?}"),
+        }
+        (worker, rx)
+    }
+
+    fn command_source(body: &str) -> String {
+        format!(
+            r#"
+fn register() {{ [ #{{ kind: "command", id: "copy", title: "Copy", function: "run" }} ] }}
+fn run(ctx) {{ {body} }}
+"#
+        )
+    }
+
+    fn evaluate(worker: &Worker, path: std::path::PathBuf) {
+        let extension = ExtensionId::new(PluginId::parse("example.test").unwrap(), LocalId::parse("copy").unwrap());
+        worker
+            .mailbox
+            .enqueue_command(Call::Evaluate {
+                extension,
+                input: input(path),
+                stamp: RequestStamp { generation: 1, request_id: 1, context_revision: 4 },
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn granted_read_is_scoped_to_the_request_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "hello").unwrap();
+        let (mut worker, rx) = spawn(
+            &command_source(r#"#{ action: "copy-text", text: read_excerpt(ctx.selection) }"#),
+            true,
+            true,
+            &[],
+            limits(),
+        );
+        evaluate(&worker, path);
+        match next(&rx, Duration::from_secs(2)) {
+            WorkerMessage::Replied { reply: Reply::Intent(crow_core::CommandIntent::CopyText(text)), .. } => {
+                assert_eq!(text, "hello");
+            }
+            other => panic!("{other:?}"),
+        }
+        worker.stop();
+    }
+
+    #[test]
+    fn denied_read_and_undeclared_asset_are_capability_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "hello").unwrap();
+        let (worker, rx) = spawn(
+            &command_source(r#"#{ action: "copy-text", text: read_excerpt(ctx.selection) }"#),
+            false,
+            false,
+            &[],
+            limits(),
+        );
+        evaluate(&worker, path.clone());
+        match next(&rx, Duration::from_secs(2)) {
+            WorkerMessage::Failed { error, .. } => assert_eq!(error.kind, CallErrorKind::Capability),
+            other => panic!("{other:?}"),
+        }
+
+        let (worker, rx) = spawn(
+            &command_source(r#"#{ action: "copy-text", text: asset("missing.txt") }"#),
+            false,
+            false,
+            &[],
+            limits(),
+        );
+        evaluate(&worker, path);
+        match next(&rx, Duration::from_secs(2)) {
+            WorkerMessage::Failed { error, .. } => assert_eq!(error.kind, CallErrorKind::Capability),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn declared_asset_is_readable_and_undeclared_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "hello").unwrap();
+        let (mut worker, rx) = spawn(
+            &command_source(r#"#{ action: "copy-text", text: asset("note.txt") }"#),
+            false,
+            false,
+            &[("note.txt", "declared")],
+            limits(),
+        );
+        evaluate(&worker, path);
+        match next(&rx, Duration::from_secs(2)) {
+            WorkerMessage::Replied { reply: Reply::Intent(crow_core::CommandIntent::CopyText(text)), .. } => {
+                assert_eq!(text, "declared");
+            }
+            other => panic!("{other:?}"),
+        }
+        worker.stop();
+    }
+
+    #[test]
+    fn deadline_and_operation_budget_terminate_and_report_budget() {
+        let (worker, rx) = spawn(&command_source("while true { }"), false, false, &[], {
+            let mut limits = limits();
+            limits.max_operations = 0;
+            limits.call_deadline = Duration::from_millis(20);
+            limits
+        });
+        evaluate(&worker, std::path::PathBuf::from("/tmp/a.txt"));
+        match next(&rx, Duration::from_secs(2)) {
+            WorkerMessage::Failed { error, .. } => assert_eq!(error.kind, CallErrorKind::Budget),
+            other => panic!("{other:?}"),
+        }
+
+        let (worker, rx) = spawn(&command_source("while true { }"), false, false, &[], {
+            let mut limits = limits();
+            limits.max_operations = 2_000;
+            limits.call_deadline = Duration::from_secs(5);
+            limits
+        });
+        evaluate(&worker, std::path::PathBuf::from("/tmp/a.txt"));
+        match next(&rx, Duration::from_secs(2)) {
+            WorkerMessage::Failed { error, .. } => assert_eq!(error.kind, CallErrorKind::Budget),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn mailbox_coalesces_refreshes_and_prioritizes_commands() {
+        let mut limits = limits();
+        limits.command_mailbox = 1;
+        limits.refresh_mailbox = 2;
+        let mailbox = Mailbox::new(&limits);
+        let extension = ExtensionId::new(PluginId::parse("example.test").unwrap(), LocalId::parse("copy").unwrap());
+        let notify = |request_id| Call::Notify {
+            extension: extension.clone(),
+            event: crow_core::HookEvent::FilesChanged { scope: "/tmp".into() },
+            stamp: RequestStamp { generation: 1, request_id, context_revision: 1 },
+        };
+        mailbox.enqueue_refresh(notify(1));
+        mailbox.enqueue_refresh(notify(2));
+        let cancel = AtomicBool::new(false);
+        match mailbox.recv(&cancel).unwrap() {
+            Call::Notify { stamp, .. } => assert_eq!(stamp.request_id, 2, "same key keeps the newest stamp"),
+            other => panic!("{other:?}"),
+        }
+        cancel.store(true, Ordering::Relaxed);
+        assert!(mailbox.recv(&cancel).is_none(), "one refresh was coalesced away");
+
+        let cancel = AtomicBool::new(false);
+        mailbox.enqueue_refresh(notify(3));
+        mailbox
+            .enqueue_command(Call::Evaluate {
+                extension,
+                input: input(std::path::PathBuf::from("/tmp/a.txt")),
+                stamp: RequestStamp { generation: 1, request_id: 4, context_revision: 1 },
+            })
+            .unwrap();
+        match mailbox.recv(&cancel).unwrap() {
+            Call::Evaluate { stamp, .. } => assert_eq!(stamp.request_id, 4, "commands go first"),
+            other => panic!("{other:?}"),
+        }
+        assert!(mailbox.enqueue_command(Call::Register).is_ok());
+        assert_eq!(mailbox.enqueue_command(Call::Register), Err(EnqueueError::Busy));
+    }
+}

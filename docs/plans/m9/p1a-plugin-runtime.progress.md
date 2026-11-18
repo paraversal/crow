@@ -6,13 +6,13 @@ Branch: `codex/m9-p1a-plugin-runtime` · Base: `cb21dcb` (M8.5 B5, merged) · La
 
 | Item | State | Notes |
 | --- | --- | --- |
-| 1 package identity, discovery, snapshot, digest | todo | New GPUI-free `crow-plugin` crate; manifest validation, symlink-safe bounded reads, SHA-256 snapshot |
-| 2 grants store and lifecycle | todo | `plugins.toml`, approve/disable/reload, generation invalidation, status with plugin name |
-| 3 capability matrix and host boundary | todo | Document API-1 (`fs = none/read`), reject `spawn`/`net`, handle-scoped reads, no raw paths |
-| 4 worker, engine, budgets, mailbox | todo | One thread + engine per plugin, 100k ops/50 ms, bounded lanes, coalesced refresh, pause/retry |
-| 5 registration, namespace, DTOs | todo | `plugin_id.local_id`, validation against `provides`, atomic publish, closed contribution values |
+| 1 package identity, discovery, snapshot, digest | done | `crow-plugin` manifest/package modules; deny-unknown TOML, ID/version/API/capability checks, no-follow `openat`, bounded reads, SHA-256 framing, duplicate IDs publish nothing |
+| 2 grants store and lifecycle | in progress | Core `plugins.toml` approve/disable/enable, exact digest+capability match, malformed file withdraws all, generation invalidation; app grant path left |
+| 3 capability matrix and host boundary | in progress | API-1 `fs = none/read` enforced; spawn/net rejected before a worker; handle-scoped `read_excerpt`, `asset`, no raw paths/shell/net; matrix doc left |
+| 4 worker, engine, budgets, mailbox | done | One thread+engine per plugin; 100k ops/50 ms; bounded command lane (busy) + coalesced refresh; pause/retry; cooperative stop; A/B test passes |
+| 5 registration, namespace, DTOs | done | `plugin_id.local_id`, `provides` check, duplicate rejection, closed reply shapes, request-local handles, typed command allowlist (`copy-text`) |
 | 6 app inventory and grant path | todo | Minimal inspectable UI, status-line errors, background discovery/config reload |
-| 7 step checks and acceptance fixtures | todo | Loader swap, A/B workers, grant reload, unsupported capabilities, bounds, stale replies |
+| 7 step checks and acceptance fixtures | in progress | Package/loader/grants/worker/host fixtures pass; app inventory/grant test pending |
 | 8 checks, docs and handoff | todo | fmt/clippy/test, capability matrix, Ready for critique |
 
 ## Questions
@@ -40,7 +40,9 @@ Branch: `codex/m9-p1a-plugin-runtime` · Base: `cb21dcb` (M8.5 B5, merged) · La
 
 - 2026-11-18 Started. Read the plan, M9 index, finish contract, repo rules, `crow-core::extensions`, config/status conventions. Base `cb21dcb`; branch created. Scout mapping the settings/status/background integration points while the crate design is written.
 - 2026-11-18 Progress file created before code.
+- 2026-11-18 Built `crates/crow-plugin`: ids/DTOs in `crow-core::extensions`, manifest, package snapshot (no-follow, bounded, SHA-256), grants, Rhai worker, registry validation, host lifecycle + service wrapper. 38 unit tests pass (loader swap, duplicate IDs, symlink entry/asset, grant invalidation, malformed grants, denied read/native, oversized input/reply, budget, queue saturation, A/B, stale reply). Clippy clean for the crate.
+- 2026-11-18 Next: wire the app inventory/grant path and status line, then capability matrix doc and full checks.
 
 ## Next
 
-Finish the integration map, then create `crates/crow-plugin` with identity/manifest/snapshot (item 1).
+Wire `crow-plugin` into the app: background service global, settings inventory with approve/disable/reload/retry, status-line errors, config/plugin watcher reload.
