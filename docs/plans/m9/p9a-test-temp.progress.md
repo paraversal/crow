@@ -1,5 +1,5 @@
 # P9A — Own temporary fixtures for their full lifetime progress
-Branch: `codex/m9-p9a-test-temp` · PR: none · Base: `083d40c` (M9 P1A, merged) · Last updated: 2026-11-18 · State: In critique
+Branch: `codex/m9-p9a-test-temp` · PR: [#62](https://github.com/paraversal/file-crow/pull/62) · Base: `083d40c` (M9 P1A, merged) · Last updated: 2026-11-18 · State: PR open
 
 ## Status
 | Item | State | Notes |
