@@ -46,7 +46,7 @@ the fixture's files contain `needle` only, so their numbers are a full walk. B5 
 - [x] Light and dark, 640 px and wide: FireBox and `solarized-light` at 1280×800 (`m85-backu-home-hidden-off-solarized-light.png`); 640×800 (`m85-backu-home-hidden-off-640-firebox.png`) keeps the footer on one line and the hidden rows dimmed. VoiceOver, This Mac and the grouped skipped list remain for the user's hand test.
 
 ## Found along the way
-- `crates/crow-app/src/palette.rs` and parts of `docs/testing.md` changed outside this plan while B5 was running (the palette test became a correctness check and `docs/testing.md` gained a release command). Not touched or committed here; the full check gate ran before those edits.
+- The 78k-file palette test took 738 ms in CI, exceeding its 650 ms debug cutoff. The follow-up keeps all five queries and checks result counts, the top hit and its highlight. `docs/testing.md` gives the release command for comparing the same workload against `main`.
 - `docs/ROADMAP.md` still says M8 is in progress and its M8 section says F1 only; M8 is merged on `main` (through #55) but its index/progress files were not moved. Left alone; the M8.5 links were updated.
 
 ## Log
@@ -57,6 +57,7 @@ the fixture's files contain `needle` only, so their numbers are a full walk. B5 
 - 2026-11-18: bench done on `main` (`../file-crow-b5-main`, shared target) and the branch; all four rows inside budget, branch ≤ main on total and first hit. Full check gate passed (`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, 81 s).
 - 2026-11-18: hand checks on the branch bundle: `.back`/`.backu` with hidden on and off, Cmd-K dot names, Search Home from a miss, Names miss and Contents hits, the 200k cap and a late exact name, FireBox/Solarized Light, 1280 and 640. `--search-trace ~ .backu --hidden` put the name hit at 4.9 s (batch 71). This machine's file is `~/.backup-excludes`.
 - 2026-11-18: `fuzz_long` 5 minutes: seed 1795006983320860000, churn off, 313.68 s, passed with no violation. Log `/tmp/crow-fuzz-long-b5.log`.
+- 2026-11-18: palette CI follow-up passed `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` outside the sandbox (823 passed, 1 ignored).
 
 ## Next
 Ready for critique. The critic opens the PR; This Mac, the grouped skipped list and VoiceOver remain for the user's hand test.

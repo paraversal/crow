@@ -289,7 +289,11 @@ cargo run --release -p crow-app -- --make-search-corpus target/fixture-search-co
 cargo run --release -p crow-app -- --bench-search target/fixture-search-200k
 cargo run --release -p crow-app -- --bench-search target/fixture-search-200k backup
 cargo run --release -p crow-app -- --bench-search target/fixture-search-200k file-01-02 --names
+cargo test --release -p crow-app --bin crow palette::tests::path_completion_filters_many_files -- --nocapture
 ```
+
+The palette test reports matcher time for five partials over 78k names. Compare release times
+with `main` on the same machine. The full palette refresh budget is in the manual checks below.
 
 `--bench-search DIR [QUERY] [--names|--contents]` times the walk, fuzzy names and content reads;
 `QUERY` defaults to `needle`, and the match flags restrict it as the panel's control does. It prints
