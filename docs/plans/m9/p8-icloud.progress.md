@@ -1,6 +1,6 @@
 # M9 P8 — iCloud metadata without hydration — progress
 
-Branch: codex/m9-p8-icloud · PR: none · Last updated: 2026-11-18 · State: **In critique**
+Branch: codex/m9-p8-icloud · PR: [#65](https://github.com/paraversal/file-crow/pull/65) · Last updated: 2026-11-18 · State: **PR open**
 Base: `b035537` (M9 P9C, merged as #64)
 
 ## Status
@@ -220,8 +220,10 @@ on `main`. Names took 190 ms on P8 and 191 ms on `main`.
 
 The branch makes download state visible and keeps routine browsing from downloading the checked
 iCloud placeholder. The remaining provider and spoken-accessibility checks are listed above.
+The latest 640 pt build shows the full cloud glyph and leaves unbadged filenames at their
+usual width. The scratch folder was moved to Trash after the final dataless check.
 
 ## Next
 
-Critique in progress. Re-run the iCloud probe only after creating a fresh scratch fixture, since
-the original was removed.
+Review and hand-test [PR #65](https://github.com/paraversal/file-crow/pull/65). After P8 and the
+P1A fix merge, execute plan P1B. Create a fresh scratch fixture for any further iCloud probes.
