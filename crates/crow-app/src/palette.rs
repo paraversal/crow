@@ -674,6 +674,8 @@ pub struct FolderCandidate {
     pub source: Source,
     /// Higher is more recent/frequent; 0 for favorites and subfolders not in Recent.
     pub frecency: f64,
+    /// A dot name or the Finder hidden flag; dimmed and demoted like search rows.
+    pub hidden: bool,
     /// Seconds since the epoch, from Recent's own visits. A zoxide-only entry has none.
     pub last_visit: Option<u64>,
 }
@@ -693,6 +695,8 @@ pub enum Item {
         /// Byte offset of the name inside `label`; `None` for the home folder.
         name_start: Option<usize>,
         source: Source,
+        /// A dot name or the Finder hidden flag; drawn dimmed, spoken as "hidden".
+        hidden: bool,
         last_visit: Option<u64>,
         /// Matched letters as byte ranges in `label`.
         matched: Vec<Range<usize>>,
@@ -783,7 +787,19 @@ pub fn folder_candidates(
     let push = |path: PathBuf, source: Source, frecency: f64, out: &mut Vec<FolderCandidate>| {
         let label = crate::style::display_path(&path, home);
         let (name, name_start) = folder_name(&path, &label, home);
-        out.push(FolderCandidate { name, name_start, label, source, frecency, last_visit: last_visit(&path), path });
+        // A dot name is the part a listing can know without a stat; the palette
+        // candidates come from paths, not `crow_fs::Entry`.
+        let hidden = path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.'));
+        out.push(FolderCandidate {
+            name,
+            name_start,
+            label,
+            source,
+            frecency,
+            hidden,
+            last_visit: last_visit(&path),
+            path,
+        });
     };
     for path in favorites {
         if seen.insert(path.clone()) {
@@ -808,12 +824,40 @@ pub fn folder_candidates(
     out
 }
 
+/// A hidden folder found by the palette's own listing of the current folder
+/// (the pane's subfolders leave hidden ones out while Show Hidden Files is off).
+pub fn hidden_folder_candidate(path: &Path, hidden: bool, home: &Path) -> FolderCandidate {
+    let label = crate::style::display_path(path, home);
+    let (name, name_start) = folder_name(path, &label, home);
+    FolderCandidate {
+        path: path.to_path_buf(),
+        label,
+        name,
+        name_start,
+        source: Source::Here,
+        frecency: 0.0,
+        hidden,
+        last_visit: None,
+    }
+}
+
 /// The input row's count for folders.
 pub fn count_text(count: usize) -> SharedString {
     match count {
         0 => "No places".into(),
         1 => "1 place".into(),
         n => format!("{n} places").into(),
+    }
+}
+
+/// The input row's count when files are listed too: "3 places · 2 files".
+/// Files are not places; an empty query has none.
+pub fn count_text_with_files(places: usize, files: usize) -> SharedString {
+    let places = count_text(places);
+    match files {
+        0 => places,
+        1 => format!("{places} · 1 file").into(),
+        n => format!("{places} · {n} files").into(),
     }
 }
 
@@ -851,16 +895,34 @@ pub fn section_header(source: Source, here: &str) -> SharedString {
 /// Favorites / In `<here>`; a typed query is one flat list, best score first
 /// (sections would let a weak match in an earlier section outrank the name you
 /// typed). Every candidate is scored; match ranges are computed only for kept rows.
-pub fn folder_listing(query: &str, folders: &[FolderCandidate], here: &str) -> Listing {
+pub fn folder_listing(
+    query: &str,
+    folders: &[FolderCandidate],
+    here: &str,
+    files: &[PathEntry],
+    home: &Path,
+    hidden: HiddenMatch,
+    file_candidates: Option<&[u32]>,
+) -> Listing {
     let mut items: Vec<Item> = Vec::new();
     let mut rows: Vec<Row> = Vec::new();
+    let mut file_count = 0usize;
     match (!query.is_empty()).then(|| FuzzyMatcher::new(query)) {
         Some(mut fuzzy) => {
+            let needle = query.to_lowercase();
+            // Files in the current folder follow the folders; the typed query is
+            // fuzzy, and the incremental narrowing keeps its per-keystroke cost down.
+            let file_matches = if files.is_empty() {
+                Vec::new()
+            } else {
+                match_entries(query, files, hidden, file_candidates, TYPED_FILE_LIMIT)
+            };
             // The home row's name is not part of its label (`~`), so score both; every
             // other name is a suffix of the label, and scoring it twice would change
             // the ranking and double the work on a folder with 100k subfolders.
             let mut matched: Vec<(u32, &FolderCandidate, bool)> = folders
                 .iter()
+                .filter(|folder| hidden != HiddenMatch::Exclude || !folder.hidden)
                 .filter_map(|folder| {
                     let label = fuzzy.score(&folder.label).map(|score| (score, folder, false));
                     let name = folder
@@ -877,25 +939,43 @@ pub fn folder_listing(query: &str, folders: &[FolderCandidate], here: &str) -> L
                 })
                 .collect();
             matched.sort_by(|a, b| {
-                b.0.cmp(&a.0)
+                let exact = |folder: &FolderCandidate| folder.name.to_lowercase() != needle;
+                let demoted = |folder: &FolderCandidate| hidden == HiddenMatch::Demote && folder.hidden;
+                exact(a.1)
+                    .cmp(&exact(b.1))
+                    .then_with(|| demoted(a.1).cmp(&demoted(b.1)))
+                    .then_with(|| b.0.cmp(&a.0))
                     .then_with(|| b.1.frecency.total_cmp(&a.1.frecency))
                     .then_with(|| a.1.label.cmp(&b.1.label))
             });
-            matched.truncate(TOTAL_LIMIT);
+            matched.truncate(TOTAL_LIMIT.saturating_sub(file_matches.len()));
             for (_, folder, by_name) in matched {
                 let (matched, name_matched) = if by_name {
                     (Vec::new(), fuzzy.indices(&folder.name).map_or_else(Vec::new, |(_, ranges)| ranges))
                 } else {
                     (fuzzy.indices(&folder.label).map_or_else(Vec::new, |(_, ranges)| ranges), Vec::new())
                 };
+                rows.push(Row::Item(items.len()));
                 items.push(folder_item(folder, matched, name_matched));
             }
-            rows = (0..items.len()).map(Row::Item).collect();
+            if !file_matches.is_empty() {
+                rows.push(Row::Header(format!("Files in {here}").into()));
+                for matched in file_matches {
+                    rows.push(Row::Item(items.len()));
+                    items.push(file_item(matched.entry, &matched.ranges, home));
+                    file_count += 1;
+                }
+            }
         }
         None => {
             for source in [Source::Recent, Source::Favorite, Source::Here] {
-                let mut group: Vec<&FolderCandidate> =
-                    folders.iter().filter(|folder| folder.source == source).collect();
+                let mut group: Vec<&FolderCandidate> = folders
+                    .iter()
+                    .filter(|folder| folder.source == source)
+                    // An empty listing leaves hidden entries out unless Show Hidden
+                    // Files is on; "search includes hidden" applies to typed queries.
+                    .filter(|folder| hidden == HiddenMatch::Include || !folder.hidden)
+                    .collect();
                 // Recent ranks by frecency; Favorites keep sidebar order and In keeps listing order.
                 if source == Source::Recent {
                     group.sort_by(|a, b| b.frecency.total_cmp(&a.frecency));
@@ -917,8 +997,30 @@ pub fn folder_listing(query: &str, folders: &[FolderCandidate], here: &str) -> L
             }
         }
     }
-    let count = count_text(items.len());
+    let count = if file_count == 0 {
+        count_text(items.len())
+    } else {
+        count_text_with_files(items.len() - file_count, file_count)
+    };
     Listing { rows, items, count }
+}
+
+/// One file row, from a fuzzy match over its name. Return reveals it in its folder.
+fn file_item(file: &PathEntry, ranges: &[Range<usize>], home: &Path) -> Item {
+    let label = crate::style::display_path(&file.path, home);
+    let (name, name_start) = folder_name(&file.path, &label, home);
+    let start = name_start.unwrap_or(label.len());
+    Item::Folder {
+        path: file.path.clone(),
+        matched: ranges.iter().map(|range| (range.start + start)..(range.end + start)).collect(),
+        label,
+        name,
+        name_start,
+        source: Source::File,
+        hidden: file.hidden,
+        last_visit: None,
+        name_matched: Vec::new(),
+    }
 }
 
 fn folder_item(folder: &FolderCandidate, matched: Vec<Range<usize>>, name_matched: Vec<Range<usize>>) -> Item {
@@ -928,6 +1030,7 @@ fn folder_item(folder: &FolderCandidate, matched: Vec<Range<usize>>, name_matche
         name: folder.name.clone(),
         name_start: folder.name_start,
         source: folder.source,
+        hidden: folder.hidden,
         last_visit: folder.last_visit,
         matched,
         name_matched,
@@ -1016,9 +1119,6 @@ pub fn path_query(query: &str, cwd: &Path, home: &Path) -> Option<(PathBuf, Stri
     Some((crow_core::resolve_typed(parent, cwd, home), partial.to_owned()))
 }
 
-/// Files shown under a typed path: those whose name starts with the partial.
-const FILE_LIMIT: usize = 5;
-
 /// The palette scores and shows at most this many query characters. A 100k-file
 /// clipboard is ~10 MB; scoring the folder or shaping a missing-path label with
 /// it blocked the main thread for 30 s (findings #25). No path or query is close.
@@ -1032,116 +1132,214 @@ pub struct PathEntry {
     pub path: PathBuf,
     pub name: String,
     pub lower: String,
+    /// A dot name or the Finder hidden flag, from the listing.
+    pub hidden: bool,
 }
 
 impl PathEntry {
-    pub fn new(path: PathBuf, name: String) -> Self {
+    pub fn new(path: PathBuf, name: String, hidden: bool) -> Self {
         let lower = name.to_lowercase();
-        Self { path, name, lower }
+        Self { path, name, lower, hidden }
     }
 }
 
-/// The children of `parent` matching `partial` by name. With an empty partial the
-/// parent itself comes first ("this folder"), so Return goes there. Files whose
-/// name starts with the partial follow the folders, except that a file named
-/// exactly as typed comes first: a pasted file path lands on its file.
-pub fn path_listing(parent: &Path, partial: &str, children: &[PathEntry], files: &[PathEntry], home: &Path) -> Listing {
+/// What a palette listing does with hidden entries.
+///
+/// Show Hidden Files on is `Include`. With it off, a typed query matches them
+/// while `search_includes_hidden` is on, but they stay dimmed and rank after
+/// visible matches (`Demote`); with the setting off they are left out
+/// (`Exclude`). An empty query always leaves them out unless Show Hidden Files
+/// is on, and a partial starting with `.` asks for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HiddenMatch {
+    Include,
+    Demote,
+    Exclude,
+}
+
+/// The policy for `partial` under the two settings.
+pub fn hidden_match(partial: &str, show_hidden: bool, search_includes_hidden: bool) -> HiddenMatch {
+    if show_hidden || partial.starts_with('.') {
+        HiddenMatch::Include
+    } else if partial.is_empty() {
+        HiddenMatch::Exclude
+    } else if search_includes_hidden {
+        HiddenMatch::Demote
+    } else {
+        HiddenMatch::Exclude
+    }
+}
+
+/// One scored entry. Ranges are computed only for the rows the listing keeps.
+// The score and the demotion flag are the matcher's contract; the unit tests
+// read them, while the listings themselves only use the sorted order and the
+// hidden flag the entry carries.
+#[allow(dead_code)]
+pub struct EntryMatch<'a> {
+    pub entry: &'a PathEntry,
+    pub score: u32,
+    /// Matched bytes in `entry.name`; empty for an empty partial.
+    pub ranges: Vec<Range<usize>>,
+    /// Hidden and Show Hidden Files is off: drawn dimmed and ranked after visible matches.
+    pub demoted: bool,
+}
+
+/// Entries matching `partial`, best first, at most `limit`.
+///
+/// Empty partial: every entry the policy allows (hidden ones only for
+/// `Include`), by lowercased name. Typed partial: fuzzy by name. Order:
+/// exact name (lowercased) first, then not demoted before demoted, then score
+/// (high first), then lowercased name. `candidates` limits scoring to those
+/// indices — the typed file rows narrow incrementally; `None` scores every entry.
+pub fn match_entries<'a>(
+    partial: &str,
+    entries: &'a [PathEntry],
+    hidden: HiddenMatch,
+    candidates: Option<&[u32]>,
+    limit: usize,
+) -> Vec<EntryMatch<'a>> {
+    let all = || 0..entries.len() as u32;
+    let indices: Vec<u32> = candidates.map_or_else(|| all().collect(), <[u32]>::to_vec);
+    let allowed = |entry: &PathEntry| match hidden {
+        HiddenMatch::Include => true,
+        HiddenMatch::Demote | HiddenMatch::Exclude => !entry.hidden,
+    };
+    if partial.is_empty() {
+        let mut kept: Vec<&PathEntry> =
+            indices.iter().filter_map(|index| entries.get(*index as usize)).filter(|entry| allowed(entry)).collect();
+        kept.sort_by(|a, b| a.lower.cmp(&b.lower));
+        kept.truncate(limit);
+        return kept
+            .into_iter()
+            .map(|entry| EntryMatch { entry, score: 0, ranges: Vec::new(), demoted: false })
+            .collect();
+    }
+
+    let needle = partial.to_lowercase();
+    let mut fuzzy = FuzzyMatcher::new(partial);
+    let mut scored: Vec<(u32, &PathEntry)> = indices
+        .iter()
+        .filter_map(|index| entries.get(*index as usize))
+        .filter(|entry| hidden != HiddenMatch::Exclude || !entry.hidden)
+        .filter_map(|entry| fuzzy.score(&entry.name).map(|score| (score, entry)))
+        .collect();
+    scored.sort_by(|(score_a, a), (score_b, b)| {
+        (a.lower != needle)
+            .cmp(&(b.lower != needle))
+            .then_with(|| demoted(hidden, a).cmp(&demoted(hidden, b)))
+            .then_with(|| score_b.cmp(score_a))
+            .then_with(|| a.lower.cmp(&b.lower))
+    });
+    scored.truncate(limit);
+    scored
+        .into_iter()
+        .map(|(score, entry)| {
+            let ranges = fuzzy.indices(&entry.name).map_or_else(Vec::new, |(_, ranges)| ranges);
+            EntryMatch { entry, score, ranges, demoted: demoted(hidden, entry) }
+        })
+        .collect()
+}
+
+fn demoted(hidden: HiddenMatch, entry: &PathEntry) -> bool {
+    hidden == HiddenMatch::Demote && entry.hidden
+}
+
+/// The indices of `files` matching `query`, the cheap first half of scoring
+/// them. When `query` extends `previous.0`, only the files that matched the
+/// prefix can match the longer needle (a prefix of a subsequence is one), so
+/// only `previous.1` is scanned; otherwise every file is.
+pub fn narrow_files(query: &str, files: &[PathEntry], previous: Option<(&str, &[u32])>) -> Vec<u32> {
+    let indices: Vec<u32> = match previous {
+        Some((old, indices)) if query.starts_with(old) => indices.to_vec(),
+        _ => (0..files.len() as u32).collect(),
+    };
+    let mut fuzzy = FuzzyMatcher::new(query);
+    indices
+        .into_iter()
+        .filter(|index| files.get(*index as usize).is_some_and(|file| fuzzy.score(&file.name).is_some()))
+        .collect()
+}
+
+/// Files shown under a typed path: the best fuzzy matches.
+const FILE_LIMIT: usize = 10;
+
+/// Files listed under a typed Cmd-K query: the best fuzzy matches in the folder.
+const TYPED_FILE_LIMIT: usize = 10;
+
+/// Path mode's folder rows, and files matching the typed name. With an empty
+/// partial the parent itself comes first ("this folder"), so Return goes there.
+/// A file named exactly as typed comes first, before the folders; the other
+/// file matches follow the folders, so no row above them moves.
+pub fn path_listing(
+    parent: &Path,
+    partial: &str,
+    children: &[PathEntry],
+    files: &[PathEntry],
+    home: &Path,
+    hidden: HiddenMatch,
+) -> Listing {
     let mut rows = vec![Row::Header(section_header(Source::Here, &crate::style::display_name(parent)))];
     let mut items: Vec<Item> = Vec::new();
     let typed = partial.to_lowercase();
-    let mut file_rows: Vec<&PathEntry> = if partial.is_empty() {
-        Vec::new()
-    } else {
-        files.iter().filter(|file| file.lower.starts_with(&typed)).collect()
-    };
-    file_rows.sort_by(|a, b| (a.lower != typed, &a.lower).cmp(&(b.lower != typed, &b.lower)));
-    file_rows.truncate(FILE_LIMIT);
-    let exact = file_rows.first().is_some_and(|file| file.lower == typed);
-    let file_item = |file: &PathEntry| {
-        let label = crate::style::display_path(&file.path, home);
-        let (name, name_start) = folder_name(&file.path, &label, home);
-        let start = name_start.unwrap_or(label.len());
-        Item::Folder {
-            path: file.path.clone(),
-            // The typed prefix, counted in characters so a case change in the name can't split one.
-            matched: std::iter::once(
-                start
-                    ..label[start..]
-                        .char_indices()
-                        .nth(partial.chars().count())
-                        .map_or(label.len(), |(i, _)| start + i),
-            )
-            .collect(),
-            label,
-            name,
-            name_start,
-            source: Source::File,
-            last_visit: None,
-            name_matched: Vec::new(),
-        }
-    };
-    if exact {
+    let mut places = 0usize;
+    let mut file_count = 0usize;
+    let file_matches =
+        if partial.is_empty() { Vec::new() } else { match_entries(partial, files, hidden, None, FILE_LIMIT) };
+    let exact = file_matches.first().filter(|file| file.entry.lower == typed).map(|file| file.entry.path.clone());
+    if let Some(file) = file_matches.first().filter(|file| Some(&file.entry.path) == exact.as_ref()) {
         rows.push(Row::Item(items.len()));
-        items.push(file_item(file_rows[0]));
+        items.push(file_item(file.entry, &file.ranges, home));
+        file_count += 1;
     }
     if partial.is_empty() {
         let label = crate::style::display_path(parent, home);
         let (name, name_start) = folder_name(parent, &label, home);
+        let hidden = parent.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.'));
         items.push(Item::Folder {
             path: parent.to_path_buf(),
             label,
             name,
             name_start,
             source: Source::Here,
+            hidden,
             last_visit: None,
             matched: Vec::new(),
             name_matched: Vec::new(),
         });
-        rows.push(Row::Item(0));
+        rows.push(Row::Item(items.len() - 1));
+        places += 1;
     }
-    let mut fuzzy = (!partial.is_empty()).then(|| FuzzyMatcher::new(partial));
-    let mut matched: Vec<(u32, &PathEntry)> = children
-        .iter()
-        .filter_map(|child| match fuzzy.as_mut() {
-            Some(fuzzy) => fuzzy.score(&child.name).map(|score| (score, child)),
-            None => Some((0, child)),
-        })
-        .collect();
-    let by_name = fuzzy.is_none();
-    matched.sort_by(|a, b| {
-        if by_name { a.1.lower.cmp(&b.1.lower) } else { b.0.cmp(&a.0).then_with(|| a.1.lower.cmp(&b.1.lower)) }
-    });
-    matched.truncate(TOTAL_LIMIT.saturating_sub(items.len()));
-    for (_, child) in matched {
-        let label = crate::style::display_path(&child.path, home);
-        let (name, name_start) = folder_name(&child.path, &label, home);
+    let folder_limit = TOTAL_LIMIT.saturating_sub(items.len());
+    for matched in match_entries(partial, children, hidden, None, folder_limit) {
+        let label = crate::style::display_path(&matched.entry.path, home);
+        let (name, name_start) = folder_name(&matched.entry.path, &label, home);
         let start = name_start.unwrap_or(label.len());
-        let matched = match fuzzy.as_mut() {
-            Some(fuzzy) => fuzzy.indices(&child.name).map_or_else(Vec::new, |(_, ranges)| {
-                ranges.into_iter().map(|range| (range.start + start)..(range.end + start)).collect()
-            }),
-            None => Vec::new(),
-        };
         rows.push(Row::Item(items.len()));
         items.push(Item::Folder {
-            path: child.path.clone(),
+            path: matched.entry.path.clone(),
             label,
             name,
             name_start,
             source: Source::Here,
+            hidden: matched.entry.hidden,
             last_visit: None,
-            matched,
+            matched: matched.ranges.iter().map(|range| (range.start + start)..(range.end + start)).collect(),
             name_matched: Vec::new(),
         });
+        places += 1;
     }
-    for file in file_rows.iter().skip(usize::from(exact)) {
+    for matched in &file_matches {
+        if Some(&matched.entry.path) == exact.as_ref() {
+            continue;
+        }
         if items.len() >= TOTAL_LIMIT {
             break;
         }
         rows.push(Row::Item(items.len()));
-        items.push(file_item(file));
+        items.push(file_item(matched.entry, &matched.ranges, home));
+        file_count += 1;
     }
-    let count = count_text(items.len());
+    let count = count_text_with_files(places, file_count);
     Listing { rows, items, count }
 }
 
@@ -1171,11 +1369,17 @@ mod tests {
     fn pe(path: &str) -> PathEntry {
         let path = PathBuf::from(path);
         let name = path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-        PathEntry::new(path, name)
+        let hidden = name.starts_with('.');
+        PathEntry::new(path, name, hidden)
     }
 
     fn folders(favorites: &[PathBuf], recents: &[PathBuf], here: &[PathBuf]) -> Vec<FolderCandidate> {
         folder_candidates(favorites.to_vec(), recents.to_vec(), here.to_vec(), Path::new("/home/me"), |_| None)
+    }
+
+    /// Folder-only listing with Show Hidden Files' policy, the common test case.
+    fn folders_listing(query: &str, folders: &[FolderCandidate], here: &str, hidden: HiddenMatch) -> Listing {
+        folder_listing(query, folders, here, &[], Path::new("/home/me"), hidden, None)
     }
 
     /// Rows as `"# Header"` and labels, for order assertions.
@@ -1209,12 +1413,12 @@ mod tests {
     fn path_listing_puts_this_folder_first() {
         let children = [pe("/home/me/Files/beta"), pe("/home/me/Files/alpha")];
         let parent = Path::new("/home/me/Files");
-        let listing = path_listing(parent, "", &children, &[], Path::new("/home/me"));
+        let listing = path_listing(parent, "", &children, &[], Path::new("/home/me"), HiddenMatch::Include);
         assert_eq!(row_text(&listing), ["# In Files", "~/Files", "~/Files/alpha", "~/Files/beta"]);
         assert_eq!(listing.items.len(), 3);
         assert_eq!(listing.count, "3 places");
 
-        let listing = path_listing(parent, "alp", &children, &[], Path::new("/home/me"));
+        let listing = path_listing(parent, "alp", &children, &[], Path::new("/home/me"), HiddenMatch::Include);
         assert_eq!(row_text(&listing), ["# In Files", "~/Files/alpha"]);
         assert_eq!(listing.items[0].name_ranges().first(), Some(&(0..3)), "the match is highlighted in the name");
     }
@@ -1224,7 +1428,7 @@ mod tests {
         let parent = Path::new("/home/me/Files");
         let children = [pe("/home/me/Files/license-old")];
         let files = [pe("/home/me/Files/LICENSE.md"), pe("/home/me/Files/LICENSE"), pe("/home/me/Files/notes.txt")];
-        let listing = path_listing(parent, "LICENSE", &children, &files, Path::new("/home/me"));
+        let listing = path_listing(parent, "LICENSE", &children, &files, Path::new("/home/me"), HiddenMatch::Include);
         assert_eq!(
             row_text(&listing),
             ["# In Files", "~/Files/LICENSE", "~/Files/license-old", "~/Files/LICENSE.md"],
@@ -1232,47 +1436,144 @@ mod tests {
         );
         let Item::Folder { source, .. } = &listing.items[0] else { panic!("a row") };
         assert_eq!(*source, Source::File);
-        let listing = path_listing(parent, "", &children, &files, Path::new("/home/me"));
+        let listing = path_listing(parent, "", &children, &files, Path::new("/home/me"), HiddenMatch::Include);
         assert!(!row_text(&listing).iter().any(|row| row.contains("notes")), "no files until a name is typed");
     }
 
-    /// H4 #20: each keystroke in a typed path used to lowercase all 78k file
-    /// names and sort them by a freshly allocated copy (55 ms on the 100k
-    /// fixture). The names are lowercased once when the parent lists; filtering
-    /// is a prefix test over the cached form. The old algorithm is the baseline,
-    /// so the check holds on a slow CI runner too.
+    /// H4 #20 and B2: each keystroke in a typed path scores 78k file names
+    /// through `match_entries`; only the kept rows get their ranges computed.
+    /// The assertion is 3× the time measured in a debug test run (recorded in
+    /// the plan's progress file), so a slow CI runner still fits.
     #[test]
     fn path_completion_filters_many_files_quickly() {
-        let parent = Path::new("/home/me/Files");
         let files: Vec<PathEntry> = (0..78_000).map(|i| pe(&format!("/home/me/Files/file-{i:06}.txt"))).collect();
         let partials = ["f", "fi", "file-0", "-🙂", "file-077"];
+        let input = std::hint::black_box(&files);
         let started = std::time::Instant::now();
         for partial in partials {
-            let listing = path_listing(parent, partial, &[], &files, Path::new("/home/me"));
-            assert!(listing.items.len() <= TOTAL_LIMIT);
+            let rows = match_entries(std::hint::black_box(partial), input, HiddenMatch::Include, None, FILE_LIMIT);
+            assert!(rows.len() <= FILE_LIMIT);
         }
-        let cached = started.elapsed();
-        let started = std::time::Instant::now();
-        for partial in partials {
-            let typed = partial.to_lowercase();
-            let mut rows: Vec<&PathEntry> = files
-                .iter()
-                .filter(|file| {
-                    file.path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().to_lowercase())
-                        .unwrap_or_default()
-                        .starts_with(&typed)
-                })
-                .collect();
-            rows.sort_by_key(|file| {
-                let name = file.path.file_name().map(|name| name.to_string_lossy().to_lowercase()).unwrap_or_default();
-                (name != typed, name)
-            });
-            rows.truncate(FILE_LIMIT);
+        let elapsed = started.elapsed();
+        println!("match_entries over 78k files, five partials: {elapsed:?}");
+        // Measured 204 ms in a debug test run (2026-11-18); 3× that.
+        assert!(elapsed < std::time::Duration::from_millis(650), "five keystrokes over 78k files took {elapsed:?}");
+    }
+
+    fn entry_names(matches: &[EntryMatch<'_>]) -> Vec<String> {
+        matches.iter().map(|matched| matched.entry.name.clone()).collect()
+    }
+
+    #[test]
+    fn hidden_match_follows_the_two_settings() {
+        assert_eq!(hidden_match("backup", true, false), HiddenMatch::Include, "Show Hidden Files wins");
+        assert_eq!(hidden_match("backup", false, true), HiddenMatch::Demote);
+        assert_eq!(hidden_match("backup", false, false), HiddenMatch::Exclude);
+        assert_eq!(hidden_match(".b", false, false), HiddenMatch::Include, "a typed dot asks for them");
+        assert_eq!(hidden_match("", false, true), HiddenMatch::Exclude, "an empty listing stays visible-only");
+    }
+
+    #[test]
+    fn match_entries_hides_hidden_for_an_empty_partial() {
+        let entries = [pe("/x/alpha"), pe("/x/.hidden")];
+        assert_eq!(entry_names(&match_entries("", &entries, HiddenMatch::Exclude, None, 10)), ["alpha"]);
+        assert_eq!(
+            entry_names(&match_entries("", &entries, HiddenMatch::Include, None, 10)),
+            [".hidden", "alpha"],
+            "Show Hidden Files lists them, by name"
+        );
+    }
+
+    #[test]
+    fn match_entries_matches_dot_names_without_the_dot() {
+        let entries = [pe("/x/backup.txt"), pe("/x/Backups"), pe("/x/.backup_excludes"), pe("/x/notes.txt")];
+        let rows = match_entries("backup", &entries, HiddenMatch::Demote, None, 10);
+        assert_eq!(entry_names(&rows), ["backup.txt", "Backups", ".backup_excludes"]);
+        assert!(!rows[0].demoted && !rows[1].demoted);
+        assert!(rows[2].demoted, "hidden and Show Hidden Files is off");
+        assert!(rows[2].score > 0, "it is a real fuzzy match");
+        assert!(!rows[2].ranges.is_empty(), "the row highlights the match");
+    }
+
+    #[test]
+    fn a_dot_partial_demotes_nothing() {
+        let entries = [pe("/x/.backup"), pe("/x/.backups"), pe("/x/notes.txt")];
+        let rows = match_entries(".b", &entries, HiddenMatch::Include, None, 10);
+        assert_eq!(entry_names(&rows), [".backup", ".backups"]);
+        assert!(rows.iter().all(|matched| !matched.demoted), "the typed dot asked for hidden entries");
+    }
+
+    #[test]
+    fn exact_name_comes_first() {
+        let entries = [pe("/x/LICENSE-MIT"), pe("/x/LICENSE"), pe("/x/license.txt")];
+        let rows = match_entries("LICENSE", &entries, HiddenMatch::Include, None, 10);
+        assert_eq!(rows[0].entry.name, "LICENSE");
+        assert!(entry_names(&rows).contains(&"LICENSE-MIT".to_owned()));
+    }
+
+    #[test]
+    fn folder_listing_demotes_hidden_candidates() {
+        let candidates = folders(&[], &[], &[p("/home/me/.config"), p("/home/me/config-notes")]);
+        let listing = folders_listing("config", &candidates, "me", HiddenMatch::Demote);
+        let names: Vec<String> = listing
+            .items
+            .iter()
+            .map(|item| match item {
+                Item::Folder { name, .. } => name.clone(),
+                Item::Command { .. } => String::new(),
+            })
+            .collect();
+        assert_eq!(names, ["config-notes", ".config"], "the hidden folder comes after visible matches");
+        assert!(matches!(listing.items.last(), Some(Item::Folder { hidden: true, .. })));
+
+        let listing = folders_listing("config", &candidates, "me", HiddenMatch::Exclude);
+        assert_eq!(listing.items.len(), 1, "the setting off leaves it out");
+        let listing = folders_listing("", &candidates, "me", HiddenMatch::Exclude);
+        assert_eq!(listing.items.len(), 1, "an empty listing leaves it out too");
+    }
+
+    #[test]
+    fn narrow_files_agrees_with_a_full_scan() {
+        let files = [pe("/x/back.txt"), pe("/x/backup.txt"), pe("/x/Backups"), pe("/x/notes.txt")];
+        let full = |query: &str| -> Vec<u32> {
+            let mut fuzzy = crow_search::FuzzyMatcher::new(query);
+            (0..files.len() as u32).filter(|index| fuzzy.score(&files[*index as usize].name).is_some()).collect()
+        };
+        let mut previous: Option<(String, Vec<u32>)> = None;
+        for query in ["b", "ba", "bac"] {
+            let narrowed =
+                narrow_files(query, &files, previous.as_ref().map(|(old, at)| (old.as_str(), at.as_slice())));
+            assert_eq!(narrowed, full(query), "{query}");
+            previous = Some((query.to_owned(), narrowed));
         }
-        let per_key = started.elapsed();
-        assert!(cached * 2 < per_key, "cached names {cached:?}, per-keystroke lowercasing {per_key:?}");
+        // A query that does not extend the last one must scan every file again:
+        // `n` matches notes.txt, which the `bac` narrowing left out.
+        let narrowed = narrow_files("n", &files, previous.as_ref().map(|(old, at)| (old.as_str(), at.as_slice())));
+        assert_eq!(narrowed, full("n"));
+        assert_eq!(narrowed, [3], "notes.txt is back");
+    }
+
+    #[test]
+    fn count_text_names_files_separately() {
+        assert_eq!(count_text_with_files(3, 0), "3 places");
+        assert_eq!(count_text_with_files(3, 1), "3 places · 1 file");
+        assert_eq!(count_text_with_files(1, 2), "1 place · 2 files");
+        assert_eq!(count_text_with_files(0, 1), "No places · 1 file");
+    }
+
+    #[test]
+    fn folder_listing_puts_files_after_the_folders() {
+        let candidates = folders(&[], &[], &[p("/home/me/Files/backup")]);
+        let files = [pe("/home/me/Files/backup.txt"), pe("/home/me/Files/notes.txt")];
+        let listing =
+            folder_listing("backup", &candidates, "Files", &files, Path::new("/home/me"), HiddenMatch::Include, None);
+        assert_eq!(row_text(&listing), ["~/Files/backup", "# Files in Files", "~/Files/backup.txt"]);
+        assert_eq!(listing.count, "1 place · 1 file");
+        let Item::Folder { source, .. } = &listing.items[1] else { panic!("a file row") };
+        assert_eq!(*source, Source::File);
+
+        let empty = folder_listing("", &candidates, "Files", &files, Path::new("/home/me"), HiddenMatch::Include, None);
+        assert!(!row_text(&empty).iter().any(|row| row.contains("notes")), "no files for an empty query");
     }
 
     #[test]
@@ -1296,7 +1597,7 @@ mod tests {
     #[test]
     fn sections_follow_source_order_and_skip_empty() {
         let candidates = folders(&[p("/home/me/Files/fav")], &[p("/home/me/Files/rec")], &[p("/home/me/Files/here")]);
-        let listing = folder_listing("", &candidates, "Files");
+        let listing = folders_listing("", &candidates, "Files", HiddenMatch::Include);
         assert_eq!(
             row_text(&listing),
             ["# Recent", "~/Files/rec", "# Favorites", "~/Files/fav", "# In Files", "~/Files/here"],
@@ -1304,7 +1605,7 @@ mod tests {
 
         let no_here = folders(&[p("/home/me/Files/fav")], &[p("/home/me/Files/rec")], &[]);
         assert_eq!(
-            row_text(&folder_listing("", &no_here, "Files")),
+            row_text(&folders_listing("", &no_here, "Files", HiddenMatch::Include)),
             ["# Recent", "~/Files/rec", "# Favorites", "~/Files/fav"]
         );
     }
@@ -1313,7 +1614,7 @@ mod tests {
     fn a_favorite_that_is_recent_shows_once_under_favorites() {
         let candidates =
             folders(&[p("/home/me/Files/beta")], &[p("/home/me/Files/beta"), p("/home/me/Files/alpha")], &[]);
-        let listing = folder_listing("", &candidates, "Files");
+        let listing = folders_listing("", &candidates, "Files", HiddenMatch::Include);
         assert_eq!(row_text(&listing), ["# Recent", "~/Files/alpha", "# Favorites", "~/Files/beta"]);
         let beta = candidates.iter().find(|c| c.path == p("/home/me/Files/beta")).expect("beta");
         assert_eq!(beta.source, Source::Favorite);
@@ -1326,7 +1627,7 @@ mod tests {
         let here: Vec<PathBuf> = (0..30).map(|i| p(&format!("/home/me/Files/here{i}"))).collect();
         let candidates = folders(&[p("/home/me/Files/fav")], &recents, &here);
 
-        let listing = folder_listing("", &candidates, "Files");
+        let listing = folders_listing("", &candidates, "Files", HiddenMatch::Include);
         let count = |source: Source| {
             listing.items.iter().filter(|item| matches!(item, Item::Folder { source: s, .. } if *s == source)).count()
         };
@@ -1339,7 +1640,7 @@ mod tests {
         let recents: Vec<PathBuf> = (0..30).map(|i| p(&format!("/home/me/Files/rec{i}"))).collect();
         let favorites: Vec<PathBuf> = (0..30).map(|i| p(&format!("/home/me/Files/fav{i}"))).collect();
         let candidates = folders(&favorites, &recents, &here);
-        let matched = folder_listing("Files", &candidates, "Files");
+        let matched = folders_listing("Files", &candidates, "Files", HiddenMatch::Include);
         assert_eq!(matched.items.len(), TOTAL_LIMIT);
     }
 
@@ -1347,7 +1648,7 @@ mod tests {
     #[allow(clippy::single_range_in_vec_init)] // The matched list is the point of the test.
     fn name_ranges_are_the_part_inside_the_name() {
         let candidates = folders(&[], &[p("/home/me/Projects/git")], &[]);
-        let listing = folder_listing("git", &candidates, "Coding");
+        let listing = folders_listing("git", &candidates, "Coding", HiddenMatch::Include);
         let Item::Folder { label, matched, .. } = &listing.items[0] else { panic!("a folder row") };
         assert_eq!(label, "~/Projects/git");
         assert_eq!(matched.first(), Some(&(11..14)), "the path line highlights the name in place");
@@ -1359,6 +1660,7 @@ mod tests {
             name: "cd".into(),
             name_start: Some(5),
             source: Source::Recent,
+            hidden: false,
             last_visit: None,
             matched: vec![3..7],
             name_matched: Vec::new(),
@@ -1372,14 +1674,14 @@ mod tests {
         let home = Path::new("/home/jules");
         let candidates = folder_candidates(vec![home.to_path_buf()], Vec::new(), Vec::new(), home, |_| None);
 
-        let listing = folder_listing("jul", &candidates, "jules");
+        let listing = folders_listing("jul", &candidates, "jules", HiddenMatch::Include);
         assert_eq!(listing.items.len(), 1, "the account name finds the home row");
         let Item::Folder { label, name, name_start, matched, .. } = &listing.items[0] else { panic!("the home row") };
         assert_eq!((label.as_str(), name.as_str(), *name_start), ("~", "jules", None));
         assert!(matched.is_empty(), "the path line has no match");
         assert_eq!(listing.items[0].name_ranges(), vec![0..3], "the name line highlights jul");
 
-        let listing = folder_listing("~", &candidates, "jules");
+        let listing = folders_listing("~", &candidates, "jules", HiddenMatch::Include);
         assert_eq!(listing.items.len(), 1, "~ still finds it");
         let Item::Folder { matched, .. } = &listing.items[0] else { panic!("the home row") };
         assert_eq!(matched, &vec![0..1], "the path line highlights ~");

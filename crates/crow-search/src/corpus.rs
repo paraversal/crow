@@ -33,6 +33,9 @@ pub enum Expect {
     Miss,
     /// Not a hit; a skip for this ancestor (relative) exists.
     UnderSkip(&'static str),
+    /// The target is a hit and the walk also recorded a skip for this ancestor
+    /// (a dot folder whose name matched but was not descended into).
+    HitAndSkip(&'static str),
     /// Not a hit and no skip: the walk never visited it.
     NotVisited,
 }
@@ -229,7 +232,7 @@ pub fn cases() -> &'static [Case] {
             show_hidden: false,
             everything: false,
             target: ".backup.txt",
-            expect: Expect::NotVisited,
+            expect: Expect::Hit,
         },
         Case {
             id: "backup-hidden-folder",
@@ -239,7 +242,27 @@ pub fn cases() -> &'static [Case] {
             show_hidden: false,
             everything: false,
             target: ".backup/.backup-inside.txt",
-            expect: Expect::NotVisited,
+            expect: Expect::UnderSkip(".backup"),
+        },
+        Case {
+            id: "hidden-folder-name",
+            root: "",
+            names: Some("backup"),
+            contents: None,
+            show_hidden: false,
+            everything: false,
+            target: ".backup",
+            expect: Expect::HitAndSkip(".backup"),
+        },
+        Case {
+            id: "hidden-folder-everything",
+            root: "",
+            names: Some("backup"),
+            contents: None,
+            show_hidden: false,
+            everything: true,
+            target: ".backup/.backup-inside.txt",
+            expect: Expect::Hit,
         },
         Case {
             id: "backup-hidden-shown",

@@ -56,7 +56,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), folder sizes (`folder_sizes`: `"off"` or `"visible"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, the terminal app Open Terminal Here uses (`terminal`: a name like `"Terminal"` or `"iTerm"`, or a path to an app), hidden files (shown by default), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), folder sizes (`folder_sizes`: `"off"` or `"visible"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, the terminal app Open Terminal Here uses (`terminal`: a name like `"Terminal"` or `"iTerm"`, or a path to an app), hidden files (shown by default), whether search still matches hidden items while they are hidden (`search_includes_hidden`, default on), the mode new searches start in (`search_match`: `"all"`, `"names"` or `"contents"`), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
@@ -138,11 +138,15 @@ told apart; the home folder matches its account name as well as `~`. Matched let
 both lines and Recent rows carry the last visit.
 Return goes there and Cmd-Return opens a folder in a new tab. Tab appends the highlighted
 folder's path and `/`, so the next letters search inside it; typing `/` or `~/` does the same by
-hand, with the parent's subfolders listed, and files whose name starts with what follows the last `/`
-(Return shows the file selected in its folder). Start with `>`: it becomes a Commands token
+hand, with the parent's subfolders and fuzzy-matched files listed (Return shows the file selected in
+its folder). Start with `>`: it becomes a Commands token
 (Backspace on the empty field goes back to folders) and rows show the menu, the label, an on/off
 chip for toggles and their keys. Commands you run from the palette are remembered under Recently
-used; `palette_recent_commands = false` hides that section and stops recording.
+used; `palette_recent_commands = false` hides that section and stops recording. A typed query also
+matches files in the current folder, under a "Files in <folder>" heading after the folders; Return
+reveals the file. While Show Hidden Files is off, dot-named entries match too when
+`search_includes_hidden` is on (the default): they are dimmed, ranked after visible matches, and a
+query starting with `.` puts them first.
 
 ## Search
 
@@ -153,7 +157,12 @@ what to match (Names reads no file contents) and Cmd-Shift-M cycles the three. C
 the field and selects the query; Tab goes field → results → sidebar → field (no results: straight
 to the sidebar); Done or Esc (from anywhere) closes, and with the skipped list open Esc closes that
 first. The scope bar switches the folder, Home or This Mac (Spotlight, names only); its switch
-skips the folders named in `exclude.toml` sets, as Cmd-Shift-A does for every set. Name matches
+skips the folders named in `exclude.toml` sets, as Cmd-Shift-A does for every set. With Show Hidden
+Files off, dot-named files are still searched while `search_includes_hidden` is on (the default) and
+are drawn dimmed; the walk visits dot folders but does not go inside them, counting each as a
+skipped folder (Search everything enters them). With `search_includes_hidden = false` they are left
+out entirely until Show Hidden Files is on. `search_match` (`"all"`, `"names"` or `"contents"`) sets
+the mode each new search starts in; the panel's control changes the open search. Name matches
 whose name contains the query come first with their letters highlighted; scattered fuzzy name hits
 follow the content hits. A name match stays one line, a content-only hit shows its line number and
 line under the name, and the footer counts results and files and lists what was skipped (relative

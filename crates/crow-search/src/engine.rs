@@ -102,7 +102,14 @@ impl Batcher {
 pub struct Query {
     pub names: Option<String>,
     pub contents: Option<String>,
-    pub show_hidden: bool,
+    /// Descend into dot folders. Dot-named entries are visited and matched
+    /// while `include_hidden` is on; this only decides whether the walk goes
+    /// inside them.
+    pub enter_hidden_folders: bool,
+    /// Visit dot-named entries at all while Show Hidden Files is off. This is
+    /// the `search_includes_hidden` setting; Show Hidden Files on overrides it.
+    /// Search everything ignores exclude rules, not this setting.
+    pub include_hidden: bool,
     /// Compiled once per `exclude.toml` generation and shared by every search
     /// that starts from it: the glob compile is ~14 ms on the main thread.
     pub rules: Arc<RuleSet>,
@@ -113,6 +120,8 @@ pub struct Query {
 pub struct Hit {
     pub path: PathBuf,
     pub is_dir: bool,
+    /// A dot name, or the macOS Finder hidden flag (`UF_HIDDEN`).
+    pub hidden: bool,
     /// Higher is a better fuzzy name match; content hits score 0.
     pub score: u32,
     pub kind: HitKind,
@@ -154,6 +163,8 @@ pub struct Skip {
 pub enum SkipReason {
     /// An exclude.toml set: `"dev: name \"node_modules\""` (the rule's text).
     Rule(String),
+    /// A dot folder the walk did not descend into (Show Hidden Files is off).
+    HiddenFolder,
     /// The folder could not be read: `"no permission"`, or the error text.
     Unreadable(String),
 }
@@ -161,7 +172,7 @@ pub enum SkipReason {
 impl SkipReason {
     /// Whether Search everything would walk it.
     pub fn lifted_by_everything(&self) -> bool {
-        matches!(self, SkipReason::Rule(_))
+        !matches!(self, SkipReason::Unreadable(_))
     }
 }
 
@@ -169,6 +180,7 @@ impl std::fmt::Display for SkipReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SkipReason::Rule(text) | SkipReason::Unreadable(text) => f.write_str(text),
+            SkipReason::HiddenFolder => f.write_str("hidden folder"),
         }
     }
 }
@@ -294,9 +306,13 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
     }
 
     let rules = if query.everything { Arc::new(RuleSet::empty()) } else { Arc::clone(&query.rules) };
+    let enter_hidden = query.enter_hidden_folders || query.everything;
+    // Search everything ignores exclude.toml; Show Hidden Files is its own setting,
+    // so it must not smuggle dot entries back in when search_includes_hidden is off.
+    let visit_hidden = query.include_hidden || query.enter_hidden_folders;
     let skipped = Arc::new(Mutex::new(Vec::new()));
     let scanned = Arc::new(AtomicU64::new(0));
-    let walker = build_walker(root, query.show_hidden, rules, skipped.clone(), cancel.clone());
+    let walker = build_walker(root, visit_hidden, rules, skipped.clone(), cancel.clone());
     let (tx, rx) = mpsc::channel::<Vec<Hit>>();
 
     let scanned_thread = scanned.clone();
@@ -341,21 +357,23 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                     let metadata = entry.metadata().ok();
                     let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
                     let size = metadata.as_ref().map_or(0, |meta| meta.len());
-                    if let Some(fuzzy) = fuzzy.as_mut() {
-                        let name = entry.file_name();
-                        let name = name.to_string_lossy();
-                        if let Some((score, ranges)) = fuzzy.indices(name.as_ref()) {
-                            // Send the name hit before this file's contents are read: a large
-                            // file must not delay its own name, or the results that follow it.
-                            let _ = tx.send(vec![Hit {
-                                path: entry.path().to_path_buf(),
-                                is_dir,
-                                score,
-                                kind: HitKind::Name { ranges },
-                                modified,
-                                size,
-                            }]);
-                        }
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    let hidden = is_hidden(name.as_ref(), metadata.as_ref());
+                    if let Some(fuzzy) = fuzzy.as_mut()
+                        && let Some((score, ranges)) = fuzzy.indices(name.as_ref())
+                    {
+                        // Send the name hit before this file's contents are read: a large
+                        // file must not delay its own name, or the results that follow it.
+                        let _ = tx.send(vec![Hit {
+                            path: entry.path().to_path_buf(),
+                            is_dir,
+                            hidden,
+                            score,
+                            kind: HitKind::Name { ranges },
+                            modified,
+                            size,
+                        }]);
                     }
                     // Contents only from regular files, and symlinks to regular files. A
                     // FIFO with no writer blocks its reader forever, which would stall the
@@ -367,7 +385,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                         && readable
                     {
                         let mut content_hits = Vec::new();
-                        let matches = content.search(entry.path(), modified, size, &mut content_hits, &cancel);
+                        let matches = content.search(entry.path(), modified, size, hidden, &mut content_hits, &cancel);
                         if matches > 1
                             && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) = content_hits.first_mut()
                         {
@@ -376,6 +394,15 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                         if !content_hits.is_empty() {
                             let _ = tx.send(content_hits);
                         }
+                    }
+                    // A dot folder is visited, so its name matches, but not descended
+                    // into while Show Hidden Files is off: one visible skip instead of
+                    // walking every dot folder in the home folder. Search everything enters it.
+                    if is_dir && !enter_hidden && name.starts_with('.') {
+                        if let Ok(mut list) = skipped.lock() {
+                            list.push(Skip { path: entry.path().to_path_buf(), reason: SkipReason::HiddenFolder });
+                        }
+                        return WalkState::Skip;
                     }
                     WalkState::Continue
                 })
@@ -413,7 +440,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
 
 fn build_walker(
     root: &Path,
-    show_hidden: bool,
+    visit_hidden: bool,
     rules: Arc<RuleSet>,
     skipped: Arc<Mutex<Vec<Skip>>>,
     cancel: Arc<AtomicBool>,
@@ -421,7 +448,9 @@ fn build_walker(
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
     let mut builder = WalkBuilder::new(root);
     builder
-        .hidden(!show_hidden)
+        // When dot entries are visited, the visit closure decides whether to
+        // descend into a dot folder and records the skip when it does not.
+        .hidden(!visit_hidden)
         .ignore(false)
         .git_ignore(false)
         .git_global(false)
@@ -447,6 +476,24 @@ fn build_walker(
             true
         });
     builder.build_parallel()
+}
+
+/// The same "hidden" the list uses: a dot name, or the macOS Finder hidden
+/// flag (`UF_HIDDEN`) on the metadata the walk already read.
+fn is_hidden(name: &str, metadata: Option<&std::fs::Metadata>) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt as _;
+        metadata.is_some_and(|meta| meta.st_flags() & libc::UF_HIDDEN != 0)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = metadata;
+        false
+    }
 }
 
 /// The path an `ignore` walk error is about, when it carries one.
@@ -515,15 +562,17 @@ impl ContentSearch {
         Ok(ContentSearch { matcher, searcher })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn search(
         &mut self,
         path: &Path,
         modified: Option<SystemTime>,
         size: u64,
+        hidden: bool,
         hits: &mut Vec<Hit>,
         cancel: &Arc<AtomicBool>,
     ) -> u64 {
-        let mut sink = ContentSink { matcher: &self.matcher, path, modified, size, hits, cancel, matches: 0 };
+        let mut sink = ContentSink { matcher: &self.matcher, path, modified, size, hidden, hits, cancel, matches: 0 };
         let _ = self.searcher.search_path(&self.matcher, path, &mut sink);
         sink.matches
     }
@@ -534,6 +583,7 @@ struct ContentSink<'a> {
     path: &'a Path,
     modified: Option<SystemTime>,
     size: u64,
+    hidden: bool,
     hits: &'a mut Vec<Hit>,
     cancel: &'a Arc<AtomicBool>,
     /// Matching lines seen in this file; only the first becomes a `Hit`.
@@ -570,6 +620,7 @@ impl Sink for ContentSink<'_> {
         self.hits.push(Hit {
             path: self.path.to_path_buf(),
             is_dir: false,
+            hidden: self.hidden,
             score: 0,
             kind: HitKind::Content { line: mat.line_number().unwrap_or(0), text: text.to_owned(), ranges, more: 0 },
             modified: self.modified,
@@ -609,13 +660,14 @@ mod tests {
         root: &Path,
         names: Option<&str>,
         contents: Option<&str>,
-        show_hidden: bool,
+        enter_hidden_folders: bool,
         everything: bool,
     ) -> (Vec<Hit>, Summary) {
         let query = Query {
             names: names.map(str::to_owned),
             contents: contents.map(str::to_owned),
-            show_hidden,
+            enter_hidden_folders,
+            include_hidden: true,
             rules: rules(),
             everything,
         };
@@ -744,14 +796,95 @@ mod tests {
     }
 
     #[test]
-    fn hidden_files_follow_the_setting() {
-        let root = root("hidden");
+    fn dot_entries_are_visited_but_dot_folders_are_not_descended() {
+        let root = root("hidden-policy");
         write(&root, ".secret.txt", b"needle\n");
+        write(&root, ".folder/inside.txt", b"needle\n");
         write(&root, "visible.txt", b"needle\n");
-        let (hidden, _) = run(&root, None, Some("needle"), false, true);
-        assert_eq!(paths(&hidden), [root.join("visible.txt")]);
-        let (shown, _) = run(&root, None, Some("needle"), true, true);
-        assert_eq!(paths(&shown), [root.join(".secret.txt"), root.join("visible.txt")]);
+
+        // Hidden off: a dot file is visited, so its name and contents match.
+        let (hits, _) = run(&root, Some("secret"), None, false, false);
+        assert_eq!(paths(&hits), [root.join(".secret.txt")]);
+        assert!(hits[0].hidden, "a dot name is hidden");
+        let (contents, _) = run(&root, None, Some("needle"), false, false);
+        assert_eq!(paths(&contents), [root.join(".secret.txt"), root.join("visible.txt")]);
+
+        // A dot folder's own name matches, but the walk does not go inside, and
+        // says so once instead of silently leaving a gap.
+        let (names, summary) = run(&root, Some("folder"), None, false, false);
+        assert_eq!(paths(&names), [root.join(".folder")]);
+        assert!(names[0].is_dir && names[0].hidden);
+        assert_eq!(summary.skipped, [Skip { path: root.join(".folder"), reason: SkipReason::HiddenFolder }]);
+
+        // Show Hidden Files on, or Search everything: the contents are found.
+        let (shown, _) = run(&root, None, Some("needle"), true, false);
+        assert!(paths(&shown).contains(&root.join(".folder/inside.txt")), "{shown:?}");
+        let (everything, summary) = run(&root, None, Some("needle"), false, true);
+        assert!(paths(&everything).contains(&root.join(".folder/inside.txt")), "{everything:?}");
+        assert!(!summary.skipped.iter().any(|skip| skip.reason == SkipReason::HiddenFolder));
+    }
+
+    #[test]
+    fn hits_carry_the_hidden_flag() {
+        let root = root("hidden-flag");
+        write(&root, ".backup.txt", b"");
+        write(&root, "backup.txt", b"");
+        let (hits, _) = run(&root, Some("backup.txt"), None, false, false);
+        let hidden = hits.iter().find(|hit| hit.path == root.join(".backup.txt")).expect("the dot name");
+        let visible = hits.iter().find(|hit| hit.path == root.join("backup.txt")).expect("the plain name");
+        assert!(hidden.hidden);
+        assert!(!visible.hidden);
+    }
+
+    #[test]
+    fn search_includes_hidden_off_leaves_dot_entries_unvisited() {
+        let root = root("hidden-setting-off");
+        write(&root, ".secret.txt", b"needle\n");
+        write(&root, ".folder/inside.txt", b"needle\n");
+        write(&root, "visible.txt", b"needle\n");
+        let mut hits = Vec::new();
+        let query = Query {
+            names: Some("needle".into()),
+            contents: Some("needle".into()),
+            enter_hidden_folders: false,
+            include_hidden: false,
+            rules: rules(),
+            everything: false,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let summary = search(&root, &query, |batch| hits.extend(batch), &cancel);
+        assert_eq!(paths(&hits), [root.join("visible.txt")]);
+        assert!(!summary.skipped.iter().any(|skip| skip.reason == SkipReason::HiddenFolder));
+
+        // Search everything ignores exclude.toml; it must not undo the hidden setting.
+        let mut hits = Vec::new();
+        let query = Query {
+            names: Some("needle".into()),
+            contents: Some("needle".into()),
+            enter_hidden_folders: false,
+            include_hidden: false,
+            rules: rules(),
+            everything: true,
+        };
+        let summary = search(&root, &query, |batch| hits.extend(batch), &cancel);
+        assert_eq!(paths(&hits), [root.join("visible.txt")], "Search everything keeps dot entries out");
+        assert!(!summary.skipped.iter().any(|skip| skip.reason == SkipReason::HiddenFolder));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_finder_hidden_flag_marks_a_plain_name_hidden() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let root = root("uf-hidden");
+        write(&root, "plain.txt", b"");
+        let path = CString::new(root.join("plain.txt").as_os_str().as_bytes()).expect("no NUL in a temp path");
+        // SAFETY: `path` is a valid NUL-terminated path under `root`.
+        let flagged = unsafe { libc::chflags(path.as_ptr(), libc::UF_HIDDEN) };
+        assert_eq!(flagged, 0, "chflags: {}", io::Error::last_os_error());
+        let (hits, _) = run(&root, Some("plain"), None, false, false);
+        let hit = hits.iter().find(|hit| hit.path == root.join("plain.txt")).expect("a name hit");
+        assert!(hit.hidden, "UF_HIDDEN marks it hidden");
     }
 
     #[test]
@@ -848,6 +981,7 @@ mod tests {
         Hit {
             path: PathBuf::from(path),
             is_dir: false,
+            hidden: false,
             score: 1,
             kind: HitKind::Name { ranges: Vec::new() },
             modified: None,
@@ -912,7 +1046,8 @@ mod tests {
         let query = Query {
             names: None,
             contents: Some("needle".into()),
-            show_hidden: false,
+            enter_hidden_folders: false,
+            include_hidden: true,
             rules: rules(),
             everything: true,
         };
@@ -936,7 +1071,8 @@ mod tests {
         let query = Query {
             names: Some("needle".into()),
             contents: Some("needle".into()),
-            show_hidden: false,
+            enter_hidden_folders: false,
+            include_hidden: true,
             rules: rules(),
             everything: true,
         };
@@ -979,7 +1115,8 @@ mod tests {
         let query = Query {
             names: None,
             contents: Some("needle".into()),
-            show_hidden: false,
+            enter_hidden_folders: false,
+            include_hidden: true,
             rules: rules(),
             everything: true,
         };
@@ -1000,7 +1137,8 @@ mod tests {
         let query = Query {
             names: None,
             contents: Some("needle".into()),
-            show_hidden: false,
+            enter_hidden_folders: false,
+            include_hidden: true,
             rules: rules(),
             everything: true,
         };
@@ -1052,7 +1190,8 @@ mod tests {
         let query = Query {
             names: None,
             contents: Some("needle".to_owned()),
-            show_hidden: true,
+            enter_hidden_folders: true,
+            include_hidden: true,
             rules: rules(),
             everything: false,
         };
@@ -1072,7 +1211,8 @@ mod tests {
         let query = Query {
             names: None,
             contents: Some("needle".to_owned()),
-            show_hidden: false,
+            enter_hidden_folders: false,
+            include_hidden: true,
             rules: rules(),
             everything: true,
         };

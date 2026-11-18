@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crow_core::motion::{Effective, MotionMode, SoundSet};
 use crow_core::{
-    AppIcon, EnterAction, Exclude, FolderSizesMode, HintsMode, KeymapLayer, Recent, RecentCommands, Settings,
-    SidebarConfig, TipsMode, Views, load_settings, load_sidebar, load_views,
+    AppIcon, EnterAction, Exclude, FolderSizesMode, HintsMode, KeymapLayer, Recent, RecentCommands, SearchMatch,
+    Settings, SidebarConfig, TipsMode, Views, load_settings, load_sidebar, load_views,
 };
 use crow_theme::Theme;
 use gpui::{App, AppContext, Global, SharedString};
@@ -406,6 +406,8 @@ pub fn reload_config(cx: &mut App) {
         crate::menus::refresh(cx);
         let show_hidden = cx.global::<Ui>().settings.show_hidden_files;
         crate::window::apply_show_hidden(show_hidden, cx);
+        let search_includes_hidden = cx.global::<Ui>().settings.search_includes_hidden;
+        crate::window::apply_search_includes_hidden(search_includes_hidden, cx);
     }
     refresh_feedback(cx);
     refresh_app_icon(cx);
@@ -451,6 +453,8 @@ pub enum SettingChange {
     FontSize(f32),
     Terminal(String),
     ShowHiddenFiles(bool),
+    SearchIncludesHidden(bool),
+    SearchMatch(SearchMatch),
     ShowPreview(bool),
     PaletteRecentCommands(bool),
     ViewPerFolder(bool),
@@ -477,6 +481,8 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             SettingChange::FontSize(value) => replace(&mut settings.font_size, *value),
             SettingChange::Terminal(value) => replace(&mut settings.terminal, value.clone()),
             SettingChange::ShowHiddenFiles(value) => replace(&mut settings.show_hidden_files, *value),
+            SettingChange::SearchIncludesHidden(value) => replace(&mut settings.search_includes_hidden, *value),
+            SettingChange::SearchMatch(value) => replace(&mut settings.search_match, *value),
             SettingChange::ShowPreview(value) => replace(&mut settings.show_preview, *value),
             SettingChange::PaletteRecentCommands(value) => replace(&mut settings.palette_recent_commands, *value),
             SettingChange::ViewPerFolder(value) => replace(&mut settings.view_per_folder, *value),
@@ -495,6 +501,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
         SettingChange::AppIcon(_) => refresh_app_icon(cx),
         SettingChange::Motion(_) | SettingChange::Sound(_) => refresh_feedback(cx),
         SettingChange::ShowHiddenFiles(show) => crate::window::apply_show_hidden(*show, cx),
+        SettingChange::SearchIncludesHidden(include) => crate::window::apply_search_includes_hidden(*include, cx),
         SettingChange::ShowPreview(_) => crate::menus::refresh(cx),
         _ => {}
     }
@@ -558,6 +565,16 @@ fn write_setting(change: SettingChange, cx: &mut App) {
                 move |config, _| crow_core::save_bool_setting(config, "show_hidden_files", value),
                 cx,
             );
+        }
+        SettingChange::SearchIncludesHidden(value) => {
+            write_config(
+                SETTINGS,
+                move |config, _| crow_core::save_bool_setting(config, "search_includes_hidden", value),
+                cx,
+            );
+        }
+        SettingChange::SearchMatch(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "search_match", value.key()), cx);
         }
         SettingChange::ShowPreview(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_bool_setting(config, "show_preview", value), cx);
@@ -908,7 +925,7 @@ mod tests {
     fn each_setting_writes_only_its_key(cx: &mut gpui::TestAppContext) {
         let config = cx.update(crate::ui::init_for_tests);
         cx.update(crate::menus::init_for_tests);
-        let before = "# mine\n\ntheme = \"system\" # theme\nkeymap = \"finder\"\nhints = \"auto\"\ntips = \"auto\"\nmotion = \"auto\"\nsound = \"crow\"\napp_icon = \"refined\"\nfont_family = \"\"\nfont_size = 13.0\nterminal = \"Terminal\"\nshow_hidden_files = true\nshow_preview = true\npalette_recent_commands = true\nview_per_folder = true\n\n[window]\nwidth = 1200\nheight = 760\n";
+        let before = "# mine\n\ntheme = \"system\" # theme\nkeymap = \"finder\"\nhints = \"auto\"\ntips = \"auto\"\nmotion = \"auto\"\nsound = \"crow\"\napp_icon = \"refined\"\nfont_family = \"\"\nfont_size = 13.0\nterminal = \"Terminal\"\nshow_hidden_files = true\nsearch_includes_hidden = true\nsearch_match = \"all\"\nshow_preview = true\npalette_recent_commands = true\nview_per_folder = true\n\n[window]\nwidth = 1200\nheight = 760\n";
         let changes = [
             SettingChange::Theme("gruvbox-dark-hard".into()),
             SettingChange::Keymap(KeymapLayer::Vim),
@@ -921,6 +938,8 @@ mod tests {
             SettingChange::FontSize(14.0),
             SettingChange::Terminal("iTerm".into()),
             SettingChange::ShowHiddenFiles(false),
+            SettingChange::SearchIncludesHidden(false),
+            SettingChange::SearchMatch(SearchMatch::Names),
             SettingChange::ShowPreview(false),
             SettingChange::PaletteRecentCommands(false),
             SettingChange::ViewPerFolder(false),

@@ -7,8 +7,8 @@ use crow_core::motion::Fx;
 use crow_core::{SidebarEdit, Tabs, TipId, TipsMode, ViewMode, ZeroMatchStreak};
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, Render,
-    Role, ScrollHandle, SharedString, Subscription, TitlebarOptions, Toggled, Window, WindowBounds, WindowOptions, div,
-    img, point, prelude::*, px, size, transparent_black,
+    Role, ScrollHandle, SharedString, Subscription, Task, TitlebarOptions, Toggled, Window, WindowBounds,
+    WindowOptions, div, img, point, prelude::*, px, size, transparent_black,
 };
 
 use crate::actions::{
@@ -33,8 +33,8 @@ use crate::preview;
 use crate::search::{SearchEvent, SearchView};
 use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::style::{
-    BAND_HEIGHT, active_selection, color, color_alpha, cursor_ring, highlight_text, icon, truncate_middle_with_ranges,
-    ui_font,
+    BAND_HEIGHT, active_selection, color, color_alpha, content_opacity, cursor_ring, highlight_text, icon,
+    truncate_middle_with_ranges, ui_font,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::{self, SettingChange, Ui, reload_theme};
@@ -130,6 +130,16 @@ pub fn apply_show_hidden(show: bool, cx: &mut App) {
     }
 }
 
+/// Apply the global `search_includes_hidden` setting to every open browser
+/// window: rerun an open search and rebuild an open palette. Idempotent, so a
+/// settings write and its reload can both call it.
+pub fn apply_search_includes_hidden(include: bool, cx: &mut App) {
+    for handle in cx.windows() {
+        let Some(handle) = handle.downcast::<CrowWindow>() else { continue };
+        handle.update(cx, |window, _, cx| window.set_search_includes_hidden(include, cx)).ok();
+    }
+}
+
 /// What `CrowWindow::open_search` starts from. U3 reuses it with a query.
 pub struct SearchStart {
     pub folder: PathBuf,
@@ -145,6 +155,8 @@ pub struct CrowWindow {
     /// Benchmark runs leave Recent alone, so its saves don't land in the measurement.
     bench: bool,
     show_hidden: bool,
+    /// The `search_includes_hidden` setting last applied to this window's search.
+    search_includes_hidden: bool,
     /// A sheet asking before an operation runs (conflicts, permanent delete).
     sheet: Option<Sheet>,
     show_activity: bool,
@@ -213,6 +225,10 @@ struct Palette {
     path: Option<PathState>,
     cursor: usize,
     folders: Vec<palette::FolderCandidate>,
+    /// The current folder's full listing (hidden entries too), for typed queries.
+    here_dir: Option<PaletteDir>,
+    /// The last typed query and the file indices it matched, for incremental narrowing.
+    file_narrow: Option<(String, Vec<u32>)>,
     scroll: ScrollHandle,
     _subscription: Subscription,
 }
@@ -281,10 +297,35 @@ struct PathState {
     files: Vec<palette::PathEntry>,
     /// The parent is not a folder, or cannot be read.
     missing: bool,
-    /// Whether the listing includes hidden entries.
-    hidden: bool,
-    /// Dropped listings (an older hidden setting) carry an older number.
+    /// Dropped listings carry an older number.
     generation: u64,
+}
+
+/// One folder for the palette, listed off the main thread with hidden entries.
+struct PaletteDir {
+    folders: Vec<palette::PathEntry>,
+    files: Vec<palette::PathEntry>,
+    missing: bool,
+}
+
+/// List a folder for the palette. Hidden entries are always included; the
+/// listing decides whether they match, so a setting change never needs a relist.
+fn list_palette_dir(parent: PathBuf, cx: &App) -> Task<PaletteDir> {
+    cx.background_spawn(async move {
+        let mut folders = Vec::new();
+        let mut files = Vec::new();
+        let listed = crow_fs::list_dir(&parent, true, |batch| {
+            for entry in batch {
+                let hidden = entry.hidden;
+                if entry.is_dir && !entry.is_package() {
+                    folders.push(palette::PathEntry::new(entry.path, entry.name, hidden));
+                } else {
+                    files.push(palette::PathEntry::new(entry.path, entry.name, hidden));
+                }
+            }
+        });
+        PaletteDir { folders, files, missing: listed.is_err() }
+    })
 }
 
 /// The list's content height, padding included.
@@ -342,6 +383,7 @@ impl CrowWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let show_hidden = cx.global::<Ui>().settings.show_hidden_files;
+        let search_includes_hidden = cx.global::<Ui>().settings.search_includes_hidden;
         if !bench {
             ui::record_visit(&dir, cx);
         }
@@ -407,6 +449,7 @@ impl CrowWindow {
             info,
             bench,
             show_hidden,
+            search_includes_hidden,
             sheet,
             show_activity: false,
             why: None,
@@ -579,6 +622,24 @@ impl CrowWindow {
             search.update(cx, |search, cx| search.set_show_hidden(show, cx));
         }
         crate::ui::set_setting(crate::ui::SettingChange::ShowHiddenFiles(show), cx);
+    }
+
+    /// The `search_includes_hidden` setting changed: rerun this window's open
+    /// search and rebuild its open palette. Idempotent.
+    fn set_search_includes_hidden(&mut self, include: bool, cx: &mut Context<Self>) {
+        if self.search_includes_hidden == include {
+            return;
+        }
+        self.search_includes_hidden = include;
+        if let Some(search) = &self.search {
+            search.update(cx, |search, cx| search.set_search_includes_hidden(include, cx));
+        }
+        if self.palette.is_some() {
+            let query =
+                self.palette.as_ref().map(|palette| palette.input.read(cx).text().to_owned()).unwrap_or_default();
+            self.refresh_palette(&query, cx);
+        }
+        cx.notify();
     }
 
     fn toggle_preview(&mut self, _: &TogglePreview, _: &mut Window, cx: &mut Context<Self>) {
@@ -2686,7 +2747,11 @@ impl CrowWindow {
             None => (PaletteMode::Folders, query.to_owned()),
         };
         let listing = match mode {
-            PaletteMode::Folders => palette::folder_listing(&text, &folders, &here),
+            PaletteMode::Folders => {
+                let search_includes_hidden = cx.global::<Ui>().settings.search_includes_hidden;
+                let hidden = palette::hidden_match(&text, self.show_hidden, search_includes_hidden);
+                palette::folder_listing(&text, &folders, &here, &[], &home, hidden, None)
+            }
             PaletteMode::Commands => self.palette_command_listing(&text, cx),
         };
         let input = cx.new(|cx| {
@@ -2739,9 +2804,42 @@ impl CrowWindow {
             path: None,
             cursor: 0,
             folders,
+            here_dir: None,
+            file_narrow: None,
             scroll: ScrollHandle::new(),
             _subscription: subscription,
         });
+        // The current folder's files and hidden subfolders arrive in the
+        // background; typed queries use them, and the empty listing is already up.
+        let task = list_palette_dir(cwd.clone(), cx);
+        cx.spawn(async move |this, cx| {
+            let dir = task.await;
+            this.update(cx, |this, cx| {
+                // The palette is per use; a result for a folder we left is stale.
+                if this.pane().read(cx).current_dir(cx) != cwd {
+                    return;
+                }
+                let home = cx.global::<Ui>().home.clone();
+                {
+                    let Some(palette) = this.palette.as_mut() else { return };
+                    let hidden: Vec<palette::FolderCandidate> = dir
+                        .folders
+                        .iter()
+                        .filter(|entry| entry.hidden)
+                        .filter(|entry| !palette.folders.iter().any(|candidate| candidate.path == entry.path))
+                        .map(|entry| palette::hidden_folder_candidate(&entry.path, entry.hidden, &home))
+                        .collect();
+                    palette.folders.extend(hidden);
+                    palette.here_dir = Some(dir);
+                    palette.file_narrow = None;
+                }
+                let query =
+                    this.palette.as_ref().map(|palette| palette.input.read(cx).text().to_owned()).unwrap_or_default();
+                this.refresh_palette(&query, cx);
+            })
+            .ok();
+        })
+        .detach();
         // A typed path (Shift-Cmd-G) lists that folder's children right away.
         if mode == PaletteMode::Folders && text.starts_with(['/', '~']) {
             self.refresh_palette(&text, cx);
@@ -2785,9 +2883,10 @@ impl CrowWindow {
         let cwd = self.pane().read(cx).current_dir(cx);
         let home = cx.global::<Ui>().home.clone();
         let show_hidden = self.show_hidden;
+        let search_includes_hidden = cx.global::<Ui>().settings.search_includes_hidden;
         let command_listing = (self.palette.as_ref().map(|palette| palette.mode) == Some(PaletteMode::Commands))
             .then(|| self.palette_command_listing(query, cx));
-        let mut spawn: Option<(PathBuf, bool, u64)> = None;
+        let mut spawn: Option<(PathBuf, u64)> = None;
         {
             let palette = self.palette.as_mut().expect("checked above");
             palette.cursor = 0;
@@ -2798,22 +2897,18 @@ impl CrowWindow {
                     palette.listing = listing;
                 }
             } else if let Some((parent, partial)) = palette::path_query(query, &cwd, &home) {
-                let hidden = show_hidden || partial.starts_with('.');
                 let relist = match &mut palette.path {
                     Some(state) if state.parent == parent => {
                         state.partial.clone_from(&partial);
-                        let relist = state.hidden != hidden;
-                        state.hidden = hidden;
-                        relist
+                        false
                     }
                     slot => {
                         *slot = Some(PathState {
                             parent: parent.clone(),
-                            partial,
+                            partial: partial.clone(),
                             children: None,
                             files: Vec::new(),
                             missing: false,
-                            hidden,
                             generation: 0,
                         });
                         true
@@ -2822,23 +2917,43 @@ impl CrowWindow {
                 let state = palette.path.as_mut().expect("set above");
                 if relist {
                     state.generation += 1;
-                    spawn = Some((parent.clone(), hidden, state.generation));
+                    spawn = Some((parent.clone(), state.generation));
                 }
+                let hidden = palette::hidden_match(&partial, show_hidden, search_includes_hidden);
                 let state = palette.path.as_ref().expect("set above");
                 palette.listing = match (&state.children, state.missing) {
                     (None, _) => palette::loading_path_listing(&state.parent),
                     (Some(_), true) => palette::missing_path_listing(&state.parent, &home),
                     (Some(children), false) => {
-                        palette::path_listing(&state.parent, &state.partial, children, &state.files, &home)
+                        palette::path_listing(&state.parent, &state.partial, children, &state.files, &home, hidden)
                     }
                 };
             } else {
                 palette.path = None;
-                palette.listing = palette::folder_listing(query, &palette.folders, &palette.here);
+                let hidden = palette::hidden_match(query, show_hidden, search_includes_hidden);
+                let narrowed = if query.is_empty() {
+                    None
+                } else {
+                    palette.here_dir.as_ref().map(|dir| {
+                        let previous = palette.file_narrow.as_ref().map(|(old, at)| (old.as_str(), at.as_slice()));
+                        palette::narrow_files(query, &dir.files, previous)
+                    })
+                };
+                let files: &[palette::PathEntry] = palette.here_dir.as_ref().map_or(&[], |dir| dir.files.as_slice());
+                palette.listing = palette::folder_listing(
+                    query,
+                    &palette.folders,
+                    &palette.here,
+                    files,
+                    &home,
+                    hidden,
+                    narrowed.as_deref(),
+                );
+                palette.file_narrow = narrowed.map(|at| (query.to_owned(), at));
             }
         }
-        if let Some((parent, hidden, generation)) = spawn {
-            self.spawn_path_listing(parent, hidden, generation, cx);
+        if let Some((parent, generation)) = spawn {
+            self.spawn_path_listing(parent, generation, cx);
         }
         // Budget (U7): under 4 ms with 10 000 subfolders per keystroke.
         tracing::debug!(
@@ -2850,32 +2965,18 @@ impl CrowWindow {
     }
 
     /// List a path-mode parent off the main thread; drop the result if the palette
-    /// has moved to another parent (or another hidden setting) meanwhile.
-    fn spawn_path_listing(&mut self, parent: PathBuf, hidden: bool, generation: u64, cx: &mut Context<Self>) {
-        let target = parent.clone();
-        let task = cx.background_spawn(async move {
-            let mut children = Vec::new();
-            let mut files = Vec::new();
-            let listed = crow_fs::list_dir(&target, hidden, |batch| {
-                for entry in batch {
-                    if entry.is_dir && !entry.is_package() {
-                        children.push(palette::PathEntry::new(entry.path, entry.name));
-                    } else {
-                        files.push(palette::PathEntry::new(entry.path, entry.name));
-                    }
-                }
-            });
-            (children, files, listed.is_err())
-        });
+    /// has moved to another parent meanwhile.
+    fn spawn_path_listing(&mut self, parent: PathBuf, generation: u64, cx: &mut Context<Self>) {
+        let task = list_palette_dir(parent.clone(), cx);
         cx.spawn(async move |this, cx| {
-            let (children, files, missing) = task.await;
+            let dir = task.await;
             this.update(cx, |this, cx| {
                 let applied = match &mut this.palette {
                     Some(palette) => match &mut palette.path {
                         Some(state) if state.parent == parent && state.generation == generation => {
-                            state.children = Some(children);
-                            state.files = files;
-                            state.missing = missing;
+                            state.children = Some(dir.folders);
+                            state.files = dir.files;
+                            state.missing = dir.missing;
                             true
                         }
                         _ => false,
@@ -3372,9 +3473,10 @@ impl CrowWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let Item::Folder { path, label, name, source, last_visit, matched, .. } = &listing.items[i] else {
+        let Item::Folder { path, label, name, source, hidden, last_visit, matched, .. } = &listing.items[i] else {
             return div().into_any_element();
         };
+        let hidden = *hidden;
         let (name_text, name_ranges) = (name.clone(), listing.items[i].name_ranges());
         let (path_text, path_ranges) =
             truncate_middle_with_ranges(label, matched, px(palette_path_width(window)), px(12.), window);
@@ -3384,9 +3486,10 @@ impl CrowWindow {
         } else {
             None
         };
+        let name_aria = if hidden { format!("{name}, hidden") } else { name.clone() };
         let aria = match &age {
-            Some(age) => format!("{name}, {label}, {section}, visited {age}"),
-            None => format!("{name}, {label}, {section}"),
+            Some(age) => format!("{name_aria}, {label}, {section}, visited {age}"),
+            None => format!("{name_aria}, {label}, {section}"),
         };
         let reveal = (*source == Source::File).then(|| "show in folder".to_owned());
         let right = note.map(str::to_owned).or(age).or(reveal);
@@ -3419,6 +3522,7 @@ impl CrowWindow {
                 div()
                     .size(px(22.))
                     .flex_none()
+                    .opacity(content_opacity(hidden, false))
                     .children(icon(path, *source != Source::File, 22).map(|image| img(image).size(px(22.)))),
             )
             .child(
@@ -3428,12 +3532,14 @@ impl CrowWindow {
                     .flex()
                     .flex_col()
                     .gap(px(1.))
-                    .child(div().text_size(px(14.)).overflow_hidden().whitespace_nowrap().child(highlight_text(
-                        name_text,
-                        &name_ranges,
-                        theme,
-                        selected,
-                    )))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .opacity(content_opacity(hidden, false))
+                            .child(highlight_text(name_text, &name_ranges, theme, selected)),
+                    )
                     .child(
                         div()
                             .text_size(px(12.))
@@ -4101,6 +4207,16 @@ impl CrowWindow {
                 },
             })
             .collect()
+    }
+
+    /// Whether palette row `row` is a hidden folder (None for headers and commands).
+    fn palette_row_hidden(&self, row: usize) -> Option<bool> {
+        let palette = self.palette.as_ref()?;
+        let Row::Item(index) = palette.listing.rows.get(row)? else { return None };
+        match palette.listing.items.get(*index)? {
+            Item::Folder { hidden, .. } => Some(*hidden),
+            Item::Command { .. } => None,
+        }
     }
 }
 

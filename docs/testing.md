@@ -62,12 +62,14 @@ a broken file starting empty, showing once, the key-use and `hints = "off"` refu
 and the zero-match streak.
 
 `crates/crow-search` tests the engine on temp trees: dev rules and sentinels skip and are counted
-with typed reasons, Search everything walks them, hidden files follow the setting, fuzzy names score,
+with typed reasons, Search everything walks them, dot names are visited and matched while Show Hidden
+Files is off (dot folders are skipped, not descended), `search_includes_hidden = false` leaves them
+out, fuzzy names score,
 literal and `/regex/` contents report the first matching line, text and ranges with the rest counted,
 batches stay bounded (one excerpt per file, 256 hits at most) and the first hit leaves at once, a name
 hit arrives before its own content read, a FIFO does not stall the walk, an unreadable folder is
 reported as a skip, binary files are not read, and cancelling stops the stream. `corpus_cases.rs`
-builds the deterministic corpus (`crow_search::corpus`) and runs its 20 named cases through the real
+builds the deterministic corpus (`crow_search::corpus`) and runs its 22 named cases through the real
 engine — the user's `.backu` case, hidden on and off, the exclusion sets, Search everything, the
 symlink and its child, the package, the unreadable folder and the FIFO — each under a 10 s deadline.
 The search panel adds keystroke tests for names and contents, Search everything and its switch,
@@ -310,7 +312,9 @@ target: name hit at 4ms (batch 2)
 The verdict is one of `name hit at Nms (batch N)`, `content hit line N at Nms`, `not found; under
 skipped PATH (REASON)`, `not found; outside DIR`, or `not found; no skipped ancestor, and the name
 does not match` (checked with the engine's own `FuzzyMatcher`). `--names` / `--contents` restrict the
-match, `--hidden` / `--no-hidden` override the setting, and `--everything` ignores the exclusion sets.
+match, `--hidden` / `--no-hidden` override Show Hidden Files, `--search-hidden` /
+`--no-search-hidden` override `search_includes_hidden` (default on), and `--everything` ignores the
+exclusion sets.
 It reads `settings.toml` and `exclude.toml` from the config folder; a broken file prints its error and
 falls back to the defaults.
 
@@ -396,7 +400,9 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | All / Names / Contents | Search a word that's in file names and inside files: Names drops the content lines, Contents drops the name-only rows. Names in Home is fast (no file reads). Switch to This Mac: the control shows Names, faded. Cmd-Shift-M in the field and in the results cycles All → Names → Contents. |
 | Search | Cmd-F, search a word in file names and in contents: while results stream the top row stays selected and previewed; contiguous name matches come first with their letters highlighted, scattered fuzzy name hits follow the content rows; a name match is one line, a content-only hit shows its line number and line under the name; the Modified column stays on one line ("Today 14:32", "Yesterday", "4. Nov"). Switch <folder> / Home / This Mac; Return, Cmd-R, Space, drag-out, Cmd-C and Cmd-Delete act on results. The right pane previews the selected result in list and column view, at the hit line. |
 | Search scope bar | One bar: "Search", the scope segments, and "Skip dev folders" on the right; click the switch and press Cmd-Shift-A: both flip it and the results change. Enable `media` in `exclude.toml`: the label becomes "Skip dev and media folders" without reopening. |
-| Skipped folders | Search a folder with `node_modules`: the footer says "1 folder skipped ›" (or "k folders skipped ›"); click it and check each folder is listed relative to the searched folder, with the rule that skipped it, above the footer. Esc closes the list first, then search. Search everything includes them and the link goes away. |
+| Skipped folders | Search a folder with `node_modules`: the footer says "1 folder skipped ›" (or "k folders skipped ›"); click it and check each folder is listed relative to the searched folder, with the rule that skipped it, above the footer. With Show Hidden Files off, dot folders appear as "hidden folder (Show Hidden Files is off)" and do not hide their contents from Search everything. Esc closes the list first, then search. Search everything includes them and the link goes away. |
+| Search hidden files setting | Show Hidden Files off (⇧⌘.), Cmd-F for `zshrc` (or another dotfile): found, dimmed, VoiceOver reads "…, hidden"; the footer counts the skipped dot folders. Turn Settings ▸ Search ▸ Search always includes hidden files off: the dot hits and their skipped folders go, and Search everything leaves them out too; turn it on: they return. With Show Hidden Files on, the setting changes nothing. |
+| Default match | Settings ▸ Search ▸ Search matches: set Names, open a new Cmd-F: the panel starts on Names (Contents likewise). Change it while a search is open: that panel keeps its own All/Names/Contents choice. |
 | Spotlight | Search This Mac for a name outside the home folder: results stream in, the switch is replaced by "Spotlight: indexed volumes only". |
 | Search idle | Cmd-F with nothing typed: the heading follows All / Names / Contents and the four left-aligned examples fill the field, switch to This Mac, or flip the switch; the fourth is plain key text and disappears when no `exclude.toml` set is enabled. The key line follows `keymap = "vim"`. |
 | Search errors | Type `/(/`: one red footer line, "Invalid pattern: unclosed group"; no rows, and the body shows "Can't search: Invalid pattern: unclosed group" and suggests removing the slashes. |
@@ -408,7 +414,9 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Check | How |
 | --- | --- |
 | Command palette | Cmd-K over a scrim; the folder you are in is not listed, so Cmd-K then Return goes to the one before it; sections Recent / Favorites / In <folder>; two folders with the same name show different paths; matched letters accented in name and path; Recent rows show "2 h ago"-style times; ↵ goes, ⌘↵ opens a tab; Vim j/k move across headers. Keycaps follow the layer: `>` rows show ⇧⌘G-style keys, and with `keymap = "vim"` Copy shows `yy`. |
-| Palette ⇥ | ⇥ on a row puts its path and `/` in the field; typing narrows to its subfolders; ↵ on "this folder" goes there; `.` shows hidden folders. |
+| Palette ⇥ | ⇥ on a row puts its path and `/` in the field; typing narrows to its subfolders and fuzzy-matches its files (mid-name too, e.g. `ack` finds `back.txt`); ↵ on "this folder" goes there; `.` shows hidden folders. |
+| Palette files here | In a folder with matching files and subfolders, type a name without `/`: folders come first, then "Files in <folder>", with the best fuzzy file matches; Return reveals the file selected in the folder. With Show Hidden Files off, an empty ⌘K lists no dot folders; typing `config` lists `.config` after visible matches and dimmed (`.co` ranks it first); dot files come after visible ones and dimmed, or not at all with the setting off. Check FireBox and Solarized Light at 640 px: the dimmed rows stay readable and the "Files in" header aligns with the folder rows. |
+| Palette budget | In `target/fixture-100k`, open ⌘K and type `file-0`, `file-00`, `file-000` quickly: no visible lag. With `RUST_LOG=debug`, the log's `palette refresh` lines stay under 16 ms (B2: 12–15 ms with 100k files; the U7 folder budget is under 4 ms with 10,000 subfolders). |
 | Palette home row | With Home in Favorites or Recent, type `jul` (your account's first letters): the home row shows and `jul` is highlighted in its name; type `~`: the same row shows with `~` highlighted in the path. Other folder rows rank as before. |
 | Palette commands | `>` turns into the Commands token and Return on the empty list never quits (typing `quit` finds Quit Crow); Backspace on an empty field removes it; rows show menu, on/off chip for Show Hidden Files and Show Activity, and keycaps (switch to the Vim layer: keycaps follow). |
 | Recently used | Run two commands from the palette, quit, relaunch: `>` lists them under Recently used. Set `palette_recent_commands = false`: the section disappears without a restart, and new runs aren't recorded. |
@@ -465,6 +473,7 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Appearance, dark and light | FireBox and Solarized Light: the Theme drop-down opens (click, Space, Return or ↓) a menu over the page, with no scroll box on the page itself: System then the index's themes, dark before light; ↓/↑ previews each in every window, Return or a click keeps it, Esc or a click outside reverts. The menu sits under its button and stays inside the window. The four app-icon tiles show at 64 px; the Dock switches when one is chosen. The Font drop-down starts with System and lists installed families (the menu scrolls); typing opens it at the match; nothing changes until Return or a click. The font-size stepper goes 10–24 with ↑↓ and typed digits. |
 | Behaviour | Keymap Finder/Vim, key hints Auto/Always/Off, tips Auto/Off, folder sizes, the terminal app, Show hidden files, Show preview, Folders keep their own view, Remember recent commands: each changes at once and writes only its line. Type `iTerm` in Terminal app and Return: `terminal = "iTerm"` and Open Terminal Here uses it; clear it and Return: `terminal = "Terminal"`. |
 | Motion & sound | Motion Auto/Off/Low/Full; Auto's line says which mode it resolves to now and whether Reduce Motion is on. Sounds Crow/Finder/Off; Play plays the trash sound in the chosen set. |
+| Search | Search always includes hidden files: find a dot file with Show Hidden Files off, then flip it: open results update at once and only its `search_includes_hidden` line changes. Search matches All/Names/Contents: the next Cmd-F starts in that mode; an open panel keeps its own control. |
 | New windows | Width and height steppers, 600–4000; a new window (⌘N) opens at the chosen size. |
 | Files | Edit settings.toml… opens the file (with the old failure message when no app owns `.toml`); Show config folder in Finder opens `~/.config/crow`; the `sidebar.toml`, `views.toml` and `exclude.toml` links open their files. |
 | Comments survive | Hand-edit `settings.toml` with comments and a value next to one, then change that value from the window: every other line, comment and blank line is unchanged. If the change is the default, the line is still written. |
