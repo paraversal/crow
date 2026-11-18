@@ -7,6 +7,346 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crow_fs::{Entry, SortKey};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Stable plugin package identity: 1–96 ASCII bytes, split on dots into
+/// nonempty lowercase alphanumeric/hyphen segments. `crow` and `crow.*` are
+/// reserved for bundled providers.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PluginId(String);
+
+impl PluginId {
+    pub const MAX_BYTES: usize = 96;
+    pub const RESERVED: &'static str = "crow";
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        if text.is_empty() || text.len() > Self::MAX_BYTES {
+            return Err(format!("plugin id must be 1-{} ASCII bytes", Self::MAX_BYTES));
+        }
+        if !text.split('.').all(is_segment) {
+            return Err(
+                "plugin id segments must be nonempty lowercase letters, digits or hyphens, split by dots".into()
+            );
+        }
+        Ok(Self(text.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The bundled namespace: installed bundles cannot claim it.
+    pub fn is_reserved(&self) -> bool {
+        self.0 == Self::RESERVED || self.0.starts_with("crow.")
+    }
+}
+
+fn is_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+impl std::fmt::Display for PluginId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Serialize for PluginId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for PluginId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+/// One plugin-local extension name. Local IDs are one segment, so
+/// `git.lines-changed` decodes at its last dot.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LocalId(String);
+
+impl LocalId {
+    pub const MAX_BYTES: usize = 96;
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        if text.is_empty() || text.len() > Self::MAX_BYTES {
+            return Err(format!("local id must be 1-{} ASCII bytes", Self::MAX_BYTES));
+        }
+        if !is_segment(text) {
+            return Err("local id must be lowercase letters, digits or hyphens, without dots".into());
+        }
+        Ok(Self(text.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for LocalId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Serialize for LocalId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for LocalId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A published extension point: `plugin_id.local_id`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ExtensionId {
+    pub plugin: PluginId,
+    pub local: LocalId,
+}
+
+impl ExtensionId {
+    pub fn new(plugin: PluginId, local: LocalId) -> Self {
+        Self { plugin, local }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let (plugin, local) = text.rsplit_once('.').ok_or("extension id needs a plugin and local part")?;
+        Ok(Self { plugin: PluginId::parse(plugin)?, local: LocalId::parse(local)? })
+    }
+}
+
+impl std::fmt::Display for ExtensionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.plugin, self.local)
+    }
+}
+
+impl Serialize for ExtensionId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ExtensionId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+/// The extension points API 1 can publish. Manifest `provides` and registration
+/// descriptors use the same keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ExtensionKind {
+    Column,
+    Decoration,
+    Preview,
+    Sidebar,
+    Command,
+    Hook,
+    Status,
+    Info,
+    IconPack,
+}
+
+impl ExtensionKind {
+    pub const ALL: [Self; 9] = [
+        Self::Column,
+        Self::Decoration,
+        Self::Preview,
+        Self::Sidebar,
+        Self::Command,
+        Self::Hook,
+        Self::Status,
+        Self::Info,
+        Self::IconPack,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Column => "column",
+            Self::Decoration => "decoration",
+            Self::Preview => "preview",
+            Self::Sidebar => "sidebar",
+            Self::Command => "command",
+            Self::Hook => "hook",
+            Self::Status => "status",
+            Self::Info => "info",
+            Self::IconPack => "icon-pack",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.key() == text)
+    }
+}
+
+/// Where a descriptor gets its data. Computed kinds name one script function;
+/// an icon pack names a manifest-declared bundle asset. The two are distinct so
+/// a contract bug cannot turn one into the other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DescriptorSource {
+    Function(String),
+    Asset(String),
+}
+
+/// One validated registration. Data-only kinds (an icon pack) carry a declared
+/// asset instead of a function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Descriptor {
+    pub kind: ExtensionKind,
+    pub id: ExtensionId,
+    pub title: String,
+    pub applies_to: Option<String>,
+    pub source: DescriptorSource,
+}
+
+impl Descriptor {
+    pub fn function(&self) -> Option<&str> {
+        match &self.source {
+            DescriptorSource::Function(function) => Some(function),
+            DescriptorSource::Asset(_) => None,
+        }
+    }
+
+    pub fn asset(&self) -> Option<&str> {
+        match &self.source {
+            DescriptorSource::Asset(asset) => Some(asset),
+            DescriptorSource::Function(_) => None,
+        }
+    }
+}
+
+/// A request-local entry identity. It is never persisted and cannot be minted by
+/// a decoded value; the host keeps the handle → entry table for one invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EntryHandle(pub u32);
+
+/// One entry's bounded text contribution, keyed by its request-local handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryValue {
+    pub handle: EntryHandle,
+    pub text: String,
+    pub spoken: Option<String>,
+}
+
+/// The preview provider's bounded output for v1: plain text or a table.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PluginPreview {
+    pub text: Option<String>,
+    pub table: Option<Vec<Vec<String>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarRow {
+    pub id: String,
+    pub title: String,
+    pub meta: Option<String>,
+    pub badge: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusItem {
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InfoRow {
+    pub label: String,
+    pub value: String,
+}
+
+/// A closed reply shape keyed to the descriptor kind. A decoded value never
+/// carries a path or a fresh handle to another invocation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContributionValues {
+    Column(Vec<EntryValue>),
+    Decoration(Vec<EntryValue>),
+    Preview(PluginPreview),
+    Sidebar(Vec<SidebarRow>),
+    Status(Vec<StatusItem>),
+    Info(Vec<InfoRow>),
+}
+
+impl ContributionValues {
+    pub fn kind(&self) -> ExtensionKind {
+        match self {
+            Self::Column(_) => ExtensionKind::Column,
+            Self::Decoration(_) => ExtensionKind::Decoration,
+            Self::Preview(_) => ExtensionKind::Preview,
+            Self::Sidebar(_) => ExtensionKind::Sidebar,
+            Self::Status(_) => ExtensionKind::Status,
+            Self::Info(_) => ExtensionKind::Info,
+        }
+    }
+}
+
+/// A checked action a command may request. P1B owns the full allowlist; the
+/// fixture needs only plain-text copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandIntent {
+    CopyText(String),
+}
+
+/// The hook events API 1 delivers. `scope` is host-provided display text, never
+/// an I/O capability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HookEvent {
+    ScopeChanged { scope: String },
+    SelectionChanged { scope: String },
+    FilesChanged { scope: String },
+    OperationDone,
+}
+
+impl HookEvent {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ScopeChanged { .. } => "scope-changed",
+            Self::SelectionChanged { .. } => "selection-changed",
+            Self::FilesChanged { .. } => "files-changed",
+            Self::OperationDone => "operation-done",
+        }
+    }
+
+    pub fn scope(&self) -> Option<&str> {
+        match self {
+            Self::ScopeChanged { scope } | Self::SelectionChanged { scope } | Self::FilesChanged { scope } => {
+                Some(scope)
+            }
+            Self::OperationDone => None,
+        }
+    }
+}
+
+/// Host-provided metadata for one entry in an invocation. No path: the host
+/// keeps the path and answers a granted read by handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryData {
+    pub handle: EntryHandle,
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub kind: String,
+}
+
+/// The bounded input map a script sees for one call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    /// Display text for the current scope (a folder path in P1B), not an I/O handle.
+    pub scope: String,
+    pub selection: Option<EntryHandle>,
+    pub entries: Vec<EntryData>,
+}
 
 /// What a column needs from the app to render a value.
 pub struct ColumnContext<'a> {
@@ -402,5 +742,32 @@ mod tests {
         let cell = SizeColumn.cell(&entry, &cx);
         assert_eq!(cell.text, "--", "Crow does not follow the link, so it has no size");
         assert_eq!(cell.spoken.as_deref(), Some("size not calculated"));
+    }
+
+    #[test]
+    fn plugin_ids_validate_and_reserve_the_bundled_namespace() {
+        assert_eq!(PluginId::parse("example.relative-path").unwrap().as_str(), "example.relative-path");
+        assert!(PluginId::parse("Crow").is_err(), "uppercase is not stable");
+        assert!(PluginId::parse("a..b").is_err(), "empty segment");
+        assert!(PluginId::parse(".a").is_err());
+        assert!(PluginId::parse("a_b").is_err(), "underscore is not in the id alphabet");
+        assert!(PluginId::parse(&"a".repeat(PluginId::MAX_BYTES + 1)).is_err());
+        assert!(PluginId::parse("crow").unwrap().is_reserved());
+        assert!(PluginId::parse("crow.git").unwrap().is_reserved());
+        assert!(!PluginId::parse("crowbar.git").unwrap().is_reserved());
+        assert!(LocalId::parse("lines-changed").is_ok());
+        assert!(LocalId::parse("git.lines").is_err(), "a local id is one segment");
+    }
+
+    #[test]
+    fn extension_ids_round_trip_at_the_last_dot() {
+        let id = ExtensionId::parse("git.lines-changed").unwrap();
+        assert_eq!(id.plugin.as_str(), "git");
+        assert_eq!(id.local.as_str(), "lines-changed");
+        assert_eq!(id.to_string(), "git.lines-changed");
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"git.lines-changed\"");
+        assert_eq!(serde_json::from_str::<ExtensionId>(&json).unwrap(), id);
+        assert!(serde_json::from_str::<ExtensionId>("\"git\"").is_err());
     }
 }

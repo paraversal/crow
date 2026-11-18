@@ -20,6 +20,7 @@ crow-core.workspace = true
 # `testing` builds `--make-fixture` and the fuzzer's edge trees/churn.
 crow-fs = { workspace = true, features = ["testing"] }
 crow-macos.workspace = true
+crow-plugin.workspace = true
 crow-search.workspace = true
 crow-theme.workspace = true
 gpui.workspace = true

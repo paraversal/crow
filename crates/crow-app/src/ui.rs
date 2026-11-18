@@ -323,6 +323,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     let ui = Ui::new(root.join("config"), state_dir, crow_core::home(), crow_theme::fallback(), false);
     cx.set_global(ui);
     crate::extensions::init(cx);
+    crate::plugins::init_empty(cx);
     crate::usage::init(cx);
     crate::tips::init(cx);
     crate::onboarding::init(cx);
@@ -338,6 +339,7 @@ fn poll(cx: &mut App) {
     if config_changed {
         reload_config(cx);
     }
+    crate::plugins::poll(cx);
     // Reduce Motion and the UI-sounds switch can change without a config edit.
     refresh_feedback(cx);
     refresh_clipboard(cx);
@@ -411,6 +413,7 @@ pub fn reload_config(cx: &mut App) {
     }
     refresh_feedback(cx);
     refresh_app_icon(cx);
+    crate::plugins::reload(cx);
     cx.refresh_windows();
 }
 
@@ -710,6 +713,33 @@ pub fn open_config_file(name: &str, cx: &mut App) {
         crate::operations::message(message, true, cx);
         cx.refresh_windows();
     }
+}
+
+/// Show `<config>/plugins` in Finder, creating it if this is the first visit.
+pub fn open_plugins_folder(cx: &mut App) {
+    let dir = cx.global::<Ui>().config_dir.join("plugins");
+    let create = cx.background_spawn(async move {
+        std::fs::create_dir_all(&dir).map(|()| dir) // io-ok: inside background_spawn
+    });
+    cx.spawn(async move |cx| {
+        let dir = match create.await {
+            Ok(dir) => dir,
+            Err(error) => {
+                cx.update(|cx| {
+                    crate::operations::message(format!("Couldn't create the plugins folder: {error}"), true, cx);
+                    cx.refresh_windows();
+                });
+                return;
+            }
+        };
+        cx.update(|cx| {
+            if !crate::effects::effects(cx).open_folder_in_finder(&dir) {
+                crate::operations::message(format!("Couldn't open {}", dir.display()), true, cx);
+                cx.refresh_windows();
+            }
+        });
+    })
+    .detach();
 }
 
 /// Show the config folder in Finder.
