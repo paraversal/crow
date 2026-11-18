@@ -5,7 +5,7 @@ Branch: m8.5-b5-regression · PR: none · Last updated: 2026-11-18 · State: in 
 | Item | State | Notes |
 | --- | --- | --- |
 | 1 Oracle on random trees | done | `crates/crow-search/src/oracle_tests.rs` walks seeded trees with a plain `read_dir` oracle; agrees with the engine on 25 seeds × 4 queries × hidden × everything × match mode (1,200 comparisons; 300 seeds took 57 s, so the plan's "lower the seed count and record it" applies). 4.7 s in debug. Coverage asserts every skip reason and both hit kinds are reached. |
-| 2 App-level corpus matrix | todo | |
+| 2 App-level corpus matrix | done | `search_corpus_matrix` drives the panel through `backup`/`needle` × All/Names/Contents × hidden on/off × everything on/off (24 runs) and compares the path set, done-footer text and skipped count with `crow_search::search` directly. Passes in 3.6 s. |
 | 3 Fuzzer | todo | |
 | 4 Bench and docs | todo | |
 
