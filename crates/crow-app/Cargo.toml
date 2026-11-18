@@ -23,6 +23,7 @@ crow-macos.workspace = true
 crow-plugin.workspace = true
 crow-search.workspace = true
 crow-theme.workspace = true
+anyhow = "1"
 gpui.workspace = true
 gpui_platform.workspace = true
 chrono.workspace = true

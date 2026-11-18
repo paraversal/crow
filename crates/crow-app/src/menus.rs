@@ -9,6 +9,38 @@ use crate::actions as act;
 use crate::palette::{COMMANDS, Command, CommandId, MenuName, MenuSlot};
 use crate::ui::Ui;
 
+/// One command row in the native `File ▸ Plugins` submenu.
+pub struct MenuPluginCommand {
+    pub extension: crow_core::ExtensionId,
+    pub generation: u64,
+    pub title: String,
+}
+
+fn plugin_menu_commands(cx: &App) -> Vec<MenuPluginCommand> {
+    let Some(plugins) = cx.try_global::<crate::plugins::Plugins>() else { return Vec::new() };
+    let snapshot = plugins.surfaces.snapshot();
+    let mut commands: Vec<(String, String, crow_core::ExtensionId, u64)> = snapshot
+        .of_kind(crow_core::ExtensionKind::Command)
+        .filter(|(id, _)| !plugins.surfaces.is_suppressed(&id.plugin))
+        .map(|(id, published)| {
+            (published.package.clone(), published.descriptor.title.clone(), id.clone(), published.generation)
+        })
+        .collect();
+    commands.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)).then(left.2.cmp(&right.2)));
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (_, title, _, _) in &commands {
+        *counts.entry(title.clone()).or_insert(0usize) += 1;
+    }
+    commands
+        .into_iter()
+        .map(|(package, title, extension, generation)| {
+            let title =
+                if counts.get(&title).copied().unwrap_or(0) > 1 { format!("{title} — {package}") } else { title };
+            MenuPluginCommand { extension, generation, title }
+        })
+        .collect()
+}
+
 /// The toggle names the action it will take, so the menu says what a click does.
 fn menu_title(command: &Command, slot: MenuSlot, show_preview: bool) -> &'static str {
     match command.id {
@@ -41,7 +73,7 @@ fn command_item(command: &Command, slot: MenuSlot, show_preview: bool, folder_si
 }
 
 /// The whole menu bar in macOS order: Crow, File, Edit, View, Go, Window, Help.
-pub fn app_menus(show_preview: bool, folder_sizes_visible: bool) -> Vec<Menu> {
+pub fn app_menus(show_preview: bool, folder_sizes_visible: bool, plugin_commands: &[MenuPluginCommand]) -> Vec<Menu> {
     let mut menus = Vec::with_capacity(MenuName::ALL.len());
     for menu in MenuName::ALL {
         let mut items = Vec::new();
@@ -78,6 +110,15 @@ pub fn app_menus(show_preview: bool, folder_sizes_visible: bool) -> Vec<Menu> {
             section = Some(slot.section);
         }
 
+        if *menu == MenuName::File && !plugin_commands.is_empty() {
+            items.push(MenuItem::separator());
+            items.push(MenuItem::submenu(Menu::new("Plugins").items(plugin_commands.iter().map(|command| {
+                MenuItem::action(
+                    command.title.clone(),
+                    act::PluginCommand { extension: command.extension.clone(), generation: command.generation },
+                )
+            }))));
+        }
         menus.push(Menu { name: menu.title().into(), items, disabled: false });
     }
     menus
@@ -108,7 +149,7 @@ pub fn refresh(cx: &mut App) {
         let settings = &cx.global::<Ui>().settings;
         (settings.show_preview, settings.folder_sizes == crow_core::FolderSizesMode::Visible)
     };
-    cx.set_menus(app_menus(show_preview, folder_sizes_visible));
+    cx.set_menus(app_menus(show_preview, folder_sizes_visible, &plugin_menu_commands(cx)));
 }
 
 #[cfg(test)]
@@ -145,8 +186,41 @@ mod tests {
     }
 
     #[test]
+    fn plugin_commands_form_one_file_submenu_in_package_order() {
+        let id = |local: &str| {
+            crow_core::ExtensionId::new(
+                crow_core::PluginId::parse("example.test").unwrap(),
+                crow_core::LocalId::parse(local).unwrap(),
+            )
+        };
+        let commands = vec![
+            MenuPluginCommand { extension: id("b"), generation: 2, title: "Copy".into() },
+            MenuPluginCommand { extension: id("a"), generation: 1, title: "Copy".into() },
+            MenuPluginCommand { extension: id("c"), generation: 3, title: "Only".into() },
+        ];
+        let menus = app_menus(false, false, &commands);
+        let file = menus.iter().find(|menu| menu.name.as_ref() == "File").expect("File menu");
+        let MenuItem::Submenu(plugins) = file
+            .items
+            .iter()
+            .find(|item| matches!(item, MenuItem::Submenu(menu) if menu.name.as_ref() == "Plugins"))
+            .expect("Plugins submenu")
+        else {
+            unreachable!()
+        };
+        assert_eq!(titles(&plugins.items), ["Copy", "Copy", "Only"]);
+        assert!(matches!(
+            &plugins.items[0],
+            MenuItem::Action { action, .. } if action.partial_eq(&act::PluginCommand {
+                extension: id("b"),
+                generation: 2,
+            })
+        ));
+    }
+
+    #[test]
     fn every_menu_command_is_in_the_menus() {
-        let menus = app_menus(true, false);
+        let menus = app_menus(true, false, &[]);
         for command in COMMANDS {
             let Some(slot) = command.menu else { continue };
             let menu = menus.iter().find(|menu| menu.name.as_ref() == slot.menu.title()).expect("menu exists");
@@ -186,7 +260,7 @@ mod tests {
     #[test]
     fn preview_menu_names_the_action() {
         let view_items = |show_preview: bool| {
-            let menus = app_menus(show_preview, false);
+            let menus = app_menus(show_preview, false, &[]);
             let view = menus.iter().find(|menu| menu.name.as_ref() == "View").expect("View menu");
             titles(&view.items).into_iter().map(str::to_owned).collect::<Vec<_>>()
         };
@@ -197,7 +271,7 @@ mod tests {
     #[test]
     fn calculate_folder_sizes_is_disabled_when_the_setting_is_visible() {
         let disabled = |folder_sizes_visible: bool| {
-            let menus = app_menus(false, folder_sizes_visible);
+            let menus = app_menus(false, folder_sizes_visible, &[]);
             let view = menus.iter().find(|menu| menu.name.as_ref() == "View").expect("View menu");
             view.items.iter().find_map(|item| match item {
                 MenuItem::Action { name, disabled, .. } if name.as_ref() == "Calculate Folder Sizes" => Some(*disabled),
@@ -210,7 +284,7 @@ mod tests {
 
     #[test]
     fn menus_are_in_bar_order() {
-        let menus = app_menus(true, false);
+        let menus = app_menus(true, false, &[]);
         let names: Vec<&str> = menus.iter().map(|menu| menu.name.as_ref()).collect();
         assert_eq!(names, ["Crow", "File", "Edit", "View", "Go", "Window", "Help"]);
 

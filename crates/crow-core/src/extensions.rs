@@ -443,11 +443,18 @@ pub struct Snapshot {
 }
 
 /// What a column needs from the app to render a value.
+pub type PluginValueFn<'a> = &'a dyn Fn(&ExtensionId, &Path, u64) -> Option<ColumnCell>;
+pub type PluginVersionFn<'a> = &'a dyn Fn(&Entry) -> u64;
+
 pub struct ColumnContext<'a> {
     pub kind: &'a dyn Fn(&Entry) -> Arc<str>,
     pub time: &'a dyn Fn(Option<SystemTime>) -> String,
     /// A folder's measured size, when the size service has one.
     pub size: &'a dyn Fn(&Entry) -> Option<KnownSize>,
+    /// A ready plugin cell for this entry, keyed by descriptor and version.
+    pub plugin_value: Option<PluginValueFn<'a>>,
+    /// The entry version the cache was keyed by.
+    pub plugin_version: Option<PluginVersionFn<'a>>,
 }
 
 /// A folder size the service knows: bytes, whether they are stale, and a version
@@ -484,8 +491,9 @@ pub enum Align {
 
 /// A list-view column after Name.
 pub trait Column: Send + Sync {
-    /// Stable identifier, used in settings (`views.toml` from M5).
-    fn id(&self) -> &'static str;
+    /// Stable identifier, used in settings (`views.toml` from M5). Plugin
+    /// columns own their fully qualified ID and borrow it here.
+    fn id(&self) -> &str;
     fn title(&self) -> &str;
     /// Default width in points.
     fn width(&self) -> f32;
@@ -568,7 +576,7 @@ impl Extensions {
 
 struct SizeColumn;
 impl Column for SizeColumn {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "size"
     }
     fn title(&self) -> &str {
@@ -617,7 +625,7 @@ impl Column for SizeColumn {
 
 struct KindColumn;
 impl Column for KindColumn {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "kind"
     }
     fn title(&self) -> &str {
@@ -636,7 +644,7 @@ impl Column for KindColumn {
 
 struct ModifiedColumn;
 impl Column for ModifiedColumn {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "modified"
     }
     fn title(&self) -> &str {
@@ -655,7 +663,7 @@ impl Column for ModifiedColumn {
 
 struct AddedColumn;
 impl Column for AddedColumn {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "added"
     }
     fn title(&self) -> &str {
@@ -832,7 +840,8 @@ mod tests {
         let ext = Extensions::with_builtins();
         let ids: Vec<_> = ext.columns().iter().map(|c| c.id()).collect();
         assert_eq!(ids, ["modified", "size", "kind", "added"]);
-        let shown: Vec<_> = ext.default_columns().iter().map(|c| c.id()).collect();
+        let columns = ext.default_columns();
+        let shown: Vec<_> = columns.iter().map(|c| c.id()).collect();
         assert_eq!(shown, ["modified", "size", "kind"], "Finder's defaults; Date Added is optional");
     }
 
@@ -853,7 +862,7 @@ mod tests {
         let kind = |_: &Entry| Arc::<str>::from("Folder");
         let time = |_: Option<SystemTime>| "—".to_owned();
         let size = |_: &Entry| Some(KnownSize { bytes: 1024, stale: false, version: 1 });
-        let cx = ColumnContext { kind: &kind, time: &time, size: &size };
+        let cx = ColumnContext { kind: &kind, time: &time, size: &size, plugin_value: None, plugin_version: None };
         let cell = SizeColumn.cell(&entry, &cx);
         assert_eq!(cell.text, "--", "Crow does not follow the link, so it has no size");
         assert_eq!(cell.spoken.as_deref(), Some("size not calculated"));

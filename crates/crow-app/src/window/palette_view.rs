@@ -47,6 +47,9 @@ pub(super) struct Palette {
     /// The last typed query and the file indices it matched, for incremental narrowing.
     file_narrow: Option<(String, Vec<u32>)>,
     scroll: ScrollHandle,
+    /// The file surface that opened the palette, so a plugin command can
+    /// restore its focus and revalidate the same scope/selection.
+    plugin_context: Option<crate::plugins::FileCommandContext>,
     _subscription: Subscription,
 }
 
@@ -56,7 +59,7 @@ impl Palette {
     pub(super) fn row_keys(&self, i: usize, cx: &App) -> Option<SharedString> {
         match self.listing.items.get(i)? {
             Item::Command { command, .. } => keys::text(command.action, command.scope, cx),
-            Item::Folder { .. } => None,
+            Item::PluginCommand { .. } | Item::Folder { .. } => None,
         }
     }
 }
@@ -72,6 +75,7 @@ const PALETTE_DIVIDER: f32 = 1.;
 pub(super) const PALETTE_LIST_PAD: f32 = 6.;
 const PALETTE_FOLDER_ROW: f32 = 44.;
 const PALETTE_COMMAND_ROW: f32 = 40.;
+const PALETTE_PLUGIN_ROW: f32 = 46.;
 const PALETTE_HEADER_ROW: f32 = 34.;
 const PALETTE_EMPTY_ROW: f32 = 44.;
 const PALETTE_MAX_LIST: f32 = 440.;
@@ -89,6 +93,7 @@ fn palette_path_width(window: &Window) -> f32 {
 fn palette_item_height(item: &Item) -> f32 {
     match item {
         Item::Command { .. } => PALETTE_COMMAND_ROW,
+        Item::PluginCommand { .. } => PALETTE_PLUGIN_ROW,
         Item::Folder { .. } => PALETTE_FOLDER_ROW,
     }
 }
@@ -270,6 +275,7 @@ impl CrowWindow {
             TextInputEvent::Cancelled => this.close_palette(window, cx),
             TextInputEvent::CompletionRequested => this.complete_palette(window, cx),
         });
+        let plugin_context = crate::plugins::current_command_context(cx);
         let focus = input.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         self.palette = Some(Palette {
@@ -283,6 +289,7 @@ impl CrowWindow {
             here_dir: None,
             file_narrow: None,
             scroll: ScrollHandle::new(),
+            plugin_context,
             _subscription: subscription,
         });
         // The current folder's files and hidden subfolders arrive in the
@@ -338,12 +345,34 @@ impl CrowWindow {
         let ui = cx.global::<Ui>();
         let recent: Vec<palette::CommandId> =
             ui.recent_commands.ids().iter().filter_map(|key| palette::CommandId::from_key(key)).collect();
-        palette::command_listing(
+        let mut listing = palette::command_listing(
             query,
             &recent,
             ui.settings.palette_recent_commands,
             ui.settings.folder_sizes == crow_core::FolderSizesMode::Visible,
-        )
+        );
+        let selection = self.palette.as_ref().and_then(|palette| palette.plugin_context.as_ref());
+        let commands: Vec<_> = crate::plugins::command_items(cx)
+            .into_iter()
+            .filter(|command| {
+                selection
+                    .is_some_and(|context| crate::plugins::command_eligible(&command.extension, &context.selection, cx))
+            })
+            .collect();
+        let matched = palette::plugin_command_matches(query, &commands);
+        if !matched.is_empty() {
+            listing.rows.push(Row::Header("Plugins".into()));
+            for (item, _) in matched {
+                listing.rows.push(Row::Item(listing.items.len()));
+                listing.items.push(item);
+            }
+            listing.count = if query.trim().is_empty() {
+                format!("{} commands", listing.items.len()).into()
+            } else {
+                format!("{} of {} commands", listing.items.len(), listing.items.len()).into()
+            };
+        }
+        listing
     }
 
     pub(super) fn refresh_palette(&mut self, query: &str, cx: &mut Context<Self>) {
@@ -564,12 +593,35 @@ impl CrowWindow {
         }
         // Typing a whole path for a folder the palette already offers is the slow way.
         let path_mode = palette.path.is_some();
+        let plugin_context = palette.plugin_context.clone();
         self.palette = None;
         self.focus_center(window, cx);
         match item {
             Some(Item::Command { command, .. }) => {
                 self.run_command(command.id, window, cx);
                 ui::record_command(command.id, cx);
+            }
+            Some(Item::PluginCommand { command, .. }) => {
+                // Restore the source surface and its captured scope/selection
+                // before the action's own availability check runs.
+                if let Some(search) = &self.search {
+                    search.update(cx, |search, cx| {
+                        search.focus_results(window, cx);
+                    });
+                } else {
+                    let focus = self.pane().read(cx).focus_handle().clone();
+                    window.focus(&focus, cx);
+                }
+                if let Some(context) = plugin_context {
+                    crate::plugins::restore_command_context(context, cx);
+                }
+                window.dispatch_action(
+                    Box::new(crate::actions::PluginCommand {
+                        extension: command.extension,
+                        generation: command.generation,
+                    }),
+                    cx,
+                );
             }
             // A file row reveals the file in its folder, in a new tab with Cmd-Return.
             Some(Item::Folder { path, source: Source::File, .. }) => {
@@ -853,6 +905,9 @@ impl CrowWindow {
                         Item::Command { .. } => {
                             self.render_palette_command_row(&palette.listing, *i, selected, &theme, cx)
                         }
+                        Item::PluginCommand { .. } => {
+                            self.render_palette_plugin_row(&palette.listing, *i, selected, &theme, cx)
+                        }
                         Item::Folder { .. } => self.render_palette_folder_row(
                             &palette.listing,
                             *i,
@@ -1066,6 +1121,84 @@ impl CrowWindow {
             .children(binding.map(|binding| Keycap::from_binding(&binding, KeycapWeight::Key)))
             .into_any_element()
     }
+
+    fn render_palette_plugin_row(
+        &self,
+        listing: &palette::Listing,
+        i: usize,
+        selected: bool,
+        theme: &crow_theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Item::PluginCommand { command, matched } = &listing.items[i] else { return div().into_any_element() };
+        let muted = color(theme.role("fg-muted"));
+        let border = color(theme.role("border"));
+        let hover = color(theme.role("surface-raised"));
+        div()
+            .id(("palette-plugin-row", i))
+            .debug_selector(|| format!("palette-plugin-row-{i}"))
+            .role(Role::ListBoxOption)
+            .aria_label(format!("{}, plugin {}", command.title, command.package))
+            .aria_position_in_set(i + 1)
+            .aria_size_of_set(listing.items.len())
+            .aria_selected(selected)
+            .when(selected, |row| row.aria_active_descendant())
+            .h(px(PALETTE_PLUGIN_ROW))
+            .px(px(10.))
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .when(selected, |row| row.bg(active_selection(theme)))
+            .when(!selected, |row| row.hover(move |style| style.bg(hover)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(palette) = &mut this.palette {
+                    palette.cursor = i;
+                }
+                this.confirm_palette(false, window, cx);
+            }))
+            .child(
+                div()
+                    .w(px(64.))
+                    .flex_none()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .child("Plugin"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .child(div().text_size(px(14.)).whitespace_nowrap().child(highlight_text(
+                        &command.title,
+                        matched,
+                        theme,
+                        selected,
+                    )))
+                    .child(
+                        div().text_size(px(12.)).text_color(muted).whitespace_nowrap().child(command.package.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(border)
+                    .px(px(7.))
+                    .h(px(18.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .child("plugin"),
+            )
+            .into_any_element()
+    }
 }
 
 #[cfg(test)]
@@ -1084,6 +1217,7 @@ impl CrowWindow {
                 Row::Item(i) => match &palette.listing.items[*i] {
                     Item::Folder { label, .. } => label.clone(),
                     Item::Command { command, .. } => command.label.to_owned(),
+                    Item::PluginCommand { command, .. } => command.title.clone(),
                 },
             })
             .collect()
@@ -1102,6 +1236,7 @@ impl CrowWindow {
                 Row::Item(i) => match &palette.listing.items[*i] {
                     Item::Folder { name, .. } => name.clone(),
                     Item::Command { command, .. } => command.label.to_owned(),
+                    Item::PluginCommand { command, .. } => command.title.clone(),
                 },
             })
             .collect()
@@ -1113,7 +1248,7 @@ impl CrowWindow {
         let Row::Item(index) = palette.listing.rows.get(row)? else { return None };
         match palette.listing.items.get(*index)? {
             Item::Folder { hidden, .. } => Some(*hidden),
-            Item::Command { .. } => None,
+            Item::Command { .. } | Item::PluginCommand { .. } => None,
         }
     }
 }

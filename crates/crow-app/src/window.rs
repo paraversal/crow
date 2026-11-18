@@ -1,5 +1,7 @@
 //! One Crow window: title bar, tabs, sidebar, the active pane, preview and path bar.
 
+use std::collections::HashMap;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,9 +15,9 @@ use gpui::{
 use crate::actions::{
     AddToSidebar, ApplyThemeEverywhere, CalculateFolderSizes, CloseTab, EditPath, EmptyTrash, GoBack, GoForward,
     GoToFolder, KeyboardShortcuts, Minimize, MoveDown, MoveUp, NewTab, NewWindow, NextTab, OpenParent,
-    PaletteOpenInTab, PathHover, PathUnhover, PreviousTab, ResetFolderView, SearchEverything, SearchHome,
-    ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, TogglePreview,
-    UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
+    PaletteOpenInTab, PathHover, PathUnhover, PluginCommand, PluginCommandResult, PreviousTab, ResetFolderView,
+    SearchEverything, SearchHome, ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus,
+    ToggleHiddenFiles, TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -39,7 +41,6 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::{self, SettingChange, Ui, reload_theme};
 use crow_fs::Entry;
 use crow_fs::ops::{Plan, Request, Resolution};
-use std::collections::HashMap;
 
 /// Open a window on `dir`. New windows share one size from settings and step
 /// 24 pt down and right from the previous one, so they never land at random sizes.
@@ -1052,7 +1053,27 @@ impl CrowWindow {
             message_id: ops.message_generation,
             progress_done,
             progress_id,
+            status: None,
+            status_spoken: None,
         };
+        if ops.running.is_none()
+            && ops.message.is_none()
+            && self.path_edit.is_none()
+            && self.palette.is_none()
+            && self.sheet.is_none()
+            && self.picker.is_none()
+        {
+            let surface = self.search.as_ref().map_or_else(
+                || self.pane().read(cx).current_plugin_surface(cx),
+                |search| search.read(cx).plugin_surface(),
+            );
+            if let Some((text, title)) = crate::plugins::status_item(cx, surface)
+                && !text.is_empty()
+            {
+                state.status = Some(text.into());
+                state.status_spoken = Some(title.into());
+            }
+        }
         // Narrow windows lose hints from the right and fold the path's middle (I7).
         bottom_bar::fit_to_window(&mut state, window);
         state
@@ -1774,6 +1795,173 @@ impl CrowWindow {
         cx.notify();
     }
 
+    // ----- plugin commands -----
+
+    fn run_plugin_command(&mut self, action: &PluginCommand, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::plugins::command_available(action, window, cx) {
+            return;
+        }
+        let Some(context) = cx.try_global::<crate::plugins::Plugins>().and_then(|p| p.command_context.clone()) else {
+            return;
+        };
+        let Some(published) = cx
+            .try_global::<crate::plugins::Plugins>()
+            .and_then(|p| p.surfaces.snapshot().extension(&action.extension).cloned())
+        else {
+            return;
+        };
+        if published.generation != action.generation
+            || !crate::plugins::command_matches(&published.descriptor, &context.selection)
+        {
+            return;
+        }
+        if !crate::plugins::begin_command_preparation(cx) {
+            operations::message("A plugin command is already being prepared; try again.", true, cx);
+            return;
+        }
+        let capture = crate::plugins::CommandCapture {
+            surface: context.surface,
+            scope: context.scope.clone(),
+            selection: context.selection.clone(),
+        };
+        let descriptor = published.descriptor.clone();
+        let action = action.clone();
+        let window_id = window.window_handle().window_id();
+        let selected = if descriptor.applies_to == crow_core::CommandTarget::Selection {
+            capture.selection.clone()
+        } else {
+            Vec::new()
+        };
+        let task = cx.background_spawn(async move {
+            selected
+                .into_iter()
+                .enumerate()
+                .map(|(index, (path, is_dir))| {
+                    // io-ok: inside background_spawn, no-follow identity before the call.
+                    let identity = std::fs::symlink_metadata(&path).ok().map(|meta| (meta.dev(), meta.ino()));
+                    (crow_core::EntryHandle(index as u32 + 1), path, is_dir, identity)
+                })
+                .collect::<Vec<_>>()
+        });
+        let this_capture = capture.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let prepared = task.await;
+            cx.update(|_, cx| crate::plugins::end_command_preparation(cx)).ok();
+            this.update_in(cx, |_, window, cx| {
+                if !crate::plugins::command_available(&action, window, cx)
+                    || !crate::plugins::capture_current(&this_capture, window, cx)
+                {
+                    return;
+                }
+                let mut entries = Vec::new();
+                let mut table = HashMap::new();
+                if descriptor.applies_to == crow_core::CommandTarget::Selection {
+                    for (handle, path, is_dir, identity) in prepared {
+                        let name = path.file_name().map_or_else(String::new, |name| {
+                            crate::style::display_text(&name.to_string_lossy()).into_owned()
+                        });
+                        entries.push(crow_core::EntryData { handle, name, is_dir, size: 0, kind: String::new() });
+                        table.insert(handle, (path, identity));
+                    }
+                }
+                let selection = (entries.len() == 1).then_some(crow_core::EntryHandle(1));
+                let input = crow_plugin::RequestInput {
+                    snapshot: crow_core::Snapshot {
+                        scope: this_capture.scope.path().display().to_string(),
+                        selection,
+                        entries,
+                    },
+                    excerpt: None,
+                };
+                let Some(handle) = cx.try_global::<crate::plugins::Plugins>().and_then(|p| p.handle.clone()) else {
+                    operations::message("The plugin service is not running.", true, cx);
+                    return;
+                };
+                match handle.try_evaluate(
+                    action.extension.clone(),
+                    action.generation,
+                    crate::plugins::capture_revision(&this_capture),
+                    input,
+                ) {
+                    Ok(ticket) => cx.global_mut::<crate::plugins::Plugins>().surfaces.track_command(
+                        ticket,
+                        action.extension.clone(),
+                        window_id,
+                        this_capture,
+                        table,
+                    ),
+                    Err(crow_plugin::SubmitError::Busy) => {
+                        operations::message("The plugin is busy; try the command again.", true, cx)
+                    }
+                    Err(crow_plugin::SubmitError::Stopped) => {
+                        operations::message("The plugin service stopped.", true, cx)
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn apply_plugin_command_result(
+        &mut self,
+        action: &PluginCommandResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if action.window != window.window_handle().window_id()
+            || !crate::plugins::capture_current(&action.capture, window, cx)
+        {
+            return;
+        }
+        match &action.effect {
+            crate::plugins::PluginEffect::Message(text) => {
+                let name = crate::plugins::plugin_name(&action.extension, cx);
+                operations::message(format!("{name}: {text}"), false, cx);
+                cx.notify();
+            }
+            crate::plugins::PluginEffect::CopyText(text) => {
+                crate::effects::write_text(text.clone(), cx);
+            }
+            crate::plugins::PluginEffect::Reveal { path, identity } => {
+                let target = path.clone();
+                let path = path.clone();
+                let identity = *identity;
+                let task = cx.background_spawn(async move {
+                    // io-ok: inside background_spawn, rechecking the revealed target.
+                    std::fs::symlink_metadata(&path).ok().map(|meta| (meta.dev(), meta.ino()))
+                });
+                let capture = action.capture.clone();
+                let extension = action.extension.clone();
+                cx.spawn_in(window, async move |this, cx| {
+                    let live = task.await;
+                    this.update_in(cx, |this, window, cx| {
+                        if !crate::plugins::capture_current(&capture, window, cx) {
+                            return;
+                        }
+                        if live != Some(identity) {
+                            let name = crate::plugins::plugin_name(&extension, cx);
+                            operations::message(
+                                format!("{name}: the revealed item changed or is unavailable"),
+                                true,
+                                cx,
+                            );
+                            return;
+                        }
+                        if this.search.is_some() {
+                            this.close_search(window, cx);
+                        }
+                        let pane = this.pane().clone();
+                        pane.update(cx, |pane, cx| pane.reveal(target, cx));
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+    }
+
     // ----- command palette -----
 
     fn run_command(&mut self, command: palette::CommandId, window: &mut Window, cx: &mut Context<Self>) {
@@ -2059,6 +2247,8 @@ impl Render for CrowWindow {
             }))
             // keys::context_stack (KeyScope::Window) mirrors this; every overlay nests under it.
             .key_context("Crow")
+            .on_action(cx.listener(Self::run_plugin_command))
+            .on_action(cx.listener(Self::apply_plugin_command_result))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::minimize))

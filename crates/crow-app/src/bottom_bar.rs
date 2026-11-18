@@ -57,6 +57,9 @@ pub struct BarState {
     /// A finished operation's fraction while its bar fades, and its id.
     pub progress_done: Option<f32>,
     pub progress_id: u64,
+    /// The first nonempty plugin Status value and its descriptor title.
+    pub status: Option<SharedString>,
+    pub status_spoken: Option<SharedString>,
 }
 
 /// The transient slot's one primary item.
@@ -431,13 +434,33 @@ pub fn fit_to_window(state: &mut BarState, window: &Window) {
     };
     // The field spans the left section: the bar less the counts and one gap.
     state.field_width = (bar - fixed + px(GAP)).max(px(0.));
-    let fit = if state.editing.is_some() {
+    let base_fit = if state.editing.is_some() {
         // The field takes the left section: the input's minimum plus the hints inside
         // it and the field's 12 px padding on both sides and 14 px gap.
         let field_min = px(PATH_FIELD_MIN + 38.) + hint_widths.iter().copied().sum::<Pixels>();
         fit(bar, fixed, &[field_min], ellipsis, other, &hint_widths)
     } else {
         path_fit
+    };
+    // The status slot is the first to yield: it only appears when it costs no
+    // hint and no path segment.
+    let fit = if let Some(text) = &state.status {
+        let with_status = other + measure(text) + px(GAP);
+        let status_fit = if state.editing.is_some() {
+            let field_min = px(PATH_FIELD_MIN + 38.) + hint_widths.iter().copied().sum::<Pixels>();
+            fit(bar, fixed, &[field_min], ellipsis, with_status, &hint_widths)
+        } else {
+            fit(bar, fixed, &segments, ellipsis, with_status, &hint_widths)
+        };
+        if status_fit.hints < base_fit.hints || status_fit.hidden != base_fit.hidden {
+            state.status = None;
+            state.status_spoken = None;
+            base_fit
+        } else {
+            status_fit
+        }
+    } else {
+        base_fit
     };
     if let Primary::Hints(hints) = &mut state.primary {
         hints.truncate(fit.hints);
@@ -1044,6 +1067,23 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
         bar_children.push(field.into_any_element());
     } else {
         bar_children.push(path.into_any_element());
+        if let Some(text) = state.status.clone() {
+            bar_children.push(
+                div()
+                    .id("bar-plugin-status")
+                    .debug_selector(|| "bar-plugin-status".into())
+                    .role(Role::Status)
+                    .aria_label(state.status_spoken.clone().unwrap_or_else(|| text.clone()))
+                    .flex_none()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(muted)
+                    .child(text)
+                    .into_any_element(),
+            );
+        }
         bar_children.push(transient);
     }
     bar_children.extend(counts.map(IntoElement::into_any_element));

@@ -11,13 +11,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crow_core::{
-    ContributionValues, Descriptor, EntryData, EntryHandle, ExtensionId, ExtensionKind, HookEvent, PluginId, Snapshot,
-    Tint,
+    CommandIntent, ContributionValues, Descriptor, EntryData, EntryHandle, ExtensionId, ExtensionKind, HookEvent,
+    PluginId, Snapshot, Tint,
 };
 use crow_plugin::{
     HostMutation, Inventory, PluginHandle, PluginState, RegisteredIconPack, RequestInput, RequestResult, RequestStamp,
     RequestTicket, SubmitError,
 };
+use gpui::WindowId;
 
 /// One view-owned demand source. Ids are never reused; a closed owner stops
 /// observing and the coordinator drops its pending work.
@@ -53,6 +54,7 @@ impl ScopeKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishedExtension {
     pub generation: u64,
+    pub package: String,
     pub descriptor: Descriptor,
 }
 
@@ -112,6 +114,32 @@ pub struct RowInput {
     pub kind: String,
     /// The focused surface's current selection; only a one-item selection is sent.
     pub selected: bool,
+}
+
+/// What a command activation captured. It must still match when the reply or
+/// the reveal check returns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandCapture {
+    pub surface: SurfaceId,
+    pub scope: ScopeKey,
+    pub selection: Vec<(PathBuf, bool)>,
+}
+
+/// A checked command effect, already resolved from the activation's handles.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PluginEffect {
+    Message(String),
+    CopyText(String),
+    Reveal { path: PathBuf, identity: (u64, u64) },
+}
+
+struct CommandTicket {
+    stamp: RequestStamp,
+    ticket: TicketProbe,
+    extension: ExtensionId,
+    window: WindowId,
+    capture: CommandCapture,
+    entries: HashMap<EntryHandle, (PathBuf, Option<(u64, u64)>)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -224,7 +252,33 @@ struct SurfaceState {
     seen: Instant,
 }
 
+struct StatusBinding {
+    scope: ScopeKey,
+    revision: u64,
+    values: BTreeMap<ExtensionId, String>,
+    seen: HashSet<ExtensionId>,
+}
+
+struct InfoBinding {
+    scope: ScopeKey,
+    revision: u64,
+    values: BTreeMap<ExtensionId, Vec<crow_core::InfoRow>>,
+    seen: HashSet<ExtensionId>,
+}
+
 enum TicketKind {
+    Info {
+        surface: SurfaceId,
+        scope: ScopeKey,
+        revision: u64,
+        descriptor: ExtensionId,
+    },
+    Status {
+        surface: SurfaceId,
+        scope: ScopeKey,
+        revision: u64,
+        descriptor: ExtensionId,
+    },
     Rows {
         surface: SurfaceId,
         scope: ScopeKey,
@@ -304,10 +358,14 @@ struct PendingRows {
 /// The coordinator. One instance lives behind the app's `Plugins` global.
 pub struct PluginSurfaces {
     snapshot: std::sync::Arc<PublishedSurfaces>,
+    snapshot_generation: u64,
     rows: RowCache,
     surfaces: HashMap<SurfaceId, SurfaceState>,
     pending_rows: HashMap<SurfaceId, PendingRows>,
     tickets: HashMap<RequestStamp, PassiveTicket>,
+    commands: HashMap<RequestStamp, CommandTicket>,
+    status: HashMap<SurfaceId, StatusBinding>,
+    info: HashMap<SurfaceId, InfoBinding>,
     hooks: HashMap<HookSlot, PendingHook>,
     suppressed: HashSet<PluginId>,
     retry_at: Option<Instant>,
@@ -318,10 +376,14 @@ impl Default for PluginSurfaces {
     fn default() -> Self {
         Self {
             snapshot: std::sync::Arc::new(PublishedSurfaces::default()),
+            snapshot_generation: 0,
             rows: RowCache::default(),
             surfaces: HashMap::new(),
             pending_rows: HashMap::new(),
             tickets: HashMap::new(),
+            commands: HashMap::new(),
+            status: HashMap::new(),
+            info: HashMap::new(),
             hooks: HashMap::new(),
             suppressed: HashSet::new(),
             retry_at: None,
@@ -334,6 +396,30 @@ impl Default for PluginSurfaces {
 impl PluginSurfaces {
     pub fn snapshot(&self) -> std::sync::Arc<PublishedSurfaces> {
         self.snapshot.clone()
+    }
+
+    /// Increments whenever the published generation snapshot changes.
+    pub fn generation(&self) -> u64 {
+        self.snapshot_generation
+    }
+
+    pub fn row_value_peek(
+        &self,
+        extension: &ExtensionId,
+        scope: &ScopeKey,
+        path: &Path,
+        version: u64,
+    ) -> Option<RowValue> {
+        let published = self.snapshot.extension(extension)?;
+        self.rows
+            .peek(&RowKey {
+                extension: extension.clone(),
+                generation: published.generation,
+                scope: scope.clone(),
+                path: path.to_path_buf(),
+                version,
+            })
+            .cloned()
     }
 
     pub fn counters(&self) -> &PluginCounters {
@@ -354,13 +440,17 @@ impl PluginSurfaces {
 
     /// Publish the newest inventory. A generation that disappeared or changed
     /// is dropped before any terminal reply from the same poll drain is read.
-    pub fn publish_inventory(&mut self, inventory: &Inventory) {
+    pub fn publish_inventory(&mut self, inventory: &Inventory) -> bool {
         let mut next = PublishedSurfaces::default();
         for entry in inventory.plugins.iter().filter(|entry| entry.state == PluginState::Running) {
             for descriptor in &entry.descriptors {
                 next.extensions.insert(
                     descriptor.id.clone(),
-                    PublishedExtension { generation: entry.generation, descriptor: descriptor.clone() },
+                    PublishedExtension {
+                        generation: entry.generation,
+                        package: entry.title().to_owned(),
+                        descriptor: descriptor.clone(),
+                    },
                 );
             }
             for pack in &entry.icon_packs {
@@ -376,11 +466,11 @@ impl PluginSurfaces {
             .collect();
         let same_extensions = invalidated.is_empty()
             && next.extensions.len() == self.snapshot.extensions.len()
-            && self
-                .snapshot
-                .extensions
-                .iter()
-                .all(|(id, old)| next.extensions.get(id).is_some_and(|new| new.descriptor == old.descriptor));
+            && self.snapshot.extensions.iter().all(|(id, old)| {
+                next.extensions
+                    .get(id)
+                    .is_some_and(|new| new.descriptor == old.descriptor && new.package == old.package)
+            });
         let same_packs = next.packs.len() == self.snapshot.packs.len()
             && self
                 .snapshot
@@ -389,7 +479,7 @@ impl PluginSurfaces {
                 .all(|(id, old)| next.packs.get(id).is_some_and(|new| new.generation() == old.generation()));
         if same_extensions && same_packs {
             // Identical approved reload: keep the generation and every ready value.
-            return;
+            return false;
         }
         for id in &invalidated {
             self.rows.remove_extension(id);
@@ -401,13 +491,25 @@ impl PluginSurfaces {
                     true
                 }
             });
+            self.commands.retain(|_, command| {
+                if &command.extension == id {
+                    command.ticket.cancel();
+                    false
+                } else {
+                    true
+                }
+            });
         }
         self.suppressed.retain(|plugin| {
             inventory.plugins.iter().any(|entry| {
                 entry.id.as_ref() == Some(plugin) && matches!(entry.state, PluginState::Starting | PluginState::Running)
             })
         });
+        self.status.clear();
+        self.info.clear();
         self.snapshot = std::sync::Arc::new(next);
+        self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
+        true
     }
 
     /// Settings queued a Disable. Drop the package's contributions now and keep
@@ -423,6 +525,16 @@ impl PluginSurfaces {
                 true
             }
         });
+        self.commands.retain(|_, command| {
+            if &command.extension.plugin == plugin {
+                command.ticket.cancel();
+                false
+            } else {
+                true
+            }
+        });
+        self.status.clear();
+        self.info.clear();
     }
 
     pub fn mutation_finished(
@@ -455,6 +567,151 @@ impl PluginSurfaces {
         self.tickets.len() < MAX_PASSIVE_REQUESTS && self.in_flight_for(extension) < MAX_PASSIVE_PER_PLUGIN
     }
 
+    /// Ask each Status descriptor once per active scope/revision. The display
+    /// uses the first nonempty value in fully qualified ID order.
+    pub fn request_status(
+        &mut self,
+        handle: Option<&PluginHandle>,
+        surface: SurfaceId,
+        scope: ScopeKey,
+        revision: u64,
+        display: &str,
+        descriptors: &[ExtensionId],
+    ) {
+        let Some(handle) = handle else { return };
+        let current =
+            self.status.get(&surface).is_some_and(|binding| binding.scope == scope && binding.revision == revision);
+        if !current {
+            self.tickets.retain(|_, ticket| {
+                let keep = !matches!(&ticket.kind, TicketKind::Status { surface: s, .. } if *s == surface);
+                if !keep {
+                    ticket.ticket.cancel();
+                }
+                keep
+            });
+            self.status.insert(
+                surface,
+                StatusBinding { scope: scope.clone(), revision, values: BTreeMap::new(), seen: HashSet::new() },
+            );
+        }
+        let Some(binding) = self.status.get(&surface) else { return };
+        let needed: Vec<ExtensionId> = descriptors
+            .iter()
+            .filter(|id| !binding.seen.contains(*id))
+            .filter(|id| !(binding.values.contains_key(*id)))
+            .cloned()
+            .collect();
+        for descriptor in needed {
+            let Some(published) = self.snapshot.extension(&descriptor).cloned() else { continue };
+            if published.descriptor.kind != ExtensionKind::Status
+                || self.suppressed.contains(&descriptor.plugin)
+                || !self.can_submit(&descriptor)
+            {
+                continue;
+            }
+            let input = RequestInput {
+                snapshot: Snapshot { scope: bounded(display), selection: None, entries: Vec::new() },
+                excerpt: None,
+            };
+            match handle.try_evaluate(descriptor.clone(), published.generation, revision, input) {
+                Ok(ticket) => {
+                    self.counters.submitted_rows += 1;
+                    self.tickets.insert(
+                        ticket.stamp(),
+                        PassiveTicket {
+                            stamp: ticket.stamp(),
+                            ticket: TicketProbe::Real(ticket),
+                            extension: descriptor.clone(),
+                            kind: TicketKind::Status { surface, scope: scope.clone(), revision, descriptor },
+                        },
+                    );
+                }
+                Err(SubmitError::Busy) => break,
+                Err(SubmitError::Stopped) => break,
+            }
+        }
+    }
+
+    pub fn status_item(&self, surface: SurfaceId) -> Option<(String, String)> {
+        let binding = self.status.get(&surface)?;
+        for (id, text) in &binding.values {
+            if text.is_empty() {
+                continue;
+            }
+            let title = self
+                .snapshot
+                .extension(id)
+                .map_or_else(|| id.to_string(), |published| published.descriptor.title.clone());
+            return Some((text.clone(), title));
+        }
+        None
+    }
+
+    /// Ask each Info descriptor once for the visible single selection.
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_info(
+        &mut self,
+        handle: Option<&PluginHandle>,
+        surface: SurfaceId,
+        scope: ScopeKey,
+        revision: u64,
+        display: &str,
+        descriptors: &[ExtensionId],
+        entry: EntryData,
+    ) {
+        let Some(handle) = handle else { return };
+        let current =
+            self.info.get(&surface).is_some_and(|binding| binding.scope == scope && binding.revision == revision);
+        if !current {
+            self.tickets.retain(|_, ticket| {
+                let keep = !matches!(&ticket.kind, TicketKind::Info { surface: s, .. } if *s == surface);
+                if !keep {
+                    ticket.ticket.cancel();
+                }
+                keep
+            });
+            self.info.insert(
+                surface,
+                InfoBinding { scope: scope.clone(), revision, values: BTreeMap::new(), seen: HashSet::new() },
+            );
+        }
+        let Some(binding) = self.info.get(&surface) else { return };
+        let needed: Vec<ExtensionId> = descriptors.iter().filter(|id| !binding.seen.contains(*id)).cloned().collect();
+        for descriptor in needed {
+            let Some(published) = self.snapshot.extension(&descriptor).cloned() else { continue };
+            if published.descriptor.kind != ExtensionKind::Info
+                || self.suppressed.contains(&descriptor.plugin)
+                || !self.can_submit(&descriptor)
+            {
+                continue;
+            }
+            let input = RequestInput {
+                snapshot: Snapshot { scope: bounded(display), selection: None, entries: vec![entry.clone()] },
+                excerpt: None,
+            };
+            match handle.try_evaluate(descriptor.clone(), published.generation, revision, input) {
+                Ok(ticket) => {
+                    self.counters.submitted_rows += 1;
+                    self.tickets.insert(
+                        ticket.stamp(),
+                        PassiveTicket {
+                            stamp: ticket.stamp(),
+                            ticket: TicketProbe::Real(ticket),
+                            extension: descriptor.clone(),
+                            kind: TicketKind::Info { surface, scope: scope.clone(), revision, descriptor },
+                        },
+                    );
+                }
+                Err(SubmitError::Busy | SubmitError::Stopped) => break,
+            }
+        }
+    }
+
+    pub fn info_rows(&self, surface: SurfaceId) -> Vec<crow_core::InfoRow> {
+        let Some(binding) = self.info.get(&surface) else { return Vec::new() };
+        binding.values.values().flat_map(|rows| rows.iter().take(16)).take(16).cloned().collect()
+    }
+
     /// Record the latest visible-row demand for a surface. The coordinator
     /// drains it on the next poll, so a row renderer never submits a call.
     #[allow(clippy::too_many_arguments)]
@@ -468,10 +725,8 @@ impl PluginSurfaces {
         descriptors: Vec<ExtensionId>,
         rows: Vec<RowInput>,
     ) {
-        self.pending_rows.insert(
-            surface,
-            PendingRows { scope, scope_version, scope_display, context_revision, descriptors, rows },
-        );
+        self.pending_rows
+            .insert(surface, PendingRows { scope, scope_version, scope_display, context_revision, descriptors, rows });
     }
 
     /// Submit the latest queued demand. Replacing (not appending) per surface
@@ -606,6 +861,70 @@ impl PluginSurfaces {
         }
     }
 
+    /// Track one explicit command. The capture and the entry table stay with
+    /// the ticket until its terminal reply.
+    pub fn track_command(
+        &mut self,
+        ticket: RequestTicket,
+        extension: ExtensionId,
+        window: WindowId,
+        capture: CommandCapture,
+        entries: HashMap<EntryHandle, (PathBuf, Option<(u64, u64)>)>,
+    ) {
+        self.commands.insert(
+            ticket.stamp(),
+            CommandTicket {
+                stamp: ticket.stamp(),
+                ticket: TicketProbe::Real(ticket),
+                extension,
+                window,
+                capture,
+                entries,
+            },
+        );
+    }
+
+    /// Consume a terminal command reply. Returns the window and the checked
+    /// effect only when the generation is still current.
+    pub fn finish_command(
+        &mut self,
+        extension: &ExtensionId,
+        stamp: RequestStamp,
+        result: RequestResult,
+    ) -> Option<(WindowId, ExtensionId, PluginEffect, CommandCapture)> {
+        let ticket = self.commands.remove(&stamp)?;
+        if &ticket.extension != extension
+            || ticket.stamp != stamp
+            || ticket.ticket.is_cancelled()
+            || self.current_extension(extension, stamp.generation).is_none()
+        {
+            self.counters.rejected_tickets += 1;
+            return None;
+        }
+        let effect = match result {
+            RequestResult::Intent(CommandIntent::Message(text)) => PluginEffect::Message(text),
+            RequestResult::Intent(CommandIntent::CopyText(text)) => PluginEffect::CopyText(text),
+            RequestResult::Intent(CommandIntent::Reveal(handle)) => {
+                let (path, identity) = ticket.entries.get(&handle)?.clone();
+                PluginEffect::Reveal { path, identity: identity? }
+            }
+            RequestResult::Unit | RequestResult::Error(_) | RequestResult::Refresh => return None,
+            RequestResult::Values(_) => return None,
+        };
+        Some((ticket.window, extension.clone(), effect, ticket.capture))
+    }
+
+    pub fn cancel_commands_for_surface(&mut self, surface: SurfaceId) {
+        self.commands.retain(|_, command| {
+            if command.capture.surface == surface {
+                command.ticket.cancel();
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     /// A terminal reply. Returns true when a ready value changed.
     pub fn finish(
         &mut self,
@@ -627,6 +946,54 @@ impl PluginSurfaces {
             return false;
         }
         match (ticket.kind, result) {
+            (
+                TicketKind::Info { surface, scope, revision, descriptor },
+                result @ (RequestResult::Values(_) | RequestResult::Unit),
+            ) => {
+                let rows = match result {
+                    RequestResult::Unit => Vec::new(),
+                    RequestResult::Values(ContributionValues::Info(rows)) => rows,
+                    _ => {
+                        self.counters.rejected_tickets += 1;
+                        return false;
+                    }
+                };
+                let Some(binding) = self.info.get_mut(&surface) else { return false };
+                if binding.scope != scope || binding.revision != revision {
+                    self.counters.rejected_tickets += 1;
+                    return false;
+                }
+                binding.seen.insert(descriptor.clone());
+                let changed = binding.values.get(&descriptor) != Some(&rows);
+                binding.values.insert(descriptor, rows);
+                changed
+            }
+            (
+                TicketKind::Status { surface, scope, revision, descriptor },
+                result @ (RequestResult::Values(_) | RequestResult::Unit),
+            ) => {
+                let text = match result {
+                    RequestResult::Unit => String::new(),
+                    RequestResult::Values(ContributionValues::Status(items)) => {
+                        items.into_iter().map(|item| item.text).find(|text| !text.is_empty()).unwrap_or_default()
+                    }
+                    _ => {
+                        self.counters.rejected_tickets += 1;
+                        return false;
+                    }
+                };
+                let Some(binding) = self.status.get_mut(&surface) else { return false };
+                if binding.scope != scope || binding.revision != revision {
+                    self.counters.rejected_tickets += 1;
+                    return false;
+                }
+                binding.seen.insert(descriptor.clone());
+                if binding.values.get(&descriptor) == Some(&text) {
+                    return false;
+                }
+                binding.values.insert(descriptor, text);
+                true
+            }
             (
                 TicketKind::Rows { surface, scope, scope_version, descriptor, entries },
                 result @ (RequestResult::Values(_) | RequestResult::Unit),
@@ -749,8 +1116,16 @@ impl PluginSurfaces {
     pub fn drop_surface(&mut self, surface: SurfaceId) {
         self.surfaces.remove(&surface);
         self.pending_rows.remove(&surface);
+        self.status.remove(&surface);
+        self.info.remove(&surface);
+        self.cancel_commands_for_surface(surface);
         self.tickets.retain(|_, ticket| {
-            let keep = !matches!(&ticket.kind, TicketKind::Rows { surface: s, .. } if *s == surface);
+            let keep = !matches!(
+                &ticket.kind,
+                TicketKind::Rows { surface: s, .. }
+                    | TicketKind::Status { surface: s, .. }
+                    | TicketKind::Info { surface: s, .. } if *s == surface
+            );
             if !keep {
                 ticket.ticket.cancel();
             }
@@ -919,6 +1294,28 @@ impl PluginSurfaces {
     #[cfg(test)]
     pub fn pending_hooks(&self) -> usize {
         self.hooks.len()
+    }
+
+    #[cfg(test)]
+    pub fn track_command_for_test(
+        &mut self,
+        stamp: RequestStamp,
+        extension: ExtensionId,
+        capture: CommandCapture,
+        entries: HashMap<EntryHandle, (PathBuf, Option<(u64, u64)>)>,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.commands.insert(
+            stamp,
+            CommandTicket {
+                stamp,
+                ticket: TicketProbe::Flag(cancelled),
+                extension,
+                window: gpui::WindowId::from(1),
+                capture,
+                entries,
+            },
+        );
     }
 }
 
@@ -1260,6 +1657,83 @@ mod tests {
         assert_eq!(surfaces.pending_hooks(), 3);
         assert!(!surfaces.flush_hooks(None, now + HOOK_DEBOUNCE));
         assert_eq!(surfaces.pending_hooks(), 0, "a closed service clears pending hooks");
+    }
+
+    fn command_capture(scope: &ScopeKey, path: &Path) -> CommandCapture {
+        CommandCapture { surface: new_surface(), scope: scope.clone(), selection: vec![(path.to_path_buf(), false)] }
+    }
+
+    #[test]
+    fn command_effects_resolve_handles_and_drop_stale_generations() {
+        let command = descriptor(ExtensionKind::Command, "relative");
+        let scope = ScopeKey::Folder(PathBuf::from("/tmp"));
+        let path = PathBuf::from("/tmp/a.txt");
+        let capture = command_capture(&scope, &path);
+        let mut surfaces = PluginSurfaces::default();
+        surfaces.publish_inventory(&running(5, vec![command.clone()]));
+        let mut entries = HashMap::new();
+        entries.insert(EntryHandle(1), (path.clone(), Some((3, 4))));
+        entries.insert(EntryHandle(2), (PathBuf::from("/tmp/b.txt"), None));
+
+        surfaces.track_command_for_test(
+            stamp(5, 1),
+            command.id.clone(),
+            capture.clone(),
+            entries.clone(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (window, _, effect, got) = surfaces
+            .finish_command(&command.id, stamp(5, 1), RequestResult::Intent(CommandIntent::Reveal(EntryHandle(1))))
+            .unwrap();
+        assert_eq!(window, gpui::WindowId::from(1));
+        assert_eq!(effect, PluginEffect::Reveal { path: path.clone(), identity: (3, 4) });
+        assert_eq!(got, capture);
+
+        surfaces.track_command_for_test(
+            stamp(5, 2),
+            command.id.clone(),
+            capture.clone(),
+            entries.clone(),
+            Arc::new(AtomicBool::new(true)),
+        );
+        assert!(
+            surfaces
+                .finish_command(&command.id, stamp(5, 2), RequestResult::Intent(CommandIntent::Reveal(EntryHandle(1))))
+                .is_none()
+        );
+
+        surfaces.track_command_for_test(
+            stamp(5, 3),
+            command.id.clone(),
+            capture.clone(),
+            entries.clone(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        surfaces.publish_inventory(&running(6, vec![command.clone()]));
+        assert!(
+            surfaces
+                .finish_command(&command.id, stamp(5, 3), RequestResult::Intent(CommandIntent::Message("x".into())))
+                .is_none()
+        );
+
+        surfaces.publish_inventory(&running(5, vec![command.clone()]));
+        surfaces.track_command_for_test(
+            stamp(5, 4),
+            command.id.clone(),
+            capture.clone(),
+            entries.clone(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(
+            surfaces
+                .finish_command(&command.id, stamp(5, 4), RequestResult::Intent(CommandIntent::Reveal(EntryHandle(9))))
+                .is_none()
+        );
+        assert!(
+            surfaces
+                .finish_command(&command.id, stamp(5, 4), RequestResult::Intent(CommandIntent::Message("dup".into())))
+                .is_none()
+        );
     }
 
     #[test]

@@ -83,12 +83,41 @@ impl Default for LocationsConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SectionConfig {
+    pub show: Option<bool>,
+    pub collapsed: Option<bool>,
+}
+
+impl Default for SectionConfig {
+    fn default() -> Self {
+        Self { show: None, collapsed: None }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SectionsConfig {
+    /// Section IDs in display order. Built-ins are `recent` and `locations`;
+    /// plugin sections use their fully qualified ExtensionId.
+    pub order: Vec<String>,
+    pub section: std::collections::BTreeMap<String, SectionConfig>,
+}
+
+impl Default for SectionsConfig {
+    fn default() -> Self {
+        Self { order: Vec::new(), section: std::collections::BTreeMap::new() }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct SidebarConfig {
     pub group: Vec<Group>,
     pub recent: RecentConfig,
     pub locations: LocationsConfig,
+    pub sections: SectionsConfig,
 }
 
 /// A favorite ready to show: its path resolved.
@@ -241,6 +270,11 @@ pub enum SidebarEdit {
         path: PathBuf,
         key: char,
     },
+    /// Write only one section's collapse flag, keeping every other line intact.
+    SetSectionCollapsed {
+        id: String,
+        collapsed: bool,
+    },
 }
 
 fn groups(doc: &mut DocumentMut) -> Result<&mut toml_edit::ArrayOfTables, String> {
@@ -283,6 +317,19 @@ fn item_path(v: &Value) -> Option<&str> {
 
 fn apply(doc: &mut DocumentMut, edit: &SidebarEdit, home: &Path) -> Result<(), String> {
     match edit {
+        SidebarEdit::SetSectionCollapsed { id, collapsed } => {
+            if id.is_empty() || id.contains('"') {
+                return Err("a section id must be nonempty".into());
+            }
+            let section = doc
+                .entry("section")
+                .or_insert_with(|| Item::Table(toml_edit::Table::new()))
+                .as_table_mut()
+                .ok_or_else(|| "`section` must be a table".to_owned())?;
+            let entry = section.entry(id).or_insert_with(|| Item::Table(toml_edit::Table::new()));
+            let table = entry.as_table_mut().ok_or_else(|| format!("section \"{id}\" must be a table"))?;
+            table["collapsed"] = toml_edit::value(*collapsed);
+        }
         SidebarEdit::Move { from, to } => {
             let value = {
                 let source = items(doc, from.0)?;

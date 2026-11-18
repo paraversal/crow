@@ -3,9 +3,7 @@
 //! queues demand; the coordinator submits it on the next 100 ms poll.
 
 use crow_core::ExtensionId;
-use gpui::{
-    AnyElement, App, Bounds, Pixels, Point, UniformListDecoration, Window, div, prelude::*,
-};
+use gpui::{AnyElement, App, Bounds, Pixels, Point, UniformListDecoration, Window, div, prelude::*};
 
 use super::{Plugins, RowInput, ScopeKey, SurfaceId};
 use crate::folder::Folder;

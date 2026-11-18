@@ -5,6 +5,7 @@
 //! listing and render at once. Permissions, owner/group and tags load off the
 //! main thread; a result for a previous selection is dropped by generation.
 
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -129,6 +130,8 @@ pub struct InfoPane {
     loader: Loader,
     /// This pane's selected-path source in the cloud-status service.
     cloud_source: u64,
+    /// This pane's plugin Info binding.
+    plugin_surface: crate::plugins::SurfaceId,
     _cloud_subscription: Option<Subscription>,
 }
 
@@ -163,6 +166,7 @@ impl InfoPane {
             generation: 0,
             loader,
             cloud_source,
+            plugin_surface: crate::plugins::new_surface(),
             _cloud_subscription: cloud_subscription,
         }
     }
@@ -214,6 +218,9 @@ impl InfoPane {
     pub fn set_tab(&mut self, tab: InfoTab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;
+            if tab != InfoTab::Info {
+                self.drop_plugin_info(cx);
+            }
             cx.notify();
         }
     }
@@ -222,7 +229,16 @@ impl InfoPane {
         if self.visible != visible || self.explicit != visible {
             self.visible = visible;
             self.explicit = visible;
+            if !visible {
+                self.drop_plugin_info(cx);
+            }
             cx.notify();
+        }
+    }
+
+    fn drop_plugin_info(&self, cx: &mut Context<Self>) {
+        if cx.try_global::<crate::plugins::Plugins>().is_some() {
+            cx.global_mut::<crate::plugins::Plugins>().surfaces.drop_surface(self.plugin_surface);
         }
     }
 
@@ -324,6 +340,24 @@ impl InfoPane {
 
 impl Render for InfoPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.visible
+            && self.tab == InfoTab::Info
+            && let Some(InfoTarget::Single { entry, .. }) = self.target.as_ref()
+        {
+            let parent = entry.path.parent().map_or_else(|| entry.path.clone(), Path::to_path_buf);
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            entry.path.hash(&mut hasher);
+            entry.size.hash(&mut hasher);
+            entry.modified.hash(&mut hasher);
+            crate::plugins::request_info(
+                cx,
+                self.plugin_surface,
+                crate::plugins::ScopeKey::Folder(parent.clone()),
+                hasher.finish(),
+                parent.display().to_string(),
+                entry,
+            );
+        }
         let theme = cx.global::<Ui>().theme.clone();
         let home = cx.global::<Ui>().home.clone();
         self.body(&theme, &home, cx)
@@ -343,7 +377,7 @@ impl InfoPane {
         match target {
             InfoTarget::Single { entry, items } => {
                 let cloud = self.cloud_status(&entry.path, cx);
-                single_body(entry, *items, loaded, cloud, theme, home, cx)
+                single_body(entry, *items, loaded, cloud, theme, home, self.plugin_surface, cx)
             }
             InfoTarget::Many(summary) => many_body(summary, loaded, theme, home, cx),
         }
@@ -396,6 +430,7 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
         .child(tab("info-tab-info", "Info", InfoTab::Info))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn single_body(
     entry: &Entry,
     items: Option<usize>,
@@ -403,6 +438,7 @@ fn single_body(
     cloud: Option<CloudStatus>,
     theme: &Theme,
     home: &Path,
+    plugin_surface: crate::plugins::SurfaceId,
     cx: &mut Context<InfoPane>,
 ) -> Div {
     let fresh = loaded.and_then(|l| l.entry.as_ref());
@@ -474,6 +510,9 @@ fn single_body(
     if folder {
         let items = items.map_or_else(|| "—".to_owned(), |n| format!("{n} item{}", if n == 1 { "" } else { "s" }));
         body = body.child(field("Items", div().child(items), theme));
+    }
+    for row in crate::plugins::info_rows(cx, plugin_surface).into_iter().take(16) {
+        body = body.child(field(&row.label, div().child(crate::style::display_text(&row.value).into_owned()), theme));
     }
     body
 }

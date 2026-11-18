@@ -1,0 +1,27 @@
+--- a/crates/gpui/src/action.rs
++++ b/crates/gpui/src/action.rs
+@@ -121,6 +121,12 @@
+     /// Do a partial equality check on this action and the other
+     fn partial_eq(&self, action: &dyn Action) -> bool;
+ 
++    /// Additional availability for this action instance. The default is true;
++    /// the dispatch tree still decides whether a handler exists on the focus path.
++    fn is_available(&self, _window: &crate::Window, _cx: &crate::App) -> bool {
++        true
++    }
++
+     /// Get the name of this action, for displaying in UI
+     fn name(&self) -> &'static str;
+ 
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -3720,6 +3720,9 @@
+ 
+     /// Determine whether the given action is available along the dispatch path to the currently focused element.
+     pub fn is_action_available(&self, action: &dyn Action, cx: &App) -> bool {
++        if !action.is_available(self, cx) {
++            return false;
++        }
+         let node_id =
+             self.focus_node_id_in_rendered_frame(self.focused(cx).map(|handle| handle.id));
+         self.rendered_frame

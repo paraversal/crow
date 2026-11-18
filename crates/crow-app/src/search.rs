@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -428,6 +429,10 @@ impl SearchView {
         }
     }
 
+    fn plugin_scope_key(&self) -> crate::plugins::ScopeKey {
+        crate::plugins::ScopeKey::Search { session: self.generation, origin: self.folder.clone() }
+    }
+
     fn notify_plugin_scope(&self, cx: &mut Context<Self>) {
         if cx.try_global::<crate::plugins::Plugins>().is_some() {
             cx.global_mut::<crate::plugins::Plugins>().surfaces.notify_scope_changed(
@@ -435,6 +440,41 @@ impl SearchView {
                 self.scope_label(),
                 Instant::now(),
             );
+        }
+    }
+
+    fn request_plugin_status(&self, cx: &mut Context<Self>) {
+        if cx.try_global::<crate::plugins::Plugins>().is_some() {
+            crate::plugins::request_status(
+                cx,
+                self.plugin_surface,
+                self.plugin_scope_key(),
+                self.generation,
+                self.scope_label(),
+            );
+        }
+    }
+
+    fn update_plugin_command_context(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if cx.try_global::<crate::plugins::Plugins>().is_none() {
+            return;
+        }
+        if window.is_window_active() && self.focus.is_focused(window) {
+            let selection = self
+                .results
+                .iter()
+                .filter(|row| self.selection.contains(&row.path))
+                .map(|row| (row.path.clone(), row.is_dir))
+                .collect();
+            let context = crate::plugins::FileCommandContext {
+                window: window.window_handle().window_id(),
+                surface: self.plugin_surface,
+                scope: self.plugin_scope_key(),
+                selection,
+            };
+            crate::plugins::set_command_context(window, Some(context), cx);
+        } else {
+            crate::plugins::set_command_context(window, None, cx);
         }
     }
 
@@ -2307,6 +2347,9 @@ impl SearchView {
             let service = service.0.clone();
             service.update(cx, |service, cx| service.observe((self.cloud_source, 0), &cloud_visible, cx));
         }
+        let decoration_ids = crate::plugins::decoration_ids(cx);
+        let has_decorations = !decoration_ids.is_empty();
+        let plugin_scope = self.plugin_scope_key();
         let now = Instant::now();
         let clipboard = cx.global::<Operations>().clipboard.as_ref();
         let flash = clipboard
@@ -2323,6 +2366,18 @@ impl SearchView {
         range
             .filter_map(|i| {
                 let row = self.results.get(i)?;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                self.generation.hash(&mut hasher);
+                row.path.hash(&mut hasher);
+                row.modified.hash(&mut hasher);
+                let version = hasher.finish();
+                let presentation =
+                    crate::plugins::row_presentation(cx, &plugin_scope, &row.path, version, &decoration_ids);
+                let plugin_spoken = if presentation.spoken.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", presentation.spoken.join(", "))
+                };
                 let cloud = self.cloud_status(&row.path, cx);
                 let cloud_spoken =
                     cloud.and_then(CloudStatus::spoken_suffix).map(|suffix| format!(", {suffix}")).unwrap_or_default();
@@ -2391,7 +2446,7 @@ impl SearchView {
                 div()
                     .id(("search-row", i))
                     .role(Role::ListBoxOption)
-                    .aria_label(format!("{}{cloud_spoken}", row.label()))
+                    .aria_label(format!("{}{plugin_spoken}{cloud_spoken}", row.label()))
                     .aria_position_in_set(i + 1)
                     .aria_size_of_set(count)
                     .aria_selected(selected)
@@ -2502,11 +2557,30 @@ impl SearchView {
                                                     .whitespace_nowrap()
                                                     .text_ellipsis()
                                                     .text_size(px(13.))
-                                                    .text_color(fg)
-                                                    .opacity(content_opacity(row.hidden, false))
+                                                    .text_color(if selected {
+                                                        fg
+                                                    } else {
+                                                        presentation
+                                                            .tint
+                                                            .map_or(fg, |tint| color(theme.role(tint.key())))
+                                                    })
+                                                    .opacity(content_opacity(row.hidden || presentation.dim, false))
                                                     .child(name),
                                             )
-                                            .children(cloud_status::badge(cloud, theme)),
+                                            .children(cloud_status::badge(cloud, theme))
+                                            .when(has_decorations, |cell| {
+                                                cell.child(
+                                                    div()
+                                                        .w(px(32.))
+                                                        .flex_none()
+                                                        .overflow_hidden()
+                                                        .whitespace_nowrap()
+                                                        .text_ellipsis()
+                                                        .text_size(px(11.))
+                                                        .text_color(muted)
+                                                        .child(presentation.badge.clone().unwrap_or_default()),
+                                                )
+                                            }),
                                     )
                                     .children(content),
                             ),
@@ -2669,6 +2743,8 @@ impl SearchView {
 
 impl Render for SearchView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.request_plugin_status(cx);
+        self.update_plugin_command_context(window, cx);
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let idle = self.query(cx).trim().is_empty();

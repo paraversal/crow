@@ -690,11 +690,26 @@ pub struct FolderCandidate {
     pub last_visit: Option<u64>,
 }
 
+/// One Running plugin command offered by the palette. `title` is the
+/// descriptor title; `package` is the display name shown on the second line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginCommandItem {
+    pub extension: crow_core::ExtensionId,
+    pub generation: u64,
+    pub title: String,
+    pub package: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum Item {
     Command {
         command: Command,
         /// Matched letters as byte ranges in `command.label`.
+        matched: Vec<Range<usize>>,
+    },
+    PluginCommand {
+        command: PluginCommandItem,
+        /// Matched letters as byte ranges in `command.title`.
         matched: Vec<Range<usize>>,
     },
     Folder {
@@ -1117,6 +1132,33 @@ pub fn command_listing(
     Listing { rows, items, count: format!("{count} of {total}").into() }
 }
 
+/// Plugin commands matching `query`, after built-in commands. The title and
+/// package name both score; the row always shows the package on its second line.
+pub fn plugin_command_matches(query: &str, commands: &[PluginCommandItem]) -> Vec<(Item, u32)> {
+    let query = query.trim();
+    if query.is_empty() {
+        return commands
+            .iter()
+            .cloned()
+            .map(|command| (Item::PluginCommand { command, matched: Vec::new() }, 0))
+            .collect();
+    }
+    let mut fuzzy = FuzzyMatcher::new(query);
+    let mut matched: Vec<(u32, Item)> = commands
+        .iter()
+        .filter_map(|command| {
+            let title_score = fuzzy.score(&command.title);
+            let package_score = fuzzy.score(&command.package);
+            let score = title_score.into_iter().chain(package_score).max()?;
+            let matched = fuzzy.indices(&command.title).map_or_else(Vec::new, |(_, ranges)| ranges);
+            Some((score, Item::PluginCommand { command: command.clone(), matched }))
+        })
+        .collect();
+    matched.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    matched.truncate(TOTAL_LIMIT);
+    matched.into_iter().map(|(score, item)| (item, score)).collect()
+}
+
 /// The path mode's parent and partial, when `query` looks like a path: `/…`,
 /// `~/…` or exactly `~`, also pasted in quotes, shell-escaped or as a `file://` URL.
 /// The text before the last `/` is the parent.
@@ -1409,6 +1451,7 @@ mod tests {
                 Row::Item(i) => match &listing.items[*i] {
                     Item::Folder { label, .. } => label.clone(),
                     Item::Command { command, .. } => command.label.to_owned(),
+                    Item::PluginCommand { command, .. } => command.title.clone(),
                 },
             })
             .collect()
@@ -1544,7 +1587,7 @@ mod tests {
             .iter()
             .map(|item| match item {
                 Item::Folder { name, .. } => name.clone(),
-                Item::Command { .. } => String::new(),
+                Item::Command { .. } | Item::PluginCommand { .. } => String::new(),
             })
             .collect();
         assert_eq!(names, ["config-notes", ".config"], "the hidden folder comes after visible matches");
@@ -1622,7 +1665,7 @@ mod tests {
             .into_iter()
             .filter_map(|item| match item {
                 Item::Command { command, .. } => Some(command.id),
-                Item::Folder { .. } => None,
+                Item::Folder { .. } | Item::PluginCommand { .. } => None,
             })
             .collect()
     }
@@ -1754,7 +1797,7 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 Item::Command { command, .. } => Some(command.id),
-                Item::Folder { .. } => None,
+                Item::Folder { .. } | Item::PluginCommand { .. } => None,
             })
             .collect();
         assert_eq!(ids.first(), Some(&CommandId::NewTab), "not even under Recently used");
@@ -1812,6 +1855,28 @@ mod tests {
     }
 
     #[test]
+    fn plugin_commands_match_title_or_package_and_keep_title_ranges() {
+        let item = |local: &str, title: &str, package: &str| PluginCommandItem {
+            extension: crow_core::ExtensionId::new(
+                crow_core::PluginId::parse("example.test").unwrap(),
+                crow_core::LocalId::parse(local).unwrap(),
+            ),
+            generation: 1,
+            title: title.into(),
+            package: package.into(),
+        };
+        let commands = vec![item("relative", "Copy Relative Path", "Example Tools"), item("other", "Open", "Other")];
+        let matched = plugin_command_matches("relative", &commands);
+        assert_eq!(matched.len(), 1);
+        let Item::PluginCommand { command, matched: ranges } = &matched[0].0 else { panic!() };
+        assert_eq!(command.title, "Copy Relative Path");
+        assert!(!ranges.is_empty(), "title matches carry ranges");
+        let by_package = plugin_command_matches("example tools", &commands);
+        assert_eq!(by_package.len(), 1);
+        assert!(plugin_command_matches("zzz", &commands).is_empty());
+    }
+
+    #[test]
     fn settings_commands_are_in_the_palette() {
         let commands = |query: &str| -> Vec<CommandId> {
             command_listing(query, &[], true, false)
@@ -1819,7 +1884,7 @@ mod tests {
                 .iter()
                 .filter_map(|item| match item {
                     Item::Command { command, .. } => Some(command.id),
-                    Item::Folder { .. } => None,
+                    Item::Folder { .. } | Item::PluginCommand { .. } => None,
                 })
                 .collect()
         };
@@ -1836,7 +1901,7 @@ mod tests {
                 .iter()
                 .filter_map(|item| match item {
                     Item::Command { command, .. } => Some(command.id),
-                    Item::Folder { .. } => None,
+                    Item::Folder { .. } | Item::PluginCommand { .. } => None,
                 })
                 .collect()
         };

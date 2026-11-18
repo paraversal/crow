@@ -4949,7 +4949,7 @@ fn palette_cursor_skips_headers(cx: &mut TestAppContext) {
         let palette = w.palette.as_ref()?;
         match palette.listing.items.get(palette.cursor)? {
             Item::Folder { label, .. } => Some(label.clone()),
-            Item::Command { .. } => None,
+            Item::Command { .. } | Item::PluginCommand { .. } => None,
         }
     });
     assert!(cursor.as_deref().is_some_and(|label| label.ends_with("/beta")), "down crossed the header: {cursor:?}");
@@ -4978,7 +4978,7 @@ fn palette_gt_becomes_commands_token(cx: &mut TestAppContext) {
         let palette = w.palette.as_ref().expect("palette is open");
         let first = match &palette.listing.items[0] {
             Item::Command { command, .. } => command.label,
-            Item::Folder { .. } => "",
+            Item::Folder { .. } | Item::PluginCommand { .. } => "",
         };
         (first, palette.listing.count.to_string())
     });
@@ -5031,7 +5031,7 @@ fn palette_toggle_chip_shows_state(cx: &mut TestAppContext) {
             let palette = w.palette.as_ref()?;
             palette.listing.items.iter().find_map(|item| match item {
                 Item::Command { command, .. } => w.toggle_state(command.id, cx),
-                Item::Folder { .. } => None,
+                Item::Folder { .. } | Item::PluginCommand { .. } => None,
             })
         })
     };
