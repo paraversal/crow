@@ -9,8 +9,8 @@ Base: `9d074d6` (M9 P9B)
 | --- | --- | --- |
 | 1 Palette view | done (this commit) | `Palette`, `PaletteMode`, `PathState`, `PaletteDir`, geometry helpers, open/refresh/completion/selection handlers and rows now live in `window/palette_view.rs`; `run_command` and `complete_typed_path` stayed in the parent; palette tests (73) pass |
 | 2 Operation UI | done (this commit) | `run_request`, `start`, undo/redo, Empty Trash, sheet dispatch/content, Activity and quit coordination moved to `window/operation_ui.rs`; `Sheet`, `close_sheet`, onboarding handlers and focus surfaces stayed in the parent; focused activity/sheet/quit/trash/undo/first-launch tests pass |
-| 3 Path edit | in progress | move `PathEdit` and its handlers to `window/path_edit.rs`; keep the shared `complete_typed_path` helper and bottom-bar rendering in the parent |
-| 4 Verification | todo | focused palette/operation/path tests between moves, workspace checks, bundle comparison with `main`, palette refresh and 100k bench |
+| 3 Path edit | done (this commit) | `PathEdit` and edit/close/confirm/completion handlers moved to `window/path_edit.rs`; `complete_typed_path`, the bottom bar and its hover state stayed in the parent; path_edit/path_bar/completion tests pass |
+| 4 Verification | in progress | focused palette/operation/path tests between moves, workspace checks, bundle comparison with `main`, palette refresh and 100k bench |
 
 ## Questions
 
@@ -37,14 +37,15 @@ None yet.
 
 ## Found along the way
 
-- Nothing yet.
+- `window::tests::watcher_batches_apply_one_at_a_time` failed once during a loaded workspace run (`crates/crow-app/src/window/tests.rs:11423`, the final row-merge assert) and passed alone and on the next full workspace run. It is a timing-sensitive 100×5 ms wait in an untouched folder-watcher test; recorded here rather than changed, outside this plan's scope.
 
 ## Log
 
 - 2026-11-18: Read P9C, the M9 index/finish contract and the current `window.rs` layout (4 242 lines + 11 663 test lines). Created the branch from `9d074d6`; started this progress file.
 - 2026-11-18: Moved the palette state, geometry helpers, open/refresh/completion/selection handlers, render rows and the palette-only test accessors to `window/palette_view.rs`. `run_command` stayed in the parent with the action owner; `open_palette` and `refresh_palette` are `pub(super)` for `go_to_folder` and the hidden-setting reload. `cargo check`/`clippy -p crow-app --all-targets` clean; `cargo test -p crow-app palette` 73 passed.
 - 2026-11-18: Moved `run_request`, `start`, undo/redo, Empty Trash, sheet dispatch and content, Activity and quit coordination to `window/operation_ui.rs` (module `pub(crate)` for the menu's Quit handler). `Sheet`, `Sheet::focus`, `close_sheet`, `choose_tips`, `move_onboarding_focus` and the onboarding creation stayed in the parent; `operation_ui` calls them. Focused `activity`/`sheet`/`quit`/`trash`/`undo`/`first_launch` tests pass; workspace clippy and tests green.
+- 2026-11-18: Moved `PathEdit` and the edit/close/confirm/Tab-completion/preview handlers to `window/path_edit.rs`. `complete_typed_path` stayed in the parent for the palette and path field to share; the bar rendering and `path_hovered` stayed with the bottom bar. `path_edit`, `path_bar` and `completion` filters pass. Workspace checks green after one flaky `watcher_batches_apply_one_at_a_time` failure (recorded under Found along the way).
 
 ## Next
 
-Move `PathEdit` and its handlers to `window/path_edit.rs`, leaving `complete_typed_path` and the bottom bar in the parent.
+Verification: build and compare bundles with `main`, run the palette refresh/100k bench on both, then finish the hand-check list.
