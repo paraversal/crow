@@ -2406,8 +2406,18 @@ impl Pane {
                 folder.update(cx, |folder, cx| folder.set_filter(Some(filter), cx));
             }
         } else if bench.frame > 600 {
+            let plugin = cx.try_global::<crate::plugins::Plugins>().map_or_else(String::new, |plugins| {
+                let counters = plugins.surfaces.counters();
+                format!(
+                    " plugin_rows={} plugin_hooks={} plugin_cache={} plugin_cache_bytes={}",
+                    counters.submitted_rows,
+                    counters.submitted_hooks,
+                    plugins.surfaces.row_count(),
+                    plugins.surfaces.row_bytes()
+                )
+            });
             let line = format!(
-                "BENCH {} warm_first_paint={:.0}ms warm_load={:.0}ms",
+                "BENCH {} warm_first_paint={:.0}ms warm_load={:.0}ms{plugin}",
                 bench.scrolled.as_deref().unwrap_or_default(),
                 folder.first_paint_ms().unwrap_or_default(),
                 folder.load_ms()

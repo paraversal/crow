@@ -361,15 +361,23 @@ impl CrowWindow {
             .collect();
         let matched = palette::plugin_command_matches(query, &commands);
         if !matched.is_empty() {
+            let builtin_total = palette::COMMANDS
+                .iter()
+                .filter(|command| command.palette)
+                .filter(|command| {
+                    !(ui.settings.folder_sizes == crow_core::FolderSizesMode::Visible
+                        && command.id == palette::CommandId::CalculateFolderSizes)
+                })
+                .count();
             listing.rows.push(Row::Header("Plugins".into()));
             for (item, _) in matched {
                 listing.rows.push(Row::Item(listing.items.len()));
                 listing.items.push(item);
             }
             listing.count = if query.trim().is_empty() {
-                format!("{} commands", listing.items.len()).into()
+                format!("{} commands", builtin_total + commands.len()).into()
             } else {
-                format!("{} of {} commands", listing.items.len(), listing.items.len()).into()
+                format!("{} of {} commands", listing.items.len(), builtin_total + commands.len()).into()
             };
         }
         listing

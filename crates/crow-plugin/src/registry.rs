@@ -1294,6 +1294,30 @@ fn run(ctx) { () }
     }
 
     #[test]
+    fn the_shipped_p1b_fixture_registers_every_api1_kind() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../crow-app/tests/fixtures/plugins/p1b-fixture");
+        let snapshot = crate::package::load_package(&root, &limits()).unwrap();
+        let source = std::str::from_utf8(&snapshot.files["main.rhai"]).unwrap();
+        let mut engine = rhai::Engine::new();
+        engine.set_max_expr_depths(64, 64);
+        engine.set_max_array_size(1024);
+        engine.set_max_map_size(1024);
+        let ast = engine.compile(source).unwrap();
+        let value = engine.call_fn::<Dynamic>(&mut rhai::Scope::new(), &ast, "register", ()).unwrap();
+        let descriptors =
+            validate_registration(&snapshot.manifest.id, &snapshot.manifest, &snapshot, &ast, value, &limits())
+                .unwrap();
+        assert_eq!(descriptors.len(), 9);
+        assert_eq!(descriptors.iter().filter(|d| d.kind == ExtensionKind::Column).count(), 1);
+        assert_eq!(descriptors.iter().filter(|d| d.kind == ExtensionKind::Preview).count(), 1);
+        let command = descriptors.iter().find(|d| d.kind == ExtensionKind::Command).unwrap();
+        assert_eq!(command.applies_to, CommandTarget::Selection);
+        assert!(command.context_menu);
+        assert_eq!(command.extensions.as_deref(), Some(&["txt".to_owned()][..]));
+    }
+
+    #[test]
     fn published_descriptors_are_rechecked_against_the_generation_rules() {
         let snapshot = all_snapshot();
         let mut column = descriptor(ExtensionKind::Column, "c", "C", DescriptorSource::Function("run".into()));

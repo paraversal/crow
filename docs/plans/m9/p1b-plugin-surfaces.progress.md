@@ -1,6 +1,6 @@
 # M9 P1B — Plugin contributions in the app progress
 
-Branch: `codex/m9-p1b-plugin-surfaces` · PR: none · Last updated: 2026-11-18 · State: in progress
+Branch: `codex/m9-p1b-plugin-surfaces` · PR: none · Last updated: 2026-11-18 · State: **Ready for critique**
 Base: `d5cab1e` (M9 P8, merged as #65). Dependencies merged: P1A `083d40c` (#61, includes P1A fix), P8 `d5cab1e` (#65).
 
 ## Status
@@ -15,7 +15,7 @@ Base: `d5cab1e` (M9 P8, merged as #65). Dependencies merged: P1A `083d40c` (#61,
 | 6 Add the shared sidebar section shell | done | Core `Section`/`SectionRow`, `[sections] order` and `[section."id"] show/collapsed` with comment-preserving collapse edits; plugin sections show/request only while shown and expanded, use the focused folder's first 128 ordinary dirs, publish only verified paths, keep cursor identity by `(section,row)`, and offer Open/New Tab/Copy Path/Show in Finder. Native favorites/Recent/Locations and their actions are untouched. Core section parse/edit test and existing sidebar suite pass; 640 pt/VoiceOver checks are in step 9. |
 | 7 Connect configured Preview providers and P8 read eligibility | done | `preview_providers` resolves through defaults/rules/folder layers; one shared 250 ms candidate loop runs before native Preview in Pane and Search, suffix-filtered and generation-checked; a read grant gets one 64 KiB no-follow excerpt only after a fresh P8 `Readable` decision, and blocked/paused/symlink cases fall through. Plugin text/table render in the existing scroll slot with provider labels and spoken text; `Space` remains native. Core layer test and a spoken-provider unit test pass; fixture/gate-race checks are in step 9. |
 | 8 Ship the test fixture and author documentation | done | `crates/crow-app/tests/fixtures/plugins/p1b-fixture/` declares every API-1 kind with the plan's copy-relative command and a `tree/` fixture; invalid-handle, oversized-field and budget siblings load and fail only at evaluation. A package-loading test pins the fixture manifest/assets/tree. `docs/plugins.md` now covers install/reapproval, descriptor fields/defaults, `views.toml`/`sidebar.toml`, command availability, hooks, grants/failures, display/handle semantics and the fixture; README settings/menu summary updated. Normal-install approval hand check is in step 9. |
-| 9 Run the acceptance matrix and hand off | todo | |
+| 9 Run the acceptance matrix and hand off | done | Final fmt/clippy/workspace tests pass (955 tests, 1 ignored); bundle built. Bench: clean branch and main parity, active fixture within budget, 115 row submissions / 5 hooks / 2,878 cached rows / 120,876 bytes. Bundle fixture walkthrough records the plugin column, decoration, sidebar section, status, Info, preview, palette, per-item menu availability, filter-focus disable, collapse persistence and full withdrawal on disable. Pending human checks listed below. |
 
 ## Questions
 
@@ -30,7 +30,26 @@ Base: `d5cab1e` (M9 P8, merged as #65). Dependencies merged: P1A `083d40c` (#61,
 
 ## Hand checks
 
-- (to be filled as steps land)
+- [x] Bundle with `example.p1b-fixture` approved: List showed the `Sample` column, `P1B` decoration, `Fixture folders` sidebar section, `P1B fixture` status, `Fixture` Info row, and `P1B Fixture preview` / `Fixture preview` text. Shots: `/tmp/p1b-bench/shot-list.png`, `shot-file.png`, `shot-info.png`.
+- [x] `File ▸ Plugins ▸ Copy Relative Path` was present and enabled with one `.txt` selected; it was disabled while the `/` filter field had focus. With the palette open from the list, `>copy relative` showed the Plugins group row.
+- [x] Clicking the section heading wrote `collapsed = true` to `sidebar.toml` and removed its child row. Disabling the grant removed the column, decoration, sidebar section, status, Info row, preview provider and menu submenu.
+- [ ] 640 pt (and light/dark) fixture layout: column/badge/status/path/count legibility.
+- [ ] VoiceOver: menu entries, decorated rows, sidebar collapse/path rows, status, Info, preview.
+- [ ] Columns-view and search-result command routes, context-menu command, two windows, and one clipboard write per activation.
+- [ ] iCloud evicted file with a configured preview provider: metadata placeholder, no content open.
+- [ ] 100k folder with a deliberately held worker: native rows/search stay live and old replies never reach the new binding.
+
+## Bench
+
+Fixture `target/fixture-100k`, 1280×800, FireBox, 120 Hz, alternating runs. Warm first paint / scroll p99:
+
+| Condition | Run 1 | Run 2 | Run 3 | Median |
+| --- | --- | --- | --- | --- |
+| `main` clean | 9 ms / 8.73 | 8 ms / 9.54 | 15 ms / 33.47* | 9 ms / 9.54 |
+| P1B clean | 9 ms / 8.67 | 7 ms / 8.67 | 9 ms / 8.63 | 9 ms / 8.67 |
+| P1B active fixture | 9 ms / 8.71 | 8 ms / 8.62 | 7 ms / 9.31 | 8 ms / 8.71 |
+
+`*` a system stall (max 24.6 s, 20 fps); the two uninterrupted main runs were 8.73/9.54 ms p99. Cold first paint medians: main 125 ms, clean 117 ms, active 119 ms. The active run's counters: **115 row requests**, **5 hooks**, **2,878 cached rows / 120,876 bytes**; a final active run with counters reported p99 8.65 ms and warm first paint 8 ms.
 
 ## Found along the way
 
@@ -43,8 +62,9 @@ Base: `d5cab1e` (M9 P8, merged as #65). Dependencies merged: P1A `083d40c` (#61,
 - 2026-11-18 Step 1 native spike: one `SpikePluginCommand` action type with two payloads in a `File ▸ Plugins Spike` submenu dispatched `example.alpha gen 7` and `example.beta gen 9` correctly; a handler-less `SpikeUnavailable` item was disabled (`enabled = false`); with Settings key, plugin items were disabled; with the list focused they were enabled; with the `/` filter field focused they stayed enabled because the handler is on the window root. GPUI's macOS action store appends on every `set_menus` and resolves old tags to old actions, so a stale open menu cannot call a different descriptor, but every rebuild leaks one action entry per item.
 - 2026-11-18 Asked Q1 before designing the menu path; continuing with the wire contract (step 2) meanwhile.
 - 2026-11-18 Step 3: added the coordinator (`plugins/coordinator.rs`) and its demand decoration. Snapshot publication drops changed generations before the same drain's terminals; cache keys are `(generation, extension, raw scope, raw path, entry version)`; request versions hash the folder generation, watcher epoch, raw path and cheap metadata. Demand is replaced per surface, not queued; submitted tickets carry surface/scope/version/descriptor/handles. Hooks are queued under one slot per owner/kind and flushed from the 100 ms poll. Folder now emits `SelectionChanged` and `WatcherApplied`; Pane and Search publish committed scope/selection; `operations::finish` plus undo/redo publish operation-done. Workspace tests pass.
+- 2026-11-18 Step 9: final gates green (955 passed, 1 ignored), bundle rebuilt, fixture bundle walkthrough and bench recorded above. Added a fixture registration test, palette count fix and plugin counters to the bench line.
 - 2026-11-18 Step 2: extended the owned DTOs (`Descriptor` presentation fields, `Tint`, `EntryValue.dim`, `SidebarRow.handle`, `CommandIntent::{Message,CopyText,Reveal}`), added badge/suffix limits, and rewrote registration/reply validation per kind. Every new positive shape, default, unit, cap, bad handle, duplicate handle, unknown tint/effect, ragged table and published-descriptor recheck has a test; a real worker round-trips a decoration and a preview table. Q1 answered A (GPUI patch).
 
 ## Next
 
-Step 4: native menu, command palette and context commands (Q1 = GPUI patch first).
+Ready for critique. The critic should run the two pending automation checks it can drive (640 pt/light, VoiceOver/AX) and open PR after fixes; the user hand-tests the bundle.
