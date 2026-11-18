@@ -2,6 +2,8 @@
 //! names, types, sizes, dates and flags for many entries per system call
 //! (what Finder uses) instead of one `lstat` per file.
 
+#[cfg(target_os = "macos")]
+use std::os::macos::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -14,6 +16,8 @@ pub struct Entry {
     pub is_symlink: bool,
     /// Starts with a dot, or carries the Finder "hidden" flag (like ~/Library).
     pub hidden: bool,
+    /// The file is a cloud placeholder (`SF_DATALESS`); reading it would hydrate.
+    pub dataless: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
     pub created: Option<SystemTime>,
@@ -72,12 +76,17 @@ pub fn stat_entry(path: &Path) -> std::io::Result<Option<Entry>> {
     let (hidden_flag, added) = bulk::flags_and_added(path);
     #[cfg(not(target_os = "macos"))]
     let (hidden_flag, added) = (false, None);
+    #[cfg(target_os = "macos")]
+    let dataless = crate::cloud::dataless_flags(meta.st_flags());
+    #[cfg(not(target_os = "macos"))]
+    let dataless = false;
     Ok(Some(Entry {
         hidden: name.starts_with('.') || hidden_flag,
         path: path.to_path_buf(),
         name,
         is_dir,
         is_symlink: meta.file_type().is_symlink(),
+        dataless,
         size: if is_dir { 0 } else { meta.len() },
         modified: meta.modified().ok(),
         created: meta.created().ok(),
@@ -239,6 +248,7 @@ mod bulk {
                 path,
                 is_dir,
                 is_symlink,
+                dataless: crate::cloud::dataless_flags(self.flags),
                 size: if is_dir { 0 } else { self.size },
                 modified: self.modified,
                 created: self.created,

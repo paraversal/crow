@@ -81,6 +81,7 @@ fn oracle_agrees_on_random_trees() {
                             include_hidden: true,
                             rules: rules.clone(),
                             everything,
+                            read_gate: None,
                         };
                         let (engine_hits, engine_skips) = run_engine(&tree, &query);
                         let (oracle_hits, oracle_skips) = run_oracle(&tree, &query);

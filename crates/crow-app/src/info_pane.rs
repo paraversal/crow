@@ -8,13 +8,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crow_fs::Entry;
+use crow_fs::{CloudStatus, Entry};
 use crow_theme::Theme;
 use gpui::{
-    AnyElement, App, Context, Div, Entity, EventEmitter, FontWeight, IntoElement, Render, Role, Window, div,
-    prelude::*, px,
+    AnyElement, App, Context, Div, Entity, EventEmitter, FontWeight, IntoElement, Render, Role, Subscription, Window,
+    div, prelude::*, px,
 };
 
+use crate::cloud_status::{self, CloudStatusService};
 use crate::folder_sizes::SizeService;
 use crate::style::{color, color_alpha, display_path, display_text, format_time, kind};
 use crate::ui::Ui;
@@ -126,6 +127,9 @@ pub struct InfoPane {
     loaded: Option<LoadedInfo>,
     generation: u64,
     loader: Loader,
+    /// This pane's selected-path source in the cloud-status service.
+    cloud_source: u64,
+    _cloud_subscription: Option<Subscription>,
 }
 
 fn observe_sizes(cx: &mut Context<InfoPane>) {
@@ -138,12 +142,16 @@ fn observe_sizes(cx: &mut Context<InfoPane>) {
 impl InfoPane {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let default = cx.global::<Ui>().settings.show_preview;
-        let pane = Self::with_default(default, Arc::new(real_load));
+        let pane = Self::with_default(default, Arc::new(real_load), cx);
         observe_sizes(cx);
         pane
     }
 
-    fn with_default(default: bool, loader: Loader) -> Self {
+    fn with_default(default: bool, loader: Loader, cx: &mut Context<Self>) -> Self {
+        let cloud_service = cx.try_global::<CloudStatusService>().map(|service| service.0.clone());
+        let cloud_source =
+            cloud_service.as_ref().map(|service| cloud_status::register_source(service, cx)).unwrap_or(0);
+        let cloud_subscription = cloud_service.map(|service| cx.observe(&service, |_, _, cx| cx.notify()));
         Self {
             tab: InfoTab::Preview,
             visible: default,
@@ -154,13 +162,15 @@ impl InfoPane {
             loaded: None,
             generation: 0,
             loader,
+            cloud_source,
+            _cloud_subscription: cloud_subscription,
         }
     }
 
     #[cfg(test)]
     pub fn with_loader(cx: &mut Context<Self>, loader: Loader) -> Self {
         let default = cx.global::<Ui>().settings.show_preview;
-        let pane = Self::with_default(default, loader);
+        let pane = Self::with_default(default, loader, cx);
         observe_sizes(cx);
         pane
     }
@@ -239,6 +249,13 @@ impl InfoPane {
             self.target = target;
             self.loaded = None;
             self.generation += 1;
+            if let Some(service) = cx.try_global::<CloudStatusService>() {
+                let path = match &self.target {
+                    Some(InfoTarget::Single { entry, .. }) => std::slice::from_ref(&entry.path),
+                    _ => &[],
+                };
+                service.0.clone().update(cx, |service, cx| service.observe((self.cloud_source, 0), path, cx));
+            }
             if let Some(target) = self.target.clone() {
                 self.start_load(target, cx);
             }
@@ -271,7 +288,7 @@ impl InfoPane {
     }
 
     /// What VoiceOver reads for the column while Info is showing.
-    pub fn label(&self) -> String {
+    pub fn label(&self, cx: &App) -> String {
         match &self.target {
             Some(InfoTarget::Single { entry, items }) => {
                 let folder = entry.is_dir && !entry.is_package();
@@ -283,10 +300,15 @@ impl InfoPane {
                     crow_fs::human_size(shown_size(entry, self.loaded.as_ref()))
                 };
                 let name = display_text(&entry.name);
+                let cloud = self
+                    .cloud_status(&entry.path, cx)
+                    .and_then(CloudStatus::spoken_suffix)
+                    .map(|suffix| format!(", {suffix}"))
+                    .unwrap_or_default();
                 if detail.is_empty() {
-                    format!("Info: {name}, {}", kind(entry))
+                    format!("Info: {name}, {}{cloud}", kind(entry))
                 } else {
-                    format!("Info: {name}, {}, {detail}", kind(entry))
+                    format!("Info: {name}, {}, {detail}{cloud}", kind(entry))
                 }
             }
             Some(InfoTarget::Many(summary)) => format!(
@@ -309,13 +331,20 @@ impl Render for InfoPane {
 }
 
 impl InfoPane {
+    fn cloud_status(&self, path: &Path, cx: &App) -> Option<CloudStatus> {
+        cx.try_global::<CloudStatusService>().and_then(|service| service.0.read(cx).status(path))
+    }
+
     fn body(&self, theme: &Theme, home: &Path, cx: &mut Context<Self>) -> Div {
         let Some(target) = &self.target else {
             return div().text_color(color(theme.role("fg-muted"))).child("No selection");
         };
         let loaded = self.loaded.as_ref();
         match target {
-            InfoTarget::Single { entry, items } => single_body(entry, *items, loaded, theme, home, cx),
+            InfoTarget::Single { entry, items } => {
+                let cloud = self.cloud_status(&entry.path, cx);
+                single_body(entry, *items, loaded, cloud, theme, home, cx)
+            }
             InfoTarget::Many(summary) => many_body(summary, loaded, theme, home, cx),
         }
     }
@@ -371,6 +400,7 @@ fn single_body(
     entry: &Entry,
     items: Option<usize>,
     loaded: Option<&LoadedInfo>,
+    cloud: Option<CloudStatus>,
     theme: &Theme,
     home: &Path,
     cx: &mut Context<InfoPane>,
@@ -416,7 +446,15 @@ fn single_body(
             div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(display_text(&entry.name).into_owned()),
             theme,
         ))
-        .child(field("Kind", div().child(kind(entry).to_string()), theme))
+        .child(field("Kind", div().child(kind(entry).to_string()), theme));
+    if let Some(status) = cloud.and_then(CloudStatus::info_text) {
+        body = body.child(field(
+            "iCloud",
+            div().flex().items_center().gap_2().children(cloud_status::badge(cloud, theme)).child(status.to_owned()),
+            theme,
+        ));
+    }
+    body = body
         .child(field("Size", div().when(size_stale, |size| size.opacity(0.5)).child(size), theme))
         .child(field("Where", where_value(entry.path.parent(), home, theme, cx), theme))
         .child(field("Created", div().child(format_time(created)), theme))
@@ -617,6 +655,7 @@ mod tests {
             is_dir: false,
             is_symlink: false,
             hidden: false,
+            dataless: false,
             size: 12,
             modified: None,
             created: None,

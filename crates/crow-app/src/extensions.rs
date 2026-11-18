@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crow_core::{Extensions, PreviewContent, Previewer};
 use crow_fs::Entry;
+use crow_fs::{ReadDecision, ReadGate, ReadHint};
 use gpui::{App, Global};
 
 pub struct Ext(pub Arc<Extensions>);
@@ -26,8 +27,11 @@ impl Previewer for QuickLookThumbnail {
         "quicklook-thumbnail"
     }
 
-    fn preview(&self, entry: &Entry) -> Option<PreviewContent> {
+    fn preview(&self, entry: &Entry, gate: &dyn ReadGate) -> Option<PreviewContent> {
         if entry.is_dir && !entry.is_package() {
+            return None;
+        }
+        if gate.check(&entry.path, ReadHint::for_path(&entry.path)) != ReadDecision::Readable {
             return None;
         }
         crow_macos::thumbnail_png(Path::new(&entry.path), 256.0).map(|png| PreviewContent::Image(Arc::new(png)))

@@ -238,6 +238,7 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     ui.theme = theme;
     cx.set_global(ui);
     crate::folder_sizes::init_at(cx, cache_dir, true);
+    crate::cloud_status::init_at(cx);
     let feedback = cx.global::<Ui>().feedback;
     cx.set_reduce_motion(feedback.mode == Effective::Off);
     feedback::preload(feedback.sound, cx);
@@ -334,6 +335,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     let ui = Ui::new(config_dir.clone(), state_dir, crow_core::home(), crow_theme::fallback(), false);
     cx.set_global(ui);
     crate::extensions::init(cx);
+    crate::cloud_status::init_for_tests(cx);
     crate::plugins::init_empty(cx);
     crate::usage::init(cx);
     crate::tips::init(cx);

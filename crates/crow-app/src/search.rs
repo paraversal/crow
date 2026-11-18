@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crow_core::{Exclude, KeymapLayer, SearchMatch, Selection, SetName};
-use crow_fs::Entry;
 use crow_fs::ops::Request;
+use crow_fs::{AllowAll, CloudStatus, Entry, ReadGate};
 use crow_search::{Control, Hit, HitKind, Query, RuleSet, Skip, SkipReason, Summary};
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
@@ -27,6 +27,7 @@ use crate::actions::{
     SearchReveal, SelectAll,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
+use crate::cloud_status::{self, CloudStatusService};
 use crate::extensions::Ext;
 use crate::icons::{self, Glyph};
 use crate::info_pane::{InfoKey, InfoTarget, SelectionSummary, TAG_SCAN_CAP};
@@ -35,8 +36,8 @@ use crate::operations::Operations;
 use crate::pane::{DraggedSelection, island_edges};
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, content_opacity, cut_outline, display_text, field_ring, format_time,
-    format_time_short, highlight_text, icon, inactive_selection, map_range, truncate_middle_parts,
+    active_selection, cloud_icon, color, color_alpha, content_opacity, cut_outline, display_text, field_ring,
+    format_time, format_time_short, highlight_text, inactive_selection, map_range, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -185,14 +186,20 @@ pub struct SearchView {
     content_count: usize,
     /// How many rows at the tail are weak fuzzy name hits.
     weak_count: usize,
+    /// Content matches unavailable because their file is a cloud placeholder.
+    cloud_skipped: u64,
+    /// This view's id in the cloud-status service's visible-row sources.
+    cloud_source: u64,
     /// The selected row's preview, loaded off the main thread.
     preview: Option<LoadedPreview>,
+    preview_generation: u64,
     scroll: UniformListScrollHandle,
     show_skipped: bool,
     /// The row whose context menu is open, while it is.
     menu: Option<usize>,
     _subscription: Subscription,
     _ui_subscription: Subscription,
+    _cloud_subscription: Option<Subscription>,
     /// Repaint the band's focus ring when the field or the results take focus.
     _focus_subscriptions: Vec<Subscription>,
 }
@@ -301,6 +308,15 @@ impl SearchView {
                 }
             }
         });
+        let (cloud_source, cloud_subscription) = match cx.try_global::<CloudStatusService>() {
+            Some(service) => {
+                let entity = service.0.clone();
+                let source = cloud_status::register_source(&entity, cx);
+                let subscription = cx.observe(&entity, |search, _, cx| search.cloud_changed(cx));
+                (source, Some(subscription))
+            }
+            None => (0, None),
+        };
         let mut search = Self {
             folder,
             folder_label,
@@ -336,12 +352,16 @@ impl SearchView {
             name_count: 0,
             content_count: 0,
             weak_count: 0,
+            cloud_skipped: 0,
+            cloud_source,
             preview: None,
+            preview_generation: 0,
             scroll: UniformListScrollHandle::new(),
             show_skipped: false,
             menu: None,
             _subscription: subscription,
             _ui_subscription: ui_subscription,
+            _cloud_subscription: cloud_subscription,
             _focus_subscriptions: focus_subscriptions,
         };
         if !query.is_empty() {
@@ -426,7 +446,9 @@ impl SearchView {
         self.name_count = 0;
         self.content_count = 0;
         self.weak_count = 0;
+        self.cloud_skipped = 0;
         self.preview = None;
+        self.preview_generation += 1;
         let query = query.trim();
         if query.is_empty() {
             self.searching = false;
@@ -497,6 +519,7 @@ impl SearchView {
                 Scope::Home | Scope::ThisMac => self.home.clone(),
             };
             let (names, contents) = query_parts(query, self.effective_match());
+            let read_gate = cx.try_global::<CloudStatusService>().map(|service| service.0.read(cx).gate());
             let query = Query {
                 names,
                 contents,
@@ -504,6 +527,7 @@ impl SearchView {
                 include_hidden: self.search_includes_hidden,
                 rules,
                 everything: self.everything,
+                read_gate,
             };
             cx.background_spawn(async move {
                 let tx = tx;
@@ -554,6 +578,7 @@ impl SearchView {
             Update::Hits(hits) => self.add_hits(hits, cx),
             Update::Done(summary) => {
                 let scanned = summary.scanned;
+                self.cloud_skipped = summary.cloud_skipped;
                 let skipped = summary.skipped.len();
                 // Every reason is listed: rules, hidden folders, packages and
                 // unreadable folders are the four ways a search can miss something.
@@ -829,6 +854,7 @@ impl SearchView {
     fn load_preview(&mut self, cx: &mut Context<Self>) {
         let Some(row) = self.results.get(self.cursor) else {
             self.preview = None;
+            self.preview_generation += 1;
             return;
         };
         let path = row.path.clone();
@@ -836,25 +862,62 @@ impl SearchView {
         if self.preview.as_ref().is_some_and(|loaded| loaded.entry.path == path) {
             return;
         }
+        self.preview = None;
+        self.preview_generation += 1;
+        let generation = self.preview_generation;
         let extensions = cx.global::<Ext>().0.clone();
+        let (gate, cloud) = match cx.try_global::<CloudStatusService>() {
+            Some(service) => {
+                let service = service.0.read(cx);
+                (service.gate(), service.status(&path))
+            }
+            None => (Arc::new(AllowAll) as Arc<dyn ReadGate>, None),
+        };
         let requested = path.clone();
         cx.spawn(async move |this, cx| {
             let loaded = cx
                 .background_spawn(async move {
                     let entry = crow_fs::stat_entry(&requested).ok().flatten()?;
-                    let preview = preview::fetch_at(&entry, &extensions, line);
+                    let preview = preview::fetch_at(&entry, &extensions, line, gate.as_ref(), cloud);
                     Some(LoadedPreview { entry, preview })
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if this.results.get(this.cursor).is_some_and(|row| row.path == path) {
-                    this.preview = loaded;
+                if this.preview_generation == generation
+                    && this.results.get(this.cursor).is_some_and(|row| row.path == path)
+                {
+                    let mut loaded = loaded;
+                    if let Some(preview) = loaded.as_mut()
+                        && this.cloud_status(&path, cx).is_some_and(|status| preview.preview.update_cloud(status))
+                    {
+                        this.load_preview(cx);
+                    } else {
+                        this.preview = loaded;
+                    }
                     cx.notify();
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// The cloud-status service changed: re-arm a blocked preview when its
+    /// selected row becomes positively local/downloaded.
+    fn cloud_changed(&mut self, cx: &mut Context<Self>) {
+        if let Some(row) = self.results.get(self.cursor)
+            && let Some(status) = self.cloud_status(&row.path, cx)
+            && let Some(loaded) = self.preview.as_mut().filter(|loaded| loaded.entry.path == row.path)
+            && loaded.preview.update_cloud(status)
+        {
+            self.preview = None;
+            self.load_preview(cx);
+        }
+        cx.notify();
+    }
+
+    fn cloud_status(&self, path: &Path, cx: &gpui::App) -> Option<CloudStatus> {
+        cx.try_global::<CloudStatusService>().and_then(|service| service.0.read(cx).status(path))
     }
 
     /// The preview pane's parts, when a result is selected.
@@ -1857,6 +1920,7 @@ impl SearchView {
             names_capped: self.names_capped,
             contents_stopped: self.contents_stopped,
             dropped: self.dropped,
+            cloud_skipped: self.cloud_skipped,
             error: self.error.as_deref(),
         })
     }
@@ -2197,15 +2261,23 @@ impl SearchView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<impl IntoElement + use<>> {
-        let ui = cx.global::<Ui>();
-        let theme = &ui.theme;
+        let (theme, mode) = {
+            let ui = cx.global::<Ui>();
+            (ui.theme.clone(), ui.feedback.mode)
+        };
+        let theme = &theme;
         let (fg, muted, subtle) =
             (color(theme.role("fg")), color(theme.role("fg-muted")), color(theme.role("fg-subtle")));
         let focused = self.focus.is_focused(window);
         let selection_bg = if focused { active_selection(theme) } else { inactive_selection(theme) };
         let count = self.results.len();
         let cursor = self.cursor;
-        let mode = ui.feedback.mode;
+        let cloud_visible: Vec<PathBuf> =
+            range.clone().filter_map(|i| self.results.get(i)).map(|row| row.path.clone()).collect();
+        if let Some(service) = cx.try_global::<CloudStatusService>() {
+            let service = service.0.clone();
+            service.update(cx, |service, cx| service.observe((self.cloud_source, 0), &cloud_visible, cx));
+        }
         let now = Instant::now();
         let clipboard = cx.global::<Operations>().clipboard.as_ref();
         let flash = clipboard
@@ -2222,6 +2294,9 @@ impl SearchView {
         range
             .filter_map(|i| {
                 let row = self.results.get(i)?;
+                let cloud = self.cloud_status(&row.path, cx);
+                let cloud_spoken =
+                    cloud.and_then(CloudStatus::spoken_suffix).map(|suffix| format!(", {suffix}")).unwrap_or_default();
                 let on_clipboard = clipboard.is_some_and(|clipboard| clipboard.contains(&row.path));
                 let cut_edge = cut_edges.get(i - first).copied().flatten();
                 let flash_tint = (on_clipboard && flash > 0.0)
@@ -2283,11 +2358,11 @@ impl SearchView {
                 } else {
                     display_text(&row.name).into_owned().into()
                 };
-                let drag_icon = icon(&row.path, row.is_dir, 22);
+                let drag_icon = cloud_icon(cloud, &row.path, row.is_dir, 22);
                 div()
                     .id(("search-row", i))
                     .role(Role::ListBoxOption)
-                    .aria_label(row.label())
+                    .aria_label(format!("{}{cloud_spoken}", row.label()))
                     .aria_position_in_set(i + 1)
                     .aria_size_of_set(count)
                     .aria_selected(selected)
@@ -2374,11 +2449,9 @@ impl SearchView {
                             .items_center()
                             .gap_2()
                             .child(
-                                div()
-                                    .size(px(16.))
-                                    .flex_none()
-                                    .opacity(content_opacity(row.hidden, false))
-                                    .children(icon(&row.path, row.is_dir, 16).map(|image| img(image).size(px(16.)))),
+                                div().size(px(16.)).flex_none().opacity(content_opacity(row.hidden, false)).children(
+                                    cloud_icon(cloud, &row.path, row.is_dir, 16).map(|image| img(image).size(px(16.))),
+                                ),
                             )
                             .child(
                                 div()
@@ -2389,13 +2462,22 @@ impl SearchView {
                                     .justify_center()
                                     .child(
                                         div()
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis()
-                                            .text_size(px(13.))
-                                            .text_color(fg)
-                                            .opacity(content_opacity(row.hidden, false))
-                                            .child(name),
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis()
+                                                    .text_size(px(13.))
+                                                    .text_color(fg)
+                                                    .opacity(content_opacity(row.hidden, false))
+                                                    .child(name),
+                                            )
+                                            .children(cloud_status::badge(cloud, theme)),
                                     )
                                     .children(content),
                             ),
@@ -2603,7 +2685,18 @@ struct FooterState<'a> {
     names_capped: bool,
     contents_stopped: bool,
     dropped: usize,
+    cloud_skipped: u64,
     error: Option<&'a str>,
+}
+
+/// " · 3 cloud files not downloaded", when content coverage was reduced by
+/// placeholders. Name and metadata hits still count, so this is not an error.
+fn cloud_text(n: u64) -> String {
+    match n {
+        0 => String::new(),
+        1 => " · 1 cloud file not downloaded".to_owned(),
+        n => format!(" · {n} cloud files not downloaded"),
+    }
 }
 
 /// "3 results" / "3 results in 1 file", without the searching prefix.
@@ -2627,19 +2720,21 @@ fn footer_summary(state: FooterState<'_>) -> String {
     if state.contents_stopped {
         let results = results_text(state.hits, state.files);
         let dropped = state.dropped;
+        let cloud = cloud_text(state.cloud_skipped);
         return if state.searching {
-            format!("Searching names… {results} · {dropped} more not shown")
+            format!("Searching names… {results} · {dropped} more not shown{cloud}")
         } else if state.matching == Match::Names {
             format!("{results} · {dropped} more not shown")
         } else {
-            format!("{results} · {dropped} more not shown · contents stopped at {MAX_OTHER_ROWS}")
+            format!("{results} · {dropped} more not shown · contents stopped at {MAX_OTHER_ROWS}{cloud}")
         };
     }
     let prefix = if state.searching { "Searching… " } else { "" };
+    let cloud = cloud_text(state.cloud_skipped);
     if state.hits == 0 {
-        return if state.searching { "Searching…".to_owned() } else { "No results".to_owned() };
+        return if state.searching { "Searching…".to_owned() } else { format!("No results{cloud}") };
     }
-    format!("{prefix}{}", results_text(state.hits, state.files))
+    format!("{prefix}{}{cloud}", results_text(state.hits, state.files))
 }
 
 /// "1 folder skipped" / "3 folders skipped", for the footer link and its aria label.
@@ -2926,6 +3021,7 @@ mod tests {
             names_capped,
             contents_stopped,
             dropped,
+            cloud_skipped: 0,
             error,
         };
         assert_eq!(footer_summary(state(true, 0, 0, false, false, 0, None)), "Searching…");
@@ -2966,6 +3062,12 @@ mod tests {
             footer_summary(state(false, 0, 0, true, true, 3, Some("Invalid pattern: unclosed group"))),
             "Invalid pattern: unclosed group"
         );
+        let mut cloud = state(false, 2, 1, false, false, 0, None);
+        cloud.cloud_skipped = 3;
+        assert_eq!(footer_summary(cloud), "2 results in 1 file · 3 cloud files not downloaded");
+        let mut one = state(false, 0, 0, false, false, 0, None);
+        one.cloud_skipped = 1;
+        assert_eq!(footer_summary(one), "No results · 1 cloud file not downloaded");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crow_fs::{Entry, SortKey};
+use crow_fs::{Entry, ReadDecision, ReadGate, ReadHint, SortKey};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Stable plugin package identity: 1–96 ASCII bytes, split on dots into
@@ -426,7 +426,9 @@ pub enum PreviewContent {
 /// `None` passes the entry to the next previewer.
 pub trait Previewer: Send + Sync {
     fn id(&self) -> &'static str;
-    fn preview(&self, entry: &Entry) -> Option<PreviewContent>;
+    /// `gate` is checked immediately before any automatic content read. A
+    /// previewer must not open a file when the fresh decision is not `Readable`.
+    fn preview(&self, entry: &Entry, gate: &dyn ReadGate) -> Option<PreviewContent>;
 }
 
 #[derive(Clone, Default)]
@@ -465,8 +467,8 @@ impl Extensions {
     }
 
     /// The first previewer that has something for `entry`.
-    pub fn preview(&self, entry: &Entry) -> Option<PreviewContent> {
-        self.previewers.iter().find_map(|p| p.preview(entry))
+    pub fn preview(&self, entry: &Entry, gate: &dyn ReadGate) -> Option<PreviewContent> {
+        self.previewers.iter().find_map(|p| p.preview(entry, gate))
     }
 }
 
@@ -592,8 +594,11 @@ impl Previewer for TextPreviewer {
         "text"
     }
 
-    fn preview(&self, entry: &Entry) -> Option<PreviewContent> {
+    fn preview(&self, entry: &Entry, gate: &dyn ReadGate) -> Option<PreviewContent> {
         if entry.is_dir || entry.size == 0 {
+            return None;
+        }
+        if gate.check(&entry.path, ReadHint::for_path(&entry.path)) != ReadDecision::Readable {
             return None;
         }
         let mut head = Vec::with_capacity(Self::MAX_BYTES);
@@ -625,9 +630,12 @@ pub struct Excerpt {
 
 /// Read at most 1 MiB around `line`: `before` lines above it, `total` lines in
 /// all. Refuses binary files and lines past the cap.
-pub fn text_excerpt(path: &Path, line: u64, before: usize, total: usize) -> Option<Excerpt> {
+pub fn text_excerpt(path: &Path, line: u64, before: usize, total: usize, gate: &dyn ReadGate) -> Option<Excerpt> {
     const MAX_BYTES: usize = 1 << 20;
     if line == 0 || total == 0 {
+        return None;
+    }
+    if gate.check(path, ReadHint::for_path(path)) != ReadDecision::Readable {
         return None;
     }
     let mut bytes = Vec::with_capacity(8192);
@@ -653,6 +661,7 @@ pub fn text_excerpt(path: &Path, line: u64, before: usize, total: usize) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crow_fs::AllowAll;
 
     fn entry_for(path: &std::path::Path) -> Entry {
         crow_fs::stat_entry(path).unwrap().unwrap()
@@ -669,12 +678,29 @@ mod tests {
         std::fs::write(&long, "ä\n".repeat(10_000)).unwrap();
 
         let ext = Extensions::with_builtins();
-        assert_eq!(ext.preview(&entry_for(&text)), Some(PreviewContent::Text("# Title\n\nbody".into())));
-        assert_eq!(ext.preview(&entry_for(&binary)), None);
-        match ext.preview(&entry_for(&long)) {
+        assert_eq!(ext.preview(&entry_for(&text), &AllowAll), Some(PreviewContent::Text("# Title\n\nbody".into())));
+        assert_eq!(ext.preview(&entry_for(&binary), &AllowAll), None);
+        match ext.preview(&entry_for(&long), &AllowAll) {
             Some(PreviewContent::Text(t)) => assert_eq!(t.lines().count(), TextPreviewer::MAX_LINES),
             other => panic!("long UTF-8 file should preview, got {other:?}"),
         }
+    }
+
+    struct Refuse;
+    impl ReadGate for Refuse {
+        fn check(&self, _: &std::path::Path, _: ReadHint) -> ReadDecision {
+            ReadDecision::SkipCloud
+        }
+    }
+
+    #[test]
+    fn a_refused_read_returns_no_preview_or_excerpt() {
+        let dir = crate::test_support::TempDir::new("crow-core-cloud-preview-");
+        let text = dir.join("notes.md");
+        std::fs::write(&text, "cloud text\n").unwrap();
+        let ext = Extensions::with_builtins();
+        assert_eq!(ext.preview(&entry_for(&text), &Refuse), None);
+        assert_eq!(text_excerpt(&text, 1, 1, 3, &Refuse), None);
     }
 
     #[test]
@@ -684,11 +710,11 @@ mod tests {
         let body: String = (1..=100).map(|n| format!("line {n}\n")).collect();
         std::fs::write(&path, body).unwrap();
 
-        let excerpt = text_excerpt(&path, 60, 5, 12).expect("an excerpt");
+        let excerpt = text_excerpt(&path, 60, 5, 12, &AllowAll).expect("an excerpt");
         assert_eq!(excerpt.first_line, 55);
         assert_eq!(excerpt.hit, 60);
         assert!(excerpt.text.lines().any(|line| line == "line 60"), "{}", excerpt.text);
-        assert_eq!(text_excerpt(&path, 60, 0, 3).expect("from the hit").first_line, 60);
+        assert_eq!(text_excerpt(&path, 60, 0, 3, &AllowAll).expect("from the hit").first_line, 60);
     }
 
     #[test]
@@ -696,7 +722,7 @@ mod tests {
         let dir = crate::test_support::TempDir::new("crow-core-excerpt-bin-");
         let binary = dir.join("blob.bin");
         std::fs::write(&binary, b"text\0more\n").unwrap();
-        assert_eq!(text_excerpt(&binary, 1, 2, 5), None);
+        assert_eq!(text_excerpt(&binary, 1, 2, 5, &AllowAll), None);
 
         let big = dir.join("big.txt");
         let mut body = String::new();
@@ -704,7 +730,7 @@ mod tests {
             body.push_str(&format!("line {n} ........................................\n"));
         }
         std::fs::write(&big, body).unwrap();
-        assert_eq!(text_excerpt(&big, 120_000, 2, 5), None, "the line sits past 1 MiB");
+        assert_eq!(text_excerpt(&big, 120_000, 2, 5, &AllowAll), None, "the line sits past 1 MiB");
     }
 
     #[test]
@@ -724,6 +750,7 @@ mod tests {
             is_dir: true,
             is_symlink: true,
             hidden: false,
+            dataless: false,
             size: 0,
             modified: None,
             created: None,

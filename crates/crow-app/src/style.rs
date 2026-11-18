@@ -150,7 +150,19 @@ thread_local! {
 
 /// Finder's icon for `path` at `points`, as a GPUI image.
 pub fn icon(path: &Path, is_dir: bool, points: u32) -> Option<Arc<Image>> {
-    let png = crow_macos::icon_png(path, is_dir, points)?;
+    cloud_icon(None, path, is_dir, points)
+}
+
+/// Use a type icon while a potential cloud item is unprobed or unavailable.
+pub fn cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path, is_dir: bool, points: u32) -> Option<Arc<Image>> {
+    if status.map_or_else(|| crow_fs::is_cloud_candidate(path), |status| !status.is_local()) {
+        let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        return image_from_png(crow_macos::type_icon_png(ext, is_dir, points)?);
+    }
+    image_from_png(crow_macos::icon_png(path, is_dir, points)?)
+}
+
+fn image_from_png(png: Arc<Vec<u8>>) -> Option<Arc<Image>> {
     let key = Arc::as_ptr(&png) as usize;
     Some(IMAGES.with(|images| {
         images

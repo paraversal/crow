@@ -58,6 +58,7 @@ fn run_case(root: &Path, case: &Case, rules: &Arc<RuleSet>) -> Result<(), String
         include_hidden: true,
         rules: rules.clone(),
         everything: case.everything,
+        read_gate: None,
     };
     let (tx, rx) = mpsc::channel();
     let walked: PathBuf = search_root.clone();

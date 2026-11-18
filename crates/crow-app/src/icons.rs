@@ -29,6 +29,8 @@ pub enum Glyph {
     Pencil,
     Folder,
     Clock,
+    Cloud,
+    CloudOff,
 }
 
 impl Glyph {
@@ -48,6 +50,8 @@ impl Glyph {
         Glyph::Pencil,
         Glyph::Folder,
         Glyph::Clock,
+        Glyph::Cloud,
+        Glyph::CloudOff,
     ];
 
     pub fn path(self) -> &'static str {
@@ -66,6 +70,8 @@ impl Glyph {
             Glyph::Pencil => "icons/pencil.svg",
             Glyph::Folder => "icons/folder.svg",
             Glyph::Clock => "icons/clock.svg",
+            Glyph::Cloud => "icons/cloud.svg",
+            Glyph::CloudOff => "icons/cloud-off.svg",
         }
     }
 }
@@ -86,6 +92,8 @@ const FILES: &[(&str, &[u8])] = &[
     ("icons/pencil.svg", include_bytes!("../assets/icons/pencil.svg")),
     ("icons/folder.svg", include_bytes!("../assets/icons/folder.svg")),
     ("icons/clock.svg", include_bytes!("../assets/icons/clock.svg")),
+    ("icons/cloud.svg", include_bytes!("../assets/icons/cloud.svg")),
+    ("icons/cloud-off.svg", include_bytes!("../assets/icons/cloud-off.svg")),
     ("icons/LICENSE", include_bytes!("../assets/icons/LICENSE")),
 ];
 

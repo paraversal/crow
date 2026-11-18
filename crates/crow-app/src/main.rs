@@ -23,6 +23,7 @@
 mod actions;
 mod bottom_bar;
 mod chrome;
+mod cloud_status;
 mod context_menu;
 mod controls;
 mod effects;
@@ -145,6 +146,7 @@ fn bench_search(args: &[String]) -> Result<(), String> {
         include_hidden: true,
         rules: Arc::new(rules),
         everything: false,
+        read_gate: Some(Arc::new(crow_macos::SystemReadGate)),
     };
     let control = crow_search::Control::new();
     let started = std::time::Instant::now();
@@ -293,6 +295,7 @@ fn search_trace(args: &[String]) -> Result<(), String> {
         include_hidden: options.search_includes_hidden,
         rules: Arc::new(rules),
         everything: options.everything,
+        read_gate: Some(Arc::new(crow_macos::SystemReadGate)),
     };
     let target = options.target.as_ref().map(|path| {
         let path =
