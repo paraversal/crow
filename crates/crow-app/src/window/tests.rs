@@ -3219,6 +3219,28 @@ fn contents_only_cap_cancels(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn late_strong_name_keeps_the_cursor_row(cx: &mut TestAppContext) {
+    let (root, _view, search, mut cx) = open_search("search-late-strong-selection", cx);
+    let contents: Vec<Hit> = (0..30).map(|i| content_hit(root.join(format!("content-{i:02}.txt")))).collect();
+    search.update(&mut cx, |search, cx| search.add_test_hits(contents, cx));
+    cx.simulate_keystrokes("tab");
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("down");
+    let selected = root.join("content-02.txt");
+    assert_eq!(search.read_with(&cx, |s, _| s.cursor()), 2);
+    assert_eq!(search.read_with(&cx, |s, _| s.selected_entry()).map(|(path, _)| path), Some(selected.clone()));
+
+    let strong: Vec<Hit> = (0..5).map(|i| strong_hit(root.join(format!("qqzz-{i}.txt")))).collect();
+    search.update(&mut cx, |search, cx| search.add_test_hits(strong, cx));
+    assert_eq!(search.read_with(&cx, |s, _| s.cursor()), 7, "the row moved right with its new index");
+    assert_eq!(
+        search.read_with(&cx, |s, _| s.selected_entry()).map(|(path, _)| path),
+        Some(selected),
+        "the selected path does not move"
+    );
+}
+
+#[gpui::test]
 fn search_footer_counts_hits_and_files(cx: &mut TestAppContext) {
     let root = fixture("search-footer");
     std::fs::write(root.join("a.txt"), "needle\nx\nneedle\nneedle\n").expect("create fixture");
