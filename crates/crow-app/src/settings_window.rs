@@ -498,6 +498,8 @@ pub struct SettingsWindow {
     plugin_position: usize,
     /// The approval target captured when the selected row was rendered.
     plugin_target: Option<PluginTarget>,
+    /// The bounded plugin rows; Up/Down scroll the selected row into view.
+    plugin_scroll: ScrollHandle,
     font_scroll: ScrollHandle,
     /// The drop-down whose menu is open (Theme or FontFamily).
     menu: Option<ControlId>,
@@ -649,6 +651,7 @@ impl SettingsWindow {
             selected_plugin: None,
             plugin_position: 0,
             plugin_target: None,
+            plugin_scroll: ScrollHandle::new(),
             font_scroll: ScrollHandle::new(),
             menu: None,
             dismissed_by_mouse: None,
@@ -966,6 +969,7 @@ impl SettingsWindow {
         if self.selected_plugin.is_none() {
             self.selected_plugin = Some(plugins[0].bundle.clone());
             self.plugin_position = 0;
+            self.plugin_scroll.scroll_to_item(0);
             cx.notify();
             return;
         }
@@ -974,6 +978,7 @@ impl SettingsWindow {
         if next != current || self.selected_plugin.is_none() {
             self.selected_plugin = Some(plugins[next].bundle.clone());
             self.plugin_position = next;
+            self.plugin_scroll.scroll_to_item(next);
             cx.notify();
         }
     }
@@ -1036,6 +1041,7 @@ impl SettingsWindow {
         let handle = cx.global::<Plugins>().handle.clone();
         let count = inventory.plugins.len();
         let grants_error = inventory.grants_error.is_some();
+        let mut scroll_to_selected = false;
         let selected = if count == 0 {
             self.selected_plugin = None;
             self.plugin_position = 0;
@@ -1049,6 +1055,7 @@ impl SettingsWindow {
                     // position, or the previous row when it was last.
                     let index = self.plugin_position.min(count - 1);
                     self.selected_plugin = Some(inventory.plugins[index].bundle.clone());
+                    scroll_to_selected = true;
                     index
                 }
             };
@@ -1058,9 +1065,9 @@ impl SettingsWindow {
         };
         let focus = self.handle(ControlId::Plugins);
         let focused = focus.is_focused(window);
-        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        let mut headers: Vec<gpui::AnyElement> = Vec::new();
         if let Some(error) = &inventory.grants_error {
-            rows.push(
+            headers.push(
                 div()
                     .id("plugins-grants-error")
                     .role(Role::Alert)
@@ -1072,7 +1079,7 @@ impl SettingsWindow {
             );
         }
         if let Some(error) = &inventory.scan_error {
-            rows.push(
+            headers.push(
                 div()
                     .id("plugins-scan-error")
                     .role(Role::Alert)
@@ -1083,50 +1090,62 @@ impl SettingsWindow {
                     .into_any_element(),
             );
         }
-        if count == 0 {
-            rows.push(
-                div()
-                    .id("plugins-empty")
-                    .role(Role::Status)
-                    .aria_label("No plugins installed")
-                    .text_size(px(12.))
-                    .text_color(color(theme.role("fg-muted")))
-                    .child("No plugins installed.")
-                    .into_any_element(),
-            );
-        }
+        let mut plugin_rows: Vec<gpui::AnyElement> = Vec::new();
         for (index, entry) in inventory.plugins.iter().enumerate() {
-            rows.push(
+            plugin_rows.push(
                 plugin_row(index, count, entry, Some(index) == selected, focused, grants_error, theme, handle.clone())
                     .into_any_element(),
             );
         }
-        rows.push(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(open_plugins_button(theme))
-                .child(open_grants_button(theme))
-                .child(reload_all_button(theme))
-                .into_any_element(),
-        );
         let mut list = div()
             .id("settings-plugins")
             .debug_selector(|| "settings-plugins".to_owned())
             .role(Role::ListBox)
             .aria_label(format!("Plugins, {count} installed"))
             .track_focus(&focus)
-            .when(focused, |list| list.shadow(cursor_ring(theme)))
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .max_h(px(320.))
+            .overflow_y_scroll()
+            .track_scroll(&self.plugin_scroll)
+            .on_key_down(cx.listener(|this, event, _, cx| this.plugin_key(event, cx)));
+        if count == 0 {
+            list = list.child(
+                div()
+                    .id("plugins-empty")
+                    .role(Role::Status)
+                    .aria_label("No plugins installed")
+                    .text_size(px(12.))
+                    .text_color(color(theme.role("fg-muted")))
+                    .child("No plugins installed."),
+            );
+        } else {
+            list = list.children(plugin_rows);
+        }
+        let footer = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(open_plugins_button(theme))
+            .child(open_grants_button(theme))
+            .child(reload_all_button(theme));
+        if scroll_to_selected && let Some(index) = selected {
+            self.plugin_scroll.scroll_to_item(index);
+        }
+        div()
+            .id("settings-plugins-surface")
             .flex()
             .flex_col()
             .gap(px(6.))
             .p(px(8.))
             .rounded(px(7.))
             .bg(color(theme.role("surface")))
-            .on_key_down(cx.listener(|this, event, _, cx| this.plugin_key(event, cx)));
-        list = list.children(rows);
-        list.into_any_element()
+            .when(focused, |surface| surface.shadow(cursor_ring(theme)))
+            .children(headers)
+            .child(list)
+            .child(footer)
+            .into_any_element()
     }
 
     fn adjust_focused(&mut self, amount: f64, window: &mut Window, cx: &mut Context<Self>) {
@@ -2148,6 +2167,7 @@ fn plugin_row(
         .aria_position_in_set(index + 1)
         .aria_size_of_set(count)
         .when(selected && focused, |row| row.aria_active_descendant())
+        .flex_none()
         .flex()
         .items_center()
         .gap(px(10.))
@@ -3149,6 +3169,38 @@ permissions = { fs = "none" }
             Some(std::ffi::OsStr::new("a")),
             "removing the last row falls back to the previous row"
         );
+    }
+
+    #[gpui::test]
+    fn a_long_plugin_list_scrolls_the_selected_row_into_view(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+            for index in 0..20 {
+                write_named_plugin_bundle(
+                    &config,
+                    &format!("p{index:02}"),
+                    &format!("example.p{index:02}"),
+                    &format!("P{index:02}"),
+                );
+            }
+            cx.update(|cx| crate::plugins::start(cx, config));
+        });
+        wait_plugin_count(&mut vcx, 20);
+        focus_control(&view, &mut vcx, ControlId::Plugins);
+        draw(&mut vcx);
+        for _ in 0..19 {
+            vcx.simulate_keystrokes("down");
+            draw(&mut vcx);
+        }
+        // The scroll requested by the last Down is applied in the next prepaint.
+        draw(&mut vcx);
+
+        let list = vcx.debug_bounds("settings-plugins").expect("the list draws");
+        let selected = vcx.debug_bounds("plugin-action-19-0").expect("the selected row's Approve draws");
+        assert!(selected.top() >= list.top(), "selected row above the list: {selected:?} vs {list:?}");
+        assert!(selected.bottom() <= list.bottom(), "selected row below the list: {selected:?} vs {list:?}");
+        let offset = view.read_with(&vcx, |view, _| view.plugin_scroll.offset().y);
+        assert!(offset < px(0.), "the list scrolled to the selected row: {offset:?}");
     }
 
     #[gpui::test]
