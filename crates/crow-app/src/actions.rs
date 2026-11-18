@@ -5,6 +5,78 @@
 
 use gpui::{KeyBinding, NoAction, actions};
 
+/// One registered plugin command. The payload is the exact extension and
+/// generation the menu row was built for; a stale row is inert.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginCommand {
+    pub extension: crow_core::ExtensionId,
+    pub generation: u64,
+}
+
+impl gpui::Action for PluginCommand {
+    fn boxed_clone(&self) -> Box<dyn gpui::Action> {
+        Box::new(self.clone())
+    }
+
+    fn partial_eq(&self, action: &dyn gpui::Action) -> bool {
+        action.as_any().downcast_ref::<Self>().is_some_and(|other| other == self)
+    }
+
+    fn name(&self) -> &'static str {
+        "PluginCommand"
+    }
+
+    fn name_for_type() -> &'static str
+    where
+        Self: Sized,
+    {
+        "PluginCommand"
+    }
+
+    fn build(_: serde_json::Value) -> gpui::Result<Box<dyn gpui::Action>> {
+        Err(anyhow::anyhow!("plugin commands are not key-bindable"))
+    }
+
+    fn is_available(&self, window: &gpui::Window, cx: &gpui::App) -> bool {
+        crate::plugins::command_available(self, window, cx)
+    }
+}
+
+/// Internal result of a plugin command activation, dispatched to the window
+/// that captured it. The handler revalidates the capture.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginCommandResult {
+    pub window: gpui::WindowId,
+    pub extension: crow_core::ExtensionId,
+    pub effect: crate::plugins::PluginEffect,
+    pub capture: crate::plugins::CommandCapture,
+}
+
+impl gpui::Action for PluginCommandResult {
+    fn boxed_clone(&self) -> Box<dyn gpui::Action> {
+        Box::new(self.clone())
+    }
+
+    fn partial_eq(&self, action: &dyn gpui::Action) -> bool {
+        action.as_any().downcast_ref::<Self>().is_some_and(|other| other == self)
+    }
+
+    fn name(&self) -> &'static str {
+        "PluginCommandResult"
+    }
+
+    fn name_for_type() -> &'static str
+    where
+        Self: Sized,
+    {
+        "PluginCommandResult"
+    }
+
+    fn build(_: serde_json::Value) -> gpui::Result<Box<dyn gpui::Action>> {
+        Err(anyhow::anyhow!("plugin command results are internal"))
+    }
+}
+
 actions!(
     crow,
     [
@@ -51,6 +123,7 @@ actions!(
         MoveFavoriteDown,
         PreviousGroup,
         NextGroup,
+        CollapseSection,
         Eject,
         // View settings and themes
         WhyThisView,
@@ -192,6 +265,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("down", MoveDown, Some("Sidebar")),
         KeyBinding::new("enter", OpenSelection, Some("Sidebar")),
         KeyBinding::new("cmd-down", OpenSelection, Some("Sidebar")),
+        KeyBinding::new("left", CollapseSection, Some("Sidebar")),
         // Last, so the sidebar's "to list" hint shows → (the last binding wins).
         KeyBinding::new("right", OpenSelection, Some("Sidebar")),
         KeyBinding::new("cmd-up", OpenParent, Some("Crow")),

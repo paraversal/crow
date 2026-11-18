@@ -125,6 +125,19 @@ fn fixture(name: &str) -> TestRoot {
     root
 }
 
+fn copy_tree(source: &Path, target: &Path) {
+    std::fs::create_dir_all(target).expect("create copied tree");
+    for entry in std::fs::read_dir(source).expect("read copied tree") {
+        let entry = entry.expect("copied entry");
+        let to = target.join(entry.file_name());
+        if entry.file_type().expect("copied type").is_dir() {
+            copy_tree(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), to).expect("copy fixture file");
+        }
+    }
+}
+
 /// The deterministic search corpus (`crow_search::corpus`) at a fresh `/tmp`
 /// path. The guard restores the unreadable folder's mode before deleting, so a
 /// failure cannot leak it into the next run.
@@ -715,6 +728,52 @@ fn a_second_window_keeps_the_focus_invariant(cx: &mut TestAppContext) {
 /// key may have no focused element (the Settings window or a second browser
 /// window is key). The test fuzzer still requires focus.
 #[gpui::test]
+fn closing_one_window_releases_its_plugin_surfaces(cx: &mut TestAppContext) {
+    let root = fixture("window-teardown-surfaces");
+    let (first, mut cx) = open(cx, &root);
+    let first_surfaces = cx.update(|_, cx| {
+        let sidebar = first.read(cx).sidebar.clone();
+        let info = first.read(cx).info.clone();
+        let info_surface = info.read(cx).plugin_surface_for_test();
+        let sidebar_surface = crate::plugins::new_surface();
+        sidebar.update(cx, |sidebar, _| sidebar.add_surface_for_test("teardown", sidebar_surface));
+        let plugin_surfaces = &mut cx.global_mut::<crate::plugins::Plugins>().surfaces;
+        plugin_surfaces.track_surface_for_test(sidebar_surface);
+        plugin_surfaces.track_surface_for_test(info_surface);
+        (sidebar_surface, info_surface)
+    });
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let handles = cx.update(|_, cx| cx.windows());
+    let second = handles
+        .into_iter()
+        .filter_map(|handle| handle.downcast::<CrowWindow>())
+        .next_back()
+        .expect("the second window");
+    let (second_sidebar, second_info) = second
+        .update(&mut cx.cx, |view, _, _| (view.sidebar.clone(), view.info.clone()))
+        .expect("the second window view");
+    let info_surface = second_info.read_with(&cx, |info, _| info.plugin_surface_for_test());
+    let sidebar_surface = crate::plugins::new_surface();
+    second_sidebar.update(&mut cx, |sidebar, _| sidebar.add_surface_for_test("teardown", sidebar_surface));
+    cx.update(|_, cx| {
+        let plugin_surfaces = &mut cx.global_mut::<crate::plugins::Plugins>().surfaces;
+        plugin_surfaces.track_surface_for_test(sidebar_surface);
+        plugin_surfaces.track_surface_for_test(info_surface);
+    });
+    let second_surfaces = (sidebar_surface, info_surface);
+    second.update(&mut cx.cx, |_, window, _| window.remove_window()).expect("close the second window");
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        let surfaces = &cx.global::<crate::plugins::Plugins>().surfaces;
+        assert!(!surfaces.has_tracked_surface_for_test(second_surfaces.0));
+        assert!(!surfaces.has_tracked_surface_for_test(second_surfaces.1));
+        assert!(surfaces.has_tracked_surface_for_test(first_surfaces.0));
+        assert!(surfaces.has_tracked_surface_for_test(first_surfaces.1));
+    });
+}
+
+#[gpui::test]
 fn inactive_windows_may_have_no_focus(cx: &mut TestAppContext) {
     let root = fixture("fuzz-inactive-focus-blur");
     let (view, mut cx) = open(cx, &root);
@@ -883,6 +942,36 @@ fn sidebar_context_menu_acts_on_the_clicked_favorite(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn sidebar_menu_keeps_its_row_through_a_refresh(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-menu-stable");
+    std::fs::create_dir_all(root.join("gamma")).expect("gamma");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+    let at = cx.debug_bounds("sidebar-1").expect("beta row").center();
+    cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::default());
+    cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::default());
+    let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+    let (_, kind) = sidebar.read_with(&cx, |sidebar, _| sidebar.menu()).expect("the menu opened");
+
+    // A refresh inserts a row before the menu's row. The menu must still act
+    // on beta, not on whatever now sits at the old display index.
+    write_config(
+        &view,
+        &mut cx,
+        "sidebar.toml",
+        &favorites_toml(&[&root.join("gamma"), &root.join("alpha"), &root.join("beta")]),
+    );
+    settle(&view, &mut cx);
+    let ix = crate::context_menu::sidebar_slots(kind)
+        .iter()
+        .position(|slot| slot.is_some_and(|(id, _)| id == CommandId::Open))
+        .expect("Open in the menu");
+    sidebar.update_in(&mut cx, |sidebar, window, cx| sidebar.choose_menu_item(Some(ix), window, cx));
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("beta"), "the menu followed its original row");
+}
+
+#[gpui::test]
 fn sidebar_context_menu_adds_a_recent_folder(cx: &mut TestAppContext) {
     use crate::context_menu::SidebarMenuKind;
     let root = fixture("sidebar-menu-recent");
@@ -904,8 +993,11 @@ fn sidebar_context_menu_adds_a_recent_folder(cx: &mut TestAppContext) {
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let recent = recent.expect("beta is in Recent");
+    recent.expect("beta is in Recent");
     let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+    let recent = sidebar
+        .read_with(&cx, |sidebar, cx| sidebar.index_of_path(&root.join("beta"), cx))
+        .expect("beta is a selectable row");
     let at = cx.debug_bounds(Box::leak(format!("sidebar-{recent}").into_boxed_str())).expect("row").center();
     cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::default());
     assert_eq!(sidebar.read_with(&cx, |s, _| s.menu()), Some((recent, SidebarMenuKind::Recent)));
@@ -1304,7 +1396,7 @@ fn option_arrows_jump_between_sidebar_groups(cx: &mut TestAppContext) {
 
     cx.simulate_keystrokes("alt-down");
     settle(&view, &mut cx);
-    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 2, "Recent is a group too");
+    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 3, "Recent's first row is after its heading");
     assert_eq!(dir(&view, &cx), root);
 
     cx.simulate_keystrokes("alt-up");
@@ -1313,6 +1405,126 @@ fn option_arrows_jump_between_sidebar_groups(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("alt-up");
     settle(&view, &mut cx);
     assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 0);
+}
+
+#[gpui::test]
+fn plugin_sidebar_destination_identity_is_checked_before_navigation(cx: &mut TestAppContext) {
+    use crow_core::{
+        Descriptor, DescriptorSource, ExtensionId, ExtensionKind, LocalId, PluginId, SectionDestination, SectionRow,
+    };
+    let root = fixture("sidebar-plugin-identity");
+    let alpha = root.join("alpha");
+    if !alpha.exists() {
+        std::fs::create_dir(&alpha).expect("alpha");
+    }
+    let (view, mut cx) = open(cx, &root);
+    let id = ExtensionId::new(PluginId::parse("example.p1b-fixture").unwrap(), LocalId::parse("folders").unwrap());
+    let descriptor = Descriptor::new(
+        ExtensionKind::Sidebar,
+        id.clone(),
+        "Fixture folders".into(),
+        DescriptorSource::Function("folders".into()),
+    );
+    let mut snapshot = crate::plugins::PublishedSurfaces::default();
+    snapshot.extensions.insert(
+        id.clone(),
+        crate::plugins::PublishedExtension {
+            generation: 3,
+            package: "P1B Fixture".into(),
+            read_allowed: false,
+            descriptor,
+        },
+    );
+    cx.update(|_, cx| cx.global_mut::<crate::plugins::Plugins>().surfaces.publish_rows_for_test(snapshot));
+    view.update(&mut cx, |_, cx| cx.notify());
+    settle(&view, &mut cx);
+    let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+    let surface = sidebar
+        .read_with(&cx, |sidebar, _| sidebar.section_surface_for_test("example.p1b-fixture.folders"))
+        .expect("the sidebar section surface");
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(&alpha).expect("alpha metadata");
+        (meta.dev(), meta.ino())
+    };
+    let rows = vec![SectionRow {
+        id: "alpha".into(),
+        text: "Alpha".into(),
+        meta: None,
+        badge: None,
+        destination: SectionDestination::Folder { path: alpha.clone(), identity },
+    }];
+    cx.update(|_, cx| {
+        cx.global_mut::<crate::plugins::Plugins>().surfaces.set_sidebar_rows_for_test(
+            surface,
+            id.clone(),
+            rows.clone(),
+        );
+    });
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("tab");
+    let index = sidebar.read_with(&cx, |sidebar, cx| sidebar.index_of_path(&alpha, cx)).expect("alpha row");
+    sidebar.update(&mut cx, |sidebar, cx| sidebar.set_cursor_for_test(index, cx));
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), alpha, "a matching identity opens the folder");
+
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.to_path_buf(), cx));
+    settle(&view, &mut cx);
+    std::fs::remove_dir_all(&alpha).expect("remove alpha");
+    cx.update(|_, cx| {
+        cx.global_mut::<crate::plugins::Plugins>().surfaces.set_sidebar_rows_for_test(
+            surface,
+            id.clone(),
+            rows.clone(),
+        );
+    });
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("tab");
+    let index = sidebar.read_with(&cx, |sidebar, cx| sidebar.index_of_path(&alpha, cx)).expect("alpha row");
+    sidebar.update(&mut cx, |sidebar, cx| sidebar.set_cursor_for_test(index, cx));
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root, "a withdrawn destination does not navigate");
+
+    std::fs::create_dir(&alpha).expect("recreate alpha");
+    cx.update(|_, cx| {
+        cx.global_mut::<crate::plugins::Plugins>().surfaces.set_sidebar_rows_for_test(surface, id, rows);
+    });
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("tab");
+    let index = sidebar.read_with(&cx, |sidebar, cx| sidebar.index_of_path(&alpha, cx)).expect("alpha row");
+    sidebar.update(&mut cx, |sidebar, cx| sidebar.set_cursor_for_test(index, cx));
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root, "a same-path replacement does not navigate");
+}
+
+#[gpui::test]
+fn section_headers_collapse_and_expand_from_the_keyboard(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-section-keyboard");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]).replace("show = false", "show = true"));
+    cx.simulate_keystrokes("tab");
+    let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+    let recent =
+        sidebar.read_with(&cx, |sidebar, cx| sidebar.index_of_section_for_test("recent", cx)).expect("Recent heading");
+    sidebar.update(&mut cx, |sidebar, cx| sidebar.set_cursor_for_test(recent, cx));
+    let before = sidebar_looks(&view, &mut cx).len();
+    cx.simulate_keystrokes("left");
+    settle(&view, &mut cx);
+    let text = std::fs::read_to_string(config_dir(&cx).join("sidebar.toml")).expect("sidebar.toml");
+    assert!(text.contains("collapsed = true"), "← collapses the heading: {text}");
+    assert!(sidebar_looks(&view, &mut cx).len() < before, "the Recent rows are hidden");
+    assert!(
+        sidebar_looks(&view, &mut cx).iter().any(|look| look.spoken.contains("Recent section, collapsed")),
+        "VoiceOver hears the collapsed state"
+    );
+    cx.simulate_keystrokes("right");
+    settle(&view, &mut cx);
+    let text = std::fs::read_to_string(config_dir(&cx).join("sidebar.toml")).expect("sidebar.toml");
+    assert!(text.contains("collapsed = false"), "→ expands it: {text}");
+    assert_eq!(sidebar_looks(&view, &mut cx).len(), before);
 }
 
 #[gpui::test]
@@ -1327,12 +1539,16 @@ fn walking_recent_keeps_the_cursor_on_the_shown_folder(cx: &mut TestAppContext) 
     }
     assert_eq!(sidebar_paths(&cx), [root.join("beta"), root.join("alpha"), root.to_path_buf()]);
     cx.simulate_keystrokes("tab");
+    // Tab lands on the section heading; one step reaches the first Recent row.
+    cx.simulate_keystrokes("down");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("beta"));
     for (step, want) in [root.join("alpha"), root.to_path_buf()].into_iter().enumerate() {
         cx.simulate_keystrokes("down");
         settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), want);
         let looks = sidebar_looks(&view, &mut cx);
-        assert!(looks[step + 1].ring && looks[step + 1].current, "Recent kept its order under the cursor: {looks:?}");
+        assert!(looks[step + 2].ring && looks[step + 2].current, "Recent kept its order under the cursor: {looks:?}");
     }
     assert_eq!(
         sidebar_paths(&cx),
@@ -1445,6 +1661,34 @@ fn dragging_a_favorite_down_inserts_below_the_row(cx: &mut TestAppContext) {
     cx.simulate_mouse_up(top, gpui::MouseButton::Left, gpui::Modifiers::default());
     settle(&view, &mut cx);
     assert_eq!(sidebar_paths(&cx), [alpha, beta], "…and dropping there moves it back");
+}
+
+#[gpui::test]
+fn plugin_section_dirs_stay_frozen_through_a_sidebar_walk(cx: &mut TestAppContext) {
+    let root = fixture("plugin-walk-freeze");
+    std::fs::create_dir_all(root.join("alpha")).expect("alpha");
+    std::fs::create_dir_all(root.join("beta")).expect("beta");
+    let target = root.join("walk-target");
+    std::fs::create_dir_all(&target).expect("target");
+    let (view, mut cx) = open(cx, &root);
+    let pane = view.read_with(&cx, |window, _| window.pane().clone());
+    pane.update(&mut cx, |pane, cx| pane.navigate(root.to_path_buf(), cx));
+    cx.run_until_parked();
+    let (dir, _, dirs) = pane.read_with(&cx, |pane, cx| pane.sidebar_plugin_dirs(false, cx));
+    assert_eq!(dir, root);
+    assert!(dirs.iter().any(|dir| dir.name == "alpha"));
+    cx.simulate_keystrokes("tab");
+
+    pane.update(&mut cx, |pane, cx| pane.show_from_sidebar(target.clone(), cx));
+    cx.run_until_parked();
+    assert!(pane.read_with(&cx, |pane, _| pane.sidebar_walk()), "the walk started");
+    let (frozen, _, frozen_dirs) = pane.read_with(&cx, |pane, cx| pane.sidebar_plugin_dirs(true, cx));
+    assert_eq!(frozen, root, "the walk keeps the folder it started in");
+    assert!(frozen_dirs.iter().any(|dir| dir.name == "alpha"));
+
+    pane.update(&mut cx, |pane, _| pane.end_sidebar_walk());
+    let (current, _, _) = pane.read_with(&cx, |pane, cx| pane.sidebar_plugin_dirs(true, cx));
+    assert_eq!(current, target, "ending the walk follows the shown folder");
 }
 
 #[gpui::test]
@@ -1640,6 +1884,31 @@ fn view_per_folder_off_keeps_the_window_view(cx: &mut TestAppContext) {
     pane(&view, &cx).update(&mut cx, |p, cx| p.navigate(root.join("beta"), cx));
     settle(&view, &mut cx);
     assert_eq!(mode(&cx), ViewMode::Columns, "turned back on, folders decide again");
+}
+
+#[gpui::test]
+fn scope_hooks_follow_tab_and_search_transitions(cx: &mut TestAppContext) {
+    let root = fixture("scope-transitions");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-t");
+    settle(&view, &mut cx);
+    cx.update(|_, cx| cx.global_mut::<crate::plugins::Plugins>().surfaces.clear_hooks_for_test());
+    cx.simulate_keystrokes("ctrl-tab");
+    settle(&view, &mut cx);
+    assert!(
+        cx.read(|cx| cx.global::<crate::plugins::Plugins>().surfaces.queued_scope_hooks()) > 0,
+        "switching tabs announces the active folder even when both tabs show it"
+    );
+
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    cx.update(|_, cx| cx.global_mut::<crate::plugins::Plugins>().surfaces.clear_hooks_for_test());
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(
+        cx.read(|cx| cx.global::<crate::plugins::Plugins>().surfaces.queued_scope_hooks()) > 0,
+        "closing search announces the pane's folder again"
+    );
 }
 
 #[gpui::test]
@@ -2166,7 +2435,7 @@ fn sidebar_favorites_and_recent_use_the_board_icons(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("down cmd-down");
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("sidebar-folder-icon-0").is_some(), "the favorite's folder is a line icon");
-    assert!(cx.debug_bounds("sidebar-clock-icon-1").is_some(), "Recent's clock is a line icon");
+    assert!(cx.debug_bounds("sidebar-clock-icon-2").is_some(), "Recent's clock is a line icon");
 }
 
 #[gpui::test]
@@ -4205,6 +4474,180 @@ fn search_result_menu_lists_its_items_and_runs_them(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn search_result_menu_appends_an_opted_in_plugin_command(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    use crow_core::{CommandTarget, Descriptor, DescriptorSource, ExtensionId, ExtensionKind, LocalId, PluginId};
+    let root = fixture("search-plugin-menu");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search open");
+
+    let id = ExtensionId::new(PluginId::parse("example.test").unwrap(), LocalId::parse("copy-relative").unwrap());
+    let mut descriptor = Descriptor::new(
+        ExtensionKind::Command,
+        id.clone(),
+        "Copy Relative Path".into(),
+        DescriptorSource::Function("run".into()),
+    );
+    descriptor.applies_to = CommandTarget::Selection;
+    descriptor.context_menu = true;
+    let mut snapshot = crate::plugins::PublishedSurfaces::default();
+    snapshot.extensions.insert(
+        id,
+        crate::plugins::PublishedExtension {
+            generation: 7,
+            package: "P1B Fixture".into(),
+            read_allowed: false,
+            descriptor,
+        },
+    );
+    cx.update(|_, cx| {
+        cx.global_mut::<crate::plugins::Plugins>().surfaces.publish_rows_for_test(snapshot);
+    });
+
+    effect_calls(&mut cx);
+    let at = row_center(&mut cx, "search-row-0");
+    right_click(&mut cx, at);
+    cx.run_until_parked();
+    assert!(search.read_with(&cx, |s, _| s.menu()).is_some(), "the row menu opened");
+    let entries = effect_calls(&mut cx)
+        .into_iter()
+        .find_map(|call| match call {
+            Call::ContextMenu(entries) => Some(entries),
+            _ => None,
+        })
+        .expect("the menu was built");
+    let titles: Vec<&str> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            crow_macos::ContextMenuEntry::Item { title, .. } => Some(title.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(titles.last(), Some(&"Copy Relative Path"), "{titles:?}");
+}
+
+#[gpui::test]
+fn shipped_fixture_command_runs_through_the_real_service(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    use crow_core::PluginId;
+    let root = fixture("plugin-palette");
+    let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins/p1b-fixture");
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        let config = cx.global::<crate::ui::Ui>().config_dir.clone();
+        let plugin = config.join("plugins/p1b-fixture");
+        copy_tree(&fixture_dir, &plugin);
+        let package = crow_plugin::load_package(&plugin, &crow_plugin::Limits::default()).expect("fixture package");
+        crow_plugin::grants::approve(&config.join("plugins.toml"), &package.manifest.id, &package)
+            .expect("approve fixture");
+        crate::plugins::start(cx, config);
+    });
+    let id = PluginId::parse("example.p1b-fixture").expect("fixture id");
+    for _ in 0..400 {
+        cx.cx.update(crate::plugins::poll);
+        cx.run_until_parked();
+        let running = cx.read(|cx| {
+            cx.global::<crate::plugins::Plugins>()
+                .inventory
+                .plugins
+                .iter()
+                .any(|plugin| plugin.id.as_ref() == Some(&id) && plugin.state == crow_plugin::PluginState::Running)
+        });
+        if running {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        cx.read(|cx| cx
+            .global::<crate::plugins::Plugins>()
+            .inventory
+            .plugins
+            .iter()
+            .any(|plugin| { plugin.id.as_ref() == Some(&id) && plugin.state == crow_plugin::PluginState::Running })),
+        "the shipped fixture reaches Running"
+    );
+
+    let run = |cx: &mut VisualTestContext, saved_context: &crate::plugins::FileCommandContext| {
+        effect_calls(cx);
+        cx.simulate_keystrokes("cmd-k");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| view.palette.is_some()), "⌘K opens the palette");
+        cx.simulate_input(">copy relative");
+        cx.run_until_parked();
+        let (mode, text) = view.read_with(cx, |view, cx| {
+            let palette = view.palette.as_ref().expect("palette");
+            (palette.mode, palette.input.read(cx).text().to_owned())
+        });
+        assert_eq!(mode, crate::window::palette_view::PaletteMode::Commands, "typed > enters command mode: {text:?}");
+        assert_eq!(text, "copy relative");
+        let names = view.read_with(cx, |view, _| view.palette_row_names());
+        assert!(
+            names.iter().any(|name| name == "Copy Relative Path"),
+            "the fixture command is in the palette: {names:?}"
+        );
+        let item = view.read_with(cx, |view, _| {
+            view.palette.as_ref().and_then(|palette| palette.listing.items.get(palette.cursor)).cloned()
+        });
+        assert!(
+            matches!(item, Some(crate::palette::Item::PluginCommand { .. })),
+            "the command row is selected: item={item:?} rows={names:?}"
+        );
+        let focused =
+            view.read_with(cx, |view, cx| view.palette.as_ref().expect("palette").input.read(cx).focus_handle(cx));
+        assert!(cx.update(|window, _| focused.is_focused(window)), "the palette field owns the keys");
+        let Some(crate::palette::Item::PluginCommand { command, .. }) = item else { panic!("plugin row") };
+        let action = crate::actions::PluginCommand { extension: command.extension, generation: command.generation };
+        cx.update(|_, cx| crate::plugins::restore_command_context(saved_context.clone(), cx));
+        view.update_in(cx, |view, window, cx| view.run_plugin_command(&action, window, cx));
+        cx.run_until_parked();
+        assert!(cx.update(|window, _| window.is_window_active()), "the test window stays active");
+        for _ in 0..400 {
+            cx.cx.update(crate::plugins::poll);
+            cx.run_until_parked();
+            if cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text())).as_deref()
+                == Some("notes.txt")
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let calls = effect_calls(cx);
+        let status = cx.read(|cx| cx.global::<crate::operations::Operations>().message.clone());
+        assert_eq!(
+            calls.iter().filter(|call| matches!(call, Call::WriteText)).count(),
+            1,
+            "one command activation writes once: {calls:?}; status={status:?}"
+        );
+        assert_eq!(
+            cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text())).as_deref(),
+            Some("notes.txt")
+        );
+    };
+
+    let commands = cx.read(crate::plugins::command_items);
+    assert!(!commands.is_empty(), "the fixture publishes a command: {commands:?}");
+    cx.update(|window, _| window.activate_window());
+    click_selector(&mut cx, "row-notes.txt");
+    settle(&view, &mut cx);
+    let saved_context = cx.read(crate::plugins::current_command_context).expect("command context");
+    // Drain the fixture's startup hook/refresh before the command ticket exists.
+    for _ in 0..30 {
+        cx.cx.update(crate::plugins::poll);
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    run(&mut cx, &saved_context);
+
+    use_vim(&view, &mut cx);
+    click_selector(&mut cx, "row-notes.txt");
+    settle(&view, &mut cx);
+    run(&mut cx, &saved_context);
+}
+
+#[gpui::test]
 fn right_click_on_a_selected_search_result_makes_it_the_active_row(cx: &mut TestAppContext) {
     let root = fixture("search-menu-active");
     std::fs::write(root.join("a-notes.txt"), "alpha\n").expect("create fixture");
@@ -4949,7 +5392,7 @@ fn palette_cursor_skips_headers(cx: &mut TestAppContext) {
         let palette = w.palette.as_ref()?;
         match palette.listing.items.get(palette.cursor)? {
             Item::Folder { label, .. } => Some(label.clone()),
-            Item::Command { .. } => None,
+            Item::Command { .. } | Item::PluginCommand { .. } => None,
         }
     });
     assert!(cursor.as_deref().is_some_and(|label| label.ends_with("/beta")), "down crossed the header: {cursor:?}");
@@ -4978,7 +5421,7 @@ fn palette_gt_becomes_commands_token(cx: &mut TestAppContext) {
         let palette = w.palette.as_ref().expect("palette is open");
         let first = match &palette.listing.items[0] {
             Item::Command { command, .. } => command.label,
-            Item::Folder { .. } => "",
+            Item::Folder { .. } | Item::PluginCommand { .. } => "",
         };
         (first, palette.listing.count.to_string())
     });
@@ -5031,7 +5474,7 @@ fn palette_toggle_chip_shows_state(cx: &mut TestAppContext) {
             let palette = w.palette.as_ref()?;
             palette.listing.items.iter().find_map(|item| match item {
                 Item::Command { command, .. } => w.toggle_state(command.id, cx),
-                Item::Folder { .. } => None,
+                Item::Folder { .. } | Item::PluginCommand { .. } => None,
             })
         })
     };

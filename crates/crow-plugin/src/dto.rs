@@ -116,6 +116,12 @@ impl RequestTicket {
     pub fn cancel(&self) {
         self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+
+    /// Read-only cancellation state. The app uses it to reject a terminal reply
+    /// that raced a superseded binding.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -384,6 +390,8 @@ pub struct PluginEntry {
     pub detail: Option<String>,
     pub digest: Option<String>,
     pub requested_fs: FsAccess,
+    /// The approved grant currently allows host-read excerpts.
+    pub read_allowed: bool,
     pub descriptors: Vec<Descriptor>,
     /// Derived from the Running record; empty outside Running.
     pub icon_packs: Vec<RegisteredIconPack>,
@@ -445,6 +453,17 @@ pub struct Inventory {
     pub scan_error: Option<String>,
 }
 
+/// A host mutation the app can correlate with its own suppression. The result
+/// is the host's outcome, not the queued send result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostMutation {
+    Approve,
+    Disable,
+    Enable,
+    Reload,
+    Retry,
+}
+
 #[derive(Clone, Debug)]
 pub enum HostEvent {
     Inventory(Inventory),
@@ -460,6 +479,13 @@ pub enum HostEvent {
         extension: ExtensionId,
         stamp: RequestStamp,
         result: RequestResult,
+    },
+    /// The host finished one approved mutation. Disable suppression waits for
+    /// this rather than for an unrelated inventory event.
+    MutationFinished {
+        plugin: PluginId,
+        mutation: HostMutation,
+        result: Result<(), String>,
     },
 }
 

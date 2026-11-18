@@ -38,6 +38,15 @@ count = 6
 
 [locations]
 show = true
+
+# Optional section layout. `recent` and `locations` are built-ins; a plugin
+# section uses its exact package ID. Unlisted sections follow in the usual order.
+# [sections]
+# order = ["recent", "example.p1b-fixture.folders", "locations"]
+#
+# [section."example.p1b-fixture.folders"]
+# show = true
+# collapsed = false
 "##;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -83,12 +92,75 @@ impl Default for LocationsConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SectionConfig {
+    pub show: Option<bool>,
+    pub collapsed: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SectionsConfig {
+    /// Section IDs in display order. Built-ins are `recent` and `locations`;
+    /// plugin sections use their fully qualified ExtensionId.
+    pub order: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct SidebarConfig {
     pub group: Vec<Group>,
     pub recent: RecentConfig,
     pub locations: LocationsConfig,
+    pub sections: SectionsConfig,
+    pub section: std::collections::BTreeMap<String, SectionConfig>,
+}
+
+/// A sidebar section independent of the native favorites/Recent/Locations
+/// adapters. Plugin rows carry an optional real folder destination; display-only
+/// rows have none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Section {
+    pub id: String,
+    pub title: String,
+    pub collapsed: bool,
+    pub rows: Vec<SectionRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionRow {
+    pub id: String,
+    pub text: String,
+    pub meta: Option<String>,
+    pub badge: Option<String>,
+    pub destination: SectionDestination,
+}
+
+/// Where a section row goes. P1B has one typed navigable destination: a real
+/// folder admitted by the host, with the no-follow identity captured off-thread.
+/// P4 adds typed Saved Query and Tag destinations here rather than encoding
+/// virtual IDs as paths.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SectionDestination {
+    Folder { path: PathBuf, identity: (u64, u64) },
+    DisplayOnly,
+}
+
+impl SectionRow {
+    pub fn folder_path(&self) -> Option<&Path> {
+        match &self.destination {
+            SectionDestination::Folder { path, .. } => Some(path),
+            SectionDestination::DisplayOnly => None,
+        }
+    }
+
+    pub fn folder_identity(&self) -> Option<(u64, u64)> {
+        match &self.destination {
+            SectionDestination::Folder { identity, .. } => Some(*identity),
+            SectionDestination::DisplayOnly => None,
+        }
+    }
 }
 
 /// A favorite ready to show: its path resolved.
@@ -104,7 +176,25 @@ pub struct Favorite {
 
 impl SidebarConfig {
     pub fn parse(text: &str) -> Result<SidebarConfig, String> {
-        toml::from_str(text).map_err(|e| crate::config::parse_error(&e, text))
+        let config: SidebarConfig = toml::from_str(text).map_err(|e| crate::config::parse_error(&e, text))?;
+        for id in config.sections.order.iter().chain(config.section.keys()) {
+            if !valid_section_id(id) {
+                return Err(format!("sidebar.toml: \"{id}\" is not a section id"));
+            }
+        }
+        Ok(config)
+    }
+
+    pub fn section(&self, id: &str) -> SectionConfig {
+        self.section.get(id).cloned().unwrap_or_default()
+    }
+
+    pub fn section_shown(&self, id: &str) -> bool {
+        self.section(id).show.unwrap_or(true)
+    }
+
+    pub fn section_collapsed(&self, id: &str) -> bool {
+        self.section(id).collapsed.unwrap_or(false)
     }
 
     /// Each group's favorites with `~` expanded.
@@ -132,6 +222,18 @@ impl SidebarConfig {
     pub fn find_key(&self, key: char, home: &Path) -> Option<PathBuf> {
         self.group.iter().flat_map(|g| &g.items).find(|i| i.key == Some(key)).map(|i| expand_home(&i.path, home))
     }
+}
+
+fn valid_section_id(id: &str) -> bool {
+    if id == "recent" || id == "locations" {
+        return true;
+    }
+    let Some((plugin, local)) = id.rsplit_once('.') else { return false };
+    !plugin.is_empty()
+        && !local.is_empty()
+        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-' || byte == b'_')
+        && !id.starts_with('.')
+        && !id.ends_with('.')
 }
 
 /// Where a favorite is: group index, item index.
@@ -241,6 +343,11 @@ pub enum SidebarEdit {
         path: PathBuf,
         key: char,
     },
+    /// Write only one section's collapse flag, keeping every other line intact.
+    SetSectionCollapsed {
+        id: String,
+        collapsed: bool,
+    },
 }
 
 fn groups(doc: &mut DocumentMut) -> Result<&mut toml_edit::ArrayOfTables, String> {
@@ -283,6 +390,19 @@ fn item_path(v: &Value) -> Option<&str> {
 
 fn apply(doc: &mut DocumentMut, edit: &SidebarEdit, home: &Path) -> Result<(), String> {
     match edit {
+        SidebarEdit::SetSectionCollapsed { id, collapsed } => {
+            if id.is_empty() || id.contains('"') {
+                return Err("a section id must be nonempty".into());
+            }
+            let section = doc
+                .entry("section")
+                .or_insert_with(|| Item::Table(toml_edit::Table::new()))
+                .as_table_mut()
+                .ok_or_else(|| "`section` must be a table".to_owned())?;
+            let entry = section.entry(id).or_insert_with(|| Item::Table(toml_edit::Table::new()));
+            let table = entry.as_table_mut().ok_or_else(|| format!("section \"{id}\" must be a table"))?;
+            table["collapsed"] = toml_edit::value(*collapsed);
+        }
         SidebarEdit::Move { from, to } => {
             let value = {
                 let source = items(doc, from.0)?;
@@ -401,6 +521,49 @@ mod tests {
         assert_eq!(c.recent, RecentConfig::default());
         let favorites = c.favorites(Path::new(HOME));
         assert_eq!(favorites[0].1[1].path, PathBuf::from("/Users/me/Desktop"));
+    }
+
+    #[test]
+    fn section_layout_parses_and_a_collapse_edit_preserves_comments() {
+        let text = r#"
+# keep this comment
+[[group]]
+name = "Favorites"
+items = [{ path = "~" }]
+
+[sections]
+order = ["recent", "example.p1b-fixture.folders", "locations"]
+
+[section."example.p1b-fixture.folders"]
+show = true
+collapsed = false
+
+[recent]
+show = true
+
+[locations]
+show = true
+"#;
+        let config = SidebarConfig::parse(text).unwrap();
+        assert_eq!(config.sections.order[1], "example.p1b-fixture.folders");
+        assert!(config.section_shown("example.p1b-fixture.folders"));
+        assert!(!config.section_collapsed("example.p1b-fixture.folders"));
+        assert!(SidebarConfig::parse("[sections]\norder = [\"not a section\"]").is_err());
+
+        let mut doc = text.parse::<DocumentMut>().unwrap();
+        apply(
+            &mut doc,
+            &SidebarEdit::SetSectionCollapsed { id: "example.p1b-fixture.folders".into(), collapsed: true },
+            Path::new(HOME),
+        )
+        .unwrap();
+        let out = doc.to_string();
+        assert!(out.contains("# keep this comment"));
+        assert!(out.contains("collapsed = true"));
+        assert!(out.contains("[[group]]"));
+        assert!(out.contains("order = [\"recent\", \"example.p1b-fixture.folders\", \"locations\"]"));
+        let reparsed = SidebarConfig::parse(&out).unwrap();
+        assert!(reparsed.section_collapsed("example.p1b-fixture.folders"));
     }
 
     #[test]

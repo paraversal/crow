@@ -9,10 +9,12 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{Effective, Fx, Look};
@@ -320,6 +322,11 @@ pub struct Pane {
     resize: Option<ResizeDrag>,
     preview: Option<Preview>,
     preview_generation: u64,
+    /// Plugin/views generations at the last preview load, so registration and
+    /// `preview_providers` edits refresh an already visible preview.
+    preview_plugin_generation: u64,
+    preview_views_generation: u64,
+    preview_cancel: Arc<AtomicBool>,
     /// The window's right column: tab choice and the Info tab's target.
     info: Entity<InfoPane>,
     /// This pane's id in the folder-size service's visible-row sources.
@@ -337,7 +344,7 @@ pub struct Pane {
     rename_when_present: Option<PathBuf>,
     bench: Option<Bench>,
     /// The `views.toml` reload and folder whose view was applied last.
-    applied_view: Option<(u64, PathBuf)>,
+    applied_view: Option<(u64, u64, PathBuf)>,
     /// List view: the uniform list's viewport, captured at prepaint.
     list_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The list row under a drag, drawn from state rather than drag-over styles.
@@ -361,6 +368,9 @@ pub struct Pane {
     focus_list_after_filter: bool,
     /// The sidebar cursor is walking this pane: later moves replace the history step.
     sidebar_walk: bool,
+    /// The folder and directory slice a plugin sidebar section keeps while the
+    /// sidebar cursor walks the pane, so contributed rows do not move under it.
+    plugin_walk_dirs: Option<(PathBuf, u64, Vec<crate::plugins::SidebarDir>)>,
     /// A row took the current mouse-down; the list behind it must not treat it as a
     /// click on empty space. Rows handle the event before the list (deeper hitbox).
     row_pressed: bool,
@@ -368,6 +378,12 @@ pub struct Pane {
     rename_pressed: bool,
     /// The context menu on screen and what it was opened for, until it closes.
     context_menu: Option<MenuKind>,
+    /// Plugin rows appended after the built-in context-menu slots.
+    context_menu_plugins: Vec<crate::actions::PluginCommand>,
+    /// The last selection signature announced to plugin hooks, per column.
+    plugin_selection: HashMap<usize, u64>,
+    /// The focused surface whose plugin scope was last announced.
+    plugin_scope: Option<(crate::plugins::SurfaceId, crate::plugins::ScopeKey)>,
 }
 
 struct Bench {
@@ -421,6 +437,9 @@ impl Pane {
             resize: None,
             preview: None,
             preview_generation: 0,
+            preview_plugin_generation: 0,
+            preview_views_generation: 0,
+            preview_cancel: Arc::new(AtomicBool::new(false)),
             info,
             size_source,
             cloud_source,
@@ -452,7 +471,11 @@ impl Pane {
             row_pressed: false,
             rename_pressed: false,
             context_menu: None,
+            context_menu_plugins: Vec::new(),
+            plugin_selection: HashMap::new(),
+            plugin_scope: None,
             sidebar_walk: false,
+            plugin_walk_dirs: None,
         };
         pane.enter(dir, cx);
         if let Some(mode) = start_mode.filter(|_| !cx.global::<Ui>().settings.view_per_folder) {
@@ -487,6 +510,57 @@ impl Pane {
     /// The folder the user is in: the focused column in column view.
     pub fn current_dir(&self, cx: &gpui::App) -> PathBuf {
         self.focused_folder().read(cx).dir().to_path_buf()
+    }
+
+    pub fn current_plugin_surface(&self, cx: &gpui::App) -> crate::plugins::SurfaceId {
+        self.focused_folder().read(cx).plugin_surface()
+    }
+
+    pub fn sidebar_walk(&self) -> bool {
+        self.sidebar_walk
+    }
+
+    /// The sidebar lost focus: the preview walk is over and its frozen section
+    /// slice must start following the shown folder again.
+    pub fn end_sidebar_walk(&mut self) {
+        self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
+    }
+
+    /// The first 128 ordinary immediate folders for a sidebar section, with a
+    /// revision that changes on relist or watcher apply. While the sidebar
+    /// cursor is walking the pane, the slice captured at the walk's start stays
+    /// fixed so moving onto one contributed row does not remove the next one.
+    pub fn sidebar_plugin_dirs(
+        &self,
+        walking: bool,
+        cx: &gpui::App,
+    ) -> (PathBuf, u64, Vec<crate::plugins::SidebarDir>) {
+        if walking && let Some(frozen) = &self.plugin_walk_dirs {
+            return frozen.clone();
+        }
+        let folder = self.focused_folder().read(cx);
+        let dir = folder.dir().to_path_buf();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        folder.plugin_scope_version().hash(&mut hasher);
+        dir.hash(&mut hasher);
+        let dirs = folder
+            .entries()
+            .iter()
+            .filter(|entry| entry.is_dir && !entry.is_symlink && !entry.is_package())
+            .take(128)
+            .map(|entry| {
+                let version = folder.plugin_entry_version(entry);
+                version.hash(&mut hasher);
+                crate::plugins::SidebarDir {
+                    path: entry.path.clone(),
+                    name: crate::style::display_text(&entry.name).into_owned(),
+                    version,
+                    identity: None,
+                }
+            })
+            .collect();
+        (dir, hasher.finish(), dirs)
     }
 
     pub fn item_count(&self, cx: &gpui::App) -> usize {
@@ -846,6 +920,7 @@ impl Pane {
     /// Go to `dir` as a new history step.
     pub fn navigate(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
         self.history.visit(dir.clone());
         self.enter(dir, cx);
     }
@@ -860,6 +935,9 @@ impl Pane {
         if self.sidebar_walk {
             self.history.replace_current(dir.clone());
         } else {
+            // Freeze the section's contributing folder before the first preview
+            // changes the focused listing.
+            self.plugin_walk_dirs = Some(self.sidebar_plugin_dirs(false, cx));
             self.history.visit(dir.clone());
             self.sidebar_walk = true;
         }
@@ -870,6 +948,7 @@ impl Pane {
     /// the pane isn't showing it already.
     pub fn open_from_sidebar(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
         if dir != self.history.current() {
             self.navigate(dir, cx);
         }
@@ -885,6 +964,7 @@ impl Pane {
 
     pub fn go_back(&mut self, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
         let from = self.dir().to_path_buf();
         if let Some(dir) = self.history.back().map(Path::to_path_buf) {
             self.enter(dir, cx);
@@ -894,6 +974,7 @@ impl Pane {
 
     pub fn go_forward(&mut self, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
         if let Some(dir) = self.history.forward().map(Path::to_path_buf) {
             self.enter(dir, cx);
         }
@@ -937,6 +1018,16 @@ impl Pane {
     /// Free the open folders' listings off the main thread before this pane is
     /// dropped (closing a tab or a window).
     pub fn release_listings(&mut self, cx: &mut Context<Self>) {
+        if cx.try_global::<crate::plugins::Plugins>().is_some() {
+            let ids: Vec<_> = self.folders.iter().map(|folder| folder.read(cx).plugin_surface()).collect();
+            let surfaces = &mut cx.global_mut::<crate::plugins::Plugins>().surfaces;
+            for id in ids {
+                surfaces.drop_surface(id);
+            }
+        }
+        self.plugin_selection.clear();
+        self.plugin_scope = None;
+        self.preview_cancel.store(true, Ordering::Relaxed);
         for folder in &self.folders {
             folder.update(cx, |folder, cx| folder.release_listing(cx));
         }
@@ -1136,16 +1227,26 @@ impl Pane {
     /// this folder and this version of the file.
     pub fn apply_view(&mut self, cx: &mut Context<Self>) {
         let ui = cx.global::<Ui>();
-        let key = (ui.views_generation, self.dir().to_path_buf());
+        let plugin_generation =
+            cx.try_global::<crate::plugins::Plugins>().map_or(0, |plugins| plugins.surfaces.generation());
+        let key = (ui.views_generation, plugin_generation, self.dir().to_path_buf());
         if self.applied_view.as_ref() == Some(&key) {
             return;
         }
-        let resolved = ui.views.resolve(&key.1);
+        let resolved = ui.views.resolve(&key.2);
         self.applied_view = Some(key);
         self.apply_sort(resolved.sort(), cx);
         let ids: Vec<&str> = self.columns.iter().map(|c| c.id()).collect();
         if ids != resolved.columns.0 {
-            let available = cx.global::<Ext>().0.columns().to_vec();
+            let mut available = cx.global::<Ext>().0.columns().to_vec();
+            if let Some(plugins) = cx.try_global::<crate::plugins::Plugins>() {
+                let snapshot = plugins.surfaces.snapshot();
+                for (_, published) in snapshot.of_kind(crow_core::ExtensionKind::Column) {
+                    if !plugins.surfaces.is_suppressed(&published.descriptor.id.plugin) {
+                        available.push(Arc::new(crate::plugins::PluginColumn::new(&published.descriptor)));
+                    }
+                }
+            }
             self.columns =
                 resolved.columns.0.iter().filter_map(|id| available.iter().find(|c| c.id() == id).cloned()).collect();
             self.table = default_table(&self.columns);
@@ -1186,6 +1287,7 @@ impl Pane {
             }
             ViewMode::Columns => self.update_chain(0, cx),
         }
+        self.plugin_scope_changed(cx);
         cx.notify();
         true
     }
@@ -1211,6 +1313,7 @@ impl Pane {
         let resolved = ui.views.resolve(&dir);
         self.sort = resolved.sort();
         self.push_folder(dir.clone(), true, cx);
+        self.plugin_scope_changed(cx);
         self.apply_view(cx);
         cx.emit(PaneEvent::Entered(dir));
         cx.notify();
@@ -1242,6 +1345,35 @@ impl Pane {
         self.folders.iter().position(|f| f.entity_id() == id)
     }
 
+    /// Announce the focused folder again even when it did not change in this
+    /// pane. A tab activation or the end of a search is a scope transition for
+    /// consumers even if the same pane already announced that folder.
+    pub fn announce_plugin_scope(&mut self, cx: &mut Context<Self>) {
+        self.plugin_scope = None;
+        self.plugin_scope_changed(cx);
+    }
+
+    /// Announce a committed change of the focused column's real folder.
+    fn plugin_scope_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(folder) = self.folders.get(self.focused).cloned() else { return };
+        let (surface, dir) = {
+            let folder = folder.read(cx);
+            (folder.plugin_surface(), folder.dir().to_path_buf())
+        };
+        let scope = crate::plugins::ScopeKey::Folder(dir.clone());
+        if self.plugin_scope.as_ref().is_some_and(|(s, q)| *s == surface && q == &scope) {
+            return;
+        }
+        self.plugin_scope = Some((surface, scope));
+        if cx.try_global::<crate::plugins::Plugins>().is_some() {
+            cx.global_mut::<crate::plugins::Plugins>().surfaces.notify_scope_changed(
+                surface,
+                dir.display().to_string(),
+                Instant::now(),
+            );
+        }
+    }
+
     fn on_folder_event(&mut self, folder: Entity<Folder>, event: &FolderEvent, cx: &mut Context<Self>) {
         let Some(k) = self.index_of(folder.entity_id()) else { return };
         if matches!(event, FolderEvent::Loaded | FolderEvent::Changed)
@@ -1250,6 +1382,46 @@ impl Pane {
             let dir = folder.read(cx).dir().to_path_buf();
             let service = service.0.clone();
             service.update(cx, |service, cx| service.invalidate_under(&dir, cx));
+        }
+        match event {
+            FolderEvent::SelectionChanged => {
+                let (surface, dir, paths) = {
+                    let folder = folder.read(cx);
+                    (folder.plugin_surface(), folder.dir().to_path_buf(), folder.selected_paths())
+                };
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                paths.hash(&mut hasher);
+                let signature = hasher.finish();
+                let previous = self.plugin_selection.insert(k, signature);
+                if previous != Some(signature)
+                    && k == self.focused
+                    && cx.try_global::<crate::plugins::Plugins>().is_some()
+                {
+                    cx.global_mut::<crate::plugins::Plugins>().surfaces.notify_selection_changed(
+                        surface,
+                        dir.display().to_string(),
+                        Instant::now(),
+                    );
+                }
+            }
+            FolderEvent::WatcherApplied { paths } => {
+                let (surface, dir) = {
+                    let folder = folder.read(cx);
+                    (folder.plugin_surface(), folder.dir().to_path_buf())
+                };
+                let scope = crate::plugins::ScopeKey::Folder(dir.clone());
+                if cx.try_global::<crate::plugins::Plugins>().is_some() {
+                    let surfaces = &mut cx.global_mut::<crate::plugins::Plugins>().surfaces;
+                    if paths.is_empty() {
+                        surfaces.bump_scope(surface, scope.clone(), 0, Instant::now());
+                    }
+                    for path in paths {
+                        surfaces.invalidate_path(&scope, path);
+                    }
+                    surfaces.notify_files_changed(scope, dir.display().to_string(), Instant::now());
+                }
+            }
+            _ => {}
         }
         if let FolderEvent::CursorMoved = event {
             if self.mode == ViewMode::Columns {
@@ -1283,9 +1455,12 @@ impl Pane {
     }
 
     fn load_preview(&mut self, cx: &mut Context<Self>) {
+        let surface = self.current_plugin_surface(cx);
         let Some(entry) = self.cursor_entry(cx) else {
             self.preview = None;
             self.preview_generation += 1;
+            self.preview_cancel.store(true, Ordering::Relaxed);
+            crate::plugins::cancel_previews(surface, cx);
             return;
         };
         if self.preview.as_ref().is_some_and(|p| p.path == entry.path) {
@@ -1293,7 +1468,14 @@ impl Pane {
         }
         self.preview_generation += 1;
         let generation = self.preview_generation;
+        self.preview_cancel.store(true, Ordering::Relaxed);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.preview_cancel = cancel.clone();
+        crate::plugins::cancel_previews(surface, cx);
         let extensions = cx.global::<Ext>().0.clone();
+        let configured = cx.global::<Ui>().views.resolve(self.dir()).preview_providers.0.clone();
+        let candidates =
+            crate::plugins::preview_candidates(cx, &configured, &entry.path, entry.is_dir, entry.is_symlink);
         let (gate, cloud) = match cx.try_global::<CloudStatusService>() {
             Some(service) => {
                 let service = service.0.read(cx);
@@ -1301,12 +1483,42 @@ impl Pane {
             }
             None => (Arc::new(AllowAll) as Arc<dyn ReadGate>, None),
         };
+        let revision = generation;
         cx.spawn(async move |this, cx| {
             let path = entry.path.clone();
-            let fetched = cx
-                .background_spawn(async move { preview::fetch_at(&entry, &extensions, None, gate.as_ref(), cloud) })
-                .await;
+            let readable =
+                gate.check(&entry.path, crow_fs::ReadHint::for_path(&entry.path)) == crow_fs::ReadDecision::Readable;
+            let plugin = if candidates.is_empty() || !readable || cancel.load(Ordering::Relaxed) {
+                None
+            } else {
+                preview::plugin_preview(
+                    cx,
+                    surface,
+                    candidates,
+                    entry.clone(),
+                    gate.clone(),
+                    cloud,
+                    revision,
+                    cancel.clone(),
+                )
+                .await
+            };
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let fetched = match plugin {
+                Some(preview) => preview,
+                None => {
+                    cx.background_spawn(
+                        async move { preview::fetch_at(&entry, &extensions, None, gate.as_ref(), cloud) },
+                    )
+                    .await
+                }
+            };
             this.update(cx, |this, cx| {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 if this.preview_generation == generation && this.cursor_entry(cx).is_some_and(|e| e.path == path) {
                     let mut fetched = fetched;
                     if this.cloud_status(&path, cx).is_some_and(|status| fetched.update_cloud(status)) {
@@ -1600,6 +1812,7 @@ impl Pane {
             self.subscriptions.insert(0, subscription);
             folder.update(cx, |f, _| f.select_after_load(child));
             self.focused = 0;
+            self.plugin_scope_changed(cx);
             cx.emit(PaneEvent::Entered(parent));
         }
         self.strip_scroll.scroll_to_item(self.focused);
@@ -1857,6 +2070,7 @@ impl Pane {
             self.drop_filter(cx);
             self.cancel_type_select(cx);
             self.focused = k;
+            self.plugin_scope_changed(cx);
             self.strip_scroll.scroll_to_item(k);
         }
         let (cmd, shift) = (event.modifiers.platform, event.modifiers.shift);
@@ -1896,6 +2110,7 @@ impl Pane {
             self.drop_filter(cx);
             self.cancel_type_select(cx);
             self.focused = k;
+            self.plugin_scope_changed(cx);
         }
         // Clearing emits CursorMoved, which closes the columns right of `k`.
         self.with_focused(cx, |f, cx| f.clear_selection(cx));
@@ -1936,6 +2151,7 @@ impl Pane {
             self.drop_filter(cx);
             self.cancel_type_select(cx);
             self.focused = k;
+            self.plugin_scope_changed(cx);
         }
         let kind = match row {
             Some(ix) => {
@@ -1973,7 +2189,18 @@ impl Pane {
             (ViewMode::Columns, false) => KeyScope::Columns,
             (ViewMode::Columns, true) => KeyScope::ColumnsFiltered,
         };
-        let entries = crate::context_menu::entries(kind, state, scope, cx);
+        let mut entries = crate::context_menu::entries(kind, state, scope, cx);
+        let selected = self.focused_folder().read(cx).selected_entries();
+        let plugins = crate::plugins::context_menu_commands(cx, selected.as_slice());
+        self.context_menu_plugins = plugins.iter().map(|(_, action)| action.clone()).collect();
+        if !plugins.is_empty() {
+            entries.push(crow_macos::ContextMenuEntry::Separator);
+            entries.extend(plugins.into_iter().map(|(title, _)| crow_macos::ContextMenuEntry::Item {
+                title,
+                shortcut: None,
+                enabled: true,
+            }));
+        }
         self.context_menu = Some(kind);
         let (sender, receiver) = futures::channel::oneshot::channel();
         // Off the main thread (tests) the recorder answers at once; in the app the
@@ -1997,11 +2224,20 @@ impl Pane {
     /// The menu closed, with the item at `chosen` picked (an index into its slots), or none.
     fn context_menu_closed(&mut self, chosen: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(kind) = self.context_menu.take() else { return };
+        let builtins = crate::context_menu::slots(kind).len();
+        let plugin = chosen
+            .and_then(|ix| ix.checked_sub(builtins + 1))
+            .and_then(|ix| self.context_menu_plugins.get(ix))
+            .cloned();
+        self.context_menu_plugins.clear();
+        window.focus(&self.focus, cx);
+        if let Some(action) = plugin {
+            window.dispatch_action(Box::new(action), cx);
+            return;
+        }
         let Some(id) = chosen.and_then(|ix| crate::context_menu::slots(kind).get(ix).copied().flatten()) else {
             return;
         };
-        // The list has focus, so the action runs exactly as its key would.
-        window.focus(&self.focus, cx);
         window.dispatch_action(crate::context_menu::command(id).action.boxed_clone(), cx);
     }
 
@@ -2242,8 +2478,18 @@ impl Pane {
                 folder.update(cx, |folder, cx| folder.set_filter(Some(filter), cx));
             }
         } else if bench.frame > 600 {
+            let plugin = cx.try_global::<crate::plugins::Plugins>().map_or_else(String::new, |plugins| {
+                let counters = plugins.surfaces.counters();
+                format!(
+                    " plugin_rows={} plugin_hooks={} plugin_cache={} plugin_cache_bytes={}",
+                    counters.submitted_rows,
+                    counters.submitted_hooks,
+                    plugins.surfaces.row_count(),
+                    plugins.surfaces.row_bytes()
+                )
+            });
             let line = format!(
-                "BENCH {} warm_first_paint={:.0}ms warm_load={:.0}ms",
+                "BENCH {} warm_first_paint={:.0}ms warm_load={:.0}ms{plugin}",
                 bench.scrolled.as_deref().unwrap_or_default(),
                 folder.first_paint_ms().unwrap_or_default(),
                 folder.load_ms()
@@ -2256,6 +2502,55 @@ impl Pane {
     }
 
     // ----- list view -----
+
+    fn plugin_row_decoration(&self, k: usize, cx: &App) -> Option<crate::plugins::PluginRows> {
+        let descriptors = crate::plugins::row_descriptors(cx);
+        if descriptors.is_empty() {
+            return None;
+        }
+        let folder = self.folders.get(k)?.clone();
+        let (surface, dir) = {
+            let folder = folder.read(cx);
+            (folder.plugin_surface(), folder.dir().to_path_buf())
+        };
+        Some(crate::plugins::PluginRows::new(folder, surface, crate::plugins::ScopeKey::Folder(dir), descriptors))
+    }
+
+    fn request_plugin_status(&self, cx: &mut Context<Self>) {
+        if cx.try_global::<crate::plugins::Plugins>().is_none() {
+            return;
+        }
+        let (surface, scope, revision, display) = {
+            let folder = self.focused_folder().read(cx);
+            let dir = folder.dir().to_path_buf();
+            (
+                folder.plugin_surface(),
+                crate::plugins::ScopeKey::Folder(dir.clone()),
+                folder.plugin_scope_version(),
+                dir.display().to_string(),
+            )
+        };
+        crate::plugins::request_status(cx, surface, scope, revision, display);
+    }
+
+    fn update_plugin_command_context(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if cx.try_global::<crate::plugins::Plugins>().is_none() {
+            return;
+        }
+        if window.is_window_active() && self.focus.is_focused(window) {
+            let folder = self.focused_folder().read(cx);
+            let selection = folder.selected_entries().iter().map(|(path, is_dir)| (path.clone(), *is_dir)).collect();
+            let context = crate::plugins::FileCommandContext {
+                window: window.window_handle().window_id(),
+                surface: folder.plugin_surface(),
+                scope: crate::plugins::ScopeKey::Folder(folder.dir().to_path_buf()),
+                selection,
+            };
+            crate::plugins::set_command_context(window, Some(context), cx);
+        } else {
+            crate::plugins::set_command_context(window, None, cx);
+        }
+    }
 
     fn render_table_rows(
         &mut self,
@@ -2290,6 +2585,29 @@ impl Pane {
             None => HashMap::new(),
         };
         self.observe_sizes((self.size_source, 0), &visible, cx);
+        let (scope, versions) = {
+            let folder = self.folders[0].read(cx);
+            let versions = range
+                .clone()
+                .filter_map(|ix| folder.row(ix))
+                .map(|(entry, _)| (entry.path.clone(), folder.plugin_entry_version(entry)))
+                .collect::<HashMap<_, _>>();
+            (crate::plugins::ScopeKey::Folder(folder.dir().to_path_buf()), versions)
+        };
+        let decoration_ids = crate::plugins::decoration_ids(cx);
+        let presentations: HashMap<PathBuf, crate::plugins::RowPresentation> = versions
+            .iter()
+            .map(|(path, version)| {
+                (path.clone(), crate::plugins::row_presentation(cx, &scope, path, *version, &decoration_ids))
+            })
+            .collect();
+        let has_decorations = !decoration_ids.is_empty();
+        let plugin_value = |extension: &crow_core::ExtensionId, path: &Path, version: u64| {
+            let plugins = cx.try_global::<crate::plugins::Plugins>()?;
+            let value = plugins.surfaces.row_value_peek(extension, &scope, path, version)?;
+            Some(crow_core::ColumnCell { text: value.text, spoken: value.spoken, opacity: 1.0, fade: None })
+        };
+        let plugin_version = |entry: &Entry| versions.get(&entry.path).copied().unwrap_or(0);
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
         let font_size = px(ui.settings.font_size);
@@ -2302,7 +2620,13 @@ impl Pane {
         let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let size = |entry: &Entry| size_snapshot.get(&entry.path).copied();
-        let column_cx = ColumnContext { kind: &kind, time: &format_time, size: &size };
+        let column_cx = ColumnContext {
+            kind: &kind,
+            time: &format_time,
+            size: &size,
+            plugin_value: Some(&plugin_value),
+            plugin_version: Some(&plugin_version),
+        };
         let widths = self.table_widths();
         // Columns hidden for a narrow pane have width 0; the last shown one stretches.
         let last = widths.iter().rposition(|w| *w > 0.0).unwrap_or(0);
@@ -2353,7 +2677,14 @@ impl Pane {
                     .collect::<Vec<_>>()
                     .join(", ");
                 let indent = NAME_INSET + depth as f32 * INDENT;
-                let name_room = px(widths[0] - indent - TRIANGLE_WIDTH - 8.0 - 16.0 - 8.0 - CELL_PADDING);
+                let name_room = px(widths[0]
+                    - indent
+                    - TRIANGLE_WIDTH
+                    - 8.0
+                    - 16.0
+                    - 8.0
+                    - CELL_PADDING
+                    - if has_decorations { 32.0 } else { 0.0 });
                 let cloud = self.cloud_status(&entry.path, cx).or(entry.dataless.then_some(CloudStatus::NotDownloaded));
                 let name_room = cloud_status::name_room(cloud, name_room);
                 let name = truncate_middle_parts(&entry.name, name_room, font_size, window);
@@ -2379,10 +2710,20 @@ impl Pane {
                 let tint = effect_tint(look, theme);
                 let is_flash = flash_flags[ix - range_start];
                 let cut_edge = cut_edges.get(ix - flags_first).copied().flatten();
-                let dim = content_opacity(
-                    entry.hidden,
-                    self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
-                );
+                let presentation = presentations.get(&entry.path).cloned().unwrap_or_default();
+                let dim = if presentation.dim {
+                    content_opacity(true, false)
+                } else {
+                    content_opacity(
+                        entry.hidden,
+                        self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
+                    )
+                };
+                let plugin_spoken = if presentation.spoken.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", presentation.spoken.join(", "))
+                };
                 let cloud_spoken =
                     cloud.and_then(CloudStatus::spoken_suffix).map(|suffix| format!(", {suffix}")).unwrap_or_default();
                 let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
@@ -2393,7 +2734,7 @@ impl Pane {
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
                     .role(Role::ListBoxOption)
-                    .aria_label(format!("{}, {spoken}{cloud_spoken}", display_text(&entry.name)))
+                    .aria_label(format!("{}, {spoken}{plugin_spoken}{cloud_spoken}", display_text(&entry.name)))
                     .aria_position_in_set(ix + 1)
                     .aria_size_of_set(total)
                     .aria_selected(selected)
@@ -2544,6 +2885,9 @@ impl Pane {
                                     .relative()
                                     .left(px(look.dx))
                                     .opacity(dim)
+                                    .when_some(presentation.tint.filter(|_| !selected), |cell, tint| {
+                                        cell.text_color(color(theme.role(tint.key())))
+                                    })
                                     // The rename field fills the name column; without this it
                                     // has no intrinsic width and collapses to zero.
                                     .flex_1()
@@ -2580,7 +2924,20 @@ impl Pane {
                                                 .into_any_element(),
                                         },
                                     })
-                                    .children(crate::cloud_status::badge(cloud, theme)),
+                                    .children(crate::cloud_status::badge(cloud, theme))
+                                    .when(has_decorations, |cell| {
+                                        cell.child(
+                                            div()
+                                                .w(px(32.))
+                                                .flex_none()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .text_size(px(11.))
+                                                .text_color(muted)
+                                                .child(presentation.badge.clone().unwrap_or_default()),
+                                        )
+                                    }),
                             ),
                     );
                 row.children(cells.into_iter().enumerate().filter(|(i, _)| widths[i + 1] > 0.0).map(
@@ -2743,11 +3100,27 @@ impl Pane {
         let glide = mode == Effective::Full && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let subtle = color(theme.role("fg-subtle"));
+        let muted = color(theme.role("fg-muted"));
         let rule = color_alpha(theme.role("fg"), 0x30);
         let Some(folder) = self.folders.get(k).map(|f| f.read(cx)) else { return Vec::new() };
         let width = COLUMN_WIDTH;
-        let name_room = px(width - 16.0 - 8.0 - 16.0 - 2.0 * CELL_PADDING - 8.0);
         let total = folder.row_count();
+        let scope = crate::plugins::ScopeKey::Folder(folder.dir().to_path_buf());
+        let versions: HashMap<PathBuf, u64> = range
+            .clone()
+            .filter_map(|ix| folder.row(ix))
+            .map(|(entry, _)| (entry.path.clone(), folder.plugin_entry_version(entry)))
+            .collect();
+        let decoration_ids = crate::plugins::decoration_ids(cx);
+        let presentations: HashMap<PathBuf, crate::plugins::RowPresentation> = versions
+            .iter()
+            .map(|(path, version)| {
+                (path.clone(), crate::plugins::row_presentation(cx, &scope, path, *version, &decoration_ids))
+            })
+            .collect();
+        let has_decorations = !decoration_ids.is_empty();
+        let name_room =
+            px(width - 16.0 - 8.0 - 16.0 - 2.0 * CELL_PADDING - 8.0 - if has_decorations { 32.0 } else { 0.0 });
         let cursor = folder.cursor_ix();
         let range_start = range.start;
         let (flags_first, edges) = {
@@ -2803,10 +3176,20 @@ impl Pane {
                 let tint = effect_tint(look, theme);
                 let is_flash = flash_flags[ix - range_start];
                 let cut_edge = cut_edges.get(ix - flags_first).copied().flatten();
-                let dim = content_opacity(
-                    entry.hidden,
-                    self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
-                );
+                let presentation = presentations.get(&entry.path).cloned().unwrap_or_default();
+                let dim = if presentation.dim {
+                    content_opacity(true, false)
+                } else {
+                    content_opacity(
+                        entry.hidden,
+                        self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
+                    )
+                };
+                let plugin_spoken = if presentation.spoken.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", presentation.spoken.join(", "))
+                };
                 let cloud_spoken =
                     cloud.and_then(CloudStatus::spoken_suffix).map(|suffix| format!(", {suffix}")).unwrap_or_default();
                 let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
@@ -2814,7 +3197,7 @@ impl Pane {
                 div()
                     .id(ix)
                     .role(Role::ListBoxOption)
-                    .aria_label(format!("{}, {}{cloud_spoken}", display_text(&entry.name), kind(&entry)))
+                    .aria_label(format!("{}, {}{plugin_spoken}{cloud_spoken}", display_text(&entry.name), kind(&entry)))
                     .aria_position_in_set(ix + 1)
                     .aria_size_of_set(total)
                     .aria_selected(selected)
@@ -2930,6 +3313,9 @@ impl Pane {
                             .left(px(look.dx))
                             .flex_1()
                             .opacity(dim)
+                            .when_some(presentation.tint.filter(|_| !selected), |cell, tint| {
+                                cell.text_color(color(theme.role(tint.key())))
+                            })
                             .flex()
                             .items_center()
                             .gap_1()
@@ -2957,7 +3343,20 @@ impl Pane {
                                         .into_any_element(),
                                 },
                             })
-                            .children(crate::cloud_status::badge(cloud, theme)),
+                            .children(crate::cloud_status::badge(cloud, theme))
+                            .when(has_decorations, |cell| {
+                                cell.child(
+                                    div()
+                                        .w(px(32.))
+                                        .flex_none()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(11.))
+                                        .text_color(muted)
+                                        .child(presentation.badge.clone().unwrap_or_default()),
+                                )
+                            }),
                     )
                     .child(div().w(px(10.)).flex_none().opacity(dim).text_color(subtle).child(if navigable {
                         "›"
@@ -3058,8 +3457,8 @@ impl Pane {
                         .overflow_hidden()
                         .when(self.tip_inset, |body| body.pb(px(crate::tips::INSET)))
                         .children(glide_fill)
-                        .child(
-                            uniform_list(
+                        .child({
+                            let mut list = uniform_list(
                                 ("column-list", k),
                                 shown,
                                 cx.processor(move |this, range, window, cx| {
@@ -3069,8 +3468,12 @@ impl Pane {
                             .track_scroll(&scroll)
                             .flex_1()
                             .min_h_0()
-                            .px_1(),
-                        )
+                            .px_1();
+                            if let Some(plugin_rows) = self.plugin_row_decoration(k, cx) {
+                                list = list.with_decoration(plugin_rows);
+                            }
+                            list
+                        })
                         .children(ghosts)
                         .into_any_element()
                 }
@@ -3420,6 +3823,22 @@ fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
 
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let plugin_generation =
+            cx.try_global::<crate::plugins::Plugins>().map_or(0, |plugins| plugins.surfaces.generation());
+        if self.applied_view.as_ref().is_some_and(|(_, applied, _)| *applied != plugin_generation) {
+            self.apply_view(cx);
+        }
+        let views_generation = cx.global::<Ui>().views_generation;
+        if self.preview_plugin_generation != plugin_generation || self.preview_views_generation != views_generation {
+            self.preview_plugin_generation = plugin_generation;
+            self.preview_views_generation = views_generation;
+            // A registration or provider-list change refreshes the visible preview
+            // instead of leaving a withdrawn provider's output on screen.
+            self.preview = None;
+            self.load_preview(cx);
+        }
+        self.request_plugin_status(cx);
+        self.update_plugin_command_context(window, cx);
         self.bench_step(window, cx);
         // Row effects and disclosures are drawn from the clock: keep frames coming
         // while one runs (GPUI only redraws on its own for its animation elements).
@@ -3573,12 +3992,17 @@ impl Render for Pane {
                                     .overflow_hidden()
                                     .when(self.tip_inset, |body| body.pb(px(crate::tips::INSET)))
                                     .children(glide_fill)
-                                    .child(
-                                        uniform_list("entries", rows, cx.processor(Self::render_table_rows))
-                                            .track_scroll(&scroll)
-                                            .pt(px(LIST_TOP_INSET))
-                                            .flex_1(),
-                                    )
+                                    .child({
+                                        let mut list =
+                                            uniform_list("entries", rows, cx.processor(Self::render_table_rows))
+                                                .track_scroll(&scroll)
+                                                .pt(px(LIST_TOP_INSET))
+                                                .flex_1();
+                                        if let Some(plugin_rows) = self.plugin_row_decoration(0, cx) {
+                                            list = list.with_decoration(plugin_rows);
+                                        }
+                                        list
+                                    })
                                     .children(ghosts)
                                     .children(drop_outline)
                                     .into_any_element()

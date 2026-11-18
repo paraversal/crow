@@ -62,9 +62,10 @@ permissions = { fs = "none", spawn = [], net = false }
 | `permissions` | Deny-by-default; see the matrix. |
 
 A package must fit these limits: 256 KiB per file, 2 MiB for manifest + entry + assets,
-64 registrations, 128 entries per call, 4 KiB per display field, 64 KiB serialized result,
-100,000 Rhai operations per call and a 50 ms call deadline measured from dequeue. The worker
-also bounds expression depth, call levels, arrays, maps, strings and modules.
+64 registrations, 128 entries per call, 4 KiB per display field, 16 bytes per badge,
+32 suffix filters, 64 KiB serialized result, 100,000 Rhai operations per call and a 50 ms
+call deadline measured from dequeue. The worker also bounds expression depth, call levels,
+arrays, maps, strings and modules.
 
 ## Capability matrix (API 1)
 
@@ -76,9 +77,10 @@ also bounds expression depth, call levels, arrays, maps, strings and modules.
 | Bundle assets | `assets = [...]` | `asset(name) -> String` returns a declared asset only. Undeclared names are capability errors. |
 
 No other host capability is exposed. Scripts get no raw filesystem paths, shell, sockets,
-module imports, debugger, print/debug output or mutating host callback. A command's only
-API-1 result is a checked `#{ kind: "copy_text", text }` request; P1B owns the larger action
-allowlist.
+module imports, debugger, print/debug output or mutating host callback. API 1 commands can
+request only a transient message, clipboard text or a reveal of a handle from that
+invocation. File mutations, raw-path intents, network, spawn, plugin-defined shortcuts and
+general-purpose native callbacks stay out of the allowlist.
 
 ## Script contract
 
@@ -98,10 +100,17 @@ fn relative_path(ctx) {
 }
 ```
 
-Each descriptor has `kind`, `id`, `title`, optional `applies_to` and exactly one source.
-Computed kinds name a `function` defined with one parameter. An `icon-pack` names an `asset`
-instead: a bundle-relative file declared in the manifest's `assets`. The two are not
-interchangeable. Registrations are namespaced as `plugin_id.local_id`; local IDs are unique,
+Each descriptor has `kind`, `id`, `title` and exactly one source. Computed kinds name a
+`function` defined with one parameter. An `icon-pack` names an `asset` instead: a
+bundle-relative file declared in the manifest's `assets`. The two are not interchangeable.
+Fields that do not belong to the descriptor's kind are rejected.
+
+| Kind | Extra registration fields |
+| --- | --- |
+| `column` | Optional integer `width` (default 100) and `min_width` (default 50), both 32–480 with `min_width <= width`; `align = "left"` (default) or `"right"`. |
+| `preview` | Optional `extensions` list of 1–32 unique ASCII suffixes (letters, digits, hyphens, underscores; no leading dot, 1–32 bytes each). Omission matches every eligible file. |
+| `command` | `applies_to = "scope"` (default) or `"selection"`; optional `context_menu = true` (selection only); optional `extensions` filter (selection only). |
+| `decoration`, `sidebar`, `status`, `info`, `hook`, `icon-pack` | No extra fields. | Registrations are namespaced as `plugin_id.local_id`; local IDs are unique,
 one segment, lowercase letters/digits/hyphens. The whole batch is rejected on an unknown
 field, duplicate ID, undeclared kind, missing function, a missing or undeclared pack asset,
 or a pack asset that is not in the approved snapshot. Nothing is published until
@@ -138,17 +147,109 @@ Computed functions receive one map:
 
 | Kind | Return |
 | --- | --- |
-| `command` | `#{ kind: "copy_text", text: "..." }` |
-| `column`, `decoration` | `[ #{ handle, text, spoken? } ]`, keyed by input handles |
-| `preview` | `#{ text: "..." }` or `#{ table: [ ["a", "b"] ] }` (not both) |
-| `sidebar` | `[ #{ id, title, meta?, badge? } ]` |
-| `status` | `[ #{ text: "..." } ]` |
-| `info` | `[ #{ label, value } ]` |
+| `command` | `()`, `#{ kind: "message", text }`, `#{ kind: "copy_text", text }` or `#{ kind: "reveal", handle }` |
+| `column` | `[ #{ handle, text, spoken? } ]`; unit or an omitted handle leaves that cell blank |
+| `decoration` | `[ #{ handle, text, spoken?, tint?, dim? } ]`; empty text allows tint/dim/spoken-only output. `tint` is `accent`, `info`, `success`, `warning` or `error`; `dim` defaults false |
+| `preview` | `#{ text: "..." }` or `#{ table: [ ["a", "b"] ] }` (not both; rectangular, 128 rows, 64 columns, 1,024 cells); unit, empty text/table or `#{}` declines |
+| `sidebar` | `[ #{ id, title, meta?, badge?, handle? } ]` or unit; a known directory handle makes a path row, omission a display-only row |
+| `status` | `[ #{ text: "..." } ]` or unit; empty text contributes nothing |
+| `info` | `[ #{ label, value } ]` or unit |
 | `icon-pack` | Registration only (see above); never evaluated for a reply |
 | `hook` | `()` or `#{ refresh: true }`; hooks cannot invoke a command |
 
-Unknown fields, unknown or duplicate handles, oversized fields and malformed batches reject
-the whole reply. Hooks can request a fresh read; only commands can return a `CommandIntent`.
+Unknown fields, mixed preview shapes, ragged tables, unknown or duplicate handles, oversized
+fields and malformed batches reject the whole reply. Handles are request-local: a command's
+`reveal` handle is checked against the entries of that invocation, never a path. Hooks can
+request a fresh read. A message is nonempty single-line text; `copy_text` keeps the P1A
+multiline clipboard rules. Display strings are lossy labels (controls replaced, UTF-8 bounded);
+paths and file identities stay host-owned. `()`, unit and an omitted handle mean no value.
+
+## App surfaces
+
+All computed kinds require the package to be **Running** in its approved generation. A
+withdrawn, paused, failed, disabled or replaced generation contributes nothing, and queued
+replies from it are ignored.
+
+- **Columns.** Add a descriptor ID to `views.toml`'s `columns` array. Active columns render
+  after Name in config order with the descriptor's width, minimum and alignment; plugin
+  headers are not sortable. Unknown or disabled IDs stay in the file.
+- **Decorations.** List, Columns and search results share the presentation: the first
+  nonempty badge and first tint in lexical fully qualified ID order, OR of all dim flags,
+  and spoken descriptions in the same order. A contributing row reserves a fixed 32 pt
+  badge slot. Selected rows keep Crow's normal foreground.
+- **Status.** The first nonempty Running status descriptor (lexical ID order) occupies the
+  bottom bar's optional slot. It yields before hints, path segments, counts, config errors
+  and operation progress, and is hidden during path editing, overlays, transient messages
+  and running operations.
+- **Info.** The visible Info tab appends up to 16 labeled fields for a single selected entry,
+  after the native metadata, ordered by descriptor ID and each reply's order.
+- **Preview.** Add provider IDs to the resolved `preview_providers` list. One selected
+  ordinary file tries configured providers in list order for at most 250 ms total, then
+  falls through to the native preview. `fs = "none"` providers receive the metadata snapshot;
+  `fs = "read"` gets one 64 KiB excerpt only when a fresh P8 gate says the file is locally
+  readable. An approved read grant never makes Crow download an iCloud placeholder, and a
+  metadata placeholder stays in place on `SkipCloud`/`SkipAmbiguous`. `Space` remains native
+  Quick Look and does not wait for a plugin.
+- **Commands.** A scope command acts on the focused List/Columns column or search results and
+  receives no entries. A selection command needs 1–128 selected rows; an optional `extensions`
+  filter requires every selected row to be a matching file by ASCII-folded raw filename
+  suffix. Commands appear in `File ▸ Plugins`, the `Cmd-K` `>` palette and, when
+  `context_menu = true`, the file context menu. Text fields, the sidebar, sheets and Settings
+  offer no command target. The app revalidates focus, scope, selection and generation before
+  applying any effect; `reveal` also rechecks no-follow identity. A stale menu item is inert.
+- **Sidebar.** A shown, expanded plugin section gets the current real folder's first 128
+  ordinary immediate folders in display order. A known directory handle yields a navigable
+  row; omitted handles are display-only. Sections can be ordered/shown/collapsed in
+  `sidebar.toml`; the heading's collapse control writes only that section's `collapsed` flag.
+  Disabling or withdrawing the package removes its rows and paths. Favorite and volume
+  actions never act on plugin rows.
+- **Hooks.** `scope-changed`, `selection-changed`, `files-changed` and `operation-done` are
+  debounced over one 100 ms UI poll per owner/kind. `files-changed` comes only from an
+  applied watcher update; `operation-done` includes cancelled and failed operations that
+  reached the shared completion path. A `#{ refresh: true }` reply invalidates only that
+  plugin's passive values for the captured scope. Hooks never fire from a repaint or a
+  result-driven refresh.
+
+```toml
+# views.toml
+[defaults]
+columns = ["modified", "size", "example.p1b-fixture.sample-column", "kind"]
+preview_providers = ["example.p1b-fixture.sample-preview"]
+
+[folder."~/Documents"]
+preview_providers = []
+```
+
+```toml
+# sidebar.toml. Existing [[group]], [recent] and [locations] entries still work.
+[sections]
+order = ["recent", "example.p1b-fixture.folders", "locations"]
+
+[section."example.p1b-fixture.folders"]
+show = true
+collapsed = false
+```
+
+## Test fixture
+
+The copyable fixture lives at
+`crates/crow-app/tests/fixtures/plugins/p1b-fixture/`. Copy the directory into
+`~/.config/crow/plugins/`, approve `example.p1b-fixture`, then open its `tree/` folder. It
+declares every API-1 kind: a column, decoration, sidebar section (`folders`), status, Info,
+a `.txt` preview, hook, selection command and icon-pack asset. Its command copies the selected
+file's name:
+
+```rhai
+fn copy_selected(ctx) {
+    if ctx.entries.len != 1 { return (); }
+    let relative = ctx.entries[0].name;
+    #{ kind: "copy_text", text: relative }
+}
+```
+
+The sibling `p1b-invalid-handle/`, `p1b-invalid-field/` and `p1b-budget/` fixtures are for
+the runtime tests: an unknown handle, an oversized field and an operation-budget loop. They
+load as packages and fail only when evaluated.
 
 ## Lifecycle
 

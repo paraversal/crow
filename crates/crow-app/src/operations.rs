@@ -399,6 +399,7 @@ fn finish(
             clear_message(cx);
         }
     }
+    crate::plugins::notify_operation_done(cx);
     // Copying or trashing changes free space; the sidebar shouldn't wait for the minute poll.
     crate::ui::refresh_volumes(cx);
     if let Some(generation) = progress_id {
@@ -438,10 +439,14 @@ pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf
                     ops.redo_stack.push(Arc::new(reversed));
                     message(label, false, cx);
                     crate::feedback::play(crow_core::motion::Event::Undo, cx);
+                    crate::plugins::notify_operation_done(cx);
                     crate::ui::refresh_volumes(cx);
                     on_done(restored, cx);
                 }
-                Err(e) => message(e.to_string(), true, cx),
+                Err(e) => {
+                    message(e.to_string(), true, cx);
+                    crate::plugins::notify_operation_done(cx);
+                }
             }
             cx.refresh_windows();
         });
@@ -472,10 +477,14 @@ pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static
                     ops.undo_stack.push(ops.log.len() - 1);
                     message(format!("Redo {label}"), false, cx);
                     crate::feedback::play(crow_core::motion::Event::Undo, cx);
+                    crate::plugins::notify_operation_done(cx);
                     crate::ui::refresh_volumes(cx);
                     on_done(results, cx);
                 }
-                Err(e) => message(e.to_string(), true, cx),
+                Err(e) => {
+                    message(e.to_string(), true, cx);
+                    crate::plugins::notify_operation_done(cx);
+                }
             }
             cx.refresh_windows();
         });

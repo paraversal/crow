@@ -1,0 +1,8 @@
+id = "example.p1b-fixture"
+name = "P1B Fixture"
+version = "0.1.0"
+api = 1
+entry = "main.rhai"
+assets = ["icons/pack.toml"]
+provides = ["column", "decoration", "sidebar", "status", "info", "preview", "hook", "command", "icon-pack"]
+permissions = { fs = "read" }

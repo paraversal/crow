@@ -200,18 +200,103 @@ pub enum DescriptorSource {
     Asset(String),
 }
 
+/// What a command may act on. A scope command receives no entries; a selection
+/// command requires 1-128 selected rows and may opt into a context menu.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommandTarget {
+    #[default]
+    Scope,
+    Selection,
+}
+
+impl CommandTarget {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Scope => "scope",
+            Self::Selection => "selection",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "scope" => Some(Self::Scope),
+            "selection" => Some(Self::Selection),
+            _ => None,
+        }
+    }
+}
+
+/// A decoration's named color. The app maps these to theme roles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tint {
+    Accent,
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+impl Tint {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Accent => "accent",
+            Self::Info => "info",
+            Self::Success => "success",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "accent" => Some(Self::Accent),
+            "info" => Some(Self::Info),
+            "success" => Some(Self::Success),
+            "warning" => Some(Self::Warning),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+}
+
 /// One validated registration. Data-only kinds (an icon pack) carry a declared
-/// asset instead of a function.
+/// asset instead of a function. Presentation fields are concrete defaults; the
+/// registry rejects fields that do not belong to the descriptor's kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Descriptor {
     pub kind: ExtensionKind,
     pub id: ExtensionId,
     pub title: String,
-    pub applies_to: Option<String>,
     pub source: DescriptorSource,
+    /// Column width in points (32-480).
+    pub width: u16,
+    /// Narrowest a column may be dragged (32-width).
+    pub min_width: u16,
+    pub align: Align,
+    /// Command target; `Scope` for kinds that do not use it.
+    pub applies_to: CommandTarget,
+    /// A selection command also appears in file context menus.
+    pub context_menu: bool,
+    /// Preview/command suffix filter, already ASCII-folded. `None` matches all.
+    pub extensions: Option<Vec<String>>,
 }
 
 impl Descriptor {
+    pub fn new(kind: ExtensionKind, id: ExtensionId, title: String, source: DescriptorSource) -> Self {
+        Self {
+            kind,
+            id,
+            title,
+            source,
+            width: 100,
+            min_width: 50,
+            align: Align::Left,
+            applies_to: CommandTarget::Scope,
+            context_menu: false,
+            extensions: None,
+        }
+    }
+
     pub fn function(&self) -> Option<&str> {
         match &self.source {
             DescriptorSource::Function(function) => Some(function),
@@ -233,11 +318,15 @@ impl Descriptor {
 pub struct EntryHandle(pub u32);
 
 /// One entry's bounded text contribution, keyed by its request-local handle.
+/// `tint` and `dim` are decoration-only and stay `None`/false for columns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryValue {
     pub handle: EntryHandle,
+    /// A column cell or a decoration badge (16 bytes for decorations).
     pub text: String,
     pub spoken: Option<String>,
+    pub tint: Option<Tint>,
+    pub dim: bool,
 }
 
 /// The preview provider's bounded output for v1: plain text or a table.
@@ -253,6 +342,8 @@ pub struct SidebarRow {
     pub title: String,
     pub meta: Option<String>,
     pub badge: Option<String>,
+    /// A request-local directory handle; `None` is a display-only row.
+    pub handle: Option<EntryHandle>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -291,11 +382,14 @@ impl ContributionValues {
     }
 }
 
-/// A checked action a command may request. P1B owns the full allowlist; the
-/// fixture needs only plain-text copy.
+/// A checked action a command may request. The app applies it only while the
+/// activation's captured owner, scope and selection are still current.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandIntent {
+    Message(String),
     CopyText(String),
+    /// A handle from this activation's request table, never a path.
+    Reveal(EntryHandle),
 }
 
 /// The hook events API 1 delivers. `scope` is host-provided display text, never
@@ -349,11 +443,18 @@ pub struct Snapshot {
 }
 
 /// What a column needs from the app to render a value.
+pub type PluginValueFn<'a> = &'a dyn Fn(&ExtensionId, &Path, u64) -> Option<ColumnCell>;
+pub type PluginVersionFn<'a> = &'a dyn Fn(&Entry) -> u64;
+
 pub struct ColumnContext<'a> {
     pub kind: &'a dyn Fn(&Entry) -> Arc<str>,
     pub time: &'a dyn Fn(Option<SystemTime>) -> String,
     /// A folder's measured size, when the size service has one.
     pub size: &'a dyn Fn(&Entry) -> Option<KnownSize>,
+    /// A ready plugin cell for this entry, keyed by descriptor and version.
+    pub plugin_value: Option<PluginValueFn<'a>>,
+    /// The entry version the cache was keyed by.
+    pub plugin_version: Option<PluginVersionFn<'a>>,
 }
 
 /// A folder size the service knows: bytes, whether they are stale, and a version
@@ -390,8 +491,9 @@ pub enum Align {
 
 /// A list-view column after Name.
 pub trait Column: Send + Sync {
-    /// Stable identifier, used in settings (`views.toml` from M5).
-    fn id(&self) -> &'static str;
+    /// Stable identifier, used in settings (`views.toml` from M5). Plugin
+    /// columns own their fully qualified ID and borrow it here.
+    fn id(&self) -> &str;
     fn title(&self) -> &str;
     /// Default width in points.
     fn width(&self) -> f32;
@@ -474,7 +576,7 @@ impl Extensions {
 
 struct SizeColumn;
 impl Column for SizeColumn {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "size"
     }
     fn title(&self) -> &str {
@@ -523,7 +625,7 @@ impl Column for SizeColumn {
 
 struct KindColumn;
 impl Column for KindColumn {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "kind"
     }
     fn title(&self) -> &str {
@@ -542,7 +644,7 @@ impl Column for KindColumn {
 
 struct ModifiedColumn;
 impl Column for ModifiedColumn {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "modified"
     }
     fn title(&self) -> &str {
@@ -561,7 +663,7 @@ impl Column for ModifiedColumn {
 
 struct AddedColumn;
 impl Column for AddedColumn {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "added"
     }
     fn title(&self) -> &str {
@@ -738,7 +840,8 @@ mod tests {
         let ext = Extensions::with_builtins();
         let ids: Vec<_> = ext.columns().iter().map(|c| c.id()).collect();
         assert_eq!(ids, ["modified", "size", "kind", "added"]);
-        let shown: Vec<_> = ext.default_columns().iter().map(|c| c.id()).collect();
+        let columns = ext.default_columns();
+        let shown: Vec<_> = columns.iter().map(|c| c.id()).collect();
         assert_eq!(shown, ["modified", "size", "kind"], "Finder's defaults; Date Added is optional");
     }
 
@@ -759,7 +862,7 @@ mod tests {
         let kind = |_: &Entry| Arc::<str>::from("Folder");
         let time = |_: Option<SystemTime>| "—".to_owned();
         let size = |_: &Entry| Some(KnownSize { bytes: 1024, stale: false, version: 1 });
-        let cx = ColumnContext { kind: &kind, time: &time, size: &size };
+        let cx = ColumnContext { kind: &kind, time: &time, size: &size, plugin_value: None, plugin_version: None };
         let cell = SizeColumn.cell(&entry, &cx);
         assert_eq!(cell.text, "--", "Crow does not follow the link, so it has no size");
         assert_eq!(cell.spoken.as_deref(), Some("size not calculated"));

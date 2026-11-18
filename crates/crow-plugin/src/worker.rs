@@ -568,19 +568,20 @@ mod tests {
     use super::*;
     use crate::dto::{ExcerptInput, RequestInput};
     use crate::manifest::Manifest;
-    use crow_core::{EntryData, EntryHandle, ExtensionId};
+    use crow_core::{ContributionValues, EntryData, EntryHandle, ExtensionId};
     use std::sync::mpsc::{Receiver, channel};
 
     fn limits() -> Limits {
         Limits::default()
     }
 
-    fn manifest(assets: &[&str]) -> Manifest {
+    fn manifest_for(provides: &[&str], assets: &[&str]) -> Manifest {
         let assets = if assets.is_empty() {
             String::new()
         } else {
             format!("assets = [{}]\n", assets.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", "))
         };
+        let provides = provides.iter().map(|kind| format!("\"{kind}\"")).collect::<Vec<_>>().join(", ");
         crate::manifest::parse_manifest(
             &format!(
                 r#"
@@ -589,7 +590,7 @@ name = "Test"
 version = "0.1.0"
 api = 1
 entry = "main.rhai"
-provides = ["command"]
+provides = [{provides}]
 {assets}permissions = {{ fs = "none" }}
 "#
             ),
@@ -598,8 +599,8 @@ provides = ["command"]
         .unwrap()
     }
 
-    fn snapshot(source: &str, assets: &[(&str, &str)]) -> Arc<crate::package::PackageSnapshot> {
-        let manifest = manifest(&assets.iter().map(|(name, _)| *name).collect::<Vec<_>>());
+    fn snapshot_for(source: &str, assets: &[(&str, &str)], provides: &[&str]) -> Arc<crate::package::PackageSnapshot> {
+        let manifest = manifest_for(provides, &assets.iter().map(|(name, _)| *name).collect::<Vec<_>>());
         let mut files = BTreeMap::new();
         files.insert("plugin.toml".into(), Arc::from(&b"manifest"[..]));
         files.insert("main.rhai".into(), Arc::from(source.as_bytes()));
@@ -645,9 +646,24 @@ provides = ["command"]
     }
 
     fn spawn(source: &str, assets: &[(&str, &str)], limits: Limits) -> (Worker, Receiver<Inbox>) {
+        spawn_for(source, assets, &["command"], limits)
+    }
+
+    fn spawn_for(
+        source: &str,
+        assets: &[(&str, &str)],
+        provides: &[&str],
+        limits: Limits,
+    ) -> (Worker, Receiver<Inbox>) {
         let (tx, rx) = channel();
-        let worker =
-            Worker::spawn(PluginId::parse("example.test").unwrap(), 1, snapshot(source, assets), limits, tx).unwrap();
+        let worker = Worker::spawn(
+            PluginId::parse("example.test").unwrap(),
+            1,
+            snapshot_for(source, assets, provides),
+            limits,
+            tx,
+        )
+        .unwrap();
         worker.mailbox.enqueue_command(Call::Register).unwrap();
         match next(&rx, Duration::from_secs(2)) {
             WorkerMessage::Registered { result: Ok(_), .. } => {}
@@ -670,7 +686,15 @@ fn run(ctx) {{ {body} }}
     }
 
     fn evaluate_with_cancel(worker: &Worker, input: RequestInput, cancel: Arc<AtomicBool>) {
-        let extension = ExtensionId::new(PluginId::parse("example.test").unwrap(), LocalId::parse("copy").unwrap());
+        evaluate_as_with_cancel(worker, "copy", input, cancel);
+    }
+
+    fn evaluate_as(worker: &Worker, local: &str, input: RequestInput) {
+        evaluate_as_with_cancel(worker, local, input, Arc::new(AtomicBool::new(false)));
+    }
+
+    fn evaluate_as_with_cancel(worker: &Worker, local: &str, input: RequestInput, cancel: Arc<AtomicBool>) {
+        let extension = ExtensionId::new(PluginId::parse("example.test").unwrap(), LocalId::parse(local).unwrap());
         worker
             .mailbox
             .enqueue_command(Call::Evaluate {
@@ -690,6 +714,41 @@ fn run(ctx) {{ {body} }}
         match next(&rx, Duration::from_secs(2)) {
             WorkerMessage::Replied { reply: Reply::Intent(crow_core::CommandIntent::CopyText(text)), .. } => {
                 assert_eq!(text, "hello");
+            }
+            other => panic!("{other:?}"),
+        }
+        worker.stop();
+    }
+
+    #[test]
+    fn decoration_and_preview_shapes_round_trip_through_the_worker() {
+        let source = r#"
+fn register() {
+    [
+        #{ kind: "decoration", id: "deco", title: "Deco", function: "badge" },
+        #{ kind: "preview", id: "preview", title: "Preview", function: "preview" }
+    ]
+}
+fn badge(ctx) { [ #{ handle: 1, text: "", tint: "warning", dim: true } ] }
+fn preview(ctx) { #{ table: [["a", "b"], ["c", "d"]] } }
+"#;
+        let (mut worker, rx) = spawn_for(source, &[], &["decoration", "preview"], limits());
+        evaluate_as(&worker, "deco", input());
+        match next(&rx, Duration::from_secs(2)) {
+            WorkerMessage::Replied { reply: Reply::Values(ContributionValues::Decoration(values)), .. } => {
+                assert_eq!(values[0].tint, Some(crow_core::Tint::Warning));
+                assert!(values[0].dim);
+                assert_eq!(values[0].text, "");
+            }
+            other => panic!("{other:?}"),
+        }
+        evaluate_as(&worker, "preview", input());
+        match next(&rx, Duration::from_secs(2)) {
+            WorkerMessage::Replied { reply: Reply::Values(ContributionValues::Preview(preview)), .. } => {
+                assert_eq!(
+                    preview.table.as_deref(),
+                    Some(&[vec!["a".into(), "b".into()], vec!["c".into(), "d".into()]][..])
+                );
             }
             other => panic!("{other:?}"),
         }

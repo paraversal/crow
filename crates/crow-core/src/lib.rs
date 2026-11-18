@@ -22,10 +22,10 @@ mod views;
 pub use config::{abbreviate_home, cache_dir, edit_toml, expand_home, home, state_dir, write_atomic};
 pub use exclude::{DEFAULT_EXCLUDE, Exclude, ExcludeSet, SetName, SetRules, exclude_path, load_exclude};
 pub use extensions::{
-    Align, Column, ColumnCell, ColumnContext, CommandIntent, ContributionValues, Descriptor, DescriptorSource,
-    EntryData, EntryHandle, EntryValue, Excerpt, ExtensionId, ExtensionKind, Extensions, HookEvent, InfoRow, KnownSize,
-    LocalId, PluginId, PluginPreview, PreviewContent, Previewer, SidebarRow, Snapshot, StatusItem, TextPreviewer,
-    text_excerpt,
+    Align, Column, ColumnCell, ColumnContext, CommandIntent, CommandTarget, ContributionValues, Descriptor,
+    DescriptorSource, EntryData, EntryHandle, EntryValue, Excerpt, ExtensionId, ExtensionKind, Extensions, HookEvent,
+    InfoRow, KnownSize, LocalId, PluginId, PluginPreview, PreviewContent, Previewer, SidebarRow, Snapshot, StatusItem,
+    TextPreviewer, Tint, text_excerpt,
 };
 pub use history::History;
 pub use onboarding::{ONBOARDING_FILE, OnboardingState};
@@ -39,8 +39,8 @@ pub use settings::{
     save_table_number,
 };
 pub use sidebar::{
-    DEFAULT_SIDEBAR, Favorite, FavoriteItem, Group, SidebarConfig, SidebarEdit, Slot, TwinInput, edit_sidebar,
-    load_sidebar, sidebar_path, twin_hints,
+    DEFAULT_SIDEBAR, Favorite, FavoriteItem, Group, Section, SectionDestination, SectionRow, SidebarConfig,
+    SidebarEdit, Slot, TwinInput, edit_sidebar, load_sidebar, sidebar_path, twin_hints,
 };
 pub use table::{ColumnWidth, ResizeDrag, TableLayout};
 pub use tabs::{TabId, Tabs};

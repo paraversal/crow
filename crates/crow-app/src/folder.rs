@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,6 +41,10 @@ pub enum FolderEvent {
     Loaded,
     /// The visible rows changed: a listing, an expansion or a child folder.
     Changed,
+    /// The selected set (not just the cursor) changed.
+    SelectionChanged,
+    /// A real watcher update landed. Empty paths mean a full relist.
+    WatcherApplied { paths: Vec<PathBuf> },
     /// A type-to-select run started or expired; the bottom bar shows its prefix.
     TypeSelect,
 }
@@ -201,6 +206,9 @@ enum Load {
 
 pub struct Folder {
     dir: PathBuf,
+    plugin_surface: crate::plugins::SurfaceId,
+    /// Bumped when a watcher apply or relist can change an entry in place.
+    plugin_epoch: u64,
     entries: Arc<Vec<Entry>>,
     load_ms: f64,
     first_paint_ms: Option<f64>,
@@ -321,6 +329,8 @@ impl Folder {
             .ok();
         let mut folder = Self {
             dir,
+            plugin_surface: crate::plugins::new_surface(),
+            plugin_epoch: 0,
             entries: Arc::new(Vec::new()),
             load_ms: 0.0,
             first_paint_ms: None,
@@ -383,6 +393,29 @@ impl Folder {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    pub fn plugin_surface(&self) -> crate::plugins::SurfaceId {
+        self.plugin_surface
+    }
+
+    /// The scope's contribution epoch. It changes on a relist or watcher apply,
+    /// so a replaced same-path entry gets a new cache key.
+    pub fn plugin_scope_version(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.generation.hash(&mut hasher);
+        self.plugin_epoch.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn plugin_entry_version(&self, entry: &Entry) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.plugin_scope_version().hash(&mut hasher);
+        entry.path.hash(&mut hasher);
+        entry.size.hash(&mut hasher);
+        entry.is_dir.hash(&mut hasher);
+        entry.modified.hash(&mut hasher);
+        hasher.finish()
     }
 
     pub fn entries(&self) -> &Arc<Vec<Entry>> {
@@ -687,8 +720,9 @@ impl Folder {
     }
 
     /// Whatever changed, the drag snapshot is stale.
-    fn selection_changed(&mut self) {
+    fn selection_changed(&mut self, cx: &mut Context<Self>) {
         self.selection_generation += 1;
+        cx.emit(FolderEvent::SelectionChanged);
     }
 
     pub fn selected_paths(&self) -> Vec<PathBuf> {
@@ -744,7 +778,7 @@ impl Folder {
         }
         self.filter = filter;
         self.rebuild_rows(cx);
-        self.prune_selection();
+        self.prune_selection(cx);
         self.settle_cursor(cx);
         cx.emit(FolderEvent::Changed);
         cx.notify();
@@ -1228,7 +1262,7 @@ impl Folder {
             self.select_after_load = None;
             self.selection_totals = Self::entry_totals(entry);
             self.selection.select_only(target);
-            self.selection_changed();
+            self.selection_changed(cx);
             selected = true;
         }
         if !self.select_when_present.is_empty() && self.all_present(&self.select_when_present) {
@@ -1246,7 +1280,7 @@ impl Folder {
                 }
             }
             self.selection_totals = totals;
-            self.selection_changed();
+            self.selection_changed(cx);
             selected = true;
             let mode = self.arrival_mode;
             self.start_effect(&wanted, Fx::Arrive, mode, cx);
@@ -1349,7 +1383,7 @@ impl Folder {
                 for path in &removed {
                     self.selection.remove(path);
                 }
-                self.selection_changed();
+                self.selection_changed(cx);
                 // The cursor may have named one of them. Settle it now, not when the
                 // new rows land: until then the old row would draw as the cursor
                 // while the selection no longer holds it (the fuzzer's cursor check).
@@ -1541,6 +1575,7 @@ impl Folder {
 
     /// The rest of an apply, after its rows are in place.
     fn finish_apply(&mut self, kind: ApplyKind, cx: &mut Context<Self>) {
+        self.plugin_epoch = self.plugin_epoch.wrapping_add(1);
         let cursor_before = match kind {
             ApplyKind::Full { .. } => self.cursor_before_apply.take(),
             ApplyKind::Partial => None,
@@ -1566,11 +1601,11 @@ impl Folder {
                 {
                     self.selection_totals = Self::entry_totals(first);
                     self.selection.select_only(first.path.clone());
-                    self.selection_changed();
+                    self.selection_changed(cx);
                 }
             }
             if prune {
-                self.prune_selection();
+                self.prune_selection(cx);
             }
         }
         if !pending_selected && let Some((old_ix, old_path)) = cursor_before {
@@ -1585,7 +1620,7 @@ impl Folder {
 
     /// Drop selected paths that are no longer visible anywhere in the tree, and
     /// sum what stays: the totals are rebuilt here so no other pass has to scan.
-    fn prune_selection(&mut self) {
+    fn prune_selection(&mut self, cx: &mut Context<Self>) {
         let before = self.selection.len();
         let before_totals = self.selection_totals;
         if before == 0 {
@@ -1630,7 +1665,7 @@ impl Folder {
             *self.selection_summary.borrow_mut() = None;
         }
         if self.selection.len() != before {
-            self.selection_changed();
+            self.selection_changed(cx);
         }
     }
 
@@ -1651,14 +1686,14 @@ impl Folder {
         if self.selection.is_empty() {
             self.selection.select_only(path);
             self.selection_totals = totals;
-            self.selection_changed();
+            self.selection_changed(cx);
         } else if self.selection.contains(&path) {
             self.selection.set_cursor(path);
         } else {
             self.selection.toggle(path);
             self.selection_totals.0 += totals.0;
             self.selection_totals.1 += totals.1;
-            self.selection_changed();
+            self.selection_changed(cx);
         }
         self.cursor_ix = Some(ix);
         self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
@@ -1682,7 +1717,7 @@ impl Folder {
     fn child_changed(&mut self, cx: &mut Context<Self>) {
         self.rebuild_rows(cx);
         self.start_disclosures();
-        self.prune_selection();
+        self.prune_selection(cx);
         self.settle_cursor(cx);
         cx.emit(FolderEvent::Changed);
         cx.notify();
@@ -1708,7 +1743,7 @@ impl Folder {
         self.expanded.insert(path);
         self.sync_children(cx);
         self.rebuild_rows(cx);
-        self.prune_selection();
+        self.prune_selection(cx);
         self.settle_cursor(cx);
         cx.emit(FolderEvent::Changed);
         cx.notify();
@@ -1737,7 +1772,7 @@ impl Folder {
         }
         self.sync_children(cx);
         self.rebuild_rows(cx);
-        self.prune_selection();
+        self.prune_selection(cx);
         self.settle_cursor(cx);
         cx.emit(FolderEvent::Changed);
         cx.notify();
@@ -1773,6 +1808,7 @@ impl Folder {
             return;
         }
         if rescan || paths.len() > MAX_DIFF {
+            cx.emit(FolderEvent::WatcherApplied { paths: Vec::new() });
             self.load(cx);
             return;
         }
@@ -1825,6 +1861,9 @@ impl Folder {
                         crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind)
                     };
                     this.replace_entries_after(updated, Some(&stats), cx);
+                    cx.emit(FolderEvent::WatcherApplied {
+                        paths: stats.iter().map(|(path, _)| path.clone()).collect(),
+                    });
                     if !this.reconcile.is_empty() || !added.is_empty() {
                         this.schedule_reconcile(added, cx);
                     }
@@ -1908,6 +1947,7 @@ impl Folder {
                     crow_fs::apply_stats(&this.entries, &stats, &this.sort, &kind)
                 };
                 this.replace_entries_after(updated, Some(&stats), cx);
+                cx.emit(FolderEvent::WatcherApplied { paths: stats.iter().map(|(path, _)| path.clone()).collect() });
             })
             .ok();
         })
@@ -1937,7 +1977,7 @@ impl Folder {
         };
         self.selection.select_only(path);
         self.selection_totals = totals;
-        self.selection_changed();
+        self.selection_changed(cx);
         self.set_cursor(ix, cx);
     }
 
@@ -1964,7 +2004,7 @@ impl Folder {
             self.selection_totals.0 += totals.0;
             self.selection_totals.1 += totals.1;
         }
-        self.selection_changed();
+        self.selection_changed(cx);
         match self.selection.cursor().and_then(|cursor| self.index_of_path(cursor)) {
             Some(ix) => self.set_cursor(ix, cx),
             None => {
@@ -1999,7 +2039,7 @@ impl Folder {
             }
         }
         self.selection_totals = totals;
-        self.selection_changed();
+        self.selection_changed(cx);
         self.set_cursor(ix, cx);
     }
 
@@ -2021,14 +2061,14 @@ impl Folder {
         });
         self.selection.select_all(paths);
         self.selection_totals = totals;
-        self.selection_changed();
+        self.selection_changed(cx);
         cx.notify();
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.selection.clear();
         self.selection_totals = (0, 0);
-        self.selection_changed();
+        self.selection_changed(cx);
         self.cursor_ix = None;
         cx.emit(FolderEvent::CursorMoved);
         cx.notify();
