@@ -122,6 +122,7 @@ pub(crate) use bulk::list_raw;
 mod bulk {
     use super::Entry;
     use std::ffi::CString;
+    use std::ffi::OsString;
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -189,21 +190,23 @@ mod bulk {
             Some(if secs >= 0 { UNIX_EPOCH + since } else { UNIX_EPOCH - since })
         }
         /// An `attrreference_t`: offset (relative to the reference itself) and length.
-        fn name(&mut self) -> Option<String> {
+        /// The bytes are kept exactly; macOS does not require UTF-8 file names.
+        fn name(&mut self) -> Option<OsString> {
+            use std::os::unix::ffi::OsStringExt;
             let start = self.at;
             let offset = self.take::<4>().map(i32::from_ne_bytes)?;
             let length = self.u32()? as usize;
             let begin = usize::try_from(start as i64 + i64::from(offset)).ok()?;
             let raw = self.entry.get(begin..begin + length)?;
             let raw = raw.split(|b| *b == 0).next()?;
-            Some(String::from_utf8_lossy(raw).into_owned())
+            Some(OsString::from_vec(raw.to_vec()))
         }
     }
 
     /// One directory entry as the kernel returned it, before the listing turns it
     /// into an `Entry`. The sizer uses the same walk without the listing's fields.
     pub(crate) struct RawEntry<'a> {
-        pub name: String,
+        pub name: OsString,
         dir: &'a Path,
         pub objtype: u32,
         pub dev: u64,
@@ -222,7 +225,8 @@ mod bulk {
         }
 
         pub fn hidden(&self) -> bool {
-            self.name.starts_with('.') || self.flags & UF_HIDDEN != 0
+            use std::os::unix::ffi::OsStrExt;
+            self.name.as_os_str().as_bytes().starts_with(b".") || self.flags & UF_HIDDEN != 0
         }
 
         /// Links are listed as links; only those need a second look to learn if they point at a folder.
@@ -244,7 +248,7 @@ mod bulk {
             let path = self.path();
             Some(Entry {
                 hidden,
-                name: self.name,
+                name: self.name.to_string_lossy().into_owned(),
                 path,
                 is_dir,
                 is_symlink,
