@@ -1,5 +1,5 @@
 # P9B — Cross-run test and fuzz reports progress
-Branch: `codex/m9-p9b-test-dashboard` · PR: none · Base: `fbdb8c1` (M9 P9A, merged) · Last updated: 2026-11-18 · State: In critique
+Branch: `codex/m9-p9b-test-dashboard` · PR: [#63](https://github.com/paraversal/file-crow/pull/63) · Base: `fbdb8c1` (M9 P9A, merged) · Last updated: 2026-11-18 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -57,6 +57,7 @@ Verdict: better. The collector now cannot lose valid reports or call an empty ru
 - 2026-11-18 Baseline: workspace `workspace-20261118T170422Z` passed 905/0/1 in 16.1 s; smoke `smoke-20261118T170438Z` passed 2 in 4.0 s, both at `1220af2a13ad`. Reports are under `target/test-reports/`; `docs/testing.md` has the commands, aggregation example, replay shapes and baseline table.
 - 2026-11-18 Final live-only change: a generated HANG now carries the kept step script as the replay artifact; a user-supplied `--script` is never copied.
 - 2026-11-18 Critique: fixed the collector's malformed-nested crash, zero-evidence pass, spawn-error status and dropped user `--script` (`7037a01`); deflaked the CI cancellation test (`8131a12`). Re-ran the full gate, the collector over the workspace and a real headless fuzz seed.
+- 2026-11-18 Opened PR #63 after pushing the branch.
 
 ## Next
-Critic pushes the branch and opens the PR (State: PR open).
+User hand-tests the live `crow --fuzz` frame table and the CI artifact upload, then squash-merges once CI is green. No further work on this branch.
