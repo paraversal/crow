@@ -85,7 +85,7 @@ pub fn app_menus(show_preview: bool, folder_sizes_visible: bool) -> Vec<Menu> {
 
 /// Register the global handlers and install the menu bar. Call after `cx.bind_keys`.
 pub fn init(cx: &mut App) {
-    cx.on_action(|_: &act::Quit, cx| crate::window::quit(cx));
+    cx.on_action(|_: &act::Quit, cx| crate::window::operation_ui::quit(cx));
     // With a Crow window focused the root's NewWindow listener opens the current folder;
     // this fires only when there is no window (or none is listening).
     cx.on_action(|_: &act::NewWindow, cx| {
