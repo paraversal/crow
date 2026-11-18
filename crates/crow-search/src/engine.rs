@@ -605,6 +605,21 @@ fn pattern_error(e: impl std::fmt::Display) -> String {
     format!("Invalid pattern: {line}")
 }
 
+/// Check between reads too: a nonmatching file never calls `ContentSink::matched`.
+struct ContentReader<'a, R> {
+    inner: R,
+    control: &'a Control,
+}
+
+impl<R: io::Read> io::Read for ContentReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.control.is_cancelled() || self.control.contents_stopped() {
+            return Ok(0);
+        }
+        self.inner.read(buffer)
+    }
+}
+
 struct ContentSearch {
     matcher: RegexMatcher,
     searcher: Searcher,
@@ -630,8 +645,12 @@ impl ContentSearch {
         hits: &mut Vec<Hit>,
         control: &Control,
     ) -> u64 {
+        let Ok(file) = std::fs::File::open(path) else {
+            return 0;
+        };
+        let reader = ContentReader { inner: file, control };
         let mut sink = ContentSink { matcher: &self.matcher, path, modified, size, hidden, hits, control, matches: 0 };
-        let _ = self.searcher.search_path(&self.matcher, path, &mut sink);
+        let _ = self.searcher.search_reader(&self.matcher, reader, &mut sink);
         sink.matches
     }
 }
@@ -712,6 +731,72 @@ mod tests {
 
     fn rules() -> Arc<RuleSet> {
         Arc::new(RuleSet::from_config(&Exclude::default(), Path::new("/Users/nobody")).expect("default rules"))
+    }
+
+    fn assert_active_content_read_stops(text: &[u8], cancel: bool) {
+        struct StopAfterRead<'a> {
+            remaining: &'a [u8],
+            control: &'a Control,
+            cancel: bool,
+            reads: usize,
+        }
+        impl io::Read for StopAfterRead<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.reads += 1;
+                let count = self.remaining.read(buffer)?;
+                if self.cancel {
+                    self.control.cancel();
+                } else {
+                    self.control.stop_contents();
+                }
+                Ok(count)
+            }
+        }
+
+        let control = Control::new();
+        let bytes = text.repeat(100_000);
+        let mut input = StopAfterRead { remaining: &bytes, control: &control, cancel, reads: 0 };
+        let mut content = ContentSearch::new(&ContentPattern::new("needle").expect("pattern")).expect("searcher");
+        let mut hits = Vec::new();
+        let mut sink = ContentSink {
+            matcher: &content.matcher,
+            path: Path::new("active.txt"),
+            modified: None,
+            size: bytes.len() as u64,
+            hidden: false,
+            hits: &mut hits,
+            control: &control,
+            matches: 0,
+        };
+        let reader = ContentReader { inner: &mut input, control: &control };
+        content.searcher.search_reader(&content.matcher, reader, &mut sink).expect("controlled read");
+        assert_eq!(sink.matches, 0, "buffered matches stop too");
+        assert!(hits.is_empty());
+        assert_eq!(input.reads, 1, "no further underlying reads after either flag");
+        assert!(!input.remaining.is_empty(), "the nonmatching tail was not drained");
+
+        // Early EOF must not leave the reusable searcher's buffers stopped.
+        let root = root(&format!("active-read-{cancel}-{}", text.len()));
+        let path = root.join("next.txt");
+        write(&root, "next.txt", b"needle\n");
+        let control = Control::new();
+        assert_eq!(content.search(&path, None, 7, false, &mut hits, &control), 1);
+        assert_eq!(hits[0].path, path);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn active_nonmatching_content_reads_stop_between_buffers() {
+        for cancel in [false, true] {
+            assert_active_content_read_stops(b"nothing here\n", cancel);
+        }
+    }
+
+    #[test]
+    fn active_matching_content_reads_stop_buffered_matches() {
+        for cancel in [false, true] {
+            assert_active_content_read_stops(b"needle\n", cancel);
+        }
     }
 
     fn run(

@@ -600,7 +600,6 @@ impl SearchView {
     }
 
     fn add_hits(&mut self, hits: Vec<Hit>, cx: &mut Context<Self>) {
-        let root = (self.scope == Scope::Folder).then(|| self.folder.clone());
         let query = self.query(cx);
         let mut changed = false;
         let mut fresh: Vec<Row> = Vec::new();
@@ -617,6 +616,7 @@ impl SearchView {
             if !known {
                 if strong_name {
                     if self.name_count + fresh_strong >= MAX_STRONG_ROWS {
+                        changed = true;
                         self.names_capped = true;
                         self.control.cancel();
                         break;
@@ -625,6 +625,7 @@ impl SearchView {
                 } else {
                     let other = self.content_count + self.weak_count + fresh_others;
                     if other >= MAX_OTHER_ROWS {
+                        changed = true;
                         self.dropped += 1;
                         self.stop_contents_at_cap();
                         // A strong name later in this batch must still get in.
@@ -667,7 +668,8 @@ impl SearchView {
                     row.set_content((line, text, ranges));
                 }
             } else {
-                let row = Row::from_hit(hit, &self.home, root.as_deref(), strong_name);
+                let root = (self.scope == Scope::Folder).then_some(self.folder.as_path());
+                let row = Row::from_hit(hit, &self.home, root, strong_name);
                 fresh_at.insert(row.path.clone(), fresh.len());
                 fresh.push(row);
                 changed = true;
@@ -1834,6 +1836,7 @@ impl SearchView {
     fn footer_text(&self) -> String {
         footer_summary(FooterState {
             searching: self.searching,
+            matching: self.effective_match(),
             hits: self.hit_count,
             files: self.results.len(),
             names_capped: self.names_capped,
@@ -2577,6 +2580,7 @@ impl Render for SearchView {
 /// What the footer says; a pure function so the wording is unit-tested.
 struct FooterState<'a> {
     searching: bool,
+    matching: Match,
     /// Every accepted hit, including extra content lines for one file.
     hits: usize,
     /// Result rows: one per path.
@@ -2610,6 +2614,8 @@ fn footer_summary(state: FooterState<'_>) -> String {
         let dropped = state.dropped;
         return if state.searching {
             format!("Searching names… {results} · {dropped} more not shown")
+        } else if state.matching == Match::Names {
+            format!("{results} · {dropped} more not shown")
         } else {
             format!("{results} · {dropped} more not shown · contents stopped at {MAX_OTHER_ROWS}")
         };
@@ -2899,6 +2905,7 @@ mod tests {
     fn footer_summary_copy() {
         let state = |searching, hits, files, names_capped, contents_stopped, dropped, error| FooterState {
             searching,
+            matching: Match::All,
             hits,
             files,
             names_capped,
@@ -2929,6 +2936,12 @@ mod tests {
             footer_summary(state(false, 1, 1, false, true, 1, None)),
             "1 result · 1 more not shown · contents stopped at 20000"
         );
+        let mut names = state(false, MAX_OTHER_ROWS, MAX_OTHER_ROWS, false, true, 80_000, None);
+        names.matching = Match::Names;
+        assert_eq!(footer_summary(names), "20000 results · 80000 more not shown");
+        let mut contents = state(false, MAX_OTHER_ROWS, MAX_OTHER_ROWS, false, true, 1, None);
+        contents.matching = Match::Contents;
+        assert_eq!(footer_summary(contents), "20000 results · 1 more not shown · contents stopped at 20000");
         // The strong cap is the bigger fact, and an error outranks both.
         assert_eq!(
             footer_summary(state(false, 44, 15, true, true, 3, None)),

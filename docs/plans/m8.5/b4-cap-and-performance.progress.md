@@ -1,5 +1,5 @@
 # B4 — Cap and performance progress
-Branch: m8.5-b4-cap · PR: none · Last updated: 2026-11-18 · State: Ready for critique
+Branch: m8.5-b4-cap · PR: none · Last updated: 2026-11-18 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -12,11 +12,12 @@ Branch: m8.5-b4-cap · PR: none · Last updated: 2026-11-18 · State: Ready for 
 | 6 Docs | done (77991d9) | `docs/testing.md`: two budgets and the four footer states (Search result cap hand check), bench flags/output and the budget in the performance table, log fields; stale "First 20000 files" gone. |
 
 ## Questions
-- none yet.
+- Q1 (2026-11-18, critique C5): Names-only `f0` reports "contents stopped" although Names never reads contents. → User chose `omit_names_suffix`: omit that suffix in Names mode only; keep counts, budgets and All/Contents wording unchanged.
 
 ## Decisions
 - Branch cut from `main` at `d7ffb5d` (B3 merged) — plan's base — plan.
 - Keep the plan's two constants at 20,000 strong and 20,000 other rows — plan.
+- Critique Q1: Names-only weak-cap footer omits "contents stopped at 20000"; All and Contents retain it. This deliberately refines item 3's unconditional suffix to match the selected mode — user approved 2026-11-18.
 
 ## Bench
 
@@ -60,4 +61,43 @@ it, the names row has nothing comparable on `main`.
 - 2026-11-18: finish. `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo test --workspace` green (73.6 s). Bundle built with `./scripts/bundle.sh`; hand checks captured under `target/shots/`. `agent-job` could not update: its `meta.json` says "Extra data" (the job still appeared at start); progress-file writes are the source of truth.
 
 ## Next
-Ready for critique. The critic opens the PR after review; do not push.
+Commit the reviewed fixes and open the B4 PR. After user hand tests and squash-merge, next is `execute plan B5` (`docs/plans/m8.5/b5-regression.md`).
+
+## Critique
+Critic session: 2026-11-18 · Base: main @ d7ffb5d · Head reviewed: 575d65e
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | `matched` is never called for nonmatching buffers, so stopping contents left active nonmatching files reading through EOF. | `crates/crow-search/src/engine.rs:608-653` | code / literal | fix | Fixed in this critique: stack-only controlled reader; deterministic matching/nonmatching read and buffer-reuse regressions pass in the workspace suite. |
+| C2 | Rejected-only batches changed `dropped` or the strong-cap state without notifying GPUI; the visible footer could remain stale until another accepted row or completion. | `crates/crow-app/src/search.rs:618-630` | UX / semantic | fix | Fixed in this critique: notify for cap-only state changes. Existing rejection test passes, extended with a strong hit after rejections in the same batch. |
+| C3 | Each hit batch cloned the folder path solely to avoid a mutable borrow, introducing an unnecessary hot-path allocation. | `crates/crow-app/src/search.rs:602-672` | code sense / literal | fix | Fixed in this critique: borrow the folder only when constructing an accepted row. Existing cap/selection tests pass. |
+| C4 | At 640 px the existing scope bar clips the right-hand skip switch on both main and the branch. | `target/shots/b4-critique-main-narrow-light-all.png`, `b4-critique-final-narrow-light-all.png` | UI / semantic | note | Left: unchanged scope-bar layout, outside B4's footer/cap change. |
+| C5 | Names-only weak matches report "contents stopped at 20000" even though no contents were searched. Reproduced with Names `f0` in the 100k fixture. The implementation follows the plan, but the copy contradicts the selected mode (principle 4, Legible). | `crates/crow-app/src/search.rs:2610-2617`; `target/shots/b4-critique-final-weak-all.png` vs `b4-critique-main-weak-all.png` | UX / semantic | ask | Q1 → user approved omitting the suffix in Names only; fixed in this critique. Explicit Names/Contents footer cases and final workspace suite pass. Actual 1280 px dark and 640 px light windows show only results/dropped counts (`b4-critique-approved-weak-*`). |
+
+Checks re-run: `cargo fmt --check` ✓; `cargo clippy --workspace --all-targets -- -D warnings` ✓; `cargo test --workspace` ✓ (821 passed, 1 ignored, 12 suites); signed release bundle ✓; CLI usage/unknown flag/extra argument/missing directory errors ✓; isolated Names/Contents smoke ✓ (one hit each, no first-name time in Contents). Final interleaved search benchmarks ✓, all four rows within budget. Listing/scroll bench not needed: no listing, scrolling or first-paint code changed.
+Looked at: main and branch bundles built with `scripts/bundle.sh`, both 1280×800 and 640×800; FireBox dark/Finder and Solarized Light/Vim; broad All/Names/Contents, exact-name narrowing, result cursor, Escape, empty folder and `target/fixture-100k`. Final narrow footer is warning-coloured and single-line in both themes; these strings fit, so the ellipsis was not exercised. Screenshot evidence is under `target/shots/b4-critique-*`. System Events exposes only the window group and native window buttons: VoiceOver speech/announcement frequency remains a hand check.
+Verdict: better after the fixes: a filled content budget no longer discards later strong names, and the footer explains the limit without adding chrome or contradicting Names mode. No open Fix or Ask findings; one unchanged out-of-scope UI note and the listed human hand checks remain.
+
+Review notes: B4's canonical menu-bar job cannot load its malformed JSON metadata (`Extra data`); a separate review job is receiving phase notes. Rust-analyzer exited on its first references request, so source and compiler checks are the fallback. No new public API is changed by the critique fixes.
+
+Verification log: initial fmt/clippy passed. The first workspace run stopped on a new review-only assertion that tried to read `Role::Status` from GPUI's interactive-element registry; status text is not an interactive element. Removed that invalid assertion (the original count assertions remain, and same-batch late-name coverage is stronger), then restarted the required gates. A CLI smoke initially assumed the existing corpus had a `needle` name; it correctly reported zero name hits. Replaced that smoke input with an isolated deterministic file rather than changing production behavior.
+
+### Critique benchmark
+
+Three interleaved runs per binary/query on the unchanged 200k fixture, after the final engine fix and workspace gates. Main `d7ffb5d` built with `scripts/bundle.sh` in a detached temporary worktree with its own release target; its only temporary source patch adds the CLI Names flag, not engine changes. Branch used the final signed bundle. Zero-hit first latency is "none", not main's old printed `0ms`.
+
+| Query | Main first / total (ms) | Branch first / total (ms) | Budget |
+| --- | --- | --- | --- |
+| `needle` All | 2 / 1576 | 1.1 / 1518.8 | pass |
+| `back` All | none / 1462 | none / 1462.3 | pass |
+| `backup` All | none / 1479 | none / 1470.5 | pass |
+| `file-01-02` Names | 4 / 185 | 3.9 / 183.8 | pass |
+
+Matching hit counts: 200000, 0, 0, 18799; 200544 entries scanned in every run. Raw local evidence: `/tmp/crow-b4-critique-bench-raw.txt`.
+
+### Remaining hand checks
+
+- [ ] VoiceOver (Cmd-F5): search `needle` in `target/fixture-search-200k`; after completion, the settled footer should be announced once, not once per arriving batch. Repeat Names `f0` in `target/fixture-100k`: counts and dropped count are announced without a claim about contents.
+- [ ] Human final pass on the signed bundle: All `needle` → exact file name, Names `file`, and Names `f0`; light/dark, 640 px and wide. The automated visual pass covers these surfaces, but cannot establish spoken timing.
+
+Final review verification: after Q1, fmt/clippy clean and workspace tests green again (821 passed, 1 ignored, 12 suites); signed bundle rebuilt. Actual Names-only weak-cap footer inspected in dark/wide and light/640 px. Benchmark engine/CLI unchanged by Q1, so the recorded final-engine medians remain applicable. Temporary baseline worktree and smoke-driver scripts removed; local screenshots and raw benchmark evidence retained. Publication scan of the actual `origin/main..HEAD` range and selective added lines is clean; an earlier scan without an upstream included already-published history, not just this branch.

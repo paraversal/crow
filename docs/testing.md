@@ -70,7 +70,9 @@ literal and `/regex/` contents report the first matching line, text and ranges w
 batches stay bounded (one excerpt per file, 256 hits at most) and the first hit leaves at once, a name
 hit arrives before its own content read, a FIFO does not stall the walk, an unreadable folder is
 reported as a skip, binary files are not read, and cancelling stops the stream while stopping
-contents keeps every name streaming. `corpus_cases.rs`
+contents keeps every name streaming. Both controls interrupt active content reads between buffers,
+including nonmatching files; buffered matching lines stop too, and the searcher can be reused.
+`corpus_cases.rs`
 builds the deterministic corpus (`crow_search::corpus`) and runs its 23 named cases through the real
 engine — the user's `.backu` case, hidden on and off, the exclusion sets, Search everything, the
 symlink and its child, the package inside and entered, the unreadable folder and the FIFO — each under a 10 s deadline.
@@ -299,7 +301,7 @@ and sizes; the files are empty) is `b659b9a8…`, unchanged since before H2.
 | --- | --- |
 | First rows on screen, 100k folder (warm app) | under 50 ms (M3: 9–10 ms; M5: 10–11 ms; M5-fix: 11 ms; M5-fix-2: 10 ms; M6: 10 ms; U1: 10 ms; U4: 10–11 ms, filtered 10–17 ms; U5: 10–11 ms; U11: 8 ms warm, 39–70 ms cold; H2: 7 ms warm, 132 ms cold) |
 | Scroll, 99th percentile frame | under 1.5 × the display's frame time (M3: 8.6–8.8 ms at 120 Hz; M5: 9.7–13 ms, main on the same machine 8.8–14.6 ms; M5-fix: 8.9 ms; M5-fix-2: 9.0 ms; M6: 8.9–9.1 ms; U1: 8.79 ms, main on the same machine 8.93 ms; U4: 8.85–8.95 ms, main on the same machine 8.84–8.86 ms, filtered 8.82–9.03 ms; U5: 8.87–9.06 ms, main on the same machine 8.86–8.95 ms; U10: Full 9.73–9.83 ms, Off 9.83 ms, Low 9.97 ms; warm first paint 8–10 ms in all three; UI overhaul as a whole (U11): 8.66–9.86 ms, `main` on the same machine 9.64–9.77 ms, M6 8.66–8.69 ms; H2: 8.70 ms p99, avg 8.42, max 40.00) |
-| Search, 200k nested files (`--bench-search`, median of 3) | first hit ≤ `main` + 5 ms; total ≤ `main` × 1.10. B4 medians, branch vs `main`: `needle` (all) 1.0 ms / 1568.7 ms vs 1 ms / 1603 ms; `back` (all) no hit / 1461.9 ms vs 0 ms / 1449 ms; `backup` (all) no hit / 1448.5 ms vs 0 ms / 1457 ms; `file-01-02 --names` 2.2 ms / 184.5 ms vs 5 ms / 210 ms. The fixture's files all contain `needle`, so `back` and `backup` measure a full walk with no hits. A regression past the budget is a blocker: profile with `samply` or Instruments before changing code. |
+| Search, 200k nested files (`--bench-search`, median of 3) | first hit ≤ `main` + 5 ms; total ≤ `main` × 1.10. B4 critique medians, branch vs `main`: `needle` (all) 1.1 ms / 1518.8 ms vs 2 ms / 1576 ms; `back` (all) no hit / 1462.3 ms vs no hit / 1462 ms; `backup` (all) no hit / 1470.5 ms vs no hit / 1479 ms; `file-01-02 --names` 3.9 ms / 183.8 ms vs 4 ms / 185 ms. The fixture's files all contain `needle`, so `back` and `backup` measure a full walk with no hits. A regression past the budget is a blocker: profile with `samply` or Instruments before changing code. |
 
 ### Search diagnostics
 
@@ -417,7 +419,7 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Search idle | Cmd-F with nothing typed: the heading follows All / Names / Contents and the left-aligned examples fill the field, switch to This Mac or Home, or flip the switch; the last is plain key text and disappears when no `exclude.toml` set is enabled. The key line follows `keymap = "vim"`. |
 | Search errors | Type `/(/`: one red footer line, "Invalid pattern: unclosed group"; no rows, and the body shows "Can't search: Invalid pattern: unclosed group" and suggests removing the slashes. |
 | Search themes | FireBox and a light scheme: switch knob, selected segment and match highlights on the selected row stay readable; VoiceOver reads the switch as on/off and the footer once per finished search. |
-| Search result cap | Two budgets: 20,000 strong (contiguous) name rows, and 20,000 other rows (content and weak fuzzy names). In `target/fixture-search-200k`, Cmd-F `needle` (All): the footer ends "… more not shown · contents stopped at 20000" in `warning`; while it still says "Searching names…", type `file-01-02-00001` without leaving search: that exact file becomes the top row, because strong names still stream. Names `file`: the footer says "First 20000 name matches · refine the search", and typing more narrows. At 640 px the footer stays on one line and ellipsizes; VoiceOver reads it once when the search settles. |
+| Search result cap | Two budgets: 20,000 strong (contiguous) name rows, and 20,000 other rows (content and weak fuzzy names). In `target/fixture-search-200k`, Cmd-F `needle` (All): the footer ends "… more not shown · contents stopped at 20000" in `warning`; while it still says "Searching names…", type `file-01-02-00001` without leaving search: that exact file becomes the top row, because strong names still stream. Names `file`: the footer says "First 20000 name matches · refine the search", and typing more narrows. Names `f0` in `target/fixture-100k` fills the weak budget: "20000 results · 80000 more not shown", without claiming contents were stopped. At 640 px the footer stays on one line and ellipsizes; VoiceOver reads it once when the search settles. |
 | Search context menu | Right-click or Ctrl-click a result: Open, Reveal in Folder, Quick Look, Copy, Cut, Copy Path, Move to Trash. An unselected row is selected first; a row in a multi-selection keeps it. Each item runs once and the menu closes; the file list and sidebar menus are unchanged. Check in the Vim layer too. |
 
 ### Palette and sheets

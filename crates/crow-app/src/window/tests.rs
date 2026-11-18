@@ -3190,6 +3190,14 @@ fn weak_hits_after_the_cap_are_counted(cx: &mut TestAppContext) {
     search.update(&mut cx, |search, cx| search.add_test_hits(hits, cx));
     assert_eq!(search.read_with(&cx, |s, _| s.result_count()), MAX_OTHER_ROWS + 1, "no new rows fit");
     assert_eq!(search.read_with(&cx, |s, _| s.dropped()), 10);
+
+    // Rejected rows must not hide a later strong name in the same engine batch.
+    let late_strong = root.join("qqzz-late.txt");
+    let hits = vec![content_hit(root.join("rejected-again.txt")), strong_hit(late_strong.clone())];
+    search.update(&mut cx, |search, cx| search.add_test_hits(hits, cx));
+    assert_eq!(search.read_with(&cx, |s, _| s.result_count()), MAX_OTHER_ROWS + 2, "only the strong name fits");
+    assert!(search.read_with(&cx, |s, _| s.result_paths().contains(&late_strong)));
+    assert_eq!(search.read_with(&cx, |s, _| s.dropped()), 11);
 }
 
 #[gpui::test]
