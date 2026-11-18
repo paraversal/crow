@@ -11,9 +11,11 @@ use crow_search::{Control, Hit, HitKind, Query, RuleSet};
 use crate::actions::StartFilter;
 use crate::search::{MAX_OTHER_ROWS, MAX_STRONG_ROWS};
 
+use super::operation_ui::quit;
 use super::palette_view::{PALETTE_LIST_PAD, PaletteMode};
 use super::*;
 use crate::palette::{Item, Row, Source};
+use crow_core::motion::Fx;
 
 fn test_ranges(start: usize, end: usize) -> Vec<std::ops::Range<usize>> {
     std::iter::once(start..end).collect()
