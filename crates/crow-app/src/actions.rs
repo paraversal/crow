@@ -89,6 +89,8 @@ actions!(
         // Search
         ShowSearch,
         SearchEverything,
+        /// ⇧⌘H in search: search the whole home folder.
+        SearchHome,
         CycleMatch,
         CloseSearch,
         SearchReveal,
@@ -231,8 +233,11 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-k", ShowCommandPalette, Some("Crow")),
         KeyBinding::new("cmd-f", ShowSearch, Some("Crow")),
         KeyBinding::new("cmd-shift-a", SearchEverything, Some("Search")),
+        // Finder's Go ▸ Home; in a search, "go Home" means "search Home".
+        KeyBinding::new("cmd-shift-h", SearchHome, Some("Search")),
         KeyBinding::new("cmd-shift-m", CycleMatch, Some("Search")),
         KeyBinding::new("cmd-shift-a", SearchEverything, Some("Crow")),
+        KeyBinding::new("cmd-shift-h", SearchHome, Some("SearchResults")),
         KeyBinding::new("escape", CloseSearch, Some("SearchResults")),
         KeyBinding::new("up", MoveUp, Some("SearchResults")),
         KeyBinding::new("down", MoveDown, Some("SearchResults")),

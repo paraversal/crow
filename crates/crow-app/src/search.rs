@@ -24,7 +24,7 @@ use gpui::{
 
 use crate::actions::{
     CloseSearch, CopyFiles, CopyPath, CutFiles, CycleMatch, DeletePermanently, MoveDown, MoveToFirst, MoveToLast,
-    MoveToTrash, MoveUp, OpenSelection, QuickLook, SearchEverything, SearchFocusField, SearchFocusResults,
+    MoveToTrash, MoveUp, OpenSelection, QuickLook, SearchEverything, SearchFocusField, SearchFocusResults, SearchHome,
     SearchReveal, SelectAll,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
@@ -189,6 +189,7 @@ struct Row {
 enum ExampleAction {
     Fill(&'static str),
     ThisMac,
+    Home,
     Everything,
 }
 
@@ -1229,6 +1230,15 @@ impl SearchView {
         self.set_everything(!self.everything, cx);
     }
 
+    /// Search Home, keeping the field or results focused.
+    pub fn search_home(&mut self, cx: &mut Context<Self>) {
+        self.set_scope(Scope::Home, cx);
+    }
+
+    fn search_home_action(&mut self, _: &SearchHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.search_home(cx);
+    }
+
     /// All → Names → Contents. Spotlight is names-only, so it stays put.
     fn cycle_match(&mut self, _: &CycleMatch, _: &mut Window, cx: &mut Context<Self>) {
         if self.scope == Scope::ThisMac {
@@ -1361,6 +1371,7 @@ impl SearchView {
             // keys::context_stack (KeyScope::Search) mirrors this.
             .key_context("Search")
             .on_action(cx.listener(Self::search_everything))
+            .on_action(cx.listener(Self::search_home_action))
             .on_action(cx.listener(Self::cycle_match))
             .on_action(cx.listener(Self::close_action))
             .on_action(cx.listener(Self::focus_results_from_field))
@@ -1737,6 +1748,8 @@ impl SearchView {
             .unwrap_or_else(|| div().text_color(fg).child("⇧⌘A").into_any_element());
         let spoken =
             keys::spoken_for(&SearchEverything, KeyScope::Search, cx).unwrap_or_else(|| "Shift Command A".to_owned());
+        let home_spoken =
+            keys::spoken_for(&SearchHome, KeyScope::Search, cx).unwrap_or_else(|| "Shift Command H".to_owned());
         let examples = div()
             .flex()
             .flex_col()
@@ -1765,9 +1778,17 @@ impl SearchView {
                 "Search This Mac".to_owned(),
                 cx,
             ))
+            .child(self.render_example(
+                3,
+                div().child("Home").into_any_element(),
+                "your whole home folder",
+                ExampleAction::Home,
+                format!("Search Home, {home_spoken}"),
+                cx,
+            ))
             .when(self.skip_label.is_some(), |examples| {
                 examples.child(self.render_example(
-                    3,
+                    4,
                     keycap,
                     "also look inside node_modules, target, .git …",
                     ExampleAction::Everything,
@@ -1842,6 +1863,7 @@ impl SearchView {
                                 input.update(cx, |input, cx| input.set_text(text, window, cx));
                             }
                             ExampleAction::ThisMac => this.set_scope(Scope::ThisMac, cx),
+                            ExampleAction::Home => this.search_home(cx),
                             ExampleAction::Everything => {
                                 this.search_everything(&SearchEverything, window, cx);
                             }
@@ -2321,6 +2343,7 @@ impl Render for SearchView {
             // keys::context_stack (KeyScope::Search) mirrors this.
             .key_context("Search")
             .on_action(cx.listener(Self::search_everything))
+            .on_action(cx.listener(Self::search_home_action))
             .on_action(cx.listener(Self::cycle_match))
             .on_action(cx.listener(Self::close_action))
             .size_full()

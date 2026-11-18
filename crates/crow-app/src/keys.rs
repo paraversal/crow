@@ -378,6 +378,7 @@ mod tests {
                 (CommandId::StartFilter, "/"),
                 (CommandId::ShowSearch, "⌘F"),
                 (CommandId::SearchEverything, "⇧⌘A"),
+                (CommandId::SearchHome, "⇧⌘H"),
                 (CommandId::ShowCommandPalette, "⌘K"),
                 (CommandId::SearchReveal, "⌘R"),
                 (CommandId::Undo, "⌘Z"),

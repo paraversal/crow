@@ -2715,6 +2715,39 @@ fn search_scope_buttons_switch_scope(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn search_home_key_switches_scope(cx: &mut TestAppContext) {
+    let root = fixture("search-home-key");
+    std::fs::write(root.join("needle.txt"), "needle\n").expect("create fixture");
+    let (view, mut cx) = open(cx, &root);
+    // Home is the fixture, so ⇧⌘H never walks the developer's home folder.
+    cx.update(|_, cx| {
+        cx.global_mut::<crate::ui::Ui>().home = root.clone();
+    });
+
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Folder);
+
+    // From the field: the scope changes and the field keeps focus.
+    cx.simulate_keystrokes("cmd-shift-h");
+    settle(&view, &mut cx);
+    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Home);
+    assert!(search_input_focused(&view, &mut cx), "focus stays in the field");
+
+    // From the results: the same key changes the scope without selecting a row.
+    click_selector(&mut cx, "search-scope-folder");
+    settle(&view, &mut cx);
+    cx.simulate_input("needle");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("down");
+    assert!(search_results_focused(&view, &mut cx), "↓ enters the results");
+    cx.simulate_keystrokes("cmd-shift-h");
+    wait_for_search(&view, &mut cx);
+    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Home);
+}
+
+#[gpui::test]
 fn search_everything_turns_the_rules_off(cx: &mut TestAppContext) {
     let root = fixture("search-rules");
     std::fs::create_dir_all(root.join("node_modules/pkg")).expect("create fixture");
@@ -3260,12 +3293,24 @@ fn search_idle_example_this_mac_switches_scope(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn search_idle_example_home_switches_scope(cx: &mut TestAppContext) {
+    let root = fixture("search-idle-home");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    click_selector(&mut cx, "search-example-3");
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Home);
+    assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "", "the field stays empty");
+}
+
+#[gpui::test]
 fn search_idle_example_everything_flips_rules(cx: &mut TestAppContext) {
     let root = fixture("search-idle-everything");
     let (view, mut cx) = open(cx, &root);
     cx.simulate_keystrokes("cmd-f");
     settle(&view, &mut cx);
-    click_selector(&mut cx, "search-example-3");
+    click_selector(&mut cx, "search-example-4");
     let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
     assert!(search.read_with(&cx, |search, _| search.everything()));
 }

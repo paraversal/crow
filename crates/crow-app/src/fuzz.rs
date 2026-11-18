@@ -333,6 +333,10 @@ fn allowed(key: &str, tabs: usize, windows: usize) -> bool {
         // Quitting and minimizing are not fuzzable: the test platform has no
         // implementation for the latter, and the former ends the run.
         "cmd-q" | "cmd-m" | "ctrl-cmd-space" => false,
+        // ⇧⌘H searches the real home folder under `ui::init_for_tests`, which would
+        // walk the developer's `~` mid-run. The Home segment has no debug selector,
+        // so this is the only route into a Home walk today.
+        "cmd-shift-h" => false,
         "cmd-w" if tabs <= 1 => false,
         "cmd-t" | "cmd-enter" if tabs >= MAX_TABS => false,
         "cmd-n" if windows >= MAX_WINDOWS => false,
