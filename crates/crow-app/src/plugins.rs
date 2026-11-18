@@ -672,6 +672,26 @@ mod tests {
     }
 
     #[test]
+    fn shipped_p1b_fixtures_load_as_packages() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins");
+        let fixture = crow_plugin::load_package(&root.join("p1b-fixture"), &crow_plugin::Limits::default())
+            .expect("valid fixture");
+        assert_eq!(fixture.manifest.id.as_str(), "example.p1b-fixture");
+        assert!(fixture.manifest.provides.contains(&ExtensionKind::Column));
+        assert!(fixture.manifest.provides.contains(&ExtensionKind::Preview));
+        assert_eq!(fixture.manifest.permissions.fs(), crow_plugin::FsAccess::Read);
+        assert!(fixture.files.contains_key("icons/pack.toml"));
+        for invalid in ["p1b-invalid-handle", "p1b-invalid-field", "p1b-budget"] {
+            assert!(
+                crow_plugin::load_package(&root.join(invalid), &crow_plugin::Limits::default()).is_ok(),
+                "{invalid} loads; its defect is exercised at evaluation time"
+            );
+        }
+        assert!(root.join("p1b-fixture/tree/fixture.txt").is_file());
+        assert!(root.join("p1b-fixture/tree/fixture-folder").is_dir());
+    }
+
+    #[test]
     fn raw_non_utf8_names_still_match_by_suffix() {
         use std::ffi::OsStr;
         let path = Path::new(OsStr::from_bytes(b"bad\xff.PNG"));

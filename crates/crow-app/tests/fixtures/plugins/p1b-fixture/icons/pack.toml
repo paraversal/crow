@@ -1,0 +1,4 @@
+# P1B fixture icon pack. P3A owns the real parser; P1B only checks the approved
+# bytes survive approval and withdrawal.
+api = 1
+name = "P1B fixture"

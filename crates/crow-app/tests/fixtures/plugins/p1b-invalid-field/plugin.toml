@@ -1,0 +1,7 @@
+id = "example.p1b-invalid-field"
+name = "P1B Invalid Field"
+version = "0.1.0"
+api = 1
+entry = "main.rhai"
+provides = ["column"]
+permissions = { fs = "none" }

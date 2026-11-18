@@ -58,8 +58,8 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 | File | What it holds |
 | --- | --- |
 | `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), folder sizes (`folder_sizes`: `"off"` or `"visible"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), font, the terminal app Open Terminal Here uses (`terminal`: a name like `"Terminal"` or `"iTerm"`, or a path to an app), hidden files (shown by default), whether search still matches hidden items while they are hidden (`search_includes_hidden`, default on), the mode new searches start in (`search_match`: `"all"`, `"names"` or `"contents"`), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for all of these; the file stays authoritative and the window follows edits made in a text editor |
-| `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
-| `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), and whether Recent and Locations show |
+| `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Also chooses list columns and plugin preview providers. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
+| `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), whether Recent and Locations show, and the order/visibility/collapse state of built-in and plugin sections |
 | `plugins.toml` | One approval record per installed plugin: `enabled`, package `digest` and the API-1 `fs` capability. Bundles live in `plugins/`; see [docs/plugins.md](docs/plugins.md). |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
 
@@ -180,7 +180,9 @@ path: type a name, Tab completes, Return goes there or selects a file; a pasted 
 shell-escaped or a `file://` URL), Cmd-L (or a click on empty space in the bottom bar) edits
 the path the bar shows in place: Tab completes, Return goes there or selects a file, Esc puts the path
 back, Cmd-, (Settings), Cmd-Shift-. and Space. Cmd-K's
-"Settings" opens the window and "Edit settings.toml" opens the file directly. Cmd-Shift-P shows
+"Settings" opens the window and "Edit settings.toml" opens the file directly. A Running
+plugin's commands appear in `File ▸ Plugins`, in Cmd-K's `>` command list and, for selection
+commands that opt in, the file context menu; an unavailable command is greyed out. Cmd-Shift-P shows
 or hides the right column (in list and column view, search included; Quick Look still
 works). Cmd-I opens it on the Info tab, and a second Cmd-I closes it; the tab strip switches
 between Preview and Info. The Info tab shows the item's name, kind, size, where, created, modified and
