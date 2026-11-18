@@ -1,6 +1,6 @@
 # B3 — Scope and misses progress
 
-Branch: `m8.5-b3-scope` · PR: none · Last updated: 2026-11-18 · State: In critique
+Branch: `m8.5-b3-scope` · PR: [#58](https://github.com/paraversal/file-crow/pull/58) · Last updated: 2026-11-18 · State: PR open
 
 ## Status
 
@@ -51,12 +51,12 @@ Branch: `m8.5-b3-scope` · PR: none · Last updated: 2026-11-18 · State: In cri
 
 ## Critique
 
-Critic session: 2026-11-18 · Base: `main` @ `42966fe` · Head reviewed: `96cde9a`
+Critic session: 2026-11-18 · Base: `main` @ `42966fe` · Head reviewed: `96cde9a` + critique `b9d64c7`
 
 | # | Finding | Where | Area | Kind | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| C1 | The fuzzer skipped ⇧⌘H under the real home *and* in `crow --fuzz`, whose home is the scratch root (`fuzz_live.rs:217`). B5 expects the generator to reach ⇧⌘H (`b5-regression.md:52`), and the plan's cap was conditional ("if it's the real home folder"). | `crates/crow-app/src/fuzz.rs:335` | code | fix | fixed (this critique commit): `GenState.home_is_real`, set from `Ui.home == crow_core::home()`; the test fuzzer skips, the live fuzzer presses it. New unit test. |
-| C2 | The skipped-folders hand check said Search everything makes the link go away, but unreadable folders stay skipped and keep the link. | `docs/testing.md:407` | docs | fix | fixed (this critique commit): the sentence now names excluded/hidden/package folders and says unreadable ones stay listed. |
+| C1 | The fuzzer skipped ⇧⌘H under the real home *and* in `crow --fuzz`, whose home is the scratch root (`fuzz_live.rs:217`). B5 expects the generator to reach ⇧⌘H (`b5-regression.md:52`), and the plan's cap was conditional ("if it's the real home folder"). | `crates/crow-app/src/fuzz.rs:335` | code | fix | fixed (`b9d64c7`): `GenState.home_is_real`, set from `Ui.home == crow_core::home()`; the test fuzzer skips, the live fuzzer presses it. New unit test. |
+| C2 | The skipped-folders hand check said Search everything makes the link go away, but unreadable folders stay skipped and keep the link. | `docs/testing.md:407` | docs | fix | fixed (`b9d64c7`): the sentence now names excluded/hidden/package folders and says unreadable ones stay listed. |
 | C3 | README's search/menus text is now stale: "four examples" (there are up to five), and Edit carries Filter This Folder, Find… and Find Everything… (Search Home is missing). | `README.md:95`, `README.md:169` | docs | note | left: B5 owns README (`b5-regression.md:60`); its docs item does not name these two lines, so it should. |
 | C4 | The index's Architecture 8 wanted the package test in `crow-core` so `crow-search` need not depend on `crow-fs`; Q1's options omitted the existing re-export pattern (`crow_core` already re-exports `crow_fs::natural_cmp`), and option A adds the direct dependency. | `crates/crow-search/Cargo.toml:10`, `crates/crow-core/src/lib.rs:78` | code sense | note | left: user chose A after Q1; the behavior is right. A `pub use crow_fs::is_package_name` in `crow-core` would drop the direct dep if wanted later. |
 | C5 | The Edit ▸ Search Home item is always enabled, not "only while search is open" as the plan says; with no search it opens one scoped Home. | `crates/crow-app/src/palette.rs:434` | plan / UX | note | left: the Decision explains it, and it mirrors Find Everything…, which is also always enabled. I agree with the choice. |
@@ -68,4 +68,4 @@ Verdict: better. The miss now names the folder, offers the three ways to widen i
 
 ## Next
 
-Ready for critique. The five hand checks below need the built app; the critic builds `scripts/bundle.sh --open` and runs them.
+PR [#58](https://github.com/paraversal/file-crow/pull/58) open. The critic built `target/bundle/Crow.app` and checked the empty state, idle examples, grouped skips, privacy row and 640/light/dark; the Folder tooltip, VoiceOver, the real System Settings action and a real-home result remain for the user's hand test. Next: B4, `docs/plans/m8.5/b4-cap-and-performance.md`, after B3 merges.
