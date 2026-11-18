@@ -9,7 +9,8 @@
 //! crow --make-fixture DIR [N]      create N (default 100,000) empty files in DIR
 //! crow --make-search-fixture DIR [N]  create N (default 200,000) nested text files
 //! crow --make-search-corpus DIR   create the deterministic search corpus (fixtures + named cases)
-//! crow --bench-search DIR [QUERY]  time a name+contents walk, print first hit and total
+//! crow --bench-search DIR [QUERY] [--names|--contents]
+//!                                  time a walk, print first hit, first name hit and totals
 //! crow --search-trace DIR QUERY [--target PATH] [--names|--contents] [--hidden|--no-hidden] [--everything]
 //!                                  run the real engine and print each batch, the totals and one verdict
 //! crow --motion-lab                a fake folder to try motion modes and feedback sounds
@@ -93,15 +94,50 @@ fn make_search_fixture(dir: &std::path::Path, count: usize) -> std::io::Result<(
     Ok(())
 }
 
-fn bench_search(dir: &std::path::Path, text: &str) -> Result<(), String> {
+/// Time a walk through the real engine. This is an engine bench: it does not
+/// apply the app's result cap, so it measures the walk, the matcher and the
+/// content reads rather than the panel's budgets.
+fn bench_search(args: &[String]) -> Result<(), String> {
     use std::sync::Arc;
 
+    let Some(dir) = args.first() else {
+        return Err("usage: crow --bench-search DIR [QUERY] [--names|--contents]".to_owned());
+    };
+    let mut text = "needle".to_owned();
+    let mut query_set = false;
+    let mut names = true;
+    let mut contents = true;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--names" => {
+                names = true;
+                contents = false;
+                index += 1;
+            }
+            "--contents" => {
+                names = false;
+                contents = true;
+                index += 1;
+            }
+            other if other.starts_with("--") => return Err(format!("unknown argument {other}")),
+            other => {
+                if query_set {
+                    return Err(format!("unexpected argument {other}"));
+                }
+                text = other.to_owned();
+                query_set = true;
+                index += 1;
+            }
+        }
+    }
+    let dir = std::path::Path::new(dir);
     // io-ok: CLI bench, before any window opens
     let root = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
     let rules = crow_search::RuleSet::from_config(&crow_core::Exclude::default(), &crow_core::home())?;
     let query = crow_search::Query {
-        names: Some(text.to_owned()),
-        contents: Some(text.to_owned()),
+        names: names.then(|| text.clone()),
+        contents: contents.then(|| text.clone()),
         enter_hidden_folders: false,
         include_hidden: true,
         rules: Arc::new(rules),
@@ -110,24 +146,35 @@ fn bench_search(dir: &std::path::Path, text: &str) -> Result<(), String> {
     let control = crow_search::Control::new();
     let started = std::time::Instant::now();
     let mut first_hit = None;
+    let mut first_name_hit = None;
     let mut hits = 0;
     let summary = crow_search::search(
         &root,
         &query,
         |batch| {
+            let elapsed = started.elapsed();
             if first_hit.is_none() {
-                first_hit = Some(started.elapsed());
+                first_hit = Some(elapsed);
+            }
+            if first_name_hit.is_none() && batch.iter().any(|hit| matches!(hit.kind, crow_search::HitKind::Name { .. }))
+            {
+                first_name_hit = Some(elapsed);
             }
             hits += batch.len();
         },
         &control,
     );
+    let ms = |time: Option<std::time::Duration>| {
+        time.map_or_else(|| "none".to_owned(), |time| format!("{:.1}ms", time.as_secs_f64() * 1000.0))
+    };
     println!(
-        "SEARCH first_hit={:.0}ms total={:.0}ms hits={hits} scanned={} skipped={}",
-        first_hit.unwrap_or_default().as_secs_f64() * 1000.0,
+        "SEARCH first_hit={} first_name_hit={} total={:.1}ms hits={hits} scanned={} skipped={} contents_stopped={}",
+        ms(first_hit),
+        ms(first_name_hit),
         started.elapsed().as_secs_f64() * 1000.0,
         summary.scanned,
-        summary.skipped.len()
+        summary.skipped.len(),
+        summary.contents_stopped
     );
     Ok(())
 }
@@ -426,15 +473,10 @@ fn main() -> ExitCode {
     }
 
     if args.first().map(String::as_str) == Some("--bench-search") {
-        let Some(dir) = args.get(1).map(PathBuf::from) else {
-            eprintln!("usage: crow --bench-search DIR [QUERY]");
-            return ExitCode::FAILURE;
-        };
-        let query = args.get(2).map(String::as_str).unwrap_or("needle");
-        return match bench_search(&dir, query) {
+        return match bench_search(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("{}: {e}", dir.display());
+                eprintln!("{e}");
                 ExitCode::FAILURE
             }
         };
