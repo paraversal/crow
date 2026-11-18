@@ -1376,6 +1376,16 @@ fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run"
 fn run(ctx) { while true { } }
 "#;
 
+    const LOOP_ON_HOLD: &str = r#"
+fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run" } ] }
+fn run(ctx) { hold_worker("cancel-during-evaluation"); while true { } }
+"#;
+
+    const LOOP_BEFORE_BUDGET: &str = r#"
+fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run" } ] }
+fn run(ctx) { hold_worker("cancel-before-budget"); while true { } }
+"#;
+
     const EXCERPT: &str = r#"
 fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run" } ] }
 fn run(ctx) { #{ kind: "copy_text", text: ctx.entries[0].excerpt } }
@@ -1874,14 +1884,39 @@ fn run(ctx) { hold_worker("saturation-a"); #{ kind: "copy_text", text: "a" } }
     fn ticket_cancel_during_evaluation_is_cancelled_and_keeps_the_plugin_running() {
         let mut limits = test_limits();
         limits.call_deadline = Duration::from_secs(5);
-        let mut service = ServiceHarness::new(&[("example.a", LOOP)], limits);
+        let mut service = ServiceHarness::new(&[("example.a", LOOP_ON_HOLD)], limits);
         service.approve("example.a");
         let generation = service.generation("example.a");
         let ticket =
             service.handle.try_evaluate(extension("example.a", "copy"), generation, 1, Harness::input()).unwrap();
-        std::thread::sleep(Duration::from_millis(5));
+        crate::worker::test_gate::wait_until_entered("cancel-during-evaluation");
         ticket.cancel();
         ticket.cancel();
+        crate::worker::test_gate::release("cancel-during-evaluation");
+        assert_eq!(service.wait_terminal(&ticket), RequestResult::Error(RequestError::cancelled()));
+        service.wait_inventory(|inventory| {
+            inventory.plugins.iter().any(|entry| {
+                entry.id.as_ref().is_some_and(|id| id.as_str() == "example.a") && entry.state == PluginState::Running
+            })
+        });
+    }
+
+    #[test]
+    fn cancellation_before_a_budget_termination_is_still_cancelled() {
+        let mut limits = test_limits();
+        limits.call_deadline = Duration::from_secs(5);
+        // Rhai can hit the operation ceiling before its progress callback sees
+        // the cancel token. The engine error must still map to cancellation so
+        // the plugin is not paused for a user's Cancel.
+        limits.max_operations = 10;
+        let mut service = ServiceHarness::new(&[("example.a", LOOP_BEFORE_BUDGET)], limits);
+        service.approve("example.a");
+        let generation = service.generation("example.a");
+        let ticket =
+            service.handle.try_evaluate(extension("example.a", "copy"), generation, 1, Harness::input()).unwrap();
+        crate::worker::test_gate::wait_until_entered("cancel-before-budget");
+        ticket.cancel();
+        crate::worker::test_gate::release("cancel-before-budget");
         assert_eq!(service.wait_terminal(&ticket), RequestResult::Error(RequestError::cancelled()));
         service.wait_inventory(|inventory| {
             inventory.plugins.iter().any(|entry| {

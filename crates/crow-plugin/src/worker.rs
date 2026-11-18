@@ -186,6 +186,14 @@ impl Runtime {
         *self.deadline.lock().unwrap() = None;
         *self.call_cancel.lock().unwrap() = None;
     }
+
+    /// Read before `end()` clears the call token. A cancellation that races a
+    /// budget or deadline termination still reports as cancelled; otherwise a
+    /// user's Cancel could pause the whole plugin.
+    fn call_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+            || self.call_cancel.lock().unwrap().as_ref().is_some_and(|token| token.load(Ordering::Relaxed))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -361,12 +369,13 @@ fn register_package(
 ) -> Result<Vec<Descriptor>, CallError> {
     runtime.begin(deadline, None);
     let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, "register", ());
+    let cancelled = runtime.call_cancelled();
     let violation = runtime.violation.load(Ordering::Relaxed);
     runtime.end();
     if violation {
         return Err(CallError::capability("script attempted a denied host capability"));
     }
-    let value = value.map_err(|error| call_error(error, runtime))?;
+    let value = value.map_err(|error| call_error(error, runtime, cancelled))?;
     registry::validate_registration(plugin, &snapshot.manifest, snapshot, ast, value, limits)
 }
 
@@ -395,12 +404,13 @@ fn evaluate(
     runtime.begin(deadline, Some(cancel));
     let context = input_map(&input);
     let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, function, (context,));
+    let cancelled = runtime.call_cancelled();
     let violation = runtime.violation.load(Ordering::Relaxed);
     runtime.end();
     if violation {
         return Err(CallError::capability("script attempted a denied host capability"));
     }
-    let value = value.map_err(|error| call_error(error, runtime))?;
+    let value = value.map_err(|error| call_error(error, runtime, cancelled))?;
     let reply = registry::reply_for(descriptor, value, &input, limits)?;
     if snapshot.manifest.id != extension.plugin {
         return Err(CallError::invalid("extension plugin does not match the package"));
@@ -431,12 +441,13 @@ fn notify(
     runtime.begin(deadline, Some(cancel));
     let context = event_map(&event);
     let value = engine.call_fn::<Dynamic>(&mut Scope::new(), ast, function, (context,));
+    let cancelled = runtime.call_cancelled();
     let violation = runtime.violation.load(Ordering::Relaxed);
     runtime.end();
     if violation {
         return Err(CallError::capability("script attempted a denied host capability"));
     }
-    let value = value.map_err(|error| call_error(error, runtime))?;
+    let value = value.map_err(|error| call_error(error, runtime, cancelled))?;
     let reply = registry::reply_for(descriptor, value, &empty_input(), limits)?;
     Ok((stamp, reply))
 }
@@ -526,9 +537,12 @@ fn event_map(event: &HookEvent) -> Map {
     map
 }
 
-fn call_error(error: Box<EvalAltResult>, runtime: &Runtime) -> CallError {
+fn call_error(error: Box<EvalAltResult>, runtime: &Runtime, cancelled: bool) -> CallError {
     if runtime.violation.load(Ordering::Relaxed) {
         return CallError::capability(error.to_string());
+    }
+    if cancelled {
+        return CallError::cancelled();
     }
     match *error {
         EvalAltResult::ErrorTooManyOperations(_) => CallError::budget("operation budget exhausted"),
