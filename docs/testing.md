@@ -104,6 +104,96 @@ every operation and its undo, each conflict choice, cancelling midway, a read-on
 a source vanishing mid-operation, undo refusing to overwrite, a forced cross-volume move,
 and 40 randomized rounds of "do, undo, compare the tree".
 
+## Test and fuzz reports
+
+`scripts/test-report.py` wraps test and fuzz commands into one report per run. It
+runs the exact argv without a shell, streams merged stdout/stderr to the terminal
+and `run.log`, and writes `run.json` atomically. The child's exit status is kept
+even when parsing or writing the report fails. `run.json` records the schema,
+actual revision (and whether the tree was dirty), UTC start, host/arch, mode,
+command, wall time, result, per-binary cargo test counts, full failing test
+output, fuzz seeds and optional live frame numbers.
+
+```bash
+python3 scripts/test-report.py run --mode workspace --out target/test-reports/workspace -- cargo test --workspace
+python3 scripts/test-report.py run --mode smoke --out target/test-reports/smoke -- cargo test -p crow-app fuzz_smoke
+python3 scripts/test-report.py summary target/test-reports
+```
+
+Without `--out`, a run goes to `target/test-reports/<mode>-<UTC>`. Results are
+`passed`, `failed`, `interrupted`, `empty`, `incomplete`, `paused` or
+`collector-error`; `collector_error` is separate from the child's `exit_code`.
+A zero exit with no cargo `test result` and no fuzz seed evidence is `empty`,
+not a pass. `summary` reads `run.json` recursively, validates the schema and
+skips a malformed or unknown-version report with a warning; the valid reports
+still render. It sorts by UTC, revision and mode and links each available
+`run.log` and replay artifact.
+
+The fuzz reporters emit machine events only when `CROW_TEST_EVENTS=1`; the
+collector sets it for `--mode fuzz` and `--mode fuzz-live`, so direct runs and
+their existing human output and replay flags are unchanged. `seed-start`,
+`seed-end`, `seed-failure` and `frame-summary` use the same decoder for
+`fuzz_long` and `crow --fuzz`. A live run's frame table is separate from the
+headless rows because hardware and modes are not comparable; a missing
+`frame-summary` renders as `—`, not zero.
+
+### Replays
+
+A headless failure carries the same options as its run. Copy the values from
+`seeds[].replay` in `run.json`:
+
+```bash
+CROW_FUZZ_SEED=42 CROW_FUZZ_TREE=small CROW_FUZZ_CHURN=0 CROW_FUZZ_STEPS=3000 \
+  cargo test -p crow-app fuzz_long -- --ignored --nocapture
+```
+
+The failure's `.rs` artifact is the shrinker's script for a regression test. A
+live failure's `.txt` artifact is the saved step format; the collector rewrites
+the command's `--script` path to that relative artifact, so run it from the
+report directory:
+
+```bash
+cd target/test-reports/<fuzz-live-run>
+cargo run --release -p crow-app --features fuzz -- --fuzz --seed 42 --tree small \
+  --script replays/<run-id>-seed-42-step-123.txt --until 123
+```
+
+Add `--pause-ms 2000` to pause before that step for a profiler. The human
+`replay:` line in `run.log` remains the same.
+
+The collector fixtures cover a pass, a failing test, a lost subprocess, a GPUI
+failure after a seed start, a start without an end, malformed events, an unknown
+schema, two revisions in one table, environment non-copying and absent live
+frame fields:
+
+```bash
+python3 scripts/test_report_test.py
+```
+
+CI wraps its Tests and Fuzz steps with the collector and uploads
+`test-report-workspace` / `test-report-fuzz` on success and failure. To aggregate
+downloaded CI artifacts with local reports, unzip or download them into one tree
+and point `summary` at it:
+
+```bash
+gh run download <run-id> -D target/test-reports/ci-<run-id>
+python3 scripts/test-report.py summary target/test-reports
+```
+
+### First baseline
+
+Recorded from `1220af2a13ad` on 2026-11-18; the worktree also held this file's
+uncommitted reporting section and the user's docs reorganization, so `run.json`
+says `revision_dirty: true`. The machine was `Julians-MacBook-Pro.local` (arm64).
+
+| Run | UTC | Revision | Mode | Result | Evidence | Report |
+| --- | --- | --- | --- | --- | --- | --- |
+| `workspace-20261118T170422Z` | 2026-11-18T17:04:22Z | `1220af2a13ad` | workspace | passed | 14 binaries · 905 passed · 0 failed · 1 ignored · 16.1 s | `target/test-reports/baseline-workspace-final/` |
+| `smoke-20261118T170438Z` | 2026-11-18T17:04:38Z | `1220af2a13ad` | smoke | passed | 2 passed · 0 failed · 4.0 s | `target/test-reports/baseline-smoke-final/` |
+
+Compare a later run with the same mode and workload. Keep live `fuzz-live` frame
+numbers in their own table; do not compare them with the headless smoke.
+
 ## Fuzzing
 
 `crates/crow-app/src/fuzz.rs` generates seeded steps from the live keymap and the
