@@ -794,10 +794,7 @@ mod tests {
         let paths = paths(&hits);
         assert!(paths.contains(&root.join("CrowBackup.app")), "the package's own name: {paths:?}");
         assert!(!hits.iter().any(|hit| hit.path.ends_with("Info.plist")), "not walked: {hits:?}");
-        assert_eq!(
-            summary.skipped,
-            [Skip { path: root.join("CrowBackup.app"), reason: SkipReason::Package }]
-        );
+        assert_eq!(summary.skipped, [Skip { path: root.join("CrowBackup.app"), reason: SkipReason::Package }]);
     }
 
     #[test]
