@@ -1,6 +1,6 @@
 # B2 — Hidden names and Cmd-K files progress
 
-Branch: `m8.5-b2-hidden` · PR: none · Last updated: 2026-11-18 · State: In critique
+Branch: `m8.5-b2-hidden` · PR: [#57](https://github.com/paraversal/file-crow/pull/57) · Last updated: 2026-11-18 · State: PR open
 
 ## Status
 
@@ -63,7 +63,7 @@ Nothing outside the plan's scope.
 
 ## Next
 
-Critique in progress; the executing agent is done.
+PR [#57](https://github.com/paraversal/file-crow/pull/57) is open for the user's hand test and merge. After it merges, the executing agent's request is **execute plan B3** (`docs/plans/m8.5/b3-scope-and-misses.md`).
 
 ## Critique
 
