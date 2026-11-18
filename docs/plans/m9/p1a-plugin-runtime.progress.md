@@ -1,6 +1,6 @@
 # P1A — Public Rhai package, permissions and worker progress
 
-Branch: `codex/m9-p1a-plugin-runtime` · Base: `cb21dcb` (M8.5 B5, merged) · Last updated: 2026-11-18 · State: In critique
+Branch: `codex/m9-p1a-plugin-runtime` · Base: `cb21dcb` (M8.5 B5, merged) · Last updated: 2026-11-18 · State: PR open — https://github.com/paraversal/file-crow/pull/61
 
 ## Status
 
@@ -84,4 +84,4 @@ Verdict: better. The runtime boundary now keeps I/O out of Rhai, the command con
 
 ## Next
 
-Push the branch and open the P1A PR from this reviewed head; the plan document and M9 docs reorganization remain the user's untracked changes.
+PR #61 is open from the reviewed head. The user hand-tests it, then squash-merges. Next in the M9 index: execute plan P9A; P1B waits for P8 after P9C. The plan document and M9 docs reorganization remain the user's untracked changes.
