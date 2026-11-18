@@ -47,6 +47,11 @@ show = true
 # [section."example.p1b-fixture.folders"]
 # show = true
 # collapsed = false
+
+# Project roots. Crow scans these folders for Git repositories; empty by default.
+# The native section is "crow.projects" in [sections]/[section] like any other.
+[projects]
+roots = []
 "##;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -109,12 +114,20 @@ pub struct SectionsConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
+pub struct ProjectsConfig {
+    /// Folders to scan for Git repositories. Empty by default.
+    pub roots: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
 pub struct SidebarConfig {
     pub group: Vec<Group>,
     pub recent: RecentConfig,
     pub locations: LocationsConfig,
     pub sections: SectionsConfig,
     pub section: std::collections::BTreeMap<String, SectionConfig>,
+    pub projects: ProjectsConfig,
 }
 
 /// A sidebar section independent of the native favorites/Recent/Locations
@@ -195,6 +208,21 @@ impl SidebarConfig {
 
     pub fn section_collapsed(&self, id: &str) -> bool {
         self.section(id).collapsed.unwrap_or(false)
+    }
+
+    /// Configured project roots with `~` expanded, duplicates removed in order.
+    pub fn project_roots(&self, home: &Path) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        for root in &self.projects.roots {
+            if root.trim().is_empty() {
+                continue;
+            }
+            let path = expand_home(root, home);
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+        out
     }
 
     /// Each group's favorites with `~` expanded.
@@ -348,6 +376,10 @@ pub enum SidebarEdit {
         id: String,
         collapsed: bool,
     },
+    /// Add one Projects discovery root, keeping comments and the rest of the file.
+    AddProjectRoot(PathBuf),
+    /// Remove one exact Projects discovery root, keeping comments.
+    RemoveProjectRoot(PathBuf),
 }
 
 fn groups(doc: &mut DocumentMut) -> Result<&mut toml_edit::ArrayOfTables, String> {
@@ -360,6 +392,19 @@ fn groups(doc: &mut DocumentMut) -> Result<&mut toml_edit::ArrayOfTables, String
         doc.insert("group", Item::ArrayOfTables(groups));
     }
     doc.get_mut("group").and_then(Item::as_array_of_tables_mut).ok_or_else(|| "`group` must be [[group]] tables".into())
+}
+
+fn project_roots_array(doc: &mut DocumentMut) -> Result<&mut Array, String> {
+    let projects = doc
+        .entry("projects")
+        .or_insert_with(|| Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| "`projects` must be a table".to_owned())?;
+    projects
+        .entry("roots")
+        .or_insert_with(|| toml_edit::value(Array::new()))
+        .as_array_mut()
+        .ok_or_else(|| "`projects.roots` must be an array".to_owned())
 }
 
 fn items(doc: &mut DocumentMut, group: usize) -> Result<&mut Array, String> {
@@ -390,6 +435,22 @@ fn item_path(v: &Value) -> Option<&str> {
 
 fn apply(doc: &mut DocumentMut, edit: &SidebarEdit, home: &Path) -> Result<(), String> {
     match edit {
+        SidebarEdit::AddProjectRoot(path) => {
+            project_roots_array(doc)?.push(abbreviate_home(path, home));
+        }
+        SidebarEdit::RemoveProjectRoot(path) => {
+            let roots = project_roots_array(doc)?;
+            let mut index = 0;
+            while index < roots.len() {
+                let matches =
+                    roots.get(index).and_then(Value::as_str).is_some_and(|spelled| expand_home(spelled, home) == *path);
+                if matches {
+                    roots.remove(index);
+                } else {
+                    index += 1;
+                }
+            }
+        }
         SidebarEdit::SetSectionCollapsed { id, collapsed } => {
             if id.is_empty() || id.contains('"') {
                 return Err("a section id must be nonempty".into());
@@ -745,5 +806,42 @@ show = true
     fn bad_values_are_errors() {
         let err = SidebarConfig::parse("[[group]]\nname = \"x\"\nitems = [{ path = \"~\", colour = \"red\" }]\n");
         assert!(err.unwrap_err().contains("colour"));
+    }
+}
+
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+
+    #[test]
+    fn project_roots_parse_expand_and_edit_without_losing_comments() {
+        let text = r#"# keep me
+[[group]]
+name = "Favorites"
+items = [{ path = "~" }]
+
+[projects]
+roots = ["~/code", "~/work"]
+"#;
+        let config = SidebarConfig::parse(text).unwrap();
+        assert_eq!(
+            config.project_roots(Path::new("/Users/me")),
+            vec![PathBuf::from("/Users/me/code"), PathBuf::from("/Users/me/work")]
+        );
+
+        let mut doc = text.parse::<DocumentMut>().unwrap();
+        apply(&mut doc, &SidebarEdit::AddProjectRoot(PathBuf::from("/Volumes/Work/src")), Path::new("/Users/me"))
+            .unwrap();
+        apply(&mut doc, &SidebarEdit::RemoveProjectRoot(PathBuf::from("/Users/me/work")), Path::new("/Users/me"))
+            .unwrap();
+        let out = doc.to_string();
+        assert!(out.contains("# keep me"));
+        assert!(out.contains("/Volumes/Work/src"));
+        assert!(!out.contains("~/work"));
+        let reparsed = SidebarConfig::parse(&out).unwrap();
+        assert_eq!(
+            reparsed.project_roots(Path::new("/Users/me")),
+            vec![PathBuf::from("/Users/me/code"), PathBuf::from("/Volumes/Work/src")]
+        );
     }
 }

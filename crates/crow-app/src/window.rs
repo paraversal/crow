@@ -1905,6 +1905,7 @@ impl CrowWindow {
                         entries,
                     },
                     excerpt: None,
+                    host: None,
                 };
                 let Some(handle) = cx.try_global::<crate::plugins::Plugins>().and_then(|p| p.handle.clone()) else {
                     operations::message("The plugin service is not running.", true, cx);
@@ -2045,6 +2046,17 @@ impl CrowWindow {
             | CommandId::Eject => {
                 self.sidebar.update(cx, |sidebar, cx| sidebar.run_command(command, window, cx));
             }
+            CommandId::AddProjectRoot | CommandId::RemoveProjectRoot => {
+                let dir = self.pane().read(cx).current_dir(cx);
+                let edit = if command == CommandId::AddProjectRoot {
+                    crow_core::SidebarEdit::AddProjectRoot(dir)
+                } else {
+                    crow_core::SidebarEdit::RemoveProjectRoot(dir)
+                };
+                crate::ui::edit_sidebar(edit, cx);
+                crate::git::refresh_projects(cx);
+            }
+            CommandId::RefreshProjects => crate::git::refresh_projects(cx),
             CommandId::Quit => operation_ui::quit(cx),
             other => self.pane().update(cx, |pane, cx| pane.run_command(other, window, cx)),
         }

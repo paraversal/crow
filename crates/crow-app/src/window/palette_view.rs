@@ -221,7 +221,10 @@ impl CrowWindow {
         };
         let folders = {
             let ui = cx.global::<Ui>();
-            palette::folder_candidates(favorites, recents, subfolders, &home, |path| ui.recent.last_visit(path))
+            let projects = crate::git::project_folders(cx);
+            palette::folder_candidates(favorites, recents, projects, subfolders, &home, |path| {
+                ui.recent.last_visit(path)
+            })
         };
         let (mode, text) = match query.strip_prefix('>') {
             Some(rest) => (PaletteMode::Commands, rest.to_owned()),

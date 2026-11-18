@@ -21,6 +21,7 @@ crow-core.workspace = true
 crow-fs = { workspace = true, features = ["testing"] }
 crow-macos.workspace = true
 crow-plugin.workspace = true
+crow-plugin-git.workspace = true
 crow-search.workspace = true
 crow-theme.workspace = true
 anyhow = "1"

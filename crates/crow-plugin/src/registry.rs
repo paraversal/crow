@@ -832,6 +832,7 @@ permissions = { fs = "none" }
                 ],
             },
             excerpt: None,
+            host: None,
         }
     }
 

@@ -37,6 +37,7 @@ mod fuzz;
 mod fuzz_events;
 #[cfg(feature = "fuzz")]
 mod fuzz_live;
+mod git;
 mod icons;
 mod info_pane;
 #[cfg(test)]

@@ -1137,6 +1137,7 @@ dependencies = [
  "crow-fs",
  "crow-macos",
  "crow-plugin",
+ "crow-plugin-git",
  "crow-search",
  "crow-theme",
  "futures",

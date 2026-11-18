@@ -115,6 +115,8 @@ pub struct RowInput {
     pub kind: String,
     /// The focused surface's current selection; only a one-item selection is sent.
     pub selected: bool,
+    /// Provider facts for the bundled `git` package, if any.
+    pub git: Option<crow_plugin::EntryHostData>,
 }
 
 /// What a command activation captured. It must still match when the reply or
@@ -195,6 +197,15 @@ impl RowCache {
         self.bytes = self.bytes.saturating_add(value.bytes());
         self.values.insert(key, CachedRow { value, touch: self.tick });
         self.evict();
+    }
+
+    fn remove_path_any(&mut self, path: &Path) {
+        let keys: Vec<RowKey> = self.values.keys().filter(|key| key.path == path).cloned().collect();
+        for key in keys {
+            if let Some(old) = self.values.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(old.value.bytes());
+            }
+        }
     }
 
     fn evict(&mut self) {
@@ -392,6 +403,7 @@ struct PendingRows {
     context_revision: u64,
     descriptors: Vec<ExtensionId>,
     rows: Vec<RowInput>,
+    repository: Option<crow_plugin::RepositoryData>,
 }
 
 /// The coordinator. One instance lives behind the app's `Plugins` global.
@@ -620,6 +632,7 @@ impl PluginSurfaces {
 
     /// Ask each Status descriptor once per active scope/revision. The display
     /// uses the first nonempty value in fully qualified ID order.
+    #[allow(clippy::too_many_arguments)]
     pub fn request_status(
         &mut self,
         handle: Option<&PluginHandle>,
@@ -628,6 +641,7 @@ impl PluginSurfaces {
         revision: u64,
         display: &str,
         descriptors: &[ExtensionId],
+        host: Option<crow_plugin::HostData>,
     ) {
         let Some(handle) = handle else { return };
         let current =
@@ -663,6 +677,7 @@ impl PluginSurfaces {
             let input = RequestInput {
                 snapshot: Snapshot { scope: bounded(display), selection: None, entries: Vec::new() },
                 excerpt: None,
+                host: host.clone(),
             };
             match handle.try_evaluate(descriptor.clone(), published.generation, revision, input) {
                 Ok(ticket) => {
@@ -715,6 +730,7 @@ impl PluginSurfaces {
         display: &str,
         descriptors: &[ExtensionId],
         entry: EntryData,
+        host: Option<crow_plugin::HostData>,
     ) {
         let Some(handle) = handle else { return };
         let current =
@@ -745,6 +761,7 @@ impl PluginSurfaces {
             let input = RequestInput {
                 snapshot: Snapshot { scope: bounded(display), selection: None, entries: vec![entry.clone()] },
                 excerpt: None,
+                host: host.clone(),
             };
             match handle.try_evaluate(descriptor.clone(), published.generation, revision, input) {
                 Ok(ticket) => {
@@ -822,8 +839,11 @@ impl PluginSurfaces {
             table.insert(entry_handle, (dir.path.clone(), identity));
             let _ = dir.version;
         }
-        let input =
-            RequestInput { snapshot: Snapshot { scope: bounded(display), selection: None, entries }, excerpt: None };
+        let input = RequestInput {
+            snapshot: Snapshot { scope: bounded(display), selection: None, entries },
+            excerpt: None,
+            host: None,
+        };
         match handle.try_evaluate(descriptor.clone(), published.generation, revision, input) {
             Ok(ticket) => {
                 if let Some(binding) = self.sidebar.get_mut(&surface) {
@@ -904,9 +924,12 @@ impl PluginSurfaces {
         context_revision: u64,
         descriptors: Vec<ExtensionId>,
         rows: Vec<RowInput>,
+        repository: Option<crow_plugin::RepositoryData>,
     ) {
-        self.pending_rows
-            .insert(surface, PendingRows { scope, scope_version, scope_display, context_revision, descriptors, rows });
+        self.pending_rows.insert(
+            surface,
+            PendingRows { scope, scope_version, scope_display, context_revision, descriptors, rows, repository },
+        );
     }
 
     /// Submit the latest queued demand. Replacing (not appending) per surface
@@ -923,6 +946,7 @@ impl PluginSurfaces {
                 demand.context_revision,
                 &demand.descriptors,
                 demand.rows,
+                demand.repository,
                 now,
             );
         }
@@ -941,6 +965,7 @@ impl PluginSurfaces {
         context_revision: u64,
         descriptors: &[ExtensionId],
         rows: Vec<RowInput>,
+        repository: Option<crow_plugin::RepositoryData>,
         now: Instant,
     ) {
         let state = self.surfaces.entry(surface).or_insert_with(|| SurfaceState {
@@ -1008,10 +1033,16 @@ impl PluginSurfaces {
             }
             let mut entries = Vec::with_capacity(rows.len().min(MAX_BATCH));
             let mut refs = Vec::with_capacity(rows.len().min(MAX_BATCH));
+            let mut host_entries = Vec::new();
             let mut selection_handle = None;
             for row in &rows {
                 if refs.len() >= MAX_BATCH {
                     break;
+                }
+                // A clean Git row has no contribution; asking the worker for it
+                // would turn a folder scroll into hundreds of empty round trips.
+                if crate::git::is_git_plugin(&descriptor.plugin) && row.git.is_none() {
+                    continue;
                 }
                 // Demand is the misses only. A cached value, hit or empty,
                 // already serves this generation, scope, path and version.
@@ -1036,14 +1067,22 @@ impl PluginSurfaces {
                     size: row.size,
                     kind: bounded(&row.kind),
                 });
+                if let Some(git) = &row.git {
+                    let mut git = git.clone();
+                    git.handle = handle;
+                    host_entries.push(git);
+                }
                 refs.push((handle, row.path.clone(), row.version));
             }
             if entries.is_empty() {
                 continue;
             }
+            let host = crate::git::is_git_plugin(&descriptor.plugin)
+                .then(|| crow_plugin::HostData { repository: repository.clone(), entries: host_entries.clone() });
             let input = RequestInput {
                 snapshot: Snapshot { scope: bounded(scope_display), selection: selection_handle, entries },
                 excerpt: None,
+                host,
             };
             match handle.try_evaluate(descriptor.clone(), generation, context_revision, input) {
                 Ok(ticket) => {
@@ -1366,6 +1405,28 @@ impl PluginSurfaces {
                 state.versions.remove(path);
             }
         }
+    }
+
+    /// A provider snapshot or line count changed. Drop this plugin's ready
+    /// values and let the next visible pass ask again.
+    pub fn invalidate_plugin(&mut self, plugin: &PluginId) {
+        self.rows.remove_plugin(plugin);
+        for binding in self.status.values_mut() {
+            binding.values.retain(|id, _| &id.plugin != plugin);
+            binding.seen.retain(|id| &id.plugin != plugin);
+        }
+        for binding in self.info.values_mut() {
+            binding.values.retain(|id, _| &id.plugin != plugin);
+            binding.seen.retain(|id| &id.plugin != plugin);
+        }
+        for binding in self.sidebar.values_mut() {
+            binding.values.retain(|id, _| &id.plugin != plugin);
+            binding.seen.retain(|id| &id.plugin != plugin);
+        }
+    }
+
+    pub fn invalidate_path_everywhere(&mut self, path: &Path) {
+        self.rows.remove_path_any(path);
     }
 
     pub fn bump_scope(&mut self, surface: SurfaceId, scope: ScopeKey, scope_version: u64, _now: Instant) {
@@ -1698,6 +1759,7 @@ mod tests {
             descriptors,
             icon_packs: vec![],
             generation,
+            bundled: false,
         }
     }
 
@@ -1745,7 +1807,9 @@ mod tests {
                 size: 1,
                 kind: "Text".into(),
                 selected: false,
+                git: None,
             }],
+            None,
             Instant::now(),
         );
         surfaces.track_rows_for_test(
@@ -1844,6 +1908,7 @@ mod tests {
             4,
             &[],
             vec![],
+            None,
             Instant::now(),
         );
         assert!(!surfaces.finish(
@@ -1958,6 +2023,7 @@ mod tests {
             size: 1,
             kind: "Text".into(),
             selected: false,
+            git: None,
         }];
         surfaces.observe_rows(
             None,
@@ -1968,6 +2034,7 @@ mod tests {
             3,
             std::slice::from_ref(&column.id),
             rows,
+            None,
             Instant::now(),
         );
         assert_eq!(surfaces.pending_tickets(), 0, "no service handle means no submission");

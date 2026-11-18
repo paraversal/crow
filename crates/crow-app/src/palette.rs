@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Datelike as _, Local, TimeZone as _};
 use crow_search::FuzzyMatcher;
-use gpui::{Action, SharedString};
+use gpui::{Action, NoAction, SharedString};
 
 use crate::actions::{
     AddToSidebar, CalculateFolderSizes, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate,
@@ -121,6 +121,9 @@ pub enum CommandId {
     MoveFavoriteUp,
     MoveFavoriteDown,
     Eject,
+    AddProjectRoot,
+    RemoveProjectRoot,
+    RefreshProjects,
     Quit,
 }
 
@@ -197,6 +200,9 @@ impl CommandId {
             CommandId::MoveFavoriteUp => "move-favorite-up",
             CommandId::MoveFavoriteDown => "move-favorite-down",
             CommandId::Eject => "eject",
+            CommandId::AddProjectRoot => "add-project-root",
+            CommandId::RemoveProjectRoot => "remove-project-root",
+            CommandId::RefreshProjects => "refresh-projects",
             CommandId::Quit => "quit",
         }
     }
@@ -321,6 +327,30 @@ pub const COMMANDS: &[Command] = &[
         action: &Eject,
         scope: KeyScope::Sidebar,
         menu: Some(MenuSlot { menu: MenuName::File, section: 2, title: "Eject" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::AddProjectRoot,
+        label: "Add Current Folder as Project Root",
+        action: &NoAction,
+        scope: KeyScope::Window,
+        menu: None,
+        palette: true,
+    },
+    Command {
+        id: CommandId::RemoveProjectRoot,
+        label: "Remove Current Folder from Project Roots",
+        action: &NoAction,
+        scope: KeyScope::Window,
+        menu: None,
+        palette: true,
+    },
+    Command {
+        id: CommandId::RefreshProjects,
+        label: "Refresh Projects",
+        action: &NoAction,
+        scope: KeyScope::Window,
+        menu: None,
         palette: true,
     },
     // Edit
@@ -666,6 +696,7 @@ pub const COMMANDS: &[Command] = &[
 pub enum Source {
     Recent,
     Favorite,
+    Project,
     Here,
     /// A file in the typed path's folder: Return reveals it there.
     File,
@@ -803,6 +834,7 @@ fn folder_name(path: &Path, label: &str, home: &Path) -> (String, Option<usize>)
 pub fn folder_candidates(
     favorites: impl IntoIterator<Item = PathBuf>,
     recents: impl IntoIterator<Item = PathBuf>,
+    projects: impl IntoIterator<Item = PathBuf>,
     subfolders: impl IntoIterator<Item = PathBuf>,
     home: &Path,
     last_visit: impl Fn(&Path) -> Option<u64>,
@@ -839,6 +871,11 @@ pub fn folder_candidates(
             push(path, Source::Recent, frecency, &mut out);
         } else if let Some(existing) = out.iter_mut().find(|candidate| candidate.path == path) {
             existing.frecency = frecency;
+        }
+    }
+    for path in projects {
+        if seen.insert(path.clone()) {
+            push(path, Source::Project, 0.0, &mut out);
         }
     }
     for path in subfolders {
@@ -912,6 +949,7 @@ pub fn section_header(source: Source, here: &str) -> SharedString {
     match source {
         Source::Recent => "Recent".into(),
         Source::Favorite => "Favorites".into(),
+        Source::Project => "Projects".into(),
         Source::Here | Source::File => format!("In {here}").into(),
     }
 }
@@ -993,7 +1031,7 @@ pub fn folder_listing(
             }
         }
         None => {
-            for source in [Source::Recent, Source::Favorite, Source::Here] {
+            for source in [Source::Recent, Source::Favorite, Source::Project, Source::Here] {
                 let mut group: Vec<&FolderCandidate> = folders
                     .iter()
                     .filter(|folder| folder.source == source)
@@ -1007,7 +1045,7 @@ pub fn folder_listing(
                 }
                 let cap = match source {
                     Source::Recent => RECENT_LIMIT,
-                    Source::Favorite => usize::MAX,
+                    Source::Favorite | Source::Project => usize::MAX,
                     Source::Here | Source::File => HERE_LIMIT,
                 };
                 group.truncate(cap.min(TOTAL_LIMIT.saturating_sub(items.len())));
@@ -1432,7 +1470,14 @@ mod tests {
     }
 
     fn folders(favorites: &[PathBuf], recents: &[PathBuf], here: &[PathBuf]) -> Vec<FolderCandidate> {
-        folder_candidates(favorites.to_vec(), recents.to_vec(), here.to_vec(), Path::new("/home/me"), |_| None)
+        folder_candidates(
+            favorites.to_vec(),
+            recents.to_vec(),
+            Vec::new(),
+            here.to_vec(),
+            Path::new("/home/me"),
+            |_| None,
+        )
     }
 
     /// Folder-only listing with Show Hidden Files' policy, the common test case.
@@ -1748,7 +1793,8 @@ mod tests {
     #[allow(clippy::single_range_in_vec_init)] // The matched list is the point of the test.
     fn home_row_matches_its_name_and_its_path() {
         let home = Path::new("/home/jules");
-        let candidates = folder_candidates(vec![home.to_path_buf()], Vec::new(), Vec::new(), home, |_| None);
+        let candidates =
+            folder_candidates(vec![home.to_path_buf()], Vec::new(), Vec::new(), Vec::new(), home, |_| None);
 
         let listing = folders_listing("jul", &candidates, "jules", HiddenMatch::Include);
         assert_eq!(listing.items.len(), 1, "the account name finds the home row");

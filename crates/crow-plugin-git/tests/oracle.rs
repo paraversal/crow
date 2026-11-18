@@ -419,3 +419,21 @@ fn discovery_prunes_packages_symlinks_and_keeps_nested_repos() {
     assert!(bounded.truncated);
     assert!(bounded.repositories.len() <= 1);
 }
+
+#[test]
+fn cloud_backed_worktrees_are_identified_and_skip_status_reads() {
+    assert!(crow_plugin_git::is_cloud_backed_worktree(Path::new(
+        "/Users/me/Library/Mobile Documents/com~apple~CloudDocs/code/repo"
+    )));
+    assert!(crow_plugin_git::is_cloud_backed_worktree(Path::new("/Users/me/Library/CloudStorage/Dropbox/repo")));
+    assert!(!crow_plugin_git::is_cloud_backed_worktree(Path::new("/Users/me/code/repo")));
+    let repo = Repo::new("cloud");
+    repo.write("a.txt", b"a\n");
+    repo.commit("base");
+    repo.write("a.txt", b"b\n");
+    let snapshot = crow_plugin_git::unavailable_snapshot(&repo.open(), 4).unwrap();
+    assert!(snapshot.unavailable);
+    assert!(snapshot.entries.is_empty());
+    assert_eq!(snapshot.changed_count, 0);
+    assert_eq!(snapshot.head.state, HeadState::Branch { name: "main".into() });
+}

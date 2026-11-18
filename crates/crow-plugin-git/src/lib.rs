@@ -270,6 +270,11 @@ pub struct StatusSnapshot {
     pub head: HeadInfo,
     pub entries: BTreeMap<PathBuf, EntryStatus>,
     pub changed_count: usize,
+    /// The first line of `HEAD`'s commit message, bounded for display.
+    pub last_commit: Option<String>,
+    /// True when the worktree is cloud-backed and status would require content
+    /// reads; Crow shows "status unavailable" instead of risking hydration.
+    pub unavailable: bool,
     /// The caller's repository generation, copied for invalidation.
     pub epoch: u64,
 }
@@ -278,6 +283,30 @@ impl StatusSnapshot {
     pub fn lookup(&self, relative: &Path) -> Option<&EntryStatus> {
         self.entries.get(relative)
     }
+}
+
+/// A worktree whose files may be cloud placeholders. Status compares worktree
+/// bytes and could hydrate them, so the provider reports status unavailable
+/// instead. P8 owns the per-file read proof; this path check is the conservative
+/// project-level gate.
+pub fn is_cloud_backed_worktree(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text.contains("/Library/Mobile Documents/")
+        || text.contains("/com~apple~CloudDocs")
+        || text.contains("/Library/CloudStorage/")
+}
+
+/// A snapshot with branch and identity but no status reads.
+pub fn unavailable_snapshot(repo: &gix::Repository, epoch: u64) -> gix::Result<StatusSnapshot> {
+    Ok(StatusSnapshot {
+        identity: RepositoryIdentity::from_repo(repo)?,
+        head: head_info(repo)?,
+        entries: BTreeMap::new(),
+        changed_count: 0,
+        last_commit: None,
+        unavailable: true,
+        epoch,
+    })
 }
 
 /// Open a repository whose worktree is exactly `worktree`, if it has one.
@@ -363,7 +392,13 @@ pub fn status_snapshot(repo: &gix::Repository, epoch: u64, cancel: &AtomicBool) 
         }
     }
     let changed_count = entries.values().filter(|entry| entry.is_changed()).count();
-    Ok(StatusSnapshot { identity, head, entries, changed_count, epoch })
+    let last_commit = repo.head_commit().ok().and_then(|commit| {
+        let title = commit.message().ok()?.title;
+        let title = String::from_utf8_lossy(title);
+        let title = title.trim();
+        (!title.is_empty()).then(|| title.chars().take(120).collect())
+    });
+    Ok(StatusSnapshot { identity, head, entries, changed_count, last_commit, unavailable: false, epoch })
 }
 
 struct StagedEntry {

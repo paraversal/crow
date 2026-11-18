@@ -13,8 +13,9 @@ pub mod registry;
 mod worker;
 
 pub use dto::{
-    EntryRef, ExcerptInput, HostEvent, HostMutation, Inventory, PluginEntry, PluginState, RegisteredIconPack,
-    RequestError, RequestErrorKind, RequestInput, RequestResult, RequestStamp, RequestTicket, SubmitError,
+    EntryHostData, EntryRef, ExcerptInput, HostData, HostEvent, HostMutation, Inventory, PluginEntry, PluginState,
+    RegisteredIconPack, RepositoryData, RequestError, RequestErrorKind, RequestInput, RequestResult, RequestStamp,
+    RequestTicket, SubmitError,
 };
 pub use excerpt::read_excerpt;
 pub use grants::{
@@ -27,6 +28,6 @@ pub use manifest::{
     API_VERSION, FsAccess, Manifest, PackageError, PackageErrorKind, Permissions, parse_manifest, validate_relative,
 };
 pub use package::{
-    Discovery, PackageCandidate, PackageSnapshot, SUPPORTED_API, bundle_path, digest_files, discover, load_package,
-    load_package_at,
+    Discovery, PackageCandidate, PackageSnapshot, SUPPORTED_API, bundle_path, digest_files, discover, embedded,
+    load_package, load_package_at,
 };

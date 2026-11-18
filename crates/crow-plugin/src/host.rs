@@ -100,6 +100,7 @@ pub struct PluginHost {
     grants_path: PathBuf,
     limits: Limits,
     candidates: Vec<PackageCandidate>,
+    embedded: Vec<Arc<PackageSnapshot>>,
     grants: Grants,
     grants_error: Option<String>,
     scan_error: Option<String>,
@@ -115,12 +116,19 @@ pub struct PluginHost {
 }
 
 impl PluginHost {
-    pub(crate) fn new(config_dir: &Path, limits: Limits, events: Sender<HostEvent>, inbox: Sender<Inbox>) -> Self {
+    pub(crate) fn new(
+        config_dir: &Path,
+        limits: Limits,
+        events: Sender<HostEvent>,
+        inbox: Sender<Inbox>,
+        embedded: Vec<Arc<PackageSnapshot>>,
+    ) -> Self {
         Self {
             plugins_dir: config_dir.join("plugins"),
             grants_path: grants::grants_path(config_dir),
             limits,
             candidates: Vec::new(),
+            embedded,
             grants: Grants::default(),
             grants_error: None,
             scan_error: None,
@@ -169,6 +177,29 @@ impl PluginHost {
         let discovery = package::discover(&self.plugins_dir, &self.limits);
         self.scan_error = discovery.error;
         self.candidates = discovery.candidates;
+        // An installed bundle may not impersonate an embedded provider.
+        for candidate in &mut self.candidates {
+            let Some(id) = &candidate.id else { continue };
+            let reserved = self.embedded.iter().any(|snapshot| &snapshot.manifest.id == id);
+            if reserved {
+                candidate.snapshot = Err(crate::manifest::PackageError::new(
+                    crate::manifest::PackageErrorKind::ReservedId,
+                    format!("plugin id \"{id}\" is reserved for the bundled package"),
+                ));
+            }
+        }
+        for snapshot in &self.embedded {
+            let id = snapshot.manifest.id.clone();
+            self.candidates.push(PackageCandidate {
+                bundle: OsString::from(format!("bundled-{}", id.as_str())),
+                dir_name: format!("{} (bundled)", id.as_str()),
+                id: Some(id),
+                name: Some(snapshot.manifest.name.clone()),
+                version: Some(snapshot.manifest.version.clone()),
+                snapshot: Ok(snapshot.clone()),
+                bundled: true,
+            });
+        }
     }
 
     fn grant_verdict(&self, id: &PluginId, snapshot: &PackageSnapshot) -> GrantVerdict {
@@ -619,7 +650,7 @@ impl PluginHost {
             }
             RefreshEnqueue::Replaced(displaced) => {
                 self.requests.insert(stamp.request_id, AdmittedRequest { extension, stamp, cancel });
-                self.finish_displaced(displaced);
+                self.finish_displaced(*displaced);
             }
             RefreshEnqueue::Full => {
                 self.finish_error(
@@ -932,6 +963,7 @@ impl PluginHost {
                 descriptors,
                 icon_packs,
                 generation,
+                bundled: candidate.bundled,
             });
         }
         Inventory { plugins, grants_error: self.grants_error.clone(), scan_error: self.scan_error.clone() }
@@ -1013,6 +1045,16 @@ pub struct PluginService {
 
 impl PluginService {
     pub fn start(config_dir: PathBuf, limits: Limits) -> Result<(Self, Receiver<HostEvent>), String> {
+        Self::start_with_bundled(config_dir, limits, Vec::new())
+    }
+
+    /// Start with packages embedded in the app. They appear in the inventory
+    /// as pending approval and are approved by digest like installed bundles.
+    pub fn start_with_bundled(
+        config_dir: PathBuf,
+        limits: Limits,
+        bundled: Vec<Arc<PackageSnapshot>>,
+    ) -> Result<(Self, Receiver<HostEvent>), String> {
         let (command_tx, command_rx) = mpsc::channel::<Inbox>();
         let (event_tx, event_rx) = mpsc::channel::<HostEvent>();
         let (ingress_tx, ingress_rx) = mpsc::sync_channel::<Submission>(limits.service_mailbox.max(1));
@@ -1021,7 +1063,7 @@ impl PluginService {
         let join = thread::Builder::new()
             .name("crow-plugins".into())
             .spawn(move || {
-                let mut host = PluginHost::new(&config_dir, limits, event_tx, inbox);
+                let mut host = PluginHost::new(&config_dir, limits, event_tx, inbox, bundled);
                 host.refresh();
                 while let Ok(message) = command_rx.recv() {
                     match message {
@@ -1190,7 +1232,7 @@ mod tests {
         fn from_dir(dir: tempfile::TempDir) -> Self {
             let (inbox_tx, inbox) = mpsc::channel::<Inbox>();
             let (event_tx, events) = mpsc::channel::<HostEvent>();
-            let mut host = PluginHost::new(dir.path(), test_limits(), event_tx, inbox_tx);
+            let mut host = PluginHost::new(dir.path(), test_limits(), event_tx, inbox_tx, Vec::new());
             host.refresh();
             let mut harness =
                 Self { host, inbox, events, last: Inventory::default(), seen: Vec::new(), next_request: 0, dir };
@@ -1262,6 +1304,7 @@ mod tests {
                     }],
                 },
                 excerpt: None,
+                host: None,
             }
         }
 
