@@ -1,6 +1,7 @@
 //! The search itself: a parallel `ignore` walk, fuzzy name scoring through
 //! `nucleo-matcher`, and literal/regex content search through `grep-searcher`.
-//! Hits stream to the caller in batches; `cancel` stops the walk and reads.
+//! Hits stream to the caller in batches; `Control` stops the walk or just the
+//! content reads.
 
 use std::io;
 use std::ops::Range;
@@ -97,6 +98,42 @@ impl Batcher {
     }
 }
 
+/// Shared between the caller and a running search.
+#[derive(Clone, Debug, Default)]
+pub struct Control {
+    cancel: Arc<AtomicBool>,
+    stop_contents: Arc<AtomicBool>,
+}
+
+impl Control {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Stop the walk and every read.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// The walk's cancel flag, for APIs that take one (Spotlight's `mdfind`).
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+
+    /// Keep walking for names, but read no more file contents (and stop the current read).
+    pub fn stop_contents(&self) {
+        self.stop_contents.store(true, Ordering::Relaxed);
+    }
+
+    pub fn contents_stopped(&self) -> bool {
+        self.stop_contents.load(Ordering::Relaxed)
+    }
+}
+
 /// What to look for. `contents` is literal and case-insensitive unless wrapped
 /// in `/…/`, which makes it a regex. `everything` ignores every exclusion set.
 pub struct Query {
@@ -148,6 +185,8 @@ pub struct Summary {
     pub scanned: u64,
     /// Folders the walk did not enter, and why.
     pub skipped: Vec<Skip>,
+    /// The walk kept running for names after contents were stopped.
+    pub contents_stopped: bool,
     /// Set when the query itself is invalid (a bad regex); no walk ran.
     pub error: Option<String>,
 }
@@ -292,9 +331,10 @@ impl FuzzyMatcher {
     }
 }
 
-/// Walk `root`, streaming matching hits to `sink` in batches. `cancel` is
-/// checked between entries and matches; the walk stops as soon as it is set.
-pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel: &Arc<AtomicBool>) -> Summary {
+/// Walk `root`, streaming matching hits to `sink` in batches. `control` is
+/// checked between entries and matches; cancelling stops the walk, while
+/// stopping contents keeps names streaming.
+pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), control: &Control) -> Summary {
     let names = query.names.as_deref().filter(|q| !q.is_empty()).map(str::to_owned);
     let contents = query.contents.as_deref().filter(|q| !q.is_empty());
     let content_pattern = match contents {
@@ -316,7 +356,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
     let enter_packages = query.everything;
     let skipped = Arc::new(Mutex::new(Vec::new()));
     let scanned = Arc::new(AtomicU64::new(0));
-    let walker = build_walker(root, visit_hidden, rules, skipped.clone(), cancel.clone());
+    let walker = build_walker(root, visit_hidden, rules, skipped.clone(), control.clone());
     let (tx, rx) = mpsc::channel::<Vec<Hit>>();
 
     let scanned_thread = scanned.clone();
@@ -325,7 +365,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
         scope.spawn(move || {
             walker.run(|| {
                 let tx = tx.clone();
-                let cancel = cancel.clone();
+                let control = control.clone();
                 let scanned = scanned_thread.clone();
                 let skipped = skipped_thread.clone();
                 let names = names.clone();
@@ -333,7 +373,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                 let mut fuzzy = names.as_deref().map(FuzzyMatcher::new);
                 let mut content = pattern.as_ref().and_then(|p| ContentSearch::new(p).ok());
                 Box::new(move |result| {
-                    if cancel.load(Ordering::Relaxed) {
+                    if control.is_cancelled() {
                         return WalkState::Quit;
                     }
                     let entry = match result {
@@ -387,9 +427,10 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                             && std::fs::metadata(entry.path()).is_ok_and(|meta| meta.is_file()));
                     if let Some(content) = content.as_mut()
                         && readable
+                        && !control.contents_stopped()
                     {
                         let mut content_hits = Vec::new();
-                        let matches = content.search(entry.path(), modified, size, hidden, &mut content_hits, &cancel);
+                        let matches = content.search(entry.path(), modified, size, hidden, &mut content_hits, &control);
                         if matches > 1
                             && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) = content_hits.first_mut()
                         {
@@ -430,15 +471,15 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
             };
             for batch in ready {
                 sink(batch);
-                if cancel.load(Ordering::Relaxed) {
+                if control.is_cancelled() {
                     break;
                 }
             }
-            if cancel.load(Ordering::Relaxed) {
+            if control.is_cancelled() {
                 break;
             }
         }
-        if !cancel.load(Ordering::Relaxed)
+        if !control.is_cancelled()
             && let Some(rest) = batcher.finish()
         {
             sink(rest);
@@ -447,7 +488,12 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
 
     let mut skipped = skipped.lock().map(|mut list| std::mem::take(&mut *list)).unwrap_or_default();
     skipped.sort_by(|a, b| a.path.cmp(&b.path));
-    Summary { scanned: scanned.load(Ordering::Relaxed), skipped, error: None }
+    Summary {
+        scanned: scanned.load(Ordering::Relaxed),
+        skipped,
+        contents_stopped: control.contents_stopped(),
+        error: None,
+    }
 }
 
 fn build_walker(
@@ -455,7 +501,7 @@ fn build_walker(
     visit_hidden: bool,
     rules: Arc<RuleSet>,
     skipped: Arc<Mutex<Vec<Skip>>>,
-    cancel: Arc<AtomicBool>,
+    control: Control,
 ) -> WalkParallel {
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
     let mut builder = WalkBuilder::new(root);
@@ -471,7 +517,7 @@ fn build_walker(
         .follow_links(false)
         .threads(threads)
         .filter_entry(move |entry| {
-            if cancel.load(Ordering::Relaxed) {
+            if control.is_cancelled() {
                 return false;
             }
             if entry.depth() == 0 || !entry.file_type().is_some_and(|kind| kind.is_dir()) {
@@ -559,6 +605,21 @@ fn pattern_error(e: impl std::fmt::Display) -> String {
     format!("Invalid pattern: {line}")
 }
 
+/// Check between reads too: a nonmatching file never calls `ContentSink::matched`.
+struct ContentReader<'a, R> {
+    inner: R,
+    control: &'a Control,
+}
+
+impl<R: io::Read> io::Read for ContentReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.control.is_cancelled() || self.control.contents_stopped() {
+            return Ok(0);
+        }
+        self.inner.read(buffer)
+    }
+}
+
 struct ContentSearch {
     matcher: RegexMatcher,
     searcher: Searcher,
@@ -582,10 +643,14 @@ impl ContentSearch {
         size: u64,
         hidden: bool,
         hits: &mut Vec<Hit>,
-        cancel: &Arc<AtomicBool>,
+        control: &Control,
     ) -> u64 {
-        let mut sink = ContentSink { matcher: &self.matcher, path, modified, size, hidden, hits, cancel, matches: 0 };
-        let _ = self.searcher.search_path(&self.matcher, path, &mut sink);
+        let Ok(file) = std::fs::File::open(path) else {
+            return 0;
+        };
+        let reader = ContentReader { inner: file, control };
+        let mut sink = ContentSink { matcher: &self.matcher, path, modified, size, hidden, hits, control, matches: 0 };
+        let _ = self.searcher.search_reader(&self.matcher, reader, &mut sink);
         sink.matches
     }
 }
@@ -597,7 +662,7 @@ struct ContentSink<'a> {
     size: u64,
     hidden: bool,
     hits: &'a mut Vec<Hit>,
-    cancel: &'a Arc<AtomicBool>,
+    control: &'a Control,
     /// Matching lines seen in this file; only the first becomes a `Hit`.
     matches: u64,
 }
@@ -606,7 +671,7 @@ impl Sink for ContentSink<'_> {
     type Error = io::Error;
 
     fn matched(&mut self, _: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, io::Error> {
-        if self.cancel.load(Ordering::Relaxed) {
+        if self.control.is_cancelled() || self.control.contents_stopped() {
             return Ok(false);
         }
         self.matches += 1;
@@ -668,6 +733,72 @@ mod tests {
         Arc::new(RuleSet::from_config(&Exclude::default(), Path::new("/Users/nobody")).expect("default rules"))
     }
 
+    fn assert_active_content_read_stops(text: &[u8], cancel: bool) {
+        struct StopAfterRead<'a> {
+            remaining: &'a [u8],
+            control: &'a Control,
+            cancel: bool,
+            reads: usize,
+        }
+        impl io::Read for StopAfterRead<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.reads += 1;
+                let count = self.remaining.read(buffer)?;
+                if self.cancel {
+                    self.control.cancel();
+                } else {
+                    self.control.stop_contents();
+                }
+                Ok(count)
+            }
+        }
+
+        let control = Control::new();
+        let bytes = text.repeat(100_000);
+        let mut input = StopAfterRead { remaining: &bytes, control: &control, cancel, reads: 0 };
+        let mut content = ContentSearch::new(&ContentPattern::new("needle").expect("pattern")).expect("searcher");
+        let mut hits = Vec::new();
+        let mut sink = ContentSink {
+            matcher: &content.matcher,
+            path: Path::new("active.txt"),
+            modified: None,
+            size: bytes.len() as u64,
+            hidden: false,
+            hits: &mut hits,
+            control: &control,
+            matches: 0,
+        };
+        let reader = ContentReader { inner: &mut input, control: &control };
+        content.searcher.search_reader(&content.matcher, reader, &mut sink).expect("controlled read");
+        assert_eq!(sink.matches, 0, "buffered matches stop too");
+        assert!(hits.is_empty());
+        assert_eq!(input.reads, 1, "no further underlying reads after either flag");
+        assert!(!input.remaining.is_empty(), "the nonmatching tail was not drained");
+
+        // Early EOF must not leave the reusable searcher's buffers stopped.
+        let root = root(&format!("active-read-{cancel}-{}", text.len()));
+        let path = root.join("next.txt");
+        write(&root, "next.txt", b"needle\n");
+        let control = Control::new();
+        assert_eq!(content.search(&path, None, 7, false, &mut hits, &control), 1);
+        assert_eq!(hits[0].path, path);
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn active_nonmatching_content_reads_stop_between_buffers() {
+        for cancel in [false, true] {
+            assert_active_content_read_stops(b"nothing here\n", cancel);
+        }
+    }
+
+    #[test]
+    fn active_matching_content_reads_stop_buffered_matches() {
+        for cancel in [false, true] {
+            assert_active_content_read_stops(b"needle\n", cancel);
+        }
+    }
+
     fn run(
         root: &Path,
         names: Option<&str>,
@@ -683,9 +814,9 @@ mod tests {
             rules: rules(),
             everything,
         };
-        let cancel = Arc::new(AtomicBool::new(false));
+        let control = Control::new();
         let mut hits = Vec::new();
-        let summary = search(root, &query, |batch| hits.extend(batch), &cancel);
+        let summary = search(root, &query, |batch| hits.extend(batch), &control);
         hits.sort_by(|a, b| {
             a.path.cmp(&b.path).then_with(|| match (&a.kind, &b.kind) {
                 (HitKind::Content { line: a, .. }, HitKind::Content { line: b, .. }) => a.cmp(b),
@@ -883,8 +1014,8 @@ mod tests {
             rules: rules(),
             everything: false,
         };
-        let cancel = Arc::new(AtomicBool::new(false));
-        let summary = search(&root, &query, |batch| hits.extend(batch), &cancel);
+        let control = Control::new();
+        let summary = search(&root, &query, |batch| hits.extend(batch), &control);
         assert_eq!(paths(&hits), [root.join("visible.txt")]);
         assert!(!summary.skipped.iter().any(|skip| skip.reason == SkipReason::HiddenFolder));
 
@@ -898,7 +1029,7 @@ mod tests {
             rules: rules(),
             everything: true,
         };
-        let summary = search(&root, &query, |batch| hits.extend(batch), &cancel);
+        let summary = search(&root, &query, |batch| hits.extend(batch), &control);
         assert_eq!(paths(&hits), [root.join("visible.txt")], "Search everything keeps dot entries out");
         assert!(!summary.skipped.iter().any(|skip| skip.reason == SkipReason::HiddenFolder));
     }
@@ -1083,12 +1214,12 @@ mod tests {
             rules: rules(),
             everything: true,
         };
-        let cancel = Arc::new(AtomicBool::new(false));
+        let control = Control::new();
         let (tx, rx) = mpsc::channel();
         let search_root = root.clone();
         std::thread::spawn(move || {
             let mut hits = Vec::new();
-            let summary = search(&search_root, &query, |batch| hits.extend(batch), &cancel);
+            let summary = search(&search_root, &query, |batch| hits.extend(batch), &control);
             let _ = tx.send((hits, summary));
         });
         let (hits, summary) = rx.recv_timeout(Duration::from_secs(10)).expect("the search finishes despite the FIFO");
@@ -1108,13 +1239,13 @@ mod tests {
             rules: rules(),
             everything: true,
         };
-        let cancel = Arc::new(AtomicBool::new(false));
+        let control = Control::new();
         let mut batches: Vec<Vec<bool>> = Vec::new();
         let summary = search(
             &root,
             &query,
             |batch| batches.push(batch.into_iter().map(|hit| matches!(hit.kind, HitKind::Name { .. })).collect()),
-            &cancel,
+            &control,
         );
         assert!(summary.error.is_none(), "{:?}", summary.error);
         let name = batches.iter().position(|batch| batch.iter().any(|is_name| *is_name)).expect("a name hit");
@@ -1152,9 +1283,9 @@ mod tests {
             rules: rules(),
             everything: true,
         };
-        let cancel = Arc::new(AtomicBool::new(false));
+        let control = Control::new();
         let mut hits = Vec::new();
-        let summary = search(&root, &query, |batch| hits.extend(batch), &cancel);
+        let summary = search(&root, &query, |batch| hits.extend(batch), &control);
         assert!(summary.error.is_none(), "{:?}", summary.error);
         assert_eq!(hits.len(), 1, "only the first line becomes a hit");
         assert_eq!(extra_matches(&hits), 1999, "the other lines are counted");
@@ -1174,9 +1305,9 @@ mod tests {
             rules: rules(),
             everything: true,
         };
-        let cancel = Arc::new(AtomicBool::new(false));
+        let control = Control::new();
         let mut batches = Vec::new();
-        let summary = search(&root, &query, |batch| batches.push(batch.len()), &cancel);
+        let summary = search(&root, &query, |batch| batches.push(batch.len()), &control);
         assert!(summary.error.is_none(), "{:?}", summary.error);
         assert!(batches.iter().all(|&len| len <= BATCH), "batches stay bounded: {batches:?}");
         assert_eq!(batches.iter().sum::<usize>(), 1000, "every file arrives");
@@ -1227,9 +1358,10 @@ mod tests {
             rules: rules(),
             everything: false,
         };
-        let cancel = Arc::new(AtomicBool::new(true));
+        let control = Control::new();
+        control.cancel();
         let mut hits = Vec::new();
-        let summary = search(&root, &query, |batch| hits.extend(batch), &cancel);
+        let summary = search(&root, &query, |batch| hits.extend(batch), &control);
         assert!(hits.is_empty());
         assert_eq!(summary.scanned, 0);
     }
@@ -1248,20 +1380,85 @@ mod tests {
             rules: rules(),
             everything: true,
         };
-        let cancel = Arc::new(AtomicBool::new(false));
+        let control = Control::new();
         let mut hits = Vec::new();
-        let flag = cancel.clone();
+        let flag = control.clone();
         let summary = search(
             &root,
             &query,
             |batch| {
                 hits.extend(batch);
-                flag.store(true, Ordering::Relaxed);
+                flag.cancel();
             },
-            &cancel,
+            &control,
         );
         assert!(hits.len() < 4000, "cancelling stopped the stream");
         assert!(summary.scanned < 4000, "the walk stopped early");
+    }
+
+    fn names_and_contents_tree(name: &str) -> (PathBuf, Query) {
+        let root = root(name);
+        for i in 0..50 {
+            write(&root, &format!("content-{i:02}.txt"), b"needle\n");
+        }
+        for i in 0..50 {
+            write(&root, &format!("needle-{i:02}.txt"), b"nothing here\n");
+        }
+        let query = Query {
+            names: Some("needle".into()),
+            contents: Some("needle".into()),
+            enter_hidden_folders: false,
+            include_hidden: true,
+            rules: rules(),
+            everything: true,
+        };
+        (root, query)
+    }
+
+    fn names(hits: &[Hit]) -> BTreeSet<PathBuf> {
+        hits.iter()
+            .filter(|hit| hit.path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("needle-")))
+            .map(|hit| hit.path.clone())
+            .collect()
+    }
+
+    #[test]
+    fn stop_contents_keeps_names_streaming() {
+        let (root, query) = names_and_contents_tree("stop-contents");
+        let control = Control::new();
+        let mut hits = Vec::new();
+        let summary = search(
+            &root,
+            &query,
+            |batch| {
+                hits.extend(batch);
+                if hits.iter().any(|hit| matches!(hit.kind, HitKind::Content { .. })) {
+                    control.stop_contents();
+                }
+            },
+            &control,
+        );
+        assert!(summary.contents_stopped, "the flag is reported");
+        assert!(!control.is_cancelled(), "names keep the walk alive");
+        assert_eq!(names(&hits).len(), 50, "every needle-* name still arrives");
+    }
+
+    /// Deterministic form of the same rule: the walk starts with contents
+    /// stopped, so no file is read, and every name still streams.
+    #[test]
+    fn contents_stopped_before_the_walk_reads_no_contents() {
+        let (root, query) = names_and_contents_tree("stop-contents-up-front");
+        let control = Control::new();
+        control.stop_contents();
+        let mut hits = Vec::new();
+        let summary = search(&root, &query, |batch| hits.extend(batch), &control);
+        assert!(summary.contents_stopped);
+        assert!(!control.is_cancelled());
+        assert_eq!(names(&hits).len(), 50);
+        assert!(
+            !hits.iter().any(|hit| matches!(hit.kind, HitKind::Content { .. })),
+            "contents are never read once stopped"
+        );
     }
 
     /// The palette scores every candidate on each keystroke. A long non-ASCII

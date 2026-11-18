@@ -7,11 +7,33 @@ use crow_fs::testing::{Churn, ChurnHandle, EdgeTree};
 use crow_search::{Hit, HitKind};
 
 use crate::actions::StartFilter;
+use crate::search::{MAX_OTHER_ROWS, MAX_STRONG_ROWS};
 
 use super::*;
 
 fn test_ranges(start: usize, end: usize) -> Vec<std::ops::Range<usize>> {
     std::iter::once(start..end).collect()
+}
+
+/// A synthetic hit for `add_test_hits`.
+fn test_hit(path: PathBuf, kind: HitKind, score: u32) -> Hit {
+    Hit { path, is_dir: false, hidden: false, score, kind, modified: None, size: 0 }
+}
+
+fn content_hit(path: PathBuf) -> Hit {
+    test_hit(
+        path,
+        HitKind::Content { line: 1, text: "qqzz lives here".to_owned(), ranges: test_ranges(0, 4), more: 0 },
+        0,
+    )
+}
+
+fn strong_hit(path: PathBuf) -> Hit {
+    test_hit(path, HitKind::Name { ranges: test_ranges(0, 4) }, 100)
+}
+
+fn weak_hit(path: PathBuf) -> Hit {
+    test_hit(path, HitKind::Name { ranges: vec![0..1, 2..3] }, 10)
 }
 
 /// `root/{alpha/inner/, beta/, notes.txt}`, canonicalized (macOS temp dirs sit behind /private).
@@ -3112,6 +3134,118 @@ fn search_contiguous_name_hits_come_before_contents_and_weak_names(cx: &mut Test
     });
     let paths = search.read_with(&cx, |search, _| search.result_paths());
     assert_eq!(paths, [strong, content, weak]);
+}
+
+/// Open search on a fixture that finds nothing for `qqzz`, ready for synthetic hits.
+fn open_search(
+    name: &str,
+    cx: &mut TestAppContext,
+) -> (PathBuf, Entity<CrowWindow>, Entity<crate::search::SearchView>, VisualTestContext) {
+    let root = fixture(name);
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    cx.simulate_input("qqzz");
+    wait_for_search(&view, &mut cx);
+    (root, view, search, cx)
+}
+
+fn fill_other_rows(search: &Entity<crate::search::SearchView>, root: &Path, cx: &mut VisualTestContext) {
+    let hits: Vec<Hit> = (0..MAX_OTHER_ROWS).map(|i| content_hit(root.join(format!("content-{i:05}.txt")))).collect();
+    search.update(cx, |search, cx| search.add_test_hits(hits, cx));
+}
+
+#[gpui::test]
+fn strong_name_after_the_cap_is_kept(cx: &mut TestAppContext) {
+    let (root, _view, search, mut cx) = open_search("search-cap-strong", cx);
+    fill_other_rows(&search, &root, &mut cx);
+    assert!(search.read_with(&cx, |s, _| s.contents_stopped()), "filling the other budget stops contents");
+    assert!(!search.read_with(&cx, |s, _| s.control_cancelled()), "names keep the walk alive");
+
+    let strong = root.join("qqzz-exact.txt");
+    search.update(&mut cx, |search, cx| search.add_test_hits(vec![strong_hit(strong.clone())], cx));
+    assert_eq!(search.read_with(&cx, |s, _| s.result_count()), MAX_OTHER_ROWS + 1);
+    assert_eq!(
+        search.read_with(&cx, |s, _| s.result_paths().first().cloned()),
+        Some(strong),
+        "the strong row is first"
+    );
+    assert!(search.read_with(&cx, |s, _| s.contents_stopped()));
+    assert!(!search.read_with(&cx, |s, _| s.control_cancelled()), "names keep the walk alive");
+}
+
+#[gpui::test]
+fn weak_hits_after_the_cap_are_counted(cx: &mut TestAppContext) {
+    let (root, _view, search, mut cx) = open_search("search-cap-weak", cx);
+    fill_other_rows(&search, &root, &mut cx);
+    let strong = root.join("qqzz-exact.txt");
+    search.update(&mut cx, |search, cx| search.add_test_hits(vec![strong_hit(strong)], cx));
+
+    let mut hits = Vec::new();
+    for i in 0..5 {
+        hits.push(weak_hit(root.join(format!("weak-{i}.txt"))));
+        hits.push(content_hit(root.join(format!("late-content-{i}.txt"))));
+    }
+    search.update(&mut cx, |search, cx| search.add_test_hits(hits, cx));
+    assert_eq!(search.read_with(&cx, |s, _| s.result_count()), MAX_OTHER_ROWS + 1, "no new rows fit");
+    assert_eq!(search.read_with(&cx, |s, _| s.dropped()), 10);
+
+    // Rejected rows must not hide a later strong name in the same engine batch.
+    let late_strong = root.join("qqzz-late.txt");
+    let hits = vec![content_hit(root.join("rejected-again.txt")), strong_hit(late_strong.clone())];
+    search.update(&mut cx, |search, cx| search.add_test_hits(hits, cx));
+    assert_eq!(search.read_with(&cx, |s, _| s.result_count()), MAX_OTHER_ROWS + 2, "only the strong name fits");
+    assert!(search.read_with(&cx, |s, _| s.result_paths().contains(&late_strong)));
+    assert_eq!(search.read_with(&cx, |s, _| s.dropped()), 11);
+}
+
+#[gpui::test]
+fn strong_names_cap_cancels(cx: &mut TestAppContext) {
+    let (root, _view, search, mut cx) = open_search("search-cap-strong-only", cx);
+    let hits: Vec<Hit> = (0..=MAX_STRONG_ROWS).map(|i| strong_hit(root.join(format!("qqzz-{i:05}.txt")))).collect();
+    search.update(&mut cx, |search, cx| search.add_test_hits(hits, cx));
+    assert!(search.read_with(&cx, |s, _| s.names_capped()));
+    assert!(search.read_with(&cx, |s, _| s.control_cancelled()), "filling the strong budget cancels the walk");
+    assert_eq!(search.read_with(&cx, |s, _| s.result_count()), MAX_STRONG_ROWS);
+    assert_eq!(search.read_with(&cx, |s, _| s.dropped()), 0);
+}
+
+#[gpui::test]
+fn contents_only_cap_cancels(cx: &mut TestAppContext) {
+    let (root, view, search, mut cx) = open_search("search-cap-contents", cx);
+    search.update(&mut cx, |search, cx| search.set_match(crate::search::Match::Contents, cx));
+    wait_for_search(&view, &mut cx);
+    assert_eq!(search.read_with(&cx, |s, _| s.effective_match()), crate::search::Match::Contents);
+
+    let hits: Vec<Hit> = (0..=MAX_OTHER_ROWS).map(|i| content_hit(root.join(format!("content-{i:05}.txt")))).collect();
+    search.update(&mut cx, |search, cx| search.add_test_hits(hits, cx));
+    assert!(search.read_with(&cx, |s, _| s.contents_stopped()));
+    assert!(search.read_with(&cx, |s, _| s.control_cancelled()), "nothing more can be shown");
+    assert_eq!(search.read_with(&cx, |s, _| s.dropped()), 1);
+    assert_eq!(search.read_with(&cx, |s, _| s.result_count()), MAX_OTHER_ROWS);
+}
+
+#[gpui::test]
+fn late_strong_name_keeps_the_cursor_row(cx: &mut TestAppContext) {
+    let (root, _view, search, mut cx) = open_search("search-late-strong-selection", cx);
+    let contents: Vec<Hit> = (0..30).map(|i| content_hit(root.join(format!("content-{i:02}.txt")))).collect();
+    search.update(&mut cx, |search, cx| search.add_test_hits(contents, cx));
+    cx.simulate_keystrokes("tab");
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("down");
+    let selected = root.join("content-02.txt");
+    assert_eq!(search.read_with(&cx, |s, _| s.cursor()), 2);
+    assert_eq!(search.read_with(&cx, |s, _| s.selected_entry()).map(|(path, _)| path), Some(selected.clone()));
+
+    let strong: Vec<Hit> = (0..5).map(|i| strong_hit(root.join(format!("qqzz-{i}.txt")))).collect();
+    search.update(&mut cx, |search, cx| search.add_test_hits(strong, cx));
+    assert_eq!(search.read_with(&cx, |s, _| s.cursor()), 7, "the row moved right with its new index");
+    assert_eq!(
+        search.read_with(&cx, |s, _| s.selected_entry()).map(|(path, _)| path),
+        Some(selected),
+        "the selected path does not move"
+    );
 }
 
 #[gpui::test]

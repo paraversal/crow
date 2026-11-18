@@ -7,13 +7,12 @@ use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use crow_core::{Exclude, KeymapLayer, SearchMatch, Selection, SetName};
 use crow_fs::Entry;
 use crow_fs::ops::Request;
-use crow_search::{Hit, HitKind, Query, RuleSet, Skip, SkipReason, Summary};
+use crow_search::{Control, Hit, HitKind, Query, RuleSet, Skip, SkipReason, Summary};
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use gpui::{
@@ -42,7 +41,12 @@ use crate::style::{
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
 
-const MAX_RESULTS: usize = 20_000;
+/// Rows for strong name matches (the name contains the query contiguously). When
+/// these fill, the search is cancelled: the query is too broad to be useful.
+pub(crate) const MAX_STRONG_ROWS: usize = 20_000;
+/// Rows for everything else: content-only and weak (scattered) fuzzy name hits.
+/// When these fill, contents stop being read; names keep streaming.
+pub(crate) const MAX_OTHER_ROWS: usize = 20_000;
 const ROW_HEIGHT: f32 = 40.0;
 /// Full Disk Access, where the user grants a folder like `~` to Crow.
 const PRIVACY_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
@@ -150,12 +154,17 @@ pub struct SearchView {
     skipped: Vec<Skip>,
     error: Option<SharedString>,
     searching: bool,
-    capped: bool,
+    /// The strong-name budget filled: the walk was cancelled.
+    names_capped: bool,
+    /// The other budget filled and the engine stopped reading contents.
+    contents_stopped: bool,
+    /// New rows the other budget refused.
+    dropped: usize,
     /// When `start_search` began the current search; for the log and first-hit ms.
     started: Instant,
     /// Milliseconds from `started` to the first accepted hit.
     first_hit_ms: Option<u64>,
-    cancel: Arc<AtomicBool>,
+    control: Control,
     generation: u64,
     exclude_generation: u64,
     /// The compiled rules for `exclude_generation`; the glob compile is ~14 ms.
@@ -174,6 +183,8 @@ pub struct SearchView {
     name_count: usize,
     /// How many rows after the name block are content-only hits.
     content_count: usize,
+    /// How many rows at the tail are weak fuzzy name hits.
+    weak_count: usize,
     /// The selected row's preview, loaded off the main thread.
     preview: Option<LoadedPreview>,
     scroll: UniformListScrollHandle,
@@ -230,7 +241,7 @@ enum Update {
 
 impl Drop for SearchView {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.control.cancel();
     }
 }
 
@@ -307,10 +318,12 @@ impl SearchView {
             skipped: Vec::new(),
             error: None,
             searching: false,
-            capped: false,
+            names_capped: false,
+            contents_stopped: false,
+            dropped: 0,
             started: Instant::now(),
             first_hit_ms: None,
-            cancel: Arc::new(AtomicBool::new(false)),
+            control: Control::new(),
             generation: 0,
             exclude_generation,
             rules: None,
@@ -322,6 +335,7 @@ impl SearchView {
             hit_count: 0,
             name_count: 0,
             content_count: 0,
+            weak_count: 0,
             preview: None,
             scroll: UniformListScrollHandle::new(),
             show_skipped: false,
@@ -360,7 +374,7 @@ impl SearchView {
     }
 
     pub fn cancel(&mut self, _: &mut App) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.control.cancel();
         self.generation += 1;
     }
 
@@ -388,17 +402,19 @@ impl SearchView {
     }
 
     fn start_search(&mut self, query: &str, cx: &mut Context<Self>) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.control.cancel();
         self.generation += 1;
         let generation = self.generation;
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel = cancel.clone();
+        let control = Control::new();
+        self.control = control.clone();
 
         self.results.clear();
         self.by_path.clear();
         self.skipped.clear();
         self.error = None;
-        self.capped = false;
+        self.names_capped = false;
+        self.contents_stopped = false;
+        self.dropped = 0;
         self.started = Instant::now();
         self.first_hit_ms = None;
         self.show_skipped = false;
@@ -409,6 +425,7 @@ impl SearchView {
         self.hit_count = 0;
         self.name_count = 0;
         self.content_count = 0;
+        self.weak_count = 0;
         self.preview = None;
         let query = query.trim();
         if query.is_empty() {
@@ -439,6 +456,7 @@ impl SearchView {
         if self.scope == Scope::ThisMac {
             let query = query.to_owned();
             let effects = crate::effects::effects(cx);
+            let cancel = control.cancel_flag();
             cx.background_spawn(async move {
                 let hits = tx.clone();
                 let result = effects.spotlight_names(
@@ -495,7 +513,7 @@ impl SearchView {
                     |batch| {
                         let _ = tx.unbounded_send(Update::Hits(batch));
                     },
-                    &cancel,
+                    &control,
                 );
                 let _ = tx.unbounded_send(Update::Done(summary));
             })
@@ -529,9 +547,10 @@ impl SearchView {
     fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
         let _span = tracing::debug_span!("search batch").entered();
         match update {
-            // Once the result cap is hit the walk is cancelled; queued batches are
-            // dropped rather than merged, so the UI is never busy draining them.
-            Update::Hits(_) if self.capped => {}
+            // Once the strong-name cap is hit the walk is cancelled; queued batches
+            // are dropped rather than merged, so the UI is never busy draining them.
+            // The other budget keeps names streaming, so its batches still apply.
+            Update::Hits(_) if self.names_capped => {}
             Update::Hits(hits) => self.add_hits(hits, cx),
             Update::Done(summary) => {
                 let scanned = summary.scanned;
@@ -550,7 +569,9 @@ impl SearchView {
                     skipped,
                     rows = self.results.len(),
                     hits = self.hit_count,
-                    capped = self.capped,
+                    names_capped = self.names_capped,
+                    contents_stopped = self.contents_stopped,
+                    dropped = self.dropped,
                     error = ?self.error,
                     "search finished"
                 );
@@ -568,7 +589,7 @@ impl SearchView {
                     first_hit_ms = ?self.first_hit_ms,
                     rows = self.results.len(),
                     hits = self.hit_count,
-                    capped = self.capped,
+                    names_capped = self.names_capped,
                     error = ?self.error,
                     "spotlight search finished"
                 );
@@ -579,17 +600,42 @@ impl SearchView {
     }
 
     fn add_hits(&mut self, hits: Vec<Hit>, cx: &mut Context<Self>) {
-        let root = (self.scope == Scope::Folder).then_some(self.folder.as_path());
         let query = self.query(cx);
         let mut changed = false;
         let mut fresh: Vec<Row> = Vec::new();
         let mut fresh_at: HashMap<PathBuf, usize> = HashMap::new();
+        let mut fresh_strong = 0usize;
+        let mut fresh_others = 0usize;
         for hit in hits {
+            // Compute the rank once: the budgets and the row both need it.
+            let strong_name = match &hit.kind {
+                HitKind::Name { ranges } => is_strong_name(&hit.path, ranges, &query),
+                HitKind::Content { .. } => false,
+            };
             let known = self.by_path.contains_key(&hit.path) || fresh_at.contains_key(&hit.path);
-            if !known && self.results.len() + fresh.len() >= MAX_RESULTS {
-                self.capped = true;
-                self.cancel.store(true, Ordering::Relaxed);
-                break;
+            if !known {
+                if strong_name {
+                    if self.name_count + fresh_strong >= MAX_STRONG_ROWS {
+                        changed = true;
+                        self.names_capped = true;
+                        self.control.cancel();
+                        break;
+                    }
+                    fresh_strong += 1;
+                } else {
+                    let other = self.content_count + self.weak_count + fresh_others;
+                    if other >= MAX_OTHER_ROWS {
+                        changed = true;
+                        self.dropped += 1;
+                        self.stop_contents_at_cap();
+                        // A strong name later in this batch must still get in.
+                        continue;
+                    }
+                    fresh_others += 1;
+                    if other + 1 == MAX_OTHER_ROWS {
+                        self.stop_contents_at_cap();
+                    }
+                }
             }
             if self.first_hit_ms.is_none() {
                 self.first_hit_ms = Some(self.started.elapsed().as_millis() as u64);
@@ -622,7 +668,8 @@ impl SearchView {
                     row.set_content((line, text, ranges));
                 }
             } else {
-                let row = Row::from_hit(hit, &self.home, root, &query);
+                let root = (self.scope == Scope::Folder).then_some(self.folder.as_path());
+                let row = Row::from_hit(hit, &self.home, root, strong_name);
                 fresh_at.insert(row.path.clone(), fresh.len());
                 fresh.push(row);
                 changed = true;
@@ -638,6 +685,19 @@ impl SearchView {
         }
         if changed {
             cx.notify();
+        }
+    }
+
+    /// The other budget filled: stop the engine's content reads. In Contents
+    /// mode nothing later can be shown, so cancel the walk too.
+    fn stop_contents_at_cap(&mut self) {
+        if self.contents_stopped {
+            return;
+        }
+        self.contents_stopped = true;
+        self.control.stop_contents();
+        if self.effective_match() == Match::Contents {
+            self.control.cancel();
         }
     }
 
@@ -659,7 +719,9 @@ impl SearchView {
                 self.content_count += added;
             }
             let first = if content_added { at } else { self.results.len() };
+            let weak_added = weak.len();
             self.results.extend(weak);
+            self.weak_count += weak_added;
             for (offset, row) in self.results[first..].iter().enumerate() {
                 self.by_path.insert(row.path.clone(), first + offset);
             }
@@ -696,7 +758,10 @@ impl SearchView {
         self.name_count = merged.len();
         self.content_count = tail.len() + content.len();
         let content_added = !content.is_empty();
+        self.weak_count = old_weak.len() + weak.len();
+        let weak_count = self.weak_count;
         self.results = merged.into_iter().chain(tail).chain(content).chain(old_weak).chain(weak).collect();
+        debug_assert_eq!(self.results.len(), self.name_count + self.content_count + weak_count);
         // Rows only move to the right, so re-index the moved suffix and index the appended rows.
         let first = first_insert.unwrap_or(if content_added { old_content_end } else { old_total });
         for (offset, row) in self.results[first..].iter().enumerate() {
@@ -734,8 +799,8 @@ impl SearchView {
             if self.by_path.contains_key(&hit.path) {
                 continue;
             }
-            if self.results.len() >= MAX_RESULTS {
-                self.capped = true;
+            if self.results.len() >= MAX_STRONG_ROWS {
+                self.names_capped = true;
                 break;
             }
             if self.first_hit_ms.is_none() {
@@ -749,6 +814,7 @@ impl SearchView {
         }
         self.name_count = self.results.len();
         self.content_count = 0;
+        self.weak_count = 0;
         let before = self.selection.cursor().cloned();
         self.follow_selection();
         if before != self.selection.cursor().cloned() {
@@ -909,6 +975,26 @@ impl SearchView {
     /// How many results the list holds so far.
     pub fn result_count(&self) -> usize {
         self.results.len()
+    }
+
+    #[cfg(test)]
+    pub fn names_capped(&self) -> bool {
+        self.names_capped
+    }
+
+    #[cfg(test)]
+    pub fn contents_stopped(&self) -> bool {
+        self.contents_stopped
+    }
+
+    #[cfg(test)]
+    pub fn dropped(&self) -> usize {
+        self.dropped
+    }
+
+    #[cfg(test)]
+    pub fn control_cancelled(&self) -> bool {
+        self.control.is_cancelled()
     }
 
     pub fn selected_count(&self) -> usize {
@@ -1662,7 +1748,7 @@ impl SearchView {
         let summary = self.footer_text();
         let text_color = if self.error.is_some() {
             error
-        } else if self.capped {
+        } else if self.names_capped || self.contents_stopped {
             warning
         } else {
             fg
@@ -1750,9 +1836,12 @@ impl SearchView {
     fn footer_text(&self) -> String {
         footer_summary(FooterState {
             searching: self.searching,
+            matching: self.effective_match(),
             hits: self.hit_count,
             files: self.results.len(),
-            capped: self.capped,
+            names_capped: self.names_capped,
+            contents_stopped: self.contents_stopped,
+            dropped: self.dropped,
             error: self.error.as_deref(),
         })
     }
@@ -2491,32 +2580,51 @@ impl Render for SearchView {
 /// What the footer says; a pure function so the wording is unit-tested.
 struct FooterState<'a> {
     searching: bool,
+    matching: Match,
     /// Every accepted hit, including extra content lines for one file.
     hits: usize,
     /// Result rows: one per path.
     files: usize,
-    capped: bool,
+    names_capped: bool,
+    contents_stopped: bool,
+    dropped: usize,
     error: Option<&'a str>,
+}
+
+/// "3 results" / "3 results in 1 file", without the searching prefix.
+fn results_text(hits: usize, files: usize) -> String {
+    let results = if hits == 1 { "1 result".to_owned() } else { format!("{hits} results") };
+    if hits > files {
+        let files = if files == 1 { "1 file".to_owned() } else { format!("{files} files") };
+        format!("{results} in {files}")
+    } else {
+        results
+    }
 }
 
 fn footer_summary(state: FooterState<'_>) -> String {
     if let Some(error) = state.error {
         return error.lines().next().unwrap_or(error).to_owned();
     }
-    if state.capped {
-        return format!("First {MAX_RESULTS} files · refine the search");
+    if state.names_capped {
+        return format!("First {MAX_STRONG_ROWS} name matches · refine the search");
+    }
+    if state.contents_stopped {
+        let results = results_text(state.hits, state.files);
+        let dropped = state.dropped;
+        return if state.searching {
+            format!("Searching names… {results} · {dropped} more not shown")
+        } else if state.matching == Match::Names {
+            format!("{results} · {dropped} more not shown")
+        } else {
+            format!("{results} · {dropped} more not shown · contents stopped at {MAX_OTHER_ROWS}")
+        };
     }
     let prefix = if state.searching { "Searching… " } else { "" };
     if state.hits == 0 {
         return if state.searching { "Searching…".to_owned() } else { "No results".to_owned() };
     }
-    let results = if state.hits == 1 { "1 result".to_owned() } else { format!("{} results", state.hits) };
-    if state.hits > state.files {
-        let files = if state.files == 1 { "1 file".to_owned() } else { format!("{} files", state.files) };
-        format!("{prefix}{results} in {files}")
-    } else {
-        format!("{prefix}{results}")
-    }
+    format!("{prefix}{}", results_text(state.hits, state.files))
 }
 
 /// "1 folder skipped" / "3 folders skipped", for the footer link and its aria label.
@@ -2596,12 +2704,11 @@ impl Row {
         label
     }
 
-    fn from_hit(hit: Hit, home: &Path, folder_root: Option<&Path>, query: &str) -> Row {
+    fn from_hit(hit: Hit, home: &Path, folder_root: Option<&Path>, strong_name: bool) -> Row {
         let (content, name_match, name_ranges) = match hit.kind {
             HitKind::Content { line, text, ranges, .. } => (Some((line, text, ranges)), false, Vec::new()),
             HitKind::Name { ranges } => (None, true, ranges),
         };
-        let strong_name = name_match && is_strong_name(&hit.path, &name_ranges, query);
         Self::new(
             hit.path,
             hit.is_dir,
@@ -2796,17 +2903,52 @@ mod tests {
 
     #[test]
     fn footer_summary_copy() {
-        let state = |searching, hits, files, capped, error| FooterState { searching, hits, files, capped, error };
-        assert_eq!(footer_summary(state(true, 0, 0, false, None)), "Searching…");
-        assert_eq!(footer_summary(state(true, 44, 15, false, None)), "Searching… 44 results in 15 files");
-        assert_eq!(footer_summary(state(false, 44, 15, false, None)), "44 results in 15 files");
-        assert_eq!(footer_summary(state(false, 3, 3, false, None)), "3 results");
-        assert_eq!(footer_summary(state(false, 1, 1, false, None)), "1 result");
-        assert_eq!(footer_summary(state(false, 2, 1, false, None)), "2 results in 1 file");
-        assert_eq!(footer_summary(state(false, 0, 0, false, None)), "No results");
-        assert_eq!(footer_summary(state(false, 20_000, 10, true, None)), "First 20000 files · refine the search");
+        let state = |searching, hits, files, names_capped, contents_stopped, dropped, error| FooterState {
+            searching,
+            matching: Match::All,
+            hits,
+            files,
+            names_capped,
+            contents_stopped,
+            dropped,
+            error,
+        };
+        assert_eq!(footer_summary(state(true, 0, 0, false, false, 0, None)), "Searching…");
+        assert_eq!(footer_summary(state(true, 44, 15, false, false, 0, None)), "Searching… 44 results in 15 files");
+        assert_eq!(footer_summary(state(false, 44, 15, false, false, 0, None)), "44 results in 15 files");
+        assert_eq!(footer_summary(state(false, 3, 3, false, false, 0, None)), "3 results");
+        assert_eq!(footer_summary(state(false, 1, 1, false, false, 0, None)), "1 result");
+        assert_eq!(footer_summary(state(false, 2, 1, false, false, 0, None)), "2 results in 1 file");
+        assert_eq!(footer_summary(state(false, 0, 0, false, false, 0, None)), "No results");
         assert_eq!(
-            footer_summary(state(false, 0, 0, false, Some("Invalid pattern: unclosed group"))),
+            footer_summary(state(false, 20_000, 20_000, true, false, 0, None)),
+            "First 20000 name matches · refine the search"
+        );
+        assert_eq!(
+            footer_summary(state(true, 44, 15, false, true, 3, None)),
+            "Searching names… 44 results in 15 files · 3 more not shown"
+        );
+        assert_eq!(
+            footer_summary(state(false, 44, 15, false, true, 3, None)),
+            "44 results in 15 files · 3 more not shown · contents stopped at 20000"
+        );
+        assert_eq!(
+            footer_summary(state(false, 1, 1, false, true, 1, None)),
+            "1 result · 1 more not shown · contents stopped at 20000"
+        );
+        let mut names = state(false, MAX_OTHER_ROWS, MAX_OTHER_ROWS, false, true, 80_000, None);
+        names.matching = Match::Names;
+        assert_eq!(footer_summary(names), "20000 results · 80000 more not shown");
+        let mut contents = state(false, MAX_OTHER_ROWS, MAX_OTHER_ROWS, false, true, 1, None);
+        contents.matching = Match::Contents;
+        assert_eq!(footer_summary(contents), "20000 results · 1 more not shown · contents stopped at 20000");
+        // The strong cap is the bigger fact, and an error outranks both.
+        assert_eq!(
+            footer_summary(state(false, 44, 15, true, true, 3, None)),
+            "First 20000 name matches · refine the search"
+        );
+        assert_eq!(
+            footer_summary(state(false, 0, 0, true, true, 3, Some("Invalid pattern: unclosed group"))),
             "Invalid pattern: unclosed group"
         );
     }

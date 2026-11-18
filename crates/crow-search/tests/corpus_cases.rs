@@ -4,13 +4,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use crow_core::Exclude;
 use crow_search::corpus::{self, Case, Expect};
-use crow_search::{Query, RuleSet, search};
+use crow_search::{Control, Query, RuleSet, search};
 
 #[test]
 fn corpus_cases_match_the_engine() {
@@ -54,9 +53,9 @@ fn run_case(root: &Path, case: &Case, rules: &Arc<RuleSet>) -> Result<(), String
     let (tx, rx) = mpsc::channel();
     let walked: PathBuf = search_root.clone();
     let handle = std::thread::spawn(move || {
-        let cancel = Arc::new(AtomicBool::new(false));
+        let control = Control::new();
         let mut hits = Vec::new();
-        let summary = search(&walked, &query, |batch| hits.extend(batch), &cancel);
+        let summary = search(&walked, &query, |batch| hits.extend(batch), &control);
         let _ = tx.send((hits, summary));
     });
     let (hits, summary) = match rx.recv_timeout(Duration::from_secs(10)) {
