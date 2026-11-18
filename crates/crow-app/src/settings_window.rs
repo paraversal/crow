@@ -156,11 +156,11 @@ impl ControlId {
         ControlId::FolderSizes,
         ControlId::Terminal,
         ControlId::ShowHidden,
-        ControlId::SearchHidden,
-        ControlId::SearchMatch,
         ControlId::ShowPreview,
         ControlId::ViewPerFolder,
         ControlId::PaletteRecent,
+        ControlId::SearchHidden,
+        ControlId::SearchMatch,
         ControlId::Motion,
         ControlId::Sound,
         ControlId::PlaySound,
@@ -1962,6 +1962,32 @@ mod tests {
         assert_eq!(state(&view, &vcx, ControlId::SearchMatch).selected, Some(2));
         assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.search_match), SearchMatch::Contents);
         wait_for(&vcx, "search_match = \"contents\"");
+    }
+
+    /// Tab and ⇧Tab follow the page, not the order the controls were declared in.
+    /// The banner is skipped: it is not a tab stop.
+    #[gpui::test]
+    fn controls_are_tabbed_in_page_order(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        draw(&mut vcx);
+        let indices = view.read_with(&vcx, |view, _| {
+            ControlId::ALL
+                .iter()
+                .copied()
+                .filter(|id| *id != ControlId::EditSettingsBanner)
+                .map(|id| (id, *view.control_items.get(&id).expect("every tab stop is on the page")))
+                .collect::<Vec<_>>()
+        });
+        for pair in indices.windows(2) {
+            assert!(
+                pair[0].1 <= pair[1].1,
+                "{:?} (row {}) is tabbed before {:?} (row {})",
+                pair[0].0,
+                pair[0].1,
+                pair[1].0,
+                pair[1].1
+            );
+        }
     }
 
     #[gpui::test]

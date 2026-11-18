@@ -102,11 +102,13 @@ impl Batcher {
 pub struct Query {
     pub names: Option<String>,
     pub contents: Option<String>,
-    /// Descend into dot folders. Dot-named entries are always visited and
-    /// matched; this only decides whether the walk goes inside them.
+    /// Descend into dot folders. Dot-named entries are visited and matched
+    /// while `include_hidden` is on; this only decides whether the walk goes
+    /// inside them.
     pub enter_hidden_folders: bool,
-    /// Visit dot-named entries at all while Show Hidden Files is off. The
-    /// `search_includes_hidden` setting; Show Hidden Files on overrides it.
+    /// Visit dot-named entries at all while Show Hidden Files is off. This is
+    /// the `search_includes_hidden` setting; Show Hidden Files on overrides it.
+    /// Search everything ignores exclude rules, not this setting.
     pub include_hidden: bool,
     /// Compiled once per `exclude.toml` generation and shared by every search
     /// that starts from it: the glob compile is ~14 ms on the main thread.
@@ -305,7 +307,9 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
 
     let rules = if query.everything { Arc::new(RuleSet::empty()) } else { Arc::clone(&query.rules) };
     let enter_hidden = query.enter_hidden_folders || query.everything;
-    let visit_hidden = query.include_hidden || enter_hidden;
+    // Search everything ignores exclude.toml; Show Hidden Files is its own setting,
+    // so it must not smuggle dot entries back in when search_includes_hidden is off.
+    let visit_hidden = query.include_hidden || query.enter_hidden_folders;
     let skipped = Arc::new(Mutex::new(Vec::new()));
     let scanned = Arc::new(AtomicU64::new(0));
     let walker = build_walker(root, visit_hidden, rules, skipped.clone(), cancel.clone());
@@ -838,6 +842,7 @@ mod tests {
         write(&root, ".secret.txt", b"needle\n");
         write(&root, ".folder/inside.txt", b"needle\n");
         write(&root, "visible.txt", b"needle\n");
+        let mut hits = Vec::new();
         let query = Query {
             names: Some("needle".into()),
             contents: Some("needle".into()),
@@ -847,9 +852,22 @@ mod tests {
             everything: false,
         };
         let cancel = Arc::new(AtomicBool::new(false));
-        let mut hits = Vec::new();
         let summary = search(&root, &query, |batch| hits.extend(batch), &cancel);
         assert_eq!(paths(&hits), [root.join("visible.txt")]);
+        assert!(!summary.skipped.iter().any(|skip| skip.reason == SkipReason::HiddenFolder));
+
+        // Search everything ignores exclude.toml; it must not undo the hidden setting.
+        let mut hits = Vec::new();
+        let query = Query {
+            names: Some("needle".into()),
+            contents: Some("needle".into()),
+            enter_hidden_folders: false,
+            include_hidden: false,
+            rules: rules(),
+            everything: true,
+        };
+        let summary = search(&root, &query, |batch| hits.extend(batch), &cancel);
+        assert_eq!(paths(&hits), [root.join("visible.txt")], "Search everything keeps dot entries out");
         assert!(!summary.skipped.iter().any(|skip| skip.reason == SkipReason::HiddenFolder));
     }
 

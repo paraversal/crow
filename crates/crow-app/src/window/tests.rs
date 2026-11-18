@@ -3087,6 +3087,12 @@ fn search_hidden_setting_updates_an_open_search(cx: &mut TestAppContext) {
         "turning the setting off leaves dot names out"
     );
     assert!(!search.read_with(&cx, |search, _| search.skipped_paths()).contains(&root.join(".backup")));
+    cx.simulate_keystrokes("cmd-shift-a");
+    wait_for_search(&view, &mut cx);
+    assert!(
+        !search.read_with(&cx, |search, _| search.result_paths()).contains(&root.join(".backup.txt")),
+        "Search everything must not undo the hidden setting"
+    );
 
     cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::SearchIncludesHidden(true), cx));
     view.update(&mut cx, |window, cx| window.set_search_includes_hidden(true, cx));
@@ -4681,6 +4687,12 @@ fn palette_typed_query_finds_files_here(cx: &mut TestAppContext) {
         })
         .expect("the palette listing");
     assert!(folders_first.iter().all(|is_file| !is_file), "every row above the header is a folder: {rows:?}");
+
+    let visible_folder = rows.iter().position(|row| row.ends_with("/Backups")).expect("a visible folder match");
+    let hidden_folder =
+        rows.iter().position(|row| row.ends_with("/.backup")).expect("the hidden folder from the current listing");
+    assert!(visible_folder < hidden_folder, "the hidden folder comes after visible matches: {rows:?}");
+    assert_eq!(view.read_with(&cx, |w, _| w.palette_row_hidden(hidden_folder)), Some(true));
 
     let file = rows.iter().position(|row| row.ends_with("/backup.txt")).expect("backup.txt is listed");
     let hidden = rows.iter().position(|row| row.ends_with("/.backup.txt")).expect(".backup.txt is listed");
