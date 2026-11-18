@@ -1,6 +1,6 @@
 # M9 P9C — Extract palette and window feature modules — progress
 
-Branch: codex/m9-p9c-window-modules · PR: none · Last updated: 2026-11-18 · State: **In critique**
+Branch: codex/m9-p9c-window-modules · PR: [#64](https://github.com/paraversal/file-crow/pull/64) · Last updated: 2026-11-18 · State: **PR open**
 Base: `9d074d6` (M9 P9B)
 
 ## Status
@@ -78,12 +78,12 @@ The first query is ~20 ms on both revisions; `docs/testing.md`'s 12–15 ms figu
 - 2026-11-18: Critique. Compared every moved function, type and constant with the base token-for-token: only `render_palette`'s signature differs (rustfmt line wrapping); no body, string or call changed. Ran workspace checks and the 100k bench, drove the branch bundle at 1200×760 and 640×760 in FireBox and Gruvbox Light Hard, and finished the hand checks. Corrected C1/C2 in this file, noted C3; opening the PR.
 
 ## Critique
-Critic session: 2026-11-18 · Base: `main` @ `9d074d6` · Head reviewed: `2459007`
+Critic session: 2026-11-18 · Base: `main` @ `9d074d6` · Head reviewed: `2459007` · Critique commit: `b367b0e`
 
 | # | Finding | Where | Area | Kind | Outcome |
 | --- | --- | --- | --- | --- | --- |
-| C1 | The hand check said "Vim layer j/k move across headers", but `j`/`k` deliberately type in every text field, including the palette (`vim_letters_type_in_every_text_field`, `crates/crow-app/src/window/tests.rs:4761-4772`); the palette moves with arrows. The unchecked line would never pass as written. | `docs/plans/m9/p9c-window-modules.progress.md` hand checks | plan / record | fix | fixed (critique commit): split the check into the observed command-mode and Vim behavior |
-| C2 | The Status rows said "done (this commit)" in the final commit, which only records decisions; the actual moves are `e3c738a`, `84b3a3f`, `79d49dc` and verification `3de3053`. | Status table | record | fix | fixed (critique commit): exact commit references |
+| C1 | The hand check said "Vim layer j/k move across headers", but `j`/`k` deliberately type in every text field, including the palette (`vim_letters_type_in_every_text_field`, `crates/crow-app/src/window/tests.rs:4761-4772`); the palette moves with arrows. The unchecked line would never pass as written. | `docs/plans/m9/p9c-window-modules.progress.md` hand checks | plan / record | fix | fixed (`b367b0e`): split the check into the observed command-mode and Vim behavior |
+| C2 | The Status rows said "done (this commit)" in the final commit, which only records decisions; the actual moves are `e3c738a`, `84b3a3f`, `79d49dc` and verification `3de3053`. | Status table | record | fix | fixed (`b367b0e`): exact commit references |
 | C3 | `operation_ui` is `pub(crate)` to let `menus.rs` reach `quit`; the module path is crate-wide although only `quit` is used outside the window. A private module plus `pub(crate) use operation_ui::quit` would narrow it and keep `window::quit`. Effective API is still one function, so not worth churn now. | `crates/crow-app/src/window.rs:2355`, `crates/crow-app/src/menus.rs:88` | code sense | note | left (effective surface is `quit` only; recorded for the next extraction) |
 
 Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (all binaries, no failures; focused window selectors 88 listed) · `git diff --check` ✓ · branch `--bench target/fixture-100k`: warm first paint 5 ms, avg 8.42 ms, p99 8.60 ms, max 42.02 ms (budget warm < 50 ms, p99 < 1.5 × 8.33 ms frame ✓; compare main from Verification: warm 10 ms, p99 8.56 ms)
@@ -92,4 +92,4 @@ Verdict: better. The moved code is token-identical, the parent keeps window/rend
 
 ## Next
 
-Ready for critique. The critic rebuilds both bundles, finishes the unchecked hand checks (light/dark, Vim command palette, scrim click, path field, permanent delete/Empty Trash, quit while running, VoiceOver) and opens the PR.
+PR open at [#64](https://github.com/paraversal/file-crow/pull/64). The user hand-tests and squash-merges; the branch is not merged by the critic. The only open hand check is VoiceOver on the moved surfaces (no labels, roles or strings changed). Next in the M9 index: execute plan P8.
