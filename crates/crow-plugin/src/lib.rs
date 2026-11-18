@@ -13,8 +13,8 @@ pub mod registry;
 mod worker;
 
 pub use dto::{
-    EntryRef, ExcerptInput, HostEvent, Inventory, PluginEntry, PluginState, RegisteredIconPack, RequestError,
-    RequestErrorKind, RequestInput, RequestResult, RequestStamp, RequestTicket, SubmitError,
+    EntryRef, ExcerptInput, HostEvent, HostMutation, Inventory, PluginEntry, PluginState, RegisteredIconPack,
+    RequestError, RequestErrorKind, RequestInput, RequestResult, RequestStamp, RequestTicket, SubmitError,
 };
 pub use excerpt::read_excerpt;
 pub use grants::{

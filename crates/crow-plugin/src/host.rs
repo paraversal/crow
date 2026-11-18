@@ -13,8 +13,9 @@ use std::thread::{self, JoinHandle};
 use crow_core::{Descriptor, ExtensionId, HookEvent, PluginId};
 
 use crate::dto::{
-    Call, CallError, CallErrorKind, CancelToken, HostEvent, Inventory, PluginEntry, PluginState, Reply, RequestError,
-    RequestErrorKind, RequestInput, RequestResult, RequestStamp, RequestTicket, SubmitError, WorkerMessage,
+    Call, CallError, CallErrorKind, CancelToken, HostEvent, HostMutation, Inventory, PluginEntry, PluginState, Reply,
+    RequestError, RequestErrorKind, RequestInput, RequestResult, RequestStamp, RequestTicket, SubmitError,
+    WorkerMessage,
 };
 use crate::grants::{self, Grants};
 use crate::limits::Limits;
@@ -444,30 +445,47 @@ impl PluginHost {
     }
 
     fn command(&mut self, command: HostCommand) {
-        match command {
-            HostCommand::Refresh => self.refresh(),
-            HostCommand::Shutdown => {}
+        let completion = match command {
+            HostCommand::Refresh => {
+                self.refresh();
+                None
+            }
+            HostCommand::Shutdown => None,
             HostCommand::Approve { id, digest } => {
-                if let Err(error) = self.approve(&id, &digest) {
+                let result = self.approve(&id, &digest);
+                if let Err(error) = &result {
                     self.status(&id, error, true);
                 }
+                Some((id, HostMutation::Approve, result))
             }
             HostCommand::Disable(id) => {
-                if let Err(error) = self.disable(&id) {
+                let result = self.disable(&id);
+                if let Err(error) = &result {
                     self.status(&id, error, true);
                 }
+                Some((id, HostMutation::Disable, result))
             }
             HostCommand::Enable(id) => {
-                if let Err(error) = self.enable(&id) {
+                let result = self.enable(&id);
+                if let Err(error) = &result {
                     self.status(&id, error, true);
                 }
+                Some((id, HostMutation::Enable, result))
             }
-            HostCommand::Reload(id) => self.reload(&id),
+            HostCommand::Reload(id) => {
+                self.reload(&id);
+                Some((id, HostMutation::Reload, Ok(())))
+            }
             HostCommand::Retry(id) => {
-                if let Err(error) = self.retry(&id) {
+                let result = self.retry(&id);
+                if let Err(error) = &result {
                     self.status(&id, error, true);
                 }
+                Some((id, HostMutation::Retry, result))
             }
+        };
+        if let Some((plugin, mutation, result)) = completion {
+            self.send(HostEvent::MutationFinished { plugin, mutation, result });
         }
         self.reap();
     }

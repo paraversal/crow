@@ -2306,6 +2306,7 @@ fn send_plugin_action(handle: Option<PluginHandle>, entry: PluginEntry, action: 
         cx.refresh_windows();
         return;
     };
+    let disable_id = id.clone();
     let result = match action {
         PluginAction::Approve => match entry.digest.clone() {
             Some(digest) => handle.approve(id, digest),
@@ -2316,9 +2317,13 @@ fn send_plugin_action(handle: Option<PluginHandle>, entry: PluginEntry, action: 
         PluginAction::Reload => handle.reload(id),
         PluginAction::Retry => handle.retry(id),
     };
-    if let Err(error) = result {
-        crate::operations::message(error, true, cx);
-        cx.refresh_windows();
+    match result {
+        Ok(()) if action == PluginAction::Disable => crate::plugins::suppress_disable(disable_id, cx),
+        Ok(()) => {}
+        Err(error) => {
+            crate::operations::message(error, true, cx);
+            cx.refresh_windows();
+        }
     }
 }
 

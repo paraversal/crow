@@ -451,6 +451,17 @@ pub struct Inventory {
     pub scan_error: Option<String>,
 }
 
+/// A host mutation the app can correlate with its own suppression. The result
+/// is the host's outcome, not the queued send result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostMutation {
+    Approve,
+    Disable,
+    Enable,
+    Reload,
+    Retry,
+}
+
 #[derive(Clone, Debug)]
 pub enum HostEvent {
     Inventory(Inventory),
@@ -466,6 +477,13 @@ pub enum HostEvent {
         extension: ExtensionId,
         stamp: RequestStamp,
         result: RequestResult,
+    },
+    /// The host finished one approved mutation. Disable suppression waits for
+    /// this rather than for an unrelated inventory event.
+    MutationFinished {
+        plugin: PluginId,
+        mutation: HostMutation,
+        result: Result<(), String>,
     },
 }
 

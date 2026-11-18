@@ -9,6 +9,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -368,6 +369,10 @@ pub struct Pane {
     rename_pressed: bool,
     /// The context menu on screen and what it was opened for, until it closes.
     context_menu: Option<MenuKind>,
+    /// The last selection signature announced to plugin hooks, per column.
+    plugin_selection: HashMap<usize, u64>,
+    /// The focused surface whose plugin scope was last announced.
+    plugin_scope: Option<(crate::plugins::SurfaceId, crate::plugins::ScopeKey)>,
 }
 
 struct Bench {
@@ -452,6 +457,8 @@ impl Pane {
             row_pressed: false,
             rename_pressed: false,
             context_menu: None,
+            plugin_selection: HashMap::new(),
+            plugin_scope: None,
             sidebar_walk: false,
         };
         pane.enter(dir, cx);
@@ -937,6 +944,15 @@ impl Pane {
     /// Free the open folders' listings off the main thread before this pane is
     /// dropped (closing a tab or a window).
     pub fn release_listings(&mut self, cx: &mut Context<Self>) {
+        if cx.try_global::<crate::plugins::Plugins>().is_some() {
+            let ids: Vec<_> = self.folders.iter().map(|folder| folder.read(cx).plugin_surface()).collect();
+            let surfaces = &mut cx.global_mut::<crate::plugins::Plugins>().surfaces;
+            for id in ids {
+                surfaces.drop_surface(id);
+            }
+        }
+        self.plugin_selection.clear();
+        self.plugin_scope = None;
         for folder in &self.folders {
             folder.update(cx, |folder, cx| folder.release_listing(cx));
         }
@@ -1186,6 +1202,7 @@ impl Pane {
             }
             ViewMode::Columns => self.update_chain(0, cx),
         }
+        self.plugin_scope_changed(cx);
         cx.notify();
         true
     }
@@ -1211,6 +1228,7 @@ impl Pane {
         let resolved = ui.views.resolve(&dir);
         self.sort = resolved.sort();
         self.push_folder(dir.clone(), true, cx);
+        self.plugin_scope_changed(cx);
         self.apply_view(cx);
         cx.emit(PaneEvent::Entered(dir));
         cx.notify();
@@ -1242,6 +1260,27 @@ impl Pane {
         self.folders.iter().position(|f| f.entity_id() == id)
     }
 
+    /// Announce a committed change of the focused column's real folder.
+    fn plugin_scope_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(folder) = self.folders.get(self.focused).cloned() else { return };
+        let (surface, dir) = {
+            let folder = folder.read(cx);
+            (folder.plugin_surface(), folder.dir().to_path_buf())
+        };
+        let scope = crate::plugins::ScopeKey::Folder(dir.clone());
+        if self.plugin_scope.as_ref().is_some_and(|(s, q)| *s == surface && q == &scope) {
+            return;
+        }
+        self.plugin_scope = Some((surface, scope));
+        if cx.try_global::<crate::plugins::Plugins>().is_some() {
+            cx.global_mut::<crate::plugins::Plugins>().surfaces.notify_scope_changed(
+                surface,
+                dir.display().to_string(),
+                Instant::now(),
+            );
+        }
+    }
+
     fn on_folder_event(&mut self, folder: Entity<Folder>, event: &FolderEvent, cx: &mut Context<Self>) {
         let Some(k) = self.index_of(folder.entity_id()) else { return };
         if matches!(event, FolderEvent::Loaded | FolderEvent::Changed)
@@ -1250,6 +1289,46 @@ impl Pane {
             let dir = folder.read(cx).dir().to_path_buf();
             let service = service.0.clone();
             service.update(cx, |service, cx| service.invalidate_under(&dir, cx));
+        }
+        match event {
+            FolderEvent::SelectionChanged => {
+                let (surface, dir, paths) = {
+                    let folder = folder.read(cx);
+                    (folder.plugin_surface(), folder.dir().to_path_buf(), folder.selected_paths())
+                };
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                paths.hash(&mut hasher);
+                let signature = hasher.finish();
+                let previous = self.plugin_selection.insert(k, signature);
+                if previous != Some(signature)
+                    && k == self.focused
+                    && cx.try_global::<crate::plugins::Plugins>().is_some()
+                {
+                    cx.global_mut::<crate::plugins::Plugins>().surfaces.notify_selection_changed(
+                        surface,
+                        dir.display().to_string(),
+                        Instant::now(),
+                    );
+                }
+            }
+            FolderEvent::WatcherApplied { paths } => {
+                let (surface, dir) = {
+                    let folder = folder.read(cx);
+                    (folder.plugin_surface(), folder.dir().to_path_buf())
+                };
+                let scope = crate::plugins::ScopeKey::Folder(dir.clone());
+                if cx.try_global::<crate::plugins::Plugins>().is_some() {
+                    let surfaces = &mut cx.global_mut::<crate::plugins::Plugins>().surfaces;
+                    if paths.is_empty() {
+                        surfaces.bump_scope(surface, scope.clone(), 0, Instant::now());
+                    }
+                    for path in paths {
+                        surfaces.invalidate_path(&scope, path);
+                    }
+                    surfaces.notify_files_changed(scope, dir.display().to_string(), Instant::now());
+                }
+            }
+            _ => {}
         }
         if let FolderEvent::CursorMoved = event {
             if self.mode == ViewMode::Columns {
@@ -1600,6 +1679,7 @@ impl Pane {
             self.subscriptions.insert(0, subscription);
             folder.update(cx, |f, _| f.select_after_load(child));
             self.focused = 0;
+            self.plugin_scope_changed(cx);
             cx.emit(PaneEvent::Entered(parent));
         }
         self.strip_scroll.scroll_to_item(self.focused);
@@ -1857,6 +1937,7 @@ impl Pane {
             self.drop_filter(cx);
             self.cancel_type_select(cx);
             self.focused = k;
+            self.plugin_scope_changed(cx);
             self.strip_scroll.scroll_to_item(k);
         }
         let (cmd, shift) = (event.modifiers.platform, event.modifiers.shift);
@@ -1896,6 +1977,7 @@ impl Pane {
             self.drop_filter(cx);
             self.cancel_type_select(cx);
             self.focused = k;
+            self.plugin_scope_changed(cx);
         }
         // Clearing emits CursorMoved, which closes the columns right of `k`.
         self.with_focused(cx, |f, cx| f.clear_selection(cx));
@@ -1936,6 +2018,7 @@ impl Pane {
             self.drop_filter(cx);
             self.cancel_type_select(cx);
             self.focused = k;
+            self.plugin_scope_changed(cx);
         }
         let kind = match row {
             Some(ix) => {
@@ -2256,6 +2339,24 @@ impl Pane {
     }
 
     // ----- list view -----
+
+    fn plugin_row_decoration(&self, k: usize, cx: &App) -> Option<crate::plugins::PluginRows> {
+        let descriptors = crate::plugins::row_descriptors(cx);
+        if descriptors.is_empty() {
+            return None;
+        }
+        let folder = self.folders.get(k)?.clone();
+        let (surface, dir) = {
+            let folder = folder.read(cx);
+            (folder.plugin_surface(), folder.dir().to_path_buf())
+        };
+        Some(crate::plugins::PluginRows::new(
+            folder,
+            surface,
+            crate::plugins::ScopeKey::Folder(dir),
+            descriptors,
+        ))
+    }
 
     fn render_table_rows(
         &mut self,
@@ -3058,8 +3159,8 @@ impl Pane {
                         .overflow_hidden()
                         .when(self.tip_inset, |body| body.pb(px(crate::tips::INSET)))
                         .children(glide_fill)
-                        .child(
-                            uniform_list(
+                        .child({
+                            let mut list = uniform_list(
                                 ("column-list", k),
                                 shown,
                                 cx.processor(move |this, range, window, cx| {
@@ -3069,8 +3170,12 @@ impl Pane {
                             .track_scroll(&scroll)
                             .flex_1()
                             .min_h_0()
-                            .px_1(),
-                        )
+                            .px_1();
+                            if let Some(plugin_rows) = self.plugin_row_decoration(k, cx) {
+                                list = list.with_decoration(plugin_rows);
+                            }
+                            list
+                        })
                         .children(ghosts)
                         .into_any_element()
                 }
@@ -3573,12 +3678,17 @@ impl Render for Pane {
                                     .overflow_hidden()
                                     .when(self.tip_inset, |body| body.pb(px(crate::tips::INSET)))
                                     .children(glide_fill)
-                                    .child(
-                                        uniform_list("entries", rows, cx.processor(Self::render_table_rows))
-                                            .track_scroll(&scroll)
-                                            .pt(px(LIST_TOP_INSET))
-                                            .flex_1(),
-                                    )
+                                    .child({
+                                        let mut list =
+                                            uniform_list("entries", rows, cx.processor(Self::render_table_rows))
+                                                .track_scroll(&scroll)
+                                                .pt(px(LIST_TOP_INSET))
+                                                .flex_1();
+                                        if let Some(plugin_rows) = self.plugin_row_decoration(0, cx) {
+                                            list = list.with_decoration(plugin_rows);
+                                        }
+                                        list
+                                    })
                                     .children(ghosts)
                                     .children(drop_outline)
                                     .into_any_element()

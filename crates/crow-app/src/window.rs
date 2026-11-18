@@ -1687,6 +1687,10 @@ impl CrowWindow {
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(search) = self.search.take() {
+            let surface = search.read(cx).plugin_surface();
+            if cx.try_global::<crate::plugins::Plugins>().is_some() {
+                cx.global_mut::<crate::plugins::Plugins>().surfaces.drop_surface(surface);
+            }
             search.update(cx, |search, cx| search.cancel(cx));
             self.focus_center(window, cx);
             cx.notify();
