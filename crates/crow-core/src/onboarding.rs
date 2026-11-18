@@ -60,10 +60,8 @@ impl OnboardingState {
 mod tests {
     use super::*;
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("crow-onboarding-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+    fn temp_dir(name: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::new(&format!("crow-onboarding-{name}-"))
     }
 
     #[test]
@@ -76,7 +74,6 @@ mod tests {
         assert!(!OnboardingState::load(&path).is_answered(), "broken");
         std::fs::write(&path, "{}").unwrap();
         assert!(!OnboardingState::load(&path).is_answered(), "no answer yet");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -95,6 +92,5 @@ mod tests {
         assert!(state.answer(true), "a different answer changes it");
         state.save(&path).expect("saves");
         assert_eq!(OnboardingState::load(&path).tips_choice(), Some(true));
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

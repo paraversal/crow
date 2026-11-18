@@ -6,7 +6,16 @@
 cargo test --workspace          # unit tests and GPUI keystroke tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
+./scripts/check-test-temp.sh    # the same tests under a private TMPDIR; fails on leftover fixtures
 ```
+
+Tests own their temporary folders and delete them when the test or app ends,
+including on an unwind. Window and palette fixtures stay under `/tmp` on purpose
+(palette scoring sees whole paths), and the check inventories new `/tmp` entries
+with Crow's `crow-*` and `.trash-*` prefixes as well as the private `TMPDIR`
+tree. It never sweeps or deletes pre-existing temp files. A forced `kill -9` of
+a test binary bypasses destructors; remove only the exact paths it named, never
+a shared prefix.
 
 The keystroke tests (`crates/crow-app/src/window.rs`) drive a real window through
 GPUI's test platform: key contexts, history, tabs, hidden files, multiple

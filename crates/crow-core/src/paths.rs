@@ -135,8 +135,7 @@ mod tests {
 
     #[test]
     fn completes_unique_folders_and_shared_prefixes() {
-        let root = std::env::temp_dir().join(format!("crow-core-complete-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::test_support::TempDir::new("crow-core-complete-");
         for dir in ["Documents", "Downloads", "Desktop", ".hidden"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
@@ -152,7 +151,6 @@ mod tests {
         assert_eq!(at(".h").as_deref(), Some(".hidden/"), "hidden names only when asked for");
         let absolute = format!("{}/Des", root.display());
         assert_eq!(complete_typed(&absolute, Path::new("/"), home), Some(format!("{}/Desktop/", root.display())));
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

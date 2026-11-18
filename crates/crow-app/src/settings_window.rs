@@ -2331,18 +2331,18 @@ mod tests {
 
     use super::*;
 
-    fn fixture(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("crow-settings-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create fixture");
-        dir
+    fn fixture(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new().prefix("crow-test-").tempdir_in("/tmp").expect("create fixture");
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).expect("create fixture child");
+        (dir, path)
     }
 
     fn setup(cx: &mut TestAppContext) {
-        let trash = std::env::temp_dir().join(format!("crow-settings-trash-{}", std::process::id()));
-        std::fs::create_dir_all(&trash).ok();
         cx.update(|cx| {
-            crate::ui::init_for_tests(cx);
+            let config = crate::ui::init_for_tests(cx);
+            let trash = config.parent().expect("test root").join("trash");
+            std::fs::create_dir_all(&trash).ok();
             crate::operations::init(cx, std::sync::Arc::new(crate::operations::FolderTrash(trash)));
             cx.bind_keys(crate::actions::finder_keymap());
             cx.bind_keys(crate::actions::vim_keymap());
@@ -2425,7 +2425,7 @@ mod tests {
     #[gpui::test]
     fn cmd_comma_opens_one_settings_window(cx: &mut TestAppContext) {
         setup(cx);
-        let root = fixture("open");
+        let (_root, root) = fixture("open");
         let browser = cx.update(|cx| crate::window::open(root.clone(), false, None, cx)).expect("browser window");
         let mut vcx = VisualTestContext::from_window(browser.into(), cx);
         vcx.run_until_parked();
@@ -2448,7 +2448,6 @@ mod tests {
             cx.update(|cx| cx.windows().into_iter().filter_map(|handle| handle.downcast::<SettingsWindow>()).collect());
         assert_eq!(settings.len(), 1, "a second ⌘, focuses the one window");
         assert_eq!(cx.update(|cx| cx.windows().len()), 2, "browser + settings");
-        std::fs::remove_dir_all(root).ok();
     }
 
     #[gpui::test]

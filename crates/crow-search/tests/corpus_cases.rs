@@ -13,9 +13,10 @@ use crow_search::{Control, Query, RuleSet, search};
 
 #[test]
 fn corpus_cases_match_the_engine() {
-    let root = std::env::temp_dir().join(format!("crow-search-corpus-{}", std::process::id()));
-    let _ = corpus::remove(&root);
+    let guard = tempfile::Builder::new().prefix("crow-search-corpus-").tempdir().expect("corpus parent");
+    let root = guard.path().canonicalize().expect("canonical corpus root");
     corpus::build(&root).expect("build the corpus");
+    let _root = CorpusRoot(root.clone());
     let rules = Arc::new(RuleSet::from_config(&Exclude::default(), Path::new("/Users/nobody")).expect("default rules"));
     let mut failures = Vec::new();
     for case in corpus::cases() {
@@ -27,17 +28,25 @@ fn corpus_cases_match_the_engine() {
             failures.push(format!("{}: {failure}", case.id));
         }
     }
-    let _ = corpus::remove(&root);
     assert!(failures.is_empty(), "corpus cases failed:\n{}", failures.join("\n"));
 }
 
 #[test]
 fn corpus_can_be_rebuilt_over_itself() {
-    let root = std::env::temp_dir().join(format!("crow-search-corpus-rebuild-{}", std::process::id()));
-    let _ = corpus::remove(&root);
+    let guard = tempfile::Builder::new().prefix("crow-search-corpus-rebuild-").tempdir().expect("corpus parent");
+    let root = guard.path().canonicalize().expect("canonical corpus root");
     corpus::build(&root).expect("first build");
+    let _root = CorpusRoot(root.clone());
     corpus::build(&root).expect("second build over the same folder");
-    let _ = corpus::remove(&root);
+}
+
+/// Removes the corpus (restoring the mode-000 folder) even when a case fails.
+struct CorpusRoot(PathBuf);
+
+impl Drop for CorpusRoot {
+    fn drop(&mut self) {
+        let _ = corpus::remove(&self.0);
+    }
 }
 
 fn run_case(root: &Path, case: &Case, rules: &Arc<RuleSet>) -> Result<(), String> {

@@ -228,10 +228,8 @@ mod tests {
 
     #[test]
     fn untagged_file_has_no_tags() {
-        let file = std::env::temp_dir().join(format!("crow-tags-{}", std::process::id()));
-        std::fs::write(&file, "x").unwrap();
-        assert!(tags(&file).is_empty());
-        std::fs::remove_file(&file).ok();
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        assert!(tags(file.path()).is_empty());
     }
 
     #[test]
@@ -250,13 +248,11 @@ mod tests {
     #[test]
     fn permissions_read_the_file_and_its_owner() {
         use std::os::unix::fs::PermissionsExt;
-        let file = std::env::temp_dir().join(format!("crow-permissions-{}", std::process::id()));
-        std::fs::write(&file, "x").unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let permissions = permissions(&file).expect("permissions");
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o640)).unwrap();
+        let permissions = permissions(file.path()).expect("permissions");
         assert_eq!(permissions.mode_string(), "-rw-r-----");
         assert!(permissions.owner.is_some(), "the owner name comes from NSFileManager");
         assert!(permissions.group.is_some(), "the group name comes from NSFileManager");
-        std::fs::remove_file(&file).ok();
     }
 }

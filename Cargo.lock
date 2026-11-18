@@ -1127,6 +1127,7 @@ dependencies = [
  "notify",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
+ "tempfile",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -1159,6 +1160,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1179,6 +1181,7 @@ dependencies = [
  "objc2-quick-look-ui",
  "objc2-uniform-type-identifiers",
  "raw-window-handle",
+ "tempfile",
  "tracing",
 ]
 
@@ -1211,6 +1214,7 @@ dependencies = [
  "libc",
  "nucleo-matcher",
  "regex-syntax",
+ "tempfile",
  "unicode-segmentation",
 ]
 
@@ -1221,6 +1225,7 @@ dependencies = [
  "notify",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

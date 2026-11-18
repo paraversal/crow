@@ -57,10 +57,8 @@ type Skips = BTreeSet<(PathBuf, SkipKey)>;
 
 #[test]
 fn oracle_agrees_on_random_trees() {
-    let root = std::env::temp_dir().join(format!("crow-search-oracle-{}", std::process::id()));
-    let _ = remove_tree(&root);
-    fs::create_dir_all(&root).expect("create the oracle root");
-    let _guard = TempTree(root.clone());
+    let guard = crate::test_support::CleanTree::new("crow-search-oracle-");
+    let root = guard.to_path_buf();
     let rules = Arc::new(
         RuleSet::from_config(&Exclude::default(), Path::new("/Users/nobody")).expect("default exclusion rules"),
     );
@@ -423,38 +421,7 @@ impl Rng {
     }
 }
 
-struct TempTree(PathBuf);
-
-impl Drop for TempTree {
-    fn drop(&mut self) {
-        let _ = remove_tree(&self.0);
-    }
-}
-
 /// Remove a tree that may hold a mode-000 folder: restore directory modes first.
 fn remove_tree(root: &Path) -> std::io::Result<()> {
-    if fs::symlink_metadata(root).is_err() {
-        return Ok(());
-    }
-    restore_modes(root);
-    fs::remove_dir_all(root)
-}
-
-fn restore_modes(path: &Path) {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return;
-    };
-    if metadata.file_type().is_symlink() {
-        return;
-    }
-    if metadata.is_dir() {
-        if metadata.permissions().mode() & 0o700 != 0o700 {
-            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
-        }
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                restore_modes(&entry.path());
-            }
-        }
-    }
+    crate::test_support::remove_tree(root)
 }

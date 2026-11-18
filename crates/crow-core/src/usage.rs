@@ -63,10 +63,8 @@ impl Usage {
 mod tests {
     use super::*;
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("crow-usage-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+    fn temp_dir(name: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::new(&format!("crow-usage-{name}-"))
     }
 
     #[test]
@@ -91,7 +89,6 @@ mod tests {
         usage.save(&path).expect("saves");
         assert_eq!(Usage::load(&path), usage);
         assert_eq!(Usage::load(&path).count("crow::ShowCommandPalette"), 2);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -102,7 +99,6 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(Usage::load(&path), Usage::default());
         assert_eq!(Usage::load(&dir.join("missing.json")), Usage::default());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

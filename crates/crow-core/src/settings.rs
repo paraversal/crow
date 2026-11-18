@@ -422,10 +422,8 @@ pub fn load_settings(dir: &Path) -> Result<Settings, SettingsError> {
 mod tests {
     use super::*;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!("crow-core-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        dir
+    fn temp_dir(name: &str) -> crate::test_support::TempDir {
+        crate::test_support::TempDir::new(&format!("crow-core-{name}-"))
     }
 
     #[test]
@@ -439,7 +437,6 @@ mod tests {
         let dir = temp_dir("create");
         assert_eq!(load_settings(&dir).expect("loads"), Settings::default());
         assert!(dir.join("settings.toml").exists());
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -451,7 +448,6 @@ mod tests {
         assert_eq!(s.keymap, KeymapLayer::Vim);
         assert_eq!(s.window, WindowDefaults { width: 900, height: 760 });
         assert_eq!(s.theme_id(), None);
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -463,7 +459,6 @@ mod tests {
         assert!(text.starts_with("# Crow settings."));
         assert!(text.contains("\ntheme = \"gruvbox-dark-hard\"\n"), "{text}");
         assert_eq!(load_settings(&dir).unwrap().theme_id(), Some("gruvbox-dark-hard"));
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -477,7 +472,6 @@ mod tests {
         assert!(!load_settings(&dir).unwrap().show_preview, "reloads as off");
         save_bool_setting(&dir, "show_preview", true).unwrap();
         assert!(load_settings(&dir).unwrap().show_preview);
-        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -491,7 +485,6 @@ mod tests {
         assert!(text.contains("\nfont_size = 15.0 # readable\n"), "{text}");
         assert!(text.contains("\nkeymap = \"vim\"\n"), "{text}");
         assert_eq!(load_settings(&dir).unwrap().font_size, 15.0);
-        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -510,7 +503,6 @@ mod tests {
         assert!(text.contains("\nheight = 760\n"), "{text}");
         assert!(!text.contains("width = 900.0"), "an integer stays an integer: {text}");
         assert_eq!(load_settings(&dir).unwrap().window.width, 900);
-        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -522,7 +514,6 @@ mod tests {
         let text = fs::read_to_string(dir.join("settings.toml")).unwrap();
         assert!(text.contains("\n[window]\nheight = 640\n"), "{text}");
         assert_eq!(load_settings(&dir).unwrap().window.height, 640);
-        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -539,7 +530,6 @@ mod tests {
         let err = load_settings(&dir).expect_err("rejects an unknown mode").to_string();
         assert!(err.contains("settings.toml"), "{err}");
         assert!(err.contains("line 1"), "{err}");
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -563,7 +553,6 @@ mod tests {
         let err = load_settings(&dir).expect_err("rejects an unknown mode").to_string();
         assert!(err.contains("settings.toml"), "{err}");
         assert!(err.contains("line 1"), "{err}");
-        fs::remove_dir_all(&dir).ok();
 
         assert!(!Settings::default().tips_muted());
         assert!(parse("tips = \"off\"").tips_muted(), "tips = off mutes");
@@ -591,7 +580,6 @@ mod tests {
         let err = load_settings(&dir).expect_err("rejects an unknown mode").to_string();
         assert!(err.contains("settings.toml"), "{err}");
         assert!(err.contains("line 1"), "{err}");
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -611,6 +599,5 @@ mod tests {
         fs::write(dir.join("settings.toml"), "keymap = \"emacs\"\n").unwrap();
         let err = load_settings(&dir).expect_err("rejects unknown layer").to_string();
         assert!(err.contains("settings.toml"), "{err}");
-        fs::remove_dir_all(&dir).ok();
     }
 }

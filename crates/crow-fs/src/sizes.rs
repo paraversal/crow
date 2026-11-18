@@ -235,13 +235,9 @@ mod portable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("crow-fs-sizes-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        dir.canonicalize().expect("canonical")
+    fn temp_dir(name: &str) -> crate::test_support::CleanTree {
+        crate::test_support::CleanTree::new(&format!("crow-fs-sizes-{name}-"))
     }
 
     fn write(path: &Path, bytes: usize) {
@@ -267,7 +263,6 @@ mod tests {
         assert_eq!(m.folders, 3, "sub, deep and empty");
         assert_eq!(m.items, 6, "3 files and 3 folders");
         assert_eq!(m.unreadable, 0);
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -280,7 +275,6 @@ mod tests {
         assert_eq!(m.bytes, 10);
         assert_eq!(m.items, 3);
         assert_eq!(m.folders, 0);
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -295,7 +289,6 @@ mod tests {
         assert_eq!(m.bytes, 106, "the links' own sizes plus the real file");
         assert_eq!(m.items, 5, "a, b, link-to-dir, real and inside");
         assert_eq!(m.folders, 1);
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -308,7 +301,6 @@ mod tests {
         assert_eq!(m.bytes, 35);
         assert_eq!(m.items, 3, "App.app, normal and normal/file");
         assert_eq!(m.folders, 2, "App.app and normal");
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -325,7 +317,6 @@ mod tests {
         assert_eq!(m.folders, 1);
         assert_eq!(m.unreadable, 1);
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -335,7 +326,6 @@ mod tests {
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
         assert_eq!(measure(&root, &Cancel::new()), None);
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -355,7 +345,6 @@ mod tests {
         });
         assert!(saw_stop, "the hook sees every folder");
         assert_eq!(result, None);
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -365,7 +354,6 @@ mod tests {
         let cancel = Cancel::new();
         cancel.cancel();
         assert_eq!(measure(&root, &cancel), None);
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -378,7 +366,6 @@ mod tests {
         let mut walk = Walk::default();
         assert!(portable::walk_dir(&root, u64::MAX, true, true, &cancel, &mut walk, &mut |_| {}));
         assert_eq!(walk.measured, Measured::default());
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[cfg(target_os = "macos")]
@@ -395,7 +382,6 @@ mod tests {
         let dev = device(&std::fs::metadata(&root).unwrap());
         assert!(portable::walk_dir(&root, dev, true, true, &cancel, &mut walk, &mut |_| {}));
         assert_eq!(bulk, walk.measured);
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[cfg(target_os = "macos")]
@@ -407,6 +393,5 @@ mod tests {
         let mut walk = Walk::default();
         assert!(imp::walk_dir(&root, u64::MAX, true, true, &cancel, &mut walk, &mut |_| {}));
         assert_eq!(walk.measured, Measured::default());
-        std::fs::remove_dir_all(&root).ok();
     }
 }

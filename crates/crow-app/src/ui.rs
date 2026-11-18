@@ -55,6 +55,8 @@ pub struct Ui {
     pub volumes: Vec<crow_macos::Volume>,
     /// Sidebar rows whose path is a symlink, filled by the Recent refresh.
     pub aliases: HashSet<PathBuf>,
+    pub themes_dir: PathBuf,
+    pub themes_state_dir: PathBuf,
     pub config_dir: PathBuf,
     pub state_dir: PathBuf,
     pub home: PathBuf,
@@ -94,6 +96,8 @@ impl Ui {
             palette_recents: Vec::new(),
             volumes: Vec::new(),
             aliases: HashSet::new(),
+            themes_dir: crow_theme::themes_dir(),
+            themes_state_dir: crow_theme::state_dir(),
             config_dir,
             state_dir,
             home,
@@ -299,28 +303,35 @@ fn install_drag_cancel(cx: &mut App) {
     .detach();
 }
 
+/// Owns every root `init_for_tests` hands out, for as long as the test's `App`
+/// lives. Keeping the directories here rather than in `Ui` means the config
+/// path returned to callers stays a plain path, while GPUI's teardown (after
+/// windows, views and executors) removes the files. A second `init_for_tests`
+/// in one app appends instead of replacing, so a live window's config is never
+/// deleted underneath it.
+#[cfg(test)]
+#[derive(Default)]
+struct TestRoots(Vec<tempfile::TempDir>);
+
+#[cfg(test)]
+impl gpui::Global for TestRoots {}
+
 /// Default settings and the embedded theme, with config files in a fresh temp folder
 /// and nothing watched.
 #[cfg(test)]
 pub fn init_for_tests(cx: &mut App) -> PathBuf {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "crow-app-config-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    // io-ok: test-only state reset
-    std::fs::remove_dir_all(&root).ok();
+    let root = tempfile::Builder::new().prefix("crow-app-config-").tempdir().expect("test config root");
     crate::effects::install(cx, std::sync::Arc::new(crate::effects::RecordingEffects::new()));
-    let state_dir = root.join("state");
+    let config_dir = root.path().join("config");
+    let state_dir = root.path().join("state");
     // Tests start past the first-launch sheet unless they ask for it: a fresh
     // state dir would otherwise owe it in every window test.
     // io-ok: test-only state
     std::fs::create_dir_all(&state_dir).ok();
     // io-ok: test-only state
     std::fs::write(state_dir.join(crow_core::ONBOARDING_FILE), "{\"tips_choice\": true}\n").ok();
-    let ui = Ui::new(root.join("config"), state_dir, crow_core::home(), crow_theme::fallback(), false);
+    cx.default_global::<TestRoots>().0.push(root);
+    let ui = Ui::new(config_dir.clone(), state_dir, crow_core::home(), crow_theme::fallback(), false);
     cx.set_global(ui);
     crate::extensions::init(cx);
     crate::plugins::init_empty(cx);
@@ -328,7 +339,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     crate::tips::init(cx);
     crate::onboarding::init(cx);
     install_drag_cancel(cx);
-    root.join("config")
+    config_dir
 }
 
 fn poll(cx: &mut App) {
@@ -619,7 +630,10 @@ pub fn set_show_preview(show: bool, cx: &mut App) {
 pub fn reload_theme(cx: &mut App) {
     let _span = tracing::debug_span!("theme reload").entered();
     let variant = variant_of(cx.window_appearance());
-    let (dir, state) = (crow_theme::themes_dir(), crow_theme::state_dir());
+    let (dir, state) = {
+        let ui = cx.global::<Ui>();
+        (ui.themes_dir.clone(), ui.themes_state_dir.clone())
+    };
     let ui = cx.global::<Ui>();
     let saved = match &ui.preview_theme {
         Some(id) => Some(id.clone()),
@@ -753,7 +767,8 @@ pub fn open_config_folder(cx: &mut App) {
 
 /// "Apply to all apps": make `theme` the global choice for its variant and follow it here.
 pub fn apply_theme_everywhere(theme: &Theme, cx: &mut App) {
-    if let Err(e) = crow_theme::set_global(theme) {
+    let state = cx.global::<Ui>().themes_state_dir.clone();
+    if let Err(e) = crow_theme::set_global(theme, &state) {
         // Not a file problem, so it belongs with the operation messages (no Open button).
         crate::operations::message(format!("Can't apply the theme to all apps: {e}"), true, cx);
         return;
@@ -985,15 +1000,84 @@ mod tests {
             let changed: Vec<_> = before.lines().zip(after.lines()).filter(|(old, new)| old != new).collect();
             assert_eq!(changed.len(), 1, "{change:?} changed {changed:?}\n{after}");
         }
-        std::fs::remove_dir_all(config.parent().unwrap()).ok();
+    }
+
+    #[gpui::test]
+    fn test_config_roots_live_until_the_app_drops(_outer: &mut gpui::TestAppContext) {
+        use std::path::PathBuf;
+
+        struct ViewProbe(Vec<PathBuf>);
+        impl gpui::Render for ViewProbe {
+            fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                gpui::div()
+            }
+        }
+        impl Drop for ViewProbe {
+            fn drop(&mut self) {
+                assert!(
+                    self.0.iter().all(|path| path.exists()),
+                    "the window outlived a config root: {:?}",
+                    self.0.iter().filter(|path| !path.exists()).collect::<Vec<_>>()
+                );
+            }
+        }
+
+        let test_cx = gpui::TestAppContext::build(gpui::TestDispatcher::new(0), Some("config roots"));
+        let first = test_cx.update(crate::ui::init_for_tests);
+        let second = test_cx.update(crate::ui::init_for_tests);
+        assert_ne!(first, second, "each init gets its own root");
+        assert!(first.exists(), "a second init keeps the first root alive");
+        assert!(second.exists());
+        test_cx.update(|cx| {
+            assert_eq!(cx.global::<Ui>().config_dir, second, "the live Ui uses the newest root");
+            cx.open_window(gpui::WindowOptions::default(), |_, cx| {
+                cx.new(|_| ViewProbe(vec![first.clone(), second.clone()]))
+            })
+            .expect("nested window");
+        });
+        test_cx.run_until_parked();
+        test_cx.update(|cx| cx.quit());
+        test_cx.run_until_parked();
+        drop(test_cx);
+        assert!(!first.exists(), "the app drop removed the first root");
+        assert!(!second.exists(), "the app drop removed the second root");
+    }
+
+    /// GPUI's test platform ends a test with `quit` and drops the app; a panic
+    /// while that app is alive must still drop the config global's roots.
+    #[gpui::test]
+    fn config_roots_are_removed_when_a_test_unwinds(_outer: &mut gpui::TestAppContext) {
+        use std::sync::{Arc, Mutex};
+
+        let root = Arc::new(Mutex::new(None));
+        let tracked = root.clone();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let test_cx = gpui::TestAppContext::build(gpui::TestDispatcher::new(0), Some("config unwind"));
+            let config = test_cx.update(crate::ui::init_for_tests);
+            let root = config.parent().expect("test root").to_path_buf();
+            std::fs::write(config.join("file"), "x").expect("fixture file");
+            *tracked.lock().unwrap() = Some(root);
+            panic!("deliberate fixture panic");
+        }));
+        assert!(caught.is_err());
+        let root = root.lock().unwrap().clone().expect("the config root");
+        assert!(!root.exists(), "the global removed the config root during unwinding");
     }
 
     #[gpui::test]
     fn theme_fade_follows_the_motion_mode(cx: &mut gpui::TestAppContext) {
-        let root = std::env::temp_dir().join(format!("crow-ui-fade-{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
-        let ui = Ui::new(root.join("config"), root.join("state"), crow_core::home(), crow_theme::fallback(), true);
-        cx.update(|cx| cx.set_global(ui));
+        let root = tempfile::Builder::new().prefix("crow-ui-fade-").tempdir().expect("test root");
+        let ui = Ui::new(
+            root.path().join("config"),
+            root.path().join("state"),
+            crow_core::home(),
+            crow_theme::fallback(),
+            true,
+        );
+        cx.update(|cx| {
+            cx.set_global(ui);
+            cx.default_global::<TestRoots>().0.push(root);
+        });
         for (mode, expected) in [
             (Effective::Off, None),
             (Effective::Low, Some(Duration::from_millis(150))),
@@ -1009,6 +1093,5 @@ mod tests {
                 assert_eq!(cx.global::<Ui>().fade_duration(), expected, "{mode:?}");
             });
         }
-        std::fs::remove_dir_all(&root).ok();
     }
 }

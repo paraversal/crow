@@ -17,4 +17,4 @@ toml_edit = "0.25"
 tracing.workspace = true
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile.workspace = true

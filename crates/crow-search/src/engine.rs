@@ -720,11 +720,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
 
-    fn root(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("crow-search-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create root");
-        dir
+    fn root(name: &str) -> crate::test_support::CleanTree {
+        crate::test_support::CleanTree::new(&format!("crow-search-{name}-"))
     }
 
     fn write(root: &Path, path: &str, bytes: &[u8]) {
@@ -858,7 +855,7 @@ mod tests {
             .sum()
     }
 
-    fn dev_tree(name: &str) -> PathBuf {
+    fn dev_tree(name: &str) -> crate::test_support::CleanTree {
         let root = root(name);
         write(&root, "keep.txt", b"needle\n");
         write(&root, "src/main.rs", b"fn main() {}\n");
@@ -1222,7 +1219,7 @@ mod tests {
         };
         let control = Control::new();
         let (tx, rx) = mpsc::channel();
-        let search_root = root.clone();
+        let search_root = root.to_path_buf();
         std::thread::spawn(move || {
             let mut hits = Vec::new();
             // Exercise the case where the path became a FIFO after the walk
@@ -1407,7 +1404,7 @@ mod tests {
         assert!(summary.scanned < 4000, "the walk stopped early");
     }
 
-    fn names_and_contents_tree(name: &str) -> (PathBuf, Query) {
+    fn names_and_contents_tree(name: &str) -> (crate::test_support::CleanTree, Query) {
         let root = root(name);
         for i in 0..50 {
             write(&root, &format!("content-{i:02}.txt"), b"needle\n");

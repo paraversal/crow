@@ -30,15 +30,15 @@ impl Trash for FolderTrash {
 struct Fixture {
     root: PathBuf,
     trash: FolderTrash,
+    _guard: crate::test_support::TempDir,
 }
 
 impl Fixture {
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("crow-ops-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join(".trash")).unwrap();
-        let root = root.canonicalize().unwrap();
-        Self { trash: FolderTrash(root.join(".trash")), root }
+        let guard = crate::test_support::TempDir::new(&format!("crow-ops-{name}-"));
+        std::fs::create_dir_all(guard.join(".trash")).unwrap();
+        let root = guard.to_path_buf();
+        Self { trash: FolderTrash(root.join(".trash")), root, _guard: guard }
     }
 
     fn path(&self, rel: &str) -> PathBuf {
@@ -87,12 +87,6 @@ impl Fixture {
     fn run_with(&self, request: Request, resolutions: &HashMap<PathBuf, Resolution>) -> Outcome {
         let plan = plan(request).expect("plan");
         execute(&plan, resolutions, &self.trash, &AtomicBool::new(false), &mut |_| {})
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 

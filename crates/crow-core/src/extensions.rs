@@ -660,8 +660,7 @@ mod tests {
 
     #[test]
     fn text_previewer_accepts_text_and_refuses_binary() {
-        let dir = std::env::temp_dir().join(format!("crow-core-preview-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::new("crow-core-preview-");
         let text = dir.join("notes.md");
         std::fs::write(&text, "# Title\n\nbody\n").unwrap();
         let binary = dir.join("blob.bin");
@@ -676,13 +675,11 @@ mod tests {
             Some(PreviewContent::Text(t)) => assert_eq!(t.lines().count(), TextPreviewer::MAX_LINES),
             other => panic!("long UTF-8 file should preview, got {other:?}"),
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn text_excerpt_centers_on_the_line() {
-        let dir = std::env::temp_dir().join(format!("crow-core-excerpt-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::new("crow-core-excerpt-");
         let path = dir.join("lines.txt");
         let body: String = (1..=100).map(|n| format!("line {n}\n")).collect();
         std::fs::write(&path, body).unwrap();
@@ -692,13 +689,11 @@ mod tests {
         assert_eq!(excerpt.hit, 60);
         assert!(excerpt.text.lines().any(|line| line == "line 60"), "{}", excerpt.text);
         assert_eq!(text_excerpt(&path, 60, 0, 3).expect("from the hit").first_line, 60);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn text_excerpt_refuses_binary_and_lines_past_the_cap() {
-        let dir = std::env::temp_dir().join(format!("crow-core-excerpt-bin-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_support::TempDir::new("crow-core-excerpt-bin-");
         let binary = dir.join("blob.bin");
         std::fs::write(&binary, b"text\0more\n").unwrap();
         assert_eq!(text_excerpt(&binary, 1, 2, 5), None);
@@ -710,7 +705,6 @@ mod tests {
         }
         std::fs::write(&big, body).unwrap();
         assert_eq!(text_excerpt(&big, 120_000, 2, 5), None, "the line sits past 1 MiB");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

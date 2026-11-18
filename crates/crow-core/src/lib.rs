@@ -55,3 +55,34 @@ pub use views::{
 
 /// Natural order for names, shared with `crow-fs` so type-to-select and sorting agree.
 pub use crow_fs::natural_cmp as natural_order;
+
+/// An owned temporary folder for tests: the directory is removed when the
+/// guard drops, including during unwinding.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::ops::Deref;
+    use std::path::Path;
+
+    pub(crate) struct TempDir(tempfile::TempDir);
+
+    impl TempDir {
+        pub(crate) fn new(prefix: &str) -> Self {
+            let dir = tempfile::Builder::new().prefix(prefix).tempdir().expect("temp dir");
+            Self(dir)
+        }
+    }
+
+    impl Deref for TempDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<Path> for TempDir {
+        fn as_ref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+}
