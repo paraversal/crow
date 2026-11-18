@@ -7,8 +7,8 @@ Base: `9d074d6` (M9 P9B)
 
 | Item | State | Notes |
 | --- | --- | --- |
-| 1 Palette view | in progress | move `Palette`, `PaletteMode`, path listing state, helpers, handlers and rows to `window/palette_view.rs`; keep `palette.rs` matching/commands and `run_command` with the action owner |
-| 2 Operation UI | todo | move request/sheet dispatch, conflict and Activity presentation, result application and stop/quit coordination to `window/operation_ui.rs`; keep onboarding and shared modal ownership in the parent |
+| 1 Palette view | done (this commit) | `Palette`, `PaletteMode`, `PathState`, `PaletteDir`, geometry helpers, open/refresh/completion/selection handlers and rows now live in `window/palette_view.rs`; `run_command` and `complete_typed_path` stayed in the parent; palette tests (73) pass |
+| 2 Operation UI | in progress | move request/sheet dispatch, conflict and Activity presentation, result application and stop/quit coordination to `window/operation_ui.rs`; keep onboarding and shared modal ownership in the parent |
 | 3 Path edit | todo | move `PathEdit` and its handlers to `window/path_edit.rs`; keep the shared `complete_typed_path` helper and bottom-bar rendering in the parent |
 | 4 Verification | todo | focused palette/operation/path tests between moves, workspace checks, bundle comparison with `main`, palette refresh and 100k bench |
 
@@ -42,7 +42,8 @@ None yet.
 ## Log
 
 - 2026-11-18: Read P9C, the M9 index/finish contract and the current `window.rs` layout (4 242 lines + 11 663 test lines). Created the branch from `9d074d6`; started this progress file.
+- 2026-11-18: Moved the palette state, geometry helpers, open/refresh/completion/selection handlers, render rows and the palette-only test accessors to `window/palette_view.rs`. `run_command` stayed in the parent with the action owner; `open_palette` and `refresh_palette` are `pub(super)` for `go_to_folder` and the hidden-setting reload. `cargo check`/`clippy -p crow-app --all-targets` clean; `cargo test -p crow-app palette` 73 passed.
 
 ## Next
 
-Move the palette state, geometry helpers, handlers and rows to `window/palette_view.rs`, then run the named palette tests.
+Move the operation-side handlers, sheet content and Activity to `window/operation_ui.rs`, keeping `Sheet`, `close_sheet`, onboarding and shared focus ownership in the parent.
