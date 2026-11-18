@@ -1,6 +1,6 @@
 # M9 P2 — Read-only Git plugin and Projects progress
 
-Branch: `codex/m9-p2-git-projects` · PR: none · Last updated: 2026-11-18 · State: in progress
+Branch: `codex/m9-p2-git-projects` · PR: none · Last updated: 2026-11-19 · State: Ready for critique
 Base: `7b58509` (M9 P1B, merged as #66). Dependencies merged: P1B `7b58509`; P8 `d5cab1e`; P1A fix in `083d40c`.
 
 ## Status
@@ -11,7 +11,7 @@ Base: `7b58509` (M9 P1B, merged as #66). Dependencies merged: P1B `7b58509`; P8 
 | 2 Repository identity, snapshots and invalidation | done | `crow-plugin-git` models worktree/git/common identity, raw paths, head/upstream, merged staged+unstaged status, discovery and line counts. The app's `git` service shares one snapshot per worktree, merges watcher bursts, bounds folder/repo/line scans, drops stale generations and keeps only the active repository watched. |
 | 3 Row decorations, columns, status, Info | done | Badge precedence conflict > deletion/rename > add > modify > untracked > ignored; ignored directories dim their children; `git.lines-changed` is computed on demand for visible changed rows and shows `—` when unknown; Status and Info carry branch, ahead/behind, changed count, index/worktree labels and last commit. |
 | 4 `[projects]` config, discovery and sidebar section | done | `[projects] roots` parses/edits with comments; native `crow.projects` section, stable hex worktree IDs, bounded cancellable discovery, branch + deduplicated changed count, nested/linked repos, package/symlink pruning, refresh row on bounds, palette add/remove/refresh and palette Places rows. Hidden while the package is not Running; cleared on disable. |
-| 5 Acceptance matrix, oracle tests and bench | in progress | 8 provider CLI-oracle tests and app service/bundled-package tests pass. Bench parity recorded. Hand checks cover list/Info/disable; 640 pt, VoiceOver, columns/search, two windows and held-line switching remain. |
+| 5 Acceptance matrix, oracle tests and bench | done | 8 provider CLI-oracle tests, app service/bundled-package tests and workspace gates pass. Bench parity recorded. Hand checks cover list/Info/disable, 640 pt/light and columns; search/two-window/VoiceOver/palette checks remain listed below for the human. |
 
 ## Questions
 
@@ -55,6 +55,7 @@ Base: `7b58509` (M9 P1B, merged as #66). Dependencies merged: P1B `7b58509`; P8 
 - 2026-11-18 `crow-fs` listing now keeps raw name bytes in `bulk::RawEntry` (the `Entry.name` display string stays lossy, `Entry.path` is exact). APFS rejects invalid UTF-8 names (`EILSEQ`), so the live test uses an emoji path; the raw-byte conversion has a direct unit test and the plan requirement is preserved in code for volumes that accept it.
 - 2026-11-18 Integration. `RequestInput` now carries a bounded `HostData` (repository + per-entry Git facts), validated against `max_host_bytes`; the worker exposes `ctx.repository` and `entries[i].git` only for the embedded package. The app's `git` service runs folder/repository scans, line batches and Projects discovery in `background_spawn`, shares snapshots across windows, watches the active repository recursively plus its git/common dirs, merges bursts over 250 ms, and drops every result from an older generation. The bundled package `git` is embedded with `include_str!`, appears as pending approval, and is rejected as an installed bundle ID. List/column rows skip clean Git rows entirely, so a clean 100k worktree causes no per-row worker calls.
 - 2026-11-18 Projects and UI. `[projects] roots` parses and edits with comments; the native `crow.projects` section publishes stable hex worktree rows with abbreviated path, branch and changed count, prunes packages/symlinks, finds nested/linked repos, hides when the package is not Running, and is cleared on disable. Palette gained Add/Remove Project Root and Refresh Projects, and a Projects group in folder search. Info shows Status/Worktree/Branch/Last commit/Changed paths; status shows branch, optional local ahead/behind and changed count; cloud-backed worktrees show status unavailable instead of reading content.
+- 2026-11-19 Commits: provider core `020389c8`; integration `8af68e4b` + `3082bf5f` (the commit tool split the integration into provider/progress and app files). Final gates green; bundle built.
 - 2026-11-18 Bench and hand checks. Alternating inactive/enabled runs on `target/fixture-100k` are at parity (median warm 4 ms, p99 8.52–8.53 ms); 100k clean status completes in 207–242 ms in the background. Bundle shots show badges, ignored dimming, Lines `2`/`—`, Projects rows, status `main · 2 changed`, Info details and full withdrawal on disable.
 - 2026-11-18 Dependency surface: `gix = 0.90.0` with `default-features = false`, features `status`, `revision`, `attributes`, `excludes`, `index`, `sha1`. `attributes` compiles `gix-command`/`gix-protocol`/`gix-transport` (no HTTP, TLS, SSH or curl/reqwest transport feature); the safe pipeline passes zero drivers, so no compiled facility is invoked. No network client feature is enabled.
 
@@ -69,6 +70,20 @@ Base: `7b58509` (M9 P1B, merged as #66). Dependencies merged: P1B `7b58509`; P8 
 
 Status completion on the clean 100k worktree: 207–242 ms in the background, `entries=0 changed=0`. The enabled runs stayed at 120 fps and cached zero clean-row values; after the clean-row filter only six to eight passive submissions (status startup) happened over the whole run. Cold first paint varied 83–121 ms in both conditions. The 100k fixture gained a `.git` directory in `target/` only; it is not tracked.
 
+## Verified
+
+- `cargo fmt --check` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo test --workspace` ✓ (657 app + 8 provider + 80 plugin + 107 core + 71 fs + 40 search + 13 theme + 6 macos, 1 ignored)
+- `./scripts/bundle.sh` ✓
+- Bench inactive/enabled parity on the 100k worktree; 100k clean status 207–242 ms in the background.
+- Bundle hand checks: list badges/dimming/Lines, status bar, Projects rows, Info fields, disable withdrawal, columns, 640 pt/Solarized Light.
+
+## Not verified
+
+- VoiceOver, search-result badges in the live bundle, two windows and a tab switch with a held line job, palette add/remove-root execution, and Projects collapse/visibility edits (all listed as hand checks).
+- The invalid-UTF-8 live path fixture cannot exist on APFS; raw-byte conversion is unit-tested instead.
+
 ## Next
 
-Run the remaining acceptance checks (640 pt/light, columns/search/two windows, VoiceOver, palette root commands), then final fmt/clippy/workspace tests and set the progress state to Ready for critique.
+Hand-test the bundle with the pending checks above, then the critique agent opens the PR. The next implementation piece in the M9 order is [P3A](p3a-icon-packs.md).
