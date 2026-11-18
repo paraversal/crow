@@ -55,7 +55,24 @@ jobs:
         run: cargo check -p crow-app --features fuzz --bin crow
 
       - name: Tests
-        run: cargo test --workspace
+        run: python3 scripts/test-report.py run --mode workspace --out "$RUNNER_TEMP/test-report-workspace" -- cargo test --workspace
+
+      - name: Test report
+        if: always()
+        run: |
+          {
+            echo "## Test run"
+            echo
+            python3 scripts/test-report.py summary "$RUNNER_TEMP/test-report-workspace" || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-report-workspace
+          path: ${{ runner.temp }}/test-report-workspace
+          if-no-files-found: warn
 
       # The frame-time benchmark needs a GPU; hosted macOS runners have none,
       # so it runs locally (see docs/testing.md) until a self-hosted runner exists.

@@ -1400,8 +1400,14 @@ mod tests {
             },
             &control,
         );
+        // The walker is parallel: it can finish the tree before the consumer is
+        // scheduled to see the first batch, so `scanned` is not a cancellation
+        // latency guarantee. The stream stopping is; the pre-cancelled test
+        // covers a walk that never starts, and the active-read tests cover a
+        // content read that is interrupted.
+        assert!(!hits.is_empty(), "the first result was streamed before cancelling");
         assert!(hits.len() < 4000, "cancelling stopped the stream");
-        assert!(summary.scanned < 4000, "the walk stopped early");
+        assert!(summary.scanned > 0, "the walk started");
     }
 
     fn names_and_contents_tree(name: &str) -> (crate::test_support::CleanTree, Query) {

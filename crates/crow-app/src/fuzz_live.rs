@@ -126,6 +126,36 @@ fn default_seed() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
 }
 
+/// Options that rebuild the same tree and replay the saved step file. The
+/// collector replaces the absolute script path with the report's artifact.
+fn build_live_replay(options: &Options, script_path: &Path) -> crate::fuzz_events::Replay {
+    let mut command: Vec<String> =
+        ["cargo", "run", "--release", "-p", "crow-app", "--features", "fuzz", "--", "--fuzz"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+    command.push("--seed".into());
+    command.push(options.seed.to_string());
+    if let Some(dir) = &options.dir {
+        command.push(dir.display().to_string());
+        command.push("--dir-is-scratch".into());
+    } else {
+        command.push("--tree".into());
+        command.push(options.tree.spec());
+    }
+    if options.churn {
+        command.push("--churn".into());
+    }
+    command.push("--script".into());
+    command.push(script_path.display().to_string());
+    crate::fuzz_events::Replay {
+        command,
+        env: BTreeMap::new(),
+        script: None,
+        script_format: crate::fuzz_events::LIVE_FORMAT,
+    }
+}
+
 fn usage() -> &'static str {
     "crow --fuzz [DIR --dir-is-scratch] [--seed N] [--minutes M] [--churn] [--script FILE] [--until INDEX] [--tree KINDS]
 
@@ -189,6 +219,7 @@ pub fn run(args: &[String]) -> ExitCode {
         },
     };
     let replay_args = format!("--seed {} --script {}", options.seed, script_path.display());
+    let seed_replay = build_live_replay(&options, &script_path);
     let trace = Trace::new();
     let _log_guard = logging::init_fuzz(trace.layer(), &setup.log_dir);
     println!(
@@ -202,6 +233,7 @@ pub fn run(args: &[String]) -> ExitCode {
         setup.log_dir.join("crow.log").display(),
         script_path.display()
     );
+    crate::fuzz_events::seed_start("fuzz-live", options.seed, &setup.tree_label, options.churn, None);
     if let Some(until) = options.until
         && options.pause_ms == 0
     {
@@ -214,6 +246,7 @@ pub fn run(args: &[String]) -> ExitCode {
     let app_setup = setup.clone();
     let app_trace = trace.clone();
     let app_outcome = outcome.clone();
+    let app_replay = seed_replay.clone();
     app.run(move |cx: &mut App| {
         effects::install(cx, Arc::new(RecordingEffects::without_file_urls()));
         ui::init_at(
@@ -242,12 +275,28 @@ pub fn run(args: &[String]) -> ExitCode {
 
         let Some(handle) = window::open(app_setup.root.clone(), false, None, cx) else {
             eprintln!("crow --fuzz: could not open the window");
+            crate::fuzz_events::seed_failure_without_counts(
+                "fuzz-live",
+                app_options.seed,
+                0,
+                "window",
+                "could not open the window",
+                &app_replay,
+            );
             set_outcome(&app_outcome, Outcome { failed: true });
             app_setup.discard();
             exit_failure();
         };
         if let Err(error) = handle.entity(cx) {
             eprintln!("crow --fuzz: {error}");
+            crate::fuzz_events::seed_failure_without_counts(
+                "fuzz-live",
+                app_options.seed,
+                0,
+                "window",
+                &error.to_string(),
+                &app_replay,
+            );
             set_outcome(&app_outcome, Outcome { failed: true });
             app_setup.discard();
             exit_failure();
@@ -258,6 +307,8 @@ pub fn run(args: &[String]) -> ExitCode {
             app_trace.clone(),
             app_outcome.clone(),
             app_options.seed,
+            app_replay.clone(),
+            app_options.script.is_none().then(|| script_path.clone()),
             cx,
         );
         let options = app_options.clone();
@@ -276,19 +327,70 @@ pub fn run(args: &[String]) -> ExitCode {
             let steps = frames.lock().expect("frames").steps;
             let elapsed = frames.lock().expect("frames").elapsed();
             let slow = !frames.lock().expect("frames").slow.is_empty();
-            let (report, freeze) =
+            let (report, stats) =
                 frames.lock().expect("frames").report(&options, &setup.tree_label, &replay_args, steps, elapsed);
             print!("{report}");
+            crate::fuzz_events::frame_summary(
+                options.seed,
+                crate::fuzz_events::Frames {
+                    heartbeats: stats.heartbeats,
+                    threshold_ms: SLOW_MS,
+                    over_budget: stats.over_limit,
+                    worst_frame_ms: stats.worst_ms,
+                    freeze_threshold_ms: FREEZE_MS,
+                    freeze: stats.freeze,
+                    slow_steps: stats.slow,
+                    steps,
+                    executed_steps: steps,
+                    duration: elapsed,
+                },
+            );
             match result {
                 RunResult::Paused { index } => {
                     println!(
                         "PAUSED before step {index}. The window stays open; attach with:\n  xcrun xctrace record --template 'Time Profiler' --attach crow\nTree: {}\nQuit Crow (⌘Q) when the profile is done.",
                         setup.root.display()
                     );
+                    crate::fuzz_events::seed_end("fuzz-live", options.seed, steps, elapsed, "paused");
                     set_outcome(&app_outcome, Outcome { failed: false });
                 }
-                RunResult::Finished { violations } => {
-                    let failed = freeze || !violations.is_empty();
+                RunResult::Finished { violations, script } => {
+                    let failed = stats.freeze || !violations.is_empty();
+                    let failure = violations.first().map(|(index, violation)| {
+                        (*index, violation.check.to_owned(), violation.detail.clone())
+                    });
+                    let failure = failure.or_else(|| {
+                        stats.freeze.then(|| {
+                            (
+                                stats.worst_index.unwrap_or(steps),
+                                "freeze".to_owned(),
+                                format!("frame over {FREEZE_MS:.0} ms: {:.1} ms", stats.worst_ms),
+                            )
+                        })
+                    });
+                    if let Some((index, invariant, detail)) = failure {
+                        let mut replay = app_replay.clone();
+                        replay.command.push("--until".to_owned());
+                        replay.command.push(index.to_string());
+                        replay.script = Some(script.iter().map(encode_step).collect::<Vec<_>>().join("\n"));
+                        crate::fuzz_events::seed_failure(
+                            "fuzz-live",
+                            options.seed,
+                            index,
+                            steps,
+                            &invariant,
+                            &detail,
+                            elapsed,
+                            &replay,
+                        );
+                    }
+                    crate::fuzz_events::seed_end(
+                        "fuzz-live",
+                        options.seed,
+                        steps,
+                        elapsed,
+                        if failed { "failed" } else { "passed" },
+                    );
                     if !violations.is_empty() {
                         println!("{} invariant violation(s) (first at step {})", violations.len(), violations[0].0);
                     }
@@ -300,6 +402,20 @@ pub fn run(args: &[String]) -> ExitCode {
                     cx.update(|cx| cx.quit());
                 }
                 RunResult::Failed { index, violation, script } => {
+                    let mut replay = app_replay.clone();
+                    replay.command.push("--until".to_owned());
+                    replay.command.push(index.to_string());
+                    replay.script = Some(script.iter().map(encode_step).collect::<Vec<_>>().join("\n"));
+                    crate::fuzz_events::seed_failure(
+                        "fuzz-live",
+                        options.seed,
+                        index,
+                        index,
+                        violation.check,
+                        &violation.detail,
+                        elapsed,
+                        &replay,
+                    );
                     println!(
                         "FAIL seed={} step={index}: {} — {}\nreplay: {replay_args} --until {index}\nscript:\n{}",
                         options.seed,
@@ -506,7 +622,7 @@ impl FrameLog {
         replay_args: &str,
         steps: usize,
         elapsed: Duration,
-    ) -> (String, bool) {
+    ) -> (String, FrameStats) {
         let mut groups: BTreeMap<(&'static str, bool), (usize, f64, usize, Step)> = BTreeMap::new();
         let mut over_limit = 0;
         for slow in &self.slow {
@@ -551,8 +667,29 @@ impl FrameLog {
                 ));
             }
         }
-        (out, freeze)
+        (
+            out,
+            FrameStats {
+                freeze,
+                over_limit,
+                heartbeats: self.frames,
+                slow: self.slow.len(),
+                worst_ms: self.max_ms,
+                worst_index: self.slow.iter().max_by(|a, b| a.ms.total_cmp(&b.ms)).map(|slow| slow.index),
+            },
+        )
     }
+}
+
+/// Totals the machine event needs, computed while building the human report.
+#[derive(Clone, Copy, Debug, Default)]
+struct FrameStats {
+    freeze: bool,
+    over_limit: usize,
+    heartbeats: u64,
+    slow: usize,
+    worst_ms: f64,
+    worst_index: Option<usize>,
 }
 
 /// Whether `step` acts on more than `BULK_PATHS` paths, so its budget is
@@ -588,6 +725,8 @@ fn install_heartbeat(
     trace: Arc<Trace>,
     outcome: Arc<Mutex<Option<Outcome>>>,
     seed: u64,
+    replay: crate::fuzz_events::Replay,
+    generated_script: Option<PathBuf>,
     cx: &mut App,
 ) {
     {
@@ -596,7 +735,7 @@ fn install_heartbeat(
         log.last_beat = Some(Instant::now());
         log.active = true;
     }
-    install_watchdog(frames.clone(), trace.clone(), seed);
+    install_watchdog(frames.clone(), trace.clone(), seed, replay, generated_script);
     cx.spawn(async move |cx| {
         let mut last = Instant::now();
         let mut frozen_steps = std::collections::HashSet::new();
@@ -659,7 +798,13 @@ fn install_heartbeat(
 /// The heartbeat runs on the main thread, so it cannot see a step that never
 /// returns. This thread can: when the heartbeat has not run for `HANG_MS` while
 /// a step is current, it prints `HANG` and exits 1.
-fn install_watchdog(frames: Arc<Mutex<FrameLog>>, trace: Arc<Trace>, seed: u64) {
+fn install_watchdog(
+    frames: Arc<Mutex<FrameLog>>,
+    trace: Arc<Trace>,
+    seed: u64,
+    replay: crate::fuzz_events::Replay,
+    generated_script: Option<PathBuf>,
+) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_millis(250));
@@ -679,6 +824,24 @@ fn install_watchdog(frames: Arc<Mutex<FrameLog>>, trace: Arc<Trace>, seed: u64) 
                 println!(
                     "HANG seed={seed} step={index} {ms:.1} ms and counting {}",
                     stall_detail(&trace, &step, started, now, &recent)
+                );
+                let mut replay = replay.clone();
+                replay.command.push("--until".to_owned());
+                replay.command.push(index.to_string());
+                // A generated run's tool-owned script is kept for replay; a
+                // user-supplied --script is not copied into the report.
+                if let Some(path) = &generated_script
+                    && let Ok(text) = std::fs::read_to_string(path)
+                {
+                    replay.script = Some(text);
+                }
+                crate::fuzz_events::seed_failure_without_counts(
+                    "fuzz-live",
+                    seed,
+                    index,
+                    "hang",
+                    &format!("no heartbeat for {ms:.1} ms"),
+                    &replay,
                 );
                 exit_failure();
             }
@@ -700,7 +863,7 @@ fn stall_detail(trace: &Trace, step: &Step, started: Instant, now: Instant, rece
 }
 
 enum RunResult {
-    Finished { violations: Vec<(usize, Violation)> },
+    Finished { violations: Vec<(usize, Violation)>, script: Vec<Step> },
     Paused { index: usize },
     Failed { index: usize, violation: Violation, script: Vec<Step> },
 }
@@ -834,7 +997,7 @@ async fn run_steps(
     if let Some(violation) = deep_violation(cx, tree).await {
         note_violation(options.seed, executed, violation, &mut seen, &mut violations);
     }
-    RunResult::Finished { violations }
+    RunResult::Finished { violations, script }
 }
 
 fn note_violation(
@@ -1358,8 +1521,8 @@ mod tests {
             tree: EdgeTree::small(),
             churn: false,
         };
-        let (report, freeze) = log.report(&options, "small", "--seed 1 --script s.txt", 10, Duration::from_secs(1));
-        assert!(!freeze);
+        let (report, stats) = log.report(&options, "small", "--seed 1 --script s.txt", 10, Duration::from_secs(1));
+        assert!(!stats.freeze);
         assert!(report.contains("Keys"), "{report}");
         assert!(report.contains("Settle"), "{report}");
         assert!(report.contains("--seed 1 --script s.txt --until 8"), "{report}");
@@ -1386,8 +1549,8 @@ mod tests {
             tree: EdgeTree::small(),
             churn: false,
         };
-        let (report, freeze) = log.report(&options, "small", "--seed 1", 10, Duration::from_secs(1));
-        assert!(!freeze);
+        let (report, stats) = log.report(&options, "small", "--seed 1", 10, Duration::from_secs(1));
+        assert!(!stats.freeze);
         // The 61 ms non-bulk frame is over its 50 ms limit; the 80 ms bulk one is
         // under its 100 ms budget.
         assert!(report.contains("over the limit 1"), "{report}");
