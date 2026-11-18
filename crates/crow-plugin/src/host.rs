@@ -845,12 +845,11 @@ impl PluginHost {
 
     fn status(&self, id: &PluginId, message: impl Into<String>, error: bool) {
         let name = self.name_for(id);
-        self.send(HostEvent::Status {
-            plugin: Some(id.clone()),
-            name: name.clone(),
-            message: format!("{name}: {}", message.into()),
-            error,
-        });
+        let message = message.into();
+        // Approval errors already name the package; the status line adds the
+        // name once, never twice.
+        let prefixed = if message.starts_with(&format!("{name}: ")) { message } else { format!("{name}: {message}") };
+        self.send(HostEvent::Status { plugin: Some(id.clone()), name, message: prefixed, error });
     }
 
     fn send(&self, event: HostEvent) {
@@ -1377,6 +1376,11 @@ fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run"
 fn run(ctx) { while true { } }
 "#;
 
+    const EXCERPT: &str = r#"
+fn register() { [ #{ kind: "command", id: "copy", title: "Copy", function: "run" } ] }
+fn run(ctx) { #{ kind: "copy_text", text: ctx.entries[0].excerpt } }
+"#;
+
     #[test]
     fn external_grant_edit_withdraws_a_when_approving_b() {
         let mut harness = Harness::new(&[("example.a", COMMAND), ("example.b", COMMAND)]);
@@ -1461,6 +1465,74 @@ fn run(ctx) { while true { } }
             HostEvent::RequestFinished { stamp, result: RequestResult::Intent(_), .. }
                 if stamp.request_id == ticket.stamp().request_id
         )));
+    }
+
+    #[test]
+    fn approving_a_changed_snapshot_is_refused_named_once_and_grants_nothing() {
+        let mut harness = Harness::new(&[("example.a", COMMAND)]);
+        let id = PluginId::parse("example.a").unwrap();
+        let digest = harness.entry("example.a").digest.clone().unwrap();
+        std::fs::write(harness.dir.path().join("plugins/example-a/main.rhai"), LOOP).unwrap();
+
+        harness.host.command(HostCommand::Approve { id, digest });
+        harness.pump_until(|harness| harness.entry("example.a").state == PluginState::PendingApproval);
+        let status = harness
+            .seen
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                HostEvent::Status { message, error: true, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("a status event");
+        assert_eq!(
+            status, "a: the package changed on disk; review the new snapshot before approving",
+            "the status line names the package once"
+        );
+        assert!(!harness.grants().contains("[plugin.\"example.a\"]"), "{}", harness.grants());
+        assert!(harness.entry("example.a").descriptors.is_empty());
+    }
+
+    #[test]
+    fn action_errors_name_the_plugin_once() {
+        let mut harness = Harness::new(&[("example.a", COMMAND)]);
+        harness.approve("example.a");
+        harness.host.command(HostCommand::Retry(PluginId::parse("example.a").unwrap()));
+        harness.pump_until(|harness| {
+            harness.seen.iter().any(|event| matches!(event, HostEvent::Status { error: true, .. }))
+        });
+        let status = harness
+            .seen
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                HostEvent::Status { message, error: true, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("a status event");
+        assert_eq!(status, "a: the package is not paused or failed");
+    }
+
+    #[test]
+    fn an_authorized_read_grant_accepts_an_excerpt() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins = dir.path().join("plugins");
+        std::fs::create_dir(&plugins).unwrap();
+        write_bundle(
+            &plugins,
+            "example.read",
+            "Read",
+            EXCERPT,
+            Permissions { fs: Some(FsAccess::Read), spawn: Vec::new(), net: false },
+        );
+        let mut harness = Harness::from_dir(dir);
+        harness.approve("example.read");
+        let generation = harness.entry("example.read").generation;
+        let mut input = Harness::input();
+        input.excerpt = Some(ExcerptInput { handle: EntryHandle(1), text: "hello".into() });
+        let ticket = harness.submit_evaluate("example.read", "copy", generation, input);
+        let (_, _, result) = harness.wait_terminal(&ticket);
+        assert_eq!(result, RequestResult::Intent(crow_core::CommandIntent::CopyText("hello".into())));
     }
 
     #[test]
@@ -1849,6 +1921,43 @@ fn hook(ctx) { #{ refresh: true } }
         crate::worker::test_gate::release("coalesce");
         assert!(matches!(service.wait_terminal(&hold), RequestResult::Intent(_)));
         assert_eq!(service.wait_terminal(&second), RequestResult::Refresh);
+    }
+
+    #[test]
+    fn a_full_hook_lane_finishes_the_extra_hook_as_busy() {
+        let script = r#"
+fn register() {
+    [
+        #{ kind: "command", id: "copy", title: "Copy", function: "run" },
+        #{ kind: "hook", id: "changed", title: "Changed", function: "hook" }
+    ]
+}
+fn run(ctx) { hold_worker("hook-lane"); #{ kind: "copy_text", text: "a" } }
+fn hook(ctx) { #{ refresh: true } }
+"#;
+        let mut limits = test_limits();
+        limits.call_deadline = Duration::from_secs(5);
+        limits.refresh_mailbox = 1;
+        let mut service = ServiceHarness::new(&[("example.a", script)], limits);
+        service.approve("example.a");
+        let generation = service.generation("example.a");
+        let hold =
+            service.handle.try_evaluate(extension("example.a", "copy"), generation, 1, Harness::input()).unwrap();
+        crate::worker::test_gate::wait_until_entered("hook-lane");
+        let hook = extension("example.a", "changed");
+        let first = service
+            .handle
+            .try_notify(hook.clone(), generation, 1, HookEvent::FilesChanged { scope: "/a".into() })
+            .unwrap();
+        let extra =
+            service.handle.try_notify(hook, generation, 1, HookEvent::FilesChanged { scope: "/b".into() }).unwrap();
+        assert_eq!(
+            service.wait_terminal(&extra),
+            RequestResult::Error(RequestError::new(RequestErrorKind::Busy, "the plugin hook lane is full"))
+        );
+        crate::worker::test_gate::release("hook-lane");
+        assert!(matches!(service.wait_terminal(&hold), RequestResult::Intent(_)));
+        assert_eq!(service.wait_terminal(&first), RequestResult::Refresh);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # M9 P1A fix — Plugin runtime foundations progress
 
-Branch: `codex/m9-p1a-plugin-runtime` (same branch as PR https://github.com/paraversal/file-crow/pull/61, per user decision) · Base: `c4482bd` · Last updated: 2026-11-18 · State: Ready for critique
+Branch: `codex/m9-p1a-plugin-runtime` (same branch as PR https://github.com/paraversal/file-crow/pull/61, per user decision) · Base: `c4482bd` · Last updated: 2026-11-18 · State: In critique
 
 ## Status
 
@@ -52,3 +52,24 @@ Branch: `codex/m9-p1a-plugin-runtime` (same branch as PR https://github.com/para
 ## Next
 
 Commit the fix list, set Ready for critique, and hand the two human checks to the user/critic.
+
+## Critique
+Critic session: 2026-11-18 · Base: `codex/m9-p1a-plugin-runtime` @ `c4482bd` · Head reviewed: `62dadb7`
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | Approval errors name the plugin twice: `approve` returns `"<name>: the package changed…"` and `HostCommand` adds the name again in `status`, so the status line reads `A: A: …` for a stale digest (and for an unreadable package). | `crates/crow-plugin/src/host.rs:339-366`, `:846-856` | UX / code | fix | fixed; `status` keeps an existing `name: ` prefix, and `approving_a_changed_snapshot_is_refused_named_once_and_grants_nothing` pins the stale-digest status |
+| C2 | The host test that approves with a digest from before the bytes changed (`a_swapped_asset_between_discovery_and_approval_cannot_execute`) was deleted, although the plan says to keep the approved-snapshot tests; the stale-digest error path is now untested. | `crates/crow-plugin/src/host.rs` tests | plan / code | fix | fixed; the same test also proves no grant is written and descriptors stay empty |
+| C3 | The positive excerpt-grant path was lost with `excerpt_input_requires_the_read_grant`; the new service test only proves the denial. A read grant that no longer permits a valid excerpt would pass the suite. | `crates/crow-plugin/src/host.rs` tests | code | fix | fixed; `an_authorized_read_grant_accepts_an_excerpt` approves a read package and asserts the excerpt reaches the intent |
+| C4 | P1A critique C3's regression test (`action_errors_name_the_plugin_in_the_status_event`) was removed with the host rewrite; only the app-level package-error test remains. | `crates/crow-plugin/src/host.rs` tests | plan / UX | fix | fixed; `action_errors_name_the_plugin_once` retries a running package and pins the single-prefix message |
+| C5 | `RefreshEnqueue::Full` (the hook lane is full because the queued hooks have different coalesce keys) is never exercised; only the displaced path is. | `crates/crow-plugin/src/worker.rs:80-97` | code | fix | fixed; `a_full_hook_lane_finishes_the_extra_hook_as_busy` holds the worker, queues two distinct scopes, and gets Busy for the extra hook |
+| C6 | With more plugins than fit on the Settings page, Up/Down moves the selected row off-screen: `move_plugin_cursor` only calls `cx.notify`, the page scrolls to the list's top (`scroll_to_focused`), and nothing scrolls a row into view. A 20-row probe left the page offset at `y = -1272.5` after 19 Downs and put the last row's Approve at `y = 2120` in a 760 pt window. The progress file claims position is used for scroll. The plan's item 6 names scroll-to-row. | `crates/crow-app/src/settings_window.rs:958-979`, `:738-744`, `:1032-1102` | UX / plan | ask | Q1 open |
+| C7 | Several P1A host tests were deleted without a record: `package_errors_have_distinct_inventory_states`, `budget_pauses_a_while_b_still_replies`, `unsupported_capability_is_an_inventory_state_and_starts_nothing`. Package-level tests cover the error kinds, but the inventory mapping and A-paused/B-replies ordering no longer have a host regression. | `crates/crow-plugin/src/host.rs` tests | code | note | left; package/app tests cover the individual error kinds; the A/B budget ordering is noted for P1B |
+| C8 | `load_package_at` was added and `bundle_path` remains public with no production caller; approval uses the fresh discovery snapshot instead. | `crates/crow-plugin/src/package.rs:128-142`, `:373-375` | code sense | note | left; possible P1B seams, same as P1A C13 |
+| C9 | A grants read/parse error marks every row `Disabled` with the grants error as detail, so the row offers Enable (blocked by the grants-error policy) rather than an error state. The alert above the list explains it, and P1A asserted the same state. | `crates/crow-plugin/src/host.rs:190-207`, `:279-289` | UX | note | left; pre-existing P1A behavior and the grants alert names the real cause |
+| C10 | The progress file said "FIFO manifest/entry/asset tests", but only the entry and asset cases existed; the manifest was read through the same helper but had no regression. | `crates/crow-plugin/src/package.rs` tests | plan / code | fix | fixed; `a_nonregular_manifest_is_rejected_without_blocking` completes the three cases |
+| C11 | The plan's bundled-app focus/active-row check and VoiceOver listening are still open. The list was reached in the bundle by Tab and renders three Pending approval rows with Approve/Reload; the terminal could not confirm the active row or play VoiceOver. | Settings ▸ Plugins in `target/bundle/Crow.app` | plan / UX | note | left as the open hand checks |
+
+Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (900 passed, 1 ignored; `crow-plugin` 66, `crow-app` 607)
+Looked at: the host/service lifecycle and cancellation paths, Settings selection and action dispatch, the package loader's nonblocking final open, icon-pack registration, the actual Tab order (Theme → … → Plugins at 21 tabs), and the bundled app's plugin list with three fixtures. Not looked at: the active row/key action in the bundle after Reload All (the key focus was ambiguous under terminal automation) and actual VoiceOver speech.
+Verdict: better. The lifecycle and cancellation design holds, the two reproduced P1 bugs have deterministic regressions, and the status line no longer double-names a package. C6 is the one open usability gap for long plugin lists; the rest are notes or hand checks.

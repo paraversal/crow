@@ -517,6 +517,21 @@ permissions = { fs = "none", spawn = [], net = false }
     }
 
     #[test]
+    fn a_nonregular_manifest_is_rejected_without_blocking() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("fifo-manifest");
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = std::ffi::CString::new(dir.join("plugin.toml").as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo: {}", std::io::Error::last_os_error());
+        let started = std::time::Instant::now();
+        let error = load_package(&dir, &limits()).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "opening the FIFO manifest must not block");
+        assert_eq!(error.kind, PackageErrorKind::Read);
+        assert!(error.message.contains("plugin.toml"), "{}", error.message);
+        assert!(error.message.contains("not a regular file"), "{}", error.message);
+    }
+
+    #[test]
     fn a_nonregular_asset_is_rejected_with_its_relative_name() {
         let temp = tempfile::tempdir().unwrap();
         let manifest =
