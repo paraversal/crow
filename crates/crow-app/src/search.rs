@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use crow_core::{Exclude, KeymapLayer, Selection, SetName};
+use crow_core::{Exclude, KeymapLayer, SearchMatch, Selection, SetName};
 use crow_fs::Entry;
 use crow_fs::ops::Request;
 use crow_search::{Hit, HitKind, Query, RuleSet, Skip, SkipReason, Summary};
@@ -107,6 +107,9 @@ pub struct SearchView {
     folder_label: String,
     home: PathBuf,
     show_hidden: bool,
+    /// The `search_includes_hidden` setting: visit dot entries while Show Hidden
+    /// Files is off. Changing it reruns an open query.
+    search_includes_hidden: bool,
     scope: Scope,
     matching: Match,
     everything: bool,
@@ -241,6 +244,12 @@ impl SearchView {
         });
         let exclude_generation = cx.global::<Ui>().exclude_generation;
         let skip_label_value = skip_label(&cx.global::<Ui>().exclude);
+        let search_includes_hidden = cx.global::<Ui>().settings.search_includes_hidden;
+        let matching = match cx.global::<Ui>().settings.search_match {
+            SearchMatch::All => Match::All,
+            SearchMatch::Names => Match::Names,
+            SearchMatch::Contents => Match::Contents,
+        };
         let ui_subscription = cx.observe_global::<Ui>(move |this, cx| {
             let generation = cx.global::<Ui>().exclude_generation;
             if this.exclude_generation != generation {
@@ -257,8 +266,9 @@ impl SearchView {
             folder_label,
             home,
             show_hidden,
+            search_includes_hidden,
             scope: Scope::Folder,
-            matching: Match::All,
+            matching,
             everything,
             skip_label: skip_label_value,
             input,
@@ -330,6 +340,18 @@ impl SearchView {
             return;
         }
         self.show_hidden = show;
+        let query = self.input.read(cx).text().to_owned();
+        if !query.is_empty() {
+            self.start_search(&query, cx);
+        }
+    }
+
+    /// The `search_includes_hidden` setting changed: rerun the open query, if any.
+    pub fn set_search_includes_hidden(&mut self, include: bool, cx: &mut Context<Self>) {
+        if self.search_includes_hidden == include {
+            return;
+        }
+        self.search_includes_hidden = include;
         let query = self.input.read(cx).text().to_owned();
         if !query.is_empty() {
             self.start_search(&query, cx);
@@ -428,8 +450,14 @@ impl SearchView {
                 Scope::Home | Scope::ThisMac => self.home.clone(),
             };
             let (names, contents) = query_parts(query, self.effective_match());
-            let query =
-                Query { names, contents, enter_hidden_folders: self.show_hidden, rules, everything: self.everything };
+            let query = Query {
+                names,
+                contents,
+                enter_hidden_folders: self.show_hidden,
+                include_hidden: self.search_includes_hidden,
+                rules,
+                everything: self.everything,
+            };
             cx.background_spawn(async move {
                 let tx = tx;
                 let summary = crow_search::search(

@@ -47,6 +47,7 @@ fn run_case(root: &Path, case: &Case, rules: &Arc<RuleSet>) -> Result<(), String
         names: case.names.map(str::to_owned),
         contents: case.contents.map(str::to_owned),
         enter_hidden_folders: case.show_hidden,
+        include_hidden: true,
         rules: rules.clone(),
         everything: case.everything,
     };

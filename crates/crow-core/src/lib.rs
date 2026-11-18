@@ -32,8 +32,9 @@ pub use recent::{Recent, parse_zoxide, query_zoxide};
 pub use recent_commands::RecentCommands;
 pub use selection::{Selection, TypeSelect};
 pub use settings::{
-    AppIcon, DEFAULT_SETTINGS, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, Settings, SettingsError, TipsMode,
-    ViewMode, config_dir, load_settings, save_bool_setting, save_number_setting, save_setting, save_table_number,
+    AppIcon, DEFAULT_SETTINGS, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, SearchMatch, Settings,
+    SettingsError, TipsMode, ViewMode, config_dir, load_settings, save_bool_setting, save_number_setting, save_setting,
+    save_table_number,
 };
 pub use sidebar::{
     DEFAULT_SIDEBAR, Favorite, FavoriteItem, Group, SidebarConfig, SidebarEdit, Slot, TwinInput, edit_sidebar,

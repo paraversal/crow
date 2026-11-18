@@ -68,6 +68,17 @@ terminal = "Terminal"
 # List dotfiles and other hidden items. View ▸ Show Hidden Files (Shift-Cmd-.) toggles it.
 show_hidden_files = true
 
+# Search (Cmd-F) and Go to (Cmd-K) match dot-named items even while Show Hidden
+# Files is off: dimmed, and Cmd-K ranks them after visible matches. false leaves
+# them out of search until View ▸ Show Hidden Files is on. A Go to path typed
+# with a leading dot still lists them.
+search_includes_hidden = true
+
+# What a new Cmd-F search looks for: "all" (names and contents), "names" or
+# "contents". The panel's All/Names/Contents control changes the open search;
+# this is the mode each new search starts in.
+search_match = "all"
+
 # The right column in list view and the last column in column view: a Preview tab
 # and an Info tab (Cmd-I). View ▸ Hide Preview (Shift-Cmd-P) toggles the column;
 # off is the default only, Cmd-I still opens it. Quick Look still works.
@@ -125,6 +136,28 @@ impl EnterAction {
         match self {
             EnterAction::Rename => "rename",
             EnterAction::Open => "open",
+        }
+    }
+}
+
+/// What a new search matches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchMatch {
+    /// Names and contents.
+    #[default]
+    All,
+    Names,
+    Contents,
+}
+
+impl SearchMatch {
+    /// The value in `settings.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            SearchMatch::All => "all",
+            SearchMatch::Names => "names",
+            SearchMatch::Contents => "contents",
         }
     }
 }
@@ -250,6 +283,8 @@ pub struct Settings {
     pub font_size: f32,
     pub terminal: String,
     pub show_hidden_files: bool,
+    pub search_includes_hidden: bool,
+    pub search_match: SearchMatch,
     pub show_preview: bool,
     pub palette_recent_commands: bool,
     pub view_per_folder: bool,
@@ -272,6 +307,8 @@ impl Default for Settings {
             font_size: 13.0,
             terminal: "Terminal".into(),
             show_hidden_files: true,
+            search_includes_hidden: true,
+            search_match: SearchMatch::All,
             show_preview: true,
             palette_recent_commands: true,
             view_per_folder: true,

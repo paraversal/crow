@@ -8,7 +8,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{Event, MotionMode, SoundSet};
-use crow_core::{AppIcon, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, TipsMode};
+use crow_core::{AppIcon, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, SearchMatch, TipsMode};
 use crow_theme::Theme;
 use gpui::{
     App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, Image, ImageFormat, IntoElement, KeyBinding,
@@ -124,6 +124,8 @@ enum ControlId {
     Tips,
     FolderSizes,
     ShowHidden,
+    SearchHidden,
+    SearchMatch,
     ShowPreview,
     ViewPerFolder,
     PaletteRecent,
@@ -142,7 +144,7 @@ enum ControlId {
 
 impl ControlId {
     /// Reading order: the order Tab visits and the order the page draws.
-    const ALL: [ControlId; 25] = [
+    const ALL: [ControlId; 27] = [
         ControlId::Theme,
         ControlId::AppIcon,
         ControlId::FontFamily,
@@ -154,6 +156,8 @@ impl ControlId {
         ControlId::FolderSizes,
         ControlId::Terminal,
         ControlId::ShowHidden,
+        ControlId::SearchHidden,
+        ControlId::SearchMatch,
         ControlId::ShowPreview,
         ControlId::ViewPerFolder,
         ControlId::PaletteRecent,
@@ -183,6 +187,8 @@ impl ControlId {
             ControlId::Tips => "settings-tips",
             ControlId::FolderSizes => "settings-folder-sizes",
             ControlId::ShowHidden => "settings-show-hidden",
+            ControlId::SearchHidden => "settings-search-hidden",
+            ControlId::SearchMatch => "settings-search-match",
             ControlId::ShowPreview => "settings-show-preview",
             ControlId::ViewPerFolder => "settings-view-per-folder",
             ControlId::PaletteRecent => "settings-palette-recent",
@@ -216,6 +222,8 @@ impl ControlId {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::ShowHidden
+            | ControlId::SearchHidden
+            | ControlId::SearchMatch
             | ControlId::ShowPreview
             | ControlId::ViewPerFolder
             | ControlId::PaletteRecent
@@ -240,6 +248,8 @@ impl ControlId {
             ControlId::Tips => "Tips",
             ControlId::FolderSizes => "Folder sizes",
             ControlId::ShowHidden => "Show hidden files",
+            ControlId::SearchHidden => "Search always includes hidden files",
+            ControlId::SearchMatch => "Search matches",
             ControlId::ShowPreview => "Show preview",
             ControlId::ViewPerFolder => "Folders keep their own view",
             ControlId::PaletteRecent => "Remember recent commands in ⌘K",
@@ -268,10 +278,13 @@ impl ControlId {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::Motion
-            | ControlId::Sound => Role::RadioGroup,
-            ControlId::ShowHidden | ControlId::ShowPreview | ControlId::ViewPerFolder | ControlId::PaletteRecent => {
-                Role::Switch
-            }
+            | ControlId::Sound
+            | ControlId::SearchMatch => Role::RadioGroup,
+            ControlId::ShowHidden
+            | ControlId::SearchHidden
+            | ControlId::ShowPreview
+            | ControlId::ViewPerFolder
+            | ControlId::PaletteRecent => Role::Switch,
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => Role::SpinButton,
             ControlId::Terminal => Role::TextInput,
             ControlId::PlaySound
@@ -299,6 +312,10 @@ impl ControlId {
             ControlId::Tips => "Point out a key the first time it matters; off mutes every tip.",
             ControlId::FolderSizes => "Measure the folders on screen in the background; off leaves them as --.",
             ControlId::ShowHidden => "List dotfiles and other hidden items.",
+            ControlId::SearchHidden => {
+                "Find dot items while Show hidden files is off; Go to ranks them after visible matches."
+            }
+            ControlId::SearchMatch => "What each new Find looks for; the panel's control changes the open search.",
             ControlId::ShowPreview => "The right column's default in list and column view: Preview and Info tabs.",
             ControlId::ViewPerFolder => "Each folder opens in its saved view; off keeps the window's view.",
             ControlId::PaletteRecent => "List the commands you ran from ⌘K under Recently used.",
@@ -756,9 +773,11 @@ impl SettingsWindow {
                     self.open_menu(id, cx);
                 }
             }
-            ControlId::ShowHidden | ControlId::ShowPreview | ControlId::ViewPerFolder | ControlId::PaletteRecent => {
-                self.toggle_bool(id, cx)
-            }
+            ControlId::ShowHidden
+            | ControlId::SearchHidden
+            | ControlId::ShowPreview
+            | ControlId::ViewPerFolder
+            | ControlId::PaletteRecent => self.toggle_bool(id, cx),
             ControlId::PlaySound => crate::feedback::play(Event::Trash, cx),
             ControlId::EditSettings | ControlId::EditSettingsBanner => ui::edit_settings_file(cx),
             ControlId::ShowConfig => ui::open_config_folder(cx),
@@ -776,6 +795,7 @@ impl SettingsWindow {
             | ControlId::FolderSizes
             | ControlId::Motion
             | ControlId::Sound
+            | ControlId::SearchMatch
             | ControlId::Terminal => {}
         }
     }
@@ -790,6 +810,7 @@ impl SettingsWindow {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::Motion
+            | ControlId::SearchMatch
             | ControlId::Sound => {
                 self.move_segment(id, delta, window, cx);
             }
@@ -829,6 +850,7 @@ impl SettingsWindow {
             ControlId::Hints => (hints_index(cx.global::<Ui>().settings.hints), 3),
             ControlId::Tips => (tips_index(cx.global::<Ui>().settings.tips), 2),
             ControlId::FolderSizes => (folder_sizes_index(cx.global::<Ui>().settings.folder_sizes), 2),
+            ControlId::SearchMatch => (search_match_index(cx.global::<Ui>().settings.search_match), 3),
             ControlId::Motion => (motion_index(cx.global::<Ui>().settings.motion), 4),
             ControlId::Sound => (sound_index(cx.global::<Ui>().settings.sound), 3),
             _ => return,
@@ -852,6 +874,11 @@ impl SettingsWindow {
             ControlId::FolderSizes => {
                 SettingChange::FolderSizes(if index == 0 { FolderSizesMode::Off } else { FolderSizesMode::Visible })
             }
+            ControlId::SearchMatch => SettingChange::SearchMatch(match index {
+                0 => SearchMatch::All,
+                1 => SearchMatch::Names,
+                _ => SearchMatch::Contents,
+            }),
             ControlId::Motion => SettingChange::Motion(match index {
                 0 => MotionMode::Auto,
                 1 => MotionMode::Off,
@@ -873,6 +900,7 @@ impl SettingsWindow {
         let settings = &cx.global::<Ui>().settings;
         let change = match id {
             ControlId::ShowHidden => SettingChange::ShowHiddenFiles(!settings.show_hidden_files),
+            ControlId::SearchHidden => SettingChange::SearchIncludesHidden(!settings.search_includes_hidden),
             ControlId::ShowPreview => SettingChange::ShowPreview(!settings.show_preview),
             ControlId::ViewPerFolder => SettingChange::ViewPerFolder(!settings.view_per_folder),
             ControlId::PaletteRecent => SettingChange::PaletteRecentCommands(!settings.palette_recent_commands),
@@ -1143,12 +1171,14 @@ impl SettingsWindow {
                 ControlId::Hints => Some(hints_index(settings.hints)),
                 ControlId::Tips => Some(tips_index(settings.tips)),
                 ControlId::FolderSizes => Some(folder_sizes_index(settings.folder_sizes)),
+                ControlId::SearchMatch => Some(search_match_index(settings.search_match)),
                 ControlId::Motion => Some(motion_index(settings.motion)),
                 ControlId::Sound => Some(sound_index(settings.sound)),
                 _ => None,
             },
             toggled: match id {
                 ControlId::ShowHidden => Some(settings.show_hidden_files),
+                ControlId::SearchHidden => Some(settings.search_includes_hidden),
                 ControlId::ShowPreview => Some(settings.show_preview),
                 ControlId::ViewPerFolder => Some(settings.view_per_folder),
                 ControlId::PaletteRecent => Some(settings.palette_recent_commands),
@@ -1290,6 +1320,19 @@ impl Render for SettingsWindow {
         );
 
         let show_hidden = switch_row(self, ControlId::ShowHidden, settings.show_hidden_files, window, &theme, cx);
+        let search_hidden =
+            switch_row(self, ControlId::SearchHidden, settings.search_includes_hidden, window, &theme, cx);
+        let search_match_select = select_callback(cx, |this, index, window, cx| {
+            this.select_segment(ControlId::SearchMatch, index, window, cx)
+        });
+        let search_match_row = controls::segmented(
+            self.meta(ControlId::SearchMatch, cx),
+            &["All", "Names", "Contents"],
+            search_match_index(settings.search_match),
+            self.style(ControlId::SearchMatch, window, &theme),
+            search_match_select,
+            None,
+        );
         let show_preview = switch_row(self, ControlId::ShowPreview, settings.show_preview, window, &theme, cx);
         let view_per_folder = switch_row(self, ControlId::ViewPerFolder, settings.view_per_folder, window, &theme, cx);
         let palette_recent =
@@ -1420,6 +1463,16 @@ impl Render for SettingsWindow {
                 (ControlId::ShowPreview, show_preview.into_any_element()),
                 (ControlId::ViewPerFolder, view_per_folder.into_any_element()),
                 (ControlId::PaletteRecent, palette_recent.into_any_element()),
+            ],
+        );
+        add_section(
+            &mut page_items,
+            &mut control_items,
+            "Search",
+            &theme,
+            vec![
+                (ControlId::SearchHidden, search_hidden.into_any_element()),
+                (ControlId::SearchMatch, search_match_row.into_any_element()),
             ],
         );
         add_section(
@@ -1676,6 +1729,14 @@ fn folder_sizes_index(value: FolderSizesMode) -> usize {
     }
 }
 
+fn search_match_index(value: SearchMatch) -> usize {
+    match value {
+        SearchMatch::All => 0,
+        SearchMatch::Names => 1,
+        SearchMatch::Contents => 2,
+    }
+}
+
 fn motion_index(value: MotionMode) -> usize {
     match value {
         MotionMode::Auto => 0,
@@ -1879,6 +1940,28 @@ mod tests {
         assert_eq!(state(&view, &vcx, ControlId::ShowHidden).toggled, Some(false));
         assert!(!vcx.read_global::<Ui, _>(|ui, _| ui.settings.show_hidden_files));
         wait_for(&vcx, "show_hidden_files = false");
+    }
+
+    #[gpui::test]
+    fn search_controls_write_their_lines(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::SearchHidden);
+        assert_eq!(state(&view, &vcx, ControlId::SearchHidden).toggled, Some(true), "the default includes hidden");
+        vcx.simulate_keystrokes("space");
+        assert_eq!(state(&view, &vcx, ControlId::SearchHidden).toggled, Some(false));
+        assert!(!vcx.read_global::<Ui, _>(|ui, _| ui.settings.search_includes_hidden));
+        wait_for(&vcx, "search_includes_hidden = false");
+
+        focus_control(&view, &mut vcx, ControlId::SearchMatch);
+        assert_eq!(state(&view, &vcx, ControlId::SearchMatch).selected, Some(0), "All is the default");
+        vcx.simulate_keystrokes("right");
+        assert_eq!(state(&view, &vcx, ControlId::SearchMatch).selected, Some(1));
+        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.search_match), SearchMatch::Names);
+        wait_for(&vcx, "search_match = \"names\"");
+        vcx.simulate_keystrokes("right");
+        assert_eq!(state(&view, &vcx, ControlId::SearchMatch).selected, Some(2));
+        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.search_match), SearchMatch::Contents);
+        wait_for(&vcx, "search_match = \"contents\"");
     }
 
     #[gpui::test]

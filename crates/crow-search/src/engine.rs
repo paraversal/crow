@@ -105,6 +105,9 @@ pub struct Query {
     /// Descend into dot folders. Dot-named entries are always visited and
     /// matched; this only decides whether the walk goes inside them.
     pub enter_hidden_folders: bool,
+    /// Visit dot-named entries at all while Show Hidden Files is off. The
+    /// `search_includes_hidden` setting; Show Hidden Files on overrides it.
+    pub include_hidden: bool,
     /// Compiled once per `exclude.toml` generation and shared by every search
     /// that starts from it: the glob compile is ~14 ms on the main thread.
     pub rules: Arc<RuleSet>,
@@ -302,9 +305,10 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
 
     let rules = if query.everything { Arc::new(RuleSet::empty()) } else { Arc::clone(&query.rules) };
     let enter_hidden = query.enter_hidden_folders || query.everything;
+    let visit_hidden = query.include_hidden || enter_hidden;
     let skipped = Arc::new(Mutex::new(Vec::new()));
     let scanned = Arc::new(AtomicU64::new(0));
-    let walker = build_walker(root, rules, skipped.clone(), cancel.clone());
+    let walker = build_walker(root, visit_hidden, rules, skipped.clone(), cancel.clone());
     let (tx, rx) = mpsc::channel::<Vec<Hit>>();
 
     let scanned_thread = scanned.clone();
@@ -432,6 +436,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
 
 fn build_walker(
     root: &Path,
+    visit_hidden: bool,
     rules: Arc<RuleSet>,
     skipped: Arc<Mutex<Vec<Skip>>>,
     cancel: Arc<AtomicBool>,
@@ -439,9 +444,9 @@ fn build_walker(
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
     let mut builder = WalkBuilder::new(root);
     builder
-        // Dot entries are always visited; the visit closure decides whether to
-        // descend into a dot folder, and records the skip when it does not.
-        .hidden(false)
+        // When dot entries are visited, the visit closure decides whether to
+        // descend into a dot folder and records the skip when it does not.
+        .hidden(!visit_hidden)
         .ignore(false)
         .git_ignore(false)
         .git_global(false)
@@ -658,6 +663,7 @@ mod tests {
             names: names.map(str::to_owned),
             contents: contents.map(str::to_owned),
             enter_hidden_folders,
+            include_hidden: true,
             rules: rules(),
             everything,
         };
@@ -824,6 +830,27 @@ mod tests {
         let visible = hits.iter().find(|hit| hit.path == root.join("backup.txt")).expect("the plain name");
         assert!(hidden.hidden);
         assert!(!visible.hidden);
+    }
+
+    #[test]
+    fn search_includes_hidden_off_leaves_dot_entries_unvisited() {
+        let root = root("hidden-setting-off");
+        write(&root, ".secret.txt", b"needle\n");
+        write(&root, ".folder/inside.txt", b"needle\n");
+        write(&root, "visible.txt", b"needle\n");
+        let query = Query {
+            names: Some("needle".into()),
+            contents: Some("needle".into()),
+            enter_hidden_folders: false,
+            include_hidden: false,
+            rules: rules(),
+            everything: false,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut hits = Vec::new();
+        let summary = search(&root, &query, |batch| hits.extend(batch), &cancel);
+        assert_eq!(paths(&hits), [root.join("visible.txt")]);
+        assert!(!summary.skipped.iter().any(|skip| skip.reason == SkipReason::HiddenFolder));
     }
 
     #[cfg(target_os = "macos")]
@@ -1002,6 +1029,7 @@ mod tests {
             names: None,
             contents: Some("needle".into()),
             enter_hidden_folders: false,
+            include_hidden: true,
             rules: rules(),
             everything: true,
         };
@@ -1026,6 +1054,7 @@ mod tests {
             names: Some("needle".into()),
             contents: Some("needle".into()),
             enter_hidden_folders: false,
+            include_hidden: true,
             rules: rules(),
             everything: true,
         };
@@ -1069,6 +1098,7 @@ mod tests {
             names: None,
             contents: Some("needle".into()),
             enter_hidden_folders: false,
+            include_hidden: true,
             rules: rules(),
             everything: true,
         };
@@ -1090,6 +1120,7 @@ mod tests {
             names: None,
             contents: Some("needle".into()),
             enter_hidden_folders: false,
+            include_hidden: true,
             rules: rules(),
             everything: true,
         };
@@ -1142,6 +1173,7 @@ mod tests {
             names: None,
             contents: Some("needle".to_owned()),
             enter_hidden_folders: true,
+            include_hidden: true,
             rules: rules(),
             everything: false,
         };
@@ -1162,6 +1194,7 @@ mod tests {
             names: None,
             contents: Some("needle".to_owned()),
             enter_hidden_folders: false,
+            include_hidden: true,
             rules: rules(),
             everything: true,
         };

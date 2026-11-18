@@ -412,6 +412,19 @@ fn settle(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
     panic!("folders never finished loading");
 }
 
+/// Wait until the palette's background listing of the current folder is in.
+fn wait_for_palette_files(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        let loaded = view.read_with(cx, |w, _| w.palette.as_ref().is_some_and(|palette| palette.here_dir.is_some()));
+        if loaded {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("the palette never listed the current folder");
+}
+
 /// Wait until the palette is not waiting on a background parent listing.
 fn settle_palette(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
     for _ in 0..400 {
@@ -3032,6 +3045,59 @@ fn search_footer_counts_hits_and_files(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn search_starts_in_the_configured_match_mode(cx: &mut TestAppContext) {
+    let root = fixture("search-default-match");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| {
+        crate::ui::set_setting(crate::ui::SettingChange::SearchMatch(crow_core::SearchMatch::Names), cx);
+    });
+    cx.simulate_keystrokes("cmd-f");
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    assert_eq!(search.read_with(&cx, |search, _| search.matching()), crate::search::Match::Names);
+    cx.simulate_keystrokes("escape");
+    cx.update(|_, cx| {
+        crate::ui::set_setting(crate::ui::SettingChange::SearchMatch(crow_core::SearchMatch::Contents), cx);
+    });
+    cx.simulate_keystrokes("cmd-f");
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    assert_eq!(search.read_with(&cx, |search, _| search.matching()), crate::search::Match::Contents);
+}
+
+#[gpui::test]
+fn search_hidden_setting_updates_an_open_search(cx: &mut TestAppContext) {
+    let root = corpus_fixture("search-hidden-setting");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-shift-.");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_keystrokes("cmd-shift-m");
+    cx.simulate_input("backup");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    assert!(
+        search.read_with(&cx, |search, _| search.result_paths()).contains(&root.join(".backup.txt")),
+        "the default includes dot names with Show Hidden Files off"
+    );
+
+    cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::SearchIncludesHidden(false), cx));
+    view.update(&mut cx, |window, cx| window.set_search_includes_hidden(false, cx));
+    wait_for_search(&view, &mut cx);
+    assert!(
+        !search.read_with(&cx, |search, _| search.result_paths()).contains(&root.join(".backup.txt")),
+        "turning the setting off leaves dot names out"
+    );
+    assert!(!search.read_with(&cx, |search, _| search.skipped_paths()).contains(&root.join(".backup")));
+
+    cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::SearchIncludesHidden(true), cx));
+    view.update(&mut cx, |window, cx| window.set_search_includes_hidden(true, cx));
+    wait_for_search(&view, &mut cx);
+    assert!(
+        search.read_with(&cx, |search, _| search.result_paths()).contains(&root.join(".backup.txt")),
+        "turning it back on finds them again"
+    );
+}
+
+#[gpui::test]
 fn search_skipped_link_opens_the_list_and_escape_closes_it_first(cx: &mut TestAppContext) {
     let root = fixture("search-skipped");
     std::fs::create_dir_all(root.join("node_modules/pkg")).expect("create fixture");
@@ -4524,9 +4590,10 @@ fn palette_tab_on_a_file_row_completes_its_name_without_a_slash(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn palette_path_mode_hides_dot_folders_until_typed(cx: &mut TestAppContext) {
+fn palette_path_mode_matches_dot_names_without_the_dot(cx: &mut TestAppContext) {
     let root = fixture("palette-path-hidden");
     std::fs::create_dir_all(root.join(".hidden")).expect("create fixture");
+    std::fs::create_dir_all(root.join("hidden-visible")).expect("create fixture");
     let (view, mut cx) = open(cx, &root);
     cx.simulate_keystrokes("cmd-shift-.");
     settle(&view, &mut cx);
@@ -4534,12 +4601,108 @@ fn palette_path_mode_hides_dot_folders_until_typed(cx: &mut TestAppContext) {
     cx.simulate_input(&format!("{}/", root.display()));
     settle_palette(&view, &mut cx);
     let rows = view.read_with(&cx, |w, _| w.palette_rows());
-    assert!(!rows.iter().any(|row| row.ends_with("/.hidden")), "hidden until asked: {rows:?}");
+    assert!(!rows.iter().any(|row| row.ends_with("/.hidden")), "an empty listing leaves it out: {rows:?}");
 
-    cx.simulate_input(".h");
+    cx.simulate_input("hid");
     settle_palette(&view, &mut cx);
     let rows = view.read_with(&cx, |w, _| w.palette_rows());
-    assert!(rows.iter().any(|row| row.ends_with("/.hidden")), "a dot partial shows hidden folders: {rows:?}");
+    let visible = rows.iter().position(|row| row.ends_with("/hidden-visible")).expect("a visible match");
+    let dot = rows.iter().position(|row| row.ends_with("/.hidden")).expect("the dot name matches");
+    assert!(visible < dot, "hidden ranks after visible matches: {rows:?}");
+    assert_eq!(view.read_with(&cx, |w, _| w.palette_row_hidden(dot)), Some(true), "the row is marked hidden");
+
+    // Close and reopen so the field starts from the dot partial itself.
+    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(&format!("{}/.h", root.display()));
+    settle_palette(&view, &mut cx);
+    let rows = view.read_with(&cx, |w, _| w.palette_rows());
+    assert_eq!(
+        rows.get(1).map(String::as_str),
+        Some(format!("{}/.hidden", root.display()).as_str()),
+        "a dot partial puts it first: {rows:?}"
+    );
+
+    // With the setting off, a dotless query leaves the dot name out; the
+    // explicit dot query above still lists it.
+    cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::SearchIncludesHidden(false), cx));
+    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(&format!("{}/hid", root.display()));
+    settle_palette(&view, &mut cx);
+    let rows = view.read_with(&cx, |w, _| w.palette_rows());
+    assert!(!rows.iter().any(|row| row.ends_with("/.hidden")), "search does not include hidden: {rows:?}");
+    assert!(rows.iter().any(|row| row.ends_with("/hidden-visible")), "visible matches stay: {rows:?}");
+}
+
+#[gpui::test]
+fn palette_path_mode_fuzzy_matches_files(cx: &mut TestAppContext) {
+    let root = corpus_fixture("palette-path-fuzzy");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(&format!("{}/ack", root.display()));
+    settle_palette(&view, &mut cx);
+    let rows = view.read_with(&cx, |w, _| w.palette_rows());
+    assert!(rows.iter().any(|row| row.ends_with("/back.txt")), "mid-name match: {rows:?}");
+    assert!(rows.iter().any(|row| row.ends_with("/backup.txt")), "mid-name match: {rows:?}");
+}
+
+#[gpui::test]
+fn palette_typed_query_finds_files_here(cx: &mut TestAppContext) {
+    let root = corpus_fixture("palette-files-here");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-shift-.");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input("backup");
+    wait_for_palette_files(&view, &mut cx);
+    settle_palette(&view, &mut cx);
+
+    let rows = view.read_with(&cx, |w, _| w.palette_rows());
+    let header = rows.iter().position(|row| row.starts_with("# Files in ")).expect("a Files in header");
+    let folders_first = view
+        .read_with(&cx, |w, _| {
+            let palette = w.palette.as_ref()?;
+            let header = palette
+                .listing
+                .rows
+                .iter()
+                .position(|row| matches!(row, Row::Header(text) if text.starts_with("Files in ")))?;
+            let file_rows = palette.listing.rows[..header]
+                .iter()
+                .filter_map(|row| match row {
+                    Row::Item(index) => {
+                        Some(matches!(palette.listing.items.get(*index)?, Item::Folder { source: Source::File, .. }))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            Some(file_rows)
+        })
+        .expect("the palette listing");
+    assert!(folders_first.iter().all(|is_file| !is_file), "every row above the header is a folder: {rows:?}");
+
+    let file = rows.iter().position(|row| row.ends_with("/backup.txt")).expect("backup.txt is listed");
+    let hidden = rows.iter().position(|row| row.ends_with("/.backup.txt")).expect(".backup.txt is listed");
+    assert!(header < file, "the file is below the header: {rows:?}");
+    assert!(file < hidden, "the visible file comes before the hidden one: {rows:?}");
+    assert_eq!(view.read_with(&cx, |w, _| w.palette_row_hidden(hidden)), Some(true));
+
+    let item = view
+        .read_with(&cx, |w, _| {
+            let palette = w.palette.as_ref()?;
+            palette.listing.items.iter().position(|item| {
+            matches!(item, Item::Folder { label, source: Source::File, .. } if label.ends_with("/backup.txt"))
+        })
+        })
+        .expect("the file row's index");
+    if item > 0 {
+        cx.simulate_keystrokes(&vec!["down"; item].join(" "));
+    }
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "Return closes the palette");
+    assert_eq!(selected_names(&view, &cx), ["backup.txt"], "Return reveals the file in its folder");
 }
 
 #[gpui::test]

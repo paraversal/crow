@@ -104,6 +104,7 @@ fn bench_search(dir: &std::path::Path, text: &str) -> Result<(), String> {
         names: Some(text.to_owned()),
         contents: Some(text.to_owned()),
         enter_hidden_folders: false,
+        include_hidden: true,
         rules: Arc::new(rules),
         everything: false,
     };
@@ -139,13 +140,14 @@ struct TraceOptions {
     names: bool,
     contents: bool,
     show_hidden: bool,
+    search_includes_hidden: bool,
     everything: bool,
 }
 
 fn parse_search_trace(args: &[String]) -> Result<TraceOptions, String> {
     let Some(dir) = args.first() else {
         return Err("usage: crow --search-trace DIR QUERY [--target PATH] [--names|--contents] \
-                    [--hidden|--no-hidden] [--everything]"
+                    [--hidden|--no-hidden] [--search-hidden|--no-search-hidden] [--everything]"
             .to_owned());
     };
     let Some(query) = args.get(1) else {
@@ -158,6 +160,7 @@ fn parse_search_trace(args: &[String]) -> Result<TraceOptions, String> {
         names: true,
         contents: true,
         show_hidden: false,
+        search_includes_hidden: true,
         everything: false,
     };
     let mut hidden_set = false;
@@ -189,6 +192,14 @@ fn parse_search_trace(args: &[String]) -> Result<TraceOptions, String> {
             "--no-hidden" => {
                 options.show_hidden = false;
                 hidden_set = true;
+                index += 1;
+            }
+            "--search-hidden" => {
+                options.search_includes_hidden = true;
+                index += 1;
+            }
+            "--no-search-hidden" => {
+                options.search_includes_hidden = false;
                 index += 1;
             }
             "--everything" => {
@@ -231,6 +242,7 @@ fn search_trace(args: &[String]) -> Result<(), String> {
         names: options.names.then(|| options.query.clone()),
         contents: options.contents.then(|| options.query.clone()),
         enter_hidden_folders: options.show_hidden,
+        include_hidden: options.search_includes_hidden,
         rules: Arc::new(rules),
         everything: options.everything,
     };
