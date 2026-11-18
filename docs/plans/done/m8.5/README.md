@@ -42,15 +42,15 @@ These are decisions, not suggestions. An executing agent that finds one impossib
 
    This keeps the default walk cost where it is today while finding `~/.backup_excludes`, `~/.zshrc` and `~/.config` itself.
 7. **Cmd-K always lists with hidden entries** and filters or demotes them in one pure function (`palette::match_entries`). With Show Hidden Files off: an empty partial hides them; a typed partial includes them, ranked after visible matches unless the partial starts with `.`. Both the path mode and the typed non-path query use it.
-8. **Search does not descend into packages** (`.app`, `.bundle`, `.framework`, `.photoslibrary`); the package itself is still a name hit, and Search everything descends. This follows Finder (principle 5). The package test moves from `crow-fs` to `crow-core` (`crow_core::is_package_name`) so `crow-search` can use it without depending on `crow-fs`; `crow-fs` and `search.rs`'s own list both call it.
+8. **Search does not descend into packages** (`.app`, `.bundle`, `.framework`, `.photoslibrary`); the package itself is still a name hit, and Search everything descends. This follows Finder (principle 5). The walker and result rows share `crow_fs::is_package_name`, as decided in [B3 Q1](b3-scope-and-misses.progress.md#questions).
 9. **The cap is two budgets** (B4): 20,000 strong name rows, and 20,000 other rows (content and weak fuzzy). When the other budget fills, the engine **stops reading contents** but keeps walking for names (`Control::stop_contents`). Only filling the strong budget cancels the walk. A `Control` struct replaces the bare `cancel: &Arc<AtomicBool>` parameter.
 10. **`Query.show_hidden` is renamed `enter_hidden_folders`** in B2, because it no longer decides what matches.
 
 ## The batches
 
-All five batches are merged; B5 carries the final checks and moves this folder to `docs/plans/done/m8.5/`.
+B5 closes the milestone with the final checks and moves this folder to `docs/plans/done/m8.5/`.
 
-| Batch | What | Was | Branch | Merged |
+| Batch | What | Was | Branch | PR |
 | --- | --- | --- | --- | --- |
 | [B1](b1-streaming.md) Streaming fix, corpus, trace | Time-based flush, name hits before contents, regular files only for contents, typed skips with unreadable folders, a small deterministic corpus with named cases, `--search-trace`, start/done log lines. Fixes the user's report. | S1 (trimmed) + the streaming half of S5 | `m8.5-b1-streaming` | [#56](https://github.com/paraversal/file-crow/pull/56) |
 | [B2](b2-hidden-and-palette.md) Hidden names and Cmd-K files | Hidden policy in the engine, `hidden` on hits and rows, Cmd-K path mode lists hidden entries and fuzzy-matches files, typed Cmd-K query matches files in the current folder. | S2 | `m8.5-b2-hidden` | [#57](https://github.com/paraversal/file-crow/pull/57) |

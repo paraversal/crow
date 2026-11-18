@@ -2767,12 +2767,18 @@ fn search_corpus_matrix(cx: &mut TestAppContext) {
     for query_text in ["backup", "needle"] {
         for hidden_on in [false, true] {
             for everything in [false, true] {
-                for mode in [crate::search::Match::All, crate::search::Match::Names, crate::search::Match::Contents] {
-                    search.update(&mut cx, |search, cx| {
-                        search.set_show_hidden(hidden_on, cx);
-                        search.set_everything(everything, cx);
-                        search.set_match(mode, cx);
-                    });
+                for (mode, selector) in [
+                    (crate::search::Match::All, "search-match-all"),
+                    (crate::search::Match::Names, "search-match-names"),
+                    (crate::search::Match::Contents, "search-match-contents"),
+                ] {
+                    if view.read_with(&cx, |w, _| w.show_hidden) != hidden_on {
+                        cx.simulate_keystrokes("cmd-shift-.");
+                    }
+                    if search.read_with(&cx, |search, _| search.everything()) != everything {
+                        click_selector(&mut cx, "search-skip-switch");
+                    }
+                    click_selector(&mut cx, selector);
                     // Cmd-F again selects the old query, so typing replaces it.
                     cx.simulate_keystrokes("cmd-f");
                     cx.simulate_input(query_text);
@@ -2844,6 +2850,39 @@ fn search_corpus_matrix(cx: &mut TestAppContext) {
         }
     }
     assert!(failures.is_empty(), "the corpus matrix failed:\n{}", failures.join("\n"));
+}
+
+#[gpui::test]
+fn search_scope_controls_fit_with_a_long_folder_name(cx: &mut TestAppContext) {
+    let root = corpus_fixture("search-scope-with-a-long-folder-name");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("backup");
+    wait_for_search(&view, &mut cx);
+
+    for (width, all_sets) in [(1280., false), (640., false), (640., true)] {
+        if all_sets {
+            cx.update(|_, cx| {
+                let ui = cx.global_mut::<crate::ui::Ui>();
+                ui.exclude.dependencies.enabled = Some(true);
+                ui.exclude.media.enabled = Some(true);
+                ui.exclude.hidden.enabled = Some(true);
+                ui.exclude.system.enabled = Some(true);
+                ui.exclude_generation += 1;
+            });
+        }
+        cx.simulate_resize(size(px(width), px(800.)));
+        cx.run_until_parked();
+        let bar = cx.debug_bounds("search-scope-bar").expect("scope bar");
+        for selector in ["search-scope-folder", "search-scope-home", "search-scope-this-mac", "search-skip-switch"] {
+            let bounds = cx.debug_bounds(selector).unwrap_or_else(|| panic!("missing {selector} at {width}"));
+            assert!(bounds.left() >= bar.left() && bounds.right() <= bar.right(), "{selector} at {width}: {bounds:?}");
+        }
+        let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+        let before = search.read_with(&cx, |search, _| search.everything());
+        click_selector(&mut cx, "search-skip-switch");
+        assert_ne!(search.read_with(&cx, |search, _| search.everything()), before);
+    }
 }
 
 #[gpui::test]

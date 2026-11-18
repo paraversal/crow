@@ -1,11 +1,11 @@
 # Crow roadmap
 
-Last updated: 2026-11-17. This page is the index; the plan and progress files under [`plans/`](plans/) are authoritative. Status values: **done**, **in progress**, **planned**, **deferred**.
+Last updated: 2026-11-18. This page is the index. The plan and progress files under [`plans/`](plans/) are authoritative. Status values are **done**, **in progress**, **planned**, and **deferred**.
 
 ## Right now
 
 - **M8 F1 is done**: merged in [#48](https://github.com/paraversal/file-crow/pull/48), with the island-rule follow-up in [#49](https://github.com/paraversal/file-crow/pull/49) (commit `2964848`).
-- **M8.5 is done**: the five search-reliability batches merged through [#59](https://github.com/paraversal/file-crow/pull/59). **Next is M9** (Phase 2); its order is in [`plans/m9/README.md`](plans/m9/README.md).
+- **M8.5 closes with B5**, following four search-reliability batches through [#59](https://github.com/paraversal/file-crow/pull/59). **Next is M9** (Phase 2). See the [M9 index](plans/m9/README.md) for the order.
 - The [inbox](plans/inbox.md) has no untriaged items.
 
 ## At a glance

@@ -1260,7 +1260,13 @@ fn demoted(hidden: HiddenMatch, entry: &PathEntry) -> bool {
 /// only `previous.1` is scanned; otherwise every file is.
 pub fn narrow_files(query: &str, files: &[PathEntry], previous: Option<(&str, &[u32])>) -> Vec<u32> {
     let indices: Vec<u32> = match previous {
-        Some((old, indices)) if query.starts_with(old) => indices.to_vec(),
+        // Appending a letter can change the lowercase form of an earlier one,
+        // such as Greek final sigma. Only reuse candidates if both prefixes hold.
+        Some((old, indices))
+            if query.starts_with(old) && (old.is_ascii() || query.to_lowercase().starts_with(&old.to_lowercase())) =>
+        {
+            indices.to_vec()
+        }
         _ => (0..files.len() as u32).collect(),
     };
     let mut fuzzy = FuzzyMatcher::new(query);
@@ -1569,6 +1575,15 @@ mod tests {
         let narrowed = narrow_files("n", &files, previous.as_ref().map(|(old, at)| (old.as_str(), at.as_slice())));
         assert_eq!(narrowed, full("n"));
         assert_eq!(narrowed, [3], "notes.txt is back");
+    }
+
+    #[test]
+    fn narrow_files_handles_context_sensitive_lowercase() {
+        let files = [pe("/x/οσα.txt")];
+        let previous = narrow_files("ΟΣ", &files, None);
+        assert!(previous.is_empty());
+        assert_eq!(narrow_files("ΟΣΑ", &files, None), [0]);
+        assert_eq!(narrow_files("ΟΣΑ", &files, Some(("ΟΣ", &previous))), [0]);
     }
 
     #[test]

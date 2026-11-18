@@ -18,7 +18,7 @@ use futures::channel::mpsc::unbounded;
 use gpui::{
     App, Context, Entity, EventEmitter, ExternalDragPayload, FileDragPaths, FocusHandle, Focusable, FontWeight, Image,
     IntoElement, MouseButton, MouseDownEvent, Render, Role, ScrollStrategy, SharedString, Subscription, Toggled,
-    UniformListScrollHandle, Window, div, img, prelude::*, px, uniform_list,
+    UniformListScrollHandle, Window, div, img, prelude::*, px, relative, uniform_list,
 };
 
 use crate::actions::{
@@ -1604,7 +1604,7 @@ impl SearchView {
             .role(Role::RadioGroup)
             .aria_label("Search scope")
             .flex()
-            .flex_none()
+            .min_w_0()
             .gap(px(2.))
             .p(px(2.))
             .rounded(px(7.))
@@ -1613,7 +1613,16 @@ impl SearchView {
             .child(self.scope_segment(Scope::Home, "Home".into(), cx))
             .child(self.scope_segment(Scope::ThisMac, "This Mac".into(), cx));
         let right: Option<gpui::AnyElement> = if self.scope == Scope::ThisMac {
-            Some(div().text_color(muted).child("Spotlight: indexed volumes only").into_any_element())
+            Some(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(muted)
+                    .child("Spotlight: indexed volumes only")
+                    .into_any_element(),
+            )
         } else {
             self.skip_label.as_ref().map(|label| self.render_skip_switch(label, cx).into_any_element())
         };
@@ -1652,8 +1661,12 @@ impl SearchView {
             .aria_toggled(if on { Toggled::True } else { Toggled::False })
             .when_some(shortcut.clone(), |switch, keys| switch.aria_keyshortcuts(keys))
             .h(px(24.))
+            // With several exclusion sets enabled, the switch label must also
+            // give up space so the three scope buttons remain reachable.
+            .max_w(relative(0.4))
             .px(px(8.))
             .flex()
+            .flex_none()
             .items_center()
             .gap(px(7.))
             .rounded(px(12.))
@@ -1711,6 +1724,8 @@ impl SearchView {
             .h(px(22.))
             .px(px(9.))
             .flex()
+            .when(scope == Scope::Folder, |segment| segment.min_w_0())
+            .when(scope != Scope::Folder, |segment| segment.flex_none())
             .items_center()
             .rounded(px(5.))
             .whitespace_nowrap()
@@ -1723,7 +1738,7 @@ impl SearchView {
             .when(scope == Scope::Folder, |segment| {
                 segment.child(icons::glyph(Glyph::Folder, 12., "fg-muted", &theme)).gap(px(4.))
             })
-            .child(div().max_w(px(160.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(label));
+            .child(div().min_w_0().max_w(px(160.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(label));
         // The bar stays quiet; the full path and the Home key are one hover away.
         if scope == Scope::Folder {
             with_tooltip(segment, folder_path.unwrap_or_default(), None)

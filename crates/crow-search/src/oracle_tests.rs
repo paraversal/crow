@@ -310,7 +310,8 @@ fn display_skip(key: &(PathBuf, SkipKey)) -> (PathBuf, &'static str) {
 fn build_tree(root: &Path, seed: u64) -> Vec<String> {
     fs::create_dir_all(root).expect("create the tree root");
     let mut rng = Rng::new(seed);
-    let count = 1 + rng.below(40);
+    // Leave room for two sentinels, two symlinks and an unreadable folder with a child.
+    let count = 1 + rng.below(34);
     let mut dirs = vec![(root.to_path_buf(), 0usize)];
     let mut files: Vec<PathBuf> = Vec::new();
     let mut manifest = Vec::new();
@@ -324,7 +325,7 @@ fn build_tree(root: &Path, seed: u64) -> Vec<String> {
         if path.exists() {
             continue;
         }
-        if depth < 4 && rng.below(100) < 45 {
+        if depth < 3 && rng.below(100) < 45 {
             fs::create_dir(&path).expect("create a tree folder");
             manifest.push(format!("d {}", relative(root, &path)));
             dirs.push((path, depth + 1));
@@ -351,34 +352,36 @@ fn build_tree(root: &Path, seed: u64) -> Vec<String> {
     // A symlink to a sibling file and (when possible) to a sibling folder.
     if let Some(target) = pick(&mut rng, &files) {
         let link = target.parent().unwrap_or(root).join("link-file");
-        if fs::symlink_metadata(&link).is_err() && symlink(target.file_name().unwrap(), &link).is_ok() {
-            manifest.push(format!("l {} -> link-file", relative(root, &link)));
-        }
+        write_symlink(root, &link, target, &mut manifest);
     }
-    let folder_targets: Vec<PathBuf> =
-        dirs.iter().skip(1).map(|(path, _)| path.clone()).filter(|path| path.parent().is_some()).collect();
-    if let Some(target) = pick(&mut rng, &folder_targets) {
+    if let Some((target, _)) = pick(&mut rng, &dirs[1..]) {
         let link = target.parent().unwrap_or(root).join("link-dir");
-        if fs::symlink_metadata(&link).is_err() && symlink(target.file_name().unwrap(), &link).is_ok() {
-            manifest.push(format!("l {} -> link-dir", relative(root, &link)));
-        }
+        write_symlink(root, &link, target, &mut manifest);
     }
 
     // Some trees have a folder the walk cannot read. Running as root, `read_dir`
     // succeeds anyway, so do not create one: the oracle would rightly agree that
     // there is no unreadable skip, but the case would test nothing.
     if unsafe { libc::geteuid() } != 0 && rng.below(100) < 50 {
-        let (parent, _) = dirs[rng.below(dirs.len())].clone();
+        let parents: Vec<_> = dirs.iter().filter(|(_, depth)| *depth < 3).collect();
+        let (parent, _) = parents[rng.below(parents.len())];
         let path = parent.join("000");
         if fs::symlink_metadata(&path).is_err() {
             fs::create_dir(&path).expect("create the unreadable folder");
             fs::write(path.join("inside.txt"), b"ab\n").expect("write inside the unreadable folder");
             fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod the unreadable folder");
             manifest.push(format!("d {} (mode 000)", relative(root, &path)));
+            manifest.push(format!("f {}/inside.txt {:?}", relative(root, &path), b"ab\n"));
         }
     }
 
     manifest
+}
+
+fn write_symlink(root: &Path, link: &Path, target: &Path, manifest: &mut Vec<String>) {
+    let name = target.file_name().expect("sibling name");
+    symlink(name, link).expect("create the sibling symlink");
+    manifest.push(format!("l {} -> {}", relative(root, link), name.to_string_lossy()));
 }
 
 fn write_sentinel(root: &Path, dir: &Path, manifest: &mut Vec<String>) {

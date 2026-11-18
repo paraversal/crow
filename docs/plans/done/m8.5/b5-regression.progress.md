@@ -1,5 +1,5 @@
 # B5 — Regression and finish progress
-Branch: m8.5-b5-regression · PR: none · Last updated: 2026-11-18 · State: Ready for critique
+Branch: m8.5-b5-regression · PR: none · Last updated: 2026-11-18 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -60,4 +60,45 @@ the fixture's files contain `needle` only, so their numbers are a full walk. B5 
 - 2026-11-18: palette CI follow-up passed `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` outside the sandbox (823 passed, 1 ignored).
 
 ## Next
-Ready for critique. The critic opens the PR; This Mac, the grouped skipped list and VoiceOver remain for the user's hand test.
+After B5 is hand-tested and merged, start [M9 P1](../../m9/README.md), the public Rhai plugin API. The M9 index records the decisions to confirm before implementation.
+
+## Critique
+
+Critic session: 2026-11-18 · Base: `main` at `26bf08e` · Original head reviewed: `a607555`
+
+### Literal findings
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | A regular file or symlink could be replaced by a FIFO after classification, stalling the content open. | `crates/crow-search/src/engine.rs` | code | fix | Open without blocking and check the opened descriptor before reading. The FIFO test also exercises this race window directly. |
+| C2 | The oracle's extra fixture entries could exceed its size and depth limits, and the failure listing printed the link names as their targets. | `crates/crow-search/src/oracle_tests.rs` | plan | fix | Reserve room for the extras, bound the depth and print the actual targets. |
+| C3 | The app corpus matrix used view setters, bypassing the match controls and the window's hidden-file action. | `crates/crow-app/src/window/tests.rs` | tests | fix | Drive the controls in all 24 runs, still comparing paths, counts and skips against the engine. |
+| C4 | The roadmap credited the B4 PR with all five merges. The index still described a package dependency superseded by the user's B3 decision. The cap instructions attributed a new query's result to the previous walk. | `docs/ROADMAP.md`, M8.5 index, `docs/testing.md` | docs | fix | Record the correct B5 closeout, reference B3 Q1 and distinguish the hand check from the same-walk automated check. |
+| C5 | One outgoing progress-note commit contained a local account name. | B5 progress history | publication | fix | Redacted the two affected unpushed commits and verified the content-only change. The scan's oracle home path is a synthetic test fixture. |
+
+### Semantic findings
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C6 | In Cmd-K, typing `ΟΣΑ` after `ΟΣ` could lose `οσα.txt`. Greek final sigma changes form during lowercasing, invalidating the cached prefix. | `crates/crow-app/src/palette.rs` | correctness | fix | Check the lowercase prefix before reusing candidates. Reproduced first and added a regression test. |
+| C7 | At 640 px, a long folder name left the skip switch at x=621–784 and mostly outside the window. | Search scope bar | UI | fix | Let the folder label truncate first. Keep the short scope labels and the skip switch reachable. |
+| C8 | A settled miss still shows the existing Return to results hint. After content reads stop at the cap, the footer's omitted count describes only hits observed so far. | Bottom bar, search footer | UX | note | Both are minor copy follow-ups. Documented here with no change to the agreed cap behavior. |
+
+### Verification
+
+- `cargo fmt --check`, clippy with warnings denied, and the workspace suite passed with 825 tests passed and one ignored. The workspace tests use normal macOS access for metadata and directory-watch events.
+- The final bundle's trace found the synthetic `.backup_excludes` with Show Hidden Files off and reported all four skip reasons. Search Everything found the name inside `.backup` and left only the unreadable folder in the skip list.
+- The GPUI scope test clicks the skip switch at 1280 and 640 px. At 640 px it also checks the full set of enabled exclusion groups.
+- The executor's five-minute fuzz log shows seed `1795006983320860000`, churn off, and a pass after 313.68 s. The critique reran smoke in the workspace suite.
+- Search benchmark, median of three interleaved runs on `target/fixture-search-200k`. Times are first hit / total in ms. `back` and `backup` have no hits in this fixture.
+
+| Query | `main` | B5 with fixes |
+| --- | ---: | ---: |
+| `needle` | 1.1 / 1491.7 | 1.1 / 1480.4 |
+| `back` | — / 1437.2 | — / 1416.5 |
+| `backup` | — / 1426.3 | — / 1411.7 |
+| `file-01-02 --names` | 3.6 / 186.8 | 2.4 / 183.6 |
+
+All four rows meet B4's first-hit and total budgets. The signed bundles built successfully. Desktop automation timed out, so visual review used the executor's screenshots and GPUI rendered bounds. Hand-test This Mac against the live Spotlight index, the grouped skipped list with a mouse, and the VoiceOver labels and footer announcement before merging.
+
+Verdict: B1–B4 address the reported empty search, make hidden names findable and give misses a path forward. B5 adds independent walk coverage and verifies that the UI carries engine results and skips through to the panel. The remaining checks need the bundled app.
