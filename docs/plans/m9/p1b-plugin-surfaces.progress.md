@@ -94,8 +94,13 @@ Critic session: 2026-11-18 · Base: `d5cab1e` · Head reviewed: `7194be0`
 
 Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `cargo test --workspace` ✓ (966 passed, 1 ignored) · `./scripts/bundle.sh` ✓. Final active fixture bench (foreground, 1280×800): warm first paint 3 ms, p99 9.16 ms, 108 row requests, 5 hooks, 2,878 cached rows / 120,876 bytes. A clean foreground run had external 33 ms frames; not used as a comparison. Registration-to-first-contribution is still unrecorded.
 Looked at: bundled fixture in List, search, Info, sidebar walk, preview; FireBox at 1280×800 and Solarized Light at 640×800. VoiceOver not run; palette/context command activation not exercised by hand.
-Verdict: better. The API, identity checks, section shell, keyboard/viewport sections, search demand, sidebar freeze, drop safety, preview lifecycle and window teardown now match the plan on the checked paths. Residual gaps are the palette click/Enter command route (real-service dispatcher passes) and C16's registration timing.
+Verdict: better. The API, identity checks, section shell, keyboard/viewport sections, search demand, sidebar freeze, drop safety, preview lifecycle and window teardown now match the plan on the checked paths.
+
+## Known gaps
+
+- **C15 palette activation.** The real shipped fixture reaches Running, the command appears in the palette, and the same fixture command writes exactly one clipboard value when sent through `CrowWindow::run_plugin_command`. Clicking the plugin row or pressing Return in the palette still does not reach that effect in the GPUI test. Do not claim the palette/File-menu command route is verified; hand-check it in the bundle.
+- **C16 registration timing.** The final active bench ran (warm 3 ms, p99 9.16 ms, 108 rows, 5 hooks), but there is no synchronization seam and no measurement of registration-to-first-contribution. The stock bench may still start scrolling before registration.
 
 ## Next
 
-Ready for critique. The critic should run the two pending automation checks it can drive (640 pt/light, VoiceOver/AX) and open PR after fixes; the user hand-tests the bundle.
+Hand off in **In critique** with the gaps above. No PR opened; the branch carries commit `0d213fc`. The user should hand-test the bundle and decide whether the palette activation and registration-timing gaps block P1B.
