@@ -44,6 +44,8 @@ use crate::ui::Ui;
 
 const MAX_RESULTS: usize = 20_000;
 const ROW_HEIGHT: f32 = 40.0;
+/// Full Disk Access, where the user grants a folder like `~` to Crow.
+const PRIVACY_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -88,6 +90,32 @@ fn query_parts(text: &str, matching: Match) -> (Option<String>, Option<String>) 
 /// Spotlight indexes names only, so the match control never applies there.
 fn effective_match_for(scope: Scope, matching: Match) -> Match {
     if scope == Scope::ThisMac { Match::Names } else { matching }
+}
+
+/// One way to widen a search that found nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Widen {
+    /// Search everything: `n` skipped folders that it would walk.
+    Everything(usize),
+    /// Scope is a folder other than Home.
+    Home,
+    /// Match is Names or Contents (not All).
+    AllMatch,
+}
+
+/// The ways to widen a search that found nothing, most specific first.
+fn widen_options(scope: Scope, folder_is_home: bool, matching: Match, liftable: usize, everything: bool) -> Vec<Widen> {
+    let mut options = Vec::new();
+    if liftable > 0 && !everything {
+        options.push(Widen::Everything(liftable));
+    }
+    if scope == Scope::Folder && !folder_is_home {
+        options.push(Widen::Home);
+    }
+    if matching != Match::All && scope != Scope::ThisMac {
+        options.push(Widen::AllMatch);
+    }
+    options
 }
 
 pub enum SearchEvent {
@@ -508,13 +536,9 @@ impl SearchView {
             Update::Done(summary) => {
                 let scanned = summary.scanned;
                 let skipped = summary.skipped.len();
-                // The app shows the skips it can explain: exclude.toml rules and
-                // dot folders (B3 adds packages; unreadable folders come with it).
-                self.skipped = summary
-                    .skipped
-                    .into_iter()
-                    .filter(|skip| matches!(skip.reason, SkipReason::Rule(_) | SkipReason::HiddenFolder))
-                    .collect();
+                // Every reason is listed: rules, hidden folders, packages and
+                // unreadable folders are the four ways a search can miss something.
+                self.skipped = summary.skipped;
                 if let Some(error) = summary.error {
                     self.error = Some(error.into());
                 }
@@ -931,6 +955,15 @@ impl SearchView {
     #[cfg(test)]
     pub fn skipped_paths(&self) -> Vec<PathBuf> {
         self.skipped.iter().map(|skip| skip.path.clone()).collect()
+    }
+
+    /// The skipped list's groups, as the renderer builds them.
+    #[cfg(test)]
+    pub fn skipped_groups(&self) -> Vec<(&'static str, Vec<PathBuf>)> {
+        skip_groups(&self.skipped)
+            .into_iter()
+            .map(|(heading, _, skips)| (heading, skips.into_iter().map(|skip| skip.path.clone()).collect()))
+            .collect()
     }
 
     #[cfg(test)]
@@ -1653,7 +1686,8 @@ impl SearchView {
                 }))
                 .child(format!("{} {chevron}", skipped_text(skipped)))
         });
-        let hint = (self.scope != Scope::ThisMac && self.skip_label.is_some()).then(|| {
+        let liftable = self.skipped.iter().any(|skip| skip.reason.lifted_by_everything());
+        let hint = (self.scope != Scope::ThisMac && (liftable || self.everything)).then(|| {
             let hint = if self.everything { "Skip folders again" } else { "Search everything" };
             with_action_tooltip(
                 div()
@@ -1743,6 +1777,18 @@ impl SearchView {
             Scope::Home => "Home".to_owned(),
             Scope::ThisMac => "This Mac".to_owned(),
         }
+    }
+
+    /// The empty state's widen buttons: what this miss could reach.
+    fn widen_options(&self) -> Vec<Widen> {
+        let liftable = self.skipped.iter().filter(|skip| skip.reason.lifted_by_everything()).count();
+        widen_options(
+            self.scope,
+            self.scope == Scope::Folder && self.folder == self.home,
+            self.effective_match(),
+            liftable,
+            self.everything,
+        )
     }
 
     fn render_idle(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -1901,8 +1947,52 @@ impl SearchView {
                 .child("Searching…")
                 .into_any_element();
         }
-        let skipped = self.skipped.len();
         let message = format!("No results for \"{}\" in {}", self.query(cx), self.scope_label());
+        let spoken_everything =
+            keys::spoken_for(&SearchEverything, KeyScope::Search, cx).unwrap_or_else(|| "Shift Command A".to_owned());
+        let spoken_home =
+            keys::spoken_for(&SearchHome, KeyScope::Search, cx).unwrap_or_else(|| "Shift Command H".to_owned());
+        let buttons: Vec<gpui::AnyElement> = self
+            .widen_options()
+            .into_iter()
+            .map(|option| {
+                let (kind, label, aria) = match option {
+                    Widen::Everything(n) => (
+                        "everything",
+                        format!("{}. Search everything", skipped_was_text(n)),
+                        format!("{}. Search everything, {spoken_everything}", skipped_was_text(n)),
+                    ),
+                    Widen::Home => ("home", "Search Home".to_owned(), format!("Search Home, {spoken_home}")),
+                    Widen::AllMatch => {
+                        ("all-match", "Search names and contents".to_owned(), "Search names and contents".to_owned())
+                    }
+                };
+                let keycap = match option {
+                    Widen::Everything(_) => {
+                        Keycap::for_action(&SearchEverything, KeyScope::Search, KeycapWeight::Outline, cx)
+                    }
+                    Widen::Home => Keycap::for_action(&SearchHome, KeyScope::Search, KeycapWeight::Outline, cx),
+                    Widen::AllMatch => None,
+                };
+                div()
+                    .id(kind)
+                    .debug_selector(move || format!("search-empty-{kind}"))
+                    .role(Role::Button)
+                    .aria_label(aria)
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_color(accent)
+                    .on_click(cx.listener(move |this, _, window, cx| match option {
+                        Widen::Everything(_) => this.search_everything(&SearchEverything, window, cx),
+                        Widen::Home => this.search_home(cx),
+                        Widen::AllMatch => this.set_match(Match::All, cx),
+                    }))
+                    .child(label)
+                    .children(keycap)
+                    .into_any_element()
+            })
+            .collect();
         div()
             .id("search-empty")
             .flex_1()
@@ -1914,24 +2004,7 @@ impl SearchView {
             .text_size(px(13.))
             .text_color(muted)
             .child(message)
-            .when(skipped > 0 && self.scope != Scope::ThisMac, |body| {
-                let hint = if self.everything { "Skip folders again" } else { "Search everything" };
-                body.child(
-                    div()
-                        .id("search-empty-everything")
-                        .role(Role::Button)
-                        .aria_label(format!("{}. {hint}", skipped_was_text(skipped)))
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_color(accent)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.search_everything(&SearchEverything, window, cx);
-                        }))
-                        .child(format!("{}. {hint}", skipped_was_text(skipped)))
-                        .children(Keycap::for_action(&SearchEverything, KeyScope::Search, KeycapWeight::Outline, cx)),
-                )
-            })
+            .children(buttons)
             .into_any_element()
     }
 
@@ -2276,21 +2349,67 @@ impl SearchView {
         }
         let theme = cx.global::<Ui>().theme.clone();
         let muted = color(theme.role("fg-muted"));
-        let rows = self.skipped.iter().enumerate().map(|(i, skip)| {
-            let shown = self.skipped_display(&skip.path);
-            let reason = skip_reason_text(&skip.reason);
-            div()
-                .id(("search-skipped-row", i))
-                .debug_selector(move || format!("search-skipped-row-{i}"))
-                .role(Role::ListItem)
-                .aria_label(format!("{shown}, {reason}"))
-                .px_3()
-                .py_1()
-                .flex()
-                .flex_col()
-                .child(div().text_size(px(12.)).child(shown))
-                .child(div().text_size(px(11.)).text_color(muted).child(reason))
-        });
+        let accent = color(theme.role("accent"));
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        let mut index = 0usize;
+        for (heading, kind, skips) in skip_groups(&self.skipped) {
+            rows.push(
+                div()
+                    .id(format!("search-skipped-header-{kind}"))
+                    .debug_selector(move || format!("search-skipped-header-{kind}"))
+                    .role(Role::Heading)
+                    .aria_level(2)
+                    .aria_label(heading)
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(muted)
+                    .child(heading)
+                    .into_any_element(),
+            );
+            let mut privacy = false;
+            for skip in skips {
+                if matches!(&skip.reason, SkipReason::Unreadable(text) if text == "no permission") {
+                    privacy = true;
+                }
+                let shown = self.skipped_display(&skip.path);
+                let reason = skip_reason_text(&skip.reason);
+                rows.push(
+                    div()
+                        .id(("search-skipped-row", index))
+                        .debug_selector(move || format!("search-skipped-row-{index}"))
+                        .role(Role::ListItem)
+                        .aria_label(format!("{shown}, {reason}"))
+                        .px_3()
+                        .py_1()
+                        .flex()
+                        .flex_col()
+                        .child(div().text_size(px(12.)).child(shown))
+                        .child(div().text_size(px(11.)).text_color(muted).child(reason))
+                        .into_any_element(),
+                );
+                index += 1;
+            }
+            if privacy {
+                rows.push(
+                    div()
+                        .id("search-skipped-privacy")
+                        .debug_selector(|| "search-skipped-privacy".into())
+                        .role(Role::Button)
+                        .aria_label("Open Privacy & Security in System Settings")
+                        .px_3()
+                        .py_1()
+                        .text_size(px(12.))
+                        .text_color(accent)
+                        .hover(|style| style.underline())
+                        .on_click(cx.listener(|_, _, _, cx| cx.open_url(PRIVACY_SETTINGS_URL)))
+                        .child("Open Privacy & Security…")
+                        .into_any_element(),
+                );
+            }
+        }
         Some(
             div()
                 .id("search-skipped")
@@ -2410,8 +2529,38 @@ pub fn skipped_text(n: usize) -> String {
 fn skip_reason_text(reason: &SkipReason) -> String {
     match reason {
         SkipReason::HiddenFolder => "hidden folder (Show Hidden Files is off)".to_owned(),
+        SkipReason::Package => "package (Search everything looks inside)".to_owned(),
         other => other.to_string(),
     }
+}
+
+/// The group a reason belongs to, for the skipped list's header selector.
+fn skip_kind(reason: &SkipReason) -> &'static str {
+    match reason {
+        SkipReason::Rule(_) => "excluded",
+        SkipReason::HiddenFolder => "hidden",
+        SkipReason::Package => "packages",
+        SkipReason::Unreadable(_) => "unreadable",
+    }
+}
+
+/// The skipped list in display order: exclusion rules, hidden folders, packages,
+/// unreadable folders; paths sorted within each group. Only non-empty groups.
+fn skip_groups(skips: &[Skip]) -> Vec<(&'static str, &'static str, Vec<&Skip>)> {
+    const GROUPS: &[(&str, &str)] = &[
+        ("Excluded", "excluded"),
+        ("Hidden folders", "hidden"),
+        ("Packages", "packages"),
+        ("Couldn't read", "unreadable"),
+    ];
+    GROUPS
+        .iter()
+        .filter_map(|&(heading, kind)| {
+            let mut group: Vec<&Skip> = skips.iter().filter(|skip| skip_kind(&skip.reason) == kind).collect();
+            group.sort_by(|a, b| a.path.cmp(&b.path));
+            (!group.is_empty()).then_some((heading, kind, group))
+        })
+        .collect()
 }
 
 /// The same wording as a sentence: "1 folder was skipped" / "3 folders were skipped".
@@ -2625,6 +2774,24 @@ mod tests {
         assert_eq!(query_parts("needle", Match::All), (Some("needle".to_owned()), Some("needle".to_owned())));
         assert_eq!(query_parts("needle", Match::Names), (Some("needle".to_owned()), None));
         assert_eq!(query_parts("needle", Match::Contents), (None, Some("needle".to_owned())));
+    }
+
+    #[test]
+    fn widen_options_are_ordered_and_gated() {
+        assert_eq!(widen_options(Scope::Folder, true, Match::All, 0, false), [], "already Home");
+        assert_eq!(widen_options(Scope::Folder, false, Match::All, 3, false), [Widen::Everything(3), Widen::Home]);
+        assert_eq!(widen_options(Scope::Folder, false, Match::Names, 0, false), [Widen::Home, Widen::AllMatch]);
+        assert_eq!(widen_options(Scope::Home, false, Match::Names, 0, false), [Widen::AllMatch]);
+        assert_eq!(widen_options(Scope::ThisMac, false, Match::Names, 2, false), [Widen::Everything(2)]);
+        assert_eq!(
+            widen_options(Scope::Folder, false, Match::Contents, 2, false),
+            [Widen::Everything(2), Widen::Home, Widen::AllMatch]
+        );
+        assert_eq!(
+            widen_options(Scope::Folder, false, Match::Names, 2, true),
+            [Widen::Home, Widen::AllMatch],
+            "everything is already on"
+        );
     }
 
     #[test]
