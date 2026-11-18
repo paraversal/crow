@@ -1,5 +1,5 @@
 # P9A — Own temporary fixtures for their full lifetime progress
-Branch: `codex/m9-p9a-test-temp` · PR: none · Base: `083d40c` (M9 P1A, merged) · Last updated: 2026-11-18 · State: Ready for critique
+Branch: `codex/m9-p9a-test-temp` · PR: none · Base: `083d40c` (M9 P1A, merged) · Last updated: 2026-11-18 · State: In critique
 
 ## Status
 | Item | State | Notes |
@@ -40,3 +40,18 @@ Branch: `codex/m9-p9a-test-temp` · PR: none · Base: `083d40c` (M9 P1A, merged)
 
 ## Next
 - Commit the work and set **Ready for critique**. No push, no PR; the critic opens it.
+
+## Critique
+Critic session: 2026-11-18 · Base: `083d40c` · Head reviewed: `de61b16`
+
+| # | Finding | Where | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| C1 | A run that fails after `prepare` leaves the tool-created support folder and tree. Repro: `TMPDIR=$(mktemp -d) cargo run -p crow-app --features fuzz -- --fuzz --script /nonexistent` left `crow-fuzz-support-*` and `crow-fuzz-tree-*` (with the unreadable edge kinds); window-open failures and an app exit with no outcome had the same hole. | `crates/crow-app/src/fuzz_live.rs:160-220`, `:243-254`, `:319-326` | plan / code | fix | fixed (9397dab) |
+| C2 | `Ui.themes_state_dir` is not used by the write path: Apply to All Apps calls `crow_theme::set_global(theme)`, which recomputes the process `state_dir()`. In a test with a fixture index that writes the developer's `~/.local/state/themes/current.json`; the progress's "per-test theme index" claim only covered reads. | `crates/crow-theme/src/lib.rs:324`, `crates/crow-app/src/ui.rs:769` | plan / code | fix | fixed (8c1822e) |
+| C3 | The "cleanup on unwind" test checked `tempfile::TempDir` directly, not the `TestRoots` config global (the source of the 69,708 leaked config roots). Replaced it with a nested GPUI app that panics and asserts the global removes the root. The fixture doc comments also still said the paths were canonicalized after `TestRoot` stopped canonicalizing. | `crates/crow-app/src/ui.rs:1045`, `crates/crow-app/src/window/tests.rs:115,124` | code / honesty | fix | fixed (8c1822e) |
+| C4 | `TestRoot`/`CorpusRoot`/`FuzzRoot` and `TestParent` both remove the same trees, and the three crate-local `test_support` modules duplicate a small `TempDir` wrapper. Harmless; a shared test-support crate would add a dependency for ~60 lines. | `crates/crow-app/src/window/tests.rs:41-135`, `crates/crow-*/src/lib.rs` | code sense | note | left (boring duplication, test-only) |
+| C5 | The plan's "existing replay still reproduces deterministically" has no recorded replay in the progress; only `fuzz_smoke` (three fixed seeds) was run. The live paused/failed/killed run remains a GUI hand check. | progress Acceptance / Hand checks | honesty | note | left (recorded for the user) |
+
+Checks re-run: `cargo fmt --check` ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ · `./scripts/check-test-temp.sh` ✓ (full workspace, 20.15 s, clean in the private `TMPDIR` and `/tmp`) · new fuzz-feature unit tests ✓ · new config-unwind and apply-everywhere tests ✓ · `TMPDIR=$(mktemp -d) cargo run -p crow-app --features fuzz -- --fuzz --script /nonexistent` now leaves nothing ✓
+Looked at: the diff, both new tests, the fuzz error paths, `scripts/check-test-temp.sh`, `docs/testing.md`, and the fixture lifecycle in the test harness. UI: no user-facing surface changed, so no light/dark, size or VoiceOver pass was needed; the theme picker's Apply to All Apps is covered by the new test.
+Verdict: better. The suite and the 100k-scale fixtures now clean up after themselves, the check script is reproducible, and the two remaining leak paths (fuzz startup errors, theme state writes) are closed.
