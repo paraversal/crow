@@ -23,6 +23,9 @@ None yet.
 - `close_sheet`, `choose_tips`, `move_onboarding_focus` and `Sheet::Onboarding` construction stay in the parent; onboarding is not an operation concern.
 - `run_command` stays in the parent with the action owner so built-in and plugin command routes can converge in P1B; palette rows call it through the parent method.
 - `complete_typed_path` stays in the parent because both the palette and the path field call it.
+- The palette-only test accessors (`palette_rows`, `palette_row_names`, `palette_row_hidden`, `Palette::row_keys`) moved with the listing they read, so the parent stops importing test-only `Item`/`Row`. Their names and call sites are unchanged.
+- `operation_ui` is `pub(crate)` only so `menus.rs` can route the menu's Quit action to `operation_ui::quit`; every other item is private or `pub(super)`.
+- Onboarding state, answer recording (`choose_tips`) and focus cycling stay in the parent. Its sheet arm is rendered in `operation_ui` with the other sheet arms because all share the same chrome, focus ring and key context.
 
 ## Hand checks
 
