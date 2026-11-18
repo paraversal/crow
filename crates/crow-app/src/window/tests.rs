@@ -2695,6 +2695,20 @@ fn search_scope_buttons_switch_scope(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
 
+    // The Folder segment names the folder and speaks its full path.
+    let folder = search.read_with(&cx, |search, _| search.folder().to_path_buf());
+    let folder_label = cx
+        .update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec())
+        .into_iter()
+        .find(|element| element.selector.as_deref() == Some("search-scope-folder"))
+        .and_then(|element| element.label)
+        .unwrap_or_default();
+    assert!(
+        folder_label.starts_with(&format!("Search in {}, ", crate::style::display_name(&folder))),
+        "{folder_label}"
+    );
+    assert!(folder_label.ends_with(&folder.display().to_string()), "{folder_label}");
+
     // Empty query: switching scope starts no walk, Home or Spotlight.
     click_selector(&mut cx, "search-scope-home");
     settle(&view, &mut cx);

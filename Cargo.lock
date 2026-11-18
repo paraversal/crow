@@ -1130,6 +1130,7 @@ name = "crow-search"
 version = "0.1.0"
 dependencies = [
  "crow-core",
+ "crow-fs",
  "globset",
  "grep-matcher",
  "grep-regex",

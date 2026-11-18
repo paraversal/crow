@@ -362,6 +362,16 @@ pub fn cases() -> &'static [Case] {
             show_hidden: false,
             everything: false,
             target: "CrowBackup.app/Contents/Info.plist",
+            expect: Expect::UnderSkip("CrowBackup.app"),
+        },
+        Case {
+            id: "package-everything",
+            root: "",
+            names: None,
+            contents: Some("needle"),
+            show_hidden: false,
+            everything: true,
+            target: "CrowBackup.app/Contents/Info.plist",
             expect: Expect::Hit,
         },
         Case {

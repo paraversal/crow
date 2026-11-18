@@ -1575,14 +1575,15 @@ impl SearchView {
             Scope::Home => "search-scope-home",
             Scope::ThisMac => "search-scope-this-mac",
         };
+        let folder_path = (scope == Scope::Folder).then(|| crate::style::display_path(&self.folder, &self.home));
         let aria = match scope {
-            Scope::Folder => format!("Search in {label}"),
+            Scope::Folder => format!("Search in {label}, {}", folder_path.as_deref().unwrap_or_default()),
             Scope::Home => "Search in Home".to_owned(),
             Scope::ThisMac => "Search This Mac with Spotlight, names only".to_owned(),
         };
         let hover = color_alpha(theme.role("surface-raised"), 0x80);
         let pressed = color(theme.role("surface-raised"));
-        div()
+        let segment = div()
             .id(id)
             .debug_selector(move || id.into())
             .role(Role::RadioButton)
@@ -1600,7 +1601,18 @@ impl SearchView {
                 segment.hover(move |style| style.bg(hover)).active(move |style| style.bg(pressed))
             })
             .on_click(cx.listener(move |this, _, _, cx| this.set_scope(scope, cx)))
-            .child(div().max_w(px(160.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+            .when(scope == Scope::Folder, |segment| {
+                segment.child(icons::glyph(Glyph::Folder, 12., "fg-muted", &theme)).gap(px(4.))
+            })
+            .child(div().max_w(px(160.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(label));
+        // The bar stays quiet; the full path and the Home key are one hover away.
+        if scope == Scope::Folder {
+            with_tooltip(segment, folder_path.unwrap_or_default(), None)
+        } else if scope == Scope::Home {
+            with_action_tooltip(segment, "Search Home", &SearchHome, KeyScope::Search, cx)
+        } else {
+            segment
+        }
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -2485,8 +2497,7 @@ impl Row {
             None => path.parent().map_or_else(String::new, |parent| crate::style::display_path(parent, home)),
         };
         let folder = display_text(&folder).into_owned();
-        let ext = Path::new(&name).extension().and_then(|ext| ext.to_str()).unwrap_or("");
-        let is_package = is_dir && matches!(ext, "app" | "bundle" | "framework" | "photoslibrary");
+        let is_package = is_dir && crow_fs::is_package_name(&name);
         let mut row = Row {
             path,
             name,

@@ -165,6 +165,8 @@ pub enum SkipReason {
     Rule(String),
     /// A dot folder the walk did not descend into (Show Hidden Files is off).
     HiddenFolder,
+    /// An application bundle or other package: a name hit, not a folder to walk.
+    Package,
     /// The folder could not be read: `"no permission"`, or the error text.
     Unreadable(String),
 }
@@ -181,6 +183,7 @@ impl std::fmt::Display for SkipReason {
         match self {
             SkipReason::Rule(text) | SkipReason::Unreadable(text) => f.write_str(text),
             SkipReason::HiddenFolder => f.write_str("hidden folder"),
+            SkipReason::Package => f.write_str("package"),
         }
     }
 }
@@ -310,6 +313,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
     // Search everything ignores exclude.toml; Show Hidden Files is its own setting,
     // so it must not smuggle dot entries back in when search_includes_hidden is off.
     let visit_hidden = query.include_hidden || query.enter_hidden_folders;
+    let enter_packages = query.everything;
     let skipped = Arc::new(Mutex::new(Vec::new()));
     let scanned = Arc::new(AtomicU64::new(0));
     let walker = build_walker(root, visit_hidden, rules, skipped.clone(), cancel.clone());
@@ -401,6 +405,14 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), cancel
                     if is_dir && !enter_hidden && name.starts_with('.') {
                         if let Ok(mut list) = skipped.lock() {
                             list.push(Skip { path: entry.path().to_path_buf(), reason: SkipReason::HiddenFolder });
+                        }
+                        return WalkState::Skip;
+                    }
+                    // A package is a name hit, not a folder to walk; Finder opens it
+                    // rather than browsing it. Search everything looks inside.
+                    if is_dir && !enter_packages && crow_fs::is_package_name(name.as_ref()) {
+                        if let Ok(mut list) = skipped.lock() {
+                            list.push(Skip { path: entry.path().to_path_buf(), reason: SkipReason::Package });
                         }
                         return WalkState::Skip;
                     }
@@ -772,6 +784,29 @@ mod tests {
             summary.skipped,
             [Skip { path: folder, reason: SkipReason::Unreadable("no permission".to_owned()) }]
         );
+    }
+
+    #[test]
+    fn packages_are_hits_but_not_descended() {
+        let root = root("packages");
+        write(&root, "CrowBackup.app/Contents/Info.plist", b"needle\n");
+        let (hits, summary) = run(&root, Some("backup"), Some("needle"), false, false);
+        let paths = paths(&hits);
+        assert!(paths.contains(&root.join("CrowBackup.app")), "the package's own name: {paths:?}");
+        assert!(!hits.iter().any(|hit| hit.path.ends_with("Info.plist")), "not walked: {hits:?}");
+        assert_eq!(
+            summary.skipped,
+            [Skip { path: root.join("CrowBackup.app"), reason: SkipReason::Package }]
+        );
+    }
+
+    #[test]
+    fn everything_enters_packages() {
+        let root = root("packages-everything");
+        write(&root, "CrowBackup.app/Contents/Info.plist", b"needle\n");
+        let (hits, summary) = run(&root, None, Some("needle"), false, true);
+        assert_eq!(paths(&hits), [root.join("CrowBackup.app/Contents/Info.plist")]);
+        assert!(summary.skipped.is_empty(), "{:?}", summary.skipped);
     }
 
     #[test]

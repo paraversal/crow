@@ -7,9 +7,9 @@ Branch: `m8.5-b3-scope` · PR: none · Last updated: 2026-11-18 · State: in pro
 | Item | State | Notes |
 | --- | --- | --- |
 | 1 Search Home: ⇧⌘H | done | `SearchHome` action, `cmd-shift-h` in Search/SearchResults, window handler (open search → scope Home; open search → switches it), palette command `search-home`, Edit ▸ Search Home, idle Home example at index 3. `search_home_key_switches_scope` (field + results) and `search_idle_example_home_switches_scope` pass; key table and palette registry tests pass. |
-| 2 Folder scope says which folder | todo | |
+| 2 Folder scope says which folder | done | Folder glyph, `~`-abbreviated path tooltip, aria "Search in <name>, <path>"; Home tooltip "Search Home ⇧⌘H". `search_scope_buttons_switch_scope` asserts the aria label. No new bar text. |
 | 3 Empty state offers every way to widen | todo | |
-| 4 Packages are not descended | todo | |
+| 4 Packages are not descended | done | `crow_fs::is_package_name` exported from the crate root (Q1 option A); `crow-search` depends on `crow-fs`; the walker records `SkipReason::Package` after the hidden check, so the package name is still a hit; `Row::new` uses the same test. Corpus: `package-inside` → `UnderSkip`, `package-everything` → `Hit`, `backup-package` → `Hit`; engine tests pin the hit/skip and everything. |
 | 5 Every skip reason in the list | todo | |
 | 6 Docs | todo | |
 
@@ -24,6 +24,8 @@ Branch: `m8.5-b3-scope` · PR: none · Last updated: 2026-11-18 · State: in pro
 - **Search Home menu item is always enabled.** The plan says "enabled only while search is open, mirroring Search Everything", but the menu bar is static (`menus::app_menus` takes only the preview and folder-size settings) and Search Everything is not disabled without a search: it opens one. Search Home mirrors that: with a search open it switches scope; without one it opens a search already scoped Home. Dynamic per-overlay menus for one item were not worth the plumbing.
 - The fuzzer skips `cmd-shift-h` (`allowed()` in `fuzz.rs`): `ui::init_for_tests` uses the real `crow_core::home()`, so the key would walk the developer's `~`. The Home segment is not in `SearchView::debug_selectors`, so no existing fuzz route reaches a Home walk; adding the key to the list was the only new route.
 - `search_home_key_switches_scope` points `Ui.home` at its fixture, so the results half can switch scope with a non-empty query without walking the real home folder.
+- Package skips are recorded after the hidden-folder check, so a dot-named package is one `HiddenFolder` skip. `everything` enters both hidden folders and packages.
+- `package-inside` now expects `UnderSkip`; the corpus runner checks the skip path only, so `packages_are_hits_but_not_descended` pins `SkipReason::Package` in the engine.
 
 ## Hand checks
 
@@ -39,7 +41,8 @@ Branch: `m8.5-b3-scope` · PR: none · Last updated: 2026-11-18 · State: in pro
 
 - 2026-11-18 Plan read, branch created from `main` (`42966fe`), progress file written.
 - 2026-11-18 Q1 asked and answered (package test stays in `crow-fs`). Item 1 done: `SearchHome` action, ⇧⌘H, menu/palette/command wiring, idle example; fuzzer guard; two GPUI tests and the registry tests pass.
+- 2026-11-18 Items 2 and 4: folder glyph/path tooltip/aria; package skips in the walker and the shared test in `Row::new`; corpus and engine tests. `cargo test -p crow-search` 33 + 2 pass; scope-bar test passes.
 
 ## Next
 
-Item 4 first (packages): export `is_package_name` from `crow-fs`, add the dependency, use it in the walker and `Row::new`; then item 5's groups can include packages.
+Item 3: `widen_options` and the empty-state buttons; then item 5's grouped skip list.

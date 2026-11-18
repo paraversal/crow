@@ -8,6 +8,7 @@ description = "Walking, fuzzy and content search, exclusion rule sets (M6)"
 
 [dependencies]
 crow-core.workspace = true
+crow-fs.workspace = true
 globset = "0.4"
 grep-matcher = "0.1"
 grep-regex = "0.1"
