@@ -46,7 +46,7 @@ fn run_case(root: &Path, case: &Case, rules: &Arc<RuleSet>) -> Result<(), String
     let query = Query {
         names: case.names.map(str::to_owned),
         contents: case.contents.map(str::to_owned),
-        show_hidden: case.show_hidden,
+        enter_hidden_folders: case.show_hidden,
         rules: rules.clone(),
         everything: case.everything,
     };
@@ -99,6 +99,17 @@ fn run_case(root: &Path, case: &Case, rules: &Arc<RuleSet>) -> Result<(), String
                 let skips: Vec<String> =
                     summary.skipped.iter().map(|skip| format!("{} ({})", skip.path.display(), skip.reason)).collect();
                 Err(format!("no skip for {}; skips: {skips:?}", ancestor.display()))
+            }
+        }
+        Expect::HitAndSkip(ancestor) => {
+            if !hit {
+                return Err(format!("no hit for {}", target.display()));
+            }
+            let ancestor = root.join(ancestor);
+            if summary.skipped.iter().any(|skip| skip.path == ancestor) {
+                Ok(())
+            } else {
+                Err(format!("hit for {}, but no skip for {}", target.display(), ancestor.display()))
             }
         }
         Expect::NotVisited => {

@@ -29,6 +29,16 @@ fn fixture(name: &str) -> PathBuf {
     root.canonicalize().expect("canonical fixture path")
 }
 
+/// The deterministic search corpus (`crow_search::corpus`) at a fresh `/tmp`
+/// path, canonicalized. `remove` restores the unreadable folder's mode first,
+/// so a previous run's leftover cannot block the rebuild.
+fn corpus_fixture(name: &str) -> PathBuf {
+    let root = PathBuf::from("/tmp").join(format!("crow-app-{name}-{}", std::process::id()));
+    let _ = crow_search::corpus::remove(&root);
+    crow_search::corpus::build(&root).expect("build the search corpus");
+    root.canonicalize().expect("canonical corpus path")
+}
+
 #[gpui::test]
 fn first_row_sits_below_the_header_line(cx: &mut TestAppContext) {
     let root = fixture("list-inset");
@@ -2717,6 +2727,50 @@ fn search_everything_turns_the_rules_off(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn search_finds_dot_names_with_hidden_off(cx: &mut TestAppContext) {
+    let root = corpus_fixture("search-hidden-off");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-shift-.");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_keystrokes("cmd-shift-m");
+    cx.simulate_input("backup");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    let paths = search.read_with(&cx, |search, _| search.result_paths());
+    assert!(paths.contains(&root.join(".backup.txt")), "{paths:?}");
+    assert!(paths.contains(&root.join(".backup_excludes")), "{paths:?}");
+    assert!(paths.contains(&root.join(".backup")), "the dot folder's own name: {paths:?}");
+    assert!(!paths.contains(&root.join(".backup/.backup-inside.txt")), "not descended: {paths:?}");
+    let index = paths.iter().position(|path| path == &root.join(".backup.txt")).expect("the dot file");
+    let label = search.read_with(&cx, |search, _| search.row_label(index)).expect("a row");
+    assert!(label.contains(", hidden"), "{label}");
+    let skipped = search.read_with(&cx, |search, _| search.skipped_paths());
+    assert!(skipped.contains(&root.join(".backup")), "the skipped list says why: {skipped:?}");
+}
+
+#[gpui::test]
+fn search_everything_enters_hidden_folders(cx: &mut TestAppContext) {
+    let root = corpus_fixture("search-hidden-everything");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-shift-.");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_keystrokes("cmd-shift-m");
+    cx.simulate_input("backup");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    let paths = search.read_with(&cx, |search, _| search.result_paths());
+    assert!(!paths.contains(&root.join(".backup/.backup-inside.txt")), "{paths:?}");
+
+    cx.simulate_keystrokes("cmd-shift-a");
+    wait_for_search(&view, &mut cx);
+    let paths = search.read_with(&cx, |search, _| search.result_paths());
+    assert!(paths.contains(&root.join(".backup/.backup-inside.txt")), "{paths:?}");
+    assert!(!search.read_with(&cx, |search, _| search.skipped_paths()).contains(&root.join(".backup")));
+}
+
+#[gpui::test]
 fn search_row_aria_reads_line(cx: &mut TestAppContext) {
     let root = fixture("search-aria");
     std::fs::write(root.join("other.txt"), "needle in beta\n").expect("create fixture");
@@ -2836,7 +2890,15 @@ fn search_selects_the_best_first_row_until_the_user_moves(cx: &mut TestAppContex
     let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
     cx.simulate_input("qqzz");
     wait_for_search(&view, &mut cx);
-    let hit = |path: PathBuf, kind: HitKind, score| Hit { path, is_dir: false, score, kind, modified: None, size: 0 };
+    let hit = |path: PathBuf, kind: HitKind, score| Hit {
+        path,
+        is_dir: false,
+        hidden: false,
+        score,
+        kind,
+        modified: None,
+        size: 0,
+    };
 
     // The walker found a content hit first; the name hit arrives in a later batch.
     let content = hit(
@@ -2872,7 +2934,15 @@ fn search_keeps_the_users_row_when_better_rows_arrive(cx: &mut TestAppContext) {
     let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
     cx.simulate_input("qqzz");
     wait_for_search(&view, &mut cx);
-    let hit = |path: PathBuf, kind: HitKind, score| Hit { path, is_dir: false, score, kind, modified: None, size: 0 };
+    let hit = |path: PathBuf, kind: HitKind, score| Hit {
+        path,
+        is_dir: false,
+        hidden: false,
+        score,
+        kind,
+        modified: None,
+        size: 0,
+    };
     let first = hit(first_path, HitKind::Name { ranges: test_ranges(0, 4) }, 100);
     let content = hit(
         root.join("notes.txt"),
@@ -2913,7 +2983,15 @@ fn search_contiguous_name_hits_come_before_contents_and_weak_names(cx: &mut Test
     let strong = outside.join("qqzz-zebra.txt");
     let weak = outside.join("q-a-q-b-z-c-z.txt");
     let content = root.join("notes.txt");
-    let hit = |path: PathBuf, kind: HitKind, score| Hit { path, is_dir: false, score, kind, modified: None, size: 0 };
+    let hit = |path: PathBuf, kind: HitKind, score| Hit {
+        path,
+        is_dir: false,
+        hidden: false,
+        score,
+        kind,
+        modified: None,
+        size: 0,
+    };
     search.update(&mut cx, |search, cx| {
         search.add_test_hits(
             vec![

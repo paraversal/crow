@@ -36,8 +36,8 @@ use crate::operations::Operations;
 use crate::pane::{DraggedSelection, island_edges};
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, color, color_alpha, cut_outline, display_text, field_ring, format_time, format_time_short,
-    highlight_text, icon, inactive_selection, map_range, truncate_middle_parts,
+    active_selection, color, color_alpha, content_opacity, cut_outline, display_text, field_ring, format_time,
+    format_time_short, highlight_text, icon, inactive_selection, map_range, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -166,6 +166,8 @@ struct Row {
     folder: String,
     is_dir: bool,
     is_package: bool,
+    /// A dot name or the Finder hidden flag; drawn dimmed, spoken as "hidden".
+    hidden: bool,
     modified: Option<SystemTime>,
     score: u32,
     /// A hit on the file name, as opposed to contents only.
@@ -426,7 +428,8 @@ impl SearchView {
                 Scope::Home | Scope::ThisMac => self.home.clone(),
             };
             let (names, contents) = query_parts(query, self.effective_match());
-            let query = Query { names, contents, show_hidden: self.show_hidden, rules, everything: self.everything };
+            let query =
+                Query { names, contents, enter_hidden_folders: self.show_hidden, rules, everything: self.everything };
             cx.background_spawn(async move {
                 let tx = tx;
                 let summary = crow_search::search(
@@ -476,10 +479,13 @@ impl SearchView {
             Update::Done(summary) => {
                 let scanned = summary.scanned;
                 let skipped = summary.skipped.len();
-                // B1 shows only the exclude.toml skips the footer already describes;
-                // B3 shows unreadable folders and the other reasons.
-                self.skipped =
-                    summary.skipped.into_iter().filter(|skip| matches!(skip.reason, SkipReason::Rule(_))).collect();
+                // The app shows the skips it can explain: exclude.toml rules and
+                // dot folders (B3 adds packages; unreadable folders come with it).
+                self.skipped = summary
+                    .skipped
+                    .into_iter()
+                    .filter(|skip| matches!(skip.reason, SkipReason::Rule(_) | SkipReason::HiddenFolder))
+                    .collect();
                 if let Some(error) = summary.error {
                     self.error = Some(error.into());
                 }
@@ -891,6 +897,11 @@ impl SearchView {
     #[cfg(test)]
     pub fn skipped_count(&self) -> usize {
         self.skipped.len()
+    }
+
+    #[cfg(test)]
+    pub fn skipped_paths(&self) -> Vec<PathBuf> {
+        self.skipped.iter().map(|skip| skip.path.clone()).collect()
     }
 
     #[cfg(test)]
@@ -2127,6 +2138,7 @@ impl SearchView {
                                 div()
                                     .size(px(16.))
                                     .flex_none()
+                                    .opacity(content_opacity(row.hidden, false))
                                     .children(icon(&row.path, row.is_dir, 16).map(|image| img(image).size(px(16.)))),
                             )
                             .child(
@@ -2143,6 +2155,7 @@ impl SearchView {
                                             .text_ellipsis()
                                             .text_size(px(13.))
                                             .text_color(fg)
+                                            .opacity(content_opacity(row.hidden, false))
                                             .child(name),
                                     )
                                     .children(content),
@@ -2203,7 +2216,7 @@ impl SearchView {
         let muted = color(theme.role("fg-muted"));
         let rows = self.skipped.iter().enumerate().map(|(i, skip)| {
             let shown = self.skipped_display(&skip.path);
-            let reason = skip.reason.to_string();
+            let reason = skip_reason_text(&skip.reason);
             div()
                 .id(("search-skipped-row", i))
                 .debug_selector(move || format!("search-skipped-row-{i}"))
@@ -2236,7 +2249,7 @@ impl SearchView {
                         .py_1()
                         .text_size(px(12.))
                         .text_color(muted)
-                        .child(div().flex_1().child("Folders skipped by exclude.toml"))
+                        .child(div().flex_1().child("Skipped folders"))
                         .child(
                             div()
                                 .id("search-skipped-close")
@@ -2329,6 +2342,15 @@ pub fn skipped_text(n: usize) -> String {
     if n == 1 { "1 folder skipped".to_owned() } else { format!("{n} folders skipped") }
 }
 
+/// The line under a skipped folder: the rule's text, or what the setting means.
+/// B3 extends this with packages and unreadable folders.
+fn skip_reason_text(reason: &SkipReason) -> String {
+    match reason {
+        SkipReason::HiddenFolder => "hidden folder (Show Hidden Files is off)".to_owned(),
+        other => other.to_string(),
+    }
+}
+
 /// The same wording as a sentence: "1 folder was skipped" / "3 folders were skipped".
 pub fn skipped_was_text(n: usize) -> String {
     if n == 1 { "1 folder was skipped".to_owned() } else { format!("{n} folders were skipped") }
@@ -2351,8 +2373,11 @@ pub fn skip_label(exclude: &Exclude) -> Option<String> {
 
 impl Row {
     fn label(&self) -> String {
-        let mut label =
-            format!("{}, in {}, modified {}", display_text(&self.name), self.folder, format_time(self.modified));
+        let mut label = display_text(&self.name).into_owned();
+        if self.hidden {
+            label.push_str(", hidden");
+        }
+        label.push_str(&format!(", in {}, modified {}", self.folder, format_time(self.modified)));
         if let Some((line, text, _)) = &self.content {
             label.push_str(&format!(", line {line}: {text}"));
         }
@@ -2368,6 +2393,7 @@ impl Row {
         Self::new(
             hit.path,
             hit.is_dir,
+            hit.hidden,
             hit.modified,
             hit.score,
             name_match,
@@ -2382,13 +2408,16 @@ impl Row {
     fn from_spotlight(hit: crow_macos::SpotlightHit, query: &str, home: &Path) -> Row {
         let name = hit.path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
         let ranges = ascii_match_ranges(&name, query);
-        Self::new(hit.path, hit.is_dir, hit.modified, 0, true, true, ranges, None, home, None)
+        // Spotlight carries no Finder hidden flag; a dot name is all it can tell.
+        let hidden = name.starts_with('.');
+        Self::new(hit.path, hit.is_dir, hidden, hit.modified, 0, true, true, ranges, None, home, None)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn new(
         path: PathBuf,
         is_dir: bool,
+        hidden: bool,
         modified: Option<SystemTime>,
         score: u32,
         name_match: bool,
@@ -2413,6 +2442,7 @@ impl Row {
             folder,
             is_dir,
             is_package,
+            hidden,
             modified,
             score,
             name_match,
@@ -2558,6 +2588,9 @@ mod tests {
         assert_eq!(skipped_text(3), "3 folders skipped");
         assert_eq!(skipped_was_text(1), "1 folder was skipped");
         assert_eq!(skipped_was_text(3), "3 folders were skipped");
+        assert_eq!(skip_reason_text(&SkipReason::HiddenFolder), "hidden folder (Show Hidden Files is off)");
+        assert_eq!(skip_reason_text(&SkipReason::Rule("dev: name \"target\"".to_owned())), "dev: name \"target\"");
+        assert_eq!(skip_reason_text(&SkipReason::Unreadable("no permission".to_owned())), "no permission");
     }
 
     #[test]

@@ -103,7 +103,7 @@ fn bench_search(dir: &std::path::Path, text: &str) -> Result<(), String> {
     let query = crow_search::Query {
         names: Some(text.to_owned()),
         contents: Some(text.to_owned()),
-        show_hidden: false,
+        enter_hidden_folders: false,
         rules: Arc::new(rules),
         everything: false,
     };
@@ -230,7 +230,7 @@ fn search_trace(args: &[String]) -> Result<(), String> {
     let query = crow_search::Query {
         names: options.names.then(|| options.query.clone()),
         contents: options.contents.then(|| options.query.clone()),
-        show_hidden: options.show_hidden,
+        enter_hidden_folders: options.show_hidden,
         rules: Arc::new(rules),
         everything: options.everything,
     };
