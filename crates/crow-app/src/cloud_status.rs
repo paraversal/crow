@@ -16,7 +16,7 @@ use crow_fs::{CloudStatus, ReadGate, status_age_limit};
 #[cfg(test)]
 use crow_fs::{ReadDecision, ReadHint};
 use crow_theme::Theme;
-use gpui::{App, AppContext as _, Context, Div, Entity, Global, div, prelude::*, px};
+use gpui::{App, AppContext as _, Context, Div, Entity, Global, Pixels, div, prelude::*, px};
 
 use crate::icons::{Glyph, glyph};
 
@@ -26,6 +26,8 @@ pub type CloudSource = (u64, usize);
 /// A cache large enough for several visible lists and the selected items, small
 /// enough that a walk over a big home folder cannot grow it without bound.
 pub const MAX_ENTRIES: usize = 4096;
+const BATCH_SIZE: usize = 128;
+const BADGE_WIDTH: f32 = 12.;
 /// A pane that stops reporting (a closed window) stops keeping its rows alive.
 const SOURCE_TTL: Duration = Duration::from_secs(5);
 /// Visible downloading rows are re-read at this pace; the value is short enough
@@ -81,6 +83,7 @@ pub struct CloudStatuses {
     provider: Arc<dyn CloudProvider>,
     gate: Arc<dyn ReadGate>,
     next_source: Cell<u64>,
+    batch_in_flight: bool,
     poll_scheduled: bool,
 }
 
@@ -88,6 +91,16 @@ pub struct CloudStatuses {
 pub struct CloudStatusService(pub Entity<CloudStatuses>);
 
 impl Global for CloudStatusService {}
+
+pub fn register_source<T: 'static>(service: &Entity<CloudStatuses>, cx: &mut Context<T>) -> u64 {
+    let owner = service.read(cx).source();
+    let service = service.downgrade();
+    cx.on_release(move |_, cx| {
+        service.update(cx, |service, cx| service.forget(owner, cx)).ok();
+    })
+    .detach();
+    owner
+}
 
 pub fn init_at(cx: &mut App) {
     install(cx, Arc::new(SystemProvider), Arc::new(crow_macos::SystemReadGate));
@@ -113,6 +126,7 @@ fn install(cx: &mut App, provider: Arc<dyn CloudProvider>, gate: Arc<dyn ReadGat
         provider,
         gate,
         next_source: Cell::new(0),
+        batch_in_flight: false,
         poll_scheduled: false,
     });
     cx.set_global(CloudStatusService(entity));
@@ -139,20 +153,31 @@ impl CloudStatuses {
     /// Called from a list renderer with the rows it shows. Enqueues only; never
     /// notifies, so it cannot make the render loop.
     pub fn observe(&mut self, source: CloudSource, paths: &[PathBuf], cx: &mut Context<Self>) {
-        self.sources.insert(source, Source { paths: paths.to_vec(), seen: Instant::now() });
+        if paths.is_empty() {
+            self.sources.remove(&source);
+        } else {
+            self.sources.insert(source, Source { paths: paths.to_vec(), seen: Instant::now() });
+        }
         self.sources.retain(|_, source| source.seen.elapsed() < SOURCE_TTL);
+        self.update_visible(cx);
+    }
+
+    pub fn forget(&mut self, owner: u64, cx: &mut Context<Self>) {
+        self.sources.retain(|(source, _), _| *source != owner);
+        self.update_visible(cx);
+    }
+
+    fn update_visible(&mut self, cx: &mut Context<Self>) {
         let mut ordered: Vec<&Source> = self.sources.values().collect();
         ordered.sort_by_key(|source| std::cmp::Reverse(source.seen));
         let mut seen = HashSet::new();
-        let mut visible = Vec::new();
-        for source in ordered {
-            for path in &source.paths {
-                if seen.insert(path.clone()) {
-                    visible.push(path.clone());
-                }
-            }
-        }
-        self.visible = visible;
+        self.visible = ordered
+            .into_iter()
+            .flat_map(|source| &source.paths)
+            .filter(|path| seen.insert((*path).clone()))
+            .take(MAX_ENTRIES)
+            .cloned()
+            .collect();
         // Rows that scrolled away stop their queued lookups; a late reply is
         // dropped because its version entry is gone.
         self.pending.retain(|path| seen.contains(path));
@@ -192,6 +217,9 @@ impl CloudStatuses {
     }
 
     fn request_stale(&mut self, cx: &mut Context<Self>) {
+        if self.batch_in_flight {
+            return;
+        }
         let now = Instant::now();
         let mut requests = Vec::new();
         for path in &self.visible {
@@ -207,10 +235,15 @@ impl CloudStatuses {
             self.versions.insert(path.clone(), version);
             self.pending.insert(path.clone());
             requests.push(Request { path: path.clone(), version });
+            if requests.len() == BATCH_SIZE {
+                break;
+            }
         }
         if requests.is_empty() {
+            self.ensure_poll(cx);
             return;
         }
+        self.batch_in_flight = true;
         let provider = self.provider.clone();
         let paths: Vec<PathBuf> = requests.iter().map(|request| request.path.clone()).collect();
         cx.spawn(async move |this, cx| {
@@ -218,25 +251,20 @@ impl CloudStatuses {
             this.update(cx, |this, cx| this.accept(&requests, statuses, cx)).ok();
         })
         .detach();
-        self.ensure_poll(cx);
     }
 
     fn accept(&mut self, requests: &[Request], statuses: Vec<CloudStatus>, cx: &mut Context<Self>) {
-        let (changed, active) = self.apply(requests, statuses);
-
+        self.batch_in_flight = false;
+        let changed = self.apply(requests, statuses);
         if changed {
             cx.notify();
         }
-        if active {
-            self.ensure_poll(cx);
-        }
+        self.request_stale(cx);
     }
 
-    /// Apply one batch after checking the version it was requested with. Returns
-    /// `(changed, any-active)`; pure so the stale-reply policy is unit-tested.
-    fn apply(&mut self, requests: &[Request], statuses: Vec<CloudStatus>) -> (bool, bool) {
+    /// Apply one batch after checking the version it was requested with.
+    fn apply(&mut self, requests: &[Request], statuses: Vec<CloudStatus>) -> bool {
         let mut changed = false;
-        let mut active = false;
         for (request, status) in requests.iter().zip(statuses) {
             if self.versions.get(&request.path) != Some(&request.version) || !self.pending.remove(&request.path) {
                 continue;
@@ -246,10 +274,9 @@ impl CloudStatuses {
             }
             self.cache.insert(request.path.clone(), Cached { status, checked: Instant::now() });
             self.versions.remove(&request.path);
-            active |= !status.is_local();
         }
         self.trim_cache();
-        (changed, active)
+        changed
     }
 
     fn trim_cache(&mut self) {
@@ -289,6 +316,11 @@ impl CloudStatuses {
     }
 }
 
+/// Leave room for the glyph and the row's 4 px gap before truncating a name.
+pub fn name_room(status: Option<CloudStatus>, room: Pixels) -> Pixels {
+    if status.is_some_and(|status| !status.is_local()) { (room - px(BADGE_WIDTH + 4.)).max(px(0.)) } else { room }
+}
+
 /// The row badge: only a non-local, non-downloaded state is visible. Downloaded
 /// iCloud files stay unbadged like Finder's; Info carries the explicit status.
 pub fn badge(status: Option<CloudStatus>, theme: &Theme) -> Option<Div> {
@@ -301,7 +333,7 @@ pub fn badge(status: Option<CloudStatus>, theme: &Theme) -> Option<Div> {
     Some(
         div()
             .debug_selector(move || format!("cloud-badge-{name}"))
-            .w(px(12.))
+            .w(px(BADGE_WIDTH))
             .h(px(16.))
             .flex_none()
             .flex()
@@ -390,6 +422,7 @@ mod tests {
                 provider,
                 gate,
                 next_source: Cell::new(0),
+                batch_in_flight: false,
                 poll_scheduled: false,
             },
             Arc::new(crow_fs::AllowAll),
@@ -422,6 +455,40 @@ mod tests {
         assert_eq!(service.cache.len(), MAX_ENTRIES);
     }
 
+    #[gpui::test]
+    fn a_fresh_placeholder_keeps_its_poll_scheduled(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let path = PathBuf::from("/placeholder");
+            let provider = Arc::new(FakeProvider::new(&[]));
+            let (mut service, _) = service(provider);
+            service.visible.push(path.clone());
+            service.cache.insert(path, Cached { status: CloudStatus::NotDownloaded, checked: Instant::now() });
+            cx.new(|cx| {
+                service.request_stale(cx);
+                assert!(!service.batch_in_flight, "the placeholder is still fresh");
+                assert!(service.poll_scheduled, "the next check is scheduled even if there is no work yet");
+                service
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn scrolling_keeps_only_one_bounded_batch_in_flight(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let provider = Arc::new(FakeProvider::new(&[]));
+            let (mut service, _) = service(provider);
+            let paths: Vec<PathBuf> = (0..BATCH_SIZE + 1).map(|i| PathBuf::from(format!("/first/{i}"))).collect();
+            cx.new(|cx| {
+                service.observe((0, 0), &paths, cx);
+                assert_eq!(service.pending.len(), BATCH_SIZE);
+                service.observe((0, 0), &[PathBuf::from("/second/a")], cx);
+                assert!(service.batch_in_flight);
+                assert!(service.pending.is_empty(), "offscreen work is discarded and the next batch waits");
+                service
+            });
+        });
+    }
+
     #[test]
     fn late_reply_for_an_invalidated_path_is_dropped() {
         let provider = Arc::new(FakeProvider::new(&[]));
@@ -431,12 +498,12 @@ mod tests {
         service.pending.insert(path.clone());
         service.versions.insert(path.clone(), 8);
         let stale = Request { path: path.clone(), version: 7 };
-        assert_eq!(service.apply(&[stale], vec![CloudStatus::NotDownloaded]), (false, false));
+        assert!(!service.apply(&[stale], vec![CloudStatus::NotDownloaded]));
         assert_eq!(service.status(&path), None);
         assert!(service.pending.contains(&path), "the newer request is still in flight");
 
         let fresh = Request { path: path.clone(), version: 8 };
-        assert_eq!(service.apply(&[fresh], vec![CloudStatus::Downloaded]), (true, false));
+        assert!(service.apply(&[fresh], vec![CloudStatus::Downloaded]));
         assert_eq!(service.status(&path), Some(CloudStatus::Downloaded));
         assert!(!service.pending.contains(&path));
     }
@@ -449,13 +516,10 @@ mod tests {
         let b = PathBuf::from("/cloud/b");
         service.versions.insert(b.clone(), 1);
         service.pending.insert(b.clone());
-        assert_eq!(
-            service.apply(&[Request { path: b.clone(), version: 1 }], vec![CloudStatus::Downloaded]),
-            (true, false)
-        );
+        assert!(service.apply(&[Request { path: b.clone(), version: 1 }], vec![CloudStatus::Downloaded]));
         service.versions.insert(a.clone(), 1);
         service.pending.insert(a.clone());
-        assert_eq!(service.apply(&[Request { path: a, version: 1 }], vec![CloudStatus::NotDownloaded]), (true, true));
+        assert!(service.apply(&[Request { path: a, version: 1 }], vec![CloudStatus::NotDownloaded]));
         assert_eq!(service.status(&b), Some(CloudStatus::Downloaded), "B keeps its own state");
     }
 

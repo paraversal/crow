@@ -444,38 +444,29 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                         && readable
                         && !control.contents_stopped()
                     {
-                        let hint = ReadHint::from_metadata(entry.path(), metadata.as_ref());
-                        let decision = match gate.as_ref() {
-                            Some(gate) => gate.check(entry.path(), hint),
-                            None => hint.cheap_decision(),
-                        };
-                        if decision != ReadDecision::Readable {
-                            cloud_skipped.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            let mut content_hits = Vec::new();
-                            match content.search(
-                                entry.path(),
-                                modified,
-                                size,
-                                hidden,
-                                &mut content_hits,
-                                &control,
-                                gate.as_deref(),
-                            ) {
-                                ContentOutcome::Matches(matches) => {
-                                    if matches > 1
-                                        && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) =
-                                            content_hits.first_mut()
-                                    {
-                                        *more = matches - 1;
-                                    }
-                                    if !content_hits.is_empty() {
-                                        let _ = tx.send(content_hits);
-                                    }
+                        let mut content_hits = Vec::new();
+                        match content.search(
+                            entry.path(),
+                            modified,
+                            size,
+                            hidden,
+                            &mut content_hits,
+                            &control,
+                            gate.as_deref(),
+                        ) {
+                            ContentOutcome::Matches(matches) => {
+                                if matches > 1
+                                    && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) =
+                                        content_hits.first_mut()
+                                {
+                                    *more = matches - 1;
                                 }
-                                ContentOutcome::CloudSkipped => {
-                                    cloud_skipped.fetch_add(1, Ordering::Relaxed);
+                                if !content_hits.is_empty() {
+                                    let _ = tx.send(content_hits);
                                 }
+                            }
+                            ContentOutcome::CloudSkipped => {
+                                cloud_skipped.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                     }

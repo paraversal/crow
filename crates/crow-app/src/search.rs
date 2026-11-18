@@ -37,7 +37,7 @@ use crate::pane::{DraggedSelection, island_edges};
 use crate::preview::{self, Preview};
 use crate::style::{
     active_selection, cloud_icon, color, color_alpha, content_opacity, cut_outline, display_text, field_ring,
-    format_time, format_time_short, highlight_text, icon, inactive_selection, map_range, truncate_middle_parts,
+    format_time, format_time_short, highlight_text, inactive_selection, map_range, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -192,6 +192,7 @@ pub struct SearchView {
     cloud_source: u64,
     /// The selected row's preview, loaded off the main thread.
     preview: Option<LoadedPreview>,
+    preview_generation: u64,
     scroll: UniformListScrollHandle,
     show_skipped: bool,
     /// The row whose context menu is open, while it is.
@@ -310,7 +311,7 @@ impl SearchView {
         let (cloud_source, cloud_subscription) = match cx.try_global::<CloudStatusService>() {
             Some(service) => {
                 let entity = service.0.clone();
-                let source = entity.read(cx).source();
+                let source = cloud_status::register_source(&entity, cx);
                 let subscription = cx.observe(&entity, |search, _, cx| search.cloud_changed(cx));
                 (source, Some(subscription))
             }
@@ -354,6 +355,7 @@ impl SearchView {
             cloud_skipped: 0,
             cloud_source,
             preview: None,
+            preview_generation: 0,
             scroll: UniformListScrollHandle::new(),
             show_skipped: false,
             menu: None,
@@ -446,6 +448,7 @@ impl SearchView {
         self.weak_count = 0;
         self.cloud_skipped = 0;
         self.preview = None;
+        self.preview_generation += 1;
         let query = query.trim();
         if query.is_empty() {
             self.searching = false;
@@ -851,6 +854,7 @@ impl SearchView {
     fn load_preview(&mut self, cx: &mut Context<Self>) {
         let Some(row) = self.results.get(self.cursor) else {
             self.preview = None;
+            self.preview_generation += 1;
             return;
         };
         let path = row.path.clone();
@@ -858,6 +862,9 @@ impl SearchView {
         if self.preview.as_ref().is_some_and(|loaded| loaded.entry.path == path) {
             return;
         }
+        self.preview = None;
+        self.preview_generation += 1;
+        let generation = self.preview_generation;
         let extensions = cx.global::<Ext>().0.clone();
         let (gate, cloud) = match cx.try_global::<CloudStatusService>() {
             Some(service) => {
@@ -876,12 +883,17 @@ impl SearchView {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if this.results.get(this.cursor).is_some_and(|row| row.path == path) {
+                if this.preview_generation == generation
+                    && this.results.get(this.cursor).is_some_and(|row| row.path == path)
+                {
                     let mut loaded = loaded;
-                    if let Some(preview) = loaded.as_mut() {
-                        preview.preview.cloud = this.cloud_status(&path, cx).or(preview.preview.cloud);
+                    if let Some(preview) = loaded.as_mut()
+                        && this.cloud_status(&path, cx).is_some_and(|status| preview.preview.update_cloud(status))
+                    {
+                        this.load_preview(cx);
+                    } else {
+                        this.preview = loaded;
                     }
-                    this.preview = loaded;
                     cx.notify();
                 }
             })
@@ -896,12 +908,10 @@ impl SearchView {
         if let Some(row) = self.results.get(self.cursor)
             && let Some(status) = self.cloud_status(&row.path, cx)
             && let Some(loaded) = self.preview.as_mut().filter(|loaded| loaded.entry.path == row.path)
+            && loaded.preview.update_cloud(status)
         {
-            loaded.preview.cloud = Some(status);
-            if loaded.preview.blocked && status.is_local() {
-                self.preview = None;
-                self.load_preview(cx);
-            }
+            self.preview = None;
+            self.load_preview(cx);
         }
         cx.notify();
     }
@@ -2348,7 +2358,7 @@ impl SearchView {
                 } else {
                     display_text(&row.name).into_owned().into()
                 };
-                let drag_icon = icon(&row.path, row.is_dir, 22);
+                let drag_icon = cloud_icon(cloud, &row.path, row.is_dir, 22);
                 div()
                     .id(("search-row", i))
                     .role(Role::ListBoxOption)

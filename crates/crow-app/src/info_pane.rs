@@ -149,7 +149,8 @@ impl InfoPane {
 
     fn with_default(default: bool, loader: Loader, cx: &mut Context<Self>) -> Self {
         let cloud_service = cx.try_global::<CloudStatusService>().map(|service| service.0.clone());
-        let cloud_source = cloud_service.as_ref().map(|service| service.read(cx).source()).unwrap_or(0);
+        let cloud_source =
+            cloud_service.as_ref().map(|service| cloud_status::register_source(service, cx)).unwrap_or(0);
         let cloud_subscription = cloud_service.map(|service| cx.observe(&service, |_, _, cx| cx.notify()));
         Self {
             tab: InfoTab::Preview,
@@ -248,14 +249,14 @@ impl InfoPane {
             self.target = target;
             self.loaded = None;
             self.generation += 1;
+            if let Some(service) = cx.try_global::<CloudStatusService>() {
+                let path = match &self.target {
+                    Some(InfoTarget::Single { entry, .. }) => std::slice::from_ref(&entry.path),
+                    _ => &[],
+                };
+                service.0.clone().update(cx, |service, cx| service.observe((self.cloud_source, 0), path, cx));
+            }
             if let Some(target) = self.target.clone() {
-                if let InfoTarget::Single { entry, .. } = &target
-                    && let Some(service) = cx.try_global::<CloudStatusService>()
-                {
-                    let service = service.0.clone();
-                    let path = entry.path.clone();
-                    service.update(cx, |service, cx| service.observe((self.cloud_source, 0), &[path], cx));
-                }
                 self.start_load(target, cx);
             }
             cx.notify();

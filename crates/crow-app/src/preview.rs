@@ -30,6 +30,16 @@ pub struct Preview {
     pub blocked: bool,
 }
 
+impl Preview {
+    /// Request one fresh read when a blocked preview learns that the item is local.
+    pub fn update_cloud(&mut self, status: CloudStatus) -> bool {
+        let retry = self.blocked && status.is_local() && self.cloud != Some(status);
+        self.blocked |= !status.is_local();
+        self.cloud = Some(status);
+        retry
+    }
+}
+
 /// `fetch`, plus the lines around a content hit when the text previewer read it.
 /// `gate` is a fresh read policy; `cloud` is only for the placeholder's text.
 pub fn fetch_at(
@@ -367,10 +377,14 @@ mod tests {
         assert_eq!(blocked.cloud, Some(CloudStatus::NotDownloaded));
 
         let gate = CountReads(Default::default());
-        let ready = fetch_at(&entry, &ext, None, &gate, Some(CloudStatus::Downloaded));
+        let mut ready = fetch_at(&entry, &ext, None, &gate, Some(CloudStatus::Downloaded));
         assert!(!ready.blocked);
         assert!(matches!(ready.content, Some(PreviewContent::Text(_))), "a downloaded file previews");
         assert!(gate.0.load(std::sync::atomic::Ordering::Relaxed) >= 1, "the gate is consulted");
+        assert!(!ready.update_cloud(CloudStatus::NotDownloaded));
+        assert!(ready.blocked, "eviction replaces an already loaded preview with the placeholder");
+        assert!(ready.update_cloud(CloudStatus::Downloaded));
+        assert!(!ready.update_cloud(CloudStatus::Downloaded), "one transition schedules only one retry");
     }
 
     #[test]

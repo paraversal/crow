@@ -150,17 +150,16 @@ thread_local! {
 
 /// Finder's icon for `path` at `points`, as a GPUI image.
 pub fn icon(path: &Path, is_dir: bool, points: u32) -> Option<Arc<Image>> {
-    image_from_png(crow_macos::icon_png(path, is_dir, points)?)
+    cloud_icon(None, path, is_dir, points)
 }
 
-/// A row icon that cannot make AppKit inspect a cloud placeholder's own icon
-/// resource. Local and downloaded items keep their path/type icon.
+/// Use a type icon while a potential cloud item is unprobed or unavailable.
 pub fn cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path, is_dir: bool, points: u32) -> Option<Arc<Image>> {
-    if status.is_some_and(|status| !status.is_local()) {
+    if status.map_or_else(|| crow_fs::is_cloud_candidate(path), |status| !status.is_local()) {
         let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
         return image_from_png(crow_macos::type_icon_png(ext, is_dir, points)?);
     }
-    icon(path, is_dir, points)
+    image_from_png(crow_macos::icon_png(path, is_dir, points)?)
 }
 
 fn image_from_png(png: Arc<Vec<u8>>) -> Option<Arc<Image>> {

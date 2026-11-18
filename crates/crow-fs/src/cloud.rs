@@ -77,7 +77,7 @@ pub struct ReadHint {
     pub is_symlink: bool,
     pub target_dataless: Option<bool>,
     pub cloud_candidate: bool,
-    pub target_cloud: bool,
+    pub target_cloud: Option<bool>,
 }
 
 impl ReadHint {
@@ -96,13 +96,13 @@ impl ReadHint {
         let (target_dataless, target_cloud) = if is_symlink {
             match std::fs::metadata(path) {
                 Ok(target) => {
-                    let target_cloud = std::fs::canonicalize(path).ok().is_some_and(|path| is_cloud_candidate(&path));
+                    let target_cloud = std::fs::canonicalize(path).ok().map(|path| is_cloud_candidate(&path));
                     (Some(dataless_metadata(&target)), target_cloud)
                 }
-                Err(_) => (None, false),
+                Err(_) => (None, None),
             }
         } else {
-            (None, false)
+            (None, None)
         };
         Self {
             dataless: meta.is_some_and(dataless_metadata),
@@ -118,7 +118,7 @@ impl ReadHint {
         if self.dataless || self.target_dataless == Some(true) {
             return ReadDecision::SkipCloud;
         }
-        if self.is_symlink && (self.cloud_candidate || self.target_cloud) {
+        if self.is_symlink && self.target_cloud.unwrap_or(self.cloud_candidate) {
             return ReadDecision::SkipAmbiguous;
         }
         ReadDecision::Readable
@@ -204,6 +204,10 @@ mod tests {
         let link =
             ReadHint { is_symlink: true, cloud_candidate: true, target_dataless: Some(false), ..ReadHint::default() };
         assert_eq!(link.cheap_decision(), ReadDecision::SkipAmbiguous, "a cloud symlink is ambiguous");
+        let cloud_link_to_local = ReadHint { target_cloud: Some(false), ..link.clone() };
+        assert_eq!(cloud_link_to_local.cheap_decision(), ReadDecision::Readable);
+        let local_link_to_cloud = ReadHint { cloud_candidate: false, target_cloud: Some(true), ..link };
+        assert_eq!(local_link_to_cloud.cheap_decision(), ReadDecision::SkipAmbiguous);
 
         let local_link = ReadHint { is_symlink: true, ..ReadHint::default() };
         assert_eq!(local_link.cheap_decision(), ReadDecision::Readable);

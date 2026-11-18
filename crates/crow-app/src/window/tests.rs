@@ -7607,6 +7607,35 @@ fn refresh_cloud(cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn a_long_cloud_filename_leaves_room_for_the_badge(cx: &mut TestAppContext) {
+    let root = fixture("cloud-badge-narrow");
+    let name = format!("{}.txt", "narrow".repeat(24));
+    let note = root.join(&name);
+    std::fs::write(&note, "fixture").expect("create fixture");
+    let path = note.clone();
+    let bounds = Bounds::new(point(px(0.), px(0.)), size(px(640.), px(710.)));
+    let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+    let (view, mut cx) = open_with_before(cx, &root, options, move |cx| {
+        crate::cloud_status::set_test_status(cx, path, crow_fs::CloudStatus::NotDownloaded);
+    });
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.reveal(note.clone(), cx));
+    settle(&view, &mut cx);
+    wait_for_cloud(&mut cx, &note, crow_fs::CloudStatus::NotDownloaded);
+
+    for mode in [ViewMode::List, ViewMode::Columns] {
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(mode, cx));
+        settle(&view, &mut cx);
+        let selector = match mode {
+            ViewMode::List => format!("row-name-{name}"),
+            ViewMode::Columns => format!("column-0-row-name-{name}"),
+        };
+        let name_cell = cx.debug_bounds(Box::leak(selector.into_boxed_str())).expect("name cell");
+        let badge = cx.debug_bounds("cloud-badge-not-downloaded").expect("cloud badge");
+        assert!(badge.right() <= name_cell.right(), "{mode:?} badge {badge:?} fits inside {name_cell:?}");
+    }
+}
+
+#[gpui::test]
 fn cloud_placeholder_turns_into_downloading_then_ready(cx: &mut TestAppContext) {
     use crow_fs::CloudStatus;
     let root = fixture("cloud-preview");

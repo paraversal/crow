@@ -36,7 +36,7 @@ use crate::actions::{
     MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection, OpenTerminal, PasteFiles, PasteMoveFiles, QuickLook,
     Rename, SelectAll, ShowInFinder, StartFilter,
 };
-use crate::cloud_status::{CloudSource, CloudStatusService};
+use crate::cloud_status::{self, CloudSource, CloudStatusService};
 use crate::context_menu::{MenuKind, MenuState};
 use crate::extensions::Ext;
 use crate::folder::{Folder, FolderEvent};
@@ -49,8 +49,8 @@ use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::style::{
     active_selection, cloud_icon, color, color_alpha, content_opacity, cut_outline, display_text, drop_outline,
-    effect_tint, focused_column, format_time, highlight_text, icon, inactive_selection, kind, map_range,
-    truncate_middle, truncate_middle_parts,
+    effect_tint, focused_column, format_time, highlight_text, inactive_selection, kind, map_range, truncate_middle,
+    truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -319,6 +319,7 @@ pub struct Pane {
     table: TableLayout,
     resize: Option<ResizeDrag>,
     preview: Option<Preview>,
+    preview_generation: u64,
     /// The window's right column: tab choice and the Info tab's target.
     info: Entity<InfoPane>,
     /// This pane's id in the folder-size service's visible-row sources.
@@ -395,7 +396,8 @@ impl Pane {
         let size_service = cx.try_global::<SizeService>().map(|service| service.0.clone());
         let size_source = size_service.as_ref().map(|service| service.read(cx).source()).unwrap_or(0);
         let cloud_service = cx.try_global::<CloudStatusService>().map(|service| service.0.clone());
-        let cloud_source = cloud_service.as_ref().map(|service| service.read(cx).source()).unwrap_or(0);
+        let cloud_source =
+            cloud_service.as_ref().map(|service| crate::cloud_status::register_source(service, cx)).unwrap_or(0);
         let subscriptions = Vec::new();
         let mut service_subscriptions = Vec::new();
         if let Some(service) = size_service {
@@ -418,6 +420,7 @@ impl Pane {
             columns,
             resize: None,
             preview: None,
+            preview_generation: 0,
             info,
             size_source,
             cloud_source,
@@ -1069,12 +1072,10 @@ impl Pane {
         };
         if let Some(status) = self.cloud_status(&entry.path, cx)
             && let Some(preview) = self.preview.as_mut().filter(|preview| preview.path == entry.path)
+            && preview.update_cloud(status)
         {
-            preview.cloud = Some(status);
-            if preview.blocked && status.is_local() {
-                self.preview = None;
-                self.load_preview(cx);
-            }
+            self.preview = None;
+            self.load_preview(cx);
         }
         cx.notify();
     }
@@ -1196,10 +1197,14 @@ impl Pane {
             self.focus_list_after_filter = true;
         }
         self.release_listings(cx);
+        if let Some(service) = cx.try_global::<CloudStatusService>() {
+            service.0.clone().update(cx, |service, cx| service.forget(self.cloud_source, cx));
+        }
         self.folders.clear();
         self.subscriptions.clear();
         self.focused = 0;
         self.preview = None;
+        self.preview_generation += 1;
         self.status = None;
         // The folder's view decides the sort before the listing starts.
         let ui = cx.global::<Ui>();
@@ -1222,6 +1227,9 @@ impl Pane {
     }
 
     fn truncate(&mut self, len: usize, cx: &mut Context<Self>) {
+        for k in len..self.folders.len() {
+            self.observe_cloud((self.cloud_source, k + 1), &[], cx);
+        }
         for folder in &self.folders[len..] {
             folder.update(cx, |folder, cx| folder.release_listing(cx));
         }
@@ -1277,11 +1285,14 @@ impl Pane {
     fn load_preview(&mut self, cx: &mut Context<Self>) {
         let Some(entry) = self.cursor_entry(cx) else {
             self.preview = None;
+            self.preview_generation += 1;
             return;
         };
         if self.preview.as_ref().is_some_and(|p| p.path == entry.path) {
             return;
         }
+        self.preview_generation += 1;
+        let generation = self.preview_generation;
         let extensions = cx.global::<Ext>().0.clone();
         let (gate, cloud) = match cx.try_global::<CloudStatusService>() {
             Some(service) => {
@@ -1296,10 +1307,14 @@ impl Pane {
                 .background_spawn(async move { preview::fetch_at(&entry, &extensions, None, gate.as_ref(), cloud) })
                 .await;
             this.update(cx, |this, cx| {
-                if this.cursor_entry(cx).is_some_and(|e| e.path == path) {
+                if this.preview_generation == generation && this.cursor_entry(cx).is_some_and(|e| e.path == path) {
                     let mut fetched = fetched;
-                    fetched.cloud = this.cloud_status(&path, cx).or(fetched.cloud);
-                    this.preview = Some(fetched);
+                    if this.cloud_status(&path, cx).is_some_and(|status| fetched.update_cloud(status)) {
+                        this.preview = None;
+                        this.load_preview(cx);
+                    } else {
+                        this.preview = Some(fetched);
+                    }
                     cx.notify();
                 }
             })
@@ -2339,6 +2354,8 @@ impl Pane {
                     .join(", ");
                 let indent = NAME_INSET + depth as f32 * INDENT;
                 let name_room = px(widths[0] - indent - TRIANGLE_WIDTH - 8.0 - 16.0 - 8.0 - CELL_PADDING);
+                let cloud = self.cloud_status(&entry.path, cx).or(entry.dataless.then_some(CloudStatus::NotDownloaded));
+                let name_room = cloud_status::name_room(cloud, name_room);
                 let name = truncate_middle_parts(&entry.name, name_room, font_size, window);
                 let ranges = folder.row_match(ix).map(|range| map_range(&name, range));
                 let expanded = folder.is_expanded(&entry.path, cx);
@@ -2349,7 +2366,7 @@ impl Pane {
                 } else {
                     Arc::new(vec![(entry.path.clone(), entry.is_dir)])
                 };
-                let drag_icon = icon(&entry.path, entry.is_dir, 22);
+                let drag_icon = cloud_icon(cloud, &entry.path, entry.is_dir, 22);
                 let drag_count = drag_entries.len();
                 let drag_label: SharedString = if drag_count > 1 {
                     format!("{drag_count} items").into()
@@ -2366,7 +2383,6 @@ impl Pane {
                     entry.hidden,
                     self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
                 );
-                let cloud = self.cloud_status(&entry.path, cx);
                 let cloud_spoken =
                     cloud.and_then(CloudStatus::spoken_suffix).map(|suffix| format!(", {suffix}")).unwrap_or_default();
                 let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
@@ -2546,6 +2562,8 @@ impl Pane {
                                             .into_any_element(),
                                         None => match ranges {
                                             Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
+                                                .min_w_0()
+                                                .overflow_hidden()
                                                 .whitespace_nowrap()
                                                 .child(highlight_text(
                                                     name.text.clone(),
@@ -2554,7 +2572,12 @@ impl Pane {
                                                     selected && active,
                                                 ))
                                                 .into_any_element(),
-                                            _ => div().whitespace_nowrap().child(name.text.clone()).into_any_element(),
+                                            _ => div()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .child(name.text.clone())
+                                                .into_any_element(),
                                         },
                                     })
                                     .children(crate::cloud_status::badge(cloud, theme)),
@@ -2757,7 +2780,9 @@ impl Pane {
             range.filter_map(|ix| folder.row(ix).map(|(e, _)| (ix, e.clone(), folder.is_selected(&e.path)))).collect();
         rows.into_iter()
             .map(|(ix, entry, selected)| {
-                let name = truncate_middle_parts(&entry.name, name_room, font_size, window);
+                let cloud = self.cloud_status(&entry.path, cx).or(entry.dataless.then_some(CloudStatus::NotDownloaded));
+                let room = cloud_status::name_room(cloud, name_room);
+                let name = truncate_middle_parts(&entry.name, room, font_size, window);
                 let ranges = folder.row_match(ix).map(|range| map_range(&name, range));
                 let navigable = entry.is_dir && !entry.is_package();
                 let drag_entries = if selected {
@@ -2765,7 +2790,7 @@ impl Pane {
                 } else {
                     Arc::new(vec![(entry.path.clone(), entry.is_dir)])
                 };
-                let drag_icon = icon(&entry.path, entry.is_dir, 22);
+                let drag_icon = cloud_icon(cloud, &entry.path, entry.is_dir, 22);
                 let drag_count = drag_entries.len();
                 let drag_label: SharedString = if drag_count > 1 {
                     format!("{drag_count} items").into()
@@ -2782,7 +2807,6 @@ impl Pane {
                     entry.hidden,
                     self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
                 );
-                let cloud = self.cloud_status(&entry.path, cx);
                 let cloud_spoken =
                     cloud.and_then(CloudStatus::spoken_suffix).map(|suffix| format!(", {suffix}")).unwrap_or_default();
                 let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
@@ -3323,7 +3347,13 @@ fn ghost_row(entry: &Entry, look: Look, theme: &Theme, font_size: Pixels) -> Div
         .gap_2()
         .px(px(CELL_PADDING))
         .opacity(look.opacity)
-        .child(row_icon(entry, look, theme, content_opacity(entry.hidden, false), None))
+        .child(row_icon(
+            entry,
+            look,
+            theme,
+            content_opacity(entry.hidden, false),
+            entry.dataless.then_some(CloudStatus::NotDownloaded),
+        ))
         .child(
             div()
                 .relative()

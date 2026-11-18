@@ -21,8 +21,7 @@ pub fn status(path: &Path) -> CloudStatus {
 }
 
 /// A batch of classifications in one autorelease pool. Foundation is consulted
-/// only for paths under a known provider root; a dataless flag anywhere is an
-/// immediate `NotDownloaded`.
+/// only for paths under a known provider root.
 pub fn status_batch(paths: &[PathBuf]) -> Vec<CloudStatus> {
     autoreleasepool(|_| paths.iter().map(|path| status_inner(path)).collect())
 }
@@ -43,11 +42,9 @@ fn status_inner(path: &Path) -> CloudStatus {
             return status_inner(&resolved);
         }
     }
-    if meta.as_ref().is_some_and(crow_fs::dataless_metadata) {
-        return CloudStatus::NotDownloaded;
-    }
+    let dataless = meta.as_ref().is_some_and(crow_fs::dataless_metadata);
     if !crow_fs::is_cloud_candidate(path) {
-        return CloudStatus::Local;
+        return if dataless { CloudStatus::NotDownloaded } else { CloudStatus::Local };
     }
     let url = crate::ns_url(path);
     // SAFETY: Foundation's resource-key constants are immutable strings for the
@@ -56,32 +53,34 @@ fn status_inner(path: &Path) -> CloudStatus {
         [NSURLIsUbiquitousItemKey, NSURLUbiquitousItemIsDownloadingKey, NSURLUbiquitousItemDownloadingStatusKey]
     });
     let Ok(values) = url.resourceValuesForKeys_error(&keys) else {
-        return CloudStatus::Unknown;
+        return if dataless { CloudStatus::NotDownloaded } else { CloudStatus::Unknown };
     };
     let flag = |key: &NSURLResourceKey| {
-        values
-            .objectForKey(key)
-            .and_then(|value| value.downcast::<NSNumber>().ok())
-            .is_some_and(|value| value.boolValue())
+        values.objectForKey(key).and_then(|value| value.downcast::<NSNumber>().ok()).map(|value| value.boolValue())
     };
     // SAFETY: the constants are immutable strings for the process lifetime.
     let (ubiquitous_key, downloading_key, status_key) = unsafe {
         (NSURLIsUbiquitousItemKey, NSURLUbiquitousItemIsDownloadingKey, NSURLUbiquitousItemDownloadingStatusKey)
     };
     let ubiquitous = flag(ubiquitous_key);
-    let downloading = flag(downloading_key);
+    let downloading = flag(downloading_key) == Some(true);
     let status = values.objectForKey(status_key).and_then(|value| value.downcast::<NSString>().ok());
-    classify(ubiquitous, downloading, status.as_deref())
+    classify(ubiquitous, downloading, dataless, status.as_deref())
 }
 
 /// The pure status precedence, separated so it can be unit-tested without a
 /// real provider.
-fn classify(ubiquitous: bool, downloading: bool, status: Option<&NSString>) -> CloudStatus {
-    if !ubiquitous {
-        return CloudStatus::Local;
-    }
+fn classify(ubiquitous: Option<bool>, downloading: bool, dataless: bool, status: Option<&NSString>) -> CloudStatus {
     if downloading {
         return CloudStatus::Downloading;
+    }
+    if dataless {
+        return CloudStatus::NotDownloaded;
+    }
+    match ubiquitous {
+        Some(true) => {}
+        Some(false) => return CloudStatus::Local,
+        None => return CloudStatus::Unknown,
     }
     let Some(status) = status else { return CloudStatus::Unknown };
     // SAFETY: the constants are immutable strings for the process lifetime.
@@ -144,18 +143,20 @@ mod tests {
 
     #[test]
     fn status_precedence() {
-        assert_eq!(classify(false, false, None), CloudStatus::Local);
-        assert_eq!(classify(true, true, None), CloudStatus::Downloading);
+        assert_eq!(classify(Some(false), false, false, None), CloudStatus::Local);
+        assert_eq!(classify(None, false, false, None), CloudStatus::Unknown);
+        assert_eq!(classify(Some(true), true, false, None), CloudStatus::Downloading);
         assert_eq!(
-            classify(true, true, Some(&ns("NSURLUbiquitousItemDownloadingStatusNotDownloaded"))),
+            classify(Some(true), true, true, Some(not_downloaded())),
             CloudStatus::Downloading,
             "downloading wins"
         );
-        assert_eq!(classify(true, false, Some(current())), CloudStatus::Downloaded);
-        assert_eq!(classify(true, false, Some(downloaded())), CloudStatus::Downloaded);
-        assert_eq!(classify(true, false, Some(not_downloaded())), CloudStatus::NotDownloaded);
-        assert_eq!(classify(true, false, None), CloudStatus::Unknown);
-        assert_eq!(classify(true, false, Some(&ns("something else"))), CloudStatus::Unknown);
+        assert_eq!(classify(Some(true), false, true, Some(current())), CloudStatus::NotDownloaded);
+        assert_eq!(classify(Some(true), false, false, Some(current())), CloudStatus::Downloaded);
+        assert_eq!(classify(Some(true), false, false, Some(downloaded())), CloudStatus::Downloaded);
+        assert_eq!(classify(Some(true), false, false, Some(not_downloaded())), CloudStatus::NotDownloaded);
+        assert_eq!(classify(Some(true), false, false, None), CloudStatus::Unknown);
+        assert_eq!(classify(Some(true), false, false, Some(&ns("something else"))), CloudStatus::Unknown);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # M9 P8 — iCloud metadata without hydration — progress
 
-Branch: codex/m9-p8-icloud · PR: none · Last updated: 2026-11-18 · State: **Ready for critique**
+Branch: codex/m9-p8-icloud · PR: none · Last updated: 2026-11-18 · State: **In critique**
 Base: `b035537` (M9 P9C, merged as #64)
 
 ## Status
@@ -133,8 +133,8 @@ candidates; no unresolved provider behavior blocks the plan.
   badge away and the Preview re-armed from the placeholder to the text without opening Quick Look.
 - [x] Content search over the scratch tree (`payload`): footer read
   “No results · 6 cloud files not downloaded · 1 folder skipped”; `large.txt` stayed evicted.
-- [ ] Names-mode hand search in the iCloud folder: the attempt lost focus to another window; covered
-  by `names_mode_never_calls_the_read_gate` and the names CLI bench, not by a visual hand check.
+- [x] Names-mode hand search in the iCloud folder: critique confirmed a single name hit for the
+  evicted scratch file, with its cloud status. The file stayed dataless.
 - [x] Local `target/fixture-100k`: listing, scroll and search unchanged within noise; no Foundation
   calls for local rows (`is_cloud_candidate` is false before any provider call).
 - [ ] VoiceOver: row/Info/Preview strings were added and the GPUI labels assert them; Cmd-F5 was not
@@ -182,8 +182,46 @@ candidates; no unresolved provider behavior blocks the plan.
 - 2026-11-18: Committed `fc90e4e` (plugin cancellation) and `05e3aa8` (P8 implementation plus this
   progress file). Working tree leaves the user's uncommitted docs reorganisation untouched.
 
+## Critique
+
+Critic session: 2026-11-18 · Base: `main` at `b035537` · Initial head: `9d9a969`
+
+| # | Finding | Area | Kind | Outcome |
+| --- | --- | --- | --- | --- |
+| C1 | The running app names the root iCloud Drive in the title and breadcrumb. Locations only lists mounted volumes. The product spec includes iCloud under Locations. | Product scope | Note | Discussed with the owner as an unscheduled MVP item outside P8. |
+| C2 | The status poll stopped whenever a placeholder was still fresh at the 500 ms tick. Rapid scrolling could also start a new background batch before the preceding one finished. | Code | Fix | Keep the next poll scheduled, cap the batch, and drop visible sources when their owners close or change folder. |
+| C3 | List, column and search drag icons bypassed the cloud icon policy. A first paint could also request a path icon before the status lookup arrived. | Code | Fix | Use the type icon for pending or unavailable cloud entries, including the drag image. |
+| C4 | A preview could accept an old same-path reply or miss a download that finished before the pending blocked preview returned. | Code | Fix | Check the preview request generation and retry once when the item becomes readable. Show the metadata placeholder if a selected file is evicted again. |
+| C5 | Status classification lost the distinction between absent and false ubiquitous metadata and put the dataless flag ahead of a verified active download. A resolved local symlink target could also be treated like an ambiguous cloud target. | Code | Fix | Preserve the three-way membership result, prioritize active downloads for display, and use the resolved link target for the cheap read decision. |
+| C6 | Search consulted the live cloud policy twice for a readable item. | Code | Fix | Use one fresh decision immediately before opening the file. |
+| C7 | A truncated filename pushed the cloud glyph past the right edge at 640 pt in List view. | UI | Fix | Reserve width on rows showing a badge, and clip the name inside its own element. The rendered-bounds regression fails on the original layout and passes in List and Columns. |
+
+Both `main` and P8 built with `scripts/bundle.sh --open`. The native workspace run passed the
+five tests that failed to receive folder notifications in the sandbox. The final
+`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and
+`cargo test --workspace` passed, with 926 tests passed and one ignored. An existing palette
+test failed once during the final checks and passed on the next full run.
+
+Opened the same scratch iCloud folder on `main` and P8. P8 showed the evicted row's
+cloud badge, the downloaded control stayed unbadged, and Preview and Info indicated the evicted
+state. Checked list and column views with mouse and keyboard in the wide dark build, and the
+empty folder and Vim navigation in a 640 pt Solarized Light test instance. Names found
+the evicted file and Contents reported one skipped file for a query matching its payload. The
+file still had `SF_DATALESS` after browsing, Preview, Info and both searches. An explicit external
+download removed the badge and restored the text preview while the row stayed selected. Checked
+the row, Preview and Info accessibility labels through the live accessibility tree. Spoken
+VoiceOver output and an independent third-party File Provider remain unverified.
+
+The alternating 100k runs at 120 Hz came within the frame budget. P8 and `main` medians were
+8 ms and 7 ms for warm first paint, and 8.67 ms and 8.68 ms for scroll p99. The first P8 run
+overlapped UI automation and returned 33.35 ms p99. Three uninterrupted P8 runs stayed at
+8.67–8.68 ms. In the 200k search fixture, median Contents time was 1,628 ms on P8 and 1,568 ms
+on `main`. Names took 190 ms on P8 and 191 ms on `main`.
+
+The branch makes download state visible and keeps routine browsing from downloading the checked
+iCloud placeholder. The remaining provider and spoken-accessibility checks are listed above.
+
 ## Next
 
-Ready for critique. Leave VoiceOver and the names-mode iCloud visual check for critique/user; both
-are listed as unticked hand checks. Re-run the iCloud probe only after creating a fresh scratch
-fixture, since the original was removed.
+Critique in progress. Re-run the iCloud probe only after creating a fresh scratch fixture, since
+the original was removed.
