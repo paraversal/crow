@@ -76,12 +76,19 @@ including nonmatching files; buffered matching lines stop too, and the searcher 
 builds the deterministic corpus (`crow_search::corpus`) and runs its 23 named cases through the real
 engine — the user's `.backu` case, hidden on and off, the exclusion sets, Search everything, the
 symlink and its child, the package inside and entered, the unreadable folder and the FIFO — each under a 10 s deadline.
-The search panel adds keystroke tests for names and contents, Search everything and its switch,
+`oracle_tests.rs` adds the check that does not depend on someone thinking of the example: 25 seeded
+trees of colliding names, exclusion sentinels, packages, symlinks and unreadable folders, walked by
+an independent recursive `read_dir` oracle and compared as hit and skip sets with the engine across
+four queries, hidden on/off, Search everything and all three match modes. (300 seeds took 57 s in
+debug; 25 keep it near 5 s.) The search panel adds keystroke tests for names and contents, Search everything and its switch,
 scope buttons and the spoken folder path, Search Home, Cmd-Shift-M cycling, idle examples, the empty
 state's widen buttons, footer counts and errors, the grouped skipped reasons and the privacy action,
 name-before-contents order, preview loading and the hit line, navigating and revealing results,
 copy and trash, Vim j/k in the results, and the two result budgets (late strong names, dropped other
 rows, the strong-name cancel, Contents-mode cancel, and a moved cursor that keeps its row).
+`search_corpus_matrix` runs both corpus queries through All/Names/Contents, hidden on/off and Search
+everything (24 runs), and compares the panel's result paths, footer and skipped count with
+`crow_search::search` directly, so an app-side filter cannot silently hide engine results again.
 
 The operation engine (`crates/crow-fs/src/ops_tests.rs`) is tested against real temp folders:
 every operation and its undo, each conflict choice, cancelling midway, a read-only destination,
@@ -421,6 +428,20 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Search themes | FireBox and a light scheme: switch knob, selected segment and match highlights on the selected row stay readable; VoiceOver reads the switch as on/off and the footer once per finished search. |
 | Search result cap | Two budgets: 20,000 strong (contiguous) name rows, and 20,000 other rows (content and weak fuzzy names). In `target/fixture-search-200k`, Cmd-F `needle` (All): the footer ends "… more not shown · contents stopped at 20000" in `warning`; while it still says "Searching names…", type `file-01-02-00001` without leaving search: that exact file becomes the top row, because strong names still stream. Names `file`: the footer says "First 20000 name matches · refine the search", and typing more narrows. Names `f0` in `target/fixture-100k` fills the weak budget: "20000 results · 80000 more not shown", without claiming contents were stopped. At 640 px the footer stays on one line and ellipsizes; VoiceOver reads it once when the search settles. |
 | Search context menu | Right-click or Ctrl-click a result: Open, Reveal in Folder, Quick Look, Copy, Cut, Copy Path, Move to Trash. An unselected row is selected first; a row in a multi-selection keeps it. Each item runs once and the menu closes; the file list and sidebar menus are unchanged. Check in the Vim layer too. |
+
+### M8.5 search finish
+
+Run on a bundle built from the branch, in light and dark, at 640 px and wide.
+
+| Check | Steps |
+| --- | --- |
+| The user's report | Cmd-F in `~`, Folder, All, hidden on: `.back` and `.backu` both show `~/.backup_excludes` within a moment. Then hidden off: the same. |
+| Dot names in Cmd-K | Hidden off: Cmd-K `zshrc` finds it under "Files in …"; `~/ssh` finds `~/.ssh`. |
+| Scopes | A miss in a subfolder offers Search Home; ⇧⌘H finds it. This Mac finds a name outside Home. |
+| Match modes | All, Names, Contents on one word; a Names miss offers "Search names and contents". |
+| Skips | `~` with hidden off: the skipped list groups Excluded, Hidden folders, Packages, Couldn't read; ⇧⌘A lifts the first three. |
+| Cap | `target/fixture-search-200k`, `needle`, then an exact file name: top row. |
+| VoiceOver | Hidden rows read "…, hidden"; the empty-state buttons read with their keys; the Folder segment reads its path; the footer reads once. |
 
 ### Palette and sheets
 

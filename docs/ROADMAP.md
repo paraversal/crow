@@ -5,8 +5,7 @@ Last updated: 2026-11-17. This page is the index; the plan and progress files un
 ## Right now
 
 - **M8 F1 is done**: merged in [#48](https://github.com/paraversal/file-crow/pull/48), with the island-rule follow-up in [#49](https://github.com/paraversal/file-crow/pull/49) (commit `2964848`).
-- **Next is M8 F2**. The M8 order is F2 → F5 → F4 → F3 → F6 → F7; F6 is independent and can start any time.
-- **M8.5** (search reliability) starts after M8. **M9** (Phase 2) starts after M8.5.
+- **M8.5 is done**: the five search-reliability batches merged through [#59](https://github.com/paraversal/file-crow/pull/59). **Next is M9** (Phase 2); its order is in [`plans/m9/README.md`](plans/m9/README.md).
 - The [inbox](plans/inbox.md) has no untriaged items.
 
 ## At a glance
@@ -21,7 +20,7 @@ Last updated: 2026-11-17. This page is the index; the plan and progress files un
 | Phase 1 | M7: hardening | done | 8 + 6 findings batches |
 | Phase 1 | Housekeeping 1–3, context menu | done | 5 + 4 + 4 + 5 |
 | Post-MVP | M8: Finder parity | in progress | 7 pieces; F1 done, F2–F7 planned |
-| Post-MVP | M8.5: search reliability | planned | 7 |
+| Post-MVP | M8.5: search reliability | done | 5 batches |
 | Phase 2 | M9: plugins, views, operations | planned | 9 |
 
 ---
@@ -184,19 +183,17 @@ F1 is merged ([#48](https://github.com/paraversal/file-crow/pull/48), follow-up 
 
 ---
 
-## Post-MVP — M8.5: search reliability (planned)
+## Post-MVP — M8.5: search reliability (done)
 
-Index: [`plans/m8.5/README.md`](plans/m8.5/README.md). Starts after M8. The first piece builds the repro corpus; no behavior changes until the reported misses are reproduced.
+Index: [`plans/done/m8.5/README.md`](plans/done/m8.5/README.md). Started after M8 and finished on 2026-11-18; the search cases, hidden policy, scopes, skips and cap are in the README and `docs/testing.md`. The draft's S1–S7 were re-cut into five batches, all merged:
 
-| Piece | What | Status | Needs |
+| Batch | What | Status | PR |
 | --- | --- | --- | --- |
-| S1 Repro corpus and diagnostics | Deterministic tree with dot names, `backup` names, exclusions, packages, symlinks and a 100k subtree; a query log that explains inclusion/skips. No behavior change. | planned | — |
-| S2 Hidden and dot names | Cmd-F/Cmd-K policy for dot-named items; Cmd-K path mode matches files by name, not only prefix. | planned | S1 |
-| S3 Scope and exclusions | Make the default scope and scope bar unambiguous; skipped folders and "Search everything" at a miss; packages, symlinks, unreadable folders. | planned | S1 |
-| S4 Ranking and cap | Keep strong name hits ahead of content/weak fuzzy hits at the 20k cap; stable selection; actionable cap state. | planned | S1 |
-| S5 Performance | Profile `back` vs `backup`; keep name hits streaming while contents read; cancellation and batching off the main thread. | planned | S1, S4 |
-| S6 Feedback | Explain an empty search (hidden off, excluded folder, contents still running, cap reached); keep the skipped list reachable. | planned | S2, S3, S4 |
-| S7 Regression and fuzz | Corpus assertions, brute-force oracle on small trees, search fuzz, bench on `target/fixture-search-200k`. | planned | S2–S5 |
+| B1 Streaming fix, corpus, trace | Batched flush, name before contents, regular files only, typed skips, the corpus and `--search-trace`. | done | [#56](https://github.com/paraversal/file-crow/pull/56) |
+| B2 Hidden names and Cmd-K files | Dot names in search and the palette; typed Cmd-K queries match files here. | done | [#57](https://github.com/paraversal/file-crow/pull/57) |
+| B3 Scope and misses | Search Home (⇧⌘H), explicit Folder scope, widen buttons, every skip reason, packages not descended. | done | [#58](https://github.com/paraversal/file-crow/pull/58) |
+| B4 Cap and performance | Two budgets, stop-contents, footer copy, stable selection, the search bench. | done | [#59](https://github.com/paraversal/file-crow/pull/59) |
+| B5 Regression and finish | Random-tree oracle, app corpus matrix, fuzz coverage, docs and this move. | done | this PR |
 
 The user's two reported cases are the acceptance tests: Cmd-K must find dot-named items, and Cmd-F must find "backup" in the reported folder.
 
