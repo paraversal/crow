@@ -56,7 +56,7 @@ B5 closes the milestone with the final checks and moves this folder to `docs/pla
 | [B2](b2-hidden-and-palette.md) Hidden names and Cmd-K files | Hidden policy in the engine, `hidden` on hits and rows, Cmd-K path mode lists hidden entries and fuzzy-matches files, typed Cmd-K query matches files in the current folder. | S2 | `m8.5-b2-hidden` | [#57](https://github.com/paraversal/file-crow/pull/57) |
 | [B3](b3-scope-and-misses.md) Scope and misses | Search Home (⇧⌘H), a clearer Folder scope, the empty state offers every way to widen the search, skipped list shows all reasons, packages not descended, unreadable folders listed. | S3 + S6 | `m8.5-b3-scope` | [#58](https://github.com/paraversal/file-crow/pull/58) |
 | [B4](b4-cap-and-performance.md) Cap and performance | `Control` with stop-contents, two-budget cap, footer says what was dropped, selection stable under late strong names, bench with a query argument and the budget recorded. | S4 + the rest of S5 | `m8.5-b4-cap` | [#59](https://github.com/paraversal/file-crow/pull/59) |
-| [B5](b5-regression.md) Regression and finish | Oracle on random small trees, the app-level corpus matrix, search actions in the fuzzer, docs, README status line. | S7 + the milestone finish | `m8.5-b5-regression` | this PR |
+| [B5](b5-regression.md) Regression and finish | Oracle on random small trees, the app-level corpus matrix, search actions in the fuzzer, docs, README status line. | S7 + the milestone finish | `m8.5-b5-regression` | [#60](https://github.com/paraversal/file-crow/pull/60) |
 
 **Order:** B1 → B2 → B3 → B4 → B5, one at a time; none can run in parallel (see the top). B1 is small and fixes the reported bug, so the user can hand-test it on day one.
 

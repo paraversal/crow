@@ -193,7 +193,7 @@ Index: [`plans/done/m8.5/README.md`](plans/done/m8.5/README.md). Started after M
 | B2 Hidden names and Cmd-K files | Dot names in search and the palette; typed Cmd-K queries match files here. | done | [#57](https://github.com/paraversal/file-crow/pull/57) |
 | B3 Scope and misses | Search Home (⇧⌘H), explicit Folder scope, widen buttons, every skip reason, packages not descended. | done | [#58](https://github.com/paraversal/file-crow/pull/58) |
 | B4 Cap and performance | Two budgets, stop-contents, footer copy, stable selection, the search bench. | done | [#59](https://github.com/paraversal/file-crow/pull/59) |
-| B5 Regression and finish | Random-tree oracle, app corpus matrix, fuzz coverage, docs and this move. | done | this PR |
+| B5 Regression and finish | Random-tree oracle, app corpus matrix, fuzz coverage, docs and this move. | done | [#60](https://github.com/paraversal/file-crow/pull/60) |
 
 The user's two reported cases are the acceptance tests: Cmd-K must find dot-named items, and Cmd-F must find "backup" in the reported folder.
 

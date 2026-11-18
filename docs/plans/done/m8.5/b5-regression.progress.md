@@ -1,5 +1,5 @@
 # B5 — Regression and finish progress
-Branch: m8.5-b5-regression · PR: none · Last updated: 2026-11-18 · State: In critique
+Branch: m8.5-b5-regression · PR: [#60](https://github.com/paraversal/file-crow/pull/60) · Last updated: 2026-11-18 · State: PR open
 
 ## Status
 | Item | State | Notes |
@@ -64,7 +64,7 @@ After B5 is hand-tested and merged, start [M9 P1](../../m9/README.md), the publi
 
 ## Critique
 
-Critic session: 2026-11-18 · Base: `main` at `26bf08e` · Original head reviewed: `a607555`
+Critic session: 2026-11-18 · Base: `main` at `26bf08e` · Original head reviewed: `a607555` · Fixes: `49654a0`
 
 ### Literal findings
 
