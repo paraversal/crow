@@ -253,6 +253,7 @@ mod tests {
                 "Filter This Folder",
                 "Find…",
                 "Find Everything…",
+                "Search Home",
             ]
         );
         assert_eq!(

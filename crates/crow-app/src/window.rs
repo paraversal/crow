@@ -14,9 +14,9 @@ use gpui::{
 use crate::actions::{
     AddToSidebar, ApplyThemeEverywhere, CalculateFolderSizes, CloseTab, EditPath, EmptyTrash, GoBack, GoForward,
     GoToFolder, KeyboardShortcuts, Minimize, MoveDown, MoveToTrash, MoveUp, NewTab, NewWindow, NextTab, OpenParent,
-    PaletteOpenInTab, PathHover, PathUnhover, PreviousTab, ResetFolderView, SearchEverything, ShowCommandPalette,
-    ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, TogglePreview, UseViewAsDefaults,
-    ViewAsColumns, ViewAsList, WhyThisView, Zoom,
+    PaletteOpenInTab, PathHover, PathUnhover, PreviousTab, ResetFolderView, SearchEverything, SearchHome,
+    ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, TogglePreview,
+    UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -2598,6 +2598,21 @@ impl CrowWindow {
         self.open_search(SearchStart { folder, query: String::new(), everything: true }, window, cx);
     }
 
+    /// Search Home. With a search open it switches that search's scope; without
+    /// one it opens a search already scoped Home, as Search Everything does.
+    fn search_home(&mut self, _: &SearchHome, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(search) = &self.search {
+            search.update(cx, |search, cx| search.search_home(cx));
+            return;
+        }
+        let folder = self.pane().read(cx).current_dir(cx);
+        if self.open_search(SearchStart { folder, query: String::new(), everything: false }, window, cx)
+            && let Some(search) = &self.search
+        {
+            search.update(cx, |search, cx| search.search_home(cx));
+        }
+    }
+
     /// Opens the search panel (Scope Folder) on `folder`, with `query` in the field and
     /// the rules set by `everything`. Does nothing while another overlay is open or
     /// search is already open.
@@ -3197,6 +3212,7 @@ impl CrowWindow {
             CommandId::EditSettings => crate::ui::edit_settings_file(cx),
             CommandId::ShowSearch => self.show_search(&ShowSearch, window, cx),
             CommandId::SearchEverything => self.search_everything(&SearchEverything, window, cx),
+            CommandId::SearchHome => self.search_home(&SearchHome, window, cx),
             // Reached from the palette? No: ShowCommandPalette is menu-only and SearchReveal needs results.
             CommandId::ShowCommandPalette | CommandId::SearchReveal => {}
             CommandId::ToggleActivity => {
@@ -3948,6 +3964,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::show_palette))
             .on_action(cx.listener(Self::show_search))
             .on_action(cx.listener(Self::search_everything))
+            .on_action(cx.listener(Self::search_home))
             .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, _, cx| {
                 this.show_activity = !this.show_activity;
                 cx.notify();

@@ -15,9 +15,9 @@ use crate::actions::{
     EditPath, EditSettings, Eject, EmptyTrash, GoBack, GoForward, GoToFolder, MoveFavoriteDown, MoveFavoriteUp,
     MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, OpenSettings, OpenTerminal,
     PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView, SearchEverything,
-    SearchReveal, SelectAll, ShowCommandPalette, ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter,
-    SwitchFocus, ToggleActivity, ToggleHiddenFiles, TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsList,
-    WhyThisView,
+    SearchHome, SearchReveal, SelectAll, ShowCommandPalette, ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker,
+    StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles, TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns,
+    ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -107,6 +107,7 @@ pub enum CommandId {
     AddToSidebar,
     ShowSearch,
     SearchEverything,
+    SearchHome,
     ShowCommandPalette,
     SearchReveal,
     WhyThisView,
@@ -182,6 +183,7 @@ impl CommandId {
             CommandId::AddToSidebar => "add-to-sidebar",
             CommandId::ShowSearch => "show-search",
             CommandId::SearchEverything => "search-everything",
+            CommandId::SearchHome => "search-home",
             CommandId::ShowCommandPalette => "show-command-palette",
             CommandId::SearchReveal => "search-reveal",
             CommandId::WhyThisView => "why-this-view",
@@ -426,6 +428,14 @@ pub const COMMANDS: &[Command] = &[
         action: &SearchEverything,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::Edit, section: 2, title: "Find Everything…" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::SearchHome,
+        label: "Search Home",
+        action: &SearchHome,
+        scope: KeyScope::Search,
+        menu: Some(MenuSlot { menu: MenuName::Edit, section: 2, title: "Search Home" }),
         palette: true,
     },
     // View
@@ -1792,6 +1802,7 @@ mod tests {
         };
         assert!(commands("settings").contains(&CommandId::OpenSettings));
         assert!(commands("edit settings").contains(&CommandId::EditSettings));
+        assert!(commands("search home").contains(&CommandId::SearchHome));
     }
 
     #[test]

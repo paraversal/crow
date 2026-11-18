@@ -21,8 +21,9 @@ row's free space and warning tone, arrows showing the folder in the center, Opti
 live change batches (a late batch cannot bring back a deleted file, watcher paths through a
 symlinked ancestor still match),
 view settings (per-folder memory, live rules, Why This View?, broken files), the theme picker
-(preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette (sections, two-line rows and match ranges, the home row matching its account name, the Commands token and chips, path mode and Tab completion, recently used commands), the search panel (scope bar and switch,
-footer counts and skipped list, idle examples, best-row selection while results stream and the user's
+(preview, revert, save), the `/` filter (its field in the focused column and list frame, match ranges and highlights, the ⌘F hand-off, the no-match state), the command palette (sections, two-line rows and match ranges, the home row matching its account name, the Commands token and chips, path mode and Tab completion, recently used commands), the search panel (scope bar, its folder glyph and spoken path, switch,
+Search Home from the field and the results, footer counts and the grouped skipped list, the Full Disk Access action,
+idle examples, empty-state widen buttons (everything, Home, names and contents), best-row selection while results stream and the user's
 row after they move, contiguous name hits before content and weak fuzzy names after, one-line regex
 errors, singular skipped wording, preview in list and column view at the hit line, match cycling), the top band
 (search field click, Cmd-F refocus and select-all, Done/Esc, Go to, All/Names/Contents, switching
@@ -64,16 +65,17 @@ and the zero-match streak.
 `crates/crow-search` tests the engine on temp trees: dev rules and sentinels skip and are counted
 with typed reasons, Search everything walks them, dot names are visited and matched while Show Hidden
 Files is off (dot folders are skipped, not descended), `search_includes_hidden = false` leaves them
-out, fuzzy names score,
+out, packages are a name hit but not descended while Search everything enters them, fuzzy names score,
 literal and `/regex/` contents report the first matching line, text and ranges with the rest counted,
 batches stay bounded (one excerpt per file, 256 hits at most) and the first hit leaves at once, a name
 hit arrives before its own content read, a FIFO does not stall the walk, an unreadable folder is
 reported as a skip, binary files are not read, and cancelling stops the stream. `corpus_cases.rs`
-builds the deterministic corpus (`crow_search::corpus`) and runs its 22 named cases through the real
+builds the deterministic corpus (`crow_search::corpus`) and runs its 23 named cases through the real
 engine — the user's `.backu` case, hidden on and off, the exclusion sets, Search everything, the
-symlink and its child, the package, the unreadable folder and the FIFO — each under a 10 s deadline.
+symlink and its child, the package inside and entered, the unreadable folder and the FIFO — each under a 10 s deadline.
 The search panel adds keystroke tests for names and contents, Search everything and its switch,
-scope buttons, Cmd-Shift-M cycling, idle examples, footer counts and errors, the skipped list,
+scope buttons and the spoken folder path, Search Home, Cmd-Shift-M cycling, idle examples, the empty
+state's widen buttons, footer counts and errors, the grouped skipped reasons and the privacy action,
 name-before-contents order, preview loading and the hit line, navigating and revealing results,
 copy and trash, and Vim j/k in the results.
 
@@ -399,12 +401,14 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Search field | Click the field: search opens with the cursor in the field; the field spans the band with an accent ring; Done esc on the right. Tab to the results: the ring goes; Tab again to the sidebar, again back to the field (with nothing typed, Tab goes straight to the sidebar). From any of them Cmd-F brings the field back with the query selected, and Esc closes. Esc or Done returns to the folder with keys going to the list. |
 | All / Names / Contents | Search a word that's in file names and inside files: Names drops the content lines, Contents drops the name-only rows. Names in Home is fast (no file reads). Switch to This Mac: the control shows Names, faded. Cmd-Shift-M in the field and in the results cycles All → Names → Contents. |
 | Search | Cmd-F, search a word in file names and in contents: while results stream the top row stays selected and previewed; contiguous name matches come first with their letters highlighted, scattered fuzzy name hits follow the content rows; a name match is one line, a content-only hit shows its line number and line under the name; the Modified column stays on one line ("Today 14:32", "Yesterday", "4. Nov"). Switch <folder> / Home / This Mac; Return, Cmd-R, Space, drag-out, Cmd-C and Cmd-Delete act on results. The right pane previews the selected result in list and column view, at the hit line. |
-| Search scope bar | One bar: "Search", the scope segments, and "Skip dev folders" on the right; click the switch and press Cmd-Shift-A: both flip it and the results change. Enable `media` in `exclude.toml`: the label becomes "Skip dev and media folders" without reopening. |
-| Skipped folders | Search a folder with `node_modules`: the footer says "1 folder skipped ›" (or "k folders skipped ›"); click it and check each folder is listed relative to the searched folder, with the rule that skipped it, above the footer. With Show Hidden Files off, dot folders appear as "hidden folder (Show Hidden Files is off)" and do not hide their contents from Search everything. Esc closes the list first, then search. Search everything includes them and the link goes away. |
+| Search scope bar | One bar: "Search", the scope segments, and "Skip dev folders" on the right; click the switch and press Cmd-Shift-A: both flip it and the results change. Enable `media` in `exclude.toml`: the label becomes "Skip dev and media folders" without reopening. The folder segment has a folder glyph; hover it for the full `~` path; VoiceOver reads "Search in <name>, ~/path". Hover Home: "Search Home ⇧⌘H". |
+| Search Home | Cmd-F in a folder below Home for a word that only exists elsewhere in your home folder: the empty state shows "Search Home ⇧⌘H"; ⇧⌘H finds it, from the field and from a result row. Edit ▸ Search Home and the palette's "Search Home" do the same; with no search open the menu item opens a search scoped Home. |
+| Empty state | A miss offers every way to widen: with skipped folders "3 folders were skipped. Search everything ⇧⌘A"; with a folder scope other than Home "Search Home ⇧⌘H"; with Names or Contents "Search names and contents" (no keycap, since ⇧⌘M cycles rather than picking All). Each button is a button to VoiceOver, with its key spoken. |
+| Skipped folders | Search a folder with `node_modules` and a package: the footer says "N folders skipped ›"; click it: groups Excluded (each with the rule that skipped it), Hidden folders, Packages ("package (Search everything looks inside)") and Couldn't read ("no permission"), paths relative to the searched folder, above the footer. A folder Crow can't read adds "Open Privacy & Security…", which opens Full Disk Access in System Settings. With Show Hidden Files off, dot folders appear under Hidden folders and do not hide their contents from Search everything. Esc closes the list first, then search. Search everything enters excluded, hidden and package folders; unreadable ones stay listed. |
 | Search hidden files setting | Show Hidden Files off (⇧⌘.), Cmd-F for `zshrc` (or another dotfile): found, dimmed, VoiceOver reads "…, hidden"; the footer counts the skipped dot folders. Turn Settings ▸ Search ▸ Search always includes hidden files off: the dot hits and their skipped folders go, and Search everything leaves them out too; turn it on: they return. With Show Hidden Files on, the setting changes nothing. |
 | Default match | Settings ▸ Search ▸ Search matches: set Names, open a new Cmd-F: the panel starts on Names (Contents likewise). Change it while a search is open: that panel keeps its own All/Names/Contents choice. |
 | Spotlight | Search This Mac for a name outside the home folder: results stream in, the switch is replaced by "Spotlight: indexed volumes only". |
-| Search idle | Cmd-F with nothing typed: the heading follows All / Names / Contents and the four left-aligned examples fill the field, switch to This Mac, or flip the switch; the fourth is plain key text and disappears when no `exclude.toml` set is enabled. The key line follows `keymap = "vim"`. |
+| Search idle | Cmd-F with nothing typed: the heading follows All / Names / Contents and the left-aligned examples fill the field, switch to This Mac or Home, or flip the switch; the last is plain key text and disappears when no `exclude.toml` set is enabled. The key line follows `keymap = "vim"`. |
 | Search errors | Type `/(/`: one red footer line, "Invalid pattern: unclosed group"; no rows, and the body shows "Can't search: Invalid pattern: unclosed group" and suggests removing the slashes. |
 | Search themes | FireBox and a light scheme: switch knob, selected segment and match highlights on the selected row stay readable; VoiceOver reads the switch as on/off and the footer once per finished search. |
 | Search context menu | Right-click or Ctrl-click a result: Open, Reveal in Folder, Quick Look, Copy, Cut, Copy Path, Move to Trash. An unselected row is selected first; a row in a multi-selection keeps it. Each item runs once and the menu closes; the file list and sidebar menus are unchanged. Check in the Vim layer too. |

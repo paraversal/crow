@@ -2662,6 +2662,45 @@ fn click_selector(cx: &mut VisualTestContext, selector: &'static str) {
 }
 
 #[gpui::test]
+fn search_empty_offers_search_home(cx: &mut TestAppContext) {
+    let root = corpus_fixture("search-empty-home");
+    let (view, mut cx) = open(cx, &root.join("backup"));
+    // Home is the corpus, so the widened walk stays off the developer's folder.
+    cx.update(|_, cx| {
+        cx.global_mut::<crate::ui::Ui>().home = root.clone();
+    });
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("savegame");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    assert_eq!(search.read_with(&cx, |search, _| search.result_count()), 0, "savegame is a sibling");
+    assert!(cx.debug_bounds("search-empty-home").is_some(), "the empty state offers Search Home");
+    assert!(cx.debug_bounds("search-empty-everything").is_none(), "no exclusion skip in backup/");
+
+    click_selector(&mut cx, "search-empty-home");
+    wait_for_search(&view, &mut cx);
+    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Home);
+}
+
+#[gpui::test]
+fn search_empty_offers_all_match(cx: &mut TestAppContext) {
+    let root = corpus_fixture("search-empty-all-match");
+    let (view, mut cx) = open(cx, &root.join("backup"));
+    cx.simulate_keystrokes("cmd-f");
+    click_selector(&mut cx, "search-match-names");
+    cx.simulate_input("needle");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    assert_eq!(search.read_with(&cx, |search, _| search.result_count()), 0, "no file is named needle");
+    assert!(cx.debug_bounds("search-empty-all-match").is_some(), "the empty state offers contents too");
+
+    click_selector(&mut cx, "search-empty-all-match");
+    wait_for_search(&view, &mut cx);
+    assert_eq!(search.read_with(&cx, |search, _| search.matching()), crate::search::Match::All);
+    assert!(search.read_with(&cx, |search, _| search.result_count()) > 0, "the contents match");
+}
+
+#[gpui::test]
 fn search_panel_streams_names_and_contents(cx: &mut TestAppContext) {
     let root = fixture("search");
     std::fs::write(root.join("notes.txt"), "needle here\n").expect("create fixture");
@@ -2695,6 +2734,20 @@ fn search_scope_buttons_switch_scope(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
 
+    // The Folder segment names the folder and speaks its full path.
+    let folder = search.read_with(&cx, |search, _| search.folder().to_path_buf());
+    let folder_label = cx
+        .update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec())
+        .into_iter()
+        .find(|element| element.selector.as_deref() == Some("search-scope-folder"))
+        .and_then(|element| element.label)
+        .unwrap_or_default();
+    assert!(
+        folder_label.starts_with(&format!("Search in {}, ", crate::style::display_name(&folder))),
+        "{folder_label}"
+    );
+    assert!(folder_label.ends_with(&folder.display().to_string()), "{folder_label}");
+
     // Empty query: switching scope starts no walk, Home or Spotlight.
     click_selector(&mut cx, "search-scope-home");
     settle(&view, &mut cx);
@@ -2712,6 +2765,39 @@ fn search_scope_buttons_switch_scope(cx: &mut TestAppContext) {
     wait_for_search(&view, &mut cx);
     let paths = search.read_with(&cx, |search, _| search.result_paths());
     assert!(paths.contains(&root.join("notes.txt")), "{paths:?}");
+}
+
+#[gpui::test]
+fn search_home_key_switches_scope(cx: &mut TestAppContext) {
+    let root = fixture("search-home-key");
+    std::fs::write(root.join("needle.txt"), "needle\n").expect("create fixture");
+    let (view, mut cx) = open(cx, &root);
+    // Home is the fixture, so ⇧⌘H never walks the developer's home folder.
+    cx.update(|_, cx| {
+        cx.global_mut::<crate::ui::Ui>().home = root.clone();
+    });
+
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Folder);
+
+    // From the field: the scope changes and the field keeps focus.
+    cx.simulate_keystrokes("cmd-shift-h");
+    settle(&view, &mut cx);
+    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Home);
+    assert!(search_input_focused(&view, &mut cx), "focus stays in the field");
+
+    // From the results: the same key changes the scope without selecting a row.
+    click_selector(&mut cx, "search-scope-folder");
+    settle(&view, &mut cx);
+    cx.simulate_input("needle");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("down");
+    assert!(search_results_focused(&view, &mut cx), "↓ enters the results");
+    cx.simulate_keystrokes("cmd-shift-h");
+    wait_for_search(&view, &mut cx);
+    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Home);
 }
 
 #[gpui::test]
@@ -3137,6 +3223,72 @@ fn search_skipped_link_opens_the_list_and_escape_closes_it_first(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn search_skipped_list_groups_reasons(cx: &mut TestAppContext) {
+    let root = corpus_fixture("search-skipped-groups");
+    let (view, mut cx) = open(cx, &root);
+    // Show Hidden Files off: dot folders are listed as skipped, not walked.
+    cx.simulate_keystrokes("cmd-shift-.");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("backup");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+
+    let groups = search.read_with(&cx, |search, _| search.skipped_groups());
+    let headings: Vec<&str> = groups.iter().map(|(heading, _)| *heading).collect();
+    assert_eq!(&headings[..3], ["Excluded", "Hidden folders", "Packages"], "{headings:?}");
+    let excluded = &groups[0].1;
+    for name in [".git", "build", "dist", "node_modules", "target"] {
+        assert!(excluded.contains(&root.join(name)), "{name} in {excluded:?}");
+    }
+    assert_eq!(groups[1].1, [root.join(".backup")]);
+    assert_eq!(groups[2].1, [root.join("CrowBackup.app")]);
+    if std::fs::read_dir(root.join("unreadable")).is_err() {
+        assert_eq!(groups[3].0, "Couldn't read");
+        assert_eq!(groups[3].1, [root.join("unreadable")]);
+    } else {
+        assert_eq!(groups.len(), 3, "root can read the unreadable folder");
+    }
+
+    click_selector(&mut cx, "search-skipped-link");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("search-skipped-header-excluded").is_some(), "the list paints its groups");
+    assert!(cx.debug_bounds("search-skipped-row-0").is_some());
+}
+
+#[gpui::test]
+fn search_skipped_privacy_opens_settings(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = fixture("search-privacy");
+    std::fs::create_dir_all(root.join("unreadable")).expect("create fixture");
+    std::fs::write(root.join("unreadable/secret.txt"), "hello\n").expect("create fixture");
+    let folder = root.join("unreadable");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+    if std::fs::read_dir(&folder).is_ok() {
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).expect("restore mode");
+        println!("read_dir succeeded on mode 000 (running as root?); skipping the privacy check");
+        return;
+    }
+
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("hello");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    assert_eq!(search.read_with(&cx, |search, _| search.skipped_groups()), [("Couldn't read", vec![folder.clone()])]);
+
+    click_selector(&mut cx, "search-skipped-link");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("search-skipped-privacy").is_some(), "the unreadable group offers Full Disk Access");
+    click_selector(&mut cx, "search-skipped-privacy");
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+    );
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).expect("restore mode");
+}
+
+#[gpui::test]
 fn search_invalid_regex_shows_the_error(cx: &mut TestAppContext) {
     let root = fixture("search-error");
     let (view, mut cx) = open(cx, &root);
@@ -3260,12 +3412,24 @@ fn search_idle_example_this_mac_switches_scope(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn search_idle_example_home_switches_scope(cx: &mut TestAppContext) {
+    let root = fixture("search-idle-home");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    click_selector(&mut cx, "search-example-3");
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
+    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Home);
+    assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "", "the field stays empty");
+}
+
+#[gpui::test]
 fn search_idle_example_everything_flips_rules(cx: &mut TestAppContext) {
     let root = fixture("search-idle-everything");
     let (view, mut cx) = open(cx, &root);
     cx.simulate_keystrokes("cmd-f");
     settle(&view, &mut cx);
-    click_selector(&mut cx, "search-example-3");
+    click_selector(&mut cx, "search-example-4");
     let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
     assert!(search.read_with(&cx, |search, _| search.everything()));
 }
