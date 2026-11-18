@@ -57,6 +57,9 @@ pub struct GenState {
     pub tabs: usize,
     pub windows: usize,
     pub vim: bool,
+    /// `Ui.home` is the developer's real home folder (`init_for_tests`), so
+    /// ⇧⌘H would walk it; the live fuzzer's scratch root is safe.
+    pub home_is_real: bool,
 }
 
 /// The plain navigation keys every window understands, whatever the layer.
@@ -134,7 +137,8 @@ impl StepGen {
         } else {
             return Step::Keys("escape".to_owned());
         };
-        let pool: Vec<&String> = source.iter().filter(|key| allowed(key, state.tabs, state.windows)).collect();
+        let pool: Vec<&String> =
+            source.iter().filter(|key| allowed(key, state.tabs, state.windows, state.home_is_real)).collect();
         if pool.is_empty() {
             return Step::Keys("escape".to_owned());
         }
@@ -328,15 +332,16 @@ pub mod logs {
 
 /// Whether a binding may be generated under the current caps. Quitting and
 /// closing the last tab are never generated; new tabs and windows stop at the caps.
-fn allowed(key: &str, tabs: usize, windows: usize) -> bool {
+fn allowed(key: &str, tabs: usize, windows: usize, home_is_real: bool) -> bool {
     match key {
         // Quitting and minimizing are not fuzzable: the test platform has no
         // implementation for the latter, and the former ends the run.
         "cmd-q" | "cmd-m" | "ctrl-cmd-space" => false,
-        // ⇧⌘H searches the real home folder under `ui::init_for_tests`, which would
-        // walk the developer's `~` mid-run. The Home segment has no debug selector,
-        // so this is the only route into a Home walk today.
-        "cmd-shift-h" => false,
+        // ⇧⌘H searches Home. Under `ui::init_for_tests` that is the developer's
+        // real home, which a test must not walk; `crow --fuzz` uses a scratch
+        // root. The key is the only fuzzer route: the Home segment is not in
+        // `SearchView::debug_selectors`, and the palette needs `>` for commands.
+        "cmd-shift-h" if home_is_real => false,
         "cmd-w" if tabs <= 1 => false,
         "cmd-t" | "cmd-enter" if tabs >= MAX_TABS => false,
         "cmd-n" if windows >= MAX_WINDOWS => false,
@@ -352,6 +357,7 @@ fn base_state(
     selectors: Vec<String>,
     text_focused: bool,
     tabs: usize,
+    home_is_real: bool,
 ) -> GenState {
     let stack = window.context_stack();
     let os = cx.platform_info().os;
@@ -363,7 +369,7 @@ fn base_state(
     let mut all = Vec::new();
     for binding in keymap.bindings() {
         let keys = binding.keystrokes().iter().map(|key| key.inner().unparse(os)).collect::<Vec<_>>().join(" ");
-        if !allowed(&keys, tabs, windows) {
+        if !allowed(&keys, tabs, windows, home_is_real) {
             continue;
         }
         all.push(keys.clone());
@@ -372,7 +378,8 @@ fn base_state(
             active.push(keys);
         }
     }
-    let mut state = GenState { active_keys: active, all_keys: all, text_focused, selectors, tabs, windows, vim };
+    let mut state =
+        GenState { active_keys: active, all_keys: all, text_focused, selectors, tabs, windows, vim, home_is_real };
     state.add_plain_keys();
     state
 }
@@ -381,7 +388,8 @@ fn base_state(
 /// The fuzz runner has a real `Window`; the test runner wraps this in its context.
 #[cfg(any(test, feature = "fuzz"))]
 pub fn state_for(view: &crate::window::CrowWindow, window: &gpui::Window, cx: &gpui::App) -> GenState {
-    base_state(window, cx, view.debug_selectors(cx), view.text_focused(window, cx), view.tab_count())
+    let home_is_real = cx.global::<crate::ui::Ui>().home == crow_core::home();
+    base_state(window, cx, view.debug_selectors(cx), view.text_focused(window, cx), view.tab_count(), home_is_real)
 }
 
 /// The Settings window as a fuzz surface: its controls' selectors, the keys its
@@ -404,7 +412,8 @@ pub fn settings_state_for(
             window.debug_bounds(selector).is_some_and(|bounds| bounds.top() < height && bounds.bottom() > gpui::px(0.))
         })
         .collect();
-    let mut state = base_state(window, cx, selectors, view.text_focused(window), 2);
+    let home_is_real = cx.global::<crate::ui::Ui>().home == crow_core::home();
+    let mut state = base_state(window, cx, selectors, view.text_focused(window), 2, home_is_real);
     state.active_keys.retain(|key| key != "cmd-w");
     state.all_keys.retain(|key| key != "cmd-w");
     if !view.menu_open() {
@@ -481,6 +490,7 @@ mod tests {
             tabs: 1,
             windows: 1,
             vim: false,
+            home_is_real: true,
         }
     }
 
@@ -511,10 +521,11 @@ mod tests {
     #[test]
     fn forbidden_keys_are_never_generated() {
         let state = GenState {
-            active_keys: vec!["cmd-q".into(), "cmd-w".into(), "cmd-t".into(), "cmd-n".into()],
-            all_keys: vec!["cmd-q".into(), "cmd-w".into(), "cmd-t".into(), "cmd-n".into()],
+            active_keys: vec!["cmd-q".into(), "cmd-w".into(), "cmd-t".into(), "cmd-n".into(), "cmd-shift-h".into()],
+            all_keys: vec!["cmd-q".into(), "cmd-w".into(), "cmd-t".into(), "cmd-n".into(), "cmd-shift-h".into()],
             tabs: 1,
             windows: 1,
+            home_is_real: true,
             ..GenState::default()
         };
         let mut generator = StepGen::new(1);
@@ -522,8 +533,15 @@ mod tests {
             if let Step::Keys(keys) = generator.next(&state) {
                 assert!(keys != "cmd-q", "never quits");
                 assert!(keys != "cmd-w", "never closes the last tab");
+                assert!(keys != "cmd-shift-h", "never walks the real home");
             }
         }
+    }
+
+    #[test]
+    fn search_home_is_skipped_only_with_a_real_home() {
+        assert!(!allowed("cmd-shift-h", 1, 1, true));
+        assert!(allowed("cmd-shift-h", 1, 1, false), "the live fuzzer's scratch root is safe");
     }
 
     #[test]
