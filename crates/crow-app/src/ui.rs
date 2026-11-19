@@ -1,15 +1,16 @@
 //! App-wide UI state: settings, view settings, the sidebar's configuration,
 //! recent folders, volumes and the theme, reloaded live for every window.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crow_core::motion::{Effective, MotionMode, SoundSet};
 use crow_core::{
-    AppIcon, EnterAction, Exclude, FolderSizesMode, HintsMode, KeymapLayer, Recent, RecentCommands, SearchMatch,
-    Settings, SidebarConfig, TipsMode, Views, load_settings, load_sidebar, load_views,
+    AppIcon, EnterAction, Exclude, FolderSizesMode, HintsMode, KeymapLayer, Recent, RecentCommands, SavedQueries,
+    SavedQueryId, SearchMatch, Settings, SidebarConfig, TipsMode, Views, load_saved_queries, load_settings,
+    load_sidebar, load_views,
 };
 use crow_theme::Theme;
 use futures::{FutureExt, future::Shared};
@@ -29,6 +30,48 @@ enum ConfigSnapshot {
 }
 
 type ConfigWrite = Shared<Task<Result<ConfigSnapshot, String>>>;
+
+/// The sidebar's last-known result count for one saved query. A running count
+/// can be partial; inactive counts keep their last value until refreshed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SavedQueryCount {
+    pub count: u64,
+    pub partial: bool,
+    pub searching: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SavedQueryCounts {
+    counts: HashMap<SavedQueryId, SavedQueryCount>,
+}
+
+impl SavedQueryCounts {
+    pub fn set(&mut self, id: SavedQueryId, count: u64, partial: bool, searching: bool) {
+        let entry = self.counts.entry(id).or_default();
+        entry.count = count;
+        entry.partial = partial;
+        entry.searching = searching;
+    }
+
+    /// The row's right-hand label: "12", "12+" when capped, "12…" while a rerun
+    /// is streaming, or "…" before the first result.
+    pub fn label(&self, id: &SavedQueryId) -> Option<String> {
+        let count = self.counts.get(id)?;
+        let mut label = format!("{}{}", count.count, if count.partial { "+" } else { "" });
+        if count.searching {
+            label.push('…');
+        }
+        Some(label)
+    }
+
+    pub fn remove(&mut self, id: &SavedQueryId) {
+        self.counts.remove(id);
+    }
+
+    pub fn retain(&mut self, ids: &[SavedQueryId]) {
+        self.counts.retain(|id, _| ids.contains(id));
+    }
+}
 
 pub struct Ui {
     pub settings: Settings,
@@ -53,6 +96,14 @@ pub struct Ui {
     pub exclude: Exclude,
     /// Counts `exclude.toml` reloads that changed it, so a running search can restart.
     pub exclude_generation: u64,
+    /// Saved searches, reloaded live with the other config. A broken file keeps
+    /// the last good set; open destinations rerun against the new specs.
+    pub saved_queries: SavedQueries,
+    /// Counts `saved-queries.toml` reloads that changed it.
+    pub saved_queries_generation: u64,
+    /// Sidebar result counts, streamed by the active destination and refreshed
+    /// for visible inactive rows.
+    pub saved_query_counts: SavedQueryCounts,
     pub recent: Recent,
     /// Commands run from the palette, newest first (state, not config).
     pub recent_commands: RecentCommands,
@@ -79,7 +130,7 @@ pub struct Ui {
     pub settings_folder: Option<PathBuf>,
     settings_category_write: Option<Shared<Task<Result<(), String>>>>,
     /// One message per config file that doesn't load; shown in the status line until fixed.
-    errors: [Option<SharedString>; 4],
+    errors: [Option<SharedString>; 5],
 }
 
 /// A config file problem as the Settings window lists it, with the config
@@ -92,7 +143,7 @@ pub struct ConfigIssue {
     pub line: Option<u32>,
 }
 
-const CONFIG_FILES: [&str; 4] = ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml"];
+const CONFIG_FILES: [&str; 5] = ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml", "saved-queries.toml"];
 
 impl Global for Ui {}
 
@@ -100,6 +151,7 @@ const SETTINGS: usize = 0;
 const VIEWS: usize = 1;
 const SIDEBAR: usize = 2;
 const EXCLUDE: usize = 3;
+const SAVED_QUERIES: usize = 4;
 
 impl Ui {
     fn new(config_dir: PathBuf, state_dir: PathBuf, home: PathBuf, theme: Theme, fade_enabled: bool) -> Ui {
@@ -141,12 +193,16 @@ impl Ui {
             settings_category,
             settings_folder: None,
             settings_category_write: None,
+            saved_queries: SavedQueries::default(),
+            saved_queries_generation: 0,
+            saved_query_counts: SavedQueryCounts::default(),
             errors: Default::default(),
         };
         ui.load_settings();
         ui.load_views();
         ui.load_sidebar();
         ui.load_exclude();
+        ui.load_saved_queries();
         ui.feedback = Feedback::read(&ui.settings);
         ui
     }
@@ -274,6 +330,24 @@ impl Ui {
                 changed
             }
             Err(e) => self.set_error(EXCLUDE, Err(e)),
+        }
+    }
+
+    /// Reload `saved-queries.toml`; a broken file keeps the last good set.
+    pub fn load_saved_queries(&mut self) -> bool {
+        match load_saved_queries(&self.config_dir, &self.home) {
+            Ok(queries) => {
+                let changed = queries != self.saved_queries;
+                let ids: Vec<SavedQueryId> = queries.queries.iter().map(|query| query.id.clone()).collect();
+                self.saved_query_counts.retain(&ids);
+                self.saved_queries = queries;
+                self.set_error(SAVED_QUERIES, Ok(()));
+                if changed {
+                    self.saved_queries_generation += 1;
+                }
+                changed
+            }
+            Err(e) => self.set_error(SAVED_QUERIES, Err(e)),
         }
     }
 
@@ -532,7 +606,8 @@ pub fn reload_config(cx: &mut App) {
     ui.load_views();
     let sidebar = ui.load_sidebar();
     let exclude = ui.load_exclude();
-    if settings || sidebar || exclude {
+    let saved_queries = ui.load_saved_queries();
+    if settings || sidebar || exclude || saved_queries {
         tracing::info!("config reloaded");
     }
     if sidebar {
@@ -1159,6 +1234,9 @@ fn write_config_with_completion(
                     EXCLUDE => {
                         ui.load_exclude();
                     }
+                    SAVED_QUERIES => {
+                        ui.load_saved_queries();
+                    }
                     _ => unreachable!("settings and views writes use the queues"),
                 },
                 Err(e) => {
@@ -1170,6 +1248,63 @@ fn write_config_with_completion(
     })
     .detach();
 }
+
+/// Write one saved search, then reload the file and every window. A failure is
+/// a config error in the status line; the last good set stays.
+pub fn save_saved_query(query: crow_core::SavedQuery, completion: Option<SavedQueryWriteCompletion>, cx: &mut App) {
+    let (config_dir, home) = {
+        let ui = cx.global::<Ui>();
+        (ui.config_dir.clone(), ui.home.clone())
+    };
+    let task = cx.background_spawn(async move { crow_core::save_saved_query(&config_dir, &home, &query) });
+    cx.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|cx| {
+            let ui = cx.global_mut::<Ui>();
+            match &result {
+                Ok(()) => {
+                    ui.load_saved_queries();
+                }
+                Err(error) => {
+                    ui.set_error(SAVED_QUERIES, Err(error.clone()));
+                }
+            }
+            if let Some(completion) = completion {
+                completion(result, cx);
+            }
+            cx.refresh_windows();
+        });
+    })
+    .detach();
+}
+
+pub fn remove_saved_query(id: SavedQueryId, completion: Option<SavedQueryWriteCompletion>, cx: &mut App) {
+    let config_dir = cx.global::<Ui>().config_dir.clone();
+    let task_id = id.clone();
+    let task = cx.background_spawn(async move { crow_core::remove_saved_query(&config_dir, &task_id) });
+    cx.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|cx| {
+            let ui = cx.global_mut::<Ui>();
+            match &result {
+                Ok(()) => {
+                    ui.load_saved_queries();
+                    ui.saved_query_counts.remove(&id);
+                }
+                Err(error) => {
+                    ui.set_error(SAVED_QUERIES, Err(error.clone()));
+                }
+            }
+            if let Some(completion) = completion {
+                completion(result, cx);
+            }
+            cx.refresh_windows();
+        });
+    })
+    .detach();
+}
+
+pub type SavedQueryWriteCompletion = Box<dyn FnOnce(Result<(), String>, &mut App)>;
 
 /// Change `[defaults]` in views.toml. The queued reload publishes a new views
 /// generation, so browser panes and Why This View apply it like any edit.

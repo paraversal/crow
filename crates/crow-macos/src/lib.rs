@@ -29,7 +29,7 @@ pub use metadata::{Permissions, kind_name, permissions, tags, thumbnail_png, typ
 pub use names::display_components;
 pub use quick_look::{QuickLookKey, set_quick_look_key_handler, toggle_quick_look, update_quick_look};
 pub use sound::{Sound, beep, play, preload, set_volume, stop, ui_sounds_enabled};
-pub use spotlight::{SpotlightHit, spotlight_names};
+pub use spotlight::{SpotlightHit, SpotlightPredicate, spotlight_expression, spotlight_names};
 pub use volumes::{MountWatcher, Volume, eject, reduce_motion, volumes, watch_mounts};
 
 use objc2::MainThreadMarker;

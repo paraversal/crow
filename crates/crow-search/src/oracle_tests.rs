@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use crow_core::Exclude;
 
-use crate::{FuzzyMatcher, HitKind, Query, RuleSet, SkipReason, search};
+use crate::{FuzzyMatcher, HitKind, Predicates, Query, RuleSet, SkipReason, search};
 
 /// How many trees to generate. The plan says 300; lower this (and record the
 /// number in the progress file) if the test grows past ~5 s in debug.
@@ -42,6 +42,7 @@ enum Mode {
 enum HitKey {
     Name,
     Content(u64),
+    Metadata,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -82,6 +83,7 @@ fn oracle_agrees_on_random_trees() {
                             rules: rules.clone(),
                             everything,
                             read_gate: None,
+                            predicates: Predicates::default(),
                         };
                         let (engine_hits, engine_skips) = run_engine(&tree, &query);
                         let (oracle_hits, oracle_skips) = run_oracle(&tree, &query);
@@ -138,6 +140,7 @@ fn run_engine(root: &Path, query: &Query) -> (Hits, Skips) {
             let kind = match hit.kind {
                 HitKind::Name { .. } => HitKey::Name,
                 HitKind::Content { line, .. } => HitKey::Content(line),
+                HitKind::Metadata { .. } => HitKey::Metadata,
             };
             (hit.path, kind)
         })
@@ -290,6 +293,7 @@ fn display(key: &(PathBuf, HitKey)) -> (PathBuf, String) {
     let kind = match key.1 {
         HitKey::Name => "name".to_owned(),
         HitKey::Content(line) => format!("content line {line}"),
+        HitKey::Metadata => "metadata".to_owned(),
     };
     (key.0.clone(), kind)
 }

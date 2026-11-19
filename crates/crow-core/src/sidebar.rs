@@ -39,10 +39,11 @@ count = 6
 [locations]
 show = true
 
-# Optional section layout. `recent` and `locations` are built-ins; a plugin
-# section uses its exact package ID. Unlisted sections follow in the usual order.
+# Optional section layout. `saved-queries`, `recent` and `locations` are
+# built-ins; a plugin section uses its exact package ID. Unlisted sections follow
+# in the usual order.
 # [sections]
-# order = ["recent", "example.p1b-fixture.folders", "locations"]
+# order = ["saved-queries", "recent", "example.p1b-fixture.folders", "locations"]
 #
 # [section."example.p1b-fixture.folders"]
 # show = true
@@ -157,6 +158,7 @@ pub struct SectionRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SectionDestination {
     Folder { path: PathBuf, identity: (u64, u64) },
+    SavedQuery { id: crate::saved_queries::SavedQueryId },
     DisplayOnly,
 }
 
@@ -164,15 +166,26 @@ impl SectionRow {
     pub fn folder_path(&self) -> Option<&Path> {
         match &self.destination {
             SectionDestination::Folder { path, .. } => Some(path),
-            SectionDestination::DisplayOnly => None,
+            SectionDestination::SavedQuery { .. } | SectionDestination::DisplayOnly => None,
         }
     }
 
     pub fn folder_identity(&self) -> Option<(u64, u64)> {
         match &self.destination {
             SectionDestination::Folder { identity, .. } => Some(*identity),
-            SectionDestination::DisplayOnly => None,
+            SectionDestination::SavedQuery { .. } | SectionDestination::DisplayOnly => None,
         }
+    }
+
+    pub fn saved_query_id(&self) -> Option<&crate::saved_queries::SavedQueryId> {
+        match &self.destination {
+            SectionDestination::SavedQuery { id } => Some(id),
+            SectionDestination::Folder { .. } | SectionDestination::DisplayOnly => None,
+        }
+    }
+
+    pub fn is_navigable(&self) -> bool {
+        !matches!(self.destination, SectionDestination::DisplayOnly)
     }
 }
 
@@ -253,7 +266,7 @@ impl SidebarConfig {
 }
 
 fn valid_section_id(id: &str) -> bool {
-    if id == "recent" || id == "locations" {
+    if id == "recent" || id == "locations" || id == "saved-queries" {
         return true;
     }
     let Some((plugin, local)) = id.rsplit_once('.') else { return false };

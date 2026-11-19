@@ -310,6 +310,8 @@ mod tests {
                 "Review Git Changes…",
                 "Show in Finder",
                 "Open Terminal Here",
+                "—",
+                "Save Search…",
             ]
         );
         assert_eq!(

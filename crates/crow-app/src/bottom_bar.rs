@@ -42,6 +42,9 @@ pub struct BarState {
     pub error: Option<BarError>,
     pub count: Count,
     pub path: Path,
+    /// A virtual destination's title (a saved search): the path slot shows this
+    /// instead of a path, and it is not editable or draggable.
+    pub virtual_path: Option<SharedString>,
     /// The path field while ⌘L edits it; the segments give way to it.
     pub editing: Option<Entity<TextInput>>,
     /// The most the transient slot may take, so the path keeps its first and last
@@ -668,6 +671,8 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
     let hover = color(theme.role("surface-raised"));
     let last = state.path.parts.len().saturating_sub(1);
     let parts = state.path.parts;
+    let virtual_path = state.virtual_path.clone();
+    let path_is_virtual = virtual_path.is_some();
     let fg_path = fg;
     let last_is_dir = state.path.last_is_dir;
 
@@ -799,6 +804,25 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
             cx,
         );
         children.push(pencil.into_any_element());
+        if let Some(label) = virtual_path.clone() {
+            children.clear();
+            children.push(
+                div()
+                    .id("saved-path")
+                    .debug_selector(|| "saved-path".into())
+                    .role(Role::Label)
+                    .aria_label(format!("Saved search: {label}"))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_1()
+                    .h(px(20.))
+                    .text_color(fg_path)
+                    .child(icons::glyph(crate::icons::Glyph::Search, 14., "fg-muted", &theme))
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+                    .into_any_element(),
+            );
+        }
         let pill_theme = theme.clone();
         let pill = div()
             .id("path-pill")
@@ -847,8 +871,10 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
             .child(empty)
             // A click on the pill's padding or the empty space edits the path; ⌘L
             // and the pencil do the same. Segments stop propagation.
-            .on_click(|_, window, cx| {
-                window.dispatch_action(Box::new(EditPath), cx);
+            .on_click(move |_, window, cx| {
+                if !path_is_virtual {
+                    window.dispatch_action(Box::new(EditPath), cx);
+                }
             })
             .on_hover(hover_path)
     };

@@ -195,12 +195,13 @@ enum ControlId {
     OpenViewsToml,
     OpenExcludeToml,
     OpenPluginsToml,
+    OpenSavedQueriesToml,
 }
 
 impl ControlId {
     /// Every control, used to build focus handles. Reading order comes from
     /// `catalog::units`, so a category can be reordered without touching this.
-    const ALL: [ControlId; 45] = [
+    const ALL: [ControlId; 46] = [
         ControlId::Theme,
         ControlId::AppIcon,
         ControlId::IconPack,
@@ -246,6 +247,7 @@ impl ControlId {
         ControlId::OpenViewsToml,
         ControlId::OpenExcludeToml,
         ControlId::OpenPluginsToml,
+        ControlId::OpenSavedQueriesToml,
     ];
 
     fn key(self) -> &'static str {
@@ -295,6 +297,7 @@ impl ControlId {
             ControlId::OpenViewsToml => "settings-open-views",
             ControlId::OpenExcludeToml => "settings-open-exclude",
             ControlId::OpenPluginsToml => "settings-open-plugins",
+            ControlId::OpenSavedQueriesToml => "settings-open-saved-queries",
         }
     }
 
@@ -383,6 +386,7 @@ impl ControlId {
             ControlId::OpenViewsToml => "views.toml",
             ControlId::OpenExcludeToml => "exclude.toml",
             ControlId::OpenPluginsToml => "plugins.toml",
+            ControlId::OpenSavedQueriesToml => "saved-queries.toml",
         }
     }
 
@@ -423,6 +427,7 @@ impl ControlId {
             | ControlId::OpenViewsToml
             | ControlId::OpenExcludeToml
             | ControlId::OpenPluginsToml
+            | ControlId::OpenSavedQueriesToml
             | ControlId::PreviewCurrentFolder
             | ControlId::PreviewChooseFolder
             | ControlId::PreviewAddRule
@@ -523,8 +528,11 @@ impl ControlId {
             ControlId::Plugins => return None,
             ControlId::EditSettings => "Open settings.toml in its default app.",
             ControlId::ShowConfig => "Open ~/.config/crow in Finder.",
-            ControlId::OpenSidebarToml | ControlId::OpenViewsToml | ControlId::OpenExcludeToml => return None,
-            ControlId::OpenPluginsToml => return None,
+            ControlId::OpenSidebarToml
+            | ControlId::OpenViewsToml
+            | ControlId::OpenExcludeToml
+            | ControlId::OpenPluginsToml
+            | ControlId::OpenSavedQueriesToml => return None,
         };
         Some(text.into())
     }
@@ -541,7 +549,8 @@ impl ControlId {
             | ControlId::OpenSidebarToml
             | ControlId::OpenViewsToml
             | ControlId::OpenExcludeToml
-            | ControlId::OpenPluginsToml => true,
+            | ControlId::OpenPluginsToml
+            | ControlId::OpenSavedQueriesToml => true,
             ControlId::DefaultView
             | ControlId::DefaultSort
             | ControlId::DefaultDirection
@@ -680,7 +689,8 @@ enum FocusTarget {
 
 /// The files the error region covers. `plugins.toml` comes from the plugin
 /// inventory; the other four from the config loader.
-const ERROR_FILES: [&str; 5] = ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml", "plugins.toml"];
+const ERROR_FILES: [&str; 6] =
+    ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml", "plugins.toml", "saved-queries.toml"];
 
 /// The preview editor's layer. The target within the layer is kept while the
 /// editor is on screen.
@@ -1504,6 +1514,7 @@ impl SettingsWindow {
             ControlId::OpenViewsToml => ui::open_config_file("views.toml", cx),
             ControlId::OpenExcludeToml => ui::open_config_file("exclude.toml", cx),
             ControlId::OpenPluginsToml => ui::open_config_file("plugins.toml", cx),
+            ControlId::OpenSavedQueriesToml => ui::open_config_file("saved-queries.toml", cx),
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => {
                 self.commit_stepper(id, window, cx);
             }
@@ -2628,13 +2639,14 @@ impl Render for SettingsWindow {
             .child(link(self, ControlId::OpenSidebarToml, "sidebar.toml", window, &theme, cx))
             .child(link(self, ControlId::OpenExcludeToml, "exclude.toml", window, &theme, cx))
             .child(link(self, ControlId::OpenPluginsToml, "plugins.toml", window, &theme, cx))
+            .child(link(self, ControlId::OpenSavedQueriesToml, "saved-queries.toml", window, &theme, cx))
             .child(show_config);
         let config_row = controls::labeled(
             ControlMeta {
                 id: "settings-config-files",
                 label: "Config files",
                 description: Some(
-                    "The five TOML files stay authoritative and editable; Crow writes back only the key you change."
+                    "The six TOML files stay authoritative and editable; Crow writes back only the key you change."
                         .into(),
                 ),
                 enabled: true,
@@ -3023,6 +3035,7 @@ fn link(
         ControlId::OpenViewsToml => "views.toml",
         ControlId::OpenExcludeToml => "exclude.toml",
         ControlId::OpenPluginsToml => "plugins.toml",
+        ControlId::OpenSavedQueriesToml => "saved-queries.toml",
         _ => unreachable!("{id:?} is not a config-file link"),
     };
     let activate = callback(cx, move |_, _, cx| ui::open_config_file(name, cx));

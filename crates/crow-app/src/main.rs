@@ -53,6 +53,7 @@ mod palette;
 mod pane;
 mod plugins;
 mod preview;
+mod saved_query_counts;
 mod search;
 mod settings_window;
 mod sidebar;
@@ -114,6 +115,7 @@ fn bench_search(args: &[String]) -> Result<(), String> {
     let mut query_set = false;
     let mut names = true;
     let mut contents = true;
+    let mut predicates = crow_search::Predicates::default();
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -126,6 +128,32 @@ fn bench_search(args: &[String]) -> Result<(), String> {
                 names = false;
                 contents = true;
                 index += 1;
+            }
+            "--kind" => {
+                let Some(value) = args.get(index + 1) else { return Err("--kind needs a value".to_owned()) };
+                let saved = crow_core::SavedKind::from_key(value)?;
+                predicates.kind = Some(match saved {
+                    crow_core::SavedKind::Folder => crow_search::Kind::Folder,
+                    crow_core::SavedKind::File => crow_search::Kind::File,
+                    crow_core::SavedKind::Image => crow_search::Kind::Image,
+                    crow_core::SavedKind::Pdf => crow_search::Kind::Pdf,
+                    crow_core::SavedKind::Audio => crow_search::Kind::Audio,
+                    crow_core::SavedKind::Video => crow_search::Kind::Video,
+                    crow_core::SavedKind::Archive => crow_search::Kind::Archive,
+                    crow_core::SavedKind::Text => crow_search::Kind::Text,
+                    crow_core::SavedKind::Extension(extension) => crow_search::Kind::Extension(extension),
+                });
+                index += 2;
+            }
+            "--modified-within" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("--modified-within needs a number of days".to_owned());
+                };
+                let days = value.parse::<u64>().map_err(|_| "--modified-within needs a positive number".to_owned())?;
+                predicates.modified_within = Some(std::time::Duration::from_secs(
+                    days.checked_mul(86_400).ok_or_else(|| "modified-within is too large".to_owned())?,
+                ));
+                index += 2;
             }
             other if other.starts_with("--") => return Err(format!("unknown argument {other}")),
             other => {
@@ -150,6 +178,7 @@ fn bench_search(args: &[String]) -> Result<(), String> {
         rules: Arc::new(rules),
         everything: false,
         read_gate: Some(Arc::new(crow_macos::SystemReadGate)),
+        predicates,
     };
     let control = crow_search::Control::new();
     let started = std::time::Instant::now();
@@ -299,6 +328,7 @@ fn search_trace(args: &[String]) -> Result<(), String> {
         rules: Arc::new(rules),
         everything: options.everything,
         read_gate: Some(Arc::new(crow_macos::SystemReadGate)),
+        predicates: crow_search::Predicates::default(),
     };
     let target = options.target.as_ref().map(|path| {
         let path =
@@ -327,7 +357,7 @@ fn search_trace(args: &[String]) -> Result<(), String> {
                 && let Some(hit) = batch.iter().find(|hit| &hit.path == target)
             {
                 let line = match &hit.kind {
-                    crow_search::HitKind::Name { .. } => None,
+                    crow_search::HitKind::Name { .. } | crow_search::HitKind::Metadata { .. } => None,
                     crow_search::HitKind::Content { line, .. } => Some(*line),
                 };
                 verdict = Some((batches, elapsed, line));

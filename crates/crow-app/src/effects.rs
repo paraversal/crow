@@ -77,6 +77,13 @@ pub trait Effects: Send + Sync {
         sink: Box<dyn FnMut(Vec<SpotlightHit>) + Send>,
         cancel: &AtomicBool,
     ) -> Result<(), String>;
+    /// Run a raw metadata-only `mdfind` expression (empty text, predicates only).
+    fn spotlight_expression(
+        &self,
+        expression: &str,
+        sink: Box<dyn FnMut(Vec<SpotlightHit>) + Send>,
+        cancel: &AtomicBool,
+    ) -> Result<(), String>;
 
     #[cfg(any(test, feature = "fuzz"))]
     fn as_any(&self) -> &dyn std::any::Any;
@@ -212,6 +219,15 @@ impl Effects for SystemEffects {
         crow_macos::spotlight_names(query, sink, cancel)
     }
 
+    fn spotlight_expression(
+        &self,
+        expression: &str,
+        sink: Box<dyn FnMut(Vec<SpotlightHit>) + Send>,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
+        crow_macos::spotlight_expression(expression, sink, cancel)
+    }
+
     #[cfg(any(test, feature = "fuzz"))]
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -294,6 +310,7 @@ pub enum Call {
     TitlebarDoubleClick,
     Eject(PathBuf),
     Spotlight(String),
+    SpotlightExpression(String),
 }
 
 /// Answers the scripted questions; everything else succeeds without doing anything.
@@ -557,6 +574,16 @@ impl Effects for RecordingEffects {
         _cancel: &AtomicBool,
     ) -> Result<(), String> {
         self.record(Call::Spotlight(query.to_owned()));
+        Ok(())
+    }
+
+    fn spotlight_expression(
+        &self,
+        expression: &str,
+        _sink: Box<dyn FnMut(Vec<SpotlightHit>) + Send>,
+        _cancel: &AtomicBool,
+    ) -> Result<(), String> {
+        self.record(Call::SpotlightExpression(expression.to_owned()));
         Ok(())
     }
 

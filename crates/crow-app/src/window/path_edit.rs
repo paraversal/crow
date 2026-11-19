@@ -33,6 +33,8 @@ impl CrowWindow {
             || self.picker.is_some()
             || self.palette.is_some()
             || self.pane().read(cx).is_renaming()
+            // A virtual destination has no path to edit; the slot shows its title.
+            || self.pane().read(cx).folder().is_none()
         {
             return;
         }

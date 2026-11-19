@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use crow_core::motion::{self, Effective, Fx, Look};
 use crow_core::{
     Align, Column, ColumnCell, ColumnContext, ColumnWidth, EnterAction, GridGeometry, GridRect, History, IconSize,
-    KeymapLayer, KnownSize, ResizeDrag, TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS, TableLayout, TipId, ViewChange, ViewMode,
+    KeymapLayer, KnownSize, Location, ResizeDrag, SavedQueryId, TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS, TableLayout,
+    TipId, ViewChange, ViewMode,
 };
 use crow_fs::{AllowAll, CloudStatus, Entry, ReadGate, Sort, SortKey};
 use crow_theme::Theme;
@@ -50,6 +51,7 @@ use crate::keys::KeyScope;
 use crate::operations::Operations;
 use crate::palette::CommandId;
 use crate::preview::{self, Preview};
+use crate::search::{SearchEvent, SearchView};
 use crate::style::{
     active_selection, cloud_icon, color, color_alpha, content_opacity, cut_outline, display_text, drop_outline,
     effect_tint, focused_column, format_time, highlight_text, inactive_selection, kind, map_range, truncate_middle,
@@ -111,6 +113,11 @@ pub enum PaneEvent {
     },
     /// The tab went to a folder (for Recent).
     Entered(PathBuf),
+    /// The tab's destination changed to a virtual location (sidebar current,
+    /// title and band follow it, but Recent does not).
+    DestinationChanged,
+    /// The saved destination's band asked for its edit form.
+    SaveSearch,
     /// Vim marks: `m x` (set) or `'x` (jump) for the letter `key`.
     Mark {
         key: char,
@@ -349,8 +356,19 @@ pub struct DropTarget {
     pub rows: Option<std::ops::Range<usize>>,
 }
 
+/// A saved-query result session retained while its location stays in history.
+struct SavedSession {
+    view: Entity<SearchView>,
+    _subscription: Subscription,
+}
+
 pub struct Pane {
-    history: History,
+    history: History<Location>,
+    /// Result sessions for saved destinations in this tab's history. Only the
+    /// active one runs; others keep their last accepted snapshot.
+    saved_sessions: HashMap<SavedQueryId, SavedSession>,
+    /// The saved destination currently shown, if any.
+    active_saved: Option<SavedQueryId>,
     mode: ViewMode,
     show_hidden: bool,
     sort: Sort,
@@ -496,7 +514,9 @@ impl Pane {
             service_subscriptions.push(cx.observe(&service, |_, _, cx| cx.notify()));
         }
         let mut pane = Self {
-            history: History::new(dir.clone()),
+            history: History::new(Location::Folder(dir.clone())),
+            saved_sessions: HashMap::new(),
+            active_saved: None,
             mode: ViewMode::List,
             show_hidden,
             sort: Sort::default(),
@@ -603,9 +623,31 @@ impl Pane {
         self.icon_size
     }
 
-    /// The tab's folder: the list view's folder, or the column view's root.
-    pub fn dir(&self) -> &Path {
+    /// The tab's destination: a real folder or a saved query id.
+    pub fn location(&self) -> &Location {
         self.history.current()
+    }
+
+    /// The real folder this tab shows, if it is a folder destination.
+    pub fn folder(&self) -> Option<&Path> {
+        self.location().as_folder()
+    }
+
+    /// The tab's folder: the list view's folder, or the column view's root.
+    /// Callers must have checked `folder()`; a virtual destination has no path.
+    pub fn dir(&self) -> &Path {
+        self.location().as_folder().expect("a folder destination")
+    }
+
+    /// The active saved-query result session, if the tab shows one.
+    pub fn saved_session(&self) -> Option<Entity<SearchView>> {
+        self.active_saved.as_ref().and_then(|id| self.saved_sessions.get(id)).map(|session| session.view.clone())
+    }
+
+    pub fn saved_unavailable(&self, cx: &gpui::App) -> Option<SharedString> {
+        let id = self.active_saved.as_ref()?;
+        (!cx.global::<Ui>().saved_queries.contains(id))
+            .then(|| SharedString::from("This saved search was removed. Back restores the previous location."))
     }
 
     /// The icon source this pane shows: the focused folder's `views.toml`
@@ -910,12 +952,12 @@ impl Pane {
         self.history.can_go_forward()
     }
 
-    /// The folder Back/Forward would show, for tooltip labels.
-    pub fn back_target(&self) -> Option<&std::path::Path> {
+    /// The destination Back/Forward would show, for tooltip labels.
+    pub fn back_target(&self) -> Option<&Location> {
         self.history.back_target()
     }
 
-    pub fn forward_target(&self) -> Option<&std::path::Path> {
+    pub fn forward_target(&self) -> Option<&Location> {
         self.history.forward_target()
     }
 
@@ -1066,26 +1108,164 @@ impl Pane {
     pub fn navigate(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
         self.plugin_walk_dirs = None;
-        self.history.visit(dir.clone());
-        self.enter(dir, cx);
+        self.visit_location(Location::Folder(dir), false, None, cx);
+    }
+
+    fn visit_location(
+        &mut self,
+        location: Location,
+        replace: bool,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        if replace {
+            self.history.replace_current(location.clone());
+        } else {
+            self.history.visit(location.clone());
+        }
+        self.apply_location(location, None, window, cx);
+    }
+
+    /// Open a saved search as the tab's destination. The sidebar arrow only moves
+    /// its cursor; activation calls this and starts the result session.
+    pub fn open_saved_query(&mut self, id: SavedQueryId, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
+        self.visit_location(Location::SavedQuery(id), false, Some(window), cx);
+    }
+
+    fn apply_location(
+        &mut self,
+        location: Location,
+        restore_from: Option<PathBuf>,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        match location {
+            Location::Folder(dir) => {
+                self.deactivate_saved(cx);
+                self.enter(dir, cx);
+                if let Some(from) = restore_from {
+                    self.folders[0].update(cx, |folder, _| folder.select_after_load(from));
+                }
+            }
+            Location::SavedQuery(id) => self.activate_saved(id, window, cx),
+            Location::Tag(_) => {
+                self.deactivate_saved(cx);
+            }
+        }
+        self.prune_saved_sessions(cx);
+        cx.emit(PaneEvent::DestinationChanged);
+    }
+
+    fn activate_saved(&mut self, id: SavedQueryId, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        self.deactivate_saved(cx);
+        self.active_saved = Some(id.clone());
+        let Some(window) = window else { return };
+        let (home, spec) = {
+            let ui = cx.global::<Ui>();
+            let Some(spec) = ui.saved_queries.get(&id).cloned() else {
+                // A deleted id stays in history as an unavailable destination.
+                return;
+            };
+            (ui.home.clone(), spec)
+        };
+        if !self.saved_sessions.contains_key(&id) {
+            let view = cx.new(|cx| SearchView::saved(spec, home, self.show_hidden, cx));
+            let subscription = cx.subscribe_in(&view, window, |pane, view, event, window, cx| {
+                pane.on_saved_event(view.clone(), event, window, cx)
+            });
+            self.saved_sessions.insert(id.clone(), SavedSession { view, _subscription: subscription });
+        }
+        if let Some(session) = self.saved_sessions.get(&id) {
+            let view = session.view.clone();
+            view.update(cx, |view, cx| view.set_active(true, cx));
+            if !view.update(cx, |view, cx| view.focus_results(window, cx)) {
+                view.update(cx, |view, cx| view.focus_input(window, cx));
+            }
+        }
+    }
+
+    fn deactivate_saved(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.active_saved.take()
+            && let Some(session) = self.saved_sessions.get(&id)
+        {
+            session.view.update(cx, |view, cx| view.set_active(false, cx));
+        }
+    }
+
+    fn prune_saved_sessions(&mut self, cx: &mut Context<Self>) {
+        let retained: HashSet<SavedQueryId> =
+            self.history.locations().filter_map(|location| location.saved_query_id().cloned()).collect();
+        let remove: Vec<SavedQueryId> =
+            self.saved_sessions.keys().filter(|id| !retained.contains(*id)).cloned().collect();
+        for id in remove {
+            if let Some(session) = self.saved_sessions.remove(&id) {
+                session.view.update(cx, |view, cx| {
+                    view.set_active(false, cx);
+                    view.cancel(cx);
+                });
+            }
+        }
+    }
+
+    fn on_saved_event(
+        &mut self,
+        view: Entity<SearchView>,
+        event: &SearchEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SearchEvent::Close => {}
+            SearchEvent::FocusResults => {
+                view.update(cx, |search, cx| search.focus_results(window, cx));
+            }
+            SearchEvent::Open { path, is_dir } => {
+                if *is_dir {
+                    self.navigate(path.clone(), cx);
+                } else {
+                    self.open_file(path.clone(), cx);
+                }
+            }
+            SearchEvent::Reveal(path) => self.reveal(path.clone(), cx),
+            SearchEvent::Run(request) => cx.emit(PaneEvent::Run(request.clone())),
+            SearchEvent::Copy { paths, cut } => cx.emit(PaneEvent::Copy { paths: paths.clone(), cut: *cut }),
+            SearchEvent::Save => cx.emit(PaneEvent::SaveSearch),
+        }
+    }
+
+    /// A tab switch: only the active tab's saved session may rerun on its own.
+    pub fn set_tab_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if let Some(session) = self.saved_session() {
+            session.update(cx, |view, cx| view.set_active(active, cx));
+        }
+    }
+
+    /// After a file operation from a saved result, rerun the visible destination.
+    pub fn refresh_saved(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.saved_session() {
+            view.update(cx, |view, cx| view.refresh_now(cx));
+        }
     }
 
     /// Show `dir` while the sidebar cursor moves. The first move is a normal history
     /// step (Back returns to where the walk began); later moves replace it, so a walk
     /// past five favorites is one Cmd-[.
     pub fn show_from_sidebar(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        if dir == self.history.current() {
+        if self.location() == &Location::Folder(dir.clone()) {
             return;
         }
         if self.sidebar_walk {
-            self.history.replace_current(dir.clone());
+            self.history.replace_current(Location::Folder(dir.clone()));
         } else {
             // Freeze the section's contributing folder before the first preview
             // changes the focused listing.
             self.plugin_walk_dirs = Some(self.sidebar_plugin_dirs(false, cx));
-            self.history.visit(dir.clone());
+            self.history.visit(Location::Folder(dir.clone()));
             self.sidebar_walk = true;
         }
+        self.deactivate_saved(cx);
         self.enter(dir, cx);
     }
 
@@ -1094,7 +1274,7 @@ impl Pane {
     pub fn open_from_sidebar(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
         self.plugin_walk_dirs = None;
-        if dir != self.history.current() {
+        if self.location() != &Location::Folder(dir.clone()) {
             self.navigate(dir, cx);
         }
     }
@@ -1114,26 +1294,23 @@ impl Pane {
         }
     }
 
-    pub fn go_back(&mut self, cx: &mut Context<Self>) {
+    pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
         self.plugin_walk_dirs = None;
-        let from = self.dir().to_path_buf();
-        if let Some(dir) = self.history.back().map(Path::to_path_buf) {
-            self.enter(dir, cx);
-            self.folders[0].update(cx, |f, _| f.select_after_load(from));
-        }
+        let from = self.location().as_folder().map(Path::to_path_buf);
+        let Some(location) = self.history.back().cloned() else { return };
+        self.apply_location(location, from, Some(window), cx);
     }
 
-    pub fn go_forward(&mut self, cx: &mut Context<Self>) {
+    pub fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
         self.plugin_walk_dirs = None;
-        if let Some(dir) = self.history.forward().map(Path::to_path_buf) {
-            self.enter(dir, cx);
-        }
+        let Some(location) = self.history.forward().cloned() else { return };
+        self.apply_location(location, None, Some(window), cx);
     }
 
     pub fn open_parent(&mut self, cx: &mut Context<Self>) {
-        let child = self.current_dir(cx);
+        let Some(child) = self.location().as_folder().map(Path::to_path_buf) else { return };
         if let Some(parent) = child.parent().map(Path::to_path_buf) {
             self.navigate(parent, cx);
             self.folders[0].update(cx, |f, _| f.select_after_load(child));
@@ -1179,6 +1356,17 @@ impl Pane {
         }
         self.plugin_selection.clear();
         self.plugin_scope = None;
+        for (_, session) in self.saved_sessions.drain() {
+            if cx.try_global::<crate::plugins::Plugins>().is_some() {
+                let id = session.view.read(cx).plugin_surface();
+                cx.global_mut::<crate::plugins::Plugins>().surfaces.drop_surface(id);
+            }
+            session.view.update(cx, |view, cx| {
+                view.set_active(false, cx);
+                view.cancel(cx);
+            });
+        }
+        self.active_saved = None;
         self.preview_cancel.store(true, Ordering::Relaxed);
         self.clear_preview(cx);
         self.preview_key = None;
@@ -1422,13 +1610,16 @@ impl Pane {
 
     /// Write a view change to `views.toml` as this folder's own setting.
     fn remember(&mut self, change: ViewChange, cx: &mut Context<Self>) {
-        let dir = self.dir().to_path_buf();
+        let Some(dir) = self.location().as_folder().map(Path::to_path_buf) else { return };
         crate::ui::save_view_change(dir, change, cx);
     }
 
     /// Show this folder the way `views.toml` says, unless that was already done for
     /// this folder and this version of the file.
     pub fn apply_view(&mut self, cx: &mut Context<Self>) {
+        if self.location().as_folder().is_none() {
+            return;
+        }
         let ui = cx.global::<Ui>();
         let plugin_generation =
             cx.try_global::<crate::plugins::Plugins>().map_or(0, |plugins| plugins.surfaces.generation());
@@ -1578,7 +1769,7 @@ impl Pane {
         self.folders = vec![keep];
         self.subscriptions = vec![subscription];
         self.focused = 0;
-        self.history.visit(dir);
+        self.history.visit(Location::Folder(dir));
     }
 
     fn enter(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
@@ -1646,6 +1837,10 @@ impl Pane {
     /// pane. A tab activation or the end of a search is a scope transition for
     /// consumers even if the same pane already announced that folder.
     pub fn announce_plugin_scope(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = self.saved_session() {
+            session.update(cx, |session, cx| session.notify_plugin_scope(cx));
+            return;
+        }
         self.plugin_scope = None;
         self.plugin_scope_changed(cx);
     }
@@ -2245,7 +2440,7 @@ impl Pane {
             let child = self.folders[0].read(cx).dir().to_path_buf();
             let Some(parent) = child.parent().map(Path::to_path_buf) else { return };
             self.drop_filter(cx);
-            self.history.visit(parent.clone());
+            self.history.visit(Location::Folder(parent.clone()));
             self.push_folder(parent.clone(), false, cx);
             let folder = self.folders.pop().expect("pushed above");
             let subscription = self.subscriptions.pop().expect("pushed above");
@@ -5321,6 +5516,23 @@ fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
 
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(message) = self.saved_unavailable(cx) {
+            let theme = cx.global::<Ui>().theme.clone();
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .bg(color(theme.role("bg")))
+                .text_color(color(theme.role("fg-muted")))
+                .child(message)
+                .into_any_element();
+        }
+        if let Some(view) = self.saved_session() {
+            return div().size_full().child(view).into_any_element();
+        }
         let plugin_generation =
             cx.try_global::<crate::plugins::Plugins>().map_or(0, |plugins| plugins.surfaces.generation());
         if self.applied_view.as_ref().is_some_and(|(_, applied, _)| *applied != plugin_generation) {
@@ -5673,7 +5885,7 @@ impl Render for Pane {
             self.focus_list_after_filter = false;
             cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));
         }
-        div().size_full().flex().flex_col().child(list)
+        div().size_full().flex().flex_col().child(list).into_any_element()
     }
 }
 

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crow_core::{SidebarEdit, Tabs, TipId, TipsMode, ViewMode, ZeroMatchStreak};
+use crow_core::{Location, SidebarEdit, Tabs, TipId, TipsMode, ViewMode, ZeroMatchStreak};
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, Render,
     Role, ScrollHandle, SharedString, Subscription, Task, TitlebarOptions, Toggled, Window, WindowBounds,
@@ -15,12 +15,13 @@ use gpui::{
 };
 
 use crate::actions::{
-    AddToSidebar, ApplyThemeEverywhere, CalculateFolderSizes, CloseTab, EditPath, EmptyTrash, GoBack, GoForward,
-    GoToFolder, IconCaptionLines, IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard, KeyboardShortcuts,
-    Minimize, MoveDown, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover, PathUnhover,
-    PluginCommand, PluginCommandResult, PreviousTab, ResetFolderView, SearchEverything, SearchHome, ShowCommandPalette,
-    ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, TogglePreview, UseViewAsDefaults,
-    ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList, WhyThisView, Zoom,
+    AddToSidebar, ApplyThemeEverywhere, CalculateFolderSizes, CloseTab, EditPath, EditSavedSearch, EmptyTrash, GoBack,
+    GoForward, GoToFolder, IconCaptionLines, IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard,
+    KeyboardShortcuts, Minimize, MoveDown, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover,
+    PathUnhover, PluginCommand, PluginCommandResult, PreviousTab, RemoveSavedSearch, ResetFolderView, SaveSearch,
+    SearchEverything, SearchHome, ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus,
+    ToggleHiddenFiles, TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList,
+    WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -179,6 +180,9 @@ pub struct CrowWindow {
     path_hovered: bool,
     /// A deferred re-focus into an open overlay is already scheduled.
     refocus_overlay: bool,
+    /// The window was active last frame; regaining focus refreshes a visible saved
+    /// destination (backstop for broad scopes with no watcher).
+    window_was_active: bool,
     /// The contextual tip on screen, if any.
     tip: Option<TipId>,
     /// Consecutive filter sessions that ended with no matches (U9's ⌘F tip).
@@ -301,6 +305,7 @@ impl CrowWindow {
             path_edit: None,
             path_hovered: false,
             refocus_overlay: false,
+            window_was_active: false,
             tip: None,
             zero_streak: ZeroMatchStreak::new(),
             walk_visit: None,
@@ -313,11 +318,31 @@ impl CrowWindow {
         self.tabs.active()
     }
 
+    /// The search session that owns the center: the transient Cmd-F overlay, or
+    /// the active tab's saved-query destination.
+    fn active_search(&self, cx: &App) -> Option<Entity<SearchView>> {
+        self.search.clone().or_else(|| self.pane().read(cx).saved_session())
+    }
+
+    /// Tell every tab whether it is visible; hidden saved sessions defer reruns.
+    fn sync_tab_activity(&self, cx: &mut App) {
+        let active = self.tabs.active_index();
+        for (index, (_, pane)) in self.tabs.iter().enumerate() {
+            pane.update(cx, |pane, cx| pane.set_tab_active(index == active, cx));
+        }
+    }
+
     /// Focus whatever fills the center: the search field while search covers the pane,
     /// else the active pane. Never the pane under an open search, which isn't rendered.
     fn focus_center(&self, window: &mut Window, cx: &mut App) {
         if let Some(search) = &self.search {
             search.update(cx, |search, cx| search.focus_input(window, cx));
+            return;
+        }
+        if let Some(search) = self.pane().read(cx).saved_session() {
+            if !search.update(cx, |search, cx| search.focus_results(window, cx)) {
+                search.update(cx, |search, cx| search.focus_input(window, cx));
+            }
             return;
         }
         let handle = self.pane().read(cx).focus_handle().clone();
@@ -400,6 +425,7 @@ impl CrowWindow {
             .push(cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)));
         self.panes.borrow_mut().push(pane.downgrade());
         self.tabs.open(pane);
+        self.sync_tab_activity(cx);
         self.announce_active_scope(cx);
         self.focus_center(window, cx);
         cx.notify();
@@ -429,6 +455,7 @@ impl CrowWindow {
             window.remove_window();
             return;
         }
+        self.sync_tab_activity(cx);
         self.announce_active_scope(cx);
         self.focus_center(window, cx);
         cx.notify();
@@ -443,6 +470,7 @@ impl CrowWindow {
         }
         self.close_tip(cx);
         self.tabs.cycle(delta);
+        self.sync_tab_activity(cx);
         if self.tabs.len() > 1 {
             self.announce_active_scope(cx);
         }
@@ -549,6 +577,9 @@ impl CrowWindow {
     /// View ▸ Calculate Folder Sizes: measure the current folder's folders once,
     /// even when `folder_sizes = "off"`.
     fn calculate_folder_sizes(&mut self, _: &CalculateFolderSizes, _: &mut Window, cx: &mut Context<Self>) {
+        if self.pane().read(cx).folder().is_none() {
+            return;
+        }
         let paths = self.pane().read(cx).folder_paths(cx);
         let service = cx.global::<crate::folder_sizes::SizeService>().0.clone();
         service.update(cx, |service, cx| service.measure_once(&paths, cx));
@@ -564,7 +595,7 @@ impl CrowWindow {
                 }
                 // The item's own folder is often the one shown: focus the list
                 // without adding a duplicate history step.
-                if *path != self.pane().read(cx).current_dir(cx) {
+                if self.pane().read(cx).folder() != Some(path.as_path()) {
                     let path = path.clone();
                     self.pane().update(cx, |pane, cx| pane.navigate(path, cx));
                 }
@@ -582,8 +613,9 @@ impl CrowWindow {
             let info = info.read(cx);
             (info.visible(), info.tab())
         };
+        let active_search = self.active_search(cx);
         let diff = if visible && tab == InfoTab::GitDiff && crate::git::provider_enabled(cx) {
-            let entry = if let Some(search) = &self.search {
+            let entry = if let Some(search) = &active_search {
                 search.read(cx).preview_parts().map(|(entry, _)| entry)
             } else {
                 self.pane().read(cx).cursor_entry(cx)
@@ -610,7 +642,7 @@ impl CrowWindow {
         if self.sheet.is_some() || self.palette.is_some() || self.picker.is_some() || self.why.is_some() {
             return;
         }
-        let (target, key) = if let Some(search) = &self.search {
+        let (target, key) = if let Some(search) = &active_search {
             search.read(cx).info_target()
         } else if self.sidebar.read(cx).focus_handle(cx).is_focused(window) {
             self.sidebar_info_target(cx)
@@ -642,7 +674,7 @@ impl CrowWindow {
     /// Shift-Cmd-G: the palette with this folder's path typed, ready for a child's
     /// name, Tab completion or a whole new path (Finder's Go to Folder, in Cmd-K).
     fn go_to_folder(&mut self, _: &GoToFolder, window: &mut Window, cx: &mut Context<Self>) {
-        let current = home_relative(&self.pane().read(cx).current_dir(cx));
+        let current = self.pane().read(cx).folder().map(home_relative).unwrap_or_else(|| "~/".to_owned());
         let typed = if current.ends_with('/') { current } else { format!("{current}/") };
         self.open_palette(&typed, window, cx);
     }
@@ -650,8 +682,8 @@ impl CrowWindow {
     /// Tab completion for a typed path, off the main thread. The palette and the
     /// bar's field share it.
     fn complete_typed_path(&self, typed: String, cx: &mut Context<Self>) -> gpui::Task<Option<String>> {
-        let cwd = self.pane().read(cx).current_dir(cx);
         let home = cx.global::<Ui>().home.clone();
+        let cwd = self.pane().read(cx).folder().map(Path::to_path_buf).unwrap_or_else(|| home.clone());
         cx.background_spawn(async move { crow_core::complete_typed(&typed, &cwd, &home) })
     }
 
@@ -695,12 +727,12 @@ impl CrowWindow {
         self.pane().update(cx, |pane, cx| pane.open_parent(cx));
     }
 
-    fn go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
-        self.pane().update(cx, |pane, cx| pane.go_back(cx));
+    fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| pane.go_back(window, cx));
     }
 
-    fn go_forward(&mut self, _: &GoForward, _: &mut Window, cx: &mut Context<Self>) {
-        self.pane().update(cx, |pane, cx| pane.go_forward(cx));
+    fn go_forward(&mut self, _: &GoForward, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| pane.go_forward(window, cx));
     }
 
     // ----- rendering -----
@@ -713,10 +745,11 @@ impl CrowWindow {
             let pane = self.pane().read(cx);
             let back_label = pane
                 .back_target()
-                .map_or_else(|| "Back".to_owned(), |dir| format!("Back to {}", crate::style::display_name(dir)));
-            let forward_label = pane
-                .forward_target()
-                .map_or_else(|| "Forward".to_owned(), |dir| format!("Forward to {}", crate::style::display_name(dir)));
+                .map_or_else(|| "Back".to_owned(), |location| format!("Back to {}", self.location_name(location, cx)));
+            let forward_label = pane.forward_target().map_or_else(
+                || "Forward".to_owned(),
+                |location| format!("Forward to {}", self.location_name(location, cx)),
+            );
             (pane.can_go_back(), pane.can_go_forward(), pane.mode(), back_label, forward_label)
         };
         let fg = color(theme.role("fg"));
@@ -764,11 +797,13 @@ impl CrowWindow {
             .gap(px(2.))
             .child(
                 nav_button("back", "Back".to_owned(), back_label, Glyph::Back, back, &GoBack, cx)
-                    .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_back(cx)))),
+                    .on_click(cx.listener(|this, _, window, cx| this.pane().update(cx, |p, cx| p.go_back(window, cx)))),
             )
             .child(
                 nav_button("forward", "Forward".to_owned(), forward_label, Glyph::Forward, forward, &GoForward, cx)
-                    .on_click(cx.listener(|this, _, _, cx| this.pane().update(cx, |p, cx| p.go_forward(cx)))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.pane().update(cx, |p, cx| p.go_forward(window, cx))),
+                    ),
             );
 
         let title_label = div()
@@ -931,8 +966,7 @@ impl CrowWindow {
             with_action_tooltip(search_field, "Search names and contents", &ShowSearch, KeyScope::Window, cx);
 
         let band = self
-            .search
-            .as_ref()
+            .active_search(cx)
             .map(|search| search.update(cx, |search, cx| search.render_band(window, cx).into_any_element()));
 
         div()
@@ -950,8 +984,10 @@ impl CrowWindow {
             .border_b_1()
             .border_color(color(theme.role("border")))
             .child(nav)
-            .when(self.search.is_some(), |bar| bar.when_some(band, |bar, band| bar.child(band)))
-            .when(self.search.is_none(), |bar| bar.child(title_label).child(views).child(go_to).child(search_field))
+            .when(self.active_search(cx).is_some(), |bar| bar.when_some(band, |bar, band| bar.child(band)))
+            .when(self.active_search(cx).is_none(), |bar| {
+                bar.child(title_label).child(views).child(go_to).child(search_field)
+            })
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -962,7 +998,10 @@ impl CrowWindow {
             .tabs
             .iter()
             .enumerate()
-            .map(|(i, (_, pane))| (i, crate::style::display_name(&pane.read(cx).current_dir(cx))))
+            .map(|(i, (_, pane))| {
+                let location = pane.read(cx).location().clone();
+                (i, self.location_name(&location, cx))
+            })
             .collect();
         div()
             .id("tabs")
@@ -1002,6 +1041,7 @@ impl CrowWindow {
                         }
                         this.close_tip(cx);
                         this.tabs.activate(i);
+                        this.sync_tab_activity(cx);
                         this.announce_active_scope(cx);
                         this.focus_center(window, cx);
                         cx.notify();
@@ -1091,7 +1131,7 @@ impl CrowWindow {
         if self.path_edit.is_some() {
             return BarFocus::PathEdit;
         }
-        if let Some(search) = &self.search {
+        if let Some(search) = self.active_search(cx) {
             return if search.read(cx).input_focused(window, cx) {
                 BarFocus::SearchField
             } else {
@@ -1137,7 +1177,8 @@ impl CrowWindow {
         let type_select = (focus == BarFocus::List).then(|| pane.type_select_prefix(cx)).flatten().map(Into::into);
 
         let sidebar_focused = focus == BarFocus::Sidebar;
-        let count = if let Some(search) = &self.search {
+        let active_search = self.active_search(cx);
+        let count = if let Some(search) = &active_search {
             let search = search.read(cx);
             search_count(search.result_count(), search.selected_count(), search.is_searching(), !search.has_query(cx))
         } else if sidebar_focused {
@@ -1150,7 +1191,13 @@ impl CrowWindow {
         };
 
         // Q8: search mode shows the selected result's path; otherwise the cursor's.
-        let (target, last_is_dir) = self.bar_target(pane, cx);
+        let virtual_path = active_search.as_ref().and_then(|search| {
+            let search = search.read(cx);
+            (search.is_saved_destination() && search.selected_entry().is_none())
+                .then(|| SharedString::from(search.title().to_owned()))
+        });
+        let (target, last_is_dir) =
+            if virtual_path.is_some() { (PathBuf::new(), false) } else { self.bar_target(pane, cx) };
         let parts: Vec<(String, std::path::PathBuf)> = crate::style::display_components(&target)
             .iter()
             .map(|(name, path)| (crate::style::display_text(name).into_owned(), path.clone()))
@@ -1200,6 +1247,7 @@ impl CrowWindow {
             error,
             count,
             path,
+            virtual_path,
             editing: self.path_edit.as_ref().map(|edit| edit.input.clone()),
             transient_max: None,
             pill_width: px(0.),
@@ -1217,7 +1265,7 @@ impl CrowWindow {
             && self.sheet.is_none()
             && self.picker.is_none()
         {
-            let surface = self.search.as_ref().map_or_else(
+            let surface = self.active_search(cx).map_or_else(
                 || self.pane().read(cx).current_plugin_surface(cx),
                 |search| search.read(cx).plugin_surface(),
             );
@@ -1237,7 +1285,7 @@ impl CrowWindow {
     /// selected search result, else the cursor entry, else the folder. ⌘L edits
     /// this path, so entering edit mode never changes what the bar says.
     fn bar_target(&self, pane: &Pane, cx: &App) -> (PathBuf, bool) {
-        if let Some(entry) = self.search.as_ref().and_then(|search| search.read(cx).selected_entry()) {
+        if let Some(entry) = self.active_search(cx).as_ref().and_then(|search| search.read(cx).selected_entry()) {
             return entry;
         }
         pane.cursor_entry(cx).map_or_else(|| (pane.current_dir(cx), true), |entry| (entry.path, entry.is_dir))
@@ -1373,6 +1421,8 @@ enum Sheet {
         show: FocusHandle,
         no: FocusHandle,
     },
+    /// File ▸ Save Search… and the sidebar's Edit Saved Search… form.
+    SavedQuery(Box<saved_query_form::SavedQueryForm>),
 }
 
 impl Sheet {
@@ -1383,11 +1433,26 @@ impl Sheet {
             | Sheet::ConfirmEmptyTrash { focus, .. }
             | Sheet::StopOperation { focus, .. }
             | Sheet::Onboarding { focus, .. } => focus,
+            Sheet::SavedQuery(form) => &form.focus,
         }
     }
 }
 
 impl CrowWindow {
+    /// A location's human name: a folder's last component, a saved title, or a
+    /// clear unavailable label. Never a made-up path for a virtual destination.
+    fn location_name(&self, location: &Location, cx: &App) -> String {
+        match location {
+            Location::Folder(path) => crate::style::display_name(path),
+            Location::SavedQuery(id) => cx
+                .global::<Ui>()
+                .saved_queries
+                .get(id)
+                .map_or_else(|| "Saved search (unavailable)".to_owned(), |query| query.name.clone()),
+            Location::Tag(id) => id.as_str().to_owned(),
+        }
+    }
+
     fn on_pane_event(&mut self, event: &PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PaneEvent::Run(request) => self.run_request(request.clone(), window, cx),
@@ -1409,6 +1474,17 @@ impl CrowWindow {
                 }
                 let dir = dir.clone();
                 self.sidebar.update(cx, |s, cx| s.set_current(dir, cx));
+            }
+            PaneEvent::SaveSearch => self.save_search(&SaveSearch, window, cx),
+            PaneEvent::DestinationChanged => {
+                operations::clear_message(cx);
+                self.close_tip(cx);
+                self.close_path_edit(false, window, cx);
+                let location = self.pane().read(cx).location().clone();
+                self.sidebar.update(cx, |s, cx| s.set_current_location(location, cx));
+                self.announce_active_scope(cx);
+                self.sync_info_target(window, cx);
+                cx.notify();
             }
             PaneEvent::Mark { key, set } => self.mark(*key, *set, window, cx),
             PaneEvent::FilterEnded { empty, matches } => {
@@ -1483,7 +1559,9 @@ impl CrowWindow {
 
     fn on_sidebar_event(&mut self, event: &SidebarEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            SidebarEvent::Show(dir) => {
+            SidebarEvent::Show(location) => {
+                // An arrow over a virtual destination only moves the sidebar cursor.
+                let Location::Folder(dir) = location else { return };
                 let dir = dir.clone();
                 if self.search.is_some() {
                     self.close_search(window, cx);
@@ -1495,22 +1573,51 @@ impl CrowWindow {
                 window.focus(&sidebar, cx);
                 cx.notify();
             }
-            SidebarEvent::Open(dir) => {
-                let dir = dir.clone();
+            SidebarEvent::Open(location) => {
                 if self.search.is_some() {
                     self.close_search(window, cx);
                 }
-                self.pane().update(cx, |pane, cx| pane.open_from_sidebar(dir, cx));
-                self.record_walk_visit(cx);
-                self.focus_center(window, cx);
+                match location {
+                    Location::Folder(dir) => {
+                        let dir = dir.clone();
+                        self.pane().update(cx, |pane, cx| pane.open_from_sidebar(dir, cx));
+                        self.record_walk_visit(cx);
+                        self.focus_center(window, cx);
+                    }
+                    Location::SavedQuery(id) => {
+                        self.walk_visit = None;
+                        let id = id.clone();
+                        self.pane().update(cx, |pane, cx| pane.open_saved_query(id, window, cx));
+                    }
+                    Location::Tag(_) => {}
+                }
             }
-            SidebarEvent::OpenInNewTab(dir) => {
+            SidebarEvent::OpenInNewTab(location) => {
                 if self.search.is_some() {
                     self.close_search(window, cx);
                 }
-                self.open_tab_at(dir.clone(), window, cx);
+                let origin = self
+                    .pane()
+                    .read(cx)
+                    .folder()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| cx.global::<Ui>().home.clone());
+                match location {
+                    Location::Folder(dir) => self.open_tab_at(dir.clone(), window, cx),
+                    Location::SavedQuery(id) => {
+                        self.open_tab_at(origin, window, cx);
+                        let id = id.clone();
+                        self.pane().update(cx, |pane, cx| pane.open_saved_query(id, window, cx));
+                    }
+                    Location::Tag(_) => {}
+                }
             }
             SidebarEvent::Run(request) => self.run_request(request.clone(), window, cx),
+            SidebarEvent::EditSavedQuery(id) => self.edit_saved_search_by_id(id.clone(), window, cx),
+            SidebarEvent::RemoveSavedQuery(id) => {
+                ui::remove_saved_query(id.clone(), None, cx);
+                cx.notify();
+            }
             SidebarEvent::Message(text, error) => {
                 operations::message(text.clone(), *error, cx);
                 cx.notify();
@@ -1561,6 +1668,9 @@ impl CrowWindow {
     // ----- view settings -----
 
     fn why_this_view(&mut self, _: &WhyThisView, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pane().read(cx).folder().is_none() {
+            return;
+        }
         if self.why.take().is_some() {
             self.focus_center(window, cx);
         } else {
@@ -1578,13 +1688,13 @@ impl CrowWindow {
     }
 
     fn use_view_as_defaults(&mut self, _: &UseViewAsDefaults, _: &mut Window, cx: &mut Context<Self>) {
-        let dir = self.pane().read(cx).dir().to_path_buf();
+        let Some(dir) = self.pane().read(cx).folder().map(Path::to_path_buf) else { return };
         ui::use_view_as_defaults(dir, cx);
         operations::message("This view is now the default for all folders", false, cx);
     }
 
     fn reset_folder_view(&mut self, _: &ResetFolderView, _: &mut Window, cx: &mut Context<Self>) {
-        let dir = self.pane().read(cx).dir().to_path_buf();
+        let Some(dir) = self.pane().read(cx).folder().map(Path::to_path_buf) else { return };
         ui::reset_view(dir, cx);
     }
 
@@ -1832,6 +1942,14 @@ impl CrowWindow {
 
     fn show_search(&mut self, _: &ShowSearch, window: &mut Window, cx: &mut Context<Self>) {
         crate::usage::record(&ShowSearch, cx);
+        if let Some(search) = self.pane().read(cx).saved_session() {
+            // Cmd-F in a saved destination refocuses its own session; it does not
+            // open the transient overlay over the tab.
+            search.update(cx, |search, cx| search.select_all_input(window, cx));
+            crate::tips::key_used(TipId::Search, cx);
+            cx.notify();
+            return;
+        }
         if let Some(search) = &self.search {
             search.update(cx, |search, cx| search.select_all_input(window, cx));
             crate::tips::key_used(TipId::Search, cx);
@@ -1857,6 +1975,14 @@ impl CrowWindow {
     }
 
     fn search_everything(&mut self, _: &SearchEverything, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(search) = self.pane().read(cx).saved_session() {
+            search.update(cx, |search, cx| {
+                let on = !search.everything();
+                search.set_everything(on, cx);
+                search.focus_input(window, cx);
+            });
+            return;
+        }
         if let Some(search) = &self.search {
             search.update(cx, |search, cx| {
                 let on = !search.everything();
@@ -1872,6 +1998,10 @@ impl CrowWindow {
     /// Search Home. With a search open it switches that search's scope; without
     /// one it opens a search already scoped Home, as Search Everything does.
     fn search_home(&mut self, _: &SearchHome, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(search) = self.pane().read(cx).saved_session() {
+            search.update(cx, |search, cx| search.search_home(cx));
+            return;
+        }
         if let Some(search) = &self.search {
             search.update(cx, |search, cx| search.search_home(cx));
             return;
@@ -1892,8 +2022,7 @@ impl CrowWindow {
             return false;
         }
         let (home, show_hidden) = (cx.global::<Ui>().home.clone(), self.show_hidden);
-        let search =
-            cx.new(|cx| SearchView::new(start.folder, home, show_hidden, start.query, start.everything, window, cx));
+        let search = cx.new(|cx| SearchView::new(start.folder, home, show_hidden, start.query, start.everything, cx));
         self._subscriptions.push(cx.observe(&search, |_, _, cx| cx.notify()));
         self._subscriptions.push(cx.subscribe_in(&search, window, |this, search, event, window, cx| {
             this.on_search_event(search.clone(), event, window, cx)
@@ -1953,6 +2082,7 @@ impl CrowWindow {
                 self.run_request(request.clone(), window, cx);
             }
             SearchEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
+            SearchEvent::Save => self.save_search(&SaveSearch, window, cx),
         }
     }
 
@@ -2209,6 +2339,9 @@ impl CrowWindow {
             CommandId::ShowSearch => self.show_search(&ShowSearch, window, cx),
             CommandId::SearchEverything => self.search_everything(&SearchEverything, window, cx),
             CommandId::SearchHome => self.search_home(&SearchHome, window, cx),
+            CommandId::SaveSearch => self.save_search(&SaveSearch, window, cx),
+            CommandId::EditSavedSearch => self.edit_saved_search(&EditSavedSearch, window, cx),
+            CommandId::RemoveSavedSearch => self.remove_saved_search(&RemoveSavedSearch, window, cx),
             // Reached from the palette? No: ShowCommandPalette is menu-only and SearchReveal needs results.
             CommandId::ShowCommandPalette | CommandId::SearchReveal => {}
             CommandId::ToggleActivity => {
@@ -2367,6 +2500,15 @@ impl CrowWindow {
 
 impl Render for CrowWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = window.is_window_active();
+        if active
+            && !self.window_was_active
+            && !self.bench
+            && let Some(search) = self.pane().read(cx).saved_session()
+        {
+            search.update(cx, |search, cx| search.refresh_now(cx));
+        }
+        self.window_was_active = active;
         // A deferred focus assignment (a new item's rename, the filter handing off
         // to the list) must not take focus from an overlay opened in between: the
         // keys the overlay blocks would land in a field behind it. This is the same
@@ -2392,15 +2534,28 @@ impl Render for CrowWindow {
         let theme = ui.theme.clone();
         let show_preview = self.info.read(cx).visible();
         let (font, font_size) = (ui_font(&ui.settings.font_family), ui.settings.font_size);
-        let title = crate::style::display_name(&self.pane().read(cx).current_dir(cx));
+        let title = {
+            let pane = self.pane().read(cx);
+            if self.search.is_some() {
+                crate::style::display_name(&pane.current_dir(cx))
+            } else {
+                self.location_name(pane.location(), cx)
+            }
+        };
         // The single-folder views share the preview column; column view has its own.
         let mode = self.pane().read(cx).mode();
         let list_view = mode != ViewMode::Columns;
         window.set_window_title(&title);
         let title_bar = self.render_title_bar(&title, window, cx);
         let tab_bar = (self.tabs.len() > 1).then(|| self.render_tab_bar(cx));
-        let current = self.pane().read(cx).current_dir(cx);
-        self.sidebar.update(cx, |s, cx| s.set_current(current, cx));
+        let (current, active_saved) = {
+            let pane = self.pane().read(cx);
+            (pane.location().clone(), pane.location().saved_query_id().cloned())
+        };
+        self.sidebar.update(cx, |s, cx| {
+            s.set_current_location(current, cx);
+            s.set_active_saved(active_saved, cx);
+        });
         let sidebar_focused = self.sidebar.read(cx).focus_handle(cx).is_focused(window);
         if self.pane().read(cx).sidebar_walk() && !sidebar_focused {
             self.pane().update(cx, |pane, _| pane.end_sidebar_walk());
@@ -2410,11 +2565,12 @@ impl Render for CrowWindow {
             let (dir, revision, dirs) = self.pane().read(cx).sidebar_plugin_dirs(walking, cx);
             self.sidebar.update(cx, |s, cx| s.set_plugin_dirs(dir, dirs, revision, cx));
         }
+        let active_search = self.active_search(cx);
         self.side_panes.layout(
             window.viewport_size().width,
             cx.global::<Ui>().settings.window.sidebar_width,
             self.info.read(cx).preferred_width,
-            show_preview && self.search.is_none() && mode == ViewMode::Gallery,
+            show_preview && active_search.is_none() && mode == ViewMode::Gallery,
         );
         let sidebar = div()
             .relative()
@@ -2423,13 +2579,13 @@ impl Render for CrowWindow {
             .w(self.side_panes.left_width())
             .child(self.sidebar.clone())
             .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme));
-        let search_preview = self.search.as_ref().and_then(|search| search.read(cx).preview_parts());
+        let search_preview = active_search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);
         // A narrow search hides the column by default; ⌘I or ⇧⌘P still opens it.
         let explicit = self.info.read(cx).explicit();
         let preview: Option<gpui::AnyElement> = if !show_preview {
             None
-        } else if self.search.is_some() {
+        } else if active_search.is_some() {
             if narrow && !explicit { None } else { search_preview }.map(|(entry, preview)| {
                 let column = self.render_preview_pane(Some(&entry), preview.as_ref(), &theme, cx);
                 if narrow {
@@ -2604,6 +2760,9 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::show_search))
             .on_action(cx.listener(Self::search_everything))
             .on_action(cx.listener(Self::search_home))
+            .on_action(cx.listener(Self::save_search))
+            .on_action(cx.listener(Self::edit_saved_search))
+            .on_action(cx.listener(Self::remove_saved_search))
             .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, _, cx| {
                 this.show_activity = !this.show_activity;
                 cx.notify();
@@ -2840,6 +2999,7 @@ pub(crate) mod git_review;
 pub(crate) mod operation_ui;
 mod palette_view;
 mod path_edit;
+mod saved_query_form;
 pub(crate) mod side_panes;
 
 #[cfg(test)]

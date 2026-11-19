@@ -11,7 +11,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use crow_core::{Exclude, KeymapLayer, SearchMatch, Selection, SetName};
+use crow_core::{
+    Exclude, KeymapLayer, SavedExclusions, SavedKind, SavedMatch, SavedQuery, SavedQueryId, SavedScope, SearchMatch,
+    Selection, SetName,
+};
 use crow_fs::ops::Request;
 use crow_fs::{AllowAll, CloudStatus, Entry, ReadGate};
 use crow_search::{Control, Hit, HitKind, Query, RuleSet, Skip, SkipReason, Summary};
@@ -129,15 +132,56 @@ fn widen_options(scope: Scope, folder_is_home: bool, matching: Match, liftable: 
 pub enum SearchEvent {
     Close,
     FocusResults,
-    Open { path: PathBuf, is_dir: bool },
+    Open {
+        path: PathBuf,
+        is_dir: bool,
+    },
     Reveal(PathBuf),
     Run(Request),
-    Copy { paths: Arc<[PathBuf]>, cut: bool },
+    Copy {
+        paths: Arc<[PathBuf]>,
+        cut: bool,
+    },
+    /// The band's Save/Update button.
+    Save,
 }
 
 impl EventEmitter<SearchEvent> for SearchView {}
 
 pub struct SearchView {
+    /// The saved record this session shows; `None` is the transient Cmd-F overlay.
+    saved: Option<SavedQuery>,
+    /// A unique owner id, so a reply can name its tab/session.
+    session_id: u64,
+    /// Bumped when the persisted spec is replaced by an external edit.
+    spec_generation: u64,
+    /// The clock captured once at the start of the current run; the age cutoff and
+    /// the Spotlight client-side filter both use it.
+    run_started: SystemTime,
+    /// The saved-queries generation this session last applied.
+    saved_generation: u64,
+    /// The display title: the saved name, or the folder's name for the overlay.
+    title: String,
+    /// The predicates resolved from the saved record, evaluated by the engine.
+    predicates: crow_search::Predicates,
+    /// Predicate-only results: no text, a metadata hit kind.
+    metadata_only: bool,
+    /// The engine's metadata result budget ended the scan.
+    metadata_capped: bool,
+    /// Paths seen by the current run, for refresh pruning.
+    seen: std::collections::HashSet<PathBuf>,
+    /// A refresh keeps the old snapshot until a complete generation proves removals.
+    refreshing: bool,
+    /// The last accepted snapshot is older than the file system or a failed run.
+    stale: bool,
+    /// The session is the active visible destination (watchers rerun only then).
+    active: bool,
+    /// A watcher or config change arrived while inactive.
+    dirty: bool,
+    /// The recursive watcher for a saved destination's bounded root.
+    watch: Option<crow_macos::FsEvents>,
+    watch_root: Option<PathBuf>,
+    watch_debounce_running: bool,
     folder: PathBuf,
     /// The folder's own name, for the field's placeholder.
     folder_label: String,
@@ -170,6 +214,7 @@ pub struct SearchView {
     first_hit_ms: Option<u64>,
     control: Control,
     generation: u64,
+    run_id: RunId,
     exclude_generation: u64,
     /// The compiled rules for `exclude_generation`; the glob compile is ~14 ms.
     rules: Option<(u64, Arc<RuleSet>)>,
@@ -212,6 +257,11 @@ pub struct SearchView {
     _cloud_subscription: Option<Subscription>,
     /// Repaint the band's focus ring when the field or the results take focus.
     _focus_subscriptions: Vec<Subscription>,
+    /// Focus subscriptions need a window; attach once on the first render, so a
+    /// saved-query destination can be built from a navigation action.
+    focus_attached: bool,
+    /// The retained metadata row order once the engine finishes a predicate-only run.
+    metadata_order_dirty: bool,
 }
 
 struct LoadedPreview {
@@ -249,11 +299,32 @@ enum ExampleAction {
     Everything,
 }
 
+/// Names every batch and completion. The session id separates tabs, the location
+/// id keeps a removed/renamed record distinct, and the two generations reject an
+/// obsolete run inside one session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RunId {
+    session: u64,
+    location: Option<SavedQueryId>,
+    spec_generation: u64,
+    run_generation: u64,
+}
+
 enum Update {
-    Hits(Vec<Hit>),
-    Done(Summary),
-    Spotlight(Vec<crow_macos::SpotlightHit>),
-    SpotlightDone(Result<(), String>),
+    Hits(Vec<Hit>, RunId),
+    Done(Summary, RunId),
+    Spotlight(Vec<crow_macos::SpotlightHit>, RunId),
+    SpotlightDone(Result<(), String>, RunId),
+}
+
+impl Update {
+    fn run_id(&self) -> &RunId {
+        match self {
+            Update::Hits(_, run) | Update::Done(_, run) | Update::Spotlight(_, run) | Update::SpotlightDone(_, run) => {
+                run
+            }
+        }
+    }
 }
 
 impl Drop for SearchView {
@@ -321,35 +392,106 @@ impl UniformListDecoration for PluginSearchRows {
     }
 }
 
+fn next_session_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+pub(crate) fn spotlight_expression_for(predicates: &crow_search::Predicates) -> Option<String> {
+    let content_type = match predicates.kind.as_ref() {
+        Some(crow_search::Kind::Folder) => Some("public.folder"),
+        Some(crow_search::Kind::File) => Some("public.data"),
+        Some(crow_search::Kind::Image) => Some("public.image"),
+        Some(crow_search::Kind::Pdf) => Some("com.adobe.pdf"),
+        Some(crow_search::Kind::Audio) => Some("public.audio"),
+        Some(crow_search::Kind::Video) => Some("public.movie"),
+        Some(crow_search::Kind::Archive) => Some("public.archive"),
+        Some(crow_search::Kind::Text) => Some("public.text"),
+        Some(crow_search::Kind::Extension(_)) | None => None,
+    };
+    let extension = match predicates.kind.as_ref() {
+        Some(crow_search::Kind::Extension(extension)) => Some(extension.clone()),
+        _ => None,
+    };
+    crow_macos::SpotlightPredicate {
+        content_type,
+        extension,
+        modified_within_secs: predicates.modified_within.map(|window| window.as_secs()),
+    }
+    .expression()
+}
+
+pub(crate) fn predicates_for_saved(saved: &SavedQuery) -> crow_search::Predicates {
+    let kind = saved.kind.as_ref().map(|kind| match kind {
+        SavedKind::Folder => crow_search::Kind::Folder,
+        SavedKind::File => crow_search::Kind::File,
+        SavedKind::Image => crow_search::Kind::Image,
+        SavedKind::Pdf => crow_search::Kind::Pdf,
+        SavedKind::Audio => crow_search::Kind::Audio,
+        SavedKind::Video => crow_search::Kind::Video,
+        SavedKind::Archive => crow_search::Kind::Archive,
+        SavedKind::Text => crow_search::Kind::Text,
+        SavedKind::Extension(extension) => crow_search::Kind::Extension(extension.clone()),
+    });
+    crow_search::Predicates { kind, modified_within: saved.modified_within().ok().flatten() }
+}
+
 impl SearchView {
+    /// The transient Cmd-F overlay: the panel's scope, match and hidden policy
+    /// start from the window and settings, and no saved record owns it.
     pub fn new(
         folder: PathBuf,
         home: PathBuf,
         show_hidden: bool,
         query: String,
         everything: bool,
-        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(folder, home, show_hidden, query, everything, None, cx)
+    }
+
+    /// A saved-query destination owned by a tab. Scope, match, hidden and
+    /// exclusion policy come from the record; the input starts with its text.
+    pub fn saved(query: SavedQuery, home: PathBuf, _show_hidden: bool, cx: &mut Context<Self>) -> Self {
+        let folder = match query.scope {
+            SavedScope::Folder => query.root_path(&home).ok().flatten().unwrap_or_else(|| home.clone()),
+            SavedScope::Home | SavedScope::ThisMac => home.clone(),
+        };
+        let query_text = query.text.clone();
+        let everything = query.exclusions == SavedExclusions::Everything;
+        Self::build(folder, home, query.enter_hidden_folders, query_text, everything, Some(query), cx)
+    }
+
+    fn build(
+        folder: PathBuf,
+        home: PathBuf,
+        show_hidden: bool,
+        query: String,
+        everything: bool,
+        saved: Option<SavedQuery>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.on_release(Self::clear_preview).detach();
         let folder_label = crate::style::display_name(&folder);
-        let placeholder = Scope::Folder.label(&folder_label);
+        let placeholder = match &saved {
+            Some(saved) => format!("Search {}", saved.name),
+            None => Scope::Folder.label(&folder_label).to_string(),
+        };
         let input = cx.new(|cx| TextInput::new(query.clone(), placeholder, cx).bare().with_role(Role::SearchInput));
         let focus = cx.focus_handle();
-        let input_focus = input.read(cx).focus_handle(cx);
-        let focus_subscriptions = vec![
-            cx.on_focus(&input_focus, window, |_, _, cx| cx.notify()),
-            cx.on_blur(&input_focus, window, |_, _, cx| cx.notify()),
-        ];
-        let subscription = cx.subscribe_in(&input, window, |this, input, event, window, cx| match event {
+        let subscription = cx.subscribe(&input, |this, input, event, cx| match event {
             TextInputEvent::Changed => {
                 let query = input.read(cx).text().to_owned();
                 this.start_search(&query, cx);
             }
             // Return moves into the results, on the first one; Return there opens it.
-            TextInputEvent::Confirmed => this.focus_results_from_field(&SearchFocusResults, window, cx),
+            TextInputEvent::Confirmed => cx.emit(SearchEvent::FocusResults),
             TextInputEvent::Cancelled => {
                 if this.show_skipped {
+                    this.show_skipped = false;
+                    cx.notify();
+                } else if this.saved.is_some() {
+                    // Q remains the tab's location; only the field's local state changes.
                     this.show_skipped = false;
                     cx.notify();
                 } else {
@@ -361,20 +503,36 @@ impl SearchView {
         });
         let exclude_generation = cx.global::<Ui>().exclude_generation;
         let skip_label_value = skip_label(&cx.global::<Ui>().exclude);
-        let search_includes_hidden = cx.global::<Ui>().settings.search_includes_hidden;
-        let matching = match cx.global::<Ui>().settings.search_match {
-            SearchMatch::All => Match::All,
-            SearchMatch::Names => Match::Names,
-            SearchMatch::Contents => Match::Contents,
-        };
+        let search_includes_hidden =
+            saved.as_ref().map_or(cx.global::<Ui>().settings.search_includes_hidden, |saved| saved.include_hidden);
+        let matching =
+            match saved.as_ref().map_or(cx.global::<Ui>().settings.search_match, |saved| match saved.matching {
+                SavedMatch::All => SearchMatch::All,
+                SavedMatch::Names => SearchMatch::Names,
+                SavedMatch::Contents => SearchMatch::Contents,
+            }) {
+                SearchMatch::All => Match::All,
+                SearchMatch::Names => Match::Names,
+                SearchMatch::Contents => Match::Contents,
+            };
+        let scope = saved.as_ref().map_or(Scope::Folder, |saved| match saved.scope {
+            SavedScope::Folder => Scope::Folder,
+            SavedScope::Home => Scope::Home,
+            SavedScope::ThisMac => Scope::ThisMac,
+        });
+        let saved_generation = cx.global::<Ui>().saved_queries_generation;
         let ui_subscription = cx.observe_global::<Ui>(move |this, cx| {
-            let generation = cx.global::<Ui>().exclude_generation;
-            if this.exclude_generation != generation {
-                this.exclude_generation = generation;
+            let exclude_generation = cx.global::<Ui>().exclude_generation;
+            if this.exclude_generation != exclude_generation {
+                this.exclude_generation = exclude_generation;
                 this.skip_label = skip_label(&cx.global::<Ui>().exclude);
-                let query = this.input.read(cx).text().to_owned();
-                if !query.is_empty() {
-                    this.start_search(&query, cx);
+                this.refresh_now(cx);
+            }
+            if this.saved.is_some() {
+                let generation = cx.global::<Ui>().saved_queries_generation;
+                if this.saved_generation != generation {
+                    this.saved_generation = generation;
+                    this.reload_saved_spec(cx);
                 }
             }
         });
@@ -387,13 +545,32 @@ impl SearchView {
             }
             None => (0, None),
         };
+        let predicates = saved.as_ref().map(predicates_for_saved).unwrap_or_default();
+        let title = saved.as_ref().map_or(folder_label.clone(), |saved| saved.name.clone());
         let mut search = Self {
+            saved: saved.clone(),
+            session_id: next_session_id(),
+            spec_generation: 0,
+            run_started: SystemTime::now(),
+            saved_generation,
+            predicates,
+            metadata_only: false,
+            metadata_capped: false,
+            seen: std::collections::HashSet::new(),
+            refreshing: false,
+            stale: false,
+            active: true,
+            dirty: false,
+            watch: None,
+            watch_root: None,
+            watch_debounce_running: false,
+            title,
             folder,
             folder_label,
             home,
-            show_hidden,
+            show_hidden: saved.as_ref().map_or(show_hidden, |saved| saved.enter_hidden_folders),
             search_includes_hidden,
-            scope: Scope::Folder,
+            scope,
             matching,
             everything,
             skip_label: skip_label_value,
@@ -411,6 +588,7 @@ impl SearchView {
             first_hit_ms: None,
             control: Control::new(),
             generation: 0,
+            run_id: RunId { session: 0, location: None, spec_generation: 0, run_generation: 0 },
             exclude_generation,
             rules: None,
             selection: Selection::default(),
@@ -437,12 +615,119 @@ impl SearchView {
             _subscription: subscription,
             _ui_subscription: ui_subscription,
             _cloud_subscription: cloud_subscription,
-            _focus_subscriptions: focus_subscriptions,
+            _focus_subscriptions: Vec::new(),
+            focus_attached: false,
+            metadata_order_dirty: false,
         };
-        if !query.is_empty() {
+        if !query.trim().is_empty() || (saved.is_some() && !search.predicates.is_empty()) {
             search.start_search(&query, cx);
         }
+        if search.saved.is_some() {
+            search.spawn_clock(cx);
+        }
         search
+    }
+
+    /// A bounded clock for rolling-date queries, plus a slow backstop for This
+    /// Mac (where no recursive watcher is practical). Inactive tabs skip ticks.
+    fn spawn_clock(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let mut ticks = 0u64;
+            loop {
+                cx.background_executor().timer(Duration::from_secs(60)).await;
+                ticks += 1;
+                let keep = this.update(cx, |this, cx| {
+                    if !this.active || this.saved.is_none() {
+                        return;
+                    }
+                    let rolling = this.predicates.modified_within.is_some();
+                    let this_mac_backstop = this.scope == Scope::ThisMac && ticks.is_multiple_of(5);
+                    if rolling || this_mac_backstop {
+                        this.refresh_now(cx);
+                    }
+                });
+                if keep.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// A watcher notification in tests (and the real debounced path): mark the
+    /// snapshot dirty; the active tab reruns it.
+    #[cfg(test)]
+    pub fn mark_dirty(&mut self, cx: &mut Context<Self>) {
+        self.dirty = true;
+        if self.active {
+            self.dirty = false;
+            self.refresh_now(cx);
+        }
+    }
+
+    fn watch_root(&self) -> Option<PathBuf> {
+        self.saved.as_ref()?;
+        match self.scope {
+            Scope::Folder => Some(self.folder.clone()),
+            Scope::Home => Some(self.home.clone()),
+            Scope::ThisMac => None,
+        }
+    }
+
+    /// Install the watcher before the scan starts, or replace it when the root
+    /// moved. FSEvents replays everything since `since`, so a change that lands
+    /// during the first scan still marks the session dirty.
+    fn ensure_watch(&mut self, cx: &mut Context<Self>) {
+        // The GPUI test scheduler rejects a wake from FSEvents' dispatch queue.
+        // Tests drive `mark_dirty` directly instead.
+        if cx.background_executor().is_test() {
+            return;
+        }
+        let Some(root) = self.watch_root() else {
+            self.watch = None;
+            self.watch_root = None;
+            return;
+        };
+        if self.watch.is_some() && self.watch_root.as_ref() == Some(&root) {
+            return;
+        }
+        self.watch = None;
+        self.watch_root = Some(root.clone());
+        let since = crow_macos::current_event_id();
+        let (tx, mut rx) = unbounded();
+        let Some(watch) = crow_macos::watch(since, Duration::from_millis(250), move |events| {
+            let _ = tx.unbounded_send(events);
+        }) else {
+            return;
+        };
+        self.watch = Some(watch);
+        let watched_root = root;
+        cx.spawn(async move |this, cx| {
+            while let Some(events) = rx.next().await {
+                if !events.iter().any(|event| event.path.starts_with(&watched_root)) {
+                    continue;
+                }
+                let _ = this.update(cx, |this, cx| {
+                    this.dirty = true;
+                    if this.watch_debounce_running {
+                        return;
+                    }
+                    this.watch_debounce_running = true;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(Duration::from_millis(300)).await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.watch_debounce_running = false;
+                            if this.active && this.dirty {
+                                this.dirty = false;
+                                this.refresh_now(cx);
+                            }
+                        });
+                    })
+                    .detach();
+                });
+            }
+        })
+        .detach();
     }
 
     pub fn plugin_surface(&self) -> crate::plugins::SurfaceId {
@@ -533,7 +818,7 @@ impl SearchView {
             .collect()
     }
 
-    fn notify_plugin_scope(&self, cx: &mut Context<Self>) {
+    pub fn notify_plugin_scope(&self, cx: &mut Context<Self>) {
         if cx.try_global::<crate::plugins::Plugins>().is_some() {
             cx.global_mut::<crate::plugins::Plugins>().surfaces.notify_scope_changed(
                 self.plugin_surface,
@@ -590,41 +875,199 @@ impl SearchView {
     }
 
     fn start_search(&mut self, query: &str, cx: &mut Context<Self>) {
+        self.start_search_mode(query, false, cx);
+    }
+
+    /// Rerun the current draft without clearing the accepted snapshot: a watcher,
+    /// an external edit, an exclusion reload or a rolling date tick.
+    pub fn refresh_now(&mut self, cx: &mut Context<Self>) {
+        let query = self.input.read(cx).text().to_owned();
+        if query.trim().is_empty() && self.predicates.is_empty() {
+            return;
+        }
+        self.start_search_mode(&query, true, cx);
+    }
+
+    /// The saved record changed in `saved-queries.toml` (or this session just
+    /// became visible after being hidden). Replace the spec and rerun, keeping a
+    /// surviving selected path.
+    fn reload_saved_spec(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.saved_query_id() else { return };
+        let Some(saved) = cx.global::<Ui>().saved_queries.get(&id).cloned() else {
+            self.cancel(cx);
+            self.error = Some("This saved search was removed.".into());
+            cx.notify();
+            return;
+        };
+        if self.saved.as_ref() == Some(&saved) {
+            return;
+        }
+        self.saved = Some(saved.clone());
+        self.title = saved.name.clone();
+        self.predicates = predicates_for_saved(&saved);
+        self.scope = match saved.scope {
+            SavedScope::Folder => Scope::Folder,
+            SavedScope::Home => Scope::Home,
+            SavedScope::ThisMac => Scope::ThisMac,
+        };
+        self.matching = match saved.matching {
+            SavedMatch::All => Match::All,
+            SavedMatch::Names => Match::Names,
+            SavedMatch::Contents => Match::Contents,
+        };
+        self.exclusions_changed(saved.exclusions == SavedExclusions::Everything);
+        self.show_hidden = saved.enter_hidden_folders;
+        self.search_includes_hidden = saved.include_hidden;
+        self.folder = match saved.scope {
+            SavedScope::Folder => saved.root_path(&self.home).ok().flatten().unwrap_or_else(|| self.home.clone()),
+            SavedScope::Home | SavedScope::ThisMac => self.home.clone(),
+        };
+        self.spec_generation += 1;
+        self.input.update(cx, |input, cx| input.set_text_silent(saved.text.clone(), cx));
+        self.refresh_now(cx);
+    }
+
+    fn exclusions_changed(&mut self, everything: bool) {
+        if self.everything != everything {
+            self.everything = everything;
+            // Compile again for the next configured run; Everything ignores the rules.
+            self.rules = None;
+        }
+    }
+
+    pub fn saved_query_id(&self) -> Option<SavedQueryId> {
+        self.saved.as_ref().map(|saved| saved.id.clone())
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn is_saved_destination(&self) -> bool {
+        self.saved.is_some()
+    }
+
+    /// The field text, including a destination's temporary draft.
+    pub fn draft_text(&self, cx: &App) -> String {
+        self.input.read(cx).text().to_owned()
+    }
+
+    pub fn scope_value(&self) -> SavedScope {
+        match self.scope {
+            Scope::Folder => SavedScope::Folder,
+            Scope::Home => SavedScope::Home,
+            Scope::ThisMac => SavedScope::ThisMac,
+        }
+    }
+
+    pub fn match_value(&self) -> SavedMatch {
+        match self.matching {
+            Match::All => SavedMatch::All,
+            Match::Names => SavedMatch::Names,
+            Match::Contents => SavedMatch::Contents,
+        }
+    }
+
+    pub fn hidden_flags(&self) -> (bool, bool) {
+        (self.search_includes_hidden, self.show_hidden)
+    }
+
+    pub fn exclusions_value(&self) -> SavedExclusions {
+        if self.everything { SavedExclusions::Everything } else { SavedExclusions::Configured }
+    }
+
+    pub fn predicate_values(&self) -> (Option<SavedKind>, Option<u32>) {
+        (
+            self.saved.as_ref().and_then(|saved| saved.kind.clone()),
+            self.saved.as_ref().and_then(|saved| saved.modified_within_days),
+        )
+    }
+
+    fn publish_count(&self, cx: &mut Context<Self>) {
+        let Some(id) = self.saved_query_id() else { return };
+        let partial = self.metadata_capped || self.names_capped || self.contents_stopped || self.stale;
+        cx.global_mut::<Ui>().saved_query_counts.set(
+            id,
+            self.results.len() as u64,
+            partial || self.refreshing,
+            self.searching,
+        );
+        cx.refresh_windows();
+    }
+
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        let was = self.active;
+        self.active = active;
+        if active && !was {
+            // A hidden tab deferred watcher and clock work; becoming visible starts
+            // a fresh generation while retaining the last accepted snapshot.
+            self.dirty = false;
+            self.refresh_now(cx);
+        }
+    }
+
+    fn start_search_mode(&mut self, query: &str, refresh: bool, cx: &mut Context<Self>) {
         self.control.cancel();
         self.generation += 1;
         let generation = self.generation;
         let control = Control::new();
         self.control = control.clone();
-
-        self.results.clear();
-        self.by_path.clear();
+        let query = query.trim().to_owned();
+        let metadata_only = query.is_empty() && !self.predicates.is_empty();
+        if query.is_empty() && !metadata_only {
+            self.searching = false;
+            self.refreshing = false;
+            cx.notify();
+            return;
+        }
+        self.metadata_only = metadata_only;
+        self.run_id = RunId {
+            session: self.session_id,
+            location: self.saved_query_id(),
+            spec_generation: self.spec_generation,
+            run_generation: generation,
+        };
+        let run_id = self.run_id.clone();
         self.skipped.clear();
         self.error = None;
         self.names_capped = false;
         self.contents_stopped = false;
+        self.metadata_capped = false;
         self.dropped = 0;
         self.started = Instant::now();
+        self.run_started = SystemTime::now();
         self.first_hit_ms = None;
         self.show_skipped = false;
-        self.selection.clear();
-        self.bump_selection(cx);
-        self.cursor = 0;
-        self.user_moved = false;
-        self.hit_count = 0;
-        self.name_count = 0;
-        self.content_count = 0;
-        self.weak_count = 0;
         self.cloud_skipped = 0;
-        self.clear_preview(cx);
-        self.preview_generation += 1;
-        let query = query.trim();
-        if query.is_empty() {
-            self.searching = false;
-            cx.notify();
-            return;
+        self.seen.clear();
+        self.stale = false;
+        if refresh {
+            self.refreshing = true;
+            // Keep the selected real path across a refresh. If it disappears, the
+            // completion picks the nearest surviving row.
+            if self.selection.cursor().is_some() {
+                self.user_moved = true;
+            }
+            self.hit_count = self.results.len();
+        } else {
+            self.refreshing = false;
+            self.results.clear();
+            self.by_path.clear();
+            self.selection.clear();
+            self.bump_selection(cx);
+            self.cursor = 0;
+            self.user_moved = false;
+            self.hit_count = 0;
+            self.name_count = 0;
+            self.content_count = 0;
+            self.weak_count = 0;
+            self.clear_preview(cx);
+            self.preview_generation += 1;
         }
         self.searching = true;
+        self.ensure_watch(cx);
         self.notify_plugin_scope(cx);
+        self.publish_count(cx);
         let root = match self.scope {
             Scope::Folder => &self.folder,
             Scope::Home | Scope::ThisMac => &self.home,
@@ -638,6 +1081,7 @@ impl SearchView {
             effective_match = ?self.effective_match(),
             show_hidden = self.show_hidden,
             everything = self.everything,
+            metadata_only,
             skip_label = ?self.skip_label,
             query_len = query.len(),
             "search started"
@@ -645,19 +1089,33 @@ impl SearchView {
 
         let (tx, mut rx) = unbounded();
         if self.scope == Scope::ThisMac {
-            let query = query.to_owned();
+            let query_text = query.clone();
+            let predicates = self.predicates.clone();
+            let expression = if query_text.is_empty() { spotlight_expression_for(&predicates) } else { None };
             let effects = crate::effects::effects(cx);
             let cancel = control.cancel_flag();
+            let run = run_id.clone();
             cx.background_spawn(async move {
                 let hits = tx.clone();
-                let result = effects.spotlight_names(
-                    &query,
-                    Box::new(move |batch| {
-                        let _ = hits.unbounded_send(Update::Spotlight(batch));
-                    }),
-                    &cancel,
-                );
-                let _ = tx.unbounded_send(Update::SpotlightDone(result));
+                let hits_for_done = tx.clone();
+                let run_for_hits = run.clone();
+                let result = match expression {
+                    Some(expression) => effects.spotlight_expression(
+                        &expression,
+                        Box::new(move |batch| {
+                            let _ = hits.unbounded_send(Update::Spotlight(batch, run_for_hits.clone()));
+                        }),
+                        &cancel,
+                    ),
+                    None => effects.spotlight_names(
+                        &query_text,
+                        Box::new(move |batch| {
+                            let _ = hits.unbounded_send(Update::Spotlight(batch, run_for_hits.clone()));
+                        }),
+                        &cancel,
+                    ),
+                };
+                let _ = hits_for_done.unbounded_send(Update::SpotlightDone(result, run));
             })
             .detach();
         } else {
@@ -687,7 +1145,7 @@ impl SearchView {
                 Scope::Folder => self.folder.clone(),
                 Scope::Home | Scope::ThisMac => self.home.clone(),
             };
-            let (names, contents) = query_parts(query, self.effective_match());
+            let (names, contents) = query_parts(&query, self.effective_match());
             let read_gate = cx.try_global::<CloudStatusService>().map(|service| service.0.read(cx).gate());
             let query = Query {
                 names,
@@ -697,18 +1155,21 @@ impl SearchView {
                 rules,
                 everything: self.everything,
                 read_gate,
+                predicates: self.predicates.clone(),
             };
+            let run_for_hits = run_id.clone();
+            let run_for_done = run_id.clone();
             cx.background_spawn(async move {
                 let tx = tx;
                 let summary = crow_search::search(
                     &root,
                     &query,
                     |batch| {
-                        let _ = tx.unbounded_send(Update::Hits(batch));
+                        let _ = tx.unbounded_send(Update::Hits(batch, run_for_hits.clone()));
                     },
                     &control,
                 );
-                let _ = tx.unbounded_send(Update::Done(summary));
+                let _ = tx.unbounded_send(Update::Done(summary, run_for_done));
             })
             .detach();
         }
@@ -720,7 +1181,7 @@ impl SearchView {
             let mut slice = std::time::Instant::now();
             while let Some(update) = rx.next().await {
                 let keep = this.update(cx, |this, cx| {
-                    if this.generation == generation {
+                    if this.run_id == run_id {
                         this.apply(update, cx);
                     }
                 });
@@ -738,45 +1199,24 @@ impl SearchView {
     }
 
     fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
+        if update.run_id() != &self.run_id {
+            return;
+        }
         let _span = tracing::debug_span!("search batch").entered();
         match update {
             // Once the strong-name cap is hit the walk is cancelled; queued batches
             // are dropped rather than merged, so the UI is never busy draining them.
             // The other budget keeps names streaming, so its batches still apply.
-            Update::Hits(_) if self.names_capped => {}
-            Update::Hits(hits) => self.add_hits(hits, cx),
-            Update::Done(summary) => {
-                let scanned = summary.scanned;
-                self.cloud_skipped = summary.cloud_skipped;
-                let skipped = summary.skipped.len();
-                // Every reason is listed: rules, hidden folders, packages and
-                // unreadable folders are the four ways a search can miss something.
-                self.skipped = summary.skipped;
-                if let Some(error) = summary.error {
-                    self.error = Some(error.into());
-                }
-                tracing::debug!(
-                    target: "crow::search",
-                    elapsed_ms = self.started.elapsed().as_millis() as u64,
-                    first_hit_ms = ?self.first_hit_ms,
-                    scanned,
-                    skipped,
-                    rows = self.results.len(),
-                    hits = self.hit_count,
-                    names_capped = self.names_capped,
-                    contents_stopped = self.contents_stopped,
-                    dropped = self.dropped,
-                    error = ?self.error,
-                    "search finished"
-                );
-                self.searching = false;
-                cx.notify();
-            }
-            Update::Spotlight(hits) => self.add_spotlight(hits, cx),
-            Update::SpotlightDone(result) => {
+            Update::Hits(_, _) if self.names_capped => {}
+            Update::Hits(hits, _) => self.add_hits(hits, cx),
+            Update::Done(summary, _) => self.finish(summary, cx),
+            Update::Spotlight(hits, _) => self.add_spotlight(hits, cx),
+            Update::SpotlightDone(result, _) => {
                 if let Err(error) = result {
                     self.error = Some(error.into());
                 }
+                let complete = self.error.is_none() && !self.names_capped;
+                self.finish_refresh(complete, cx);
                 tracing::debug!(
                     target: "crow::search",
                     elapsed_ms = self.started.elapsed().as_millis() as u64,
@@ -788,8 +1228,116 @@ impl SearchView {
                     "spotlight search finished"
                 );
                 self.searching = false;
+                self.publish_count(cx);
                 cx.notify();
             }
+        }
+    }
+
+    fn finish(&mut self, summary: Summary, cx: &mut Context<Self>) {
+        let scanned = summary.scanned;
+        self.cloud_skipped = summary.cloud_skipped;
+        self.metadata_capped = summary.capped;
+        let skipped = summary.skipped.len();
+        // Every reason is listed: rules, hidden folders, packages and
+        // unreadable folders are the four ways a search can miss something.
+        self.skipped = summary.skipped;
+        if let Some(error) = summary.error {
+            self.error = Some(error.into());
+        }
+        let complete = !summary.cancelled && !summary.capped && self.error.is_none() && !self.names_capped;
+        self.finish_refresh(complete, cx);
+        tracing::debug!(
+            target: "crow::search",
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            first_hit_ms = ?self.first_hit_ms,
+            scanned,
+            skipped,
+            rows = self.results.len(),
+            hits = self.hit_count,
+            names_capped = self.names_capped,
+            contents_stopped = self.contents_stopped,
+            metadata_capped = self.metadata_capped,
+            complete,
+            dropped = self.dropped,
+            error = ?self.error,
+            "search finished"
+        );
+        self.searching = false;
+        self.publish_count(cx);
+        cx.notify();
+    }
+
+    /// A refresh may remove an old row only when a complete generation proved the
+    /// walk saw everything. A cancelled, failed or capped run keeps the old rows
+    /// marked stale instead of silently losing changes.
+    fn finish_refresh(&mut self, complete: bool, cx: &mut Context<Self>) {
+        if self.refreshing {
+            if complete {
+                self.prune_unseen();
+            } else {
+                self.stale = true;
+            }
+            self.refreshing = false;
+        }
+        if self.metadata_only {
+            self.sort_metadata_results();
+        }
+        if self.selection.cursor().is_some_and(|path| !self.by_path.contains_key(path)) {
+            if self.results.is_empty() {
+                self.selection.clear();
+                self.cursor = 0;
+                self.bump_selection(cx);
+            } else {
+                let index = self.cursor.min(self.results.len() - 1);
+                let path = self.results[index].path.clone();
+                self.selection.select_only(path);
+                self.bump_selection(cx);
+                self.cursor = index;
+            }
+        }
+    }
+
+    /// Drop rows the completed generation did not report, rebuilding the tables.
+    fn prune_unseen(&mut self) {
+        if self.seen.len() == self.results.len() && self.results.iter().all(|row| self.seen.contains(&row.path)) {
+            return;
+        }
+        let seen = std::mem::take(&mut self.seen);
+        self.results.retain(|row| seen.contains(&row.path));
+        self.reindex_rows();
+    }
+
+    fn reindex_rows(&mut self) {
+        self.by_path.clear();
+        for (index, row) in self.results.iter().enumerate() {
+            self.by_path.insert(row.path.clone(), index);
+        }
+        if self.metadata_only {
+            self.name_count = 0;
+            self.content_count = 0;
+            self.weak_count = self.results.len();
+        } else {
+            self.name_count = self.results.iter().filter(|row| row.strong_name).count();
+            self.content_count = self.results.iter().skip(self.name_count).filter(|row| !row.name_match).count();
+            self.weak_count = self.results.len() - self.name_count - self.content_count;
+        }
+        self.hit_count = self.results.len();
+    }
+
+    /// Predicate-only results are ordered by natural name, then raw path, whatever
+    /// order the parallel walk or a refresh delivered them in.
+    fn sort_metadata_results(&mut self) {
+        if !self.metadata_order_dirty {
+            return;
+        }
+        self.metadata_order_dirty = false;
+        self.results.sort_by(|a, b| crow_core::natural_order(&a.name, &b.name).then_with(|| a.path.cmp(&b.path)));
+        self.reindex_rows();
+        if let Some(path) = self.selection.cursor().cloned()
+            && let Some(&index) = self.by_path.get(&path)
+        {
+            self.cursor = index;
         }
     }
 
@@ -801,9 +1349,11 @@ impl SearchView {
         let mut fresh_strong = 0usize;
         let mut fresh_others = 0usize;
         for hit in hits {
+            self.seen.insert(hit.path.clone());
             // Compute the rank once: the budgets and the row both need it.
             let strong_name = match &hit.kind {
                 HitKind::Name { ranges } => is_strong_name(&hit.path, ranges, &query),
+                HitKind::Metadata { .. } => self.metadata_only,
                 HitKind::Content { .. } => false,
             };
             let known = self.by_path.contains_key(&hit.path) || fresh_at.contains_key(&hit.path);
@@ -812,6 +1362,7 @@ impl SearchView {
                     if self.name_count + fresh_strong >= MAX_STRONG_ROWS {
                         changed = true;
                         self.names_capped = true;
+                        self.metadata_capped |= self.metadata_only;
                         self.control.cancel();
                         break;
                     }
@@ -837,7 +1388,7 @@ impl SearchView {
             // A content hit carries the file's other matching lines as a count.
             let more = match &hit.kind {
                 HitKind::Content { more, .. } => *more,
-                HitKind::Name { .. } => 0,
+                HitKind::Name { .. } | HitKind::Metadata { .. } => 0,
             };
             self.hit_count += 1 + more as usize;
             if let Some(&index) = self.by_path.get(&hit.path) {
@@ -870,7 +1421,17 @@ impl SearchView {
             }
         }
         if !fresh.is_empty() {
-            self.insert_rows(fresh);
+            if self.metadata_only {
+                // The engine sends predicate-only hits in natural-name order; a
+                // refresh can mix old rows, so the final order is settled once at
+                // completion instead of sorting the growing list every batch. The
+                // index is refreshed here so the auto-selected first row is real.
+                self.results.extend(fresh);
+                self.metadata_order_dirty = true;
+                self.reindex_rows();
+            } else {
+                self.insert_rows(fresh);
+            }
         }
         let before = self.selection.cursor().cloned();
         self.follow_selection(cx);
@@ -878,6 +1439,7 @@ impl SearchView {
             self.load_preview(cx);
         }
         if changed {
+            self.publish_count(cx);
             cx.notify();
         }
     }
@@ -990,17 +1552,24 @@ impl SearchView {
         let query = self.query(cx);
         let mut changed = false;
         for hit in hits {
+            if !self.predicates.is_empty()
+                && !self.predicates.matches(&hit.path, hit.is_dir, hit.modified, self.run_started)
+            {
+                continue;
+            }
             if self.by_path.contains_key(&hit.path) {
                 continue;
             }
             if self.results.len() >= MAX_STRONG_ROWS {
                 self.names_capped = true;
+                self.metadata_capped |= self.metadata_only;
                 break;
             }
             if self.first_hit_ms.is_none() {
                 self.first_hit_ms = Some(self.started.elapsed().as_millis() as u64);
             }
             self.hit_count += 1;
+            self.seen.insert(hit.path.clone());
             let row = Row::from_spotlight(hit, &query, &self.home);
             self.by_path.insert(row.path.clone(), self.results.len());
             self.results.push(row);
@@ -1009,12 +1578,16 @@ impl SearchView {
         self.name_count = self.results.len();
         self.content_count = 0;
         self.weak_count = 0;
+        if self.metadata_only {
+            self.metadata_order_dirty = true;
+        }
         let before = self.selection.cursor().cloned();
         self.follow_selection(cx);
         if before != self.selection.cursor().cloned() {
             self.load_preview(cx);
         }
         if changed {
+            self.publish_count(cx);
             cx.notify();
         }
     }
@@ -1238,7 +1811,7 @@ impl SearchView {
 
     /// Whether the field has a query; the bottom bar shows no count in idle.
     pub fn has_query(&self, cx: &App) -> bool {
-        !self.query(cx).trim().is_empty()
+        !self.query(cx).trim().is_empty() || !self.predicates.is_empty()
     }
 
     /// How many results the list holds so far.
@@ -1624,7 +2197,7 @@ impl SearchView {
         if self.show_skipped {
             self.show_skipped = false;
             cx.notify();
-        } else {
+        } else if self.saved.is_none() {
             cx.emit(SearchEvent::Close);
         }
     }
@@ -1816,6 +2389,9 @@ impl SearchView {
             .child(icons::glyph(Glyph::Search, 15., "fg-muted", &theme))
             .child(div().flex_1().min_w_0().child(self.input.clone()))
             .child(self.render_match_control(focused, cx));
+        let title_color = color(theme.role("fg-muted"));
+        let save_surface = color(theme.role("surface"));
+        let band_fg = color(theme.role("fg"));
         let done = div()
             .id("search-done")
             .debug_selector(|| "search-done".into())
@@ -1835,7 +2411,45 @@ impl SearchView {
             .on_click(cx.listener(|_, _, _, cx| cx.emit(SearchEvent::Close)))
             .child("Done")
             .child(Keycap::text("esc", KeycapWeight::Outline));
-        div().flex_1().min_w_0().flex().items_center().gap(px(10.)).child(field).child(done)
+        let mut band = div().flex_1().min_w_0().flex().items_center().gap(px(10.)).child(field);
+        let save_label = if self.saved.is_some() { "Update…" } else { "Save…" };
+        band = band.child(
+            div()
+                .id("search-save")
+                .debug_selector(|| "search-save".into())
+                .role(Role::Button)
+                .aria_label(save_label)
+                .flex_none()
+                .h(px(30.))
+                .px(px(10.))
+                .rounded(px(8.))
+                .flex()
+                .items_center()
+                .text_size(px(13.))
+                .text_color(band_fg)
+                .hover(move |style| style.bg(save_surface))
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(SearchEvent::Save)))
+                .child(save_label),
+        );
+        if self.saved.is_some() {
+            // The destination title stays visible; Done would imply closing the tab.
+            band = band.child(
+                div()
+                    .id("saved-query-title")
+                    .debug_selector(|| "saved-query-title".into())
+                    .flex_none()
+                    .max_w(px(260.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(13.))
+                    .text_color(title_color)
+                    .child(self.title.clone()),
+            );
+        } else {
+            band = band.child(done);
+        }
+        band
     }
 
     fn render_match_control(&self, focused: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -2068,7 +2682,7 @@ impl SearchView {
         let summary = self.footer_text();
         let text_color = if self.error.is_some() {
             error
-        } else if self.names_capped || self.contents_stopped {
+        } else if self.names_capped || self.contents_stopped || self.metadata_capped || self.stale {
             warning
         } else {
             fg
@@ -2161,6 +2775,8 @@ impl SearchView {
             files: self.results.len(),
             names_capped: self.names_capped,
             contents_stopped: self.contents_stopped,
+            metadata_capped: self.metadata_capped,
+            stale: self.stale,
             dropped: self.dropped,
             cloud_skipped: self.cloud_skipped,
             error: self.error.as_deref(),
@@ -2169,7 +2785,7 @@ impl SearchView {
 
     /// Idle, error, empty or results, depending on the query and what has arrived.
     fn render_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        if self.query(cx).trim().is_empty() {
+        if self.query(cx).trim().is_empty() && self.predicates.is_empty() {
             return self.render_idle(cx);
         }
         if self.results.is_empty() {
@@ -2926,6 +3542,14 @@ impl SearchView {
 
 impl Render for SearchView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.focus_attached {
+            self.focus_attached = true;
+            let input_focus = self.input.read(cx).focus_handle(cx);
+            self._focus_subscriptions = vec![
+                cx.on_focus(&input_focus, window, |_, _, cx| cx.notify()),
+                cx.on_blur(&input_focus, window, |_, _, cx| cx.notify()),
+            ];
+        }
         let plugin_generation =
             cx.try_global::<crate::plugins::Plugins>().map_or(0, |plugins| plugins.surfaces.generation());
         let views_generation = cx.global::<Ui>().views_generation;
@@ -2939,7 +3563,7 @@ impl Render for SearchView {
         self.update_plugin_command_context(window, cx);
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
-        let idle = self.query(cx).trim().is_empty();
+        let idle = self.query(cx).trim().is_empty() && self.predicates.is_empty();
         let now = Instant::now();
         if cx
             .global::<Operations>()
@@ -2981,6 +3605,8 @@ struct FooterState<'a> {
     files: usize,
     names_capped: bool,
     contents_stopped: bool,
+    metadata_capped: bool,
+    stale: bool,
     dropped: usize,
     cloud_skipped: u64,
     error: Option<&'a str>,
@@ -3014,6 +3640,10 @@ fn footer_summary(state: FooterState<'_>) -> String {
     if state.names_capped {
         return format!("First {MAX_STRONG_ROWS} name matches · refine the search");
     }
+    if state.metadata_capped {
+        let results = results_text(state.hits, state.files);
+        return format!("{results} · first {} matches; partial results", crow_search::MAX_METADATA_RESULTS);
+    }
     if state.contents_stopped {
         let results = results_text(state.hits, state.files);
         let dropped = state.dropped;
@@ -3028,10 +3658,11 @@ fn footer_summary(state: FooterState<'_>) -> String {
     }
     let prefix = if state.searching { "Searching… " } else { "" };
     let cloud = cloud_text(state.cloud_skipped);
+    let stale = if state.stale && !state.searching { " · previous results kept" } else { "" };
     if state.hits == 0 {
-        return if state.searching { "Searching…".to_owned() } else { format!("No results{cloud}") };
+        return if state.searching { "Searching…".to_owned() } else { format!("No results{cloud}{stale}") };
     }
-    format!("{prefix}{}{cloud}", results_text(state.hits, state.files))
+    format!("{prefix}{}{cloud}{stale}", results_text(state.hits, state.files))
 }
 
 /// "1 folder skipped" / "3 folders skipped", for the footer link and its aria label.
@@ -3115,6 +3746,7 @@ impl Row {
         let (content, name_match, name_ranges) = match hit.kind {
             HitKind::Content { line, text, ranges, .. } => (Some((line, text, ranges)), false, Vec::new()),
             HitKind::Name { ranges } => (None, true, ranges),
+            HitKind::Metadata { .. } => (None, false, Vec::new()),
         };
         Self::new(
             hit.path,
@@ -3317,6 +3949,8 @@ mod tests {
             files,
             names_capped,
             contents_stopped,
+            metadata_capped: false,
+            stale: false,
             dropped,
             cloud_skipped: 0,
             error,

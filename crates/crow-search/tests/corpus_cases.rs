@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crow_core::Exclude;
 use crow_search::corpus::{self, Case, Expect};
-use crow_search::{Control, Query, RuleSet, search};
+use crow_search::{Control, Predicates, Query, RuleSet, search};
 
 #[test]
 fn corpus_cases_match_the_engine() {
@@ -59,6 +59,7 @@ fn run_case(root: &Path, case: &Case, rules: &Arc<RuleSet>) -> Result<(), String
         rules: rules.clone(),
         everything: case.everything,
         read_gate: None,
+        predicates: Predicates::default(),
     };
     let (tx, rx) = mpsc::channel();
     let walked: PathBuf = search_root.clone();

@@ -12,15 +12,17 @@ use std::hash::{Hash, Hasher};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{self, Effective, Fx};
-use crow_core::{Favorite, Section, SectionDestination, SectionRow, SidebarEdit, Slot};
+use crow_core::{Favorite, Location, SavedQueryId, Section, SectionDestination, SectionRow, SidebarEdit, Slot};
 use crow_fs::ops::Request;
 use gpui::{
     Animation, AnimationExt, Bounds, ClickEvent, Context, EventEmitter, ExternalPaths, FocusHandle, Focusable,
     FontWeight, IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, Role, SharedString, SpringAnimation,
-    SpringConfig, Window, div, img, prelude::*, px,
+    SpringConfig, Task, Window, div, img, prelude::*, px,
 };
 
 use crate::actions::{
@@ -36,13 +38,16 @@ use crate::ui::{self, Ui};
 
 pub enum SidebarEvent {
     /// The cursor moved onto a folder: show it in the center, keep focus here.
-    Show(PathBuf),
-    Open(PathBuf),
+    Show(Location),
+    Open(Location),
     /// The context menu's Open in New Tab.
-    OpenInNewTab(PathBuf),
+    OpenInNewTab(Location),
     /// Files dropped on a row.
     Run(Request),
     Message(SharedString, bool),
+    /// The sidebar's saved-query context menu.
+    EditSavedQuery(SavedQueryId),
+    RemoveSavedQuery(SavedQueryId),
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
@@ -54,11 +59,11 @@ enum SidebarNav {
     NewTab,
 }
 
-fn emit_nav(nav: SidebarNav, path: PathBuf, cx: &mut Context<Sidebar>) {
+fn emit_nav(nav: SidebarNav, location: Location, cx: &mut Context<Sidebar>) {
     match nav {
-        SidebarNav::Show => cx.emit(SidebarEvent::Show(path)),
-        SidebarNav::Open => cx.emit(SidebarEvent::Open(path)),
-        SidebarNav::NewTab => cx.emit(SidebarEvent::OpenInNewTab(path)),
+        SidebarNav::Show => cx.emit(SidebarEvent::Show(location)),
+        SidebarNav::Open => cx.emit(SidebarEvent::Open(location)),
+        SidebarNav::NewTab => cx.emit(SidebarEvent::OpenInNewTab(location)),
     }
 }
 
@@ -141,11 +146,24 @@ impl Row {
         }
     }
 
+    fn location(&self) -> Option<Location> {
+        match self {
+            Row::Favorite(_, f) => Some(Location::Folder(f.path.clone())),
+            Row::Recent(path) | Row::Volume(crow_macos::Volume { path, .. }) => Some(Location::Folder(path.clone())),
+            Row::PluginItem { row, .. } => match &row.destination {
+                SectionDestination::Folder { path, .. } => Some(Location::Folder(path.clone())),
+                SectionDestination::SavedQuery { id } => Some(Location::SavedQuery(id.clone())),
+                SectionDestination::DisplayOnly => None,
+            },
+            Row::Header(..) | Row::SectionHeader { .. } => None,
+        }
+    }
+
     fn plugin_destination(&self) -> Option<(&Path, (u64, u64))> {
         match self {
             Row::PluginItem { row, .. } => match &row.destination {
                 SectionDestination::Folder { path, identity } => Some((path, *identity)),
-                SectionDestination::DisplayOnly => None,
+                SectionDestination::SavedQuery { .. } | SectionDestination::DisplayOnly => None,
             },
             _ => None,
         }
@@ -159,7 +177,7 @@ fn section_order(ui: &Ui, sections: &[Section]) -> Vec<String> {
             order.push(id.clone());
         }
     }
-    for id in ["recent", "locations"] {
+    for id in ["saved-queries", "recent", "locations"] {
         if !order.iter().any(|seen| seen == id) {
             order.push(id.to_owned());
         }
@@ -180,6 +198,22 @@ fn rows(ui: &Ui, sections: &[Section]) -> Vec<Row> {
     }
     for id in section_order(ui, sections) {
         match id.as_str() {
+            "saved-queries" if ui.sidebar.section_shown("saved-queries") && !ui.saved_queries.is_empty() => {
+                let collapsed = ui.sidebar.section_collapsed("saved-queries");
+                rows.push(Row::SectionHeader { id: "saved-queries".into(), title: "Saved Queries".into(), collapsed });
+                if !collapsed {
+                    rows.extend(ui.saved_queries.queries.iter().map(|query| Row::PluginItem {
+                        section: "saved-queries".into(),
+                        row: SectionRow {
+                            id: query.id.as_str().to_owned(),
+                            text: query.name.clone(),
+                            meta: ui.saved_query_counts.label(&query.id),
+                            badge: None,
+                            destination: SectionDestination::SavedQuery { id: query.id.clone() },
+                        },
+                    }));
+                }
+            }
             "recent" if ui.sidebar.section_shown("recent") && ui.sidebar.recent.show && !ui.recent_list.is_empty() => {
                 let collapsed = ui.sidebar.section_collapsed("recent");
                 rows.push(Row::SectionHeader { id: "recent".into(), title: "Recent".into(), collapsed });
@@ -311,7 +345,7 @@ pub struct Sidebar {
     /// Index into the selectable rows (favorites, recents, volumes).
     cursor: usize,
     /// The folder the window shows, highlighted when it's in the sidebar.
-    current: PathBuf,
+    current: Location,
     /// Where each direct child of the list sits, captured when it is prepainted.
     /// A cell so prepaint can fill it without scheduling another render.
     layout: RowLayout,
@@ -354,6 +388,14 @@ pub struct Sidebar {
     navigation_generation: u64,
     /// Stable identity of a plugin row across reorder/refresh.
     cursor_key: Option<(String, String)>,
+    /// The saved query the active tab is viewing; its own session streams counts.
+    active_saved: Option<SavedQueryId>,
+    /// One bounded worker refreshes the visible inactive saved-query counts.
+    count_worker: Option<Task<()>>,
+    count_cancel: Arc<AtomicBool>,
+    count_revision: u64,
+    count_generation: u64,
+    count_done: HashSet<SavedQueryId>,
 }
 
 impl Focusable for Sidebar {
@@ -367,7 +409,7 @@ impl Sidebar {
         Self {
             focus: cx.focus_handle(),
             cursor: 0,
-            current: PathBuf::new(),
+            current: Location::Folder(PathBuf::new()),
             layout: Rc::default(),
             drop_target: None,
             dragging_favorite: Rc::new(Cell::new(false)),
@@ -390,7 +432,95 @@ impl Sidebar {
             visible_sections: Rc::default(),
             navigation_generation: 0,
             cursor_key: None,
+            active_saved: None,
+            count_worker: None,
+            count_cancel: Arc::new(AtomicBool::new(false)),
+            count_revision: 0,
+            count_generation: 0,
+            count_done: HashSet::new(),
         }
+    }
+
+    pub fn set_active_saved(&mut self, id: Option<SavedQueryId>, cx: &mut Context<Self>) {
+        if self.active_saved == id {
+            return;
+        }
+        if let Some(previous) = self.active_saved.take() {
+            self.count_done.remove(&previous);
+        }
+        self.active_saved = id;
+        self.cancel_counts();
+        cx.notify();
+    }
+
+    fn cancel_counts(&mut self) {
+        self.count_cancel.store(true, Ordering::Relaxed);
+        self.count_worker = None;
+        self.count_revision = self.count_revision.wrapping_add(1);
+    }
+
+    fn request_inactive_counts(&mut self, cx: &mut Context<Self>) {
+        let ui = cx.global::<Ui>();
+        if !ui.sidebar.section_shown("saved-queries") || ui.sidebar.section_collapsed("saved-queries") {
+            if self.count_worker.is_some() {
+                self.cancel_counts();
+            }
+            return;
+        }
+        let generation = ui.saved_queries_generation;
+        if self.count_generation != generation {
+            self.count_generation = generation;
+            self.count_done.clear();
+            self.cancel_counts();
+        }
+        if self.count_worker.is_some() {
+            return;
+        }
+        let active = self.active_saved.clone();
+        let queries: Vec<crow_core::SavedQuery> = ui
+            .saved_queries
+            .queries
+            .iter()
+            .filter(|query| Some(&query.id) != active.as_ref() && !self.count_done.contains(&query.id))
+            .take(16)
+            .cloned()
+            .collect();
+        if queries.is_empty() {
+            return;
+        }
+        let (home, exclude) = (ui.home.clone(), ui.exclude.clone());
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.count_cancel = cancel.clone();
+        let worker_cancel = cancel.clone();
+        let revision = self.count_revision;
+        let task = cx.background_spawn(async move {
+            let mut out = Vec::new();
+            for query in queries {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let id = query.id.clone();
+                out.push((id, crate::saved_query_counts::count_saved_query(&query, &home, &exclude, &cancel)));
+            }
+            out
+        });
+        self.count_worker = Some(cx.spawn(async move |this, cx| {
+            let results = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.count_revision != revision {
+                    return;
+                }
+                this.count_worker = None;
+                for (id, result) in results {
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    this.count_done.insert(id.clone());
+                    cx.global_mut::<Ui>().saved_query_counts.set(id, result.count, result.partial, false);
+                }
+                cx.notify();
+            });
+        }));
     }
 
     /// Keep the last visible-folder slice the plugin sections may offer. The
@@ -399,7 +529,7 @@ impl Sidebar {
         let config = cx.global::<Ui>().sidebar.clone();
         let descriptors = crate::plugins::sidebar_descriptors(cx);
         let scope_dir = if self.plugin_dirs_dir.as_os_str().is_empty() {
-            self.current.clone()
+            self.current.as_folder().map(Path::to_path_buf).unwrap_or_default()
         } else {
             self.plugin_dirs_dir.clone()
         };
@@ -588,9 +718,21 @@ impl Sidebar {
         self.receive.as_ref().is_some_and(|(target, _)| target == path)
     }
 
+    /// The saved-query id under the cursor, if the row is a saved destination.
+    pub fn cursor_saved_query(&self, cx: &gpui::App) -> Option<SavedQueryId> {
+        match self.cursor_row(cx)? {
+            Row::PluginItem { row, .. } => row.saved_query_id().cloned(),
+            _ => None,
+        }
+    }
+
     pub fn set_current(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        if self.current != dir {
-            self.current = dir;
+        self.set_current_location(Location::Folder(dir), cx);
+    }
+
+    pub fn set_current_location(&mut self, location: Location, cx: &mut Context<Self>) {
+        if self.current != location {
+            self.current = location;
             cx.notify();
         }
     }
@@ -795,7 +937,7 @@ impl Sidebar {
                 right,
                 badge,
                 spoken,
-                current: row.path().is_some_and(|path| path == self.current),
+                current: row.location().as_ref() == Some(&self.current),
                 ring: focused && i == self.cursor,
                 drop: !self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Row(i)),
                 bar,
@@ -1056,10 +1198,20 @@ impl Sidebar {
             }
             return;
         }
+        if let Row::PluginItem { row, .. } = &row
+            && let SectionDestination::SavedQuery { id } = &row.destination
+        {
+            // An arrow only moves the cursor over a virtual destination; activating
+            // it opens the saved search (and starts its result session).
+            if nav != SidebarNav::Show {
+                emit_nav(nav, Location::SavedQuery(id.clone()), cx);
+            }
+            return;
+        }
         let Some((path, identity)) = row.plugin_destination().map(|(path, identity)| (path.to_path_buf(), identity))
         else {
             if let Some(path) = row.path() {
-                emit_nav(nav, path.to_path_buf(), cx);
+                emit_nav(nav, Location::Folder(path.to_path_buf()), cx);
             }
             return;
         };
@@ -1073,7 +1225,7 @@ impl Sidebar {
             _ => return,
         };
         let scope = if self.plugin_dirs_dir.as_os_str().is_empty() {
-            self.current.clone()
+            self.current.as_folder().map(Path::to_path_buf).unwrap_or_default()
         } else {
             self.plugin_dirs_dir.clone()
         };
@@ -1105,7 +1257,7 @@ impl Sidebar {
                     return;
                 }
                 if matches {
-                    emit_nav(nav, expected_path, cx);
+                    emit_nav(nav, Location::Folder(expected_path), cx);
                 } else if nav != SidebarNav::Show {
                     cx.emit(SidebarEvent::Message("That folder is no longer available".into(), true));
                 }
@@ -1181,6 +1333,9 @@ impl Sidebar {
             Row::Volume(v) => {
                 (SidebarMenuKind::Volume, SidebarMenuState { ejectable: v.ejectable, ..SidebarMenuState::default() })
             }
+            Row::PluginItem { row, .. } if row.saved_query_id().is_some() => {
+                (SidebarMenuKind::SavedQuery, SidebarMenuState::default())
+            }
             Row::PluginItem { row, .. } if row.folder_path().is_some() => {
                 (SidebarMenuKind::Plugin, SidebarMenuState::default())
             }
@@ -1245,6 +1400,19 @@ impl Sidebar {
         else {
             return;
         };
+        if let Row::PluginItem { row, .. } = &row
+            && let Some(saved_id) = row.saved_query_id().cloned()
+        {
+            self.cursor = i;
+            match id {
+                CommandId::Open => self.navigate_row(i, SidebarNav::Open, cx),
+                CommandId::NewTab => self.navigate_row(i, SidebarNav::NewTab, cx),
+                CommandId::EditSavedSearch => cx.emit(SidebarEvent::EditSavedQuery(saved_id)),
+                CommandId::RemoveSavedSearch => cx.emit(SidebarEvent::RemoveSavedQuery(saved_id)),
+                _ => {}
+            }
+            return;
+        }
         let Some(path) = row.path().map(Path::to_path_buf) else { return };
         match id {
             CommandId::Open => {
@@ -1362,6 +1530,7 @@ impl Render for Sidebar {
             window.request_animation_frame();
         }
         self.update_plugin_sections(cx);
+        self.request_inactive_counts(cx);
         let rows = rows(cx.global::<Ui>(), &self.plugin_sections);
         let wants_pin_lines = self.layout.borrow().first().is_some_and(|(_, _, bounds)| bounds.size.width >= px(300.));
         let pin_summaries: HashMap<_, _> = if crate::git::provider_enabled(cx) {
@@ -1413,7 +1582,7 @@ impl Render for Sidebar {
             self.insert_slot = None;
             self.dragging_favorite.set(false);
         }
-        let current_child = rows.iter().position(|row| row.path() == Some(self.current.as_path()));
+        let current_child = rows.iter().position(|row| row.location().as_ref() == Some(&self.current));
         let fill = {
             let layout = self.layout.borrow();
             let current_bounds = current_child.and_then(|ix| layout.get(ix).map(|(_, _, bounds)| *bounds));

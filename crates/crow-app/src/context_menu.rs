@@ -119,6 +119,7 @@ pub enum SidebarMenuKind {
     Recent,
     Volume,
     Plugin,
+    SavedQuery,
 }
 
 /// A menu line with its own title when the row needs other words than the menu
@@ -162,12 +163,21 @@ const SIDEBAR_VOLUME: &[TitledSlot] = &[
 const SIDEBAR_PLUGIN: &[TitledSlot] =
     &[Some((CommandId::Open, None)), Some((CommandId::NewTab, Some("Open in New Tab")))];
 
+const SIDEBAR_SAVED_QUERY: &[TitledSlot] = &[
+    Some((CommandId::Open, None)),
+    Some((CommandId::NewTab, Some("Open in New Tab"))),
+    None,
+    Some((CommandId::EditSavedSearch, Some("Edit Saved Search…"))),
+    Some((CommandId::RemoveSavedSearch, Some("Remove Saved Search"))),
+];
+
 pub fn sidebar_slots(kind: SidebarMenuKind) -> &'static [TitledSlot] {
     match kind {
         SidebarMenuKind::Favorite => SIDEBAR_FAVORITE,
         SidebarMenuKind::Recent => SIDEBAR_RECENT,
         SidebarMenuKind::Volume => SIDEBAR_VOLUME,
         SidebarMenuKind::Plugin => SIDEBAR_PLUGIN,
+        SidebarMenuKind::SavedQuery => SIDEBAR_SAVED_QUERY,
     }
 }
 

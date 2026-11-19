@@ -325,6 +325,19 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Replace the whole text without a window notification or a `Changed` event.
+    /// Used when an external config edit replaces a saved search's draft; the
+    /// caller starts the run itself.
+    pub fn set_text_silent(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.history.last = None;
+        self.content = text.into();
+        self.selected_range = self.content.len()..self.content.len();
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.touch_caret(cx);
+        cx.notify();
+    }
+
     /// Replace the whole text and put the cursor at its end.
     pub fn set_text(&mut self, text: impl Into<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
         self.record(EditKind::Other, &(0..self.content.len()));
