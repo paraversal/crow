@@ -690,6 +690,8 @@ impl Pane {
     pub fn set_folder_tag_filter(&mut self, tags: Vec<String>, cx: &mut Context<Self>) {
         let folder = self.focused_folder().clone();
         folder.update(cx, |folder, cx| folder.set_tag_filter(tags, cx));
+        self.schedule_filter_announce(cx);
+        cx.notify();
     }
 
     pub fn folder_tag_filter(&self, cx: &gpui::App) -> Vec<String> {
