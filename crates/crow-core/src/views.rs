@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use crow_fs::{Sort, SortKey};
 use globset::{GlobBuilder, GlobMatcher};
 use serde::Deserialize;
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 use crate::config::{abbreviate_home, edit_toml, expand_home};
 use crate::settings::ViewMode;
@@ -181,6 +181,22 @@ struct Rule {
     pattern: String,
     matchers: Vec<GlobMatcher>,
     layer: ViewLayer,
+    /// The rule's other fields, so an editor target can prove the rule at an
+    /// index is still the one it drew.
+    fingerprint: String,
+}
+
+/// Identity for a rule that repeats other fields; an index alone would aim at
+/// whatever moved into its place after an external insert or reorder.
+fn rule_fingerprint(rule: &RuleFile) -> String {
+    // The preview list itself is the field the editor writes; including it
+    // would invalidate the target after every successful edit.
+    format!(
+        "{:?}\u{1f}{:?}\u{1f}{:?}\u{1f}{:?}\u{1f}{:?}\u{1f}{:?}",
+        rule.path, rule.view, rule.sort, rule.ascending, rule.folders_first, rule.columns
+    )
+    .replace('\u{1f}', "|")
+        + &format!("|{:?}", rule.icon_source)
 }
 
 /// The parsed `views.toml`.
@@ -220,6 +236,7 @@ impl Views {
             .rule
             .into_iter()
             .map(|r| {
+                let fingerprint = rule_fingerprint(&r);
                 let expanded = expand_home(&r.path, home);
                 // "a/**" should also match "a" itself, which the glob alone doesn't.
                 let text = expanded.to_string_lossy().into_owned();
@@ -243,7 +260,7 @@ impl Views {
                 };
                 validate_preview_providers(&layer, &format!("rule \"{}\"", r.path))?;
                 validate_icon_source(&layer, &format!("rule \"{}\"", r.path))?;
-                Ok(Rule { pattern: r.path, matchers, layer })
+                Ok(Rule { pattern: r.path, matchers, layer, fingerprint })
             })
             .collect::<Result<_, String>>()?;
         for (path, layer) in &file.folder {
@@ -309,9 +326,65 @@ impl Views {
         self.defaults.view.unwrap_or_default()
     }
 
+    /// The raw `[defaults]` layer, for controls that edit only that layer.
+    pub fn defaults_layer(&self) -> &ViewLayer {
+        &self.defaults
+    }
+
+    /// Every path rule in file order; `index` identifies one even when two
+    /// rules use the same pattern.
+    pub fn rules(&self) -> Vec<RuleInfo> {
+        self.rules
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| RuleInfo {
+                index,
+                pattern: rule.pattern.clone(),
+                preview_providers: rule.layer.preview_providers.clone(),
+                fingerprint: rule.fingerprint.clone(),
+            })
+            .collect()
+    }
+
+    /// A rule's own preview list: `None` for an unknown index, `Some(None)` when
+    /// the rule has no override (it inherits).
+    pub fn rule_preview_providers(&self, index: usize) -> Option<Option<Vec<String>>> {
+        self.rules.get(index).map(|rule| rule.layer.preview_providers.clone())
+    }
+
+    /// The identity a preview edit uses to prove the rule did not move or change.
+    pub fn rule_locator(&self, index: usize) -> Option<RuleLocator> {
+        let rule = self.rules.get(index)?;
+        Some(RuleLocator { index, pattern: rule.pattern.clone(), fingerprint: rule.fingerprint.clone() })
+    }
+
+    /// A folder's own raw layer, for an editor that writes only that layer.
+    pub fn folder_layer(&self, dir: &Path) -> Option<&ViewLayer> {
+        self.folders.get(dir)
+    }
+
     pub fn has_folder_override(&self, dir: &Path) -> bool {
         self.folders.contains_key(dir)
     }
+}
+
+/// One path rule as the preview editor lists it. Repeated patterns keep
+/// distinct indexes in on-disk order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleInfo {
+    pub index: usize,
+    pub pattern: String,
+    /// The rule's own `preview_providers`; `None` inherits.
+    pub preview_providers: Option<Vec<String>>,
+    pub fingerprint: String,
+}
+
+/// The stable target a preview edit is allowed to change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleLocator {
+    pub index: usize,
+    pub pattern: String,
+    pub fingerprint: String,
 }
 
 /// A change to one folder's view, as the user made it.
@@ -320,6 +393,20 @@ pub enum ViewChange {
     View(ViewMode),
     Sort(Sort),
     Columns(Vec<String>),
+}
+
+/// A change to `[defaults]` only, independent of the folder on screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DefaultsChange {
+    View(ViewMode),
+    /// Sets only `sort`; a saved `ascending` stays as the user wrote it.
+    SortKey(SortKey),
+    /// `Some` writes `ascending`; `None` removes it so the natural direction applies.
+    Ascending(Option<bool>),
+    FoldersFirst(bool),
+    PreviewProviders(Vec<String>),
+    /// Remove the defaults list so the built-in Native behavior applies.
+    InheritPreviewProviders,
 }
 
 fn mode_name(mode: ViewMode) -> &'static str {
@@ -373,6 +460,200 @@ pub fn save_folder_change(config_dir: &Path, home: &Path, dir: &Path, change: Vi
         let table = folders.entry(&key).or_insert_with(|| Item::Table(Table::new()));
         let table = table.as_table_mut().ok_or_else(|| format!("views.toml: folder \"{key}\" must be a table"))?;
         write_change(table, change);
+        Ok(())
+    })
+}
+
+/// Change `[defaults]` only, leaving every folder and rule layer untouched.
+/// `sort` and `ascending` are separate: choosing a sort key alone keeps a saved
+/// direction, and removing `ascending` restores the natural direction.
+pub fn save_defaults_change(config_dir: &Path, change: DefaultsChange) -> Result<(), String> {
+    edit_toml(&views_path(config_dir), DEFAULT_VIEWS, |doc| {
+        let defaults = doc.entry("defaults").or_insert_with(|| Item::Table(Table::new()));
+        let table = defaults.as_table_mut().ok_or_else(|| "views.toml: `defaults` must be a table".to_owned())?;
+        match change {
+            DefaultsChange::View(mode) => table["view"] = value(mode_name(mode)),
+            DefaultsChange::SortKey(key) => table["sort"] = value(sort_key_name(key)),
+            DefaultsChange::Ascending(Some(ascending)) => table["ascending"] = value(ascending),
+            DefaultsChange::Ascending(None) => {
+                table.remove("ascending");
+            }
+            DefaultsChange::FoldersFirst(folders_first) => table["folders_first"] = value(folders_first),
+            DefaultsChange::PreviewProviders(providers) => write_preview_list(table, &providers),
+            DefaultsChange::InheritPreviewProviders => {
+                table.remove("preview_providers");
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Replace one layer's `preview_providers`, keeping the formatting of items
+/// that survived (their comments are part of the item).
+fn write_preview_list(table: &mut Table, providers: &[String]) {
+    let old = table.get("preview_providers").and_then(Item::as_array);
+    let mut array = old.cloned().unwrap_or_default();
+    array.clear();
+    for provider in providers {
+        if let Some(existing) = old.and_then(|old| old.iter().find(|item| item.as_str() == Some(provider))) {
+            array.push_formatted(existing.clone());
+        } else {
+            array.push(provider);
+        }
+    }
+    table["preview_providers"] = value(array);
+}
+
+/// The `[folder]` keys whose expanded path is exactly `dir`. More than one is
+/// an ambiguity an editor must report instead of picking one.
+fn existing_folder_keys(doc: &DocumentMut, home: &Path, dir: &Path) -> Vec<String> {
+    let Some(folders) = doc.get("folder").and_then(Item::as_table) else { return Vec::new() };
+    folders
+        .iter()
+        .filter(|(_, item)| item.is_table())
+        .filter(|(key, _)| expand_home(key, home) == dir)
+        .map(|(key, _)| key.to_owned())
+        .collect()
+}
+
+/// The spelling for a folder key. Unlike `abbreviate_home`, a path that is not
+/// UTF-8 is an error: TOML cannot round-trip the raw bytes.
+fn checked_folder_key(dir: &Path, home: &Path) -> Result<String, String> {
+    let key = match dir.strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Ok(rest) => format!(
+            "~/{}",
+            rest.to_str()
+                .ok_or_else(|| format!("{} is not valid UTF-8; views.toml cannot store this folder", dir.display()))?
+        ),
+        Err(_) => dir
+            .to_str()
+            .ok_or_else(|| format!("{} is not valid UTF-8; views.toml cannot store this folder", dir.display()))?
+            .to_owned(),
+    };
+    Ok(key)
+}
+
+/// Set or clear one folder's `preview_providers`. `None` removes the key so the
+/// folder inherits again; `Some([])` is the explicit Native-only list. An
+/// existing `~/…` or absolute spelling is reused, and two equivalent spellings
+/// are reported instead of writing a third.
+pub fn save_folder_preview_providers(
+    config_dir: &Path,
+    home: &Path,
+    dir: &Path,
+    providers: Option<Vec<String>>,
+) -> Result<(), String> {
+    edit_toml(&views_path(config_dir), DEFAULT_VIEWS, |doc| {
+        let existing = existing_folder_keys(doc, home, dir);
+        if existing.len() > 1 {
+            return Err(format!(
+                "views.toml: folder \"{}\" has {} equivalent keys ({}); resolve them before editing preview providers",
+                dir.display(),
+                existing.len(),
+                existing.join(", ")
+            ));
+        }
+        match providers {
+            None => {
+                if let Some(key) = existing.first()
+                    && let Some(folders) = doc.get_mut("folder").and_then(Item::as_table_mut)
+                    && let Some(table) = folders.get_mut(key).and_then(Item::as_table_mut)
+                {
+                    table.remove("preview_providers");
+                    if table.iter().next().is_none() {
+                        folders.remove(key);
+                    }
+                }
+                Ok(())
+            }
+            Some(providers) => {
+                let key = match existing.first() {
+                    Some(key) => key.clone(),
+                    None => checked_folder_key(dir, home)?,
+                };
+                let table = folder_tables(doc)?.entry(&key).or_insert_with(|| Item::Table(Table::new()));
+                let table =
+                    table.as_table_mut().ok_or_else(|| format!("views.toml: folder {key:?} must be a table"))?;
+                write_preview_list(table, &providers);
+                Ok(())
+            }
+        }
+    })
+}
+
+/// Set or clear one rule's `preview_providers`, proving first that the rule at
+/// the locator's index is still the one the editor drew. Clearing leaves every
+/// other field of a mixed-purpose rule intact.
+pub fn save_rule_preview_providers(
+    config_dir: &Path,
+    home: &Path,
+    locator: &RuleLocator,
+    providers: Option<Vec<String>>,
+) -> Result<(), String> {
+    let current = load_views(config_dir, home)?;
+    let Some(rule) = current.rules().into_iter().find(|rule| rule.index == locator.index) else {
+        return Err("views.toml: the selected rule is gone; choose it again".into());
+    };
+    if rule.pattern != locator.pattern || rule.fingerprint != locator.fingerprint {
+        return Err("views.toml: the selected rule changed; choose it again".into());
+    }
+    edit_toml(&views_path(config_dir), DEFAULT_VIEWS, |doc| {
+        let rules = doc
+            .get_mut("rule")
+            .and_then(Item::as_array_of_tables_mut)
+            .ok_or_else(|| "views.toml: `rule` must be an array of tables".to_owned())?;
+        let table = rules
+            .get_mut(locator.index)
+            .ok_or_else(|| "views.toml: the selected rule is gone; choose it again".to_owned())?;
+        if table.get("path").and_then(Item::as_str) != Some(locator.pattern.as_str()) {
+            return Err("views.toml: the selected rule moved; choose it again".into());
+        }
+        match providers {
+            Some(providers) => write_preview_list(table, &providers),
+            None => {
+                table.remove("preview_providers");
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Validate a path pattern the same way the resolver does, including the
+/// `/**` form that also matches the base folder.
+fn validate_rule_pattern(pattern: &str, home: &Path) -> Result<(), String> {
+    if pattern.trim().is_empty() {
+        return Err("a path rule needs a pattern".into());
+    }
+    let expanded = expand_home(pattern, home);
+    let text = expanded.to_string_lossy().into_owned();
+    let mut patterns = vec![text.clone()];
+    if let Some(base) = text.strip_suffix("/**") {
+        patterns.push(base.to_owned());
+    }
+    for pattern in patterns {
+        GlobBuilder::new(&pattern)
+            .literal_separator(true)
+            .build()
+            .map_err(|error| format!("rule \"{pattern}\": {error}"))?;
+    }
+    Ok(())
+}
+
+/// Append a preview-only rule after the existing rules. Later rules win in the
+/// resolver, so the new one overrides earlier matches for the folders it covers.
+pub fn add_preview_rule(config_dir: &Path, home: &Path, pattern: &str, providers: Vec<String>) -> Result<(), String> {
+    validate_rule_pattern(pattern, home)?;
+    edit_toml(&views_path(config_dir), DEFAULT_VIEWS, |doc| {
+        let rules = doc
+            .entry("rule")
+            .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()))
+            .as_array_of_tables_mut()
+            .ok_or_else(|| "views.toml: `rule` must be an array of tables".to_owned())?;
+        let mut table = Table::new();
+        table["path"] = value(pattern);
+        write_preview_list(&mut table, &providers);
+        rules.push(table);
         Ok(())
     })
 }
@@ -570,6 +851,186 @@ view = "list"
         assert!(err.contains("line 2"), "the parser's span is a line: {err}");
         let err = Views::parse("[defaults]\nsortt = \"name\"\n", Path::new(HOME)).err().unwrap();
         assert!(err.contains("sortt"), "{err}");
+    }
+
+    #[test]
+    fn defaults_changes_touch_only_defaults_and_keep_a_saved_direction() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Path::new(HOME);
+        std::fs::write(
+            dir.path().join("views.toml"),
+            r#"# mine
+[defaults]
+view = "list"
+sort = "name"
+folders_first = true # group
+preview_providers = ["example.pack.preview"] # first
+
+[[rule]]
+path = "~/Pictures"
+view = "columns"
+
+[folder."~/Pictures"]
+sort = "size"
+"#,
+        )
+        .unwrap();
+
+        save_defaults_change(dir.path(), DefaultsChange::SortKey(SortKey::Modified)).unwrap();
+        let views = load_views(dir.path(), home).unwrap();
+        let defaults = views.defaults_layer();
+        assert_eq!(defaults.sort, Some(SortKey::Modified));
+        assert_eq!(defaults.ascending, None, "a sort key alone does not invent a direction");
+        assert_eq!(views.resolve(Path::new("/tmp")).ascending, (false, Source::Defaults), "modified is newest first");
+        let text = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+        assert!(text.starts_with("# mine\n"), "{text}");
+        assert!(text.contains("folders_first = true # group"), "{text}");
+        assert!(text.contains("# first"), "list item comments survive: {text}");
+        assert!(text.contains("view = \"columns\""), "a rule is untouched: {text}");
+        assert!(text.contains("[folder.\"~/Pictures\"]\nsort = \"size\""), "a folder is untouched: {text}");
+
+        save_defaults_change(dir.path(), DefaultsChange::Ascending(Some(true))).unwrap();
+        assert_eq!(load_views(dir.path(), home).unwrap().defaults_layer().ascending, Some(true));
+        save_defaults_change(dir.path(), DefaultsChange::Ascending(None)).unwrap();
+        assert_eq!(load_views(dir.path(), home).unwrap().defaults_layer().ascending, None, "natural is absence");
+        let text = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+        assert!(!text.contains("ascending"), "{text}");
+
+        save_defaults_change(dir.path(), DefaultsChange::PreviewProviders(vec!["example.other.preview".into()]))
+            .unwrap();
+        let views = load_views(dir.path(), home).unwrap();
+        assert_eq!(views.defaults_layer().preview_providers, Some(vec!["example.other.preview".into()]));
+        assert_eq!(views.resolve(Path::new("/tmp")).preview_providers.1, Source::Defaults);
+        save_defaults_change(dir.path(), DefaultsChange::PreviewProviders(Vec::new())).unwrap();
+        assert_eq!(
+            load_views(dir.path(), home).unwrap().resolve(Path::new("/tmp")).preview_providers.0,
+            Vec::<String>::new(),
+            "an explicit empty list is Native only, not inheritance"
+        );
+    }
+
+    #[test]
+    fn preview_writes_target_one_layer_without_duplicating_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Path::new(HOME);
+        let pictures = Path::new("/Users/me/Pictures");
+        std::fs::write(
+            dir.path().join("views.toml"),
+            r#"# mine
+[defaults]
+preview_providers = ["example.pack.first"] # default list
+
+[[rule]]
+path = "~/Pictures"
+view = "columns"
+
+[[rule]]
+path = "~/Pictures"
+sort = "size"
+preview_providers = ["example.pack.rule"]
+
+[folder."~/Pictures"]
+view = "list" # keep me
+"#,
+        )
+        .unwrap();
+
+        save_folder_preview_providers(dir.path(), home, pictures, Some(vec!["example.pack.folder".into()])).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+        assert!(text.starts_with("# mine\n"), "{text}");
+        assert!(text.contains("view = \"list\" # keep me"), "the folder's other fields and comments stay: {text}");
+        assert_eq!(text.matches("[folder.\"~/Pictures\"]").count(), 1, "no second spelling: {text}");
+        let views = load_views(dir.path(), home).unwrap();
+        assert_eq!(views.folder_layer(pictures).unwrap().preview_providers, Some(vec!["example.pack.folder".into()]));
+        assert_eq!(views.resolve(pictures).preview_providers.1, Source::Folder);
+
+        save_folder_preview_providers(dir.path(), home, pictures, None).unwrap();
+        let views = load_views(dir.path(), home).unwrap();
+        assert_eq!(views.folder_layer(pictures).unwrap().preview_providers, None);
+        assert_eq!(views.folder_layer(pictures).unwrap().view, Some(ViewMode::List), "the mixed table survives");
+        assert_eq!(
+            views.resolve(pictures).preview_providers.0,
+            ["example.pack.rule"],
+            "clearing falls back to the later matching rule"
+        );
+
+        // Repeated rules are distinct targets in file order.
+        let rule_one = views.rule_locator(1).expect("second rule");
+        save_rule_preview_providers(dir.path(), home, &rule_one, None).unwrap();
+        let views = load_views(dir.path(), home).unwrap();
+        assert_eq!(views.rule_preview_providers(0), Some(None), "the first rule was never touched");
+        assert_eq!(views.rule_preview_providers(1), Some(None));
+        assert_eq!(views.rules()[1].pattern, "~/Pictures", "the rule itself stays");
+
+        // An external reorder changes the target at that index: refuse, keep the file.
+        let stale = views.rule_locator(1).unwrap();
+        let before = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+        std::fs::write(
+            dir.path().join("views.toml"),
+            r#"[[rule]]
+path = "~/Other"
+preview_providers = ["example.pack.other"]
+
+[[rule]]
+path = "~/Pictures"
+view = "columns"
+"#,
+        )
+        .unwrap();
+        let after_external = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+        let error = save_rule_preview_providers(dir.path(), home, &stale, Some(vec!["example.pack.rule".into()]))
+            .expect_err("a moved rule is not the drawn rule");
+        assert!(error.contains("changed"), "{error}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("views.toml")).unwrap(), after_external);
+        assert_ne!(before, after_external, "the test did change the file outside");
+
+        // A new preview-only rule is appended after the existing ones and wins for matching folders.
+        add_preview_rule(dir.path(), home, "~/Other/**", vec!["example.pack.new".into()]).unwrap();
+        let views = load_views(dir.path(), home).unwrap();
+        assert_eq!(views.rules().len(), 3);
+        assert_eq!(views.rules()[2].pattern, "~/Other/**");
+        assert_eq!(
+            views.resolve(Path::new("/Users/me/Other/Inside")).preview_providers.0,
+            ["example.pack.new"],
+            "later rules win"
+        );
+        assert_eq!(
+            views.resolve(Path::new("/Users/me/Other")).preview_providers.0,
+            ["example.pack.new"],
+            "/** also matches the base folder"
+        );
+        assert!(add_preview_rule(dir.path(), home, "~/[", vec![]).is_err(), "the resolver's glob validation applies");
+    }
+
+    #[test]
+    fn ambiguous_folder_spellings_are_reported_and_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Path::new(HOME);
+        let pictures = Path::new("/Users/me/Pictures");
+        let text = r#"[folder."~/Pictures"]
+view = "list"
+
+[folder."/Users/me/Pictures"]
+sort = "size"
+"#;
+        std::fs::write(dir.path().join("views.toml"), text).unwrap();
+        let error = save_folder_preview_providers(dir.path(), home, pictures, Some(vec!["example.pack.a".into()]))
+            .expect_err("two spellings");
+        assert!(error.contains("equivalent keys"), "{error}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("views.toml")).unwrap(), text);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_folder_is_refused_before_writing() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = Path::new(HOME);
+        let bad = PathBuf::from(std::ffi::OsString::from_vec(b"/Users/me/Bad-\xff".to_vec()));
+        let error = save_folder_preview_providers(dir.path(), home, &bad, Some(vec![]))
+            .expect_err("TOML cannot round-trip the bytes");
+        assert!(error.contains("not valid UTF-8"), "{error}");
+        assert!(!dir.path().join("views.toml").exists(), "nothing was written");
     }
 
     #[test]
