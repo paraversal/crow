@@ -23,7 +23,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod batch;
 mod job;
+
+pub(crate) use batch::{BatchHooks, execute_batch, plan_approved_moves};
+pub use batch::{
+    BatchRenameEntry, BatchRenameInput, BatchRowState, BatchValidation, NameSemantics, RecoveryItem,
+    is_owned_staging_path, name_semantics, names_equal, owned_staging_paths, validate_batch_rename,
+};
 
 #[cfg(test)]
 pub(crate) use job::FORCE_CROSS_DEVICE;
@@ -50,6 +57,10 @@ pub enum Request {
     Rename {
         path: PathBuf,
         new_name: String,
+    },
+    /// Several names in place, already approved with their source identities.
+    BatchRename {
+        moves: Arc<[BatchRenameEntry]>,
     },
     Duplicate {
         paths: Arc<[PathBuf]>,
@@ -201,6 +212,10 @@ pub enum Step {
     },
     /// Permanently deleted; cannot be undone.
     Deleted(PathBuf),
+    /// A batch rename committed as a group. Undo stages the inverse graph.
+    BatchRenamed {
+        moves: Vec<BatchRenameEntry>,
+    },
 }
 
 /// What an operation did, for the activity log and undo.
@@ -217,13 +232,15 @@ impl Record {
 
     /// The items the operation produced (to select them afterwards).
     pub fn results(&self) -> Vec<PathBuf> {
-        self.steps
-            .iter()
-            .filter_map(|s| match s {
-                Step::Created(p) | Step::Moved { to: p, .. } => Some(p.clone()),
-                _ => None,
-            })
-            .collect()
+        let mut results = Vec::new();
+        for step in &self.steps {
+            match step {
+                Step::Created(path) | Step::Moved { to: path, .. } => results.push(path.clone()),
+                Step::BatchRenamed { moves } => results.extend(moves.iter().map(|entry| entry.target.clone())),
+                _ => {}
+            }
+        }
+        results
     }
 }
 
@@ -262,6 +279,12 @@ pub enum OpError {
     },
     /// This filesystem has no verified primitive for the operation.
     Unsupported(PathBuf, &'static str),
+    /// The approved batch no longer matches the disk; nothing changed.
+    BatchChanged(PathBuf),
+    /// A batch could not restore everything. These are the exact locations.
+    BatchRecovery {
+        items: Vec<RecoveryItem>,
+    },
     Io(PathBuf, Arc<io::Error>),
 }
 
@@ -290,6 +313,22 @@ impl fmt::Display for OpError {
                 )
             }
             OpError::Unsupported(p, what) => write!(f, "“{}”: {what} isn't supported on this volume", name(p)),
+            OpError::BatchChanged(p) => {
+                write!(f, "“{}” changed since the preview; nothing was renamed", name(p))
+            }
+            OpError::BatchRecovery { items } => {
+                write!(f, "Batch rename couldn't restore {} item(s). Kept data:", items.len())?;
+                for item in items {
+                    write!(
+                        f,
+                        " “{}” is at “{}” (wanted “{}”)",
+                        item.original.display(),
+                        item.current.display(),
+                        item.intended.display()
+                    )?;
+                }
+                Ok(())
+            }
             OpError::Io(p, e) => write!(f, "“{}”: {e}", name(p)),
         }
     }
@@ -306,8 +345,9 @@ fn io_err(path: &Path) -> impl FnOnce(io::Error) -> OpError + '_ {
 const PACKAGE_EXTS: [&str; 5] = ["app", "bundle", "framework", "photoslibrary", "pkg"];
 
 /// Split "report.pdf" into ("report", ".pdf"). Folders keep their whole name,
-/// except packages ("Tool.app"), like Finder.
-fn split_name(name: &str, is_dir: bool) -> (&str, &str) {
+/// except packages ("Tool.app"), like Finder. Shared with the batch-rename
+/// transform in `crow-core`, so both preserve exactly the same extension.
+pub fn split_name(name: &str, is_dir: bool) -> (&str, &str) {
     match name.rfind('.') {
         Some(i) if i > 0 && (!is_dir || PACKAGE_EXTS.contains(&&name[i + 1..])) => (&name[..i], &name[i..]),
         _ => (name, ""),
@@ -352,6 +392,8 @@ pub fn check_name(name: &str) -> Result<(), OpError> {
         "it is empty"
     } else if name.contains('/') {
         "it contains “/”"
+    } else if name.contains('\0') {
+        "it contains a NUL character"
     } else if name == "." || name == ".." {
         "it is reserved"
     } else if name.len() > 255 {
@@ -501,6 +543,11 @@ pub fn plan_cancellable(request: Request, cancel: &AtomicBool) -> Result<Plan, O
                 }],
                 label,
             )
+        }
+        Request::BatchRename { moves } => {
+            let items = plan_approved_moves(moves)?;
+            let count_text = count(items.len());
+            (items, format!("Rename {count_text}"))
         }
         Request::Duplicate { paths } => {
             let mut items = Vec::new();
@@ -685,6 +732,18 @@ pub fn undo(record: &Record, trash: &dyn Trash) -> Result<Record, OpError> {
                     job::move_item(to, from, &never, &mut |_| {})?;
                 }
                 reversed.steps.push(Step::Moved { from: to.clone(), to: from.clone() });
+            }
+            Step::BatchRenamed { moves } => {
+                let inverse: Vec<BatchRenameEntry> = moves
+                    .iter()
+                    .map(|entry| BatchRenameEntry {
+                        source: entry.target.clone(),
+                        target: entry.source.clone(),
+                        identity: entry.identity.clone(),
+                    })
+                    .collect();
+                let undone = execute_batch(&inverse, &|| false, &mut |_| {}, &BatchHooks::default())?;
+                reversed.steps.push(Step::BatchRenamed { moves: undone });
             }
             Step::Trashed { original, trashed } => {
                 if exists(original) {

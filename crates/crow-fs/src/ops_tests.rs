@@ -1348,3 +1348,344 @@ fn a_target_swapped_between_verify_and_trash_is_restored() {
     assert!(outcome.record.steps.is_empty(), "the swapped occupant was restored, not recorded");
     assert_eq!(f.snapshot()["dest/a.txt"], "new occupant");
 }
+
+// ----- batch rename -----
+
+fn batch_inputs(paths: &[(PathBuf, &str)]) -> Vec<BatchRenameInput> {
+    paths
+        .iter()
+        .map(|(path, target)| BatchRenameInput {
+            source: path.clone(),
+            name: path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+            is_dir: path.is_dir(),
+            target_name: (*target).to_owned(),
+        })
+        .collect()
+}
+
+fn batch_moves(paths: &[(PathBuf, &str)]) -> Vec<BatchRenameEntry> {
+    let inputs = batch_inputs(paths);
+    validate_batch_rename(&inputs, &AtomicBool::new(false)).expect("validation").moves
+}
+
+fn run_batch(f: &Fixture, paths: &[(PathBuf, &str)]) -> Outcome {
+    let moves = batch_moves(paths);
+    assert!(!moves.is_empty(), "the batch has moves");
+    f.run(Request::BatchRename { moves: moves.into() })
+}
+
+#[test]
+fn batch_preflight_reports_duplicates_occupants_and_vanished_sources() {
+    let f = Fixture::new("batch-preflight");
+    f.file("a.txt", "a");
+    f.file("b.txt", "b");
+    let duplicate = batch_inputs(&[(f.path("a.txt"), "same.txt"), (f.path("b.txt"), "same.txt")]);
+    let checked = validate_batch_rename(&duplicate, &AtomicBool::new(false)).unwrap();
+    assert!(checked.rows.iter().all(|row| matches!(row, BatchRowState::Invalid(_))), "{:?}", checked.rows);
+    assert!(checked.moves.is_empty());
+
+    let occupied = batch_inputs(&[(f.path("a.txt"), "b.txt")]);
+    let checked = validate_batch_rename(&occupied, &AtomicBool::new(false)).unwrap();
+    assert!(matches!(checked.rows[0], BatchRowState::Invalid(_)), "an unchanged b.txt blocks the target");
+
+    let vanished = batch_inputs(&[(f.path("a.txt"), "x.txt")]);
+    std::fs::remove_file(f.path("a.txt")).unwrap();
+    let checked = validate_batch_rename(&vanished, &AtomicBool::new(false)).unwrap();
+    assert!(matches!(checked.rows[0], BatchRowState::Invalid(_)));
+    std::fs::write(f.path("a.txt"), "a").unwrap();
+}
+
+#[test]
+fn batch_swap_is_one_record_and_undo_redo_reverse_it() {
+    let f = Fixture::new("batch-swap");
+    f.file("a.txt", "A");
+    f.file("b.txt", "B");
+    let out = run_batch(&f, &[(f.path("a.txt"), "b.txt"), (f.path("b.txt"), "a.txt")]);
+    ok(&out);
+    assert_eq!(f.snapshot()["a.txt"], "B");
+    assert_eq!(f.snapshot()["b.txt"], "A");
+    assert_eq!(out.record.steps.len(), 1, "one grouped step");
+    assert!(matches!(out.record.steps[0], Step::BatchRenamed { .. }));
+    assert_eq!(out.record.results(), vec![f.path("b.txt"), f.path("a.txt")]);
+
+    let undone = undo(&out.record, &f.trash).unwrap();
+    assert_eq!(f.snapshot()["a.txt"], "A");
+    assert_eq!(f.snapshot()["b.txt"], "B");
+    undo(&undone, &f.trash).unwrap();
+    assert_eq!(f.snapshot()["a.txt"], "B");
+    assert_eq!(f.snapshot()["b.txt"], "A");
+}
+
+#[test]
+fn batch_long_cycle_completes_in_display_order() {
+    let f = Fixture::new("batch-cycle");
+    f.file("a.txt", "A");
+    f.file("b.txt", "B");
+    f.file("c.txt", "C");
+    let out = run_batch(&f, &[(f.path("a.txt"), "b.txt"), (f.path("b.txt"), "c.txt"), (f.path("c.txt"), "a.txt")]);
+    ok(&out);
+    assert_eq!(f.snapshot()["b.txt"], "A");
+    assert_eq!(f.snapshot()["c.txt"], "B");
+    assert_eq!(f.snapshot()["a.txt"], "C");
+    undo(&out.record, &f.trash).unwrap();
+    assert_eq!(f.snapshot()["a.txt"], "A");
+    assert_eq!(f.snapshot()["b.txt"], "B");
+    assert_eq!(f.snapshot()["c.txt"], "C");
+}
+
+#[test]
+fn batch_case_only_rename_keeps_one_entry() {
+    let f = Fixture::new("batch-case");
+    f.file("Notes.txt", "n");
+    let out = run_batch(&f, &[(f.path("Notes.txt"), "notes.txt")]);
+    ok(&out);
+    let names: Vec<String> = std::fs::read_dir(&f.root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".txt"))
+        .collect();
+    assert_eq!(names.len(), 1, "one directory entry, new spelling: {names:?}");
+    assert_eq!(names[0], "notes.txt");
+    undo(&out.record, &f.trash).unwrap();
+    assert!(f.path("Notes.txt").exists());
+}
+
+#[test]
+fn batch_hard_links_and_unselected_entries_block_targets() {
+    let f = Fixture::new("batch-hard-link");
+    let a = f.file("a.txt", "shared");
+    let b = f.path("b.txt");
+    std::fs::hard_link(&a, &b).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(std::fs::metadata(&a).unwrap().ino(), std::fs::metadata(&b).unwrap().ino());
+
+    let blocked = batch_inputs(&[(a.clone(), "b.txt")]);
+    let checked = validate_batch_rename(&blocked, &AtomicBool::new(false)).unwrap();
+    assert!(matches!(checked.rows[0], BatchRowState::Invalid(_)), "an unselected hard link still occupies b");
+
+    let vacated = batch_inputs(&[(a.clone(), "b.txt"), (b.clone(), "c.txt")]);
+    let checked = validate_batch_rename(&vacated, &AtomicBool::new(false)).unwrap();
+    assert!(checked.rows.iter().all(|row| *row == BatchRowState::Ready), "{:?}", checked.rows);
+    let out = f.run(Request::BatchRename { moves: checked.moves.into() });
+    ok(&out);
+    assert_eq!(f.snapshot()["b.txt"], "shared");
+    assert_eq!(f.snapshot()["c.txt"], "shared");
+    assert!(!a.exists());
+    undo(&out.record, &f.trash).unwrap();
+    assert!(a.exists() && b.exists());
+}
+
+#[test]
+fn batch_multiple_parents_folders_packages_and_symlinks() {
+    let f = Fixture::new("batch-parents");
+    f.file("one/a.txt", "a");
+    f.file("two/b.txt", "b");
+    f.dir("one/folder.bin");
+    f.dir("one/Tool.app");
+    let link = f.path("one/link");
+    std::os::unix::fs::symlink("a.txt", &link).unwrap();
+    let moves = batch_moves(&[
+        (f.path("one/a.txt"), "a 1.txt"),
+        (f.path("two/b.txt"), "b 1.txt"),
+        (f.path("one/folder.bin"), "folder 1.bin"),
+        (f.path("one/Tool.app"), "Tool 1.app"),
+        (link.clone(), "link 1"),
+    ]);
+    let out = f.run(Request::BatchRename { moves: moves.into() });
+    ok(&out);
+    assert!(f.path("one/a 1.txt").is_file());
+    assert!(f.path("two/b 1.txt").is_file());
+    assert!(f.path("one/folder 1.bin").is_dir());
+    assert!(f.path("one/Tool 1.app").is_dir());
+    assert_eq!(std::fs::read_link(f.path("one/link 1")).unwrap().to_string_lossy(), "a.txt");
+    undo(&out.record, &f.trash).unwrap();
+    assert!(f.path("one/a.txt").exists());
+    assert!(f.path("one/Tool.app").exists());
+}
+
+#[test]
+fn batch_ancestor_and_non_utf8_sources_are_refused() {
+    let f = Fixture::new("batch-refuse");
+    let dir = f.dir("folder");
+    f.file("folder/a.txt", "a");
+    let ancestor = batch_inputs(&[(dir.clone(), "renamed"), (f.path("folder/a.txt"), "b.txt")]);
+    let checked = validate_batch_rename(&ancestor, &AtomicBool::new(false)).unwrap();
+    assert!(checked.error.is_some(), "a folder and its child are not independent");
+    assert!(checked.moves.is_empty());
+
+    use std::os::unix::ffi::OsStringExt;
+    let raw = f.root.join(std::ffi::OsString::from_vec(b"raw-\xff.txt".to_vec()));
+    match std::fs::write(&raw, "r") {
+        Ok(()) => {
+            let lossy = raw.file_name().unwrap().to_string_lossy().into_owned();
+            let checked = validate_batch_rename(
+                &[BatchRenameInput {
+                    source: raw.clone(),
+                    name: lossy,
+                    is_dir: false,
+                    target_name: "fixed.txt".into(),
+                }],
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert!(matches!(checked.rows[0], BatchRowState::Invalid(_)), "raw path cannot round-trip");
+            assert!(raw.exists(), "nothing moved");
+        }
+        // APFS rejects non-UTF-8 directory-entry names. Exercise the same
+        // round-trip guard with a mismatched text name instead.
+        Err(err) if err.raw_os_error() == Some(92) => {
+            f.file("text.txt", "t");
+            let checked = validate_batch_rename(
+                &[BatchRenameInput {
+                    source: f.path("text.txt"),
+                    name: "other.txt".into(),
+                    is_dir: false,
+                    target_name: "fixed.txt".into(),
+                }],
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert!(matches!(checked.rows[0], BatchRowState::Invalid(_)), "mismatched name cannot round-trip");
+        }
+        Err(err) => panic!("raw path write: {err}"),
+    }
+}
+
+#[test]
+fn batch_stage_failure_restores_the_earlier_items() {
+    let f = Fixture::new("batch-stage-fail");
+    f.file("a.txt", "A");
+    f.file("b.txt", "B");
+    let moves = batch_moves(&[(f.path("a.txt"), "x.txt"), (f.path("b.txt"), "y.txt")]);
+    let second = f.path("b.txt");
+    let hooks = BatchHooks {
+        before_stage: Some(Arc::new(move |index| {
+            if index == 1 {
+                std::fs::write(&second, "changed while the batch ran").unwrap();
+            }
+        })),
+        ..Default::default()
+    };
+    let result = execute_batch(&moves, &|| false, &mut |_| {}, &hooks);
+    assert!(matches!(result, Err(OpError::BatchChanged(_))), "{result:?}");
+    assert_eq!(f.snapshot()["a.txt"], "A", "the first staged source is back");
+    assert_eq!(f.snapshot()["b.txt"], "changed while the batch ran", "the changed source is untouched");
+    assert!(!f.snapshot().keys().any(|key| key.contains(".crow-batch")), "stage removed");
+}
+
+#[test]
+fn batch_placement_failure_rolls_back_without_touching_an_external_file() {
+    let f = Fixture::new("batch-place-fail");
+    f.file("a.txt", "A");
+    f.file("b.txt", "B");
+    let moves = batch_moves(&[(f.path("a.txt"), "x.txt"), (f.path("b.txt"), "y.txt")]);
+    let before = f.snapshot();
+    let target = f.path("y.txt");
+    let hooks = BatchHooks {
+        before_place: Some(Arc::new(move |index| {
+            if index == 1 {
+                std::fs::write(&target, "external").unwrap();
+            }
+        })),
+        ..Default::default()
+    };
+    let result = execute_batch(&moves, &|| false, &mut |_| {}, &hooks);
+    assert!(matches!(result, Err(OpError::BatchChanged(_))), "{result:?}");
+    assert_eq!(f.snapshot()["a.txt"], "A");
+    assert_eq!(f.snapshot()["b.txt"], "B");
+    assert_eq!(f.snapshot()["y.txt"], "external", "the concurrent writer keeps its file");
+    assert!(!f.snapshot().keys().any(|key| key.contains(".crow-batch")), "stage removed");
+    let _ = before;
+}
+
+#[test]
+fn batch_blocked_restore_keeps_the_data_and_reports_exact_locations() {
+    let f = Fixture::new("batch-recovery");
+    f.file("a.txt", "A");
+    f.file("b.txt", "B");
+    let moves = batch_moves(&[(f.path("a.txt"), "x.txt"), (f.path("b.txt"), "y.txt")]);
+    let y = f.path("y.txt");
+    let a = f.path("a.txt");
+    let hooks = BatchHooks {
+        before_place: Some(Arc::new(move |index| {
+            if index == 1 {
+                std::fs::write(&y, "external").unwrap();
+            }
+        })),
+        before_restore: Some(Arc::new(move |index| {
+            if index == 0 {
+                std::fs::write(&a, "newcomer").unwrap();
+            }
+        })),
+        ..Default::default()
+    };
+    let error = execute_batch(&moves, &|| false, &mut |_| {}, &hooks).expect_err("rollback is blocked");
+    let OpError::BatchRecovery { items } = &error else { panic!("expected recovery, got {error:?}") };
+    assert!(!items.is_empty());
+    assert_eq!(std::fs::read_to_string(f.path("a.txt")).unwrap(), "newcomer");
+    let kept = items.iter().find(|item| item.current != f.path("a.txt") || item.original == f.path("a.txt"));
+    assert!(kept.is_some(), "the staged data path is reported: {items:?}");
+    for item in items {
+        assert!(item.current.exists(), "reported current path exists: {item:?}");
+    }
+    assert!(error.to_string().contains("wanted"));
+}
+
+#[test]
+fn batch_undo_refuses_an_unrelated_occupant_and_changes_nothing() {
+    let f = Fixture::new("batch-undo-block");
+    f.file("a.txt", "A");
+    f.file("b.txt", "B");
+    let out = run_batch(&f, &[(f.path("a.txt"), "x.txt"), (f.path("b.txt"), "y.txt")]);
+    ok(&out);
+    f.file("a.txt", "newcomer");
+    let error = undo(&out.record, &f.trash).expect_err("undo must refuse");
+    assert!(matches!(error, OpError::BatchChanged(_) | OpError::NameTaken(_)), "{error:?}");
+    assert_eq!(f.snapshot()["a.txt"], "newcomer");
+    assert_eq!(f.snapshot()["x.txt"], "A", "the renamed item is still there");
+}
+
+#[test]
+fn batch_name_semantics_compare_case_and_normalization() {
+    let case_sensitive = NameSemantics { case_sensitive: true, normalization_insensitive: true };
+    let case_insensitive = NameSemantics { case_sensitive: false, normalization_insensitive: true };
+    assert!(names_equal("Notes.txt", "notes.txt", case_insensitive));
+    assert!(!names_equal("Notes.txt", "notes.txt", case_sensitive));
+    assert!(names_equal("e\u{301}.txt", "é.txt", case_sensitive), "APFS canonical equivalence");
+    assert!(!names_equal("e\u{301}.txt", "e.txt", case_sensitive));
+    let exact = NameSemantics { case_sensitive: true, normalization_insensitive: false };
+    assert!(!names_equal("e\u{301}.txt", "é.txt", exact));
+}
+
+#[test]
+fn batch_normalization_alias_keeps_one_entry() {
+    let f = Fixture::new("batch-normalize");
+    let nfd = f.path("e\u{301}.txt");
+    std::fs::write(&nfd, "accent").unwrap();
+    let out = run_batch(&f, &[(nfd.clone(), "é.txt")]);
+    ok(&out);
+    let entries: Vec<PathBuf> = std::fs::read_dir(&f.root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+        .collect();
+    assert_eq!(entries.len(), 1, "one directory entry: {entries:?}");
+    assert_eq!(std::fs::read_to_string(&entries[0]).unwrap(), "accent");
+    undo(&out.record, &f.trash).unwrap();
+    assert_eq!(std::fs::read_to_string(f.path("e\u{301}.txt")).unwrap(), "accent");
+}
+
+#[test]
+fn batch_blocked_vacating_row_also_blocks_the_row_behind_it() {
+    let f = Fixture::new("batch-cascade");
+    f.file("a.txt", "A");
+    f.file("b.txt", "B");
+    f.file("x.txt", "X");
+    // B would vacate b.txt for A, but B's own target is occupied, so B cannot move.
+    let inputs = batch_inputs(&[(f.path("a.txt"), "b.txt"), (f.path("b.txt"), "x.txt")]);
+    let checked = validate_batch_rename(&inputs, &AtomicBool::new(false)).unwrap();
+    assert!(checked.rows.iter().all(|row| matches!(row, BatchRowState::Invalid(_))), "{:?}", checked.rows);
+    assert!(checked.moves.is_empty(), "a row that cannot vacate must not leave its dependent ready");
+}

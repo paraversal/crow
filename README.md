@@ -265,6 +265,8 @@ Copying or cutting more than 1000 items keeps them in Crow's own clipboard (the 
 Cmd-Option-C copies the selected items' paths (one per line; the folder's own path with nothing
 selected). Nothing is ever overwritten: name clashes ask first, and Replace moves the old item to the Trash.
 
+Select two or more items and press F2 (or Return in its default mode) to rename them together. One sheet applies literal find/replace, adds text before or after the name, or numbers the selection in display order, with a live old → new preview and one Undo for the whole batch. Extensions are kept by default, and a swap or other cycle is staged safely; nothing is overwritten.
+
 Clicking empty space in the list deselects (focus stays on the list); in column view it also closes
 the columns to the right of the one clicked. Right-click or Ctrl-click opens a native menu with the
 same names and keys as the menu bar: on items, Open, Quick Look, Show Info, Rename, Duplicate, Copy,

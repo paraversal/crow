@@ -75,8 +75,8 @@ pub struct MenuState {
 pub fn enabled(id: CommandId, state: MenuState) -> bool {
     match id {
         CommandId::Paste => state.can_paste,
-        // Rename edits one name in place.
-        CommandId::Rename => state.selected == 1,
+        // One item edits in place; two or more open the batch sheet.
+        CommandId::Rename => state.selected >= 1,
         // Only folders go in the sidebar.
         CommandId::AddToSidebar => state.selected_folders > 0,
         // One row has a folder (a file's parent); a multi-selection has no "here".
@@ -322,6 +322,6 @@ mod tests {
         let two = MenuState { selected: 2, selected_folders: 1, can_paste: true };
         assert!(enabled(CommandId::Paste, two));
         assert!(enabled(CommandId::AddToSidebar, two));
-        assert!(!enabled(CommandId::Rename, two), "one name at a time");
+        assert!(enabled(CommandId::Rename, two), "two or more open batch rename");
     }
 }

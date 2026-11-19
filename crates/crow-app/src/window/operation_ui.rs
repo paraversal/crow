@@ -203,6 +203,26 @@ impl CrowWindow {
         failed: bool,
         cx: &mut Context<Self>,
     ) {
+        if let Request::BatchRename { moves } = request
+            && !failed
+        {
+            let map: std::collections::HashMap<PathBuf, PathBuf> = moves
+                .iter()
+                .filter(|entry| entry.source != entry.target)
+                .map(|entry| (entry.source.clone(), entry.target.clone()))
+                .collect();
+            let cursor = cx.global_mut::<Operations>().batch_cursor.take();
+            let pane = self.pane().downgrade();
+            pane.update(cx, |pane, cx| {
+                pane.apply_rename_map(&map, cursor.as_deref(), cx);
+                pane.refresh_saved(cx);
+            })
+            .ok();
+            if let Some(search) = self.search.clone() {
+                search.update(cx, |search, cx| search.apply_rename_map(&map, cx));
+            }
+            return;
+        }
         let pane = self.pane().downgrade();
         if failed
             && let Some(paths) = match request {
@@ -382,6 +402,10 @@ impl CrowWindow {
     }
 
     pub(super) fn confirm_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.sheet, Some(Sheet::BatchRename(_))) {
+            self.submit_batch_rename(window, cx);
+            return;
+        }
         if matches!(self.sheet, Some(Sheet::SavedQuery(_))) {
             self.confirm_saved_query_form(window, cx);
             return;
@@ -400,6 +424,7 @@ impl CrowWindow {
                 return;
             }
             Some(Sheet::SavedQuery(_)) => {}
+            Some(Sheet::BatchRename(_)) => {}
             Some(Sheet::Onboarding { no, .. }) => {
                 // Return activates the focused choice; the panel focus means the
                 // default, Show tips.
@@ -443,7 +468,10 @@ impl CrowWindow {
         self.confirm_sheet(window, cx);
     }
 
-    pub(super) fn render_sheet(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    pub(super) fn render_sheet(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if matches!(self.sheet, Some(Sheet::BatchRename(_))) {
+            return Some(self.render_batch_rename(window, cx));
+        }
         let sheet = self.sheet.as_ref()?;
         let theme = cx.global::<Ui>().theme.clone();
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
@@ -569,6 +597,7 @@ impl CrowWindow {
                 if form.id.is_some() { "Edit Saved Search" } else { "Save Search" }.to_owned(),
                 self.render_saved_query_form(form, window, cx),
             ),
+            Sheet::BatchRename(_) => unreachable!("batch rename renders above"),
             Sheet::Onboarding { show, no, .. } => (
                 "Show tips as you go?".to_owned(),
                 div()
@@ -717,41 +746,48 @@ impl CrowWindow {
             if let Some(Sheet::Conflict { controls, .. }) = &this.sheet {
                 cycle_focus(controls, forward, window, cx);
                 cx.notify();
+            } else if matches!(this.sheet, Some(Sheet::BatchRename(_))) {
+                this.batch_rename_tab(forward, window, cx);
             } else {
                 this.move_onboarding_focus(forward, window, cx);
             }
             cx.stop_propagation();
         });
-        Some(chrome::sheet(
-            chrome::sheet_panel(
-                "sheet",
-                if matches!(sheet, Sheet::SavedQuery(_)) { SheetWidth::Wide } else { SheetWidth::Narrow },
+        Some(
+            chrome::sheet(
+                chrome::sheet_panel(
+                    "sheet",
+                    if matches!(sheet, Sheet::SavedQuery(_)) { SheetWidth::Wide } else { SheetWidth::Narrow },
+                    &theme,
+                )
+                .aria_label(title.clone())
+                // keys::context_stack (KeyScope::Sheet) mirrors this.
+                .key_context("Sheet")
+                .when(!matches!(sheet, Sheet::SavedQuery(_)), |panel| panel.track_focus(sheet.focus()))
+                .on_action(
+                    cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.activate_sheet(window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_sheet(window, cx)),
+                )
+                .when(matches!(sheet, Sheet::Onboarding { .. } | Sheet::Conflict { .. }), |panel| {
+                    panel.on_key_down(sheet_tab)
+                })
+                .p_4()
+                // The first-launch question sits a little lower than the other
+                // sheets, so it reads as an invitation rather than an alert.
+                .when(matches!(sheet, Sheet::Onboarding { .. }), |panel| panel.mt_2())
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                .child(body),
                 &theme,
+                cx.global::<Ui>().feedback.mode,
+                cx.listener(|this, _, window, cx| this.close_sheet(window, cx)),
             )
-            .aria_label(title.clone())
-            // keys::context_stack (KeyScope::Sheet) mirrors this.
-            .key_context("Sheet")
-            .when(!matches!(sheet, Sheet::SavedQuery(_)), |panel| panel.track_focus(sheet.focus()))
-            .on_action(
-                cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.activate_sheet(window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_sheet(window, cx)))
-            .when(matches!(sheet, Sheet::Onboarding { .. } | Sheet::Conflict { .. }), |panel| {
-                panel.on_key_down(sheet_tab)
-            })
-            .p_4()
-            // The first-launch question sits a little lower than the other
-            // sheets, so it reads as an invitation rather than an alert.
-            .when(matches!(sheet, Sheet::Onboarding { .. }), |panel| panel.mt_2())
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(body),
-            &theme,
-            cx.global::<Ui>().feedback.mode,
-            cx.listener(|this, _, window, cx| this.close_sheet(window, cx)),
-        ))
+            .into_any_element(),
+        )
     }
 
     /// Active and queued jobs first, then recent terminal outcomes newest first.

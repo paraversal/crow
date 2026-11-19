@@ -880,6 +880,49 @@ impl Folder {
         if is_dir { (0, 1) } else { (size, 0) }
     }
 
+    /// Map selected paths and the cursor after a rename. The listing swaps on
+    /// the watcher's next batch; the cursor index settles then.
+    pub fn remap_selection(&mut self, map: &HashMap<PathBuf, PathBuf>, cursor: Option<&Path>, cx: &mut Context<Self>) {
+        if map.is_empty() {
+            return;
+        }
+        let before = self.selection.cursor().cloned();
+        let old_selected: HashSet<PathBuf> = self.selection.iter().cloned().collect();
+        self.selection.remap(map);
+        // The watcher may have dropped the old names before the terminal event;
+        // every target in the approved map was selected at submit. Only this
+        // folder's targets belong here (a search batch can span parents).
+        let mut selected: Vec<PathBuf> = self.selection.iter().cloned().collect();
+        for (source, target) in map {
+            if target.parent() != Some(self.dir.as_path()) || selected.contains(target) {
+                continue;
+            }
+            if !old_selected.contains(source)
+                && let Some(entry) = self.entries.iter().find(|entry| &entry.path == source)
+            {
+                Self::add_totals(&mut self.selection_totals, entry);
+            }
+            selected.push(target.clone());
+        }
+        selected.sort();
+        if let Some(cursor) = cursor {
+            if selected.contains(&cursor.to_path_buf()) {
+                self.selection.set_cursor(cursor.to_path_buf());
+            }
+        } else if self.selection.cursor().is_none()
+            && let Some(first) = selected.first().cloned()
+        {
+            self.selection.set_cursor(first);
+        }
+        self.selection.select_all(selected);
+        self.cursor_ix = self.selection.cursor().and_then(|cursor| self.index_of_path(cursor));
+        self.selection_changed(cx);
+        if before != self.selection.cursor().cloned() {
+            cx.emit(FolderEvent::CursorMoved);
+        }
+        cx.notify();
+    }
+
     pub fn selected_paths(&self) -> Vec<PathBuf> {
         self.rows
             .iter()
@@ -1757,6 +1800,17 @@ impl Folder {
         sync: bool,
     ) {
         let _span = tracing::debug_span!("listing apply").entered();
+        // An operation's private staging is never a row. Registered paths only,
+        // never a name guess: a user's own similarly named folder stays visible.
+        let staging = crow_fs::ops::owned_staging_paths();
+        let entries: Vec<Entry> = if staging.is_empty() {
+            entries
+        } else {
+            entries
+                .into_iter()
+                .filter(|entry| !staging.iter().any(|container| entry.path.starts_with(container)))
+                .collect()
+        };
         // Remember the cursor's row before the listing changes: if the apply drops
         // it, the row now at that index becomes the cursor (Finder's next row).
         self.cursor_before_apply =
@@ -2211,9 +2265,11 @@ impl Folder {
     fn apply_folder_changes(&mut self, cx: &mut Context<Self>) {
         let mut paths = std::mem::take(&mut self.pending);
         let mut rescan = std::mem::take(&mut self.pending_rescan);
+        let staging = crow_fs::ops::owned_staging_paths();
+        let staged = |path: &Path| staging.iter().any(|container| path.starts_with(container));
         for change in self.changes_rx.try_iter() {
             match change {
-                FolderChange::Paths(p) => paths.extend(p),
+                FolderChange::Paths(p) => paths.extend(p.into_iter().filter(|path| !staged(path))),
                 FolderChange::Rescan => rescan = true,
             }
         }
@@ -2543,7 +2599,10 @@ impl Folder {
     /// Feed a watcher batch without touching the disk (tests).
     #[cfg(test)]
     pub(crate) fn queue_changes(&self, paths: Vec<PathBuf>) {
-        self.changes_tx.send(FolderChange::Paths(paths)).ok();
+        let paths: Vec<PathBuf> = paths.into_iter().filter(|path| !crow_fs::ops::is_owned_staging_path(path)).collect();
+        if !paths.is_empty() {
+            self.changes_tx.send(FolderChange::Paths(paths)).ok();
+        }
     }
 
     /// Hold apply results in flight for `delay` (tests reproduce out-of-order batches).

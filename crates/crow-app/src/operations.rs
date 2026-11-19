@@ -271,6 +271,8 @@ pub struct Operations {
     /// Bumped by every message, so an old timer cannot clear a newer one and the
     /// bar can fade in a new one.
     pub message_generation: u64,
+    /// The batch-rename cursor's final path, captured when the sheet submitted.
+    pub batch_cursor: Option<PathBuf>,
     /// The fraction a finished operation's bar shows while it fades, and its id.
     pub progress_done: Option<(f32, u64)>,
     progress_generation: u64,
@@ -339,13 +341,28 @@ impl Operations {
     /// The paths the next undo would touch.
     #[cfg(feature = "fuzz")]
     pub fn undo_paths(&self) -> usize {
-        self.undo_stack.last().and_then(|index| self.log.get(*index)).map_or(0, |entry| entry.record.steps.len())
+        self.undo_stack
+            .last()
+            .and_then(|index| self.log.get(*index))
+            .map_or(0, |entry| Self::record_paths(&entry.record))
+    }
+
+    #[cfg(feature = "fuzz")]
+    fn record_paths(record: &Record) -> usize {
+        record
+            .steps
+            .iter()
+            .map(|step| match step {
+                ops::Step::BatchRenamed { moves } => moves.len(),
+                _ => 1,
+            })
+            .sum()
     }
 
     /// The paths the next redo would touch.
     #[cfg(feature = "fuzz")]
     pub fn redo_paths(&self) -> usize {
-        self.redo_stack.last().map_or(0, |record| record.steps.len())
+        self.redo_stack.last().map_or(0, |record| Self::record_paths(record))
     }
 }
 
@@ -404,6 +421,7 @@ pub fn init(cx: &mut App, trash: Arc<dyn Trash>) {
         clipboard: None,
         message: None,
         message_generation: 0,
+        batch_cursor: None,
         progress_done: None,
         progress_generation: 0,
         #[cfg(any(test, feature = "fuzz"))]
@@ -423,6 +441,9 @@ fn plan_paths(plan: &Plan) -> Vec<&Path> {
     let mut out: Vec<&Path> = match &plan.request {
         Request::NewFolder { parent } | Request::NewFile { parent } => vec![parent],
         Request::Rename { path, .. } => vec![path],
+        Request::BatchRename { moves } => {
+            moves.iter().flat_map(|entry| [entry.source.as_path(), entry.target.as_path()]).collect()
+        }
         Request::Duplicate { paths } | Request::Trash { paths } | Request::DeletePermanently { paths } => {
             paths.iter().map(PathBuf::as_path).collect()
         }
@@ -473,6 +494,9 @@ pub fn request_label(request: &ops::Request) -> String {
         ops::Request::Rename { path, new_name } => {
             let name = path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
             format!("Rename “{name}” to “{new_name}”")
+        }
+        ops::Request::BatchRename { moves } => {
+            format!("Rename {} item{}", moves.len(), if moves.len() == 1 { "" } else { "s" })
         }
         ops::Request::Duplicate { paths } => format!("Duplicate {}", count(paths.len())),
         ops::Request::Copy { paths, into } => format!("Copy {} to {}", count(paths.len()), dir_name(into)),
