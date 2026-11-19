@@ -328,6 +328,7 @@ mod tests {
                 "Select All",
                 "—",
                 "Filter This Folder",
+                "Filter by Tag…",
                 "Find…",
                 "Find Everything…",
                 "Search Home",

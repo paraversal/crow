@@ -4,7 +4,7 @@
 
 use gpui::{AnyElement, Context, CursorStyle, Focusable, IntoElement, MouseButton, Role, Window, div, prelude::*, px};
 
-use crate::actions::ShowSearch;
+use crate::actions::{ChooseTags, ShowSearch};
 use crate::chrome::{Keycap, KeycapWeight};
 use crate::icons::{Glyph, glyph};
 use crate::keys::{self, KeyScope};
@@ -31,9 +31,16 @@ impl Pane {
         let filtering = self.filtering.as_ref()?;
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
-        let (shown, total, dir) = {
+        let (shown, total, dir, tags, scanning, errors) = {
             let folder = self.focused_folder().read(cx);
-            (folder.row_count(), folder.entries().len(), folder.dir().to_path_buf())
+            (
+                folder.row_count(),
+                folder.entries().len(),
+                folder.dir().to_path_buf(),
+                folder.tag_filter().to_vec(),
+                folder.tag_scanning(),
+                folder.tag_errors(),
+            )
         };
         let name = display_name(&dir);
         let input = filtering.input.clone();
@@ -41,6 +48,49 @@ impl Pane {
         // Transparent when the list has focus, so only the place keys go is accented.
         let border = if focused { field_ring(theme) } else { color_alpha(theme.role("accent"), 0) };
         let esc = Keycap::for_action(&Cancel, KeyScope::Filter, KeycapWeight::Outline, cx);
+        let tag_label = match tags.len() {
+            0 => "Tags".to_owned(),
+            1 => tags[0].clone(),
+            count => format!("{count} tags"),
+        };
+        let tag_label = if scanning { format!("{tag_label}…") } else { tag_label };
+        let tag_aria = if tags.is_empty() {
+            "Filter by tag".to_owned()
+        } else {
+            format!("Filter by tag; selected: {}", tags.join(", "))
+        };
+        let tag_control = div()
+            .id("filter-tags")
+            .debug_selector(|| "filter-tags".into())
+            .role(Role::Button)
+            .aria_label(tag_aria)
+            .flex_none()
+            .h(px(22.))
+            .max_w(px(150.))
+            .px(px(6.))
+            .rounded(px(4.))
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_size(px(12.))
+            .when(tags.is_empty(), |control| control.text_color(color(theme.role("fg-muted"))))
+            .when(!tags.is_empty(), |control| {
+                control.bg(color_alpha(theme.role("accent"), 36)).text_color(color(theme.role("accent")))
+            })
+            .hover(|style| style.bg(color(theme.role("surface-raised"))))
+            .on_click(cx.listener(|_, _, window, cx| {
+                window.dispatch_action(Box::new(ChooseTags), cx);
+            }))
+            .child(tag_label);
+        let mut count = format!("{shown} of {total}");
+        if scanning {
+            count.push('…');
+        }
+        if errors > 0 {
+            count.push_str(&format!(" · {errors} unreadable"));
+        }
         let field = div()
             .id("filter-field")
             .debug_selector(|| "filter-field".into())
@@ -78,6 +128,7 @@ impl Pane {
                     .child("/"),
             )
             .child(div().flex_1().min_w_0().child(input))
+            .child(tag_control)
             .child(
                 div()
                     .id("filter-count")
@@ -90,7 +141,7 @@ impl Pane {
                     .flex_none()
                     .text_size(px(12.))
                     .text_color(color(theme.role("fg-muted")))
-                    .child(format!("{shown} of {total}")),
+                    .child(count),
             )
             .children(esc);
         Some(field.into_any_element())
@@ -145,21 +196,35 @@ impl Pane {
     /// The D state: nothing matches, with the way out (⌘F) and why the folder may be empty.
     pub(super) fn render_no_matches(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let query = self.filter_query(cx)?;
-        if query.is_empty() {
-            return None;
-        }
-        let name = {
+        let (name, tags) = {
             let folder = self.focused_folder().read(cx);
-            let shown = folder.row_count();
-            if !shows_no_matches(Some(&query), shown, folder.is_loading(), folder.error().is_some()) {
+            let tags = folder.tag_filter().to_vec();
+            if query.is_empty() && tags.is_empty() {
                 return None;
             }
-            display_name(folder.dir())
+            let shown = folder.row_count();
+            if !shows_no_matches(
+                !query.is_empty() || !tags.is_empty(),
+                shown,
+                folder.is_loading() || folder.tag_scanning(),
+                folder.error().is_some(),
+            ) {
+                return None;
+            }
+            (display_name(folder.dir()), tags)
         };
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
-        let text = format!("Nothing in {name} matches \u{201c}{query}\u{201d}");
+        let text = if query.is_empty() {
+            if tags.len() == 1 {
+                format!("Nothing in {name} is tagged \u{201c}{}\u{201d}", tags[0])
+            } else {
+                format!("Nothing in {name} has every tag: {}", tags.join(", "))
+            }
+        } else {
+            format!("Nothing in {name} matches \u{201c}{query}\u{201d}")
+        };
         let spoken = keys::spoken_for(&ShowSearch, KeyScope::Filter, cx).unwrap_or_else(|| "Command F".into());
         let keycap = Keycap::for_action(&ShowSearch, KeyScope::Filter, KeycapWeight::Outline, cx)
             .map(|keycap| keycap.border("fg-subtle"));
@@ -222,8 +287,8 @@ impl Pane {
 }
 
 /// The D state replaces the list only when a non-empty filter has settled on a folder.
-fn shows_no_matches(query: Option<&str>, shown: usize, loading: bool, error: bool) -> bool {
-    query.is_some_and(|query| !query.is_empty()) && shown == 0 && !loading && !error
+fn shows_no_matches(constrained: bool, shown: usize, loading: bool, error: bool) -> bool {
+    constrained && shown == 0 && !loading && !error
 }
 
 /// Why the folder looks empty, and the way out that always works.
@@ -237,12 +302,11 @@ mod tests {
 
     #[test]
     fn no_matches_waits_for_a_settled_listing() {
-        assert!(shows_no_matches(Some("vfs"), 0, false, false));
-        assert!(!shows_no_matches(Some("vfs"), 0, true, false), "still loading: keep the area quiet");
-        assert!(!shows_no_matches(Some("vfs"), 0, false, true), "the folder's own error is shown instead");
-        assert!(!shows_no_matches(Some("vfs"), 1, false, false), "there is a match");
-        assert!(!shows_no_matches(Some(""), 0, false, false), "an empty query never shows D");
-        assert!(!shows_no_matches(None, 0, false, false));
+        assert!(shows_no_matches(true, 0, false, false));
+        assert!(!shows_no_matches(true, 0, true, false), "still loading: keep the area quiet");
+        assert!(!shows_no_matches(true, 0, false, true), "the folder's own error is shown instead");
+        assert!(!shows_no_matches(true, 1, false, false), "there is a match");
+        assert!(!shows_no_matches(false, 0, false, false), "no constraint never shows D");
     }
 
     #[test]

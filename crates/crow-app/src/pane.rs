@@ -21,7 +21,7 @@ use crow_core::motion::{self, Effective, Fx, Look};
 use crow_core::{
     Align, Column, ColumnCell, ColumnContext, ColumnWidth, EnterAction, GridGeometry, GridRect, History, IconSize,
     KeymapLayer, KnownSize, Location, ResizeDrag, SavedQueryId, TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS, TableLayout,
-    TipId, ViewChange, ViewMode,
+    TagId, TipId, ViewChange, ViewMode,
 };
 use crow_fs::{AllowAll, CloudStatus, Entry, ReadGate, Sort, SortKey};
 use crow_theme::Theme;
@@ -34,10 +34,10 @@ use gpui::{
 };
 
 use crate::actions::{
-    BeginJump, BeginMark, ClearFilter, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate, EnterRow,
-    ExtendDown, ExtendUp, FilterFocusField, FilterFocusResults, MoveDown, MoveLeft, MoveRight, MoveToFirst, MoveToLast,
-    MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection, OpenTerminal, PasteFiles, PasteMoveFiles, QuickLook,
-    Rename, SelectAll, ShowInFinder, StartFilter,
+    BeginJump, BeginMark, ChooseTags, ClearFilter, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate,
+    EnterRow, ExtendDown, ExtendUp, FilterFocusField, FilterFocusResults, MoveDown, MoveLeft, MoveRight, MoveToFirst,
+    MoveToLast, MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection, OpenTerminal, PasteFiles, PasteMoveFiles,
+    QuickLook, Rename, SelectAll, ShowInFinder, StartFilter,
 };
 use crate::chrome::with_tooltip;
 use crate::cloud_status::{self, CloudSource, CloudStatusService};
@@ -118,6 +118,8 @@ pub enum PaneEvent {
     DestinationChanged,
     /// The saved destination's band asked for its edit form.
     SaveSearch,
+    /// The focused folder filter wants its tag picker opened.
+    ChooseTags,
     FocusSidebar,
     /// Vim marks: `m x` (set) or `'x` (jump) for the letter `key`.
     Mark {
@@ -368,8 +370,12 @@ pub struct Pane {
     /// Result sessions for saved destinations in this tab's history. Only the
     /// active one runs; others keep their last accepted snapshot.
     saved_sessions: HashMap<SavedQueryId, SavedSession>,
+    /// Result sessions for tag destinations in this tab's history.
+    tag_sessions: HashMap<TagId, SavedSession>,
     /// The saved destination currently shown, if any.
     active_saved: Option<SavedQueryId>,
+    /// The tag destination currently shown, if any.
+    active_tag: Option<TagId>,
     mode: ViewMode,
     show_hidden: bool,
     sort: Sort,
@@ -517,7 +523,9 @@ impl Pane {
         let mut pane = Self {
             history: History::new(Location::Folder(dir.clone())),
             saved_sessions: HashMap::new(),
+            tag_sessions: HashMap::new(),
             active_saved: None,
+            active_tag: None,
             mode: ViewMode::List,
             show_hidden,
             sort: Sort::default(),
@@ -645,9 +653,13 @@ impl Pane {
         self.location().as_folder().expect("a folder destination")
     }
 
-    /// The active saved-query result session, if the tab shows one.
+    /// The active virtual destination's result session, if the tab shows one.
     pub fn saved_session(&self) -> Option<Entity<SearchView>> {
-        self.active_saved.as_ref().and_then(|id| self.saved_sessions.get(id)).map(|session| session.view.clone())
+        self.active_saved
+            .as_ref()
+            .and_then(|id| self.saved_sessions.get(id))
+            .or_else(|| self.active_tag.as_ref().and_then(|id| self.tag_sessions.get(id)))
+            .map(|session| session.view.clone())
     }
 
     pub fn saved_unavailable(&self, cx: &gpui::App) -> Option<SharedString> {
@@ -672,6 +684,30 @@ impl Pane {
             .and_then(|folder| folder.read(cx).icon_source().map(str::to_owned))
             .unwrap_or_else(|| cx.global::<Ui>().settings.icon_pack.clone());
         crate::icon_packs::Resolver::for_source(cx, &source)
+    }
+
+    /// Apply the `/` filter's tag constraint to the focused column.
+    pub fn set_folder_tag_filter(&mut self, tags: Vec<String>, cx: &mut Context<Self>) {
+        let folder = self.focused_folder().clone();
+        folder.update(cx, |folder, cx| folder.set_tag_filter(tags, cx));
+        self.schedule_filter_announce(cx);
+        cx.notify();
+    }
+
+    pub fn folder_tag_filter(&self, cx: &gpui::App) -> Vec<String> {
+        self.focused_folder().read(cx).tag_filter().to_vec()
+    }
+
+    fn choose_tags(&mut self, _: &ChooseTags, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filtering.is_none() {
+            self.start_filter(&StartFilter, window, cx);
+        }
+        cx.emit(PaneEvent::ChooseTags);
+    }
+
+    #[cfg(test)]
+    pub fn focused_folder_for_test(&self) -> Entity<Folder> {
+        self.focused_folder().clone()
     }
 
     fn focused_folder(&self) -> &Entity<Folder> {
@@ -994,7 +1030,14 @@ impl Pane {
     /// The filter count as the live field shows it ("2 of 9 shown").
     fn filter_count_text(&self, cx: &gpui::App) -> String {
         let folder = self.focused_folder().read(cx);
-        format!("{} of {} shown", folder.row_count(), folder.entries().len())
+        let mut text = format!("{} of {} shown", folder.row_count(), folder.entries().len());
+        if folder.tag_scanning() {
+            text.push_str(&format!(", scanning tags {} of {}", folder.tag_scanned(), folder.entries().len()));
+        }
+        if folder.tag_errors() > 0 {
+            text.push_str(&format!(", {} with unreadable tags", folder.tag_errors()));
+        }
+        text
     }
 
     /// Queue the filter count for VoiceOver 300 ms after the last keystroke. The
@@ -1140,6 +1183,13 @@ impl Pane {
         self.visit_location(Location::SavedQuery(id), false, Some(window), cx);
     }
 
+    /// Open a Finder tag destination as the tab's location.
+    pub fn open_tag(&mut self, id: TagId, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
+        self.visit_location(Location::Tag(id), false, Some(window), cx);
+    }
+
     fn apply_location(
         &mut self,
         location: Location,
@@ -1156,9 +1206,7 @@ impl Pane {
                 }
             }
             Location::SavedQuery(id) => self.activate_saved(id, window, cx),
-            Location::Tag(_) => {
-                self.deactivate_saved(cx);
-            }
+            Location::Tag(id) => self.activate_tag(id, window, cx),
         }
         self.prune_saved_sessions(cx);
         cx.emit(PaneEvent::DestinationChanged);
@@ -1193,9 +1241,38 @@ impl Pane {
         }
     }
 
+    fn activate_tag(&mut self, id: TagId, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        self.deactivate_saved(cx);
+        self.active_tag = Some(id.clone());
+        let Some(window) = window else { return };
+        let (home, show_hidden) = {
+            let ui = cx.global::<Ui>();
+            (ui.home.clone(), self.show_hidden)
+        };
+        if !self.tag_sessions.contains_key(&id) {
+            let view = cx.new(|cx| SearchView::tag(id.clone(), home, show_hidden, cx));
+            let subscription = cx.subscribe_in(&view, window, |pane, view, event, window, cx| {
+                pane.on_saved_event(view.clone(), event, window, cx)
+            });
+            self.tag_sessions.insert(id.clone(), SavedSession { view, _subscription: subscription });
+        }
+        if let Some(session) = self.tag_sessions.get(&id) {
+            let view = session.view.clone();
+            view.update(cx, |view, cx| view.set_active(true, cx));
+            if !view.update(cx, |view, cx| view.focus_results(window, cx)) {
+                view.update(cx, |view, cx| view.focus_input(window, cx));
+            }
+        }
+    }
+
     fn deactivate_saved(&mut self, cx: &mut Context<Self>) {
         if let Some(id) = self.active_saved.take()
             && let Some(session) = self.saved_sessions.get(&id)
+        {
+            session.view.update(cx, |view, cx| view.leave_destination(cx));
+        }
+        if let Some(id) = self.active_tag.take()
+            && let Some(session) = self.tag_sessions.get(&id)
         {
             session.view.update(cx, |view, cx| view.leave_destination(cx));
         }
@@ -1208,6 +1285,17 @@ impl Pane {
             self.saved_sessions.keys().filter(|id| !retained.contains(*id)).cloned().collect();
         for id in remove {
             if let Some(session) = self.saved_sessions.remove(&id) {
+                session.view.update(cx, |view, cx| {
+                    view.set_active(false, cx);
+                    view.cancel(cx);
+                });
+            }
+        }
+        let retained: HashSet<TagId> =
+            self.history.locations().filter_map(|location| location.tag_id().cloned()).collect();
+        let remove: Vec<TagId> = self.tag_sessions.keys().filter(|id| !retained.contains(*id)).cloned().collect();
+        for id in remove {
+            if let Some(session) = self.tag_sessions.remove(&id) {
                 session.view.update(cx, |view, cx| {
                     view.set_active(false, cx);
                     view.cancel(cx);
@@ -1477,6 +1565,7 @@ impl Pane {
             CommandId::OpenTerminal => self.open_terminal(&OpenTerminal, window, cx),
             CommandId::SelectAll => self.select_all(&SelectAll, window, cx),
             CommandId::StartFilter => self.start_filter(&StartFilter, window, cx),
+            CommandId::ChooseTags => self.choose_tags(&ChooseTags, window, cx),
             _ => {}
         }
     }
@@ -2193,7 +2282,10 @@ impl Pane {
         let filtering = self.filtering.take()?;
         let query = filtering.input.read(cx).text().to_owned();
         for folder in &self.folders {
-            folder.update(cx, |folder, cx| folder.set_filter(None, cx));
+            folder.update(cx, |folder, cx| {
+                folder.set_filter(None, cx);
+                folder.set_tag_filter(Vec::new(), cx);
+            });
         }
         self.focus_list_after_filter = false;
         cx.notify();
@@ -2214,7 +2306,10 @@ impl Pane {
         self.filter_announce = SharedString::default();
         self.filter_announce_gen += 1;
         for folder in &self.folders {
-            folder.update(cx, |folder, cx| folder.set_filter(None, cx));
+            folder.update(cx, |folder, cx| {
+                folder.set_filter(None, cx);
+                folder.set_tag_filter(Vec::new(), cx);
+            });
         }
         self.focus_list_after_filter = false;
         cx.notify();
@@ -5853,6 +5948,9 @@ impl Render for Pane {
                     .on_action(cx.listener(Self::start_filter))
                     .on_action(cx.listener(Self::clear_filter))
             })
+            // The tag control lives inside the open filter field, so this must be
+            // active while the field has focus (unlike the list shortcuts above).
+            .on_action(cx.listener(Self::choose_tags))
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if cx.has_active_drag() {

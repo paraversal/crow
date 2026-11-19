@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{self, Effective, Fx};
-use crow_core::{Favorite, Location, SavedQueryId, Section, SectionDestination, SectionRow, SidebarEdit, Slot};
+use crow_core::{Favorite, Location, SavedQueryId, Section, SectionDestination, SectionRow, SidebarEdit, Slot, TagId};
 use crow_fs::ops::Request;
 use gpui::{
     Animation, AnimationExt, Bounds, ClickEvent, Context, EventEmitter, ExternalPaths, FocusHandle, Focusable,
@@ -153,6 +153,7 @@ impl Row {
             Row::PluginItem { row, .. } => match &row.destination {
                 SectionDestination::Folder { path, .. } => Some(Location::Folder(path.clone())),
                 SectionDestination::SavedQuery { id } => Some(Location::SavedQuery(id.clone())),
+                SectionDestination::Tag { id } => Some(Location::Tag(id.clone())),
                 SectionDestination::DisplayOnly => None,
             },
             Row::Header(..) | Row::SectionHeader { .. } => None,
@@ -163,7 +164,9 @@ impl Row {
         match self {
             Row::PluginItem { row, .. } => match &row.destination {
                 SectionDestination::Folder { path, identity } => Some((path, *identity)),
-                SectionDestination::SavedQuery { .. } | SectionDestination::DisplayOnly => None,
+                SectionDestination::SavedQuery { .. }
+                | SectionDestination::Tag { .. }
+                | SectionDestination::DisplayOnly => None,
             },
             _ => None,
         }
@@ -177,7 +180,7 @@ fn section_order(ui: &Ui, sections: &[Section]) -> Vec<String> {
             order.push(id.clone());
         }
     }
-    for id in ["saved-queries", "recent", "locations"] {
+    for id in ["tags", "saved-queries", "recent", "locations"] {
         if !order.iter().any(|seen| seen == id) {
             order.push(id.to_owned());
         }
@@ -198,6 +201,26 @@ fn rows(ui: &Ui, sections: &[Section]) -> Vec<Row> {
     }
     for id in section_order(ui, sections) {
         match id.as_str() {
+            "tags" if ui.sidebar.section_shown("tags") && (!ui.tags.is_empty() || ui.tags.error.is_some()) => {
+                let collapsed = ui.sidebar.section_collapsed("tags");
+                rows.push(Row::SectionHeader {
+                    id: "tags".into(),
+                    title: ui.tags.section_title().to_owned(),
+                    collapsed,
+                });
+                if !collapsed {
+                    rows.extend(ui.tags.all().into_iter().map(|tag| Row::PluginItem {
+                        section: "tags".into(),
+                        row: SectionRow {
+                            id: tag.clone(),
+                            text: tag.clone(),
+                            meta: None,
+                            badge: None,
+                            destination: SectionDestination::Tag { id: TagId::new(tag) },
+                        },
+                    }));
+                }
+            }
             "saved-queries" if ui.sidebar.section_shown("saved-queries") && !ui.saved_queries.is_empty() => {
                 let collapsed = ui.sidebar.section_collapsed("saved-queries");
                 rows.push(Row::SectionHeader { id: "saved-queries".into(), title: "Saved Queries".into(), collapsed });
@@ -1199,15 +1222,20 @@ impl Sidebar {
             }
             return;
         }
-        if let Row::PluginItem { row, .. } = &row
-            && let SectionDestination::SavedQuery { id } = &row.destination
-        {
-            // An arrow only moves the cursor over a virtual destination; activating
-            // it opens the saved search (and starts its result session).
-            if nav != SidebarNav::Show {
-                emit_nav(nav, Location::SavedQuery(id.clone()), cx);
+        if let Row::PluginItem { row, .. } = &row {
+            let destination = match &row.destination {
+                SectionDestination::SavedQuery { id } => Some(Location::SavedQuery(id.clone())),
+                SectionDestination::Tag { id } => Some(Location::Tag(id.clone())),
+                _ => None,
+            };
+            if let Some(destination) = destination {
+                // An arrow only moves the cursor over a virtual destination; activating
+                // it opens the destination (and starts its result session).
+                if nav != SidebarNav::Show {
+                    emit_nav(nav, destination, cx);
+                }
+                return;
             }
-            return;
         }
         let Some((path, identity)) = row.plugin_destination().map(|(path, identity)| (path.to_path_buf(), identity))
         else {
@@ -1728,7 +1756,14 @@ impl Render for Sidebar {
             kinds.push((droppable.then_some(DropTarget::Row(i)), favorite_slot));
             let path = row.path().map(Path::to_path_buf).unwrap_or_default();
             let navigable = row.location().is_some();
-            let current_description = if row.path().is_some() { "current folder" } else { "current saved query" };
+            let current_description = if row.path().is_some() {
+                "current folder"
+            } else if matches!(&row, Row::PluginItem { row, .. } if matches!(row.destination, SectionDestination::Tag { .. }))
+            {
+                "current tag"
+            } else {
+                "current saved query"
+            };
             let cursor = i == self.cursor;
             let mut look = looks.next().expect("one look per selectable row");
             let pin = row.path().and_then(|path| pin_summaries.get(path)).filter(|_| matches!(row, Row::Favorite(..)));
@@ -1749,7 +1784,15 @@ impl Render for Sidebar {
                     f.color.as_deref().and_then(|c| favorite_color(c, &theme)),
                 ),
                 Row::Recent(_) => (None, Some(crate::icons::Glyph::Clock), None),
-                Row::PluginItem { .. } => (None, Some(crate::icons::Glyph::Folder), None),
+                Row::PluginItem { row, .. } => (
+                    None,
+                    Some(if matches!(row.destination, SectionDestination::Tag { .. }) {
+                        crate::icons::Glyph::Tag
+                    } else {
+                        crate::icons::Glyph::Folder
+                    }),
+                    None,
+                ),
                 _ => (None, None, None),
             };
             let volume_label = match &row {

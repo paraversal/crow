@@ -39,11 +39,15 @@ count = 6
 [locations]
 show = true
 
-# Optional section layout. `saved-queries`, `recent` and `locations` are
+# Finder tags shown even when no indexed item uses them (Crow discovers used
+# tags from Spotlight; Finder's unused list is private). Case-sensitive.
+# pinned_tags = ["Work", "review"]
+
+# Optional section layout. `tags`, `saved-queries`, `recent` and `locations` are
 # built-ins; a plugin section uses its exact package ID. Unlisted sections follow
 # in the usual order.
 # [sections]
-# order = ["saved-queries", "recent", "example.p1b-fixture.folders", "locations"]
+# order = ["tags", "saved-queries", "recent", "example.p1b-fixture.folders", "locations"]
 #
 # [section."example.p1b-fixture.folders"]
 # show = true
@@ -126,6 +130,8 @@ pub struct SidebarConfig {
     pub group: Vec<Group>,
     pub recent: RecentConfig,
     pub locations: LocationsConfig,
+    /// Finder tags shown even when Spotlight has not discovered a use for them.
+    pub pinned_tags: Vec<String>,
     pub sections: SectionsConfig,
     pub section: std::collections::BTreeMap<String, SectionConfig>,
     pub projects: ProjectsConfig,
@@ -159,6 +165,7 @@ pub struct SectionRow {
 pub enum SectionDestination {
     Folder { path: PathBuf, identity: (u64, u64) },
     SavedQuery { id: crate::saved_queries::SavedQueryId },
+    Tag { id: crate::saved_queries::TagId },
     DisplayOnly,
 }
 
@@ -166,21 +173,36 @@ impl SectionRow {
     pub fn folder_path(&self) -> Option<&Path> {
         match &self.destination {
             SectionDestination::Folder { path, .. } => Some(path),
-            SectionDestination::SavedQuery { .. } | SectionDestination::DisplayOnly => None,
+            SectionDestination::SavedQuery { .. }
+            | SectionDestination::Tag { .. }
+            | SectionDestination::DisplayOnly => None,
         }
     }
 
     pub fn folder_identity(&self) -> Option<(u64, u64)> {
         match &self.destination {
             SectionDestination::Folder { identity, .. } => Some(*identity),
-            SectionDestination::SavedQuery { .. } | SectionDestination::DisplayOnly => None,
+            SectionDestination::SavedQuery { .. }
+            | SectionDestination::Tag { .. }
+            | SectionDestination::DisplayOnly => None,
         }
     }
 
     pub fn saved_query_id(&self) -> Option<&crate::saved_queries::SavedQueryId> {
         match &self.destination {
             SectionDestination::SavedQuery { id } => Some(id),
-            SectionDestination::Folder { .. } | SectionDestination::DisplayOnly => None,
+            SectionDestination::Folder { .. } | SectionDestination::Tag { .. } | SectionDestination::DisplayOnly => {
+                None
+            }
+        }
+    }
+
+    pub fn tag_id(&self) -> Option<&crate::saved_queries::TagId> {
+        match &self.destination {
+            SectionDestination::Tag { id } => Some(id),
+            SectionDestination::Folder { .. }
+            | SectionDestination::SavedQuery { .. }
+            | SectionDestination::DisplayOnly => None,
         }
     }
 
@@ -202,7 +224,9 @@ pub struct Favorite {
 
 impl SidebarConfig {
     pub fn parse(text: &str) -> Result<SidebarConfig, String> {
-        let config: SidebarConfig = toml::from_str(text).map_err(|e| crate::config::parse_error(&e, text))?;
+        let mut config: SidebarConfig = toml::from_str(text).map_err(|e| crate::config::parse_error(&e, text))?;
+        config.pinned_tags =
+            crate::tags::normalize_tags(&config.pinned_tags).map_err(|error| format!("sidebar.toml: {error}"))?;
         for id in config.sections.order.iter().chain(config.section.keys()) {
             if !valid_section_id(id) {
                 return Err(format!("sidebar.toml: \"{id}\" is not a section id"));
@@ -266,7 +290,7 @@ impl SidebarConfig {
 }
 
 fn valid_section_id(id: &str) -> bool {
-    if id == "recent" || id == "locations" || id == "saved-queries" {
+    if id == "recent" || id == "locations" || id == "saved-queries" || id == "tags" {
         return true;
     }
     let Some((plugin, local)) = id.rsplit_once('.') else { return false };

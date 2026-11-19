@@ -60,6 +60,7 @@ fn run_case(root: &Path, case: &Case, rules: &Arc<RuleSet>) -> Result<(), String
         everything: case.everything,
         read_gate: None,
         predicates: Predicates::default(),
+        tag_reader: None,
     };
     let (tx, rx) = mpsc::channel();
     let walked: PathBuf = search_root.clone();

@@ -72,14 +72,30 @@ const TEXT: &[&str] = &[
 pub struct Predicates {
     pub kind: Option<Kind>,
     pub modified_within: Option<Duration>,
+    /// Finder tag values (NFD) that all must be present.
+    pub tags: Vec<String>,
 }
 
 impl Predicates {
     pub fn is_empty(&self) -> bool {
-        self.kind.is_none() && self.modified_within.is_none()
+        self.kind.is_none() && self.modified_within.is_none() && self.tags.is_empty()
     }
 
     pub fn matches(&self, path: &Path, is_dir: bool, modified: Option<SystemTime>, run_started: SystemTime) -> bool {
+        self.matches_with_tags(path, is_dir, modified, run_started, None)
+    }
+
+    /// `entry_tags` are the candidate's Finder tags, or `None` when they were not
+    /// read. A tag predicate needs them: unreadable metadata cannot satisfy it.
+    /// Kind and age only: the cheap part every candidate can afford before a
+    /// tag metadata read.
+    pub fn matches_cheap(
+        &self,
+        path: &Path,
+        is_dir: bool,
+        modified: Option<SystemTime>,
+        run_started: SystemTime,
+    ) -> bool {
         if let Some(kind) = &self.kind
             && !kind.matches(path, is_dir)
         {
@@ -93,6 +109,29 @@ impl Predicates {
             }
             let cutoff = run_started.checked_sub(window).unwrap_or(SystemTime::UNIX_EPOCH);
             if modified < cutoff {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The full predicate. `entry_tags` are the candidate's Finder tags, or
+    /// `None` when they were not read. A tag predicate needs them: unreadable
+    /// metadata cannot satisfy it.
+    pub fn matches_with_tags(
+        &self,
+        path: &Path,
+        is_dir: bool,
+        modified: Option<SystemTime>,
+        run_started: SystemTime,
+        entry_tags: Option<&[String]>,
+    ) -> bool {
+        if !self.matches_cheap(path, is_dir, modified, run_started) {
+            return false;
+        }
+        if !self.tags.is_empty() {
+            let Some(entry_tags) = entry_tags else { return false };
+            if !crow_core::tags_contain_all(entry_tags, &self.tags) {
                 return false;
             }
         }
@@ -162,7 +201,7 @@ mod tests {
     fn age_cutoff_is_inclusive_and_rejects_future_or_missing() {
         let run = at(1_000_000);
         let window = Duration::from_secs(100);
-        let predicates = Predicates { kind: None, modified_within: Some(window) };
+        let predicates = Predicates { kind: None, modified_within: Some(window), tags: Vec::new() };
         let cutoff = run - window;
         assert!(predicates.matches(Path::new("/x/a"), false, Some(cutoff), run));
         assert!(!predicates.matches(Path::new("/x/a"), false, Some(cutoff - Duration::from_secs(1)), run));

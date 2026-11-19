@@ -59,6 +59,7 @@ mod settings_window;
 mod sidebar;
 mod style;
 mod syntax;
+mod tags;
 mod text_input;
 mod theme_choice;
 mod thumbnails;
@@ -179,6 +180,7 @@ fn bench_search(args: &[String]) -> Result<(), String> {
         everything: false,
         read_gate: Some(Arc::new(crow_macos::SystemReadGate)),
         predicates,
+        tag_reader: None,
     };
     let control = crow_search::Control::new();
     let started = std::time::Instant::now();
@@ -329,6 +331,7 @@ fn search_trace(args: &[String]) -> Result<(), String> {
         everything: options.everything,
         read_gate: Some(Arc::new(crow_macos::SystemReadGate)),
         predicates: crow_search::Predicates::default(),
+        tag_reader: None,
     };
     let target = options.target.as_ref().map(|path| {
         let path =

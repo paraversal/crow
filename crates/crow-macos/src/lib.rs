@@ -25,7 +25,7 @@ pub use files::{SystemTrash, open_path, pasteboard_change_count, read_file_urls,
 pub use fonts::available_font_families;
 pub use fsevents::{Event, EventFlags, FsEvents, current_event_id, volume_uuid, watch, watch_under};
 pub use icons::{icon_png, type_icon_png};
-pub use metadata::{Permissions, kind_name, permissions, tags, thumbnail_png, type_identifiers};
+pub use metadata::{Permissions, kind_name, permissions, tags, tags_checked, thumbnail_png, type_identifiers};
 pub use names::display_components;
 pub use quick_look::{QuickLookKey, set_quick_look_key_handler, toggle_quick_look, update_quick_look};
 pub use sound::{Sound, beep, play, preload, set_volume, stop, ui_sounds_enabled};

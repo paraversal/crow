@@ -159,6 +159,7 @@ pub struct CrowWindow {
     side_panes: side_panes::SidePanes,
     git_review: Option<git_review::GitReview>,
     column_picker: Option<column_picker::ColumnPicker>,
+    tag_picker: Option<tag_picker::TagPicker>,
     /// Benchmark runs leave Recent alone, so its saves don't land in the measurement.
     bench: bool,
     show_hidden: bool,
@@ -293,6 +294,7 @@ impl CrowWindow {
             side_panes: side_panes::SidePanes::new(cx),
             git_review: None,
             column_picker: None,
+            tag_picker: None,
             bench,
             show_hidden,
             search_includes_hidden,
@@ -376,6 +378,8 @@ impl CrowWindow {
             allowed.push(("why", why.clone()));
         } else if let Some(picker) = &self.column_picker {
             allowed.push(("column picker", picker.focus.clone()));
+        } else if let Some(picker) = &self.tag_picker {
+            allowed.push(("tag picker", picker.focus.clone()));
         } else if let Some(review) = &self.git_review {
             allowed.push(("git review", review.focus.clone()));
         } else if let Some(search) = &self.search {
@@ -1200,7 +1204,7 @@ impl CrowWindow {
         // Q8: search mode shows the selected result's path; otherwise the cursor's.
         let virtual_path = active_search.as_ref().and_then(|search| {
             let search = search.read(cx);
-            (search.is_saved_destination() && search.selected_entry().is_none())
+            (search.is_destination() && search.selected_entry().is_none())
                 .then(|| SharedString::from(search.title().to_owned()))
         });
         let (target, last_is_dir) =
@@ -1463,6 +1467,7 @@ impl CrowWindow {
     fn on_pane_event(&mut self, event: &PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PaneEvent::Run(request) => self.run_request(request.clone(), window, cx),
+            PaneEvent::ChooseTags => self.open_tag_picker(window, cx),
             PaneEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
             PaneEvent::Entered(dir) => {
                 // A stale message would otherwise outlive the place it described (Q2).
@@ -1601,7 +1606,11 @@ impl CrowWindow {
                         let id = id.clone();
                         self.pane().update(cx, |pane, cx| pane.open_saved_query(id, window, cx));
                     }
-                    Location::Tag(_) => {}
+                    Location::Tag(id) => {
+                        self.walk_visit = None;
+                        let id = id.clone();
+                        self.pane().update(cx, |pane, cx| pane.open_tag(id, window, cx));
+                    }
                 }
             }
             SidebarEvent::OpenInNewTab(location) => {
@@ -1621,7 +1630,11 @@ impl CrowWindow {
                         let id = id.clone();
                         self.pane().update(cx, |pane, cx| pane.open_saved_query(id, window, cx));
                     }
-                    Location::Tag(_) => {}
+                    Location::Tag(id) => {
+                        self.open_tab_at(origin, window, cx);
+                        let id = id.clone();
+                        self.pane().update(cx, |pane, cx| pane.open_tag(id, window, cx));
+                    }
                 }
             }
             SidebarEvent::Run(request) => self.run_request(request.clone(), window, cx),
@@ -2666,6 +2679,7 @@ impl Render for CrowWindow {
         let picker = self.render_picker(cx);
         let git_review = self.render_git_review(cx);
         let column_picker = self.render_column_picker(cx);
+        let tag_picker = self.render_tag_picker(cx);
         let palette = self.render_palette(window, cx);
         let center: gpui::AnyElement = match &self.search {
             Some(search) => div().flex_1().min_w_0().h_full().child(search.clone()).into_any_element(),
@@ -2818,6 +2832,7 @@ impl Render for CrowWindow {
             .children(picker)
             .children(git_review)
             .children(column_picker)
+            .children(tag_picker)
             .children(palette)
     }
 }
@@ -3034,6 +3049,7 @@ mod palette_view;
 mod path_edit;
 pub(crate) mod saved_query_form;
 pub(crate) mod side_panes;
+pub(crate) mod tag_picker;
 
 #[cfg(test)]
 mod tests;

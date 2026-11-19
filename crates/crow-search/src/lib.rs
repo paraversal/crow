@@ -12,7 +12,15 @@ pub mod corpus;
 mod oracle_tests;
 
 pub use engine::{Control, FuzzyMatcher, Hit, HitKind, MAX_METADATA_RESULTS, Query, Skip, SkipReason, Summary, search};
+use std::path::Path;
+
 pub use predicates::{Kind, Predicates};
+
+/// Reads one path's Finder tag names for a tag predicate. The engine normalizes
+/// values before comparison; `Err` means the metadata was unreadable.
+pub trait TagReader: Send + Sync {
+    fn read_tags(&self, path: &Path) -> Result<Vec<String>, String>;
+}
 pub use rules::RuleSet;
 
 /// Owned temporary trees for tests: `CleanTree` also restores mode-000 folders

@@ -158,6 +158,7 @@ actions!(
         IconCaptionLines,
         // List filter
         StartFilter,
+        ChooseTags,
         ClearFilter,
         /// ↓ in the filter field: focus the matches, leaving the field.
         FilterFocusResults,

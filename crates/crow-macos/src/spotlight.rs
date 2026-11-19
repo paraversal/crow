@@ -28,6 +28,46 @@ pub struct SpotlightPredicate {
     pub content_type: Option<&'static str>,
     pub extension: Option<String>,
     pub modified_within_secs: Option<u64>,
+    /// Finder tag values; every one must be present (Spotlight ANDs them).
+    pub tags: Vec<String>,
+    /// A name substring, for a tag query that also has text. `mdfind -name`
+    /// cannot be combined with raw attributes, so the unified expression uses
+    /// `kMDItemFSName` with the same case-insensitive substring semantics.
+    pub name_contains: Option<String>,
+}
+
+/// Escape a `mdfind` quoted-literal value. `&`, `(` and `)` are literal inside
+/// quotes; `*` and `?` are wildcards even there, and a quote or backslash needs
+/// escaping. Verified with `mdfind` on macOS 27: `"star*tag"` also matched a
+/// file tagged `starXXtag`, while `"star\*tag"` matched only the literal name.
+pub fn escape_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '*' => out.push_str("\\*"),
+            '?' => out.push_str("\\?"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Escape a `kMDItemFSName` pattern so the user's text is literal: `*` and `?`
+/// are wildcards, and a trailing backslash would escape the closing quote.
+fn escape_name_pattern(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '*' => out.push_str("\\*"),
+            '?' => out.push_str("\\?"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 impl SpotlightPredicate {
@@ -35,10 +75,18 @@ impl SpotlightPredicate {
     pub fn expression(&self) -> Option<String> {
         let mut conditions: Vec<String> = Vec::new();
         if let Some(content_type) = self.content_type {
-            conditions.push(format!("kMDItemContentTypeTree == \"{content_type}\""));
+            conditions.push(format!("kMDItemContentTypeTree == \"{}\"", escape_literal(content_type)));
         }
         if let Some(extension) = &self.extension {
             conditions.push(format!("kMDItemFSName == \"*.{extension}\"cd"));
+        }
+        if let Some(name) = &self.name_contains
+            && !name.is_empty()
+        {
+            conditions.push(format!("kMDItemFSName == \"*{}*\"cd", escape_name_pattern(name)));
+        }
+        for tag in &self.tags {
+            conditions.push(format!("kMDItemUserTags == \"{}\"", escape_literal(tag)));
         }
         if let Some(seconds) = self.modified_within_secs {
             conditions.push(format!(
@@ -109,4 +157,34 @@ fn run_mdfind(args: Vec<OsString>, mut sink: impl FnMut(Vec<SpotlightHit>), canc
         return Err(format!("Spotlight search failed: {}", stderr.trim()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_and_name_terms_are_escaped_literals() {
+        let predicate = SpotlightPredicate {
+            tags: vec!["say \"hi\"".into(), "a\\b".into(), "star*tag".into(), "q?tag".into()],
+            name_contains: Some("wo*rk?".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            predicate.expression().as_deref(),
+            Some(
+                r#"kMDItemFSName == "*wo\*rk\?*"cd && kMDItemUserTags == "say \"hi\"" && kMDItemUserTags == "a\\b" && kMDItemUserTags == "star\*tag" && kMDItemUserTags == "q\?tag""#
+            )
+        );
+        assert_eq!(SpotlightPredicate::default().expression(), None);
+    }
+
+    #[test]
+    fn a_tag_only_predicate_is_one_condition_per_value() {
+        let predicate = SpotlightPredicate { tags: vec!["Work".into(), "review".into()], ..Default::default() };
+        assert_eq!(
+            predicate.expression().as_deref(),
+            Some(r#"kMDItemUserTags == "Work" && kMDItemUserTags == "review""#)
+        );
+    }
 }

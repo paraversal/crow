@@ -113,20 +113,29 @@ fn type_rank(identifier: &str) -> u8 {
 }
 
 /// The item's Finder tags, in Finder's order. Empty when it has none or cannot be read.
+///
+/// Info's compatibility wrapper: a filter uses [`tags_checked`], because no
+/// tags and unreadable metadata are different answers.
 pub fn tags(path: &Path) -> Vec<String> {
+    tags_checked(path).unwrap_or_default()
+}
+
+/// Like [`tags`], but a missing or unreadable path is an error and no tags is
+/// `Ok(vec![])`. Works for unindexed paths and hidden files; Finder's tag color
+/// is not exposed by this public resource key.
+pub fn tags_checked(path: &Path) -> Result<Vec<String>, String> {
     autoreleasepool(|_| {
         let url = ns_url(path);
         let mut value: Option<Retained<AnyObject>> = None;
         // SAFETY: NSURLTagNamesKey yields an NSArray<NSString> (or nil); checked by downcast below.
-        if unsafe { url.getResourceValue_forKey_error(&mut value, NSURLTagNamesKey) }.is_err() {
-            return Vec::new();
-        }
-        value
+        unsafe { url.getResourceValue_forKey_error(&mut value, NSURLTagNamesKey) }
+            .map_err(|error| format!("{}: {}", path.display(), error.localizedDescription()))?;
+        Ok(value
             .and_then(|v| v.downcast::<NSArray>().ok())
             .map(|array| {
                 array.iter().filter_map(|item| item.downcast::<NSString>().ok()).map(|s| s.to_string()).collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
     })
 }
 
@@ -297,9 +306,22 @@ mod tests {
     }
 
     #[test]
-    fn untagged_file_has_no_tags() {
+    fn untagged_and_unreadable_tags_are_distinct() {
         let file = tempfile::NamedTempFile::new().expect("temp file");
+        assert_eq!(tags_checked(file.path()), Ok(Vec::new()));
         assert!(tags(file.path()).is_empty());
+        assert!(tags_checked(Path::new("/no/such/crow-tag-fixture")).is_err());
+
+        // Finder stores tag names in this metadata attribute as a binary plist;
+        // xattr writes the fixture without touching Finder or Spotlight.
+        let hex = "62706c6973743030a10154576f726b080a000000000000010100000000000000020000000000000000000000000000000f";
+        let status = std::process::Command::new("xattr")
+            .args(["-wx", "com.apple.metadata:_kMDItemUserTags", hex])
+            .arg(file.path())
+            .status()
+            .expect("run xattr");
+        assert!(status.success());
+        assert_eq!(tags_checked(file.path()), Ok(vec!["Work".to_owned()]));
     }
 
     #[test]

@@ -327,6 +327,8 @@ struct Script {
     begin_drag: bool,
     /// The recorder's stand-in for the pasteboard's text.
     text: Option<String>,
+    /// Scripted Spotlight answers, one batch queue per call. Empty means no hits.
+    spotlight_hits: std::collections::VecDeque<Vec<SpotlightHit>>,
 }
 
 /// Records every effect and answers from [`Script`]. Installed by
@@ -412,6 +414,15 @@ impl RecordingEffects {
     /// Whether a native drag should claim the drag (false lets GPUI's own run).
     pub fn set_begin_drag(&self, enabled: bool) {
         self.script.lock().expect("the effect script is not poisoned").begin_drag = enabled;
+    }
+
+    /// Answer the next Spotlight calls with these batches, in order.
+    pub fn set_spotlight_hits(&self, batches: Vec<Vec<SpotlightHit>>) {
+        self.script.lock().expect("the effect script is not poisoned").spotlight_hits = batches.into();
+    }
+
+    pub fn clear_spotlight_hits(&self) {
+        self.script.lock().expect("the effect script is not poisoned").spotlight_hits.clear();
     }
 
     /// The text Crow last put on the (recorded) pasteboard.
@@ -570,20 +581,26 @@ impl Effects for RecordingEffects {
     fn spotlight_names(
         &self,
         query: &str,
-        _sink: Box<dyn FnMut(Vec<SpotlightHit>) + Send>,
+        mut sink: Box<dyn FnMut(Vec<SpotlightHit>) + Send>,
         _cancel: &AtomicBool,
     ) -> Result<(), String> {
         self.record(Call::Spotlight(query.to_owned()));
+        if let Some(batch) = self.script.lock().expect("the effect script is not poisoned").spotlight_hits.pop_front() {
+            sink(batch);
+        }
         Ok(())
     }
 
     fn spotlight_expression(
         &self,
         expression: &str,
-        _sink: Box<dyn FnMut(Vec<SpotlightHit>) + Send>,
+        mut sink: Box<dyn FnMut(Vec<SpotlightHit>) + Send>,
         _cancel: &AtomicBool,
     ) -> Result<(), String> {
         self.record(Call::SpotlightExpression(expression.to_owned()));
+        if let Some(batch) = self.script.lock().expect("the effect script is not poisoned").spotlight_hits.pop_front() {
+            sink(batch);
+        }
         Ok(())
     }
 

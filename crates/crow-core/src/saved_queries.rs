@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde::{Deserialize, Deserializer};
 
 use crate::{config, edit_toml};
-use toml_edit::{ArrayOfTables, Item, Table, value};
+use toml_edit::{Array, ArrayOfTables, Item, Table, Value, value};
 
 /// The documented default `saved-queries.toml`, written on first launch.
 pub const DEFAULT_SAVED_QUERIES: &str = r#"# Saved searches are live destinations in the sidebar. A saved search may search
@@ -30,6 +30,8 @@ pub const DEFAULT_SAVED_QUERIES: &str = r#"# Saved searches are live destination
 #   kind                  optional "folder", "file", "image", "pdf", "audio",
 #                         "video", "archive", "text", or an exact extension
 #   modified_within_days  optional positive age in days
+#   tags                  optional Finder tag names; every one must be present
+#                         (case-sensitive, Unicode-normalized)
 #
 # Example:
 #
@@ -85,8 +87,10 @@ impl fmt::Display for SavedQueryId {
 pub struct TagId(String);
 
 impl TagId {
+    /// Tag ids are the NFD comparison form of the Finder value, so history,
+    /// sidebar rows and predicates name the same tag however it was typed.
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        Self(crate::tags::normalize_tag(&id.into()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -248,6 +252,9 @@ pub struct SavedQuery {
     pub kind: Option<SavedKind>,
     #[serde(default)]
     pub modified_within_days: Option<u32>,
+    /// Finder tag names (NFD); all must be present.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl SavedQuery {
@@ -332,8 +339,10 @@ impl SavedQuery {
         if self.scope == SavedScope::ThisMac && self.matching != SavedMatch::Names {
             return Err("This Mac searches names through Spotlight; use match = \"names\" or scope \"home\"".into());
         }
-        if self.text.trim().is_empty() && self.kind.is_none() && self.modified_within_days.is_none() {
-            return Err("a saved search needs text, a kind, or modified_within_days".into());
+        let tags = crate::tags::normalize_tags(&self.tags)?;
+        if self.text.trim().is_empty() && self.kind.is_none() && self.modified_within_days.is_none() && tags.is_empty()
+        {
+            return Err("a saved search needs text, a kind, modified_within_days, or tags".into());
         }
         Ok(())
     }
@@ -348,9 +357,9 @@ pub struct SavedQueries {
 
 impl SavedQueries {
     pub fn parse(text: &str) -> Result<Self, String> {
-        let queries: SavedQueries = toml::from_str(text).map_err(|error| config::parse_error(&error, text))?;
+        let mut queries: SavedQueries = toml::from_str(text).map_err(|error| config::parse_error(&error, text))?;
         let mut ids = std::collections::HashSet::new();
-        for query in &queries.queries {
+        for query in &mut queries.queries {
             SavedQueryId::new(query.id.as_str())?;
             if !ids.insert(query.id.clone()) {
                 return Err(format!("duplicate saved-search id \"{}\"", query.id));
@@ -358,6 +367,8 @@ impl SavedQueries {
             if query.name.trim().is_empty() {
                 return Err(format!("saved search \"{}\": name is empty", query.id));
             }
+            query.tags = crate::tags::normalize_tags(&query.tags)
+                .map_err(|error| format!("saved search \"{}\": {error}", query.id))?;
         }
         Ok(queries)
     }
@@ -405,6 +416,8 @@ pub fn load_saved_queries(config_dir: &Path, home: &Path) -> Result<SavedQueries
 /// Insert or update one saved search by id, keeping the file's comments and the
 /// record's other fields and layout.
 pub fn save_saved_query(config_dir: &Path, home: &Path, query: &SavedQuery) -> Result<(), String> {
+    let mut query = query.clone();
+    query.tags = crate::tags::normalize_tags(&query.tags)?;
     query.validate(home)?;
     let path = saved_queries_path(config_dir);
     edit_toml(&path, DEFAULT_SAVED_QUERIES, |doc| {
@@ -412,10 +425,10 @@ pub fn save_saved_query(config_dir: &Path, home: &Path, query: &SavedQuery) -> R
         let tables = query_tables(doc)?;
         let index = current.queries.iter().position(|existing| existing.id == query.id);
         match index {
-            Some(index) => write_query(tables.get_mut(index).expect("indexed table"), query),
+            Some(index) => write_query(tables.get_mut(index).expect("indexed table"), &query),
             None => {
                 let mut table = Table::new();
-                write_query(&mut table, query);
+                write_query(&mut table, &query);
                 tables.push(table);
             }
         }
@@ -474,6 +487,15 @@ fn write_query(table: &mut Table, query: &SavedQuery) {
             table.remove("modified_within_days");
         }
     }
+    if query.tags.is_empty() {
+        table.remove("tags");
+    } else {
+        let mut tags = Array::new();
+        for tag in &query.tags {
+            tags.push(tag.as_str());
+        }
+        set_query_value(table, "tags", Item::Value(Value::Array(tags)));
+    }
 }
 
 fn set_query_value(table: &mut Table, key: &str, mut item: Item) {
@@ -503,6 +525,7 @@ mod tests {
             exclusions: SavedExclusions::Configured,
             kind: Some(SavedKind::Pdf),
             modified_within_days: Some(30),
+            tags: Vec::new(),
         }
     }
 
@@ -536,6 +559,35 @@ mod tests {
         pdf.root = Some("Documents".into());
         let error = pdf.root_path(Path::new(HOME)).unwrap_err();
         assert!(error.contains("absolute"), "{error}");
+    }
+
+    #[test]
+    fn tags_are_a_predicate_normalized_and_round_tripped() {
+        let dir = TempDir::new("saved-query-tags");
+        let config = dir.as_ref();
+        let mut tagged = query("tagged");
+        tagged.kind = None;
+        tagged.modified_within_days = None;
+        tagged.text = String::new();
+        tagged.tags = vec!["Café".into(), "Work".into(), "Cafe\u{0301}".into()];
+        assert!(tagged.validate(Path::new(HOME)).is_ok());
+        save_saved_query(config, Path::new(HOME), &tagged).unwrap();
+        let text = std::fs::read_to_string(saved_queries_path(config)).unwrap();
+        assert!(text.contains("tags = [\"Cafe\u{0301}\", \"Work\"]"), "{text}");
+        let loaded = load_saved_queries(config, Path::new(HOME)).unwrap();
+        assert_eq!(loaded.get(&tagged.id).unwrap().tags, ["Cafe\u{0301}", "Work"]);
+
+        let mut empty = query("no-predicate");
+        empty.kind = None;
+        empty.modified_within_days = None;
+        empty.text = String::new();
+        empty.tags.clear();
+        let error = empty.validate(Path::new(HOME)).unwrap_err();
+        assert!(error.contains("tags"), "{error}");
+
+        let mut bad = query("bad-tag");
+        bad.tags = vec!["two\nlines".into()];
+        assert!(bad.validate(Path::new(HOME)).is_err());
     }
 
     #[test]

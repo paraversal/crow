@@ -101,6 +101,8 @@ pub struct Ui {
     /// Sidebar result counts, streamed by the active destination and refreshed
     /// for visible inactive rows.
     pub saved_query_counts: SavedQueryCounts,
+    /// Finder tags the sidebar shows: configured pinned first, then discovered.
+    pub tags: crate::tags::TagIndex,
     pub recent: Recent,
     /// Commands run from the palette, newest first (state, not config).
     pub recent_commands: RecentCommands,
@@ -193,6 +195,7 @@ impl Ui {
             saved_queries: SavedQueries::default(),
             saved_queries_generation: 0,
             saved_query_counts: SavedQueryCounts::default(),
+            tags: crate::tags::TagIndex::default(),
             errors: Default::default(),
         };
         ui.load_settings();
@@ -307,6 +310,7 @@ impl Ui {
         match load_sidebar(&self.config_dir) {
             Ok(sidebar) => {
                 let changed = sidebar != self.sidebar;
+                self.tags.set_pinned(sidebar.pinned_tags.clone());
                 self.sidebar = sidebar;
                 self.set_error(SIDEBAR, Ok(())) || changed
             }
@@ -418,6 +422,7 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     crate::usage::init(cx);
     crate::tips::init(cx);
     crate::onboarding::init(cx);
+    crate::tags::init(cx);
 
     let (theme_tx, theme_rx) = mpsc::channel();
     let theme_watcher = crow_theme::watch(theme_tx).inspect_err(|e| tracing::warn!("theme watch: {e}")).ok();
@@ -525,6 +530,8 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     crate::usage::init(cx);
     crate::tips::init(cx);
     crate::onboarding::init(cx);
+    // Tests set `Ui.tags` directly; scanning the real Spotlight index in every
+    // GPUI test would be slow and machine-dependent.
     install_drag_cancel(cx);
     config_dir
 }

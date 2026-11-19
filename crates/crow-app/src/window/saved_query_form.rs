@@ -29,6 +29,7 @@ pub(crate) struct SavedQueryForm {
     pub(crate) text: Entity<TextInput>,
     pub(crate) kind: Entity<TextInput>,
     pub(crate) days: Entity<TextInput>,
+    pub(crate) tags: Entity<TextInput>,
     pub(crate) scope: SavedScope,
     pub(crate) matching: SavedMatch,
     pub(crate) include_hidden: bool,
@@ -38,6 +39,16 @@ pub(crate) struct SavedQueryForm {
     pub(crate) writing: bool,
     controls: [(FormChange, FocusHandle); 13],
     subscriptions: Vec<Subscription>,
+}
+
+/// A tag field that stays comma-separated for ordinary names; a name containing
+/// a comma is shown as a JSON string array so editing it cannot split the value.
+fn tag_field_text(tags: &[String]) -> String {
+    if tags.iter().any(|tag| tag.contains(',')) {
+        serde_json::to_string(tags).unwrap_or_default()
+    } else {
+        tags.join(", ")
+    }
 }
 
 fn field<T: 'static>(
@@ -65,11 +76,12 @@ impl SavedQueryForm {
                 search.hidden_flags(),
                 search.exclusions_value(),
                 search.predicate_values(),
+                tag_field_text(search.tag_values()),
             )
         });
-        let (scope, matching, text, hidden, exclusions, predicates) = match &search_state {
-            Some((scope, matching, text, hidden, exclusions, predicates)) => {
-                (*scope, *matching, text.clone(), *hidden, *exclusions, predicates.clone())
+        let (scope, matching, text, hidden, exclusions, predicates, tags) = match &search_state {
+            Some((scope, matching, text, hidden, exclusions, predicates, tags)) => {
+                (*scope, *matching, text.clone(), *hidden, *exclusions, predicates.clone(), tags.clone())
             }
             None => existing.as_ref().map_or(
                 (
@@ -79,6 +91,7 @@ impl SavedQueryForm {
                     (true, false),
                     SavedExclusions::Configured,
                     (None, None),
+                    String::new(),
                 ),
                 |saved| {
                     (
@@ -88,6 +101,7 @@ impl SavedQueryForm {
                         (saved.include_hidden, saved.enter_hidden_folders),
                         saved.exclusions,
                         (saved.kind.clone(), saved.modified_within_days),
+                        tag_field_text(&saved.tags),
                     )
                 },
             ),
@@ -111,6 +125,7 @@ impl SavedQueryForm {
         let kind =
             field(kind.map(|kind| kind.key().to_owned()).unwrap_or_default(), "pdf, image, rs…", "Kind predicate", cx);
         let days = field(days.map(|days| days.to_string()).unwrap_or_default(), "30", "Modified within days", cx);
+        let tags = field(tags, "Work, review", "Tag predicates", cx);
         Self {
             focus,
             id: existing.as_ref().map(|saved| saved.id.clone()),
@@ -119,6 +134,7 @@ impl SavedQueryForm {
             text,
             kind,
             days,
+            tags,
             scope,
             matching,
             include_hidden: hidden.0,
@@ -172,6 +188,14 @@ impl SavedQueryForm {
                     .map_err(|_| "Modified within must be a positive whole number of days".to_owned())?,
             )
         };
+        let tags_text = self.tags.read(cx).text().trim().to_owned();
+        let tags = if tags_text.starts_with('[') {
+            let values: Vec<String> = serde_json::from_str(&tags_text)
+                .map_err(|_| "Tags must be a comma-separated list or a JSON array of strings".to_owned())?;
+            crow_core::normalize_tags(values)?
+        } else {
+            crow_core::normalize_tags(tags_text.split(',').map(str::trim).filter(|tag| !tag.is_empty()))?
+        };
         let id = match &self.id {
             Some(id) => id.clone(),
             None => SavedQuery::allocate_id(&name, &cx.global::<Ui>().saved_queries),
@@ -188,6 +212,7 @@ impl SavedQueryForm {
             exclusions: self.exclusions,
             kind,
             modified_within_days,
+            tags,
         };
         query.validate(&cx.global::<Ui>().home)?;
         Ok(query)
@@ -198,7 +223,7 @@ impl SavedQueryForm {
         window: &mut Window,
         cx: &mut Context<T>,
     ) {
-        for field in [&self.name, &self.root, &self.text, &self.kind, &self.days] {
+        for field in [&self.name, &self.root, &self.text, &self.kind, &self.days, &self.tags] {
             self.subscriptions.push(cx.subscribe_in(field, window, move |host, _, event, window, cx| {
                 let action = match event {
                     TextInputEvent::Confirmed => FormChange::Save,
@@ -217,7 +242,7 @@ impl SavedQueryForm {
         if self.scope == SavedScope::Folder {
             stops.push(self.root.read(cx).focus_handle(cx));
         }
-        stops.extend([&self.text, &self.kind, &self.days].map(|input| input.read(cx).focus_handle(cx)));
+        stops.extend([&self.text, &self.kind, &self.days, &self.tags].map(|input| input.read(cx).focus_handle(cx)));
         stops.extend(
             self.controls[3..]
                 .iter()
@@ -475,6 +500,7 @@ impl SavedQueryForm {
             .child(row("Text", form.text.clone()))
             .child(row("Kind", form.kind.clone()))
             .child(row("Modified within", form.days.clone()))
+            .child(row("Tags", form.tags.clone()))
             .child(option_row(
                 "Match",
                 vec![
@@ -572,5 +598,16 @@ impl CrowWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         form.render(window, cx, Self::saved_form_action)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_comma_inside_a_tag_uses_a_json_array() {
+        assert_eq!(tag_field_text(&["Work".into(), "review".into()]), "Work, review");
+        assert_eq!(tag_field_text(&["Work".into(), "a,b".into()]), r#"["Work","a,b"]"#);
     }
 }

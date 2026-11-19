@@ -21,6 +21,20 @@ fn test_ranges(start: usize, end: usize) -> Vec<std::ops::Range<usize>> {
     std::iter::once(start..end).collect()
 }
 
+/// Deterministic Finder tags for folder-filter tests, with a read count so a
+/// name-filter change can prove it reused the metadata facts.
+struct TagMap {
+    tags: std::collections::HashMap<PathBuf, Result<Vec<String>, String>>,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crow_search::TagReader for TagMap {
+    fn read_tags(&self, path: &Path) -> Result<Vec<String>, String> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.tags.get(path).cloned().unwrap_or_else(|| Ok(Vec::new()))
+    }
+}
+
 /// A synthetic hit for `add_test_hits`.
 fn test_hit(path: PathBuf, kind: HitKind, score: u32) -> Hit {
     Hit { path, is_dir: false, hidden: false, score, kind, modified: None, size: 0 }
@@ -2197,10 +2211,10 @@ fn icon_grid_arrows_follow_the_tile_geometry(cx: &mut TestAppContext) {
     for i in 0..8 {
         std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
     }
-    let (view, mut cx) = open_sized(cx, &root, 640., 800.);
+    let (view, mut cx) = open_sized(cx, &root, 600., 800.);
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
-    // Hide Preview so the 640 pt window leaves a three-column pane.
+    // Hide Preview so the 600 pt window leaves a three-column pane.
     cx.simulate_keystrokes("cmd-shift-p");
     settle(&view, &mut cx);
     let bounds = |cx: &VisualTestContext, name: &str| {
@@ -2259,7 +2273,7 @@ fn marquee_selects_columns_and_restores_the_start_on_escape(cx: &mut TestAppCont
     for i in 0..8 {
         std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
     }
-    let (view, mut cx) = open_sized(cx, &root, 640., 800.);
+    let (view, mut cx) = open_sized(cx, &root, 600., 800.);
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
@@ -2309,7 +2323,7 @@ fn cmd_marquee_keeps_the_starting_selection(cx: &mut TestAppContext) {
     for i in 0..8 {
         std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
     }
-    let (view, mut cx) = open_sized(cx, &root, 640., 800.);
+    let (view, mut cx) = open_sized(cx, &root, 600., 800.);
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
@@ -2451,7 +2465,7 @@ fn icon_size_presets_keep_the_filter_and_cursor_visible(cx: &mut TestAppContext)
 #[gpui::test]
 fn icon_grid_reflow_preserves_the_partially_visible_path_offset(cx: &mut TestAppContext) {
     let root = long_fixture("icon-scroll-anchor", 200);
-    let (view, mut cx) = open_sized(cx, &root, 640., 500.);
+    let (view, mut cx) = open_sized(cx, &root, 600., 500.);
     cx.simulate_keystrokes("cmd-1 cmd-shift-p");
     settle(&view, &mut cx);
     let viewport = cx.debug_bounds("file-list").expect("icon viewport");
@@ -2463,7 +2477,7 @@ fn icon_grid_reflow_preserves_the_partially_visible_path_offset(cx: &mut TestApp
     });
     settle(&view, &mut cx);
     let top = cx.debug_bounds("tile-f006.txt").expect("first visible tile").top();
-    assert!(top < viewport.top() && top > viewport.top() - px(106.));
+    assert!(top < viewport.top() && top > viewport.top() - px(104.));
 
     cx.simulate_resize(size(px(1050.), px(500.)));
     settle(&view, &mut cx);
@@ -4450,6 +4464,7 @@ fn search_corpus_matrix(cx: &mut TestAppContext) {
                         everything,
                         read_gate: None,
                         predicates: crow_search::Predicates::default(),
+                        tag_reader: None,
                     };
                     let control = Control::new();
                     let mut hits = Vec::new();
@@ -7700,6 +7715,193 @@ fn filter_narrows_rows_and_escape_restores_focus(cx: &mut TestAppContext) {
     assert_eq!(rows(&view, &cx).len(), 3, "Escape clears the filter");
     cx.simulate_keystrokes("n");
     assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "focus is back on the list for type-to-select");
+}
+
+#[gpui::test]
+fn tag_filter_requires_every_tag_and_reuses_metadata_for_name_changes(cx: &mut TestAppContext) {
+    let root = fixture("tag-filter");
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.focused_folder_for_test());
+    let alpha = root.join("alpha");
+    let beta = root.join("beta");
+    let notes = root.join("notes.txt");
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut tags = std::collections::HashMap::new();
+    tags.insert(alpha.clone(), Ok(vec!["Work".into(), "review".into()]));
+    tags.insert(beta.clone(), Ok(vec!["Work".into()]));
+    tags.insert(notes.clone(), Err("no permission".into()));
+    folder.update(&mut cx, |folder, _| {
+        folder.set_tag_reader_for_test(Arc::new(TagMap { tags, reads: reads.clone() }));
+    });
+
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["Work".into()], cx));
+    settle(&view, &mut cx);
+    assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0), ("beta".to_owned(), 0)]);
+    assert_eq!(folder.read_with(&cx, |folder, _| folder.tag_errors()), 1, "the unreadable entry is reported");
+    assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 3);
+
+    // A new constraint never shows the previous constraint's rows while the new
+    // scan runs; the field says it is scanning instead.
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["review".into()], cx));
+    assert!(rows(&view, &cx).is_empty(), "the old constraint's rows are not a snapshot of the new one");
+    settle(&view, &mut cx);
+    assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)]);
+
+    // Changing the tag set rereads only when a path's fact is missing; all three
+    // are cached, so adding `review` is classification, not another tag read.
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["Work".into(), "review".into()], cx));
+    settle(&view, &mut cx);
+    assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)]);
+    assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 3);
+
+    // The name filter applies on top without a metadata read.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("AL");
+    settle(&view, &mut cx);
+    assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)]);
+    assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 3);
+
+    // Removing the last tag constraint restores names-only filtering at once.
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(Vec::new(), cx));
+    assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)], "the name filter still applies");
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0), ("beta".to_owned(), 0), ("notes.txt".to_owned(), 0)]);
+}
+
+struct AllWorkTags {
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crow_search::TagReader for AllWorkTags {
+    fn read_tags(&self, _: &Path) -> Result<Vec<String>, String> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(vec!["Work".into()])
+    }
+}
+
+#[gpui::test]
+#[ignore = "bench: needs target/fixture-100k"]
+fn bench_tag_filter_100k(cx: &mut TestAppContext) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixture-100k");
+    assert!(root.is_dir(), "run `cargo run --release -p crow-app -- --make-fixture target/fixture-100k 100000`");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.focused_folder_for_test());
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    folder.update(&mut cx, |folder, _| folder.set_tag_reader_for_test(Arc::new(AllWorkTags { reads: reads.clone() })));
+    let started = Instant::now();
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["Work".into()], cx));
+    let mut first_ms = None;
+    for _ in 0..20_000 {
+        cx.run_until_parked();
+        let (scanning, rows, batch_ms) =
+            folder.read_with(&cx, |folder, _| (folder.tag_scanning(), folder.row_count(), folder.tag_first_batch_ms()));
+        if first_ms.is_none() {
+            first_ms = batch_ms;
+        }
+        if !scanning {
+            let settled_ms = started.elapsed().as_secs_f64() * 1000.0;
+            println!(
+                "TAGBENCH first={:.1}ms settled={:.1}ms reads={} rows={rows}",
+                first_ms.unwrap_or_default(),
+                settled_ms,
+                reads.load(std::sync::atomic::Ordering::Relaxed)
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("tag scan never settled");
+}
+
+#[gpui::test]
+fn tag_filter_includes_hidden_symlink_and_package_entries(cx: &mut TestAppContext) {
+    let root = fixture("tag-filter-edges");
+    std::fs::write(root.join(".hidden.txt"), "x").expect("hidden");
+    std::fs::create_dir_all(root.join("Bundle.app/Contents")).expect("package");
+    std::os::unix::fs::symlink(root.join("notes.txt"), root.join("link.txt")).expect("symlink");
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.focused_folder_for_test());
+    let mut tags = std::collections::HashMap::new();
+    for name in [".hidden.txt", "Bundle.app", "link.txt"] {
+        tags.insert(root.join(name), Ok(vec!["Work".into()]));
+    }
+    folder.update(&mut cx, |folder, _| {
+        folder.set_tag_reader_for_test(Arc::new(TagMap {
+            tags,
+            reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }));
+    });
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["Work".into()], cx));
+    settle(&view, &mut cx);
+    assert_eq!(
+        rows(&view, &cx),
+        [("Bundle.app".to_owned(), 0), (".hidden.txt".to_owned(), 0), ("link.txt".to_owned(), 0)]
+    );
+}
+
+#[gpui::test]
+fn a_tag_only_filter_with_no_matches_shows_the_reason(cx: &mut TestAppContext) {
+    let root = fixture("tag-filter-empty");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("/");
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["Missing".into()], cx));
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("filter-no-matches").is_some(), "the empty state names the tag constraint");
+}
+
+#[gpui::test]
+fn a_tag_inventory_error_is_visible_without_pinned_tags(cx: &mut TestAppContext) {
+    let root = fixture("tag-inventory-error");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<Ui>().tags.error = Some("Spotlight failed".into()));
+    settle(&view, &mut cx);
+    let looks = sidebar_looks(&view, &mut cx);
+    assert!(
+        looks.iter().any(|look| look.label == "Tags (index unavailable)"),
+        "the Tags section names the unavailable index even with no pinned tags: {looks:?}"
+    );
+}
+
+#[gpui::test]
+fn filter_tag_control_opens_a_picker_and_applies_every_tag(cx: &mut TestAppContext) {
+    let root = fixture("tag-picker");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<Ui>().tags.set_pinned(vec!["Work".into(), "review".into()]));
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.focused_folder_for_test());
+    let mut tags = std::collections::HashMap::new();
+    tags.insert(root.join("alpha"), Ok(vec!["Work".into()]));
+    tags.insert(root.join("beta"), Ok(vec!["Work".into(), "review".into()]));
+    tags.insert(root.join("notes.txt"), Ok(vec!["review".into()]));
+    folder.update(&mut cx, |folder, _| {
+        folder.set_tag_reader_for_test(Arc::new(TagMap {
+            tags,
+            reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }));
+    });
+
+    cx.simulate_keystrokes("/");
+    settle(&view, &mut cx);
+    let control = cx.debug_bounds("filter-tags").expect("the visible tag control");
+    cx.simulate_click(control.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("sheet-panel").is_some(), "the picker is open");
+    let work = cx.debug_bounds("tag-toggle-0").expect("Work row");
+    cx.simulate_click(work.center(), gpui::Modifiers::default());
+    let done = cx.debug_bounds("tags-done").expect("Done");
+    cx.simulate_click(done.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0), ("beta".to_owned(), 0)]);
+    assert_eq!(cx.debug_bounds("filter-tags").map(|b| b.size.width > px(30.)), Some(true));
+
+    // A second tag narrows to the one entry carrying both.
+    let control = cx.debug_bounds("filter-tags").expect("control stays in the field");
+    cx.simulate_click(control.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down space enter");
+    settle(&view, &mut cx);
+    assert_eq!(rows(&view, &cx), [("beta".to_owned(), 0)]);
 }
 
 #[gpui::test]
@@ -13853,6 +14055,153 @@ fn saved_query_is_a_destination_with_history_and_results(cx: &mut TestAppContext
             crow_core::Location::SavedQuery(_)
         ),
         "Escape leaves Q as the tab's location"
+    );
+}
+
+#[gpui::test]
+fn tag_destination_searches_spotlight_and_survives_history(cx: &mut TestAppContext) {
+    let root = fixture("tag-destination");
+    let (view, mut cx) = open(cx, &root);
+    write_config(
+        &view,
+        &mut cx,
+        "sidebar.toml",
+        &format!(
+            "pinned_tags = [\"Work\"]\n[[group]]\nname = \"Favorites\"\nitems = [{{ path = \"{}\" }}]\n[recent]\nshow = false\n[sections]\norder = [\"tags\"]\n",
+            root.display()
+        ),
+    );
+    assert_eq!(view.read_with(&cx, |_, cx| cx.global::<Ui>().tags.all()), ["Work"]);
+    let hit = crow_macos::SpotlightHit { path: root.join("notes.txt"), is_dir: false, modified: None, size: 0 };
+    cx.update(|_, cx| {
+        crate::effects::recording(cx).expect("recording effects").set_spotlight_hits(vec![vec![hit.clone()]])
+    });
+
+    let row = cx.debug_bounds("sidebar-2").expect("the pinned tag row");
+    cx.simulate_click(row.center(), gpui::Modifiers::default());
+    wait_for_pane_search(&view, &mut cx);
+    let tag = crow_core::TagId::new("Work");
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::Tag(tag.clone())
+    );
+    let session = pane(&view, &cx).read_with(&cx, |pane, _| pane.saved_session()).expect("tag session");
+    assert_eq!(session.read_with(&cx, |search, _| search.result_paths()), [root.join("notes.txt")]);
+    assert_eq!(session.read_with(&cx, |search, _| search.title().to_owned()), "Work");
+    assert!(
+        effect_calls(&mut cx).iter().any(|call| matches!(call, crate::effects::Call::SpotlightExpression(expression) if expression == "kMDItemUserTags == \"Work\"")),
+        "the tag destination asks Spotlight for the exact tag"
+    );
+
+    // A batch from an older folder/title or spec cannot change this snapshot.
+    let stale = crow_macos::SpotlightHit { path: root.join("alpha"), is_dir: true, modified: None, size: 0 };
+    session.update(&mut cx, |search, cx| search.inject_stale_spotlight_for_test(vec![stale], cx));
+    assert_eq!(session.read_with(&cx, |search, _| search.result_paths()), [root.join("notes.txt")]);
+
+    // Saving from the tag destination prefills the tag predicate and writes it.
+    let window = cx.update(|_, cx| cx.windows()[0]);
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |this, cx| this.save_search(&SaveSearch, window, cx));
+    })
+    .expect("open the save form");
+    assert!(view.read_with(&cx, |w, _| matches!(w.sheet, Some(Sheet::SavedQuery(_)))));
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |this, cx| this.confirm_saved_query_form(window, cx));
+    })
+    .expect("save the form");
+    for _ in 0..200 {
+        cx.run_until_parked();
+        let path = config_dir(&cx).join("saved-queries.toml");
+        if std::fs::read_to_string(&path).is_ok_and(|text| text.contains("[[query]]")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let text = std::fs::read_to_string(config_dir(&cx).join("saved-queries.toml")).unwrap();
+    assert!(text.contains("tags = [\"Work\"]"), "{text}");
+
+    cx.simulate_keystrokes("cmd-[");
+    settle(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::Folder(root.to_path_buf())
+    );
+    cx.simulate_keystrokes("cmd-]");
+    wait_for_pane_search(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()), crow_core::Location::Tag(tag));
+}
+
+/// Finder's on-disk tag attribute for `["Work"]`, as a binary plist.
+const WORK_TAG_PLIST: &str =
+    "62706c6973743030a10154576f726b080a000000000000010100000000000000020000000000000000000000000000000f";
+
+fn set_work_tag(path: &Path) {
+    let status = std::process::Command::new("xattr")
+        .args(["-wx", "com.apple.metadata:_kMDItemUserTags", WORK_TAG_PLIST])
+        .arg(path)
+        .status()
+        .expect("run xattr");
+    assert!(status.success(), "set the Finder tag on {}", path.display());
+}
+
+fn clear_work_tag(path: &Path) {
+    let _ = std::process::Command::new("xattr").args(["-d", "com.apple.metadata:_kMDItemUserTags"]).arg(path).status();
+}
+
+#[gpui::test]
+fn saved_query_tags_and_text_use_one_spotlight_expression(cx: &mut TestAppContext) {
+    let root = fixture("saved-query-this-mac-tags");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &saved_sidebar_toml(&root));
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        "[[query]]\nid = \"work-notes\"\nname = \"Work notes\"\nscope = \"this-mac\"\ntext = \"note\"\nmatch = \"names\"\ntags = [\"Work\"]\n",
+    );
+    let hit = crow_macos::SpotlightHit { path: root.join("notes.txt"), is_dir: false, modified: None, size: 0 };
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").set_spotlight_hits(vec![vec![hit]]));
+    cx.simulate_keystrokes("tab down down enter");
+    wait_for_pane_search(&view, &mut cx);
+    let session = pane(&view, &cx).read_with(&cx, |pane, _| pane.saved_session()).expect("saved session");
+    assert_eq!(session.read_with(&cx, |search, _| search.result_paths()), [root.join("notes.txt")]);
+    assert!(
+        effect_calls(&mut cx).iter().any(|call| matches!(call, crate::effects::Call::SpotlightExpression(expression)
+            if expression == "kMDItemFSName == \"*note*\"cd && kMDItemUserTags == \"Work\"")),
+        "the text and tag predicate become one metadata expression"
+    );
+}
+
+#[gpui::test]
+fn saved_query_tag_predicate_follows_a_tag_change(cx: &mut TestAppContext) {
+    let root = fixture("saved-query-tags");
+    let notes = root.join("notes.txt");
+    set_work_tag(&notes);
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &saved_sidebar_toml(&root));
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &format!(
+            "[[query]]\nid = \"work\"\nname = \"Work\"\nscope = \"folder\"\nroot = \"{}\"\ntext = \"\"\nmatch = \"names\"\ntags = [\"Work\"]\n",
+            root.display()
+        ),
+    );
+    cx.simulate_keystrokes("tab down down enter");
+    wait_for_pane_search(&view, &mut cx);
+    let session = pane(&view, &cx).read_with(&cx, |pane, _| pane.saved_session()).expect("saved tag session");
+    let results = session.read_with(&cx, |search, _| search.result_paths());
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], notes);
+
+    clear_work_tag(&notes);
+    session.update(&mut cx, |search, cx| search.refresh_now(cx));
+    wait_for_pane_search(&view, &mut cx);
+    assert_eq!(
+        session.read_with(&cx, |search, _| search.result_paths()),
+        Vec::<PathBuf>::new(),
+        "removing the Finder tag removes the saved-query result"
     );
 }
 
