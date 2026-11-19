@@ -383,6 +383,9 @@ impl CrowWindow {
             if let Sheet::Conflict { controls, .. } = sheet {
                 allowed.extend(controls.iter().cloned().map(|focus| ("conflict control", focus)));
             }
+            if let Sheet::BatchRename(batch) = sheet {
+                allowed.extend(batch.focus_surfaces(cx).into_iter().map(|focus| ("batch rename field", focus)));
+            }
         } else if let Some(palette) = &self.palette {
             allowed.push(("palette", palette.input.read(cx).focus_handle(cx)));
         } else if let Some(picker) = &self.picker {
@@ -1456,6 +1459,8 @@ enum Sheet {
     },
     /// File ▸ Save Search… and the sidebar's Edit Saved Search… form.
     SavedQuery(Box<saved_query_form::SavedQueryForm>),
+    /// Rename two or more selected entries with one rule and one preview.
+    BatchRename(Box<batch_rename::BatchRenameSheet>),
 }
 
 impl Sheet {
@@ -1467,6 +1472,7 @@ impl Sheet {
             | Sheet::StopOperation { focus, .. }
             | Sheet::Onboarding { focus, .. } => focus,
             Sheet::SavedQuery(form) => &form.focus,
+            Sheet::BatchRename(sheet) => &sheet.focus,
         }
     }
 }
@@ -1489,6 +1495,7 @@ impl CrowWindow {
     fn on_pane_event(&mut self, event: &PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PaneEvent::Run(request) => self.run_request(request.clone(), window, cx),
+            PaneEvent::BatchRename(entries) => self.open_batch_rename(entries.clone(), window, cx),
             PaneEvent::ChooseTags => self.open_tag_picker(window, cx),
             PaneEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
             PaneEvent::Entered(dir) => {
@@ -1551,6 +1558,11 @@ impl CrowWindow {
     }
 
     fn close_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Sheet::BatchRename(sheet)) = &self.sheet
+            && let Some(cancel) = &sheet.validation_cancel
+        {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         // Escape or a click outside the first-launch sheet keeps the default:
         // record that it was asked, leave `tips` as the file has it.
         if matches!(self.sheet, Some(Sheet::Onboarding { .. })) {
@@ -2147,6 +2159,7 @@ impl CrowWindow {
             }
             SearchEvent::Copy { paths, cut } => self.copy_paths(paths.clone(), *cut, cx),
             SearchEvent::Save => self.save_search(&SaveSearch, window, cx),
+            SearchEvent::BatchRename(entries) => self.open_batch_rename(entries.clone(), window, cx),
         }
     }
 
@@ -3073,6 +3086,7 @@ fn missing_focus_violation(focus_required: bool) -> Option<crate::fuzz::Violatio
     focus_required.then(|| crate::fuzz::Violation::new("focus", "nothing is focused"))
 }
 
+pub(crate) mod batch_rename;
 pub(crate) mod column_picker;
 pub(crate) mod git_review;
 pub(crate) mod operation_ui;

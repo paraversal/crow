@@ -18,6 +18,7 @@ rand_chacha = { version = "0.9", optional = true }
 rayon = "1"
 serde.workspace = true
 serde_json.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

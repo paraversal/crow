@@ -1,6 +1,7 @@
 //! Crow's UI-free model. Everything here is plain data with unit tests;
 //! `crow-app` renders it and feeds it events.
 
+pub mod batch_rename;
 mod config;
 mod exclude;
 mod extensions;

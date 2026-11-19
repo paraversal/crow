@@ -7786,24 +7786,19 @@ fn enter_opens_in_open_mode_but_sidebar_and_search_still_open(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn rename_with_a_multi_selection_beeps_and_says_why(cx: &mut TestAppContext) {
-    use crate::effects::Call;
+fn rename_with_a_multi_selection_opens_the_batch_sheet(cx: &mut TestAppContext) {
     let root = fixture("rename-multi");
     let (view, mut cx) = open(cx, &root);
     cx.simulate_keystrokes("down shift-down");
     assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.selected_count(cx)), 2);
-    effect_calls(&mut cx);
 
     cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
-    assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "Rename edits one name");
-    assert!(effect_calls(&mut cx).iter().any(|call| matches!(call, Call::Beep)), "the refusal beeps");
-    match bar_state(&view, &mut cx).primary {
-        crate::bottom_bar::Primary::Message(text) => assert_eq!(text.as_ref(), "Select one item to rename"),
-        _ => panic!("the bar says why Rename did nothing"),
-    }
+    assert!(!pane(&view, &cx).read_with(&cx, |p, _| p.is_renaming()), "multiple items do not start an inline field");
+    assert!(view.read_with(&cx, |w, _| matches!(w.sheet, Some(Sheet::BatchRename(_)))), "the batch sheet is up");
+    assert!(root.join("alpha").exists() && root.join("beta").exists(), "nothing changed yet");
 
-    // One item: the name field opens.
+    // One item: the name field still opens.
     cx.simulate_keystrokes("escape");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("down");
@@ -15076,4 +15071,286 @@ fn clearing_search_clears_the_result_selection(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-f cmd-backspace");
     assert!(search.read_with(&cx, |search, _| search.result_paths()).is_empty());
     assert!(search.read_with(&cx, |search, _| search.selected_entry()).is_none());
+}
+
+/// Let the sheet's off-main validation finish; it is not part of the operation queue.
+fn pump_batch(cx: &mut VisualTestContext) {
+    for _ in 0..40 {
+        cx.executor().advance_clock(Duration::from_millis(20));
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn batch_rename_sheet_previews_applies_one_activity_and_undo_selects(cx: &mut TestAppContext) {
+    let root = fixture("batch-sheet-apply");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-a f2");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| matches!(w.sheet, Some(Sheet::BatchRename(_)))));
+    assert!(
+        !view.read_with(&cx, |w, _| match &w.sheet {
+            Some(Sheet::BatchRename(sheet)) => sheet.can_submit(),
+            _ => true,
+        }),
+        "an empty find field cannot submit"
+    );
+
+    let (find, replace) = view.read_with(&cx, |w, cx| match &w.sheet {
+        Some(Sheet::BatchRename(sheet)) => {
+            (sheet.find.read(cx).focus_handle(cx), sheet.replace.read(cx).focus_handle(cx))
+        }
+        _ => panic!("batch sheet"),
+    });
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(find), "typing starts in Find");
+    cx.simulate_keystrokes("tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(replace), "Tab reaches Replace");
+
+    let add = cx.debug_bounds("batch-rule-add").expect("Add Text rule").center();
+    cx.simulate_click(add, Default::default());
+    cx.simulate_input(" x");
+    pump_batch(&mut cx);
+    assert!(
+        view.read_with(&cx, |w, _| match &w.sheet {
+            Some(Sheet::BatchRename(sheet)) =>
+                sheet.can_submit() && sheet.preview.rows.iter().any(|row| row.destination_name == "alpha x"),
+            _ => false,
+        }),
+        "the preview shows the applied rule and enables Rename"
+    );
+    assert!(root.join("alpha").exists(), "preview changes no disk state");
+
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(!sheet_open(&view, &cx), "Enter submits and closes the sheet");
+    assert!(root.join("alpha x").is_dir(), "the displayed mapping was applied");
+    assert!(root.join("beta x").is_dir());
+    assert!(root.join("notes x.txt").is_file());
+
+    let (entries, steps, label) = view.read_with(&cx, |_, cx| {
+        let ops = cx.global::<Operations>();
+        let entry = ops.log.last().expect("activity entry");
+        (ops.log.len(), entry.record.steps.len(), entry.record.label.clone())
+    });
+    assert_eq!(entries, 1, "one Activity record for the batch");
+    assert_eq!(steps, 1, "one grouped undo step");
+    assert_eq!(label, "Rename 3 items");
+    pump_batch(&mut cx);
+
+    let paths = pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_paths(cx));
+    assert_eq!(
+        paths,
+        vec![root.join("alpha x"), root.join("beta x"), root.join("notes x.txt")],
+        "the selection follows the final names"
+    );
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.selection_cursor(cx)),
+        Some(root.join("alpha x")),
+        "the cursor follows its item to the final name"
+    );
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_bytes(cx)),
+        (6, 2),
+        "the selected total follows the same items, not the old bytes twice or not at all"
+    );
+
+    cx.simulate_keystrokes("cmd-z");
+    settle(&view, &mut cx);
+    pump_batch(&mut cx);
+    assert!(root.join("alpha").is_dir() && root.join("notes.txt").is_file(), "undo restores the batch");
+    let paths = pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_paths(cx));
+    assert_eq!(paths, vec![root.join("alpha"), root.join("beta"), root.join("notes.txt")]);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_bytes(cx)),
+        (6, 2),
+        "undo maps the selected total back without double counting"
+    );
+
+    cx.simulate_keystrokes("cmd-shift-z");
+    settle(&view, &mut cx);
+    pump_batch(&mut cx);
+    assert!(root.join("alpha x").is_dir() && root.join("notes x.txt").is_file(), "redo repeats the batch");
+    let paths = pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_paths(cx));
+    assert_eq!(paths, vec![root.join("alpha x"), root.join("beta x"), root.join("notes x.txt")]);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_bytes(cx)),
+        (6, 2),
+        "redo maps the selected total forward without double counting"
+    );
+}
+
+#[gpui::test]
+fn batch_rename_escape_changes_nothing_and_keeps_the_selection(cx: &mut TestAppContext) {
+    let root = fixture("batch-sheet-escape");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-a f2");
+    settle(&view, &mut cx);
+    let add = cx.debug_bounds("batch-rule-add").expect("Add Text rule").center();
+    cx.simulate_click(add, Default::default());
+    cx.simulate_input(" x");
+    pump_batch(&mut cx);
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(!sheet_open(&view, &cx), "Escape closes the sheet");
+    assert!(root.join("alpha").exists() && root.join("notes.txt").exists(), "no disk change on Escape");
+    assert!(cx.update(|_, cx| cx.global::<Operations>().is_idle()), "nothing was queued");
+    let paths = pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_paths(cx));
+    assert_eq!(paths, vec![root.join("alpha"), root.join("beta"), root.join("notes.txt")]);
+}
+
+#[gpui::test]
+fn batch_rename_controls_activate_from_the_keyboard(cx: &mut TestAppContext) {
+    let root = fixture("batch-sheet-keys");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-a f2");
+    settle(&view, &mut cx);
+
+    // Find is focused. Shift-Tab walks back through the rule radios.
+    cx.simulate_keystrokes("shift-tab");
+    cx.simulate_keystrokes("space");
+    assert!(
+        view.read_with(&cx, |w, _| matches!(
+            &w.sheet,
+            Some(Sheet::BatchRename(sheet)) if sheet.kind == crow_core::batch_rename::RenameKind::Number
+        )),
+        "Space activates the focused Numbering radio"
+    );
+    let base_focus = view.read_with(&cx, |w, cx| match &w.sheet {
+        Some(Sheet::BatchRename(sheet)) => sheet.base.read(cx).focus_handle(cx),
+        _ => panic!("batch sheet"),
+    });
+    assert_eq!(
+        cx.update(|window, cx| window.focused(cx)),
+        Some(base_focus),
+        "switching rules focuses the rule's first field"
+    );
+
+    // Numbering focuses Base. Shift-Tab back to Numbering, then Add Text.
+    cx.simulate_keystrokes("shift-tab shift-tab space");
+    assert!(
+        view.read_with(&cx, |w, _| matches!(
+            &w.sheet,
+            Some(Sheet::BatchRename(sheet)) if sheet.kind == crow_core::batch_rename::RenameKind::AddText
+        )),
+        "Space activates the focused Add Text radio"
+    );
+    let add_focus = view.read_with(&cx, |w, cx| match &w.sheet {
+        Some(Sheet::BatchRename(sheet)) => sheet.add.read(cx).focus_handle(cx),
+        _ => panic!("batch sheet"),
+    });
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(add_focus.clone()));
+
+    cx.simulate_input(" x");
+    pump_batch(&mut cx);
+    assert!(view.read_with(&cx, |w, _| match &w.sheet {
+        Some(Sheet::BatchRename(sheet)) => sheet.can_submit(),
+        _ => false,
+    }));
+
+    // Enter on a focused rule changes the rule; it does not submit the batch.
+    cx.simulate_keystrokes("shift-tab shift-tab enter");
+    assert!(sheet_open(&view, &cx), "the sheet stays open");
+    assert!(root.join("alpha").is_dir() && !root.join("alpha x").exists(), "Enter on a rule does not rename");
+    assert_eq!(
+        cx.update(|window, cx| window.focused(cx)),
+        Some(add_focus),
+        "Enter activated Add Text and moved to its field"
+    );
+
+    // Add -> After -> Before -> Keep extension. Space toggles it; Enter on
+    // Cancel closes without submitting the valid preview.
+    cx.simulate_keystrokes("tab tab tab space");
+    assert!(
+        view.read_with(&cx, |w, _| matches!(
+            &w.sheet,
+            Some(Sheet::BatchRename(sheet)) if !sheet.preserve_extension
+        )),
+        "Space toggles Keep extension"
+    );
+    cx.simulate_keystrokes("tab enter");
+    settle(&view, &mut cx);
+    assert!(!sheet_open(&view, &cx), "Enter on Cancel closes the sheet");
+    assert!(root.join("alpha").is_dir(), "Cancel does not rename");
+    assert!(!root.join("alpha x").exists());
+}
+
+#[gpui::test]
+fn batch_rename_validation_shows_blocked_targets_in_the_sheet(cx: &mut TestAppContext) {
+    let root = fixture("batch-sheet-blocked");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-a f2");
+    settle(&view, &mut cx);
+    // Find "a" and replace it with "e": beta -> bete (free), alpha -> elph e?? no;
+    // use Find "beta" Replace "notes.txt" so beta collides with the unselected row.
+    cx.simulate_input("beta");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("notes.txt");
+    pump_batch(&mut cx);
+    let (blocked, can_submit) = view.read_with(&cx, |w, _| match &w.sheet {
+        Some(Sheet::BatchRename(sheet)) => {
+            (sheet.preview.rows.iter().any(|row| row.destination_name == "notes.txt"), sheet.can_submit())
+        }
+        _ => (false, true),
+    });
+    assert!(blocked, "the rule targets the occupied name");
+    assert!(!can_submit, "an occupied target keeps Rename disabled");
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(root.join("beta").exists() && root.join("notes.txt").exists());
+}
+
+#[gpui::test]
+fn batch_rename_from_search_results_accepts_multiple_parents(cx: &mut TestAppContext) {
+    let root = fixture("batch-search");
+    std::fs::write(root.join("alpha/one-match.txt"), "one").expect("write");
+    std::fs::write(root.join("beta/two-match.txt"), "two").expect("write");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("match");
+    wait_for_search(&view, &mut cx);
+    let count = view.read_with(&cx, |w, cx| w.search.as_ref().map_or(0, |search| search.read(cx).result_count()));
+    assert_eq!(count, 2, "two results from different folders");
+    cx.simulate_keystrokes("down cmd-a f2");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| matches!(w.sheet, Some(Sheet::BatchRename(_)))));
+
+    let add = cx.debug_bounds("batch-rule-add").expect("Add Text rule").center();
+    cx.simulate_click(add, Default::default());
+    cx.simulate_input(" x");
+    pump_batch(&mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    pump_batch(&mut cx);
+    assert!(root.join("alpha/one-match x.txt").is_file(), "renamed in its own parent");
+    assert!(root.join("beta/two-match x.txt").is_file(), "a distinct parent is accepted");
+    assert!(!root.join("alpha/one-match.txt").exists());
+}
+
+#[gpui::test]
+fn batch_rename_rejects_a_changed_source_after_the_preview(cx: &mut TestAppContext) {
+    let root = fixture("batch-late-change");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-a f2");
+    settle(&view, &mut cx);
+    let add = cx.debug_bounds("batch-rule-add").expect("Add Text rule").center();
+    cx.simulate_click(add, Default::default());
+    cx.simulate_input(" x");
+    pump_batch(&mut cx);
+    assert!(view.read_with(&cx, |w, _| match &w.sheet {
+        Some(Sheet::BatchRename(sheet)) => sheet.can_submit(),
+        _ => false,
+    }));
+
+    std::fs::write(root.join("notes.txt"), "changed after the preview").expect("change source");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    pump_batch(&mut cx);
+    assert!(root.join("alpha").exists() && root.join("beta").exists() && root.join("notes.txt").exists());
+    assert!(!root.join("alpha x").exists(), "nothing was staged for the stale batch");
+    let (error, steps) = view.read_with(&cx, |_, cx| {
+        let entry = cx.global::<Operations>().log.last().expect("activity entry");
+        (entry.error.clone(), entry.record.steps.len())
+    });
+    assert_eq!(steps, 0, "a stale preview has no undoable batch");
+    assert!(error.as_ref().is_some_and(|error| error.contains("changed since the preview")), "{error:?}");
 }

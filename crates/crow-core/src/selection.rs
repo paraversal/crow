@@ -107,6 +107,18 @@ impl<K: Clone + Eq + Hash> Selection<K> {
         (from, to)
     }
 
+    /// Replace keys by path after a rename, keeping the cursor and anchor on
+    /// the same items.
+    pub fn remap(&mut self, map: &std::collections::HashMap<K, K>) {
+        if map.is_empty() {
+            return;
+        }
+        let old = std::mem::take(&mut self.selected);
+        self.selected = old.into_iter().map(|key| map.get(&key).cloned().unwrap_or(key)).collect();
+        self.cursor = self.cursor.as_ref().map(|key| map.get(key).cloned().unwrap_or_else(|| key.clone()));
+        self.anchor = self.anchor.as_ref().map(|key| map.get(key).cloned().unwrap_or_else(|| key.clone()));
+    }
+
     /// Cmd-A.
     pub fn select_all(&mut self, keys: impl IntoIterator<Item = K>) {
         self.selected = keys.into_iter().collect();

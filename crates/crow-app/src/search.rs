@@ -29,8 +29,8 @@ use gpui::{
 
 use crate::actions::{
     CloseSearch, CopyFiles, CopyPath, CutFiles, CycleMatch, DeletePermanently, MoveDown, MoveToFirst, MoveToLast,
-    MoveToTrash, MoveUp, OpenSelection, QuickLook, SearchEverything, SearchFocusField, SearchFocusResults, SearchHome,
-    SearchReveal, SelectAll,
+    MoveToTrash, MoveUp, OpenSelection, QuickLook, Rename, SearchEverything, SearchFocusField, SearchFocusResults,
+    SearchHome, SearchReveal, SelectAll,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::cloud_status::{self, CloudStatusService};
@@ -144,6 +144,8 @@ pub enum SearchEvent {
     },
     /// The band's Save/Update button.
     Save,
+    /// Rename the selected results with one rule and one preview.
+    BatchRename(Arc<[crow_core::batch_rename::RenameInput]>),
 }
 
 impl EventEmitter<SearchEvent> for SearchView {}
@@ -1484,12 +1486,16 @@ impl SearchView {
             return;
         }
         let query = self.query(cx);
+        let staging = crow_fs::ops::owned_staging_paths();
         let mut changed = false;
         let mut fresh: Vec<Row> = Vec::new();
         let mut fresh_at: HashMap<PathBuf, usize> = HashMap::new();
         let mut fresh_strong = 0usize;
         let mut fresh_others = 0usize;
         for hit in hits {
+            if staging.iter().any(|container| hit.path.starts_with(container)) {
+                continue;
+            }
             // Compute the rank once: the budgets and the row both need it.
             let strong_name = match &hit.kind {
                 HitKind::Name { ranges } => is_strong_name(&hit.path, ranges, &query),
@@ -1589,7 +1595,11 @@ impl SearchView {
     fn add_refresh_hits(&mut self, hits: Vec<Hit>, cx: &mut Context<Self>) {
         let query = self.query(cx);
         let root = (self.scope == Scope::Folder).then_some(self.folder.as_path());
+        let staging = crow_fs::ops::owned_staging_paths();
         for hit in hits {
+            if staging.iter().any(|container| hit.path.starts_with(container)) {
+                continue;
+            }
             if self.seen.contains(&hit.path) {
                 let row = &mut self.results[self.by_path[&hit.path]];
                 if let HitKind::Content { line, text, ranges, .. } = hit.kind
@@ -1748,8 +1758,12 @@ impl SearchView {
         // the client-side pass only has to prove kind and age. Without tags, the
         // hit's tags were never read, and the predicate does not ask for them.
         let known_tags = (!self.predicates.tags.is_empty()).then_some(self.predicates.tags.as_slice());
+        let staging = crow_fs::ops::owned_staging_paths();
         let mut changed = false;
         for hit in hits {
+            if staging.iter().any(|container| hit.path.starts_with(container)) {
+                continue;
+            }
             if !self.predicates.is_empty()
                 && !self.predicates.matches_with_tags(&hit.path, hit.is_dir, hit.modified, self.run_started, known_tags)
             {
@@ -2357,6 +2371,54 @@ impl SearchView {
 
     fn selected_paths(&self) -> Vec<PathBuf> {
         self.results.iter().filter(|row| self.selection.contains(&row.path)).map(|row| row.path.clone()).collect()
+    }
+
+    /// Keep result rows, selection and cursor on the same items after a rename.
+    pub(crate) fn apply_rename_map(
+        &mut self,
+        map: &std::collections::HashMap<PathBuf, PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if map.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for row in &mut self.results {
+            if let Some(new) = map.get(&row.path) {
+                row.path = new.clone();
+                row.name = new.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                changed = true;
+            }
+        }
+        if changed {
+            self.by_path = self.results.iter().enumerate().map(|(index, row)| (row.path.clone(), index)).collect();
+            self.selection.remap(map);
+            self.bump_selection(cx);
+            cx.notify();
+        }
+    }
+
+    fn selected_rename_inputs(&self) -> Vec<crow_core::batch_rename::RenameInput> {
+        self.results
+            .iter()
+            .filter(|row| self.selection.contains(&row.path))
+            .map(|row| crow_core::batch_rename::RenameInput {
+                source: row.path.clone(),
+                name: row.name.clone(),
+                is_dir: row.is_dir,
+            })
+            .collect()
+    }
+
+    fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = self.selected_rename_inputs();
+        if entries.len() < 2 {
+            crate::feedback::refuse(crate::feedback::RefuseTarget::None, window, cx);
+            crate::operations::message("Select two or more results to rename", false, cx);
+            cx.notify();
+            return;
+        }
+        cx.emit(SearchEvent::BatchRename(entries.into()));
     }
 
     fn open_selected(&mut self, cx: &mut Context<Self>) {
@@ -3321,6 +3383,7 @@ impl SearchView {
             .on_action(cx.listener(Self::move_to_first))
             .on_action(cx.listener(Self::move_to_last))
             .on_action(cx.listener(Self::open))
+            .on_action(cx.listener(Self::rename))
             .on_action(cx.listener(Self::reveal))
             .on_action(cx.listener(Self::quick_look))
             .on_action(cx.listener(Self::select_all))

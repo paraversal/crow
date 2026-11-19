@@ -13,6 +13,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use super::batch::{register_staging, unregister_staging};
 use super::*;
 
 /// A long-lived id for one accepted job.
@@ -118,6 +119,9 @@ pub(crate) struct TestHooks {
     pub before_source_retire: Option<Arc<dyn Fn() + Send + Sync>>,
     pub on_first_bytes: Option<Arc<dyn Fn() + Send + Sync>>,
     pub after_commit: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub before_batch_stage: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    pub before_batch_place: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    pub before_batch_restore: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     /// Test-only: take the non-clone byte-copy path.
     pub no_clone: bool,
     /// Test-only: take the cross-volume move path without a second volume.
@@ -442,6 +446,13 @@ impl<'a> Runner<'a> {
             total_bytes: self.progress.total_bytes,
             pause_supported: self.control.pause_supported,
         });
+        let batch = match &self.request {
+            Request::BatchRename { moves } => Some(moves.clone()),
+            _ => None,
+        };
+        if let Some(moves) = batch {
+            return self.run_batch(&moves);
+        }
         for index in 0..self.items.len() {
             let item = self.items[index].clone();
             self.item_index = index;
@@ -472,6 +483,51 @@ impl<'a> Runner<'a> {
         }
         let progress = self.progress.clone();
         self.control.checkpoint(&progress, self.emit)
+    }
+
+    fn run_batch(&mut self, moves: &[BatchRenameEntry]) -> Result<(), Stop> {
+        let job_id = self.job_id;
+        let hooks = self.batch_hooks();
+        let emit = &mut *self.emit;
+        let progress = &mut self.progress;
+        let control = self.control;
+        let external = self.external_cancel;
+        let cancel = || control.is_cancelled() || external.is_some_and(|cancel| cancel.load(Ordering::Relaxed));
+        let result = execute_batch(
+            moves,
+            &cancel,
+            &mut |done| {
+                progress.done_items = done;
+                (emit)(JobEvent::Progress { job_id, progress: progress.clone() });
+            },
+            &hooks,
+        );
+        match result {
+            Ok(committed) => {
+                progress.done_items = committed.len();
+                (emit)(JobEvent::Progress { job_id, progress: progress.clone() });
+                self.record.steps.push(Step::BatchRenamed { moves: committed });
+                Ok(())
+            }
+            Err(OpError::Cancelled) => Err(Stop::Cancelled),
+            Err(error) => Err(Stop::Failed(error)),
+        }
+    }
+
+    fn batch_hooks(&self) -> BatchHooks {
+        #[cfg(test)]
+        {
+            let hooks = self.options.hooks.as_ref();
+            BatchHooks {
+                before_stage: hooks.and_then(|h| h.before_batch_stage.clone()),
+                before_place: hooks.and_then(|h| h.before_batch_place.clone()),
+                before_restore: hooks.and_then(|h| h.before_batch_restore.clone()),
+            }
+        }
+        #[cfg(not(test))]
+        {
+            BatchHooks::default()
+        }
     }
 
     fn emit_progress(&mut self, force: bool) {
@@ -562,6 +618,7 @@ impl<'a> Runner<'a> {
                 self.record.steps.push(Step::Deleted(item.target.clone()));
                 Ok(ItemResult::Done)
             }
+            Request::BatchRename { .. } => unreachable!("a batch runs as one commit segment"),
             Request::Duplicate { .. } | Request::Copy { .. } | Request::Move { .. } => self.transfer(item),
         }
     }
@@ -1025,7 +1082,10 @@ impl Stage {
             let mut builder = std::fs::DirBuilder::new();
             builder.mode(0o700);
             match builder.create(&container) {
-                Ok(()) => return Ok(Self { item: container.join("item"), container }),
+                Ok(()) => {
+                    register_staging(container.clone());
+                    return Ok(Self { item: container.join("item"), container });
+                }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(e),
             }
@@ -1038,6 +1098,7 @@ impl Drop for Stage {
     fn drop(&mut self) {
         // Only the container this job created, and only when it is ours: create_dir
         // was exclusive, so a pre-existing path never reaches this.
+        unregister_staging(&self.container);
         if let Err(e) = remove_tree(&self.container) {
             warn(&format!("could not remove staging folder {}: {e}", self.container.display()));
         }

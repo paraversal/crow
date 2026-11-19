@@ -345,6 +345,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("alt-up", MoveToFirst, Some("SearchResults")),
         KeyBinding::new("alt-down", MoveToLast, Some("SearchResults")),
         KeyBinding::new("enter", OpenSelection, Some("SearchResults")),
+        KeyBinding::new("f2", Rename, Some("SearchResults")),
         KeyBinding::new("space", QuickLook, Some("SearchResults")),
         KeyBinding::new("cmd-r", SearchReveal, Some("SearchResults")),
         KeyBinding::new("cmd-a", SelectAll, Some("SearchResults")),

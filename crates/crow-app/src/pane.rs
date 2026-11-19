@@ -103,6 +103,8 @@ const PREVIEW_COLUMN_WIDTH: f32 = 300.0;
 /// confirmations) and the clipboard is app-wide, so the window handles these.
 pub enum PaneEvent {
     Run(Request),
+    /// Open the batch-rename sheet for a frozen, display-ordered selection.
+    BatchRename(Arc<[crow_core::batch_rename::RenameInput]>),
     Copy {
         paths: Arc<[PathBuf]>,
         cut: bool,
@@ -1329,6 +1331,7 @@ impl Pane {
             SearchEvent::Run(request) => cx.emit(PaneEvent::Run(request.clone())),
             SearchEvent::Copy { paths, cut } => cx.emit(PaneEvent::Copy { paths: paths.clone(), cut: *cut }),
             SearchEvent::Save => cx.emit(PaneEvent::SaveSearch),
+            SearchEvent::BatchRename(entries) => cx.emit(PaneEvent::BatchRename(entries.clone())),
         }
     }
 
@@ -1475,6 +1478,30 @@ impl Pane {
         for folder in &self.folders {
             folder.update(cx, |folder, cx| folder.release_listing(cx));
         }
+    }
+
+    /// Keep the selection and cursor on the same items after a batch rename.
+    /// The listing itself settles on the watcher's final names.
+    pub fn apply_rename_map(
+        &mut self,
+        map: &std::collections::HashMap<PathBuf, PathBuf>,
+        cursor: Option<&Path>,
+        cx: &mut Context<Self>,
+    ) {
+        if map.is_empty() {
+            return;
+        }
+        for folder in self.folders.clone() {
+            folder.update(cx, |folder, cx| folder.remap_selection(map, cursor, cx));
+        }
+        self.load_preview(cx);
+        self.refresh_saved(cx);
+        cx.notify();
+    }
+
+    /// The selection cursor's path, even before the listing catches up.
+    pub fn selection_cursor(&self, cx: &gpui::App) -> Option<PathBuf> {
+        self.focused_folder().read(cx).selection_cursor().map(Path::to_path_buf)
     }
 
     /// The selected items of the focused folder, in display order.
@@ -2572,17 +2599,38 @@ impl Pane {
     }
 
     fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
-        // Rename edits one name; the context menu disables it for a multi-selection,
-        // and the key says why instead of doing nothing.
-        if self.focused_folder().read(cx).selected_count() > 1 {
-            crate::feedback::refuse(crate::feedback::RefuseTarget::None, window, cx);
-            crate::operations::message("Select one item to rename", false, cx);
-            cx.notify();
+        let selected = self.focused_folder().read(cx).selected_count();
+        if selected > 1 {
+            let inputs = self.batch_rename_inputs(cx);
+            if inputs.len() < 2 {
+                crate::feedback::refuse(crate::feedback::RefuseTarget::None, window, cx);
+                crate::operations::message("Select two or more items to rename", false, cx);
+                cx.notify();
+                return;
+            }
+            cx.emit(PaneEvent::BatchRename(inputs.into()));
+            return;
+        }
+        if selected == 0 {
             return;
         }
         if let Some(entry) = self.cursor_entry(cx) {
             self.begin_rename(entry.path, entry.is_dir, window, cx);
         }
+    }
+
+    /// The selected rows frozen in display order for the batch sheet.
+    fn batch_rename_inputs(&self, cx: &App) -> Vec<crow_core::batch_rename::RenameInput> {
+        let mut seen = HashSet::new();
+        self.selected_entries(cx)
+            .iter()
+            .filter(|(path, _)| seen.insert(path.clone()))
+            .map(|(path, is_dir)| crow_core::batch_rename::RenameInput {
+                source: path.clone(),
+                name: path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+                is_dir: *is_dir,
+            })
+            .collect()
     }
 
     /// Replace the item's name with a text field; the name without its extension is selected.

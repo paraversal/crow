@@ -20,7 +20,7 @@ a shared prefix.
 The keystroke tests (`crates/crow-app/src/window.rs`) drive a real window through
 GPUI's test platform: key contexts, history, tabs, hidden files, multiple
 selection, type-to-select (its bottom-bar prefix, timeout, Escape, and staying out of the filter and Vim), sorting, Go to Folder (Shift-Cmd-G into the palette), views kept per window, the column view's focus rules, file operations
-(new folder and new file with inline rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete,
+(new folder and new file with inline rename, batch rename with a live preview, one Activity entry and grouped undo, trash and undo, duplicate, copy and paste, conflicts, permanent delete,
 New File/Folder with a folder or file selected, Open Terminal Here and its failure, Empty Trash and its sheet,
 cancel, empty, partial failure and text-field block), the sidebar's line icons, responsive Columns view widths, the syntax
 preview's numbered lines,
@@ -102,7 +102,7 @@ everything (24 runs), and compares the panel's result paths, footer and skipped 
 The operation engine (`crates/crow-fs/src/ops_tests.rs`) is tested against real temp folders:
 every operation and its undo, each conflict choice, cancelling midway, a read-only destination,
 a source vanishing mid-operation, undo refusing to overwrite, a forced cross-volume move,
-and 40 randomized rounds of "do, undo, compare the tree". The job engine's deterministic
+and 40 randomized rounds of "do, undo, compare the tree". Batch rename is checked against real folders too: multiple parents, folders/packages/symlinks, exact duplicates and occupied targets, an unselected hard link, ancestor/descendant refusal, non-UTF-8 round-trip refusal, case-only renames and canonically equivalent Unicode names on APFS, a swap and a longer cycle, injected stage/placement failures with byte-level restore assertions, a blocked restore that keeps and reports the exact staging paths, grouped undo/redo, and undo refusing an unrelated occupant. The job engine's deterministic
 gates cover a pause acknowledged inside a byte callback, a clone paused after it completes,
 cancel while paused and while a conflict waits, a late conflict keyed by attempt, a stale
 answer, apply-to-all, an approved target replaced while paused, a source changed while
@@ -124,6 +124,8 @@ including after navigation away and back. A cancelled terminal keeps its committ
 undoable. A confirmed close cancels paused and conflict-waiting jobs, refuses late submissions,
 and waits for cleanup. Empty Trash releases the queue even if its window closes meanwhile.
 Pause/Resume through the bundled UI is P5B's hand check.
+
+Batch staging is a private `0700` container named `.crow-batch-<pid>-<sequence>` beside each real parent, created exclusively and registered only while this process owns it. Reconciliation and listings ignore exactly the registered paths; a folder that merely looks similar is never hidden or removed. A successful batch removes its containers. A blocked restore keeps them and the error names each original, current and intended path, which is the session's recovery record. A crash leaves the containers on disk; they are not guessed at or cleaned by name on the next launch.
 
 ## Test and fuzz reports
 
@@ -538,6 +540,7 @@ if Crow asks on first launch. To skip the prompt in a fresh test profile, set
 | Inline folders | In the list, the chevron (›/⌄) opens and closes a folder inline; Right opens a folder indented under it (Right again goes in), Left steps to the containing row, Left again closes it. Option-click is a normal click. Select across levels (Cmd-click or Shift-click a nested row) and copy or trash: every selected row is included. Navigate away and back: expansions are gone. |
 | Quick Look | Select a file, press Space. Arrow keys while it is open move it along. |
 | Click on empty space | List view: select a few items, click below the last row (or in the gutter beside a row): nothing is selected, ↓ selects the first row. Cmd- or Shift-click there keeps the selection. Column view with three columns open: click the empty part of the first column: the others close and nothing is selected. While renaming, click empty space (or another row): the rename is applied, not left open. |
+| Batch rename | Select two or more files and press F2: one sheet previews the old → new names before anything moves. Find & Replace, Add Text (before/after) and Numbering (base, start, padding) each update the preview; Keep extension is on by default. A duplicate or occupied target, a source changed since the preview, or an ancestor/descendant selection keeps Rename disabled or refuses with an error and no disk changes. Apply a swap, return, and use ⌘Z once: every name returns and the cursor follows the mapped row; ⇧⌘Z swaps again. Escape leaves the disk and selection alone. Try the same from results across two folders. Tab through the rules, Keep extension and buttons: Space and Enter activate the focused control, and Enter on Cancel closes without renaming. |
 | Context menu | Right-click an unselected row: it alone is selected and a native menu opens at the pointer, with the menu bar's names and keys (⌘⌫ beside Move to Trash, ⌥⌘C beside Copy Path). Right-click inside a multi-selection: the selection stays; Move to Trash trashes all. Ctrl-click does the same as right-click. Right-click empty space: selection clears; New Folder starts its rename; Paste is grey with nothing copied, enabled after ⌘C. Show in Finder reveals the items (on empty space, opens the folder). Esc or a click outside closes the menu without acting. Both in list and column view, with the Vim layer on too (keys shown stay ⌘C etc.). While the menu is open, check whether a running copy's progress keeps updating: AppKit's tracking loop pauses GPUI frames, so it may freeze until the menu closes, then resume. |
 | Live updates | With a folder open, create, rename and delete files from Terminal; the list follows without jumping. |
 | View settings | Cmd-3 in one folder, then visit another: it keeps its own view; going up in column view stays in columns. Add a `[[rule]]` to `views.toml` with the folder open: it applies at once. Cmd-J explains each value. Set `view_per_folder = false`: Cmd-3, then visit that folder with its own list view and go Back: the window stays in columns, Cmd-T opens columns, `views.toml` is unchanged, Cmd-J says "this window". |
