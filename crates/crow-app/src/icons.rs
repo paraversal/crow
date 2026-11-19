@@ -17,6 +17,7 @@ use crate::style::color;
 pub enum Glyph {
     Back,
     Forward,
+    Grid,
     List,
     Columns,
     Search,
@@ -38,6 +39,7 @@ impl Glyph {
     pub const ALL: &'static [Glyph] = &[
         Glyph::Back,
         Glyph::Forward,
+        Glyph::Grid,
         Glyph::List,
         Glyph::Columns,
         Glyph::Search,
@@ -58,6 +60,7 @@ impl Glyph {
         match self {
             Glyph::Back => "icons/chevron-left.svg",
             Glyph::Forward => "icons/chevron-right.svg",
+            Glyph::Grid => "icons/layout-grid.svg",
             Glyph::List => "icons/list.svg",
             Glyph::Columns => "icons/columns-3.svg",
             Glyph::Search => "icons/search.svg",
@@ -81,6 +84,7 @@ pub struct Assets;
 const FILES: &[(&str, &[u8])] = &[
     ("icons/chevron-left.svg", include_bytes!("../assets/icons/chevron-left.svg")),
     ("icons/chevron-right.svg", include_bytes!("../assets/icons/chevron-right.svg")),
+    ("icons/layout-grid.svg", include_bytes!("../assets/icons/layout-grid.svg")),
     ("icons/list.svg", include_bytes!("../assets/icons/list.svg")),
     ("icons/columns-3.svg", include_bytes!("../assets/icons/columns-3.svg")),
     ("icons/search.svg", include_bytes!("../assets/icons/search.svg")),

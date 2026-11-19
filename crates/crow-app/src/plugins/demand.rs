@@ -13,6 +13,8 @@ pub struct PluginRows {
     surface: SurfaceId,
     scope: ScopeKey,
     descriptors: Vec<ExtensionId>,
+    /// Icon view: one uniform item is a row of this many tiles.
+    columns: Option<usize>,
 }
 
 impl PluginRows {
@@ -22,7 +24,17 @@ impl PluginRows {
         scope: ScopeKey,
         descriptors: Vec<ExtensionId>,
     ) -> Self {
-        Self { folder, surface, scope, descriptors }
+        Self { folder, surface, scope, descriptors, columns: None }
+    }
+
+    pub fn new_grid(
+        folder: gpui::Entity<Folder>,
+        surface: SurfaceId,
+        scope: ScopeKey,
+        descriptors: Vec<ExtensionId>,
+        columns: usize,
+    ) -> Self {
+        Self { folder, surface, scope, descriptors, columns: Some(columns.max(1)) }
     }
 }
 
@@ -42,7 +54,19 @@ impl UniformListDecoration for PluginRows {
         }
         let (scope_version, scope_display, rows) = {
             let folder = self.folder.read(cx);
-            let rows = visible_range
+            let count = folder.row_count();
+            let indices: Vec<usize> = match self.columns {
+                Some(columns) => visible_range
+                    .clone()
+                    .flat_map(|row| {
+                        let first = row.saturating_mul(columns);
+                        first..(first + columns).min(count)
+                    })
+                    .collect(),
+                None => visible_range.clone().collect(),
+            };
+            let rows = indices
+                .into_iter()
                 .filter_map(|ix| {
                     let (entry, _) = folder.row(ix)?;
                     Some(RowInput {

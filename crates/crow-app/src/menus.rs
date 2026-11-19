@@ -334,9 +334,15 @@ mod tests {
         assert_eq!(
             by_name("View"),
             [
+                "as Icons",
                 "as List",
                 "as Columns",
                 "—",
+                "Icon Size: Compact",
+                "Icon Size: Standard",
+                "Icon Size: Large",
+                "Icon Caption: Off",
+                "Icon Caption: Lines Changed",
                 "Choose List Columns…",
                 "Why This View?",
                 "Use as Defaults",

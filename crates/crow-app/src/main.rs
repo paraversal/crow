@@ -60,6 +60,7 @@ mod style;
 mod syntax;
 mod text_input;
 mod theme_choice;
+mod thumbnails;
 mod tips;
 mod trash;
 mod ui;

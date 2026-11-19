@@ -405,6 +405,8 @@ deterministic tree the `crow-search` corpus cases use; the unreadable folder in 
 remove it with `chmod -R u+rwx` first.
 
 `--bench` scrolls 600 frames and prints first paint, load time and frame times.
+`CROW_BENCH_VIEW=icons` (or `list`/`columns`) forces the view for that run, so the
+icon grid is measured on the same fixture and path as the list.
 `--bench-filter <query>` applies the name filter first, so the scroll times are for
 highlighted rows. It needs a GPU, so it runs locally, not in CI. `--make-fixture`
 uses `crow_fs::testing::EdgeTree::wide`; the 100k fixture's manifest hash (names
@@ -452,11 +454,16 @@ finish line carries elapsed ms, first-hit ms, scanned, skipped, rows, hits, `nam
 Run `scripts/bundle.sh --open` so macOS treats Crow as an app. Rows are grouped by window
 region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 
+For agent-driven app checks, always launch with tips off. Choose **Don’t show tips**
+if Crow asks on first launch. To skip the prompt in a fresh test profile, set
+`tips = "off"` in its `settings.toml` and put `{"tips_choice":false}` in its
+`onboarding.json` under `CROW_STATE_DIR`. Enable tips only for checks that exercise them.
+
 ### Band and menus
 
 | Check | How |
 | --- | --- |
-| Toolbar | Hover Back, Forward, both view buttons, Go to and the search field: each shows a tooltip with its name and key ("Back to <folder> ⌘["); the same for a path segment, the disk row, Search everything and Cancel during a copy. At the start of history Back is the same icon at 40 %. Icons are drawn, crisp at 1× and 2×; traffic lights sit centred on the band. Light and dark themes. VoiceOver still reads each control's label, not the tooltip. |
+| Toolbar | Hover Back, Forward, the icons, list and columns buttons, Go to and the search field: each shows a tooltip with its name and key ("Back to <folder> ⌘["); the same for a path segment, the disk row, Search everything and Cancel during a copy. At the start of history Back is the same icon at 40 %. Icons are drawn, crisp at 1× and 2×; traffic lights sit centred on the band. Light and dark themes. VoiceOver still reads each control's label, not the tooltip. |
 | Band, narrow | Shrink the window: the title truncates, then the field shrinks, then Go to loses its label. In search mode the field shrinks but the match control and Done stay whole. |
 | Window drag | Drag the band's empty area (the title): the window moves. Drag Back, Forward, either view button, Go to or the search field: the window stays put and the control still works (Back still goes back). Double-click the empty band: the system's titlebar action (zoom unless System Settings says otherwise). Traffic lights stay at (14, 19) and the titlebar looks transparent, at 640 px and wide, light and dark. |
 | Menu bar | Open each of File, Edit, View, Go, Window and Help: every item shows the key it has in the list (⌘F, ⇧⌘A, ⌘K, ⇧⌘G, ⌘[ …). Rename shows ↩, Filter This Folder `/` and Quick Look Space. Items without a key are the ones the README names. |
@@ -488,6 +495,11 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Check | How |
 | --- | --- |
 | Column view | Cmd-3: arrows move within a column, Right moves into the selected folder, Left moves back; Left in the leftmost column goes up a folder. Only the focused column's selection is in the accent color. Selecting a file shows its preview as the last column. Cmd-2 returns to the list in the folder you were in. |
+| Icon view | Cmd-1: tiles show the direct entries only, never inline-expanded children. Open a folder in List, select a child, then Cmd-1: the cursor moves to the direct folder; Cmd-2 restores the open child. Filter, sort, type-to-select, Return, rename, context menu, Preview and drag payloads match List. Arrows follow the tile grid, Shift extends in display order and Cmd-click toggles. |
+| Icon sizes and reflow | View ▸ Icon Size Compact, Standard and Large at 640 px and wide: the tile is fixed per preset, names keep up to two lines, and Compact fits more names. Change size with the cursor near the middle and with it at the bottom: the focused tile stays visible and selected, the filter and cursor survive, and a resize with a drag in flight cancels and restores it. |
+| Icon marquee | Drag from empty space: tiles intersecting the rectangle get the inset preview; reverse and they drop out. Cmd-drag keeps the starting selection, Esc restores it, and dropping the pointer past an edge autoscrolls with the rectangle origin fixed. A watcher reorder or tab/focus change cancels and restores. |
+| Icon thumbnails | On a mixed-image folder: thumbnails replace the pack/native icon as Quick Look replies; scrolling fast keeps frame time bounded and the cache does not grow without limit. A cloud placeholder keeps its download badge and never requests bytes; an unavailable provider falls back to the pack or native icon. |
+| Icon caption | With the Git plugin enabled and `icon_caption = "git.lines-changed"` in one folder, each tile shows a muted `Lines · n` line; Off in View removes the line, and a folder override can differ from the default. Disable or reload the plugin: the slot stays reserved and blank, the configured id survives, and VoiceOver reads the caption. |
 | Preview column | Column view: the preview takes the rest of the strip, never narrower than 300 px; with a folder under the cursor it shows the folder icon, name, "Folder · n items" and modified; with no matches the folder you are filtering shows the same summary. ⇧⌘P hides it and the columns keep their widths. |
 | Preview pane | Select an image, a PDF, a text file and a folder: thumbnail, text, icon. Tags show for tagged files. |
 | Syntax preview | Select a `.rs`, `.toml`, `.json`, `.js`, `.py` and `.sh` file: the preview shows line numbers and coloured keywords, strings, numbers, types and comments. A search hit still shows its excerpt with the hit line washed. Text previews stop at 80 lines and clip; a 100k folder's scroll is unchanged. |

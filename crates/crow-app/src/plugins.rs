@@ -589,6 +589,44 @@ pub fn decoration_ids(cx: &App) -> Vec<crow_core::ExtensionId> {
         .collect()
 }
 
+/// One configured tile caption: the descriptor's title and the returned cell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnValue {
+    pub title: String,
+    pub text: String,
+    pub spoken: Option<String>,
+}
+
+pub fn column_title(cx: &App, id: &crow_core::ExtensionId) -> Option<String> {
+    let plugins = cx.try_global::<Plugins>()?;
+    Some(plugins.surfaces.snapshot().extension(id)?.descriptor.title.clone())
+}
+
+pub fn column_value(
+    cx: &App,
+    id: &crow_core::ExtensionId,
+    scope: &ScopeKey,
+    path: &Path,
+    version: u64,
+) -> Option<ColumnValue> {
+    let plugins = cx.try_global::<Plugins>()?;
+    let title = plugins.surfaces.snapshot().extension(id)?.descriptor.title.clone();
+    let value = plugins.surfaces.row_value_peek(id, scope, path, version)?;
+    (!value.text.is_empty()).then_some(ColumnValue { title, text: value.text, spoken: value.spoken })
+}
+
+/// The descriptors an icon grid needs: decorations for badges and dimming,
+/// plus the one column configured as its caption. No other list columns.
+pub fn icon_row_descriptors(cx: &App, caption: Option<&str>) -> Vec<crow_core::ExtensionId> {
+    let mut ids = decoration_ids(cx);
+    if let Some(id) = caption.and_then(|caption| crow_core::ExtensionId::parse(caption).ok())
+        && !ids.contains(&id)
+    {
+        ids.push(id);
+    }
+    ids
+}
+
 /// First nonempty badge, first tint, OR'd dim and all spoken descriptions in
 /// lexical fully qualified ID order. A badge is its own spoken fallback.
 pub fn row_presentation(

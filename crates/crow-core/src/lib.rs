@@ -4,6 +4,7 @@
 mod config;
 mod exclude;
 mod extensions;
+mod grid;
 mod history;
 pub mod icon_pack;
 pub mod motion;
@@ -28,6 +29,7 @@ pub use extensions::{
     InfoRow, KnownSize, LocalId, PluginId, PluginPreview, PreviewContent, Previewer, SidebarRow, Snapshot, StatusItem,
     TextPreviewer, Tint, text_excerpt,
 };
+pub use grid::{GridGeometry, GridMetrics, GridRect, IconSize};
 pub use history::History;
 pub use icon_pack::{
     ICON_PACK_API, IconColor, IconEntry, IconPack, MAX_ASSET_REF_BYTES, MAX_GLYPH_BYTES, MAX_GLYPHS, MAX_PACK_BYTES,

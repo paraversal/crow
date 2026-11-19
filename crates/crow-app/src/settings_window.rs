@@ -458,7 +458,7 @@ impl ControlId {
             ControlId::ShowPreview => "The right column's default in list and column view: Preview and Info tabs.",
             ControlId::ViewPerFolder => "Each folder opens in its saved view; off keeps the window's view.",
             ControlId::PaletteRecent => "List the commands you ran from ⌘K under Recently used.",
-            ControlId::DefaultView => "The view for folders without their own; List and Columns in this release.",
+            ControlId::DefaultView => "The view for folders without their own: Icons, List or Columns.",
             ControlId::DefaultSort => "The [defaults] order; a rule or folder override still wins.",
             ControlId::DefaultDirection => {
                 let ui = cx.global::<Ui>();
@@ -1483,7 +1483,7 @@ impl SettingsWindow {
             ControlId::PreviewClear => self.preview_clear(cx),
             ControlId::PreviewList | ControlId::PreviewRulePattern => {}
             ControlId::DefaultView => {
-                let index = usize::from(cx.global::<Ui>().views.defaults_layer().view == Some(ViewMode::Columns));
+                let index = view_index(cx.global::<Ui>().views.defaults_layer().view.unwrap_or_default());
                 self.select_default_view(index, cx);
             }
             ControlId::DefaultDirection => {
@@ -1535,8 +1535,8 @@ impl SettingsWindow {
                 self.move_segment(id, delta, window, cx);
             }
             ControlId::DefaultView => {
-                let current = usize::from(cx.global::<Ui>().views.defaults_layer().view == Some(ViewMode::Columns));
-                let next = (current as isize + delta).clamp(0, 1) as usize;
+                let current = view_index(cx.global::<Ui>().views.defaults_layer().view.unwrap_or_default());
+                let next = (current as isize + delta).clamp(0, 2) as usize;
                 if next != current {
                     self.select_default_view(next, cx);
                 }
@@ -2087,7 +2087,11 @@ impl SettingsWindow {
     }
 
     fn select_default_view(&mut self, index: usize, cx: &mut Context<Self>) {
-        let mode = if index == 0 { ViewMode::List } else { ViewMode::Columns };
+        let mode = match index {
+            0 => ViewMode::Icons,
+            1 => ViewMode::List,
+            _ => ViewMode::Columns,
+        };
         if cx.global::<Ui>().views.defaults_layer().view != Some(mode) {
             ui::save_defaults_change(DefaultsChange::View(mode), None, cx);
         }
@@ -2296,7 +2300,7 @@ impl SettingsWindow {
                 ControlId::Sound => Some(sound_index(settings.sound)),
                 ControlId::IconPack => self.icon_pack_ids.iter().position(|id| id == &settings.icon_pack),
                 ControlId::DefaultView => {
-                    Some(usize::from(cx.global::<Ui>().views.defaults_layer().view == Some(ViewMode::Columns)))
+                    Some(view_index(cx.global::<Ui>().views.defaults_layer().view.unwrap_or_default()))
                 }
                 ControlId::DefaultSort => {
                     Some(sort_key_index(cx.global::<Ui>().views.defaults_layer().sort.unwrap_or_default()))
@@ -2567,8 +2571,8 @@ impl Render for SettingsWindow {
         let view_select = select_callback(cx, |this, index, _window, cx| this.select_default_view(index, cx));
         let default_view_row = controls::segmented(
             self.meta(ControlId::DefaultView, cx),
-            &["List", "Columns"],
-            usize::from(cx.global::<Ui>().views.defaults_layer().view == Some(ViewMode::Columns)),
+            &["Icons", "List", "Columns"],
+            view_index(cx.global::<Ui>().views.defaults_layer().view.unwrap_or_default()),
             self.style(ControlId::DefaultView, window, &theme),
             view_select,
             None,
@@ -3085,6 +3089,14 @@ const SORT_LABELS: [&str; 5] = ["Name", "Size", "Kind", "Modified", "Added"];
 
 fn sort_labels() -> Vec<String> {
     SORT_LABELS.iter().map(|label| (*label).to_owned()).collect()
+}
+
+fn view_index(view: ViewMode) -> usize {
+    match view {
+        ViewMode::Icons => 0,
+        ViewMode::List => 1,
+        ViewMode::Columns => 2,
+    }
 }
 
 fn sort_key_index(key: SortKey) -> usize {
@@ -3829,7 +3841,7 @@ mod tests {
         focus_control(&view, &mut vcx, ControlId::DefaultView);
         vcx.simulate_keystrokes("right");
         wait_for_views(&vcx, "view = \"columns\"");
-        assert_eq!(state(&view, &vcx, ControlId::DefaultView).selected, Some(1));
+        assert_eq!(state(&view, &vcx, ControlId::DefaultView).selected, Some(2));
         let text = views_text(&vcx);
         assert!(text.starts_with("# mine\n"), "comments survive: {text}");
 
@@ -3879,7 +3891,7 @@ mod tests {
         vcx.update(|_, cx| ui::reload_config(cx));
         vcx.run_until_parked();
         draw(&mut vcx);
-        assert_eq!(state(&view, &vcx, ControlId::DefaultView).selected, Some(0));
+        assert_eq!(state(&view, &vcx, ControlId::DefaultView).selected, Some(1));
         assert_eq!(state(&view, &vcx, ControlId::DefaultSort).selected, Some(3));
         assert_eq!(state(&view, &vcx, ControlId::DefaultDirection).selected, Some(2));
         assert_eq!(state(&view, &vcx, ControlId::DefaultFoldersFirst).toggled, Some(true));
