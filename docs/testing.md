@@ -107,10 +107,12 @@ gates cover a pause acknowledged inside a byte callback, a clone paused after it
 cancel while paused and while a conflict waits, a late conflict keyed by attempt, a stale
 answer, apply-to-all, an approved target replaced while paused, a source changed while
 paused, Keep Both collision retry, a Replace whose placement fails and is restored (or whose
-restore is blocked), a cross-volume move that keeps its destination when the source cannot be
-retired, metadata/xattrs/ACL on clone and non-clone copies, case-folded targets, dangling
-symlinks, special files refused in planning, and undo of a committed prefix. Pause/Resume
-through the bundled UI is P5B's hand check.
+restore is blocked), a cancel between Replace's Trash and placement, a same-volume Move with
+Replace and its undo, a symlinked parent counted as the same folder, a cross-volume move that
+keeps its destination when the source cannot be retired, monotonic progress,
+metadata/xattrs/ACL on clone and non-clone copies, case-folded targets, dangling symlinks,
+special files refused in planning, and undo of a committed prefix.
+Pause/Resume through the bundled UI is P5B's hand check.
 
 ## Test and fuzz reports
 

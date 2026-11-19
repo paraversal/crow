@@ -920,6 +920,57 @@ fn a_blocked_restore_keeps_the_recoverable_trash_step() {
 }
 
 #[test]
+fn a_same_volume_move_replaces_and_undoes() {
+    let f = Fixture::new("job-move-replace");
+    f.file("src/a.txt", "new");
+    let dest = f.dir("dest");
+    f.file("dest/a.txt", "old");
+    let before = f.snapshot();
+    let planned = plan(Request::Move { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    let mut options = JobOptions { progress_interval: Duration::ZERO, ..Default::default() };
+    options.resolutions.insert(dest.join("a.txt"), Resolution::Replace);
+    let outcome = f.start_plan(planned, options).terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert!(!f.path("src/a.txt").exists());
+    assert_eq!(f.snapshot()["dest/a.txt"], "new");
+    assert!(
+        matches!(
+            outcome.record.steps.as_slice(),
+            [Step::Trashed { .. }, Step::Moved { from, to }] if *from == f.path("src/a.txt") && *to == dest.join("a.txt")
+        ),
+        "{:?}",
+        outcome.record.steps
+    );
+    undo(&outcome.record, &f.trash).unwrap();
+    assert_eq!(f.snapshot(), before);
+}
+
+#[test]
+fn cancel_after_replace_trash_still_places_and_records() {
+    let f = Fixture::new("job-cancel-replace");
+    f.file("src/a.txt", "new");
+    let dest = f.dir("dest");
+    f.file("dest/a.txt", "old");
+    let before = f.snapshot();
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    let gate = Gate::new();
+    let mut options =
+        job_options(TestHooks { after_replace_trash: Some(gate_hook(&gate)), no_clone: true, ..Default::default() });
+    options.resolutions.insert(dest.join("a.txt"), Resolution::Replace);
+    let harness = f.start_plan(planned, options);
+    gate.wait_reached();
+    harness.job.cancel();
+    gate.release();
+    let outcome = harness.terminal();
+    assert!(outcome.cancelled, "{outcome:?}");
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(outcome.record.steps.len(), 2, "trash and placement both finished: {:?}", outcome.record.steps);
+    assert_eq!(f.snapshot()["dest/a.txt"], "new");
+    undo(&outcome.record, &f.trash).unwrap();
+    assert_eq!(f.snapshot(), before);
+}
+
+#[test]
 fn apply_to_all_answers_later_conflicts() {
     let f = Fixture::new("job-apply-all");
     f.file("src/a.txt", "A");
@@ -1004,6 +1055,33 @@ fn a_source_change_while_paused_fails_before_the_target_is_touched() {
 }
 
 #[test]
+fn progress_never_goes_backwards() {
+    let f = Fixture::new("job-progress-monotonic");
+    let a = f.file_bytes("src/tree/a.bin", &vec![b'z'; 4 * 1024 * 1024]);
+    f.file_bytes("src/tree/b.bin", &vec![b'z'; 4 * 1024 * 1024]);
+    assert!(
+        std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "user.crow-test", "hello", a.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let dest = f.dir("dest");
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/tree")]), into: dest }).unwrap();
+    let harness = f.start_plan(planned, job_options(TestHooks { no_clone: true, ..Default::default() }));
+    let outcome = harness.terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    let mut last = 0;
+    for event in harness.log.events() {
+        if let JobEvent::Progress { progress, .. } = event {
+            assert!(progress.done_bytes >= last, "progress went backwards: {last} -> {}", progress.done_bytes);
+            last = progress.done_bytes;
+        }
+    }
+    assert_eq!(last, 8 * 1024 * 1024);
+}
+
+#[test]
 fn a_case_folded_target_is_a_conflict() {
     let f = Fixture::new("job-case-fold");
     f.file("src/a.txt", "new");
@@ -1083,6 +1161,31 @@ fn nesting_through_a_symlink_is_refused() {
         plan(Request::Copy { paths: paths(vec![f.path("root")]), into: f.path("root/sub/nope") }),
         Err(OpError::Io(..))
     ));
+}
+
+#[test]
+fn a_symlinked_parent_counts_as_the_same_folder() {
+    let f = Fixture::new("job-parent-link");
+    f.file("root/a.txt", "a");
+    std::os::unix::fs::symlink(f.path("root"), f.path("link")).unwrap();
+
+    let planned = plan(Request::Move { paths: paths(vec![f.path("root/a.txt")]), into: f.path("link") }).unwrap();
+    assert!(planned.items.is_empty(), "moving through a symlinked parent is already there: {:?}", planned.items);
+
+    let out = f
+        .start(
+            Request::Copy { paths: paths(vec![f.path("root/a.txt")]), into: f.path("link") },
+            job_options(TestHooks { no_clone: true, ..Default::default() }),
+        )
+        .terminal();
+    assert!(out.error.is_none(), "{:?}", out.error);
+    assert_eq!(std::fs::read_to_string(f.path("root/a.txt")).unwrap(), "a");
+    assert_eq!(
+        std::fs::read_to_string(f.path("root/a copy.txt")).unwrap(),
+        "a",
+        "the copy uses Duplicate naming, not a conflict"
+    );
+    assert!(!f.path("root/a 2.txt").exists());
 }
 
 #[test]

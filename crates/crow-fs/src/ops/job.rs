@@ -46,7 +46,7 @@ pub enum ConflictReason {
     Exists,
     /// A free target became occupied before commit.
     Appeared,
-    /// The previously approved target is now a different object.
+    /// The target an earlier plan or decision was based on is now a different object.
     Changed,
 }
 
@@ -58,7 +58,7 @@ pub struct Conflict {
     pub target: PathBuf,
     /// No-follow identity observed for this attempt.
     pub observed: FileIdentity,
-    /// The identity an earlier approval covered, if any.
+    /// The identity the plan-time choice or previous conflict decision covered, if any.
     pub previous: Option<FileIdentity>,
     pub reason: ConflictReason,
     pub choices: [Resolution; 3],
@@ -484,8 +484,11 @@ impl<'a> Runner<'a> {
     }
 
     fn on_bytes(&mut self, copied: u64) -> Result<(), OpError> {
-        self.progress.done_bytes =
-            self.before_bytes.saturating_add(copied.min(self.item_bytes)).min(self.progress.total_bytes);
+        // copyfile reports some status events without the current file's bytes (for
+        // example an xattr after the data). Progress only moves forward; a late
+        // callback with a smaller total must not take the bar backwards.
+        let done = self.before_bytes.saturating_add(copied.min(self.item_bytes)).min(self.progress.total_bytes);
+        self.progress.done_bytes = self.progress.done_bytes.max(done);
         self.emit_progress(false);
         #[cfg(test)]
         if !self.first_bytes_fired && copied > 0 {
@@ -1236,14 +1239,20 @@ fn copy_tree(
     if let Some(error) = ctx.stopped.take() {
         return Err(error);
     }
-    if rc == 0 { Ok(()) } else { Err(op_io(source, io::Error::last_os_error())) }
+    if rc == 0 {
+        Ok(())
+    } else {
+        // Name the child copyfile failed on, not the tree root.
+        let path = ctx.failed_path.take().unwrap_or_else(|| source.to_path_buf());
+        Err(op_io(&path, io::Error::last_os_error()))
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 fn copy_tree(
     source: &Path,
     dest: &Path,
-    clone: bool,
+    _clone: bool,
     checkpoint: &mut dyn FnMut(u64) -> Result<(), OpError>,
 ) -> Result<(), OpError> {
     use std::io::{Read, Write};

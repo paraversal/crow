@@ -374,6 +374,17 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Whether both paths name the same folder, following symlinks. Used to see that
+/// "move into this folder" through a symlinked parent is already there.
+fn same_directory(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a == b
+        || matches!(
+            (a.metadata(), b.metadata()),
+            (Ok(x), Ok(y)) if x.dev() == y.dev() && x.ino() == y.ino()
+        )
+}
+
 /// Finder's duplicate name, also avoiding names this plan already claimed.
 fn copy_name_avoiding(dir: &Path, name: &str, is_dir: bool, reserved: &HashMap<PathBuf, ()>) -> PathBuf {
     let (stem, ext) = split_name(name, is_dir);
@@ -531,11 +542,13 @@ pub fn plan_cancellable(request: Request, cancel: &AtomicBool) -> Result<Plan, O
                 }
                 let name = file_name(source)?;
                 let target = into.join(&name);
-                if moving && source.parent() == Some(into.as_path()) {
-                    continue; // already there
+                // A symlinked parent names the same folder; moving there is a no-op.
+                let same_parent = source.parent().is_some_and(|parent| same_directory(parent, into));
+                if moving && same_parent {
+                    continue;
                 }
                 // Copying into its own folder makes a copy, as Duplicate does.
-                let target = if target == *source {
+                let target = if target == *source || same_parent {
                     copy_name_avoiding(into, &name, source.is_dir(), &reserved)
                 } else {
                     target
