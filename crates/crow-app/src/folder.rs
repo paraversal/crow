@@ -206,6 +206,8 @@ enum Load {
 
 pub struct Folder {
     dir: PathBuf,
+    /// This folder's `views.toml` icon source, if a layer set one.
+    icon_source: Option<String>,
     plugin_surface: crate::plugins::SurfaceId,
     /// Bumped when a watcher apply or relist can change an entry in place.
     plugin_epoch: u64,
@@ -329,6 +331,7 @@ impl Folder {
             .ok();
         let mut folder = Self {
             dir,
+            icon_source: None,
             plugin_surface: crate::plugins::new_surface(),
             plugin_epoch: 0,
             entries: Arc::new(Vec::new()),
@@ -393,6 +396,14 @@ impl Folder {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    pub fn set_icon_source(&mut self, source: Option<String>) {
+        self.icon_source = source;
+    }
+
+    pub fn icon_source(&self) -> Option<&str> {
+        self.icon_source.as_deref()
     }
 
     pub fn plugin_surface(&self) -> crate::plugins::SurfaceId {

@@ -180,6 +180,7 @@ pub fn poll(cx: &mut App) {
     });
     let mut refresh = false;
     let mut menu_projection_changed = false;
+    let mut icon_packs_changed = false;
     if let Some(inventory) = newest_inventory {
         let changed = {
             let plugins = cx.global_mut::<Plugins>();
@@ -188,7 +189,11 @@ pub fn poll(cx: &mut App) {
             changed
         };
         menu_projection_changed |= changed;
+        icon_packs_changed = changed;
         refresh = true;
+    }
+    if icon_packs_changed {
+        crate::icon_packs::reload(cx);
     }
     let handle = cx.try_global::<Plugins>().and_then(|plugins| plugins.handle.clone());
     let mut messages: Vec<(String, bool)> = Vec::new();

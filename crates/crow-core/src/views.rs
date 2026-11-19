@@ -37,6 +37,8 @@ pub const DEFAULT_VIEWS: &str = r#"# Crow view settings. Changes apply when you 
 #   columns = ["modified", "size", "kind", "added"]   list view columns after Name
 #     Include "git.lines-changed" for Lines when the bundled Git plugin is enabled.
 #   preview_providers = ["example.pack.preview"]       plugin previews tried before native
+#   icon_source = "native" | "<pack-id>"               icons for this folder; unset
+#                                                      follows settings.toml
 
 [defaults]
 view = "list"
@@ -67,6 +69,7 @@ pub struct ViewLayer {
     pub folders_first: Option<bool>,
     pub columns: Option<Vec<String>>,
     pub preview_providers: Option<Vec<String>>,
+    pub icon_source: Option<String>,
 }
 
 // `flatten` can't be combined with `deny_unknown_fields`, so a rule repeats the layer's keys.
@@ -81,6 +84,7 @@ struct RuleFile {
     folders_first: Option<bool>,
     columns: Option<Vec<String>>,
     preview_providers: Option<Vec<String>>,
+    icon_source: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -159,6 +163,8 @@ pub struct ResolvedView {
     pub folders_first: (bool, Source),
     pub columns: (Vec<String>, Source),
     pub preview_providers: (Vec<String>, Source),
+    /// `None`: no layer chose one, so `settings.toml`'s icon pack applies.
+    pub icon_source: Option<(String, Source)>,
     /// Every rule that matched, in order (for the explanation, even those whose
     /// values were all overridden).
     pub matched_rules: Vec<String>,
@@ -191,6 +197,11 @@ impl Default for Views {
     }
 }
 
+fn validate_icon_source(layer: &ViewLayer, where_: &str) -> Result<(), String> {
+    let Some(source) = &layer.icon_source else { return Ok(()) };
+    crate::icon_pack::validate_source(source).map_err(|error| format!("{where_}: icon_source: {error}"))
+}
+
 fn validate_preview_providers(layer: &ViewLayer, where_: &str) -> Result<(), String> {
     let Some(ids) = &layer.preview_providers else { return Ok(()) };
     for id in ids {
@@ -204,6 +215,7 @@ impl Views {
     pub fn parse(text: &str, home: &Path) -> Result<Views, String> {
         let file: ViewsFile = toml::from_str(text).map_err(|e| crate::config::parse_error(&e, text))?;
         validate_preview_providers(&file.defaults, "defaults")?;
+        validate_icon_source(&file.defaults, "defaults")?;
         let rules = file
             .rule
             .into_iter()
@@ -227,13 +239,16 @@ impl Views {
                     folders_first: r.folders_first,
                     columns: r.columns,
                     preview_providers: r.preview_providers,
+                    icon_source: r.icon_source,
                 };
                 validate_preview_providers(&layer, &format!("rule \"{}\"", r.path))?;
+                validate_icon_source(&layer, &format!("rule \"{}\"", r.path))?;
                 Ok(Rule { pattern: r.path, matchers, layer })
             })
             .collect::<Result<_, String>>()?;
         for (path, layer) in &file.folder {
             validate_preview_providers(layer, &format!("folder \"{path}\""))?;
+            validate_icon_source(layer, &format!("folder \"{path}\""))?;
         }
         let folders = file.folder.into_iter().map(|(path, layer)| (expand_home(&path, home), layer)).collect();
         Ok(Views { defaults: file.defaults, rules, folders })
@@ -248,6 +263,7 @@ impl Views {
             folders_first: (true, Source::Builtin),
             columns: (vec!["modified".into(), "size".into(), "kind".into()], Source::Builtin),
             preview_providers: (Vec::new(), Source::Builtin),
+            icon_source: None,
             matched_rules: Vec::new(),
         };
         let mut apply = |layer: &ViewLayer, source: Source| {
@@ -269,7 +285,10 @@ impl Views {
                 out.columns = (c.clone(), source.clone());
             }
             if let Some(p) = &layer.preview_providers {
-                out.preview_providers = (p.clone(), source);
+                out.preview_providers = (p.clone(), source.clone());
+            }
+            if let Some(icon) = &layer.icon_source {
+                out.icon_source = Some((icon.clone(), source));
             }
         };
         apply(&self.defaults, Source::Defaults);
@@ -488,6 +507,42 @@ preview_providers = []
             Views::parse("[defaults]\npreview_providers = [\"not-qualified\"]", Path::new(HOME)).is_err(),
             "a provider ID without plugin.local is a config error, not a runtime skip"
         );
+    }
+
+    #[test]
+    fn icon_source_inherits_and_an_explicit_native_wins_at_its_layer() {
+        let v = Views::parse(
+            r#"
+[defaults]
+icon_source = "sample"
+
+[[rule]]
+path = "~/Pictures/**"
+icon_source = "native"
+
+[folder."~/Pictures/Plain"]
+"#,
+            Path::new(HOME),
+        )
+        .unwrap();
+        let inherited = v.resolve(Path::new("/Users/me/Documents"));
+        assert_eq!(
+            inherited.icon_source,
+            Some(("sample".to_owned(), Source::Defaults)),
+            "an unset layer follows the one below; the setting is the final fallback"
+        );
+        let native = v.resolve(Path::new("/Users/me/Pictures/One"));
+        assert_eq!(native.icon_source, Some(("native".to_owned(), Source::Rule("~/Pictures/**".into()))));
+        assert_eq!(
+            v.resolve(Path::new("/Users/me/Pictures/Plain")).icon_source,
+            Some(("native".to_owned(), Source::Rule("~/Pictures/**".into()))),
+            "a folder layer without icon_source does not reset it"
+        );
+        assert!(
+            Views::parse("[defaults]\nicon_source = \"My Pack\"", Path::new(HOME)).is_err(),
+            "a malformed pack id is a config error"
+        );
+        assert!(Views::parse("[defaults]\nicon_source = \"example.pack.theme\"", Path::new(HOME)).is_ok());
     }
 
     #[test]

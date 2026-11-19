@@ -238,9 +238,11 @@ impl Ui {
 struct Watchers {
     theme_rx: Receiver<()>,
     config_rx: Receiver<()>,
+    icon_rx: Receiver<()>,
     mounts_rx: Receiver<()>,
     _theme: Option<RecommendedWatcher>,
     _config: Option<RecommendedWatcher>,
+    _icon: Option<RecommendedWatcher>,
     _mounts: Option<crow_macos::MountWatcher>,
 }
 
@@ -258,6 +260,11 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     // The config dir is watched, so it has to exist before the first file is written.
     // io-ok: startup: the config dir must exist before it is watched
     std::fs::create_dir_all(&config_dir).ok();
+    // Packs are optional, but the folder exists so the recursive watcher can attach
+    // and adding a pack needs no restart.
+    let icon_packs_dir = config_dir.join("icon-packs");
+    // io-ok: startup: the pack folder must exist before it is watched
+    std::fs::create_dir_all(&icon_packs_dir).ok();
     let mut ui = Ui::new(config_dir.clone(), state_dir, home, crow_theme::fallback(), true);
     let theme = crow_theme::current(ui.settings.theme_id(), variant_of(cx.window_appearance()));
     tracing::info!(theme = %theme.name, "starting");
@@ -276,6 +283,7 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     crate::folder_sizes::init_at(cx, cache_dir, true);
     crate::cloud_status::init_at(cx);
     crate::git::init_at(cx);
+    crate::icon_packs::install(cx);
     let feedback = cx.global::<Ui>().feedback;
     cx.set_reduce_motion(feedback.mode == Effective::Off);
     feedback::preload(feedback.sound, cx);
@@ -296,6 +304,15 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     .and_then(|mut w| w.watch(&config_dir, RecursiveMode::NonRecursive).map(|()| w))
     .inspect_err(|e| tracing::warn!("config watch: {e}"))
     .ok();
+    let (icon_tx, icon_rx) = mpsc::channel();
+    let icon_watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok() {
+            icon_tx.send(()).ok();
+        }
+    })
+    .and_then(|mut w| w.watch(&icon_packs_dir, RecursiveMode::Recursive).map(|()| w))
+    .inspect_err(|e| tracing::warn!("icon pack watch: {e}"))
+    .ok();
     let (mounts_tx, mounts_rx) = mpsc::channel();
     let mounts = crow_macos::watch_mounts(move || {
         mounts_tx.send(()).ok();
@@ -303,9 +320,11 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     cx.set_global(Watchers {
         theme_rx,
         config_rx,
+        icon_rx,
         mounts_rx,
         _theme: theme_watcher,
         _config: config_watcher,
+        _icon: icon_watcher,
         _mounts: mounts,
     });
 
@@ -372,6 +391,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     let ui = Ui::new(config_dir.clone(), state_dir, crow_core::home(), crow_theme::fallback(), false);
     cx.set_global(ui);
     crate::extensions::init(cx);
+    crate::icon_packs::install(cx);
     crate::cloud_status::init_for_tests(cx);
     crate::git::init_for_tests(cx);
     crate::plugins::init_empty(cx);
@@ -385,10 +405,14 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
 fn poll(cx: &mut App) {
     let watchers = cx.global::<Watchers>();
     let config_changed = watchers.config_rx.try_iter().count() > 0;
+    let icon_packs_changed = watchers.icon_rx.try_iter().count() > 0;
     let theme_changed = watchers.theme_rx.try_iter().count() > 0;
     let mounts_changed = watchers.mounts_rx.try_iter().count() > 0;
     if config_changed {
         reload_config(cx);
+    }
+    if icon_packs_changed {
+        crate::icon_packs::reload(cx);
     }
     crate::plugins::poll(cx);
     crate::git::poll(cx);
@@ -445,8 +469,10 @@ pub fn refresh_feedback(cx: &mut App) {
 /// Reload every config file. Views always count as changed (cheap, and panes only
 /// re-apply what differs); the others only when their contents did.
 pub fn reload_config(cx: &mut App) {
+    let icon_before = cx.global::<Ui>().settings.icon_pack.clone();
     let ui = cx.global_mut::<Ui>();
     let settings = ui.load_settings();
+    let icon_changed = ui.settings.icon_pack != icon_before;
     ui.load_views();
     let sidebar = ui.load_sidebar();
     let exclude = ui.load_exclude();
@@ -462,6 +488,9 @@ pub fn reload_config(cx: &mut App) {
         crate::window::apply_show_hidden(show_hidden, cx);
         let search_includes_hidden = cx.global::<Ui>().settings.search_includes_hidden;
         crate::window::apply_search_includes_hidden(search_includes_hidden, cx);
+    }
+    if icon_changed {
+        crate::icon_packs::reload(cx);
     }
     refresh_feedback(cx);
     refresh_app_icon(cx);

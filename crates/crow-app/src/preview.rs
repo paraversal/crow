@@ -14,7 +14,7 @@ use crow_theme::Theme;
 use gpui::{Div, FontWeight, HighlightStyle, Image, ImageFormat, Rgba, Role, StyledText, div, img, prelude::*, px};
 
 use crate::icons::{Glyph, glyph};
-use crate::style::{cloud_icon, color, color_alpha, display_text, format_time, icon, kind};
+use crate::style::{cloud_icon, color, color_alpha, display_text, format_time, kind};
 use crate::syntax::{self, Language};
 
 /// What the preview shows for one item, loaded off the main thread.
@@ -351,6 +351,27 @@ fn code_box(theme: &Theme, border: Rgba) -> gpui::Stateful<Div> {
         .flex_col()
 }
 
+/// A packed glyph, or Finder's icon when the source is native, the pack has no
+/// match, or the item is a cloud placeholder.
+fn path_icon(
+    resolver: &crate::icon_packs::Resolver,
+    path: &std::path::Path,
+    is_dir: bool,
+    is_package: bool,
+    cloud: Option<CloudStatus>,
+    theme: &Theme,
+    size: f32,
+) -> gpui::AnyElement {
+    let packed =
+        (!crate::style::native_cloud_icon(cloud, path)).then(|| resolver.resolve(path, is_dir, is_package)).flatten();
+    match packed {
+        Some(icon) => crate::icons::pack_glyph(&icon.asset, size, color(icon.color.rgb(theme))).into_any_element(),
+        None => div()
+            .children(cloud_icon(cloud, path, is_dir, size as u32).map(|image| img(image).size(px(size))))
+            .into_any_element(),
+    }
+}
+
 /// The preview's contents for `entry`, stacked top to bottom. `folder_size` is
 /// the service's measured size for a folder or package; a file uses its own.
 pub fn contents(
@@ -359,6 +380,7 @@ pub fn contents(
     theme: &Theme,
     folder_size: Option<KnownSize>,
     cloud: Option<CloudStatus>,
+    resolver: &crate::icon_packs::Resolver,
 ) -> Div {
     let muted = color(theme.role("fg-muted"));
     let border = color(theme.role("border"));
@@ -402,7 +424,7 @@ pub fn contents(
                 .flex()
                 .items_center()
                 .justify_center()
-                .children(cloud_icon(cloud, &entry.path, entry.is_dir, 128).map(|i| img(i).size(px(128.))))
+                .child(path_icon(resolver, &entry.path, entry.is_dir, entry.is_package(), cloud, theme, 128.))
                 .into_any_element(),
         }
     };
@@ -471,7 +493,7 @@ pub fn folder_spoken(name: &str, items: Option<usize>, size: Option<crow_core::K
 
 /// The preview column when the cursor is a folder (or the focused folder has no
 /// rows): its icon, name, "Folder · n items · size" and the modified date.
-pub fn folder_summary(summary: FolderSummary<'_>, theme: &Theme) -> Div {
+pub fn folder_summary(summary: FolderSummary<'_>, theme: &Theme, resolver: &crate::icon_packs::Resolver) -> Div {
     let muted = color(theme.role("fg-muted"));
     let items = match summary.items {
         Some(1) => "Folder · 1 item".to_owned(),
@@ -493,7 +515,6 @@ pub fn folder_summary(summary: FolderSummary<'_>, theme: &Theme) -> Div {
                 .flex()
                 .items_center()
                 .justify_center()
-                .children(icon(summary.path, true, 128).map(|i| img(i).size(px(128.)))),
         )
         .child(
             div()

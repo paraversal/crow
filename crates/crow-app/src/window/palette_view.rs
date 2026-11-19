@@ -1008,13 +1008,19 @@ impl CrowWindow {
                 }
                 this.confirm_palette(false, window, cx);
             }))
-            .child(
-                div()
-                    .size(px(22.))
-                    .flex_none()
-                    .opacity(content_opacity(hidden, false))
-                    .children(icon(path, *source != Source::File, 22).map(|image| img(image).size(px(22.)))),
-            )
+            .child(div().size(px(22.)).flex_none().opacity(content_opacity(hidden, false)).child({
+                let is_dir = *source != Source::File;
+                let icons = crate::icon_packs::Resolver::for_source(cx, &cx.global::<Ui>().settings.icon_pack);
+                let packed = icons.resolve(path, is_dir, is_dir && crow_fs::is_package_path(path));
+                match packed {
+                    Some(packed) => {
+                        crate::icons::pack_glyph(&packed.asset, 22., color(packed.color.rgb(theme))).into_any_element()
+                    }
+                    None => icon(path, is_dir, 22)
+                        .map(|image| img(image).size(px(22.)).into_any_element())
+                        .unwrap_or_else(|| div().into_any_element()),
+                }
+            }))
             .child(
                 div()
                     .flex_1()

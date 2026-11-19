@@ -57,6 +57,11 @@ sound = "crow"
 # into Crow.app, so Finder and Launchpad show it after the next bundle.
 app_icon = "refined"
 
+# Icons in the file list, sidebar, palette and previews: "native" (default) uses
+# macOS icons. Set a pack id to use a data-only pack from icon-packs/<id>/ or a
+# plugin pack named <plugin-id>.<pack-id>. views.toml can override this per folder.
+icon_pack = "native"
+
 # Interface font. Empty uses the system font.
 font_family = ""
 font_size = 13.0
@@ -270,6 +275,16 @@ impl Default for WindowDefaults {
     }
 }
 
+fn native_icon_pack() -> String {
+    crate::icon_pack::NATIVE_ICON_SOURCE.to_owned()
+}
+
+fn icon_pack_value<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    crate::icon_pack::validate_source(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -282,6 +297,8 @@ pub struct Settings {
     pub motion: MotionMode,
     pub sound: SoundSet,
     pub app_icon: AppIcon,
+    #[serde(default = "native_icon_pack", deserialize_with = "icon_pack_value")]
+    pub icon_pack: String,
     pub font_family: String,
     pub font_size: f32,
     pub terminal: String,
@@ -306,6 +323,7 @@ impl Default for Settings {
             motion: MotionMode::Auto,
             sound: SoundSet::Crow,
             app_icon: AppIcon::Refined,
+            icon_pack: native_icon_pack(),
             font_family: String::new(),
             font_size: 13.0,
             terminal: "Terminal".into(),
@@ -451,6 +469,16 @@ mod tests {
         assert_eq!(s.keymap, KeymapLayer::Vim);
         assert_eq!(s.window, WindowDefaults { width: 900, ..WindowDefaults::default() });
         assert_eq!(s.theme_id(), None);
+    }
+
+    #[test]
+    fn icon_pack_defaults_to_native_and_rejects_malformed_ids() {
+        let parsed: Settings = toml::from_str("theme = \"system\"").unwrap();
+        assert_eq!(parsed.icon_pack, "native");
+        let parsed: Settings = toml::from_str("icon_pack = \"example.pack.theme\"").unwrap();
+        assert_eq!(parsed.icon_pack, "example.pack.theme");
+        assert!(toml::from_str::<Settings>("icon_pack = \"My Pack\"").is_err());
+        assert!(toml::from_str::<Settings>("icon_pack = \"\"").is_err());
     }
 
     #[test]

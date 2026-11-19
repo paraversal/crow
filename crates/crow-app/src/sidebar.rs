@@ -1381,6 +1381,7 @@ impl Render for Sidebar {
         let theme = ui.theme.clone();
         let mode = ui.feedback.mode;
         let now = Instant::now();
+        let icons = crate::icon_packs::Resolver::for_source(cx, &ui.settings.icon_pack);
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
         self.stabilize_plugin_cursor(&rows);
         let focused = self.focus.is_focused(window);
@@ -1689,19 +1690,33 @@ impl Render for Sidebar {
                     .into_any_element(),
                 None => match line_icon {
                     Some(glyph) => {
-                        let icon_tint = tint.map(color).unwrap_or_else(|| color(theme.role("link")));
-                        let name = match glyph {
-                            crate::icons::Glyph::Folder => "folder-icon",
-                            crate::icons::Glyph::Clock => "clock-icon",
-                            _ => "line-icon",
-                        };
-                        div()
-                            .w(px(16.))
-                            .flex()
-                            .justify_center()
-                            .debug_selector(move || format!("sidebar-{name}-{i}"))
-                            .child(crate::icons::glyph_color(glyph, 15., icon_tint))
-                            .into_any_element()
+                        let packed = matches!(row, Row::Favorite(..) | Row::PluginItem { .. })
+                            .then(|| icons.resolve(&path, true, false))
+                            .flatten();
+                        if let Some(packed) = packed {
+                            let icon_tint = tint.map(color).unwrap_or_else(|| color(packed.color.rgb(&theme)));
+                            div()
+                                .w(px(16.))
+                                .flex()
+                                .justify_center()
+                                .debug_selector(move || format!("sidebar-pack-icon-{i}"))
+                                .child(crate::icons::pack_glyph(&packed.asset, 15., icon_tint))
+                                .into_any_element()
+                        } else {
+                            let icon_tint = tint.map(color).unwrap_or_else(|| color(theme.role("link")));
+                            let name = match glyph {
+                                crate::icons::Glyph::Folder => "folder-icon",
+                                crate::icons::Glyph::Clock => "clock-icon",
+                                _ => "line-icon",
+                            };
+                            div()
+                                .w(px(16.))
+                                .flex()
+                                .justify_center()
+                                .debug_selector(move || format!("sidebar-{name}-{i}"))
+                                .child(crate::icons::glyph_color(glyph, 15., icon_tint))
+                                .into_any_element()
+                        }
                     }
                     None if has_path => div()
                         .w(px(16.))

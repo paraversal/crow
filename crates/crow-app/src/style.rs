@@ -155,11 +155,17 @@ pub fn icon(path: &Path, is_dir: bool, points: u32) -> Option<Arc<Image>> {
 
 /// Use a type icon while a potential cloud item is unprobed or unavailable.
 pub fn cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path, is_dir: bool, points: u32) -> Option<Arc<Image>> {
-    if status.map_or_else(|| crow_fs::is_cloud_candidate(path), |status| !status.is_local()) {
+    if native_cloud_icon(status, path) {
         let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
         return image_from_png(crow_macos::type_icon_png(ext, is_dir, points)?);
     }
     image_from_png(crow_macos::icon_png(path, is_dir, points)?)
+}
+
+/// A cloud placeholder (or an unprobed cloud candidate) keeps its native
+/// type/cloud icon: an icon pack must not hide the download affordance.
+pub fn native_cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path) -> bool {
+    status.map_or_else(|| crow_fs::is_cloud_candidate(path), |status| !status.is_local())
 }
 
 fn image_from_png(png: Arc<Vec<u8>>) -> Option<Arc<Image>> {

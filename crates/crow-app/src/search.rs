@@ -1387,6 +1387,17 @@ impl SearchView {
         self.focus.clone()
     }
 
+    /// Search uses the origin folder's `views.toml` icon source, else the
+    /// global pack. Re-resolved per render, so a config edit applies live.
+    pub fn icon_source(&self, cx: &gpui::App) -> String {
+        let ui = cx.global::<Ui>();
+        ui.views
+            .resolve(&self.folder)
+            .icon_source
+            .map(|(source, _)| source)
+            .unwrap_or_else(|| ui.settings.icon_pack.clone())
+    }
+
     #[cfg(test)]
     pub fn scope(&self) -> Scope {
         self.scope
@@ -2521,6 +2532,7 @@ impl SearchView {
         let has_decorations = !decoration_ids.is_empty();
         let plugin_scope = self.plugin_scope_key();
         let now = Instant::now();
+        let icons = crate::icon_packs::Resolver::for_source(cx, &self.icon_source(cx));
         let clipboard = cx.global::<Operations>().clipboard.as_ref();
         let flash = clipboard
             .and_then(|clipboard| clipboard.flash)
@@ -2698,11 +2710,20 @@ impl SearchView {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(
-                                div().size(px(16.)).flex_none().opacity(content_opacity(row.hidden, false)).children(
-                                    cloud_icon(cloud, &row.path, row.is_dir, 16).map(|image| img(image).size(px(16.))),
-                                ),
-                            )
+                            .child(div().size(px(16.)).flex_none().opacity(content_opacity(row.hidden, false)).child({
+                                let packed = (!crate::style::native_cloud_icon(cloud, &row.path))
+                                    .then(|| icons.resolve(&row.path, row.is_dir, row.is_package))
+                                    .flatten();
+                                match packed {
+                                    Some(icon) => {
+                                        crate::icons::pack_glyph(&icon.asset, 16., color(icon.color.rgb(theme)))
+                                            .into_any_element()
+                                    }
+                                    None => cloud_icon(cloud, &row.path, row.is_dir, 16)
+                                        .map(|image| img(image).size(px(16.)).into_any_element())
+                                        .unwrap_or_else(|| div().into_any_element()),
+                                }
+                            }))
                             .child(
                                 div()
                                     .flex_1()

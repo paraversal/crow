@@ -5,6 +5,7 @@ mod config;
 mod exclude;
 mod extensions;
 mod history;
+pub mod icon_pack;
 pub mod motion;
 mod onboarding;
 mod paths;
@@ -28,6 +29,10 @@ pub use extensions::{
     TextPreviewer, Tint, text_excerpt,
 };
 pub use history::History;
+pub use icon_pack::{
+    ICON_PACK_API, IconColor, IconEntry, IconPack, MAX_ASSET_REF_BYTES, MAX_GLYPH_BYTES, MAX_GLYPHS, MAX_PACK_BYTES,
+    NATIVE_ICON_SOURCE, is_native, validate_asset_ref, validate_source, validate_svg,
+};
 pub use onboarding::{ONBOARDING_FILE, OnboardingState};
 pub use paths::{clean_pasted_path, complete_typed, resolve_typed};
 pub use recent::{Recent, parse_zoxide, query_zoxide};
