@@ -2197,10 +2197,10 @@ fn icon_grid_arrows_follow_the_tile_geometry(cx: &mut TestAppContext) {
     for i in 0..8 {
         std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
     }
-    let (view, mut cx) = open_sized(cx, &root, 640., 800.);
+    let (view, mut cx) = open_sized(cx, &root, 600., 800.);
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
-    // Hide Preview so the 640 pt window leaves a three-column pane.
+    // Hide Preview so the 600 pt window leaves a three-column pane.
     cx.simulate_keystrokes("cmd-shift-p");
     settle(&view, &mut cx);
     let bounds = |cx: &VisualTestContext, name: &str| {
@@ -2451,7 +2451,7 @@ fn icon_size_presets_keep_the_filter_and_cursor_visible(cx: &mut TestAppContext)
 #[gpui::test]
 fn icon_grid_reflow_preserves_the_partially_visible_path_offset(cx: &mut TestAppContext) {
     let root = long_fixture("icon-scroll-anchor", 200);
-    let (view, mut cx) = open_sized(cx, &root, 640., 500.);
+    let (view, mut cx) = open_sized(cx, &root, 600., 500.);
     cx.simulate_keystrokes("cmd-1 cmd-shift-p");
     settle(&view, &mut cx);
     let viewport = cx.debug_bounds("file-list").expect("icon viewport");
@@ -2463,7 +2463,7 @@ fn icon_grid_reflow_preserves_the_partially_visible_path_offset(cx: &mut TestApp
     });
     settle(&view, &mut cx);
     let top = cx.debug_bounds("tile-f006.txt").expect("first visible tile").top();
-    assert!(top < viewport.top() && top > viewport.top() - px(106.));
+    assert!(top < viewport.top() && top > viewport.top() - px(104.));
 
     cx.simulate_resize(size(px(1050.), px(500.)));
     settle(&view, &mut cx);
