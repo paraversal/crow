@@ -92,8 +92,9 @@ const NAME_INSET: f32 = 4.0;
 const INDENT: f32 = 18.0;
 const TRIANGLE_WIDTH: f32 = 20.0;
 const CELL_PADDING: f32 = 8.0;
-/// Every column in column view is the board's fixed 196 px; long names truncate.
-const COLUMN_WIDTH: f32 = 196.0;
+/// Browse columns grow with the strip, keeping two readable alongside Preview.
+const COLUMN_MIN_WIDTH: f32 = 196.0;
+const COLUMN_MAX_WIDTH: f32 = 360.0;
 const PREVIEW_COLUMN_WIDTH: f32 = 300.0;
 
 /// Requests the pane can't carry out alone: operations may need a sheet (conflicts,
@@ -365,7 +366,7 @@ pub struct Pane {
     /// The list view's columns after Name, and the widths shared by header and rows.
     columns: Vec<Arc<dyn Column>>,
     table: TableLayout,
-    list_width: Pixels,
+    content_width: Pixels,
     resize: Option<ResizeDrag>,
     preview: Option<Preview>,
     preview_key: Option<(PathBuf, u64, u32)>,
@@ -506,7 +507,7 @@ impl Pane {
             focus: cx.focus_handle(),
             table: default_table(&columns),
             columns,
-            list_width: Pixels::ZERO,
+            content_width: Pixels::ZERO,
             resize: None,
             preview: None,
             preview_key: None,
@@ -768,8 +769,8 @@ impl Pane {
     }
 
     /// The containing window sets this before rendering the pane.
-    pub(crate) fn set_list_width(&mut self, width: Pixels) {
-        self.list_width = width;
+    pub(crate) fn set_content_width(&mut self, width: Pixels) {
+        self.content_width = width;
     }
 
     /// Whether a row is being renamed.
@@ -1513,7 +1514,7 @@ impl Pane {
     /// last known viewport height (or the window's) decides the visible rows;
     /// column count and tile bounds only need the width and the listing.
     fn icon_grid(&self, count: usize, cx: &App) -> GridGeometry {
-        let width = f32::from(self.list_width).max(1.0);
+        let width = f32::from(self.content_width).max(1.0);
         let height = self
             .icon_bounds
             .get()
@@ -4431,6 +4432,7 @@ impl Pane {
     fn render_column_rows(
         &mut self,
         k: usize,
+        width: Pixels,
         range: Range<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -4478,7 +4480,6 @@ impl Pane {
             .as_ref()
             .filter(|_| k == self.focused)
             .and_then(|motion| motion.progress(mode, now).map(|t| (motion, t)));
-        let width = COLUMN_WIDTH;
         let total = folder.row_count();
         let scope = crate::plugins::ScopeKey::Folder(folder.dir().to_path_buf());
         let versions: HashMap<PathBuf, u64> = range
@@ -4493,9 +4494,10 @@ impl Pane {
                 (path.clone(), crate::plugins::row_presentation(cx, &scope, path, *version, &decoration_ids))
             })
             .collect();
-        let has_decorations = !decoration_ids.is_empty();
-        let name_room =
-            px(width - 16.0 - 8.0 - 16.0 - 2.0 * CELL_PADDING - 8.0 - if has_decorations { 32.0 } else { 0.0 });
+        let arrow_width = px(10.);
+        let badge_width = px(32.);
+        // Column border, list gutters, row padding, icon and its gap.
+        let name_room = width - px(1. + 8. + 2. * CELL_PADDING + 16. + 8.);
         let cursor = folder.cursor_ix();
         let range_start = range.start;
         let (flags_first, edges) = {
@@ -4529,10 +4531,18 @@ impl Pane {
         rows.into_iter()
             .map(|(ix, entry, selected)| {
                 let cloud = self.cloud_status(&entry.path, cx).or(entry.dataless.then_some(CloudStatus::NotDownloaded));
-                let room = cloud_status::name_room(cloud, name_room);
-                let name = truncate_middle_parts(&entry.name, room, font_size, window);
-                let ranges = folder.row_match(ix).map(|range| map_range(&name, range));
                 let navigable = entry.is_dir && !entry.is_package();
+                let presentation = presentations.get(&entry.path).cloned().unwrap_or_default();
+                let mut room = cloud_status::name_room(cloud, name_room);
+                if navigable {
+                    room -= arrow_width + px(8.);
+                }
+                if presentation.badge.is_some() {
+                    room -= badge_width + px(4.);
+                }
+                let name = truncate_middle_parts(&entry.name, room.max(px(0.)), font_size, window);
+                let ranges = folder.row_match(ix).map(|range| map_range(&name, range));
+                let renaming = self.renaming.as_ref().filter(|r| r.path == entry.path);
                 let drag_entries = if selected {
                     selected_entries.clone()
                 } else {
@@ -4551,7 +4561,6 @@ impl Pane {
                 let tint = effect_tint(look, theme);
                 let is_flash = flash_flags[ix - range_start];
                 let cut_edge = cut_edges.get(ix - flags_first).copied().flatten();
-                let presentation = presentations.get(&entry.path).cloned().unwrap_or_default();
                 let dim = if presentation.dim {
                     content_opacity(true, false)
                 } else {
@@ -4647,6 +4656,9 @@ impl Pane {
                         )
                     })
                     .debug_selector(|| format!("column-{k}-row-{}", entry.name))
+                    .when(name.cut.is_some() && renaming.is_none(), |row| {
+                        crate::chrome::with_tooltip(row, display_text(&entry.name).into_owned(), None)
+                    })
                     .on_drag(DraggedSelection { entries: drag_entries }, {
                         let handoff = handoff.clone();
                         move |_value, offset, window, cx| {
@@ -4698,6 +4710,7 @@ impl Pane {
                             .relative()
                             .left(px(look.dx))
                             .flex_1()
+                            .min_w_0()
                             .opacity(dim)
                             .when_some(presentation.tint.filter(|_| !selected), |cell, tint| {
                                 cell.text_color(color(theme.role(tint.key())))
@@ -4706,7 +4719,7 @@ impl Pane {
                             .items_center()
                             .gap_1()
                             .child({
-                                let label = match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                                let label = match renaming {
                                     Some(r) => div()
                                         .flex_1()
                                         .on_mouse_down(
@@ -4741,10 +4754,10 @@ impl Pane {
                                 }
                             })
                             .children(crate::cloud_status::badge(cloud, theme))
-                            .when(has_decorations, |cell| {
+                            .when_some(presentation.badge, |cell, text| {
                                 cell.child(
                                     div()
-                                        .w(px(32.))
+                                        .w(badge_width)
                                         .flex_none()
                                         .overflow_hidden()
                                         .whitespace_nowrap()
@@ -4752,7 +4765,7 @@ impl Pane {
                                         .text_size(px(11.))
                                         .text_color(muted)
                                         .id("plugin-row-badge")
-                                        .child(presentation.badge.clone().unwrap_or_default())
+                                        .child(text)
                                         .when(entry.is_dir && presentation.git_badge, |badge| {
                                             let path = entry.path.clone();
                                             badge.role(Role::Button).aria_label("Review folder Git changes").on_click(
@@ -4765,11 +4778,9 @@ impl Pane {
                                 )
                             }),
                     )
-                    .child(div().w(px(10.)).flex_none().opacity(dim).text_color(subtle).child(if navigable {
-                        "›"
-                    } else {
-                        ""
-                    }))
+                    .when(navigable, |row| {
+                        row.child(div().w(arrow_width).flex_none().opacity(dim).text_color(subtle).child("›"))
+                    })
             })
             .collect()
     }
@@ -4783,6 +4794,11 @@ impl Pane {
         let now = Instant::now();
         let border = color(theme.role("border"));
         let focused = self.focused;
+        // Keep widths independent of selection depth and the Info toggle.
+        // Deeper chains still scroll horizontally on narrow windows.
+        let width = px(((f32::from(self.content_width) - PREVIEW_COLUMN_WIDTH) / 2.0)
+            .floor()
+            .clamp(COLUMN_MIN_WIDTH, COLUMN_MAX_WIDTH));
         let mut strip = div()
             .id("columns")
             .debug_selector(|| "columns".into())
@@ -4791,12 +4807,11 @@ impl Pane {
             .overflow_x_scroll()
             .track_scroll(&self.strip_scroll);
         for (k, folder) in self.folders.iter().enumerate() {
-            let (count, shown, width, scroll, title, filtered) = {
+            let (count, shown, scroll, title, filtered) = {
                 let f = folder.read(cx);
                 (
                     f.entries().len(),
                     f.row_count(),
-                    COLUMN_WIDTH,
                     f.scroll().clone(),
                     f.dir().file_name().map_or_else(|| "/".to_owned(), |n| n.to_string_lossy().into_owned()),
                     f.filter().is_some(),
@@ -4872,7 +4887,7 @@ impl Pane {
                                 ("column-list", k),
                                 shown,
                                 cx.processor(move |this, range, window, cx| {
-                                    this.render_column_rows(k, range, window, cx)
+                                    this.render_column_rows(k, width, range, window, cx)
                                 }),
                             )
                             .track_scroll(&scroll)
@@ -4935,7 +4950,7 @@ impl Pane {
                         } else {
                             format!("{title}, {count} items")
                         })
-                        .w(px(width))
+                        .w(width)
                         .flex_none()
                         .h_full()
                         .flex()
@@ -5430,7 +5445,7 @@ impl Render for Pane {
                 let field = self.render_filter_field(FilterPlace::List, window, cx);
                 let no_matches = self.render_no_matches(cx);
                 let footer = self.render_filter_footer(FilterPlace::List, cx);
-                let widths = self.table.fitted(f32::from(self.list_width) - 2.0 * LIST_SIDE_INSET);
+                let widths = self.table.fitted(f32::from(self.content_width) - 2.0 * LIST_SIDE_INSET);
                 div()
                     .size_full()
                     .flex()

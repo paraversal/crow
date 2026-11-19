@@ -448,9 +448,9 @@ pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane
         let folder = folder_entity.read(cx);
         (folder.row_count(), crate::style::display_name(folder.dir()).to_owned())
     };
-    let width = f32::from(pane.list_width).max(1.0);
+    let width = f32::from(pane.content_width).max(1.0);
     let theme = cx.global::<crate::ui::Ui>().theme.clone();
-    let rail_width = rail_width(pane.list_width);
+    let rail_width = rail_width(pane.content_width);
     let preview_width = (width - rail_width - 1.0).max(0.0);
     let entries = &pane.gallery.entries;
     let cursor = pane.cursor_entry(cx).map(|entry| entry.path.clone());
@@ -625,7 +625,7 @@ fn render_rows(
     let icons = pane.icon_resolver(0, cx);
     let thumbnails = crate::thumbnails::service(cx);
     let gate = crate::thumbnails::readable_gate(cx);
-    let width = rail_width(pane.list_width);
+    let width = rail_width(pane.content_width);
     let wide = width >= 240.0;
     let name_room =
         px((width - 1.0 - 2.0 * LIST_SIDE_INSET - 2.0 * ROW_PADDING - THUMBNAIL_POINTS as f32 - ICON_GAP).max(0.0));

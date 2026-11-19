@@ -3662,17 +3662,35 @@ fn sidebar_favorites_use_a_pack_unless_they_have_their_own_icon(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn columns_are_the_board_width(cx: &mut TestAppContext) {
-    let root = fixture("columns-196");
-    std::fs::create_dir_all(root.join("a very long folder name that used to widen the column"))
-        .expect("create fixture");
-    let (_view, mut cx) = open_sized(cx, &root, 1280.0, 800.0);
-    cx.simulate_keystrokes("cmd-3");
-    cx.run_until_parked();
-    let first = cx.debug_bounds("column-0").expect("first column");
-    assert_eq!(first.size.width, px(196.), "the board's fixed width");
-    let second = cx.debug_bounds("column-1").expect("the selected folder's column");
-    assert_eq!(second.size.width, px(196.), "a long name does not widen the column");
+fn columns_give_names_room_without_changing_width_on_selection(cx: &mut TestAppContext) {
+    let root = fixture("columns-room");
+    std::fs::write(root.join("report with a long descriptive filename.pdf"), "").expect("create fixture");
+    for width in [640., 1380.] {
+        let (view, mut cx) = open_sized(cx, &root, width, 800.);
+        cx.simulate_keystrokes("cmd-3 cmd-i");
+        settle(&view, &mut cx);
+        let first = cx.debug_bounds("column-0").expect("first column");
+        let second = cx.debug_bounds("column-1").expect("the selected folder's column");
+        let name = cx.debug_bounds("column-0-row-name-report with a long descriptive filename.pdf").expect("name");
+        let info = cx.debug_bounds("preview-column").expect("Info");
+        assert_eq!(first.size.width, second.size.width);
+        assert!(info.size.width >= px(300.));
+        if width == 640. {
+            assert_eq!(first.size.width, px(196.), "narrow columns keep their minimum width");
+        } else {
+            assert!(name.size.width >= px(300.), "the wide filename has room to read");
+            let strip = cx.debug_bounds("columns").expect("strip");
+            assert!(info.right() <= strip.right(), "two wide columns and Info fit");
+        }
+
+        cx.simulate_keystrokes("down down");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("column-1").is_none(), "a file has no child column");
+        assert_eq!(cx.debug_bounds("column-0").unwrap().size.width, first.size.width);
+        cx.simulate_keystrokes("cmd-i");
+        settle(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("column-0").unwrap().size.width, first.size.width);
+    }
 }
 
 #[gpui::test]

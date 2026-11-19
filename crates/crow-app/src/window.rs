@@ -2482,13 +2482,11 @@ impl Render for CrowWindow {
             Some(search) => div().flex_1().min_w_0().h_full().child(search.clone()).into_any_element(),
             None => {
                 let pane = self.pane().clone();
-                if list_view {
-                    let mut width = window.viewport_size().width - self.side_panes.left_width();
-                    if preview.is_some() {
-                        width -= self.side_panes.right_width();
-                    }
-                    pane.update(cx, |pane, _| pane.set_list_width(width));
+                let mut width = window.viewport_size().width - self.side_panes.left_width();
+                if preview.is_some() {
+                    width -= self.side_panes.right_width();
                 }
+                pane.update(cx, |pane, _| pane.set_content_width(width));
                 div().flex_1().min_w_0().h_full().child(pane).into_any_element()
             }
         };
