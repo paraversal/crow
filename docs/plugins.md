@@ -228,7 +228,9 @@ replies from it are ignored.
   and running operations.
 - **Info.** The visible Info tab appends up to 16 labeled fields for a single selected entry,
   after the native metadata, ordered by descriptor ID and each reply's order.
-- **Preview.** Add provider IDs to the resolved `preview_providers` list. One selected
+- **Preview.** Add provider IDs to the resolved `preview_providers` list. Settings ▸
+  Views & Preview ▸ Preview providers edits the ordered list for `[defaults]`, one folder
+  or one path rule; a layer with no key inherits, and `[]` is Native only. One selected
   ordinary file tries configured providers in list order for at most 250 ms total, then
   falls through to the native preview. `fs = "none"` providers receive the metadata snapshot;
   `fs = "read"` gets one 64 KiB excerpt only when a fresh P8 gate says the file is locally
