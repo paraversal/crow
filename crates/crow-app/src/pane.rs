@@ -3962,7 +3962,8 @@ fn row_icon(
                     theme,
                 )),
             )
-        })
+        },
+    )
 }
 
 /// A row drawn over the list while its swallow finishes after the listing dropped it.
