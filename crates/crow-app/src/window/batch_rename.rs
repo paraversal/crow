@@ -36,6 +36,18 @@ pub(crate) struct BatchRenameSheet {
     pub(crate) subscriptions: Vec<Subscription>,
 }
 
+/// Preview revisions are unique across sheets, so a canceled validation from a
+/// closed sheet can never match the next sheet's revision after it reopens.
+static NEXT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+enum BatchRenameActivation {
+    Kind(RenameKind),
+    Side(AddPosition),
+    Extension,
+    Cancel,
+    Rename,
+}
+
 fn field(value: String, placeholder: &'static str, aria: &'static str, cx: &mut App) -> Entity<TextInput> {
     cx.new(|cx| TextInput::new(value, placeholder, cx).bare().with_aria_label(aria))
 }
@@ -58,7 +70,7 @@ impl BatchRenameSheet {
             checks: None,
             validation_error: None,
             validating: false,
-            revision: 0,
+            revision: NEXT_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             submit: None,
             preview_scroll: UniformListScrollHandle::new(),
             rules: std::array::from_fn(|_| cx.focus_handle()),
@@ -290,6 +302,69 @@ impl CrowWindow {
         self.refresh_batch_rename(window, cx);
     }
 
+    fn batch_rename_activation(&self, window: &Window) -> Option<BatchRenameActivation> {
+        let Sheet::BatchRename(sheet) = self.sheet.as_ref()? else { return None };
+        if sheet.rules[0].is_focused(window) {
+            Some(BatchRenameActivation::Kind(RenameKind::Replace))
+        } else if sheet.rules[1].is_focused(window) {
+            Some(BatchRenameActivation::Kind(RenameKind::AddText))
+        } else if sheet.rules[2].is_focused(window) {
+            Some(BatchRenameActivation::Kind(RenameKind::Number))
+        } else if sheet.sides[0].is_focused(window) {
+            Some(BatchRenameActivation::Side(AddPosition::After))
+        } else if sheet.sides[1].is_focused(window) {
+            Some(BatchRenameActivation::Side(AddPosition::Before))
+        } else if sheet.extension.is_focused(window) {
+            Some(BatchRenameActivation::Extension)
+        } else if sheet.cancel.is_focused(window) {
+            Some(BatchRenameActivation::Cancel)
+        } else if sheet.rename.is_focused(window) {
+            Some(BatchRenameActivation::Rename)
+        } else {
+            None
+        }
+    }
+
+    fn activate_batch_rename_control(
+        &mut self,
+        activation: BatchRenameActivation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match activation {
+            BatchRenameActivation::Kind(kind) => self.batch_rename_kind(kind, window, cx),
+            BatchRenameActivation::Side(side) => self.batch_rename_side(side, window, cx),
+            BatchRenameActivation::Extension => self.batch_rename_extension(window, cx),
+            BatchRenameActivation::Cancel => self.close_sheet(window, cx),
+            BatchRenameActivation::Rename => self.submit_batch_rename(window, cx),
+        }
+    }
+
+    /// Space activates the focused radio, toggle or button. Enter arrives as
+    /// `SheetConfirm` (GPUI dispatches key bindings before key listeners), so
+    /// `batch_rename_confirm` handles the same focus before submitting.
+    pub(super) fn batch_rename_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.key != "space" {
+            return;
+        }
+        let Some(activation) = self.batch_rename_activation(window) else { return };
+        cx.stop_propagation();
+        self.activate_batch_rename_control(activation, window, cx);
+    }
+
+    pub(super) fn batch_rename_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(activation) = self.batch_rename_activation(window) {
+            self.activate_batch_rename_control(activation, window, cx);
+        } else {
+            self.submit_batch_rename(window, cx);
+        }
+    }
+
     pub(super) fn batch_rename_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Sheet::BatchRename(sheet)) = &self.sheet else { return };
         let order = sheet.tab_order(cx);
@@ -330,6 +405,7 @@ impl CrowWindow {
                 .when(!selected, |el| el.text_color(muted))
                 .child(label)
         };
+        let field_label = |text: &'static str| div().text_size(px(11.)).text_color(muted).child(text);
         let extension = div()
             .id("batch-keep-extension")
             .debug_selector(|| "batch-keep-extension".into())
@@ -374,15 +450,15 @@ impl CrowWindow {
                     cx.listener(|this, _, window, cx| this.batch_rename_kind(RenameKind::Number, window, cx)),
                 ),
             );
-        let fields =
-            match sheet.kind {
-                RenameKind::Replace => div()
-                    .flex()
-                    .gap_2()
-                    .child(div().flex_1().child(sheet.find.clone()))
-                    .child(div().flex_1().child(sheet.replace.clone()))
-                    .into_any_element(),
-                RenameKind::AddText => div()
+        let fields = match sheet.kind {
+            RenameKind::Replace => div()
+                .flex()
+                .gap_2()
+                .child(div().flex_1().child(sheet.find.clone()))
+                .child(div().flex_1().child(sheet.replace.clone()))
+                .into_any_element(),
+            RenameKind::AddText => {
+                div()
                     .flex()
                     .gap_2()
                     .child(div().flex_1().child(sheet.add.clone()))
@@ -413,15 +489,28 @@ impl CrowWindow {
                                 })),
                             ),
                     )
-                    .into_any_element(),
-                RenameKind::Number => div()
-                    .flex()
-                    .gap_2()
-                    .child(div().flex_1().child(sheet.base.clone()))
-                    .child(div().w(px(90.)).child(sheet.start.clone()))
-                    .child(div().w(px(90.)).child(sheet.padding.clone()))
-                    .into_any_element(),
-            };
+                    .into_any_element()
+            }
+            RenameKind::Number => div()
+                .flex()
+                .gap_2()
+                .child(
+                    div().flex_1().flex().flex_col().gap_1().child(field_label("Base name")).child(sheet.base.clone()),
+                )
+                .child(
+                    div().w(px(90.)).flex().flex_col().gap_1().child(field_label("Start")).child(sheet.start.clone()),
+                )
+                .child(
+                    div()
+                        .w(px(90.))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(field_label("Padding"))
+                        .child(sheet.padding.clone()),
+                )
+                .into_any_element(),
+        };
         let header = div()
             .flex()
             .gap_2()
@@ -508,12 +597,15 @@ impl CrowWindow {
                 .key_context("Sheet")
                 .track_focus(&sheet.focus)
                 .on_action(cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| {
-                    this.submit_batch_rename(window, cx)
+                    this.batch_rename_confirm(window, cx)
                 }))
                 .on_action(
                     cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_sheet(window, cx)),
                 )
                 .on_key_down(tab)
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                    this.batch_rename_key_down(event, window, cx)
+                }))
                 .p_4()
                 .flex()
                 .flex_col()
@@ -537,17 +629,24 @@ impl CrowWindow {
         let theme = cx.global::<Ui>().theme.clone();
         let muted = color(theme.role("fg-muted"));
         let error = color(theme.role("error"));
+        // A blank field is a form error, shown once in the status line. Repeating
+        // it on every preview row would bury the names the rows are there to show.
+        let form_error = sheet.preview.error.is_some();
         range
             .filter_map(|index| {
                 let row = sheet.preview.rows.get(index)?;
                 let state = sheet.row_state(index);
-                let (line, color_) = match state {
-                    Some(BatchRowState::Invalid(reason)) => (reason.as_str(), error),
-                    _ => match &row.state {
-                        RowState::Invalid(reason) => (reason.as_str(), error),
-                        RowState::Unchanged => ("unchanged", muted),
-                        RowState::Ready => ("", muted),
-                    },
+                let (line, color_) = if form_error {
+                    ("", muted)
+                } else {
+                    match state {
+                        Some(BatchRowState::Invalid(reason)) => (reason.as_str(), error),
+                        _ => match &row.state {
+                            RowState::Invalid(reason) => (reason.as_str(), error),
+                            RowState::Unchanged => ("unchanged", muted),
+                            RowState::Ready => ("", muted),
+                        },
+                    }
                 };
                 let detail = if line.is_empty() { String::new() } else { format!(", {line}") };
                 Some(

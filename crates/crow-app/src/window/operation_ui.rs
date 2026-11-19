@@ -213,11 +213,7 @@ impl CrowWindow {
                 .collect();
             let cursor = cx.global_mut::<Operations>().batch_cursor.take();
             let pane = self.pane().downgrade();
-            pane.update(cx, |pane, cx| {
-                pane.apply_rename_map(&map, cursor.as_deref(), cx);
-                pane.refresh_saved(cx);
-            })
-            .ok();
+            pane.update(cx, |pane, cx| pane.apply_rename_map(&map, cursor.as_deref(), cx)).ok();
             if let Some(search) = self.search.clone() {
                 search.update(cx, |search, cx| search.apply_rename_map(&map, cx));
             }

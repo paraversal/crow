@@ -14,7 +14,7 @@
 //! record. A startup can therefore report leftovers by exact path without ever
 //! deleting them by name.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -61,7 +61,7 @@ pub struct BatchValidation {
 }
 
 /// How this volume compares directory-entry names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NameSemantics {
     pub case_sensitive: bool,
     /// Canonically equivalent Unicode spellings name the same entry.
@@ -69,7 +69,7 @@ pub struct NameSemantics {
 }
 
 /// Where data is when a rollback could not complete: its original path, where
-/// it is now, and the final name the batch planned for it.
+/// it is now, and where the rollback was trying to put it (its original name).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryItem {
     pub original: PathBuf,
@@ -179,73 +179,112 @@ fn macos_name_semantics(dir: &Path) -> Result<NameSemantics, OpError> {
     Ok(NameSemantics { case_sensitive, normalization_insensitive: true })
 }
 
+/// A name folded the way this volume compares directory entries.
+fn folded_name(name: &str, semantics: NameSemantics) -> String {
+    let name = if semantics.case_sensitive { name.to_owned() } else { name.to_lowercase() };
+    if semantics.normalization_insensitive { name.nfc().collect() } else { name }
+}
+
 /// Whether `a` and `b` name the same directory entry under `semantics`.
 pub fn names_equal(a: &str, b: &str, semantics: NameSemantics) -> bool {
-    if a == b {
-        return true;
-    }
-    let fold = |name: &str| {
-        let name = if semantics.case_sensitive { name.to_owned() } else { name.to_lowercase() };
-        if semantics.normalization_insensitive { name.nfc().collect::<String>() } else { name }
-    };
-    fold(a) == fold(b)
+    a == b || folded_name(a, semantics) == folded_name(b, semantics)
 }
 
-fn same_directory(a: &Path, b: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (a.metadata(), b.metadata()) {
-        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
-        _ => false,
-    }
-}
-
-fn same_directory_entry(a: &Path, b: &Path, semantics: NameSemantics) -> bool {
-    let (Some(a_name), Some(b_name)) =
-        (a.file_name().and_then(|name| name.to_str()), b.file_name().and_then(|name| name.to_str()))
-    else {
-        return a == b;
-    };
-    match (a.parent(), b.parent()) {
-        (Some(a_parent), Some(b_parent)) => {
-            same_directory(a_parent, b_parent) && names_equal(a_name, b_name, semantics)
-        }
-        _ => false,
-    }
-}
-
-/// Whether `child` is `dir` or lies inside it, following symlinked parents.
-fn inside(dir: &Path, child: &Path) -> bool {
-    if child.starts_with(dir) {
-        return true;
-    }
-    if !dir.symlink_metadata().is_ok_and(|meta| meta.is_dir()) {
-        return false;
-    }
-    match (std::fs::canonicalize(dir), std::fs::canonicalize(child)) {
-        (Ok(dir), Ok(child)) => child.starts_with(dir),
-        _ => false,
-    }
+/// One directory entry keyed by its real parent and this volume's name rules.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct NameKey {
+    parent: PathBuf,
+    semantics: NameSemantics,
+    folded: String,
 }
 
 fn parent_key(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn duplicate_targets(entries: &[(usize, PathBuf, String, NameSemantics)]) -> Vec<usize> {
-    let mut invalid = Vec::new();
-    for i in 0..entries.len() {
-        for j in (i + 1)..entries.len() {
-            let (a_index, a_parent, a_name, semantics) = &entries[i];
-            let (b_index, b_parent, b_name, other) = &entries[j];
-            if a_parent == b_parent && semantics == other && names_equal(a_name, b_name, *semantics) {
-                invalid.push(*a_index);
-                invalid.push(*b_index);
+/// Which sources contain, or are inside, another source. One canonicalize per
+/// source and one walk up its parents, instead of a pair and two canonicalize
+/// calls per pair.
+fn ancestor_marks(paths: &[&Path], cancel: Option<&AtomicBool>) -> Result<(Vec<bool>, Vec<bool>), OpError> {
+    let mut inside = vec![false; paths.len()];
+    let mut contains = vec![false; paths.len()];
+    let mut lexical: HashMap<&Path, Vec<usize>> = HashMap::new();
+    let mut canonical: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+    for (index, path) in paths.iter().enumerate() {
+        lexical.entry(*path).or_default().push(index);
+        // Only a real directory can contain another selected item. A symlink
+        // and the file or directory it points at are independent entries.
+        if path.symlink_metadata().is_ok_and(|meta| meta.is_dir())
+            && let Ok(real) = std::fs::canonicalize(path)
+        {
+            canonical.entry(real).or_default().push(index);
+        }
+    }
+    for (index, path) in paths.iter().enumerate() {
+        if index % 1024 == 0 && cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+            return Err(OpError::Cancelled);
+        }
+        let mut cursor = Some(*path);
+        while let Some(parent) = cursor {
+            if let Some(others) = lexical.get(parent) {
+                for &other in others {
+                    if other == index {
+                        continue;
+                    }
+                    if parent == *path {
+                        inside[index] = true;
+                        inside[other] = true;
+                    } else {
+                        inside[index] = true;
+                        contains[other] = true;
+                    }
+                }
+            }
+            cursor = parent.parent();
+        }
+        if let Ok(source) = std::fs::canonicalize(path) {
+            let mut cursor = Some(source.as_path());
+            while let Some(parent) = cursor {
+                if let Some(others) = canonical.get(parent) {
+                    for &other in others {
+                        if other == index {
+                            continue;
+                        }
+                        if parent == source.as_path() {
+                            inside[index] = true;
+                            inside[other] = true;
+                        } else {
+                            inside[index] = true;
+                            contains[other] = true;
+                        }
+                    }
+                }
+                cursor = parent.parent();
             }
         }
     }
-    invalid.sort_unstable();
-    invalid.dedup();
-    invalid
+    Ok((inside, contains))
+}
+
+/// Mark every selected item that contains, or is inside, another selected item.
+fn mark_ancestor_conflicts(
+    inputs: &[BatchRenameInput],
+    rows: &mut [BatchRowState],
+    cancel: &AtomicBool,
+) -> Result<bool, OpError> {
+    let paths: Vec<&Path> = inputs.iter().map(|input| input.source.as_path()).collect();
+    let (inside, contains) = ancestor_marks(&paths, Some(cancel))?;
+    let mut found = false;
+    for index in 0..inputs.len() {
+        if inside[index] {
+            rows[index] = BatchRowState::Invalid("it is inside another selected item".to_owned());
+            found = true;
+        } else if contains[index] {
+            rows[index] = BatchRowState::Invalid("it contains another selected item".to_owned());
+            found = true;
+        }
+    }
+    Ok(found)
 }
 
 /// Read-only validation of the preview. Never mutates the disk.
@@ -284,19 +323,18 @@ pub fn validate_batch_rename(inputs: &[BatchRenameInput], cancel: &AtomicBool) -
     }
 
     // An ancestor and its descendant cannot be independent entries in one batch.
-    for i in 0..inputs.len() {
-        for j in (i + 1)..inputs.len() {
-            if inside(&inputs[i].source, &inputs[j].source) || inside(&inputs[j].source, &inputs[i].source) {
-                rows[i] = BatchRowState::Invalid("it is inside another selected item".to_owned());
-                rows[j] = BatchRowState::Invalid("it contains another selected item".to_owned());
-                error.get_or_insert_with(|| "Select items that don't contain one another".to_owned());
-            }
-        }
+    if mark_ancestor_conflicts(inputs, &mut rows, cancel)? {
+        error.get_or_insert_with(|| "Select items that don't contain one another".to_owned());
     }
 
     // One semantics probe per real parent.
     let mut parent_semantics: HashMap<PathBuf, Option<NameSemantics>> = HashMap::new();
+    let mut parent_key_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let mut parent_keys: Vec<Option<PathBuf>> = vec![None; inputs.len()];
     for (index, input) in inputs.iter().enumerate() {
+        if index % 1024 == 0 && cancel.load(Ordering::Relaxed) {
+            return Err(OpError::Cancelled);
+        }
         if matches!(rows[index], BatchRowState::Invalid(_)) {
             continue;
         }
@@ -304,72 +342,136 @@ pub fn validate_batch_rename(inputs: &[BatchRenameInput], cancel: &AtomicBool) -
             rows[index] = BatchRowState::Invalid("it has no parent folder".to_owned());
             continue;
         };
-        let key = parent_key(parent);
-        let found = *parent_semantics.entry(key).or_insert_with(|| name_semantics(parent).ok());
+        let key = parent_key_cache.entry(parent.to_path_buf()).or_insert_with(|| parent_key(parent)).clone();
+        let found = *parent_semantics.entry(key.clone()).or_insert_with(|| name_semantics(parent).ok());
         match found {
-            Some(found) => semantics[index] = Some(found),
+            Some(found) => {
+                semantics[index] = Some(found);
+                parent_keys[index] = Some(key);
+            }
             None => {
                 rows[index] = BatchRowState::Invalid("Crow can't compare names on this volume".to_owned());
             }
         }
     }
 
+    // Two selected spellings of one directory entry must not be renamed twice.
+    // Hard links have different names and pass; a symlinked parent spelling does
+    // not, because both keys resolve to the same real parent and folded name.
+    let mut source_entries: HashMap<NameKey, usize> = HashMap::new();
+    for (index, input) in inputs.iter().enumerate() {
+        if index % 1024 == 0 && cancel.load(Ordering::Relaxed) {
+            return Err(OpError::Cancelled);
+        }
+        if matches!(rows[index], BatchRowState::Invalid(_)) {
+            continue;
+        }
+        let (Some(parent), Some(semantics)) = (parent_keys[index].as_ref(), semantics[index]) else {
+            continue;
+        };
+        let key = NameKey { parent: parent.clone(), semantics, folded: folded_name(&input.name, semantics) };
+        if let Some(previous) = source_entries.insert(key, index) {
+            rows[index] = BatchRowState::Invalid("it is the same item as another selected item".to_owned());
+            rows[previous] = BatchRowState::Invalid("it is the same item as another selected item".to_owned());
+        }
+    }
+
     // Duplicate final names under each volume's own comparison rules.
-    let comparisons: Vec<(usize, PathBuf, String, NameSemantics)> = inputs
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| rows[*index] == BatchRowState::Ready)
-        .map(|(index, input)| {
-            let key = input.source.parent().map(parent_key).unwrap_or_default();
-            (
-                index,
-                key,
-                input.target_name.clone(),
-                semantics[index].unwrap_or(NameSemantics { case_sensitive: true, normalization_insensitive: false }),
-            )
-        })
-        .collect();
-    for index in duplicate_targets(&comparisons) {
-        rows[index] = BatchRowState::Invalid("another selected item would get this name".to_owned());
+    let mut target_keys: HashMap<NameKey, Vec<usize>> = HashMap::new();
+    for (index, input) in inputs.iter().enumerate() {
+        if index % 1024 == 0 && cancel.load(Ordering::Relaxed) {
+            return Err(OpError::Cancelled);
+        }
+        if rows[index] != BatchRowState::Ready {
+            continue;
+        }
+        let (Some(parent), Some(semantics)) = (parent_keys[index].as_ref(), semantics[index]) else {
+            continue;
+        };
+        target_keys
+            .entry(NameKey { parent: parent.clone(), semantics, folded: folded_name(&input.target_name, semantics) })
+            .or_default()
+            .push(index);
+    }
+    for group in target_keys.values() {
+        if group.len() > 1 {
+            for &index in group {
+                rows[index] = BatchRowState::Invalid("another selected item would get this name".to_owned());
+            }
+        }
     }
 
     // Occupied destinations: a changing source may vacate one; anything else blocks.
-    // Marking one row invalid can remove the source another row depended on, so
-    // repeat until no further row is blocked.
-    loop {
-        let vacating: Vec<usize> = (0..inputs.len())
-            .filter(|index| rows[*index] == BatchRowState::Ready && inputs[*index].target_name != inputs[*index].name)
-            .collect();
-        let mut changed = false;
-        for (index, input) in inputs.iter().enumerate() {
-            if rows[index] != BatchRowState::Ready {
-                continue;
+    // A row waiting on a source that later becomes invalid is invalidated through
+    // `remaining`, so one pass replaces the old repeated scan.
+    let mut source_keys: Vec<Option<NameKey>> = vec![None; inputs.len()];
+    let mut remaining: HashMap<NameKey, usize> = HashMap::new();
+    for (index, input) in inputs.iter().enumerate() {
+        if index % 1024 == 0 && cancel.load(Ordering::Relaxed) {
+            return Err(OpError::Cancelled);
+        }
+        if rows[index] != BatchRowState::Ready {
+            continue;
+        }
+        let (Some(parent), Some(semantics)) = (parent_keys[index].as_ref(), semantics[index]) else {
+            continue;
+        };
+        let key = NameKey { parent: parent.clone(), semantics, folded: folded_name(&input.name, semantics) };
+        source_keys[index] = Some(key.clone());
+        *remaining.entry(key).or_default() += 1;
+    }
+    let mut dependents: HashMap<NameKey, Vec<usize>> = HashMap::new();
+    let mut invalidated: Vec<usize> = Vec::new();
+    for (index, input) in inputs.iter().enumerate() {
+        if index % 1024 == 0 && cancel.load(Ordering::Relaxed) {
+            return Err(OpError::Cancelled);
+        }
+        if rows[index] != BatchRowState::Ready {
+            continue;
+        }
+        let (Some(parent), Some(semantics)) = (parent_keys[index].as_ref(), semantics[index]) else {
+            continue;
+        };
+        // A target that is this entry under another spelling is the same
+        // directory entry, not an occupant to vacate.
+        if names_equal(&input.name, &input.target_name, semantics) {
+            continue;
+        }
+        let target = parent.join(&input.target_name);
+        match target.symlink_metadata() {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                rows[index] = BatchRowState::Invalid(err.to_string());
+                invalidated.push(index);
             }
-            let semantics =
-                semantics[index].unwrap_or(NameSemantics { case_sensitive: true, normalization_insensitive: false });
-            let Some(target) = input.source.parent().map(|parent| parent.join(&input.target_name)) else {
-                continue;
-            };
-            match target.symlink_metadata() {
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    rows[index] = BatchRowState::Invalid(err.to_string());
-                    changed = true;
-                }
-                Ok(_) => {
-                    if !same_directory_entry(&input.source, &target, semantics)
-                        && !vacating
-                            .iter()
-                            .any(|other| same_directory_entry(&inputs[*other].source, &target, semantics))
-                    {
-                        rows[index] = BatchRowState::Invalid("that name is already taken".to_owned());
-                        changed = true;
-                    }
+            Ok(_) => {
+                let key =
+                    NameKey { parent: parent.clone(), semantics, folded: folded_name(&input.target_name, semantics) };
+                if remaining.contains_key(&key) {
+                    dependents.entry(key).or_default().push(index);
+                } else {
+                    rows[index] = BatchRowState::Invalid("that name is already taken".to_owned());
+                    invalidated.push(index);
                 }
             }
         }
-        if !changed {
-            break;
+    }
+    let mut head = 0;
+    while head < invalidated.len() {
+        let index = invalidated[head];
+        head += 1;
+        let Some(key) = source_keys[index].take() else { continue };
+        let Some(count) = remaining.get_mut(&key) else { continue };
+        *count = count.saturating_sub(1);
+        if *count == 0
+            && let Some(waiting) = dependents.get(&key)
+        {
+            for &other in waiting {
+                if rows[other] == BatchRowState::Ready {
+                    rows[other] = BatchRowState::Invalid("that name is already taken".to_owned());
+                    invalidated.push(other);
+                }
+            }
         }
     }
 
@@ -394,33 +496,67 @@ pub(crate) fn plan_approved_moves(moves: &[BatchRenameEntry]) -> Result<Vec<Plan
     if moves.is_empty() {
         return Err(OpError::InvalidName("no names would change".to_owned()));
     }
-    for i in 0..moves.len() {
-        for j in (i + 1)..moves.len() {
-            if inside(&moves[i].source, &moves[j].source) || inside(&moves[j].source, &moves[i].source) {
-                return Err(OpError::InvalidName("the selection contains a folder and one of its items".to_owned()));
-            }
-        }
+    let paths: Vec<&Path> = moves.iter().map(|move_| move_.source.as_path()).collect();
+    let (inside, contains) = ancestor_marks(&paths, None)?;
+    if inside.iter().chain(contains.iter()).any(|flag| *flag) {
+        return Err(OpError::InvalidName("the selection contains a folder and one of its items".to_owned()));
     }
-    let mut targets = Vec::with_capacity(moves.len());
-    let mut items = Vec::with_capacity(moves.len());
-    for (index, move_) in moves.iter().enumerate() {
+    let mut parent_semantics: HashMap<PathBuf, NameSemantics> = HashMap::new();
+    let mut parent_key_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let mut parent_keys = Vec::with_capacity(moves.len());
+    let mut semantics = Vec::with_capacity(moves.len());
+    for move_ in moves {
         let source_parent = move_.source.parent().ok_or_else(|| OpError::NotFound(move_.source.clone()))?;
         if move_.target.parent() != Some(source_parent) {
             return Err(OpError::InvalidName("batch rename only changes names in place".to_owned()));
         }
-        let semantics = name_semantics(source_parent)?;
-        check_name(&super::file_name(&move_.target)?)?;
+        let key =
+            parent_key_cache.entry(source_parent.to_path_buf()).or_insert_with(|| parent_key(source_parent)).clone();
+        let sem = match parent_semantics.get(&key) {
+            Some(found) => *found,
+            None => {
+                let found = name_semantics(source_parent)?;
+                parent_semantics.insert(key.clone(), found);
+                found
+            }
+        };
+        parent_keys.push(key);
+        semantics.push(sem);
+    }
+    // The entries this batch will vacate. One build, then one hash lookup per
+    // occupied target instead of a metadata call against every other move.
+    let mut vacating: HashSet<NameKey> = HashSet::with_capacity(moves.len());
+    for (index, move_) in moves.iter().enumerate() {
+        let name = super::file_name(&move_.source)?;
+        vacating.insert(NameKey {
+            parent: parent_keys[index].clone(),
+            semantics: semantics[index],
+            folded: folded_name(&name, semantics[index]),
+        });
+    }
+    let mut targets = HashSet::with_capacity(moves.len());
+    let mut items = Vec::with_capacity(moves.len());
+    for (index, move_) in moves.iter().enumerate() {
+        let target_name = super::file_name(&move_.target)?;
+        check_name(&target_name)?;
         let current = identity(&move_.source).map_err(io_err(&move_.source))?;
         if !current.same_after_rename(&move_.identity) {
             return Err(OpError::BatchChanged(move_.source.clone()));
         }
-        targets.push((index, parent_key(source_parent), super::file_name(&move_.target)?, semantics));
+        let key = NameKey {
+            parent: parent_keys[index].clone(),
+            semantics: semantics[index],
+            folded: folded_name(&target_name, semantics[index]),
+        };
+        if !targets.insert(key.clone()) {
+            return Err(OpError::InvalidName("two items would get the same name".to_owned()));
+        }
         let target_identity = target_identity(&move_.target)?;
-        if target_identity.is_some()
-            && !same_directory_entry(&move_.source, &move_.target, semantics)
-            && !moves.iter().any(|other| same_directory_entry(&other.source, &move_.target, semantics))
-        {
-            return Err(OpError::NameTaken(move_.target.clone()));
+        if target_identity.is_some() {
+            let source_name = super::file_name(&move_.source)?;
+            if !names_equal(&source_name, &target_name, semantics[index]) && !vacating.contains(&key) {
+                return Err(OpError::NameTaken(move_.target.clone()));
+            }
         }
         items.push(PlannedItem {
             source: Some(move_.source.clone()),
@@ -430,10 +566,6 @@ pub(crate) fn plan_approved_moves(moves: &[BatchRenameEntry]) -> Result<Vec<Plan
             source_identity: Some(move_.identity.clone()),
             target_identity,
         });
-    }
-    let duplicates = duplicate_targets(&targets);
-    if !duplicates.is_empty() {
-        return Err(OpError::InvalidName("two items would get the same name".to_owned()));
     }
     Ok(items)
 }
@@ -621,7 +753,10 @@ fn rollback(
             hook(*index);
         }
         let item = staged.iter().find(|item| item.index == *index).expect("placed item was staged");
-        if rename_no_clobber(&moves[*index].target, &item.staged).is_err() {
+        // Never move a replacement some other writer put at the final name into
+        // our staging. The identity we staged is the item this batch owns.
+        let still_ours = identity(&moves[*index].target).is_ok_and(|current| current.same_object(&item.identity));
+        if !still_ours || rename_no_clobber(&moves[*index].target, &item.staged).is_err() {
             recovery.push(RecoveryItem {
                 original: item.original.clone(),
                 current: item.target.clone(),
@@ -641,7 +776,7 @@ fn rollback(
             recovery.push(RecoveryItem {
                 original: item.original.clone(),
                 current: item.staged.clone(),
-                intended: item.target.clone(),
+                intended: item.original.clone(),
             });
         }
     }

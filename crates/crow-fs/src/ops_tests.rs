@@ -1477,6 +1477,19 @@ fn batch_hard_links_and_unselected_entries_block_targets() {
 }
 
 #[test]
+fn batch_same_entry_through_a_symlinked_parent_is_refused() {
+    let f = Fixture::new("batch-source-alias");
+    f.dir("one");
+    f.file("one/a.txt", "A");
+    let link = f.path("one-link");
+    std::os::unix::fs::symlink("one", &link).unwrap();
+    let inputs = batch_inputs(&[(f.path("one/a.txt"), "x.txt"), (link.join("a.txt"), "y.txt")]);
+    let checked = validate_batch_rename(&inputs, &AtomicBool::new(false)).unwrap();
+    assert!(checked.rows.iter().all(|row| matches!(row, BatchRowState::Invalid(_))), "{:?}", checked.rows);
+    assert!(checked.moves.is_empty(), "the same directory entry is not renamed twice");
+}
+
+#[test]
 fn batch_multiple_parents_folders_packages_and_symlinks() {
     let f = Fixture::new("batch-parents");
     f.file("one/a.txt", "a");
@@ -1624,12 +1637,46 @@ fn batch_blocked_restore_keeps_the_data_and_reports_exact_locations() {
     let OpError::BatchRecovery { items } = &error else { panic!("expected recovery, got {error:?}") };
     assert!(!items.is_empty());
     assert_eq!(std::fs::read_to_string(f.path("a.txt")).unwrap(), "newcomer");
-    let kept = items.iter().find(|item| item.current != f.path("a.txt") || item.original == f.path("a.txt"));
-    assert!(kept.is_some(), "the staged data path is reported: {items:?}");
+    let kept = items.iter().find(|item| item.original == f.path("a.txt")).expect("the staged data path is reported");
+    assert_ne!(kept.current, f.path("a.txt"), "the data is retained in staging");
+    assert_eq!(kept.intended, f.path("a.txt"), "recovery wants the original name, not the planned final one");
     for item in items {
         assert!(item.current.exists(), "reported current path exists: {item:?}");
     }
     assert!(error.to_string().contains("wanted"));
+}
+
+#[test]
+fn batch_rollback_does_not_move_a_replacement_at_the_final_name() {
+    let f = Fixture::new("batch-recovery-target");
+    f.file("a.txt", "A");
+    f.file("b.txt", "B");
+    let moves = batch_moves(&[(f.path("a.txt"), "x.txt"), (f.path("b.txt"), "y.txt")]);
+    let x = f.path("x.txt");
+    let replacement_at = x.clone();
+    let y = f.path("y.txt");
+    let a = f.path("a.txt");
+    let hooks = BatchHooks {
+        before_place: Some(Arc::new(move |index| {
+            if index == 1 {
+                std::fs::write(&y, "external").unwrap();
+            }
+        })),
+        before_restore: Some(Arc::new(move |index| {
+            if index == 0 {
+                std::fs::remove_file(&replacement_at).unwrap();
+                std::fs::write(&replacement_at, "replacement").unwrap();
+            }
+        })),
+        ..Default::default()
+    };
+    let error = execute_batch(&moves, &|| false, &mut |_| {}, &hooks).expect_err("rollback is blocked");
+    let OpError::BatchRecovery { items } = &error else { panic!("expected recovery, got {error:?}") };
+    assert_eq!(std::fs::read_to_string(&x).unwrap(), "replacement", "an unrelated writer keeps its file");
+    assert!(!a.exists(), "the replacement is not moved to the original name");
+    let item = items.iter().find(|item| item.original == a).expect("the changed target is reported");
+    assert_eq!(item.current, x);
+    assert_eq!(item.intended, a);
 }
 
 #[test]
@@ -1688,4 +1735,11 @@ fn batch_blocked_vacating_row_also_blocks_the_row_behind_it() {
     let checked = validate_batch_rename(&inputs, &AtomicBool::new(false)).unwrap();
     assert!(checked.rows.iter().all(|row| matches!(row, BatchRowState::Invalid(_))), "{:?}", checked.rows);
     assert!(checked.moves.is_empty(), "a row that cannot vacate must not leave its dependent ready");
+
+    // The same refusal propagates through a longer chain, not just one hop.
+    f.file("c.txt", "C");
+    let inputs = batch_inputs(&[(f.path("a.txt"), "b.txt"), (f.path("b.txt"), "c.txt"), (f.path("c.txt"), "x.txt")]);
+    let checked = validate_batch_rename(&inputs, &AtomicBool::new(false)).unwrap();
+    assert!(checked.rows.iter().all(|row| matches!(row, BatchRowState::Invalid(_))), "{:?}", checked.rows);
+    assert!(checked.moves.is_empty(), "a blocked tail invalidates every row waiting behind it");
 }

@@ -1486,12 +1486,16 @@ impl SearchView {
             return;
         }
         let query = self.query(cx);
+        let staging = crow_fs::ops::owned_staging_paths();
         let mut changed = false;
         let mut fresh: Vec<Row> = Vec::new();
         let mut fresh_at: HashMap<PathBuf, usize> = HashMap::new();
         let mut fresh_strong = 0usize;
         let mut fresh_others = 0usize;
         for hit in hits {
+            if staging.iter().any(|container| hit.path.starts_with(container)) {
+                continue;
+            }
             // Compute the rank once: the budgets and the row both need it.
             let strong_name = match &hit.kind {
                 HitKind::Name { ranges } => is_strong_name(&hit.path, ranges, &query),
@@ -1591,7 +1595,11 @@ impl SearchView {
     fn add_refresh_hits(&mut self, hits: Vec<Hit>, cx: &mut Context<Self>) {
         let query = self.query(cx);
         let root = (self.scope == Scope::Folder).then_some(self.folder.as_path());
+        let staging = crow_fs::ops::owned_staging_paths();
         for hit in hits {
+            if staging.iter().any(|container| hit.path.starts_with(container)) {
+                continue;
+            }
             if self.seen.contains(&hit.path) {
                 let row = &mut self.results[self.by_path[&hit.path]];
                 if let HitKind::Content { line, text, ranges, .. } = hit.kind
@@ -1750,8 +1758,12 @@ impl SearchView {
         // the client-side pass only has to prove kind and age. Without tags, the
         // hit's tags were never read, and the predicate does not ask for them.
         let known_tags = (!self.predicates.tags.is_empty()).then_some(self.predicates.tags.as_slice());
+        let staging = crow_fs::ops::owned_staging_paths();
         let mut changed = false;
         for hit in hits {
+            if staging.iter().any(|container| hit.path.starts_with(container)) {
+                continue;
+            }
             if !self.predicates.is_empty()
                 && !self.predicates.matches_with_tags(&hit.path, hit.is_dir, hit.modified, self.run_started, known_tags)
             {

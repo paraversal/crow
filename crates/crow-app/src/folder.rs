@@ -887,20 +887,14 @@ impl Folder {
             return;
         }
         let before = self.selection.cursor().cloned();
-        let old_selected: HashSet<PathBuf> = self.selection.iter().cloned().collect();
         self.selection.remap(map);
         // The watcher may have dropped the old names before the terminal event;
         // every target in the approved map was selected at submit. Only this
         // folder's targets belong here (a search batch can span parents).
         let mut selected: Vec<PathBuf> = self.selection.iter().cloned().collect();
-        for (source, target) in map {
+        for target in map.values() {
             if target.parent() != Some(self.dir.as_path()) || selected.contains(target) {
                 continue;
-            }
-            if !old_selected.contains(source)
-                && let Some(entry) = self.entries.iter().find(|entry| &entry.path == source)
-            {
-                Self::add_totals(&mut self.selection_totals, entry);
             }
             selected.push(target.clone());
         }
@@ -915,6 +909,20 @@ impl Folder {
             self.selection.set_cursor(first);
         }
         self.selection.select_all(selected);
+        // Recompute from the rows that exist now. Before the watcher applies the
+        // new names the selected targets are not listed yet, so their bytes are
+        // not counted; that batch then adds each target once. Reusing the old
+        // totals would count a target again when it lands (the old path and the
+        // new one were both counted), and dropping them without this recompute
+        // leaves the totals stale after the watcher wins the race.
+        self.selection_totals = (0, 0);
+        for row in self.rows.iter() {
+            if let Some(entry) = Self::row_entry(row, &self.entries)
+                && self.selection.contains(&entry.path)
+            {
+                Self::add_totals(&mut self.selection_totals, entry);
+            }
+        }
         self.cursor_ix = self.selection.cursor().and_then(|cursor| self.index_of_path(cursor));
         self.selection_changed(cx);
         if before != self.selection.cursor().cloned() {
