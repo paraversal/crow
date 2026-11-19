@@ -3,6 +3,7 @@
 //! Hits stream to the caller in batches; `Control` stops the walk or just the
 //! content reads.
 
+use std::collections::BinaryHeap;
 use std::io;
 use std::ops::Range;
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -21,6 +22,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crow_fs::{ReadDecision, ReadGate, ReadHint};
 
+use crate::predicates::{Kind, MetadataKey, Predicates};
 use crate::rules::RuleSet;
 
 /// Hits are handed to the sink in batches of at most this many. A single file
@@ -106,11 +108,18 @@ impl Batcher {
 pub struct Control {
     cancel: Arc<AtomicBool>,
     stop_contents: Arc<AtomicBool>,
+    parent_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Control {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Let a longer-lived worker stop this search without tying its own lifetime
+    /// to this search's result cap.
+    pub fn with_parent_cancel(cancel: Arc<AtomicBool>) -> Self {
+        Self { parent_cancel: Some(cancel), ..Self::default() }
     }
 
     /// Stop the walk and every read.
@@ -120,6 +129,7 @@ impl Control {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+            || self.parent_cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::Relaxed))
     }
 
     /// The walk's cancel flag, for APIs that take one (Spotlight's `mdfind`).
@@ -157,6 +167,9 @@ pub struct Query {
     /// The app's fresh automatic-read policy. `None` uses the cheap file flags
     /// only (the engine's own tests and the CLI benches).
     pub read_gate: Option<Arc<dyn ReadGate>>,
+    /// Saved-search predicates. Empty for a plain Cmd-F query; evaluated once
+    /// per candidate before any name match or content read.
+    pub predicates: Predicates,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,6 +196,9 @@ pub enum HitKind {
     /// how many further lines matched: the results table shows one excerpt per
     /// file, and carrying every line made huge files produce millions of hits.
     Content { line: u64, text: String, ranges: Vec<Range<usize>>, more: u64 },
+    /// A predicate-only match, with the resolved kind predicate that admitted it
+    /// (if any). The app renders it without a text match.
+    Metadata { kind: Option<Kind> },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -199,6 +215,12 @@ pub struct Summary {
     /// ambiguous cloud symlink) could not be read without hydrating it. Name
     /// hits for these files are still delivered.
     pub cloud_skipped: u64,
+    /// The metadata-only result budget ended the scan; the retained results are
+    /// the deterministic smallest names/paths, and the set may be incomplete.
+    pub capped: bool,
+    /// The walk was cancelled (by the app or a caller). An incomplete run cannot
+    /// prove that previous results have disappeared.
+    pub cancelled: bool,
 }
 
 /// A folder the walk did not enter, and why.
@@ -345,6 +367,7 @@ impl FuzzyMatcher {
 /// checked between entries and matches; cancelling stops the walk, while
 /// stopping contents keeps names streaming.
 pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), control: &Control) -> Summary {
+    let run_started = SystemTime::now();
     let names = query.names.as_deref().filter(|q| !q.is_empty()).map(str::to_owned);
     let contents = query.contents.as_deref().filter(|q| !q.is_empty());
     let content_pattern = match contents {
@@ -354,7 +377,8 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
         },
         None => None,
     };
-    if names.is_none() && content_pattern.is_none() {
+    let metadata_only = names.is_none() && content_pattern.is_none() && !query.predicates.is_empty();
+    if names.is_none() && content_pattern.is_none() && !metadata_only {
         return Summary::default();
     }
 
@@ -367,12 +391,17 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
     let skipped = Arc::new(Mutex::new(Vec::new()));
     let scanned = Arc::new(AtomicU64::new(0));
     let cloud_skipped = Arc::new(AtomicU64::new(0));
+    let metadata_heap = Arc::new(Mutex::new(BinaryHeap::<MetadataEntry>::new()));
+    let metadata_matched = Arc::new(AtomicU64::new(0));
     let walker = build_walker(root, visit_hidden, rules, skipped.clone(), control.clone());
     let (tx, rx) = mpsc::channel::<Vec<Hit>>();
 
     let scanned_thread = scanned.clone();
     let skipped_thread = skipped.clone();
     let cloud_skipped_thread = cloud_skipped.clone();
+    let metadata_thread = metadata_heap.clone();
+    let metadata_matched_thread = metadata_matched.clone();
+    let predicates = query.predicates.clone();
     let read_gate = query.read_gate.clone();
     std::thread::scope(|scope| {
         scope.spawn(move || {
@@ -382,6 +411,9 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                 let scanned = scanned_thread.clone();
                 let skipped = skipped_thread.clone();
                 let cloud_skipped = cloud_skipped_thread.clone();
+                let metadata_heap = metadata_thread.clone();
+                let metadata_matched = metadata_matched_thread.clone();
+                let predicates = predicates.clone();
                 let gate = read_gate.clone();
                 let names = names.clone();
                 let pattern = content_pattern.clone();
@@ -419,13 +451,38 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
                     let hidden = is_hidden(name.as_ref(), metadata.as_ref());
-                    if let Some(fuzzy) = fuzzy.as_mut()
+                    let path = entry.path();
+                    if !predicates.matches(path, is_dir, modified, run_started) {
+                        return WalkState::Continue;
+                    }
+                    if metadata_only {
+                        metadata_matched.fetch_add(1, Ordering::Relaxed);
+                        let hit = Hit {
+                            path: path.to_path_buf(),
+                            is_dir,
+                            hidden,
+                            score: 0,
+                            kind: HitKind::Metadata { kind: predicates.kind.clone() },
+                            modified,
+                            size,
+                        };
+                        if let Ok(mut heap) = metadata_heap.lock() {
+                            heap.push(MetadataEntry { key: MetadataKey::new(path), hit });
+                            // Retain the deterministic smallest results. A later
+                            // candidate can only enter by displacing the largest.
+                            if heap.len() > MAX_METADATA_RESULTS {
+                                heap.pop();
+                            }
+                        }
+                    }
+                    if !metadata_only
+                        && let Some(fuzzy) = fuzzy.as_mut()
                         && let Some((score, ranges)) = fuzzy.indices(name.as_ref())
                     {
                         // Send the name hit before this file's contents are read: a large
                         // file must not delay its own name, or the results that follow it.
                         let _ = tx.send(vec![Hit {
-                            path: entry.path().to_path_buf(),
+                            path: path.to_path_buf(),
                             is_dir,
                             hidden,
                             score,
@@ -440,20 +497,14 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                     let readable = file_type.is_some_and(|kind| kind.is_file())
                         || (file_type.is_some_and(|kind| kind.is_symlink())
                             && std::fs::metadata(entry.path()).is_ok_and(|meta| meta.is_file()));
-                    if let Some(content) = content.as_mut()
+                    if !metadata_only
+                        && let Some(content) = content.as_mut()
                         && readable
                         && !control.contents_stopped()
                     {
                         let mut content_hits = Vec::new();
-                        match content.search(
-                            entry.path(),
-                            modified,
-                            size,
-                            hidden,
-                            &mut content_hits,
-                            &control,
-                            gate.as_deref(),
-                        ) {
+                        match content.search(path, modified, size, hidden, &mut content_hits, &control, gate.as_deref())
+                        {
                             ContentOutcome::Matches(matches) => {
                                 if matches > 1
                                     && let Some(Hit { kind: HitKind::Content { more, .. }, .. }) =
@@ -490,6 +541,20 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                     WalkState::Continue
                 })
             });
+            if metadata_only {
+                // Predicate-only results are ordered after the walk: natural name,
+                // then raw path, with the retained budget deterministic.
+                let hits = metadata_heap
+                    .lock()
+                    .map(|mut heap| std::mem::take(&mut *heap).into_sorted_vec())
+                    .unwrap_or_default();
+                for chunk in hits.chunks(BATCH) {
+                    if control.is_cancelled() {
+                        break;
+                    }
+                    let _ = tx.send(chunk.iter().map(|entry| entry.hit.clone()).collect());
+                }
+            }
         });
 
         let mut batcher = Batcher::new();
@@ -518,12 +583,15 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
 
     let mut skipped = skipped.lock().map(|mut list| std::mem::take(&mut *list)).unwrap_or_default();
     skipped.sort_by(|a, b| a.path.cmp(&b.path));
+    let matched = metadata_matched.load(Ordering::Relaxed);
     Summary {
         scanned: scanned.load(Ordering::Relaxed),
         skipped,
         contents_stopped: control.contents_stopped(),
         error: None,
         cloud_skipped: cloud_skipped.load(Ordering::Relaxed),
+        capped: metadata_only && matched > MAX_METADATA_RESULTS as u64,
+        cancelled: control.is_cancelled(),
     }
 }
 
@@ -566,6 +634,36 @@ fn build_walker(
         });
     builder.build_parallel()
 }
+
+/// A metadata-only hit with its deterministic retention key.
+struct MetadataEntry {
+    key: MetadataKey,
+    hit: Hit,
+}
+
+impl PartialEq for MetadataEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for MetadataEntry {}
+
+impl PartialOrd for MetadataEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MetadataEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
+/// The retained predicate-only result budget. The smallest names/paths survive,
+/// so a capped scan has a deterministic set whatever the walk order.
+pub const MAX_METADATA_RESULTS: usize = 20_000;
 
 /// The same "hidden" the list uses: a dot name, or the macOS Finder hidden
 /// flag (`UF_HIDDEN`) on the metadata the walk already read.
@@ -865,6 +963,7 @@ mod tests {
             rules: rules(),
             everything,
             read_gate: None,
+            predicates: Predicates::default(),
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -890,7 +989,7 @@ mod tests {
         hits.iter()
             .filter_map(|hit| match &hit.kind {
                 HitKind::Content { line, text, ranges, .. } => Some((*line, text.clone(), ranges.clone())),
-                HitKind::Name { .. } => None,
+                HitKind::Name { .. } | HitKind::Metadata { .. } => None,
             })
             .collect()
     }
@@ -899,7 +998,7 @@ mod tests {
         hits.iter()
             .filter_map(|hit| match &hit.kind {
                 HitKind::Content { more, .. } => Some(*more),
-                HitKind::Name { .. } => None,
+                HitKind::Name { .. } | HitKind::Metadata { .. } => None,
             })
             .sum()
     }
@@ -920,6 +1019,101 @@ mod tests {
         write(&root, "dist/out.js", b"needle\n");
         write(&root, "sub/build/notes.txt", b"needle\n");
         root
+    }
+
+    fn set_modified(path: &Path, time: SystemTime) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).expect("open for mtime");
+        file.set_modified(time).expect("set mtime");
+    }
+
+    #[test]
+    fn predicates_reject_before_names_and_content_reads() {
+        let root = root("predicates");
+        write(&root, "mislabeled.pdf", b"needle\n");
+        write(&root, "report.txt", b"needle\n");
+        write(&root, "old.pdf", b"needle\n");
+        write(&root, "future.pdf", b"needle\n");
+        let now = SystemTime::now();
+        set_modified(&root.join("mislabeled.pdf"), now - Duration::from_secs(24 * 60 * 60));
+        set_modified(&root.join("report.txt"), now - Duration::from_secs(24 * 60 * 60));
+        set_modified(&root.join("old.pdf"), now - Duration::from_secs(31 * 24 * 60 * 60));
+        set_modified(&root.join("future.pdf"), now + Duration::from_secs(60 * 60));
+
+        // Metadata only: no text, a kind and an age predicate. The deliberately
+        // mislabeled PDF is a PDF because the cheap classification is by extension.
+        let gate = Arc::new(CountGate(std::sync::atomic::AtomicUsize::new(0)));
+        let query = Query {
+            names: None,
+            contents: None,
+            enter_hidden_folders: false,
+            include_hidden: true,
+            rules: rules(),
+            everything: false,
+            read_gate: Some(gate.clone()),
+            predicates: Predicates { kind: Some(Kind::Pdf), modified_within: Some(Duration::from_secs(30 * 86_400)) },
+        };
+        let control = Control::new();
+        let mut hits = Vec::new();
+        let summary = search(&root, &query, |batch| hits.extend(batch), &control);
+        assert!(summary.error.is_none(), "{:?}", summary.error);
+        assert!(!summary.capped);
+        assert_eq!(paths(&hits), [root.join("mislabeled.pdf")], "age and kind both apply");
+        assert!(
+            hits.iter().all(|hit| matches!(&hit.kind, HitKind::Metadata { kind: Some(Kind::Pdf) })),
+            "a predicate-only hit carries its kind: {:?}",
+            hits.iter().map(|hit| &hit.kind).collect::<Vec<_>>()
+        );
+        assert_eq!(gate.0.load(std::sync::atomic::Ordering::Relaxed), 0, "suppressed contents are never opened");
+
+        // The same predicate with text: mismatching contents are never opened.
+        let gate = Arc::new(CountGate(std::sync::atomic::AtomicUsize::new(0)));
+        let query = Query {
+            names: Some("needle".into()),
+            contents: Some("needle".into()),
+            enter_hidden_folders: false,
+            include_hidden: true,
+            rules: rules(),
+            everything: false,
+            read_gate: Some(gate.clone()),
+            predicates: Predicates { kind: Some(Kind::Pdf), modified_within: Some(Duration::from_secs(30 * 86_400)) },
+        };
+        let mut hits = Vec::new();
+        let summary = search(&root, &query, |batch| hits.extend(batch), &control);
+        assert!(summary.error.is_none(), "{:?}", summary.error);
+        assert_eq!(paths(&hits), [root.join("mislabeled.pdf")], "only the live PDF passes the predicate");
+        assert_eq!(gate.0.load(std::sync::atomic::Ordering::Relaxed), 1, "only the admitted file is opened");
+    }
+
+    #[test]
+    fn predicate_only_matches_are_ordered_by_natural_name_then_path() {
+        let root = root("predicate-order");
+        for name in ["file-10.txt", "file-2.txt", "file-1.txt"] {
+            write(&root, name, b"x");
+        }
+        write(&root, "sub/file-1.txt", b"x");
+        let query = Query {
+            names: None,
+            contents: None,
+            enter_hidden_folders: false,
+            include_hidden: true,
+            rules: rules(),
+            everything: false,
+            read_gate: None,
+            predicates: Predicates { kind: Some(Kind::Text), modified_within: None },
+        };
+        let control = Control::new();
+        let mut hits = Vec::new();
+        let _ = search(&root, &query, |batch| hits.extend(batch), &control);
+        let names: Vec<_> = hits.iter().map(|hit| hit.path.strip_prefix(&root).unwrap().to_path_buf()).collect();
+        assert_eq!(
+            names,
+            [
+                PathBuf::from("file-1.txt"),
+                PathBuf::from("sub/file-1.txt"),
+                PathBuf::from("file-2.txt"),
+                PathBuf::from("file-10.txt"),
+            ]
+        );
     }
 
     #[test]
@@ -975,6 +1169,7 @@ mod tests {
             rules: rules(),
             everything: true,
             read_gate: Some(gate),
+            predicates: Predicates::default(),
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -1005,6 +1200,7 @@ mod tests {
             rules: rules(),
             everything: true,
             read_gate: Some(gate.clone()),
+            predicates: Predicates::default(),
         };
         let control = Control::new();
         let summary = search(&root, &query, |_| {}, &control);
@@ -1133,6 +1329,7 @@ mod tests {
             rules: rules(),
             everything: false,
             read_gate: None,
+            predicates: Predicates::default(),
         };
         let control = Control::new();
         let summary = search(&root, &query, |batch| hits.extend(batch), &control);
@@ -1149,6 +1346,7 @@ mod tests {
             rules: rules(),
             everything: true,
             read_gate: None,
+            predicates: Predicates::default(),
         };
         let summary = search(&root, &query, |batch| hits.extend(batch), &control);
         assert_eq!(paths(&hits), [root.join("visible.txt")], "Search everything keeps dot entries out");
@@ -1335,6 +1533,7 @@ mod tests {
             rules: rules(),
             everything: true,
             read_gate: None,
+            predicates: Predicates::default(),
         };
         let control = Control::new();
         let (tx, rx) = mpsc::channel();
@@ -1366,6 +1565,7 @@ mod tests {
             rules: rules(),
             everything: true,
             read_gate: None,
+            predicates: Predicates::default(),
         };
         let control = Control::new();
         let mut batches: Vec<Vec<bool>> = Vec::new();
@@ -1411,6 +1611,7 @@ mod tests {
             rules: rules(),
             everything: true,
             read_gate: None,
+            predicates: Predicates::default(),
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -1434,6 +1635,7 @@ mod tests {
             rules: rules(),
             everything: true,
             read_gate: None,
+            predicates: Predicates::default(),
         };
         let control = Control::new();
         let mut batches = Vec::new();
@@ -1488,6 +1690,7 @@ mod tests {
             rules: rules(),
             everything: false,
             read_gate: None,
+            predicates: Predicates::default(),
         };
         let control = Control::new();
         control.cancel();
@@ -1511,6 +1714,7 @@ mod tests {
             rules: rules(),
             everything: true,
             read_gate: None,
+            predicates: Predicates::default(),
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -1550,6 +1754,7 @@ mod tests {
             rules: rules(),
             everything: true,
             read_gate: None,
+            predicates: Predicates::default(),
         };
         (root, query)
     }

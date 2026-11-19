@@ -3161,7 +3161,9 @@ fn back_button_tooltip_names_the_folder(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root);
     cx.simulate_keystrokes("cmd-down");
     settle(&view, &mut cx);
-    let back = view.read_with(&cx, |w, cx| w.pane().read(cx).back_target().map(Path::to_path_buf));
+    let back = view.read_with(&cx, |w, cx| {
+        w.pane().read(cx).back_target().and_then(|location| location.as_folder()).map(Path::to_path_buf)
+    });
     assert_eq!(back.as_deref(), Some(&*root), "Back points at the folder we came from");
 
     let bounds = cx.debug_bounds("back").expect("the back button is laid out");
@@ -4447,6 +4449,7 @@ fn search_corpus_matrix(cx: &mut TestAppContext) {
                         rules: rules.clone(),
                         everything,
                         read_gate: None,
+                        predicates: crow_search::Predicates::default(),
                     };
                     let control = Control::new();
                     let mut hits = Vec::new();
@@ -4460,7 +4463,7 @@ fn search_corpus_matrix(cx: &mut TestAppContext) {
                         .map(|hit| {
                             1 + match hit.kind {
                                 HitKind::Content { more, .. } => more as usize,
-                                HitKind::Name { .. } => 0,
+                                HitKind::Name { .. } | HitKind::Metadata { .. } => 0,
                             }
                         })
                         .sum();
@@ -13740,4 +13743,294 @@ fn first_launch_escape_keeps_the_default(cx: &mut TestAppContext) {
     wait_for_file(&mut cx, &onboarding, "\"tips_choice\": true");
     let settings = std::fs::read_to_string(config_dir(&cx).join("settings.toml")).expect("settings");
     assert!(!settings.contains("tips = \"off\""), "Escape writes no setting: {settings}");
+}
+
+// ----- saved searches -----
+
+fn saved_queries_toml(records: &[(&str, &str, &str, Option<&str>)]) -> String {
+    let mut text = String::from("# test saved queries\n");
+    for (id, name, root, kind) in records {
+        text.push_str(&format!(
+            "[[query]]\nid = \"{id}\"\nname = \"{name}\"\nscope = \"folder\"\nroot = \"{root}\"\ntext = \"\"\nmatch = \"names\"\ninclude_hidden = true\nenter_hidden_folders = false\nexclusions = \"configured\"\n"
+        ));
+        if let Some(kind) = kind {
+            text.push_str(&format!("kind = \"{kind}\"\n"));
+        }
+        text.push('\n');
+    }
+    text
+}
+
+fn saved_sidebar_toml(root: &Path) -> String {
+    format!(
+        "[[group]]\nname = \"Favorites\"\nitems = [{{ path = \"{}\" }}]\n[recent]\nshow = false\n[sections]\norder = [\"saved-queries\"]\n",
+        root.display()
+    )
+}
+
+fn wait_for_pane_search(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        let busy = pane(view, cx)
+            .read_with(cx, |pane, cx| pane.saved_session().is_some_and(|search| search.read(cx).is_searching()));
+        if !busy {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("saved-query search never finished");
+}
+
+#[gpui::test]
+fn saved_query_is_a_destination_with_history_and_results(cx: &mut TestAppContext) {
+    let root = fixture("saved-query-destination");
+    std::fs::write(root.join("doc.pdf"), b"x").expect("write pdf");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &saved_sidebar_toml(&root));
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &saved_queries_toml(&[("pdfs", "PDFs", &root.display().to_string(), Some("pdf"))]),
+    );
+
+    // Down onto the saved row only moves the sidebar cursor; it does not start a
+    // result session while passing over the virtual destination.
+    cx.simulate_keystrokes("tab down down");
+    settle(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::Folder(root.to_path_buf()),
+        "an arrow over a saved row does not navigate"
+    );
+    assert!(pane(&view, &cx).read_with(&cx, |pane, _| pane.saved_session().is_none()));
+
+    cx.simulate_keystrokes("enter");
+    wait_for_pane_search(&view, &mut cx);
+    let id = crow_core::SavedQueryId::new("pdfs").unwrap();
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::SavedQuery(id.clone())
+    );
+    let paths =
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.saved_session().expect("a session").read(cx).result_paths());
+    assert_eq!(paths, [root.join("doc.pdf")], "only the PDF passes the predicate");
+    let state = bar_state(&view, &mut cx);
+    assert_eq!(state.path.parts.last().map(|(name, _)| name.as_str()), Some("doc.pdf"));
+    let title = pane(&view, &cx)
+        .read_with(&cx, |pane, _| pane.saved_session())
+        .expect("session")
+        .read_with(&cx, |search, _| search.title().to_owned());
+    assert_eq!(title, "PDFs", "the destination title names the session");
+
+    // Back returns to the folder; Forward restores the same saved destination and
+    // its retained result session.
+    cx.simulate_keystrokes("cmd-[");
+    settle(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::Folder(root.to_path_buf())
+    );
+    cx.simulate_keystrokes("cmd-]");
+    // A watcher notification reruns the visible destination and keeps its path.
+    pane(&view, &cx)
+        .read_with(&cx, |pane, _| pane.saved_session())
+        .expect("session")
+        .update(&mut cx, |search, cx| search.mark_dirty(cx));
+    wait_for_pane_search(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::SavedQuery(id)
+    );
+
+    // Cmd-F refocuses the destination's own field instead of opening the overlay.
+    cx.simulate_keystrokes("cmd-f");
+    assert!(view.read_with(&cx, |w, _| w.search.is_none()), "no transient overlay over a destination");
+    cx.simulate_keystrokes("escape");
+    assert!(
+        matches!(
+            pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+            crow_core::Location::SavedQuery(_)
+        ),
+        "Escape leaves Q as the tab's location"
+    );
+}
+
+#[gpui::test]
+fn saved_query_updates_externally_and_removal_shows_unavailable(cx: &mut TestAppContext) {
+    let root = fixture("saved-query-update");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &saved_sidebar_toml(&root));
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &saved_queries_toml(&[("docs", "Documents", &root.display().to_string(), Some("text"))]),
+    );
+    cx.simulate_keystrokes("tab down down enter");
+    wait_for_pane_search(&view, &mut cx);
+    let paths = pane(&view, &cx)
+        .read_with(&cx, |pane, _| pane.saved_session())
+        .expect("session")
+        .read_with(&cx, |search, _| search.result_paths());
+    assert!(paths.iter().any(|path| path.ends_with("notes.txt")), "{paths:?}");
+
+    // An external title edit replaces the stored spec and refreshes the tab title.
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &saved_queries_toml(&[("docs", "Renamed", &root.display().to_string(), Some("text"))]),
+    );
+    wait_for_pane_search(&view, &mut cx);
+    let title = pane(&view, &cx)
+        .read_with(&cx, |pane, _| pane.saved_session())
+        .expect("session")
+        .read_with(&cx, |search, _| search.title().to_owned());
+    assert_eq!(title, "Renamed");
+
+    // Back to the folder, remove the record, then visit the id from Forward: the
+    // destination stays an unavailable saved-query location, never a fake path.
+    cx.simulate_keystrokes("cmd-[");
+    settle(&view, &mut cx);
+    write_config(&view, &mut cx, "saved-queries.toml", "# none\n");
+    cx.simulate_keystrokes("cmd-]");
+    settle(&view, &mut cx);
+    assert!(matches!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::SavedQuery(_)
+    ));
+    assert!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.saved_unavailable(cx)).is_some(),
+        "a removed id shows an unavailable destination"
+    );
+}
+
+#[gpui::test]
+fn save_search_writes_the_record_and_keeps_the_live_search(cx: &mut TestAppContext) {
+    let root = fixture("save-search");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    let window = cx.update(|_, cx| cx.windows()[0]);
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |this, cx| this.save_search(&SaveSearch, window, cx));
+    })
+    .expect("open the save form");
+    assert!(view.read_with(&cx, |w, _| matches!(w.sheet, Some(Sheet::SavedQuery(_)))));
+
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |this, cx| this.confirm_saved_query_form(window, cx));
+    })
+    .expect("save the form");
+    for _ in 0..200 {
+        cx.run_until_parked();
+        let path = config_dir(&cx).join("saved-queries.toml");
+        if std::fs::read_to_string(&path).is_ok_and(|text| text.contains("[[query]]")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let text = std::fs::read_to_string(config_dir(&cx).join("saved-queries.toml")).unwrap();
+    assert!(text.contains("name = \"notes\""), "{text}");
+    assert!(text.contains("kind = \"") || text.contains("modified_within_days"), "{text}");
+    assert!(view.read_with(&cx, |w, _| w.search.is_some()), "saving from Cmd-F leaves the live search open");
+    assert!(!view.read_with(&cx, |w, _| w.sheet.is_some()), "the form closes after a successful save");
+}
+
+#[gpui::test]
+fn two_tabs_keep_their_own_saved_destination_sessions(cx: &mut TestAppContext) {
+    let root = fixture("saved-query-two-tabs");
+    std::fs::write(root.join("doc.pdf"), b"x").expect("write pdf");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &saved_sidebar_toml(&root));
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &saved_queries_toml(&[("pdfs", "PDFs", &root.display().to_string(), Some("pdf"))]),
+    );
+    cx.simulate_keystrokes("tab down down enter");
+    wait_for_pane_search(&view, &mut cx);
+    let id = crow_core::SavedQueryId::new("pdfs").unwrap();
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::SavedQuery(id.clone())
+    );
+
+    // A second tab starts at the folder and gets its own session for the same id.
+    cx.simulate_keystrokes("cmd-t");
+    settle(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::Folder(root.to_path_buf())
+    );
+    cx.simulate_keystrokes("tab down down enter");
+    wait_for_pane_search(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::SavedQuery(id.clone())
+    );
+
+    // Switching tabs leaves each tab's destination and result session intact.
+    cx.simulate_keystrokes("cmd-shift-[");
+    settle(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::SavedQuery(id.clone())
+    );
+    cx.simulate_keystrokes("cmd-shift-]");
+    wait_for_pane_search(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::SavedQuery(id)
+    );
+}
+
+#[gpui::test]
+fn saved_sidebar_rows_open_independently_by_mouse_and_keyboard(cx: &mut TestAppContext) {
+    let root = fixture("saved-query-sidebar-activation");
+    std::fs::write(root.join("doc.pdf"), b"x").expect("write pdf");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &saved_sidebar_toml(&root));
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &saved_queries_toml(&[
+            ("pdfs", "PDFs", &root.display().to_string(), Some("pdf")),
+            ("text", "Text", &root.display().to_string(), Some("text")),
+        ]),
+    );
+    wait_for_selector(&view, &mut cx, "sidebar-3");
+    click_selector(&mut cx, "sidebar-2");
+    wait_for_pane_search(&view, &mut cx);
+    let active_id =
+        |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |pane, _| pane.location().saved_query_id().cloned());
+    assert_eq!(active_id(&cx).unwrap().as_str(), "pdfs");
+    click_selector(&mut cx, "sidebar-3");
+    wait_for_pane_search(&view, &mut cx);
+    assert_eq!(active_id(&cx).unwrap().as_str(), "text");
+
+    cx.simulate_keystrokes("cmd-f tab tab up");
+    assert_eq!(active_id(&cx).unwrap().as_str(), "text", "an arrow alone never opens a query");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    wait_for_pane_search(&view, &mut cx);
+    assert_eq!(active_id(&cx).unwrap().as_str(), "pdfs");
+}
+
+#[gpui::test]
+fn clearing_search_clears_the_result_selection(cx: &mut TestAppContext) {
+    let root = fixture("search-clear-selection");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search");
+    assert!(!search.read_with(&cx, |search, _| search.result_paths()).is_empty());
+    cx.simulate_keystrokes("cmd-f cmd-backspace");
+    assert!(search.read_with(&cx, |search, _| search.result_paths()).is_empty());
+    assert!(search.read_with(&cx, |search, _| search.selected_entry()).is_none());
 }

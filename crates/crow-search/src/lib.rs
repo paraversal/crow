@@ -3,6 +3,7 @@
 //! sentinel files).
 
 mod engine;
+mod predicates;
 mod rules;
 
 pub mod corpus;
@@ -10,7 +11,8 @@ pub mod corpus;
 #[cfg(test)]
 mod oracle_tests;
 
-pub use engine::{Control, FuzzyMatcher, Hit, HitKind, Query, Skip, SkipReason, Summary, search};
+pub use engine::{Control, FuzzyMatcher, Hit, HitKind, MAX_METADATA_RESULTS, Query, Skip, SkipReason, Summary, search};
+pub use predicates::{Kind, Predicates};
 pub use rules::RuleSet;
 
 /// Owned temporary trees for tests: `CleanTree` also restores mode-000 folders

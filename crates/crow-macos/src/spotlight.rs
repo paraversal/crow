@@ -2,6 +2,7 @@
 //! stats each result on the calling (background) thread; killing the child
 //! stops the query. Spotlight only sees indexed volumes, which the UI says.
 
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -18,19 +19,58 @@ pub struct SpotlightHit {
     pub size: u64,
 }
 
+/// A metadata predicate Spotlight can answer for an empty text query. Kind is
+/// decided by the content type tree (or an exact name suffix); the age upper
+/// bound excludes future modification dates, which the engine predicate also
+/// rejects client-side.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpotlightPredicate {
+    pub content_type: Option<&'static str>,
+    pub extension: Option<String>,
+    pub modified_within_secs: Option<u64>,
+}
+
+impl SpotlightPredicate {
+    /// The raw `mdfind` query, or `None` when nothing narrows the scan.
+    pub fn expression(&self) -> Option<String> {
+        let mut conditions: Vec<String> = Vec::new();
+        if let Some(content_type) = self.content_type {
+            conditions.push(format!("kMDItemContentTypeTree == \"{content_type}\""));
+        }
+        if let Some(extension) = &self.extension {
+            conditions.push(format!("kMDItemFSName == \"*.{extension}\"cd"));
+        }
+        if let Some(seconds) = self.modified_within_secs {
+            conditions.push(format!(
+                "kMDItemFSContentChangeDate >= $time.now(-{seconds}) && kMDItemFSContentChangeDate <= $time.now(0)"
+            ));
+        }
+        (!conditions.is_empty()).then(|| conditions.join(" && "))
+    }
+}
+
 /// Run `mdfind -name query`, sending hits in batches. Returns an error only when
 /// Spotlight itself fails; no results is success.
-pub fn spotlight_names(
-    query: &str,
-    mut sink: impl FnMut(Vec<SpotlightHit>),
+pub fn spotlight_names(query: &str, sink: impl FnMut(Vec<SpotlightHit>), cancel: &AtomicBool) -> Result<(), String> {
+    run_mdfind(vec![OsString::from("-name"), OsString::from(query)], sink, cancel)
+}
+
+/// Run a raw metadata-only `mdfind` expression (no `-name`), for an empty text
+/// query with kind/age predicates.
+pub fn spotlight_expression(
+    expression: &str,
+    sink: impl FnMut(Vec<SpotlightHit>),
     cancel: &AtomicBool,
 ) -> Result<(), String> {
+    run_mdfind(vec![OsString::from(expression)], sink, cancel)
+}
+
+fn run_mdfind(args: Vec<OsString>, mut sink: impl FnMut(Vec<SpotlightHit>), cancel: &AtomicBool) -> Result<(), String> {
     if cancel.load(Ordering::Relaxed) {
         return Ok(());
     }
     let mut child = Command::new("mdfind")
-        .arg("-name")
-        .arg(query)
+        .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

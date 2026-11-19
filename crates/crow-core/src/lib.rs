@@ -7,11 +7,13 @@ mod extensions;
 mod grid;
 mod history;
 pub mod icon_pack;
+mod location;
 pub mod motion;
 mod onboarding;
 mod paths;
 mod recent;
 mod recent_commands;
+mod saved_queries;
 mod selection;
 mod settings;
 mod sidebar;
@@ -35,10 +37,15 @@ pub use icon_pack::{
     ICON_PACK_API, IconColor, IconEntry, IconPack, MAX_ASSET_REF_BYTES, MAX_GLYPH_BYTES, MAX_GLYPHS, MAX_PACK_BYTES,
     NATIVE_ICON_SOURCE, is_native, validate_asset_ref, validate_source, validate_svg,
 };
+pub use location::Location;
 pub use onboarding::{ONBOARDING_FILE, OnboardingState};
 pub use paths::{clean_pasted_path, complete_typed, resolve_typed};
 pub use recent::{Recent, parse_zoxide, query_zoxide};
 pub use recent_commands::RecentCommands;
+pub use saved_queries::{
+    DEFAULT_SAVED_QUERIES, SavedExclusions, SavedKind, SavedMatch, SavedQueries, SavedQuery, SavedQueryId, SavedScope,
+    TagId, load_saved_queries, remove_saved_query, save_saved_query, saved_queries_path,
+};
 pub use selection::{Selection, TypeSelect};
 pub use settings::{
     AppIcon, DEFAULT_SETTINGS, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, SearchMatch, Settings,

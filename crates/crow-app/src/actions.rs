@@ -178,6 +178,13 @@ actions!(
         SearchFocusResults,
         /// ↑ on the first result: back to the search field.
         SearchFocusField,
+        /// File ▸ Save Search…: write the open search (or the active saved one)
+        /// as a saved query.
+        SaveSearch,
+        /// The sidebar's saved-query row: edit its record.
+        EditSavedSearch,
+        /// The sidebar's saved-query row: remove its record.
+        RemoveSavedSearch,
         // Window
         NewTab,
         CloseTab,

@@ -53,7 +53,7 @@ macOS privacy prompts naming Crow.
 
 ## Configuration
 
-Five files in `~/.config/crow/`, each created on first launch with every option documented.
+Six files in `~/.config/crow/`, each created on first launch with every option documented.
 Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
@@ -63,10 +63,11 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), whether Recent and Locations show, the order/visibility/collapse state of built-in and plugin sections, and `[projects] roots`, the folders the Projects section scans for Git repositories |
 | `plugins.toml` | One approval record per plugin, including the bundled Git package: `enabled`, package `digest` and the API-1 `fs` capability. Installed bundles live in `plugins/`; see [docs/plugins.md](docs/plugins.md). |
 | `exclude.toml` | Folders search skips, in named sets: `dev` is on by default (`node_modules`, `target` beside `Cargo.toml`, `.git`, `build`/`dist` beside manifests, …); `dependencies`, `media`, `hidden` and `system` are off until enabled. The search footer counts results and files, and lists each skipped folder with the rule that skipped it. |
+| `saved-queries.toml` | Live search destinations in the sidebar: `[[query]]` records with a stable `id`, `name`, `scope` (`folder`, `home` or `this-mac`), `root` for a folder, `text`, `match`, both hidden booleans, `exclusions` (`configured` or `everything`), and optional `kind` and `modified_within_days` predicates. Predicates combine with AND; an empty text is allowed when a predicate can produce results. The File menu, Cmd-F and the palette save the open search, and a saved row can be edited or removed from its context menu. Settings ▸ Search lists saved queries and lets you create, edit or remove them. |
 
 ⌘, (or Crow ▸ Settings…) opens one resizable Settings window with a category sidebar: Appearance, Behaviour, Views & Preview, Search, Plugins and Config Files. A new window opens in the last category you chose, and the sidebar stays visible while the page scrolls. Search Settings (⌘F) finds controls across categories by name, natural aliases ("Vim", "hidden", "icon pack") or exact TOML keys; matching controls render in place and edit the same file the category page would.
 
-The preference controls edit `settings.toml`: the file stays the single source of truth, every change writes just that key (comments survive), and edits made in a text editor appear in the window. Views & Preview writes `[defaults]` in `views.toml` for the default view, sort key, direction and folders-first, and edits the preview-provider list at the defaults, folder or path-rule layer. A saved direction stays when you change only the sort key; Natural removes the key again. Preview providers in a folder or rule layer inherit when the layer has no key, and an explicit empty list means Native only. Plugins writes the approval records in `plugins.toml` and opens the bundle folder and grants file. Config Files opens all five TOML files and reveals the config folder in Finder. A broken file adds a row naming it (and the line) with an Open button; only controls that write that file are disabled. ⌘K's "Settings" opens the window and "Edit settings.toml" opens the file directly.
+The preference controls edit `settings.toml`: the file stays the single source of truth, every change writes just that key (comments survive), and edits made in a text editor appear in the window. Views & Preview writes `[defaults]` in `views.toml` for the default view, sort key, direction and folders-first, and edits the preview-provider list at the defaults, folder or path-rule layer. A saved direction stays when you change only the sort key; Natural removes the key again. Preview providers in a folder or rule layer inherit when the layer has no key, and an explicit empty list means Native only. Plugins writes the approval records in `plugins.toml` and opens the bundle folder and grants file. Config Files opens all six TOML files and reveals the config folder in Finder. A broken file adds a row naming it (and the line) with an Open button; only controls that write that file are disabled. ⌘K's "Settings" opens the window and "Edit settings.toml" opens the file directly.
 
 Icon packs are data-only. A local pack is `icon-packs/<id>/pack.toml` under the config folder, with its SVGs beside it; Settings ▸ Appearance ▸ Icon pack selects it (the list also keeps a saved pack that is no longer installed visible), and an `icon_source` in any `views.toml` layer overrides the choice for that folder. A pack maps exact item paths, file names, folder names, extensions, UTType identifiers and generic files/folders to a local SVG and a theme role or palette hue (`base08`–`base0F`, `base12`–`base17`). Plugin packs use their `<plugin-id>.<pack-id>` name and [docs/plugins.md](docs/plugins.md) documents their manifest route. Packs load off the main thread; an invalid pack keeps the last good icons and shows the error, and removing a pack falls back to native icons while keeping the setting. Why This View (⌘J) names the winning source.
 
@@ -189,6 +190,9 @@ line under the name, and the footer counts results and files and lists what was 
 to the folder). With nothing typed, four examples fill the field. The right preview follows the
 selected result in list and column view, at the hit line for content hits. Return in the field moves to the
 first result; results open with Return, reveal with Cmd-R, Quick Look with Space, and take the usual copy, cut and trash keys.
+File ▸ Save Search… (also in Cmd-K) writes the open search to `saved-queries.toml`; saved searches are live
+sidebar destinations with their own result list, and Cmd-F inside one edits its temporary query without
+changing the saved record. The sidebar row's context menu edits or removes it.
 
 ## Keys
 

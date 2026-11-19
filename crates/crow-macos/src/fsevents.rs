@@ -147,6 +147,17 @@ pub fn watch(
     latency: Duration,
     on_events: impl Fn(Vec<Event>) + Send + Sync + 'static,
 ) -> Option<FsEvents> {
+    watch_under("/", since, latency, on_events)
+}
+
+/// Watch a folder and its descendants. The stream reports changes to the root
+/// itself as well as changes inside it.
+pub fn watch_under(
+    root: &str,
+    since: u64,
+    latency: Duration,
+    on_events: impl Fn(Vec<Event>) + Send + Sync + 'static,
+) -> Option<FsEvents> {
     let callback = Arc::new(Callback { on_events: Box::new(on_events) });
     let context = Arc::into_raw(callback) as *mut c_void;
     let mut stream_context = objc2_core_services::FSEventStreamContext {
@@ -156,7 +167,7 @@ pub fn watch(
         release: None,
         copyDescription: None,
     };
-    let root = CFString::from_str("/");
+    let root = CFString::from_str(root);
     let paths = CFArray::from_objects(&[&*root]);
     // SAFETY: a CFArray<CFString> is a CFArray; the stream only reads it.
     let paths: objc2_core_foundation::CFRetained<CFArray> =
@@ -180,7 +191,7 @@ pub fn watch(
         unsafe { drop(Arc::from_raw(context.cast::<Callback>())) };
         return None;
     }
-    let queue = DispatchQueue::new("crow.folder-sizes", None);
+    let queue = DispatchQueue::new("crow.fsevents", None);
     // SAFETY: the stream is valid and the queue is retained by this struct.
     unsafe { FSEventStreamSetDispatchQueue(stream, Some(&queue)) };
     // SAFETY: the stream is valid and has a dispatch queue.

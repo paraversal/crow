@@ -291,6 +291,14 @@ pub(super) const UNITS: &[Unit] = &[
         &[ControlId::SearchMatch],
     ),
     unit(
+        ControlId::SavedQueryList,
+        Category::Search,
+        "Saved Queries",
+        &["saved searches", "new saved query", "smart folders"],
+        &["saved-queries.toml"],
+        &[ControlId::NewSavedQuery, ControlId::SavedQueryList],
+    ),
+    unit(
         ControlId::Plugins,
         Category::Plugins,
         "Plugins",

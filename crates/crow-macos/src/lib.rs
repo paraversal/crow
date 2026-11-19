@@ -23,13 +23,13 @@ pub use context_menu::{ContextMenuEntry, MenuShortcut, show_context_menu};
 pub use drag::{ComboDrag, begin_drag, remember_mouse_down};
 pub use files::{SystemTrash, open_path, pasteboard_change_count, read_file_urls, write_file_urls};
 pub use fonts::available_font_families;
-pub use fsevents::{Event, EventFlags, FsEvents, current_event_id, volume_uuid, watch};
+pub use fsevents::{Event, EventFlags, FsEvents, current_event_id, volume_uuid, watch, watch_under};
 pub use icons::{icon_png, type_icon_png};
 pub use metadata::{Permissions, kind_name, permissions, tags, thumbnail_png, type_identifiers};
 pub use names::display_components;
 pub use quick_look::{QuickLookKey, set_quick_look_key_handler, toggle_quick_look, update_quick_look};
 pub use sound::{Sound, beep, play, preload, set_volume, stop, ui_sounds_enabled};
-pub use spotlight::{SpotlightHit, spotlight_names};
+pub use spotlight::{SpotlightHit, SpotlightPredicate, spotlight_expression, spotlight_names};
 pub use volumes::{MountWatcher, Volume, eject, reduce_motion, volumes, watch_mounts};
 
 use objc2::MainThreadMarker;

@@ -33,6 +33,7 @@ use crate::ui::{self, SettingChange, Ui};
 
 mod catalog;
 mod preview;
+mod saved_queries;
 mod search;
 use catalog::Category;
 
@@ -86,6 +87,9 @@ pub fn keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-f", FocusSearch, settings),
         KeyBinding::new("cmd-,", OpenSettings, settings),
     ]
+    .into_iter()
+    .chain(crate::window::saved_query_form::keymap())
+    .collect()
 }
 
 /// Open the one Settings window, or bring it to the front and focus its first
@@ -164,6 +168,8 @@ enum ControlId {
     ShowHidden,
     SearchHidden,
     SearchMatch,
+    SavedQueryList,
+    NewSavedQuery,
     ShowPreview,
     ViewPerFolder,
     PaletteRecent,
@@ -195,12 +201,13 @@ enum ControlId {
     OpenViewsToml,
     OpenExcludeToml,
     OpenPluginsToml,
+    OpenSavedQueriesToml,
 }
 
 impl ControlId {
     /// Every control, used to build focus handles. Reading order comes from
     /// `catalog::units`, so a category can be reordered without touching this.
-    const ALL: [ControlId; 45] = [
+    const ALL: [ControlId; 48] = [
         ControlId::Theme,
         ControlId::AppIcon,
         ControlId::IconPack,
@@ -239,6 +246,8 @@ impl ControlId {
         ControlId::ViewPerFolder,
         ControlId::SearchHidden,
         ControlId::SearchMatch,
+        ControlId::SavedQueryList,
+        ControlId::NewSavedQuery,
         ControlId::Plugins,
         ControlId::EditSettings,
         ControlId::ShowConfig,
@@ -246,6 +255,7 @@ impl ControlId {
         ControlId::OpenViewsToml,
         ControlId::OpenExcludeToml,
         ControlId::OpenPluginsToml,
+        ControlId::OpenSavedQueriesToml,
     ];
 
     fn key(self) -> &'static str {
@@ -264,6 +274,8 @@ impl ControlId {
             ControlId::ShowHidden => "settings-show-hidden",
             ControlId::SearchHidden => "settings-search-hidden",
             ControlId::SearchMatch => "settings-search-match",
+            ControlId::SavedQueryList => "settings-saved-query-list",
+            ControlId::NewSavedQuery => "settings-new-saved-query",
             ControlId::ShowPreview => "settings-show-preview",
             ControlId::ViewPerFolder => "settings-view-per-folder",
             ControlId::PaletteRecent => "settings-palette-recent",
@@ -295,6 +307,7 @@ impl ControlId {
             ControlId::OpenViewsToml => "settings-open-views",
             ControlId::OpenExcludeToml => "settings-open-exclude",
             ControlId::OpenPluginsToml => "settings-open-plugins",
+            ControlId::OpenSavedQueriesToml => "settings-open-saved-queries",
         }
     }
 
@@ -352,6 +365,8 @@ impl ControlId {
             ControlId::ShowHidden => "Show hidden files",
             ControlId::SearchHidden => "Search always includes hidden files",
             ControlId::SearchMatch => "Search matches",
+            ControlId::SavedQueryList => "Saved Queries",
+            ControlId::NewSavedQuery => "New Saved Query…",
             ControlId::ShowPreview => "Show preview",
             ControlId::ViewPerFolder => "Folders keep their own view",
             ControlId::PaletteRecent => "Remember recent commands in ⌘K",
@@ -383,6 +398,7 @@ impl ControlId {
             ControlId::OpenViewsToml => "views.toml",
             ControlId::OpenExcludeToml => "exclude.toml",
             ControlId::OpenPluginsToml => "plugins.toml",
+            ControlId::OpenSavedQueriesToml => "saved-queries.toml",
         }
     }
 
@@ -415,14 +431,16 @@ impl ControlId {
             | ControlId::DefaultFoldersFirst => Role::Switch,
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => Role::SpinButton,
             ControlId::Terminal | ControlId::PreviewRulePattern => Role::TextInput,
-            ControlId::Plugins | ControlId::PreviewList => Role::ListBox,
+            ControlId::Plugins | ControlId::PreviewList | ControlId::SavedQueryList => Role::ListBox,
             ControlId::PlaySound
+            | ControlId::NewSavedQuery
             | ControlId::EditSettings
             | ControlId::ShowConfig
             | ControlId::OpenSidebarToml
             | ControlId::OpenViewsToml
             | ControlId::OpenExcludeToml
             | ControlId::OpenPluginsToml
+            | ControlId::OpenSavedQueriesToml
             | ControlId::PreviewCurrentFolder
             | ControlId::PreviewChooseFolder
             | ControlId::PreviewAddRule
@@ -455,6 +473,7 @@ impl ControlId {
                 "Find dot items while Show hidden files is off; Go to ranks them after visible matches."
             }
             ControlId::SearchMatch => "What each new Find looks for; the panel's control changes the open search.",
+            ControlId::SavedQueryList | ControlId::NewSavedQuery => return None,
             ControlId::ShowPreview => "The right column's default in list and column view: Preview and Info tabs.",
             ControlId::ViewPerFolder => "Each folder opens in its saved view; off keeps the window's view.",
             ControlId::PaletteRecent => "List the commands you ran from ⌘K under Recently used.",
@@ -523,8 +542,11 @@ impl ControlId {
             ControlId::Plugins => return None,
             ControlId::EditSettings => "Open settings.toml in its default app.",
             ControlId::ShowConfig => "Open ~/.config/crow in Finder.",
-            ControlId::OpenSidebarToml | ControlId::OpenViewsToml | ControlId::OpenExcludeToml => return None,
-            ControlId::OpenPluginsToml => return None,
+            ControlId::OpenSidebarToml
+            | ControlId::OpenViewsToml
+            | ControlId::OpenExcludeToml
+            | ControlId::OpenPluginsToml
+            | ControlId::OpenSavedQueriesToml => return None,
         };
         Some(text.into())
     }
@@ -541,7 +563,10 @@ impl ControlId {
             | ControlId::OpenSidebarToml
             | ControlId::OpenViewsToml
             | ControlId::OpenExcludeToml
-            | ControlId::OpenPluginsToml => true,
+            | ControlId::OpenPluginsToml
+            | ControlId::OpenSavedQueriesToml => true,
+            ControlId::SavedQueryList => !ui.saved_queries.is_empty() && ui.file_error("saved-queries.toml").is_none(),
+            ControlId::NewSavedQuery => ui.file_error("saved-queries.toml").is_none(),
             ControlId::DefaultView
             | ControlId::DefaultSort
             | ControlId::DefaultDirection
@@ -680,7 +705,8 @@ enum FocusTarget {
 
 /// The files the error region covers. `plugins.toml` comes from the plugin
 /// inventory; the other four from the config loader.
-const ERROR_FILES: [&str; 5] = ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml", "plugins.toml"];
+const ERROR_FILES: [&str; 6] =
+    ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml", "plugins.toml", "saved-queries.toml"];
 
 /// The preview editor's layer. The target within the layer is kept while the
 /// editor is on screen.
@@ -766,6 +792,9 @@ pub struct SettingsWindow {
     preview_add_type_ahead: TypeAhead,
     preview_message: Option<SharedString>,
     preview_picker_pending: bool,
+    saved_query_selection: Option<crow_core::SavedQueryId>,
+    saved_query_scroll: ScrollHandle,
+    saved_query_form: Option<Box<crate::window::saved_query_form::SavedQueryForm>>,
     content_motion: Option<ContentMotion>,
     /// The drop-down whose menu is open.
     menu: Option<ControlId>,
@@ -988,6 +1017,9 @@ impl SettingsWindow {
             preview_add_type_ahead: TypeAhead::default(),
             preview_message: None,
             preview_picker_pending: false,
+            saved_query_selection: None,
+            saved_query_scroll: ScrollHandle::new(),
+            saved_query_form: None,
             content_motion: None,
             menu: None,
             dismissed_by_mouse: None,
@@ -1230,7 +1262,8 @@ impl SettingsWindow {
 
     /// ⌘, on an open window brings it forward without stealing valid focus.
     fn focus_first(&self, window: &mut Window, cx: &mut App) {
-        if self.sidebar_focused(window)
+        if self.saved_query_form.is_some()
+            || self.sidebar_focused(window)
             || self.search_handle(cx).is_focused(window)
             || self.clear_search.is_focused(window)
             || self.focused_control(window).is_some()
@@ -1437,6 +1470,9 @@ impl SettingsWindow {
     }
 
     fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saved_query_form.is_some() {
+            return;
+        }
         let input = self.search.clone();
         let len = input.read(cx).text().len();
         input.update(cx, |input, cx| input.select_range(0..len, window, cx));
@@ -1499,11 +1535,18 @@ impl SettingsWindow {
             ControlId::PlaySound => crate::feedback::play(Event::Trash, cx),
             ControlId::EditSettings => ui::edit_settings_file(cx),
             ControlId::Plugins => self.activate_plugin(cx),
+            ControlId::NewSavedQuery => self.open_saved_query_editor(None, window, cx),
+            ControlId::SavedQueryList => {
+                if let Some(id) = self.selected_saved_query(cx).cloned() {
+                    self.open_saved_query_editor(Some(id), window, cx);
+                }
+            }
             ControlId::ShowConfig => ui::open_config_folder(cx),
             ControlId::OpenSidebarToml => ui::open_config_file("sidebar.toml", cx),
             ControlId::OpenViewsToml => ui::open_config_file("views.toml", cx),
             ControlId::OpenExcludeToml => ui::open_config_file("exclude.toml", cx),
             ControlId::OpenPluginsToml => ui::open_config_file("plugins.toml", cx),
+            ControlId::OpenSavedQueriesToml => ui::open_config_file("saved-queries.toml", cx),
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => {
                 self.commit_stepper(id, window, cx);
             }
@@ -1593,6 +1636,7 @@ impl SettingsWindow {
                 self.adjust_stepper(id, -(delta as f64), window, cx);
             }
             ControlId::Plugins => self.move_plugin_cursor(delta, cx),
+            ControlId::SavedQueryList => self.move_saved_query_cursor(delta, cx),
             _ => {}
         }
     }
@@ -2195,7 +2239,9 @@ impl SettingsWindow {
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.is_some() {
+        if self.saved_query_form.is_some() {
+            self.close_saved_query_editor(window, cx);
+        } else if self.menu.is_some() {
             self.close_menu(window, cx);
         } else if !self.query.is_empty() {
             self.clear_query(true, window, cx);
@@ -2628,13 +2674,14 @@ impl Render for SettingsWindow {
             .child(link(self, ControlId::OpenSidebarToml, "sidebar.toml", window, &theme, cx))
             .child(link(self, ControlId::OpenExcludeToml, "exclude.toml", window, &theme, cx))
             .child(link(self, ControlId::OpenPluginsToml, "plugins.toml", window, &theme, cx))
+            .child(link(self, ControlId::OpenSavedQueriesToml, "saved-queries.toml", window, &theme, cx))
             .child(show_config);
         let config_row = controls::labeled(
             ControlMeta {
                 id: "settings-config-files",
                 label: "Config files",
                 description: Some(
-                    "The five TOML files stay authoritative and editable; Crow writes back only the key you change."
+                    "The six TOML files stay authoritative and editable; Crow writes back only the key you change."
                         .into(),
                 ),
                 enabled: true,
@@ -2731,6 +2778,7 @@ impl Render for SettingsWindow {
         rows.insert(ControlId::ViewPerFolder, view_per_folder.into_any_element());
         rows.insert(ControlId::SearchHidden, search_hidden.into_any_element());
         rows.insert(ControlId::SearchMatch, search_match_row.into_any_element());
+        rows.insert(ControlId::SavedQueryList, self.render_saved_queries(window, &theme, cx));
         rows.insert(ControlId::PreviewScope, self.render_preview_unit(window, &theme, cx));
         rows.insert(ControlId::Plugins, plugin_row);
         rows.insert(ControlId::EditSettings, config_row.into_any_element());
@@ -2822,6 +2870,7 @@ impl Render for SettingsWindow {
             .id("settings-window")
             .role(Role::Group)
             .aria_label("Settings")
+            .relative()
             .key_context("Settings")
             .track_focus(&self.focus)
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.dismissed_by_mouse = None))
@@ -2851,6 +2900,7 @@ impl Render for SettingsWindow {
             .child(search_row)
             .children(error_region)
             .child(div().flex_1().min_h_0().flex().child(self.sidebar(&theme, window, cx)).child(scroll))
+            .children(self.render_saved_query_editor(window, &theme, cx))
     }
 }
 
@@ -3023,6 +3073,7 @@ fn link(
         ControlId::OpenViewsToml => "views.toml",
         ControlId::OpenExcludeToml => "exclude.toml",
         ControlId::OpenPluginsToml => "plugins.toml",
+        ControlId::OpenSavedQueriesToml => "saved-queries.toml",
         _ => unreachable!("{id:?} is not a config-file link"),
     };
     let activate = callback(cx, move |_, _, cx| ui::open_config_file(name, cx));
@@ -3971,6 +4022,40 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("preview state never reached the expected value");
+    }
+
+    #[gpui::test]
+    fn search_settings_create_and_list_saved_queries(cx: &mut TestAppContext) {
+        let (_dir, path) = fixture("saved-query-settings");
+        let (view, mut vcx) = open_settings(cx);
+        vcx.update(|_, cx| cx.global_mut::<Ui>().settings_folder = Some(path.clone()));
+        show_category(&view, &mut vcx, Category::Search);
+
+        focus_control(&view, &mut vcx, ControlId::NewSavedQuery);
+        vcx.simulate_keystrokes("enter");
+        vcx.simulate_input("Recent PDFs");
+        // Name, three scope options, root, text, kind, days.
+        vcx.simulate_keystrokes("tab tab tab tab tab tab");
+        vcx.simulate_input("pdf");
+        vcx.simulate_keystrokes("tab");
+        vcx.simulate_input("30");
+        vcx.simulate_keystrokes("enter");
+        wait_for_preview(&vcx, |ui| ui.saved_queries.queries.len() == 1);
+        let (name, kind, days) = vcx.read_global::<Ui, _>(|ui, _| {
+            let query = &ui.saved_queries.queries[0];
+            (query.name.clone(), query.kind.clone(), query.modified_within_days)
+        });
+        assert_eq!(name, "Recent PDFs");
+        assert_eq!(kind, Some(crow_core::SavedKind::Pdf));
+        assert_eq!(days, Some(30));
+        draw(&mut vcx);
+        assert!(vcx.debug_bounds("settings-saved-query-recent-pdfs").is_some());
+
+        focus_control(&view, &mut vcx, ControlId::SavedQueryList);
+        vcx.simulate_keystrokes("enter");
+        assert!(view.read_with(&vcx, |view, _| view.saved_query_form.is_some()));
+        vcx.simulate_keystrokes("escape");
+        assert!(view.read_with(&vcx, |view, _| view.saved_query_form.is_none()));
     }
 
     #[gpui::test]

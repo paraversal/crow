@@ -140,7 +140,11 @@ impl CrowWindow {
                 pane.update(cx, |pane, cx| pane.start_effect(paths, Fx::Refuse, cx)).ok();
             }
             let results = record.results();
-            pane.update(cx, |pane, cx| pane.show_results(results, rename_result, cx)).ok();
+            pane.update(cx, |pane, cx| {
+                pane.show_results(results, rename_result, cx);
+                pane.refresh_saved(cx);
+            })
+            .ok();
         });
     }
 
@@ -152,14 +156,22 @@ impl CrowWindow {
         self.notify_views(cx);
         let pane = self.pane().downgrade();
         operations::undo(index, cx, move |restored, cx| {
-            pane.update(cx, |pane, cx| pane.show_results(restored, false, cx)).ok();
+            pane.update(cx, |pane, cx| {
+                pane.show_results(restored, false, cx);
+                pane.refresh_saved(cx);
+            })
+            .ok();
         });
     }
 
     pub(super) fn redo(&mut self, cx: &mut Context<Self>) {
         let pane = self.pane().downgrade();
         operations::redo(cx, move |results, cx| {
-            pane.update(cx, |pane, cx| pane.show_results(results, false, cx)).ok();
+            pane.update(cx, |pane, cx| {
+                pane.show_results(results, false, cx);
+                pane.refresh_saved(cx);
+            })
+            .ok();
         });
     }
 
@@ -220,6 +232,10 @@ impl CrowWindow {
     }
 
     fn confirm_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.sheet, Some(Sheet::SavedQuery(_))) {
+            self.confirm_saved_query_form(window, cx);
+            return;
+        }
         match self.sheet.take() {
             Some(Sheet::Conflicts { plan, choices, .. }) => {
                 let targets: Vec<PathBuf> = plan.conflicts().map(|i| i.target.clone()).collect();
@@ -237,6 +253,7 @@ impl CrowWindow {
                 stop_then_quit(cx);
                 return;
             }
+            Some(Sheet::SavedQuery(_)) => {}
             Some(Sheet::Onboarding { no, .. }) => {
                 // Return activates the focused choice; the panel focus means the
                 // default, Show tips.
@@ -379,6 +396,10 @@ impl CrowWindow {
                         .into_any_element(),
                 )
             }
+            Sheet::SavedQuery(form) => (
+                if form.id.is_some() { "Edit Saved Search" } else { "Save Search" }.to_owned(),
+                self.render_saved_query_form(form, window, cx),
+            ),
             Sheet::Onboarding { show, no, .. } => (
                 "Show tips as you go?".to_owned(),
                 div()
@@ -499,27 +520,27 @@ impl CrowWindow {
             }
         });
         Some(chrome::sheet(
-            chrome::sheet_panel("sheet", SheetWidth::Narrow, &theme)
-                .aria_label(title.clone())
-                // keys::context_stack (KeyScope::Sheet) mirrors this.
-                .key_context("Sheet")
-                .track_focus(sheet.focus())
-                .on_action(
-                    cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.confirm_sheet(window, cx)),
-                )
-                .on_action(
-                    cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_sheet(window, cx)),
-                )
-                .when(matches!(sheet, Sheet::Onboarding { .. }), |panel| panel.on_key_down(onboarding_tab))
-                .p_4()
-                // The first-launch question sits a little lower than the other
-                // sheets, so it reads as an invitation rather than an alert.
-                .when(matches!(sheet, Sheet::Onboarding { .. }), |panel| panel.mt_2())
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-                .child(body),
+            chrome::sheet_panel(
+                "sheet",
+                if matches!(sheet, Sheet::SavedQuery(_)) { SheetWidth::Wide } else { SheetWidth::Narrow },
+                &theme,
+            )
+            .aria_label(title.clone())
+            // keys::context_stack (KeyScope::Sheet) mirrors this.
+            .key_context("Sheet")
+            .when(!matches!(sheet, Sheet::SavedQuery(_)), |panel| panel.track_focus(sheet.focus()))
+            .on_action(cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.confirm_sheet(window, cx)))
+            .on_action(cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_sheet(window, cx)))
+            .when(matches!(sheet, Sheet::Onboarding { .. }), |panel| panel.on_key_down(onboarding_tab))
+            .p_4()
+            // The first-launch question sits a little lower than the other
+            // sheets, so it reads as an invitation rather than an alert.
+            .when(matches!(sheet, Sheet::Onboarding { .. }), |panel| panel.mt_2())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(body),
             &theme,
             cx.global::<Ui>().feedback.mode,
             cx.listener(|this, _, window, cx| this.close_sheet(window, cx)),
