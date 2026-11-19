@@ -1,6 +1,6 @@
 # M9 — Git review and resizable side panes progress
 
-Branch `codex/m9-git-review-sidebar` · PR none · Base `aab54a0` (P2 merged as #67) · 2026-11-19 · State: Ready for critique
+Branch `codex/m9-git-review-sidebar` · PR [#68](https://github.com/paraversal/file-crow/pull/68) · Base `aab54a0` (P2 merged as #67) · 2026-11-19 · State: PR open
 
 | Item | State | Notes |
 | --- | --- | --- |
@@ -30,4 +30,4 @@ Branch `codex/m9-git-review-sidebar` · PR none · Base `aab54a0` (P2 merged as 
 
 ## Next
 
-Independent critique of the follow-up branch. P2 is already merged.
+CI and the remaining app hand checks. The PR was opened directly at the user's request.
