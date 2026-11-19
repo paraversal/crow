@@ -5,6 +5,9 @@ use std::time::{Duration, Instant};
 
 use gpui::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle};
 
+use crow_fs::ops::{
+    Conflict, ConflictKey, ConflictReason, EntryKind, FileIdentity, JobEvent, JobId, Outcome, Record, Step,
+};
 use crow_fs::testing::{Churn, ChurnHandle, EdgeTree};
 use crow_search::{Control, Hit, HitKind, Query, RuleSet};
 
@@ -698,9 +701,12 @@ fn open_with_before(
 /// Folders load on real threads; wait until every tab has finished.
 fn settle(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
     for _ in 0..400 {
+        // Operation events arrive through a 16 ms poll; the test clock must move
+        // for that timer to fire.
+        cx.executor().advance_clock(std::time::Duration::from_millis(20));
         cx.run_until_parked();
         let busy = view.read_with(cx, |w, cx| {
-            w.tabs.iter().any(|(_, pane)| pane.read(cx).is_settling(cx)) || cx.global::<Operations>().running.is_some()
+            w.tabs.iter().any(|(_, pane)| pane.read(cx).is_settling(cx)) || cx.global::<Operations>().is_settling()
         });
         if !busy {
             cx.run_until_parked();
@@ -3384,46 +3390,95 @@ fn overlay_hides_hints(cx: &mut TestAppContext) {
     assert!(hint_labels(&bar_state(&view, &mut cx)).is_empty());
 }
 
-/// Install a running operation and hand back its cancel flag.
-fn inject_running(cx: &mut VisualTestContext) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let handle = cancel.clone();
+/// Install a running operation in the app-wide coordinator.
+fn inject_running(cx: &mut VisualTestContext) {
     cx.update(|_, cx| {
-        cx.global_mut::<Operations>().running = Some(crate::operations::Running {
-            label: "Move 2 items to Trash".into(),
-            progress: crow_fs::ops::Progress { done_items: 1, total_items: 2, total_bytes: 0, ..Default::default() },
-            cancel: handle,
-            started: std::time::Instant::now(),
-        });
+        crate::operations::test_active_in(
+            cx,
+            Request::Trash { paths: std::sync::Arc::from([PathBuf::from("/tmp/crow-bar")]) },
+            crate::operations::JobPhase::Running,
+            crow_fs::ops::Progress { done_items: 1, total_items: 2, total_bytes: 0, ..Default::default() },
+        );
         cx.refresh_windows();
     });
     cx.run_until_parked();
-    cancel
+}
+
+/// Clear the synthesized operation between checks.
+fn clear_running(cx: &mut VisualTestContext) {
+    cx.update(|_, cx| crate::operations::test_clear(cx));
 }
 
 #[gpui::test]
 fn cancel_button_sets_the_cancel_flag(cx: &mut TestAppContext) {
     let root = fixture("bar-cancel-click");
     let (_view, mut cx) = open(cx, &root);
-    let cancel = inject_running(&mut cx);
+    inject_running(&mut cx);
     let bounds = cx.debug_bounds("bar-cancel").expect("the Cancel button is laid out");
     let progress = cx.debug_bounds("bar-progress").expect("the progress line is laid out");
     assert!(progress.size.width > gpui::px(0.), "some progress is drawn");
     cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-    assert!(cancel.load(std::sync::atomic::Ordering::Relaxed), "the click asked the operation to stop");
+    cx.run_until_parked();
+    assert!(cx.read(|cx| cx.global::<Operations>().active.is_none()), "the click asked the operation to stop");
+    let logged = cx.read(|cx| cx.global::<Operations>().log.iter().any(|entry| entry.cancelled));
+    assert!(logged, "the stop reaches the Activity log");
 
-    cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+    clear_running(&mut cx);
 }
 
 #[gpui::test]
 fn escape_cancels_from_the_list(cx: &mut TestAppContext) {
     let root = fixture("bar-cancel-escape");
     let (_view, mut cx) = open(cx, &root);
-    let cancel = inject_running(&mut cx);
+    inject_running(&mut cx);
     cx.simulate_keystrokes("escape");
-    assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+    cx.run_until_parked();
+    assert!(cx.read(|cx| cx.global::<Operations>().active.is_none()), "Escape stops the operation");
 
-    cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+    clear_running(&mut cx);
+}
+
+#[gpui::test]
+fn the_bar_names_the_queue_and_opens_activity(cx: &mut TestAppContext) {
+    let root = fixture("bar-queue");
+    let (view, mut cx) = open(cx, &root);
+    inject_running(&mut cx);
+    cx.cx.update(|cx| {
+        crate::operations::enqueue(copy_request(&[root.join("notes.txt")], root.join("beta")), None, cx);
+    });
+    cx.run_until_parked();
+    let state = bar_state(&view, &mut cx);
+    let Primary::Running(running) = &state.primary else { panic!("progress is primary") };
+    assert!(running.detail.contains("1 waiting"), "{}", running.detail);
+    let bounds = cx.debug_bounds("bar-activity").expect("the bar offers Activity");
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    assert!(view.read_with(&cx, |this, _| this.show_activity), "the affordance opens Activity");
+    clear_running(&mut cx);
+}
+
+#[gpui::test]
+fn a_planning_head_shows_an_indeterminate_bar(cx: &mut TestAppContext) {
+    let root = fixture("bar-planning");
+    let (view, mut cx) = open(cx, &root);
+    cx.cx.update(|cx| {
+        crate::operations::test_active_in(
+            cx,
+            copy_request(&[root.join("notes.txt")], root.join("beta")),
+            crate::operations::JobPhase::Planning,
+            crow_fs::ops::Progress::default(),
+        );
+    });
+    cx.run_until_parked();
+    let state = bar_state(&view, &mut cx);
+    let Primary::Running(running) = &state.primary else { panic!("progress is primary") };
+    assert!(running.indeterminate, "planning has no totals yet");
+    assert_eq!(running.detail.as_ref(), "Planning…");
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let progress = cx.debug_bounds("bar-progress").expect("the indeterminate segment is drawn");
+    assert!(progress.size.width > gpui::px(0.));
+    clear_running(&mut cx);
 }
 
 #[gpui::test]
@@ -3925,12 +3980,15 @@ fn error_and_progress_leave_the_path_its_ends(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root);
     cx.simulate_resize(gpui::size(px(700.), px(500.)));
     cx.update(|_, cx| {
-        cx.global_mut::<Operations>().running = Some(crate::operations::Running {
-            label: "Copy 12 items to a folder with a rather long name indeed".into(),
-            progress: crow_fs::ops::Progress { done_bytes: 1, total_bytes: 4, ..Default::default() },
-            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            started: std::time::Instant::now(),
-        });
+        crate::operations::test_active_in(
+            cx,
+            Request::Copy {
+                paths: std::sync::Arc::from([PathBuf::from("/tmp/crow-a")]),
+                into: PathBuf::from("/tmp/crow-b"),
+            },
+            crate::operations::JobPhase::Running,
+            crow_fs::ops::Progress { done_bytes: 1, total_bytes: 4, ..Default::default() },
+        );
     });
     let dir = config_dir(&cx);
     std::fs::write(dir.join("views.toml"), "[defaults]\nsort = \"a colour that does not exist at all\"\n")
@@ -3947,7 +4005,7 @@ fn error_and_progress_leave_the_path_its_ends(cx: &mut TestAppContext) {
     assert!(tail.size.width > px(20.), "the last segment keeps its room: {tail:?}");
     let counts = cx.debug_bounds("bar-cancel").expect("Cancel is drawn");
     assert!(counts.right() <= px(700.), "the transient stays inside the window: {counts:?}");
-    cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+    clear_running(&mut cx);
 }
 
 #[gpui::test]
@@ -4109,12 +4167,15 @@ fn error_and_running_operation_show_together(cx: &mut TestAppContext) {
     let root = fixture("bar-error-running");
     let (view, mut cx) = open(cx, &root);
     cx.update(|_, cx| {
-        cx.global_mut::<Operations>().running = Some(crate::operations::Running {
-            label: "Copy 1 item to x".into(),
-            progress: crow_fs::ops::Progress { total_items: 1, total_bytes: 1, ..Default::default() },
-            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            started: std::time::Instant::now(),
-        });
+        crate::operations::test_active_in(
+            cx,
+            Request::Copy {
+                paths: std::sync::Arc::from([PathBuf::from("/tmp/crow-a")]),
+                into: PathBuf::from("/tmp/crow-b"),
+            },
+            crate::operations::JobPhase::Running,
+            crow_fs::ops::Progress { total_items: 1, total_bytes: 1, ..Default::default() },
+        );
     });
     let dir = config_dir(&cx);
     std::fs::write(dir.join("views.toml"), "[defaults]\nsort = \"colour\"\n").expect("break views.toml");
@@ -4127,7 +4188,7 @@ fn error_and_running_operation_show_together(cx: &mut TestAppContext) {
     assert!(error.file.as_ref().is_some_and(|f| f.ends_with("views.toml")));
     assert!(error.text.starts_with("views.toml"), "{}", error.text);
 
-    cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+    clear_running(&mut cx);
     settle(&view, &mut cx);
 }
 
@@ -7317,13 +7378,32 @@ fn tabs_open_next_to_the_active_one_and_close(cx: &mut TestAppContext) {
 fn closing_the_last_window_leaves_the_app_running(app: &mut TestAppContext) {
     let root = fixture("close-resident");
     let (_view, mut cx) = open(app, &root);
-    let cancel = inject_running(&mut cx);
 
     cx.simulate_keystrokes("cmd-w");
     app.run_until_parked();
-    assert_eq!(app.update(|cx| cx.windows().len()), 0, "the window closes");
-    assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "the operation keeps running");
-    app.update(|cx| cx.global_mut::<Operations>().running = None);
+    assert_eq!(app.update(|cx| cx.windows().len()), 0, "the idle window closes");
+}
+
+#[gpui::test]
+fn closing_the_last_window_with_work_asks_first(app: &mut TestAppContext) {
+    let root = fixture("close-pending");
+    let (view, mut cx) = open(app, &root);
+    inject_running(&mut cx);
+
+    cx.simulate_keystrokes("cmd-w");
+    app.run_until_parked();
+    assert_eq!(app.update(|cx| cx.windows().len()), 1, "the window stays open to ask");
+    assert!(
+        view.read_with(&cx, |w, _| matches!(
+            w.sheet,
+            Some(Sheet::StopOperation { intent: crate::operations::StopIntent::Close, .. })
+        )),
+        "the close sheet is up"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.read(|cx| cx.global::<Operations>().has_active()), "Escape keeps the operation and the window");
+    clear_running(&mut cx);
 }
 
 #[gpui::test]
@@ -7331,12 +7411,21 @@ fn quitting_with_no_window_opens_one_and_asks(app: &mut TestAppContext) {
     let root = fixture("quit-resident");
     let (_view, mut cx) = open(app, &root);
     app.update(|cx| cx.set_global(LaunchFolder(root.to_path_buf())));
-    let cancel = inject_running(&mut cx);
 
     cx.simulate_keystrokes("cmd-w");
     app.run_until_parked();
     assert_eq!(app.update(|cx| cx.windows().len()), 0);
 
+    // A later request can still be running with no window open (a Dock reopen,
+    // say); ⌘Q opens one to ask in.
+    app.update(|cx| {
+        crate::operations::test_active_in(
+            cx,
+            Request::Trash { paths: std::sync::Arc::from([PathBuf::from("/tmp/crow-quit")]) },
+            crate::operations::JobPhase::Running,
+            crow_fs::ops::Progress { done_items: 1, total_items: 2, ..Default::default() },
+        );
+    });
     app.update(quit);
     app.run_until_parked();
     let handle = app
@@ -7345,8 +7434,8 @@ fn quitting_with_no_window_opens_one_and_asks(app: &mut TestAppContext) {
     let asking =
         handle.update(app, |this, _, _| matches!(this.sheet, Some(Sheet::StopOperation { .. }))).expect("window alive");
     assert!(asking, "the Stop and Quit sheet is up");
-    assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "nothing is cancelled before the answer");
-    app.update(|cx| cx.global_mut::<Operations>().running = None);
+    assert!(app.update(|cx| cx.global::<Operations>().has_active()), "nothing is cancelled before the answer");
+    app.update(crate::operations::test_clear);
 }
 
 #[gpui::test]
@@ -7383,19 +7472,19 @@ fn closing_with_other_windows_open_just_closes(app: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-n");
     cx.run_until_parked();
     assert_eq!(app.update(|cx| cx.windows().len()), 2);
-    let _cancel = inject_running(&mut cx);
+    inject_running(&mut cx);
     // Another window stays open, so the operation keeps going without asking.
     cx.simulate_keystrokes("cmd-w");
     app.run_until_parked();
     assert_eq!(app.update(|cx| cx.windows().len()), 1, "closed without a sheet");
-    app.update(|cx| cx.global_mut::<Operations>().running = None);
+    app.update(crate::operations::test_clear);
 }
 
 #[gpui::test]
 fn quitting_mid_operation_asks_first(cx: &mut TestAppContext) {
     let root = fixture("quit-guard");
     let (view, mut cx) = open(cx, &root);
-    let cancel = inject_running(&mut cx);
+    inject_running(&mut cx);
     // Menu, palette and ⌘Q all go through `quit`.
     cx.update(|_, cx| quit(cx));
     cx.run_until_parked();
@@ -7404,8 +7493,8 @@ fn quitting_mid_operation_asks_first(cx: &mut TestAppContext) {
         "⌘Q asks while the move runs"
     );
     cx.simulate_keystrokes("escape");
-    assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
-    cx.update(|_, cx| cx.global_mut::<Operations>().running = None);
+    assert!(cx.read(|cx| cx.global::<Operations>().has_active()), "Escape keeps it running");
+    clear_running(&mut cx);
 }
 
 #[gpui::test]
@@ -10228,6 +10317,502 @@ fn conflicts_ask_first_and_keep_both_by_default(cx: &mut TestAppContext) {
     assert!(!sheet_open(&view, &cx));
     assert_eq!(std::fs::read_to_string(root.join("alpha/notes 2.txt")).ok().as_deref(), Some("hello\n"));
     assert_eq!(std::fs::read_to_string(root.join("alpha/notes.txt")).ok().as_deref(), Some("already here"));
+}
+
+fn second_window(cx: &mut VisualTestContext, dir: &Path) -> (Entity<CrowWindow>, VisualTestContext) {
+    let handle =
+        cx.update(|_, cx| crate::window::open(dir.to_path_buf(), false, None, cx)).expect("open a second window");
+    let mut second = VisualTestContext::from_window(handle.into(), cx);
+    let view = handle.root(&mut second).expect("second root view");
+    (view, second)
+}
+
+fn copy_request(paths: &[PathBuf], into: PathBuf) -> Request {
+    Request::Copy { paths: Arc::from(paths.to_vec()), into }
+}
+
+fn conflict_at(engine: JobId, attempt: u32, target: PathBuf) -> Conflict {
+    Conflict {
+        key: ConflictKey { job_id: engine, item_index: 0, attempt },
+        source: PathBuf::from("/tmp/crow-source"),
+        target,
+        observed: FileIdentity {
+            dev: 1,
+            ino: 2,
+            kind: EntryKind::File,
+            size: 1,
+            mtime: 0,
+            mtime_nsec: 0,
+            ctime: 0,
+            ctime_nsec: 0,
+        },
+        previous: None,
+        reason: ConflictReason::Exists,
+        choices: [Resolution::KeepBoth, Resolution::Replace, Resolution::Skip],
+        policy: None,
+        auto: None,
+    }
+}
+
+#[gpui::test]
+fn transfers_queue_in_submission_order_and_activity_is_app_wide(cx: &mut TestAppContext) {
+    let root = fixture("queue-order");
+    let (view_a, mut cx_a) = open(cx, &root);
+    cx_a.update(|_, cx| cx.global_mut::<Operations>().test_hold_planning = true);
+    let notes = root.join("notes.txt");
+    for into in [root.join("beta"), root.join("alpha/inner")] {
+        view_a.update_in(&mut cx_a, |this, window, cx| {
+            this.run_request(copy_request(std::slice::from_ref(&notes), into.clone()), window, cx);
+        });
+    }
+    let (phase, queued) = cx_a.read(|cx| {
+        let ops = cx.global::<Operations>();
+        (ops.active.as_ref().map(|active| active.phase), ops.queue.len())
+    });
+    assert_eq!(phase, Some(crate::operations::JobPhase::Planning), "the first request plans");
+    assert_eq!(queued, 1, "the second waits instead of planning");
+
+    let (view_b, mut cx_b) = second_window(&mut cx_a, &root);
+    assert_eq!(cx_b.read(|cx| cx.global::<Operations>().queue.len()), 1, "the queue is app-wide");
+    view_b.update(&mut cx_b, |this, cx| {
+        this.show_activity = true;
+        cx.notify();
+    });
+    cx_b.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let (active_id, queued_id) = cx_b.read(|cx| {
+        let ops = cx.global::<Operations>();
+        (ops.active.as_ref().expect("a head").id, ops.queue.front().expect("one waiting").id)
+    });
+    let active_row: &'static str = format!("activity-active-{}", active_id.0).leak();
+    let queued_row: &'static str = format!("activity-queued-{}", queued_id.0).leak();
+    let active_row = cx_b.debug_bounds(active_row).expect("the active job is listed");
+    let queued_row = cx_b.debug_bounds(queued_row).expect("the queued job is listed");
+    assert!(active_row.origin.y < queued_row.origin.y, "active jobs come before queued ones");
+
+    cx_b.update(|_, cx| crate::operations::release_planning(cx));
+    settle(&view_a, &mut cx_a);
+    assert!(root.join("beta/notes.txt").exists());
+    assert!(root.join("alpha/inner/notes.txt").exists());
+    let log: Vec<String> =
+        cx_a.read(|cx| cx.global::<Operations>().log.iter().map(|entry| entry.record.label.clone()).collect());
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert!(log[0].ends_with("to beta"), "submission order is kept: {log:?}");
+    assert!(log[1].ends_with("to inner"), "submission order is kept: {log:?}");
+}
+
+#[gpui::test]
+fn closing_the_origin_window_rehosts_a_conflict(cx: &mut TestAppContext) {
+    let root = fixture("cross-conflict");
+    std::fs::write(root.join("alpha/notes.txt"), "already here").expect("create fixture");
+    let (view_a, mut cx_a) = open(cx, &root);
+    let (view_b, mut cx_b) = second_window(&mut cx_a, &root);
+    view_a.update_in(&mut cx_a, |this, window, cx| {
+        this.run_request(copy_request(&[root.join("notes.txt")], root.join("alpha")), window, cx);
+    });
+    settle(&view_a, &mut cx_a);
+    let (job, key) = cx_a.read(|cx| {
+        let prompt = cx.global::<Operations>().prompt.clone().expect("a conflict waits");
+        (prompt.job, prompt.key())
+    });
+    assert!(
+        view_a.read_with(&cx_a, |this, _| matches!(this.sheet, Some(Sheet::Conflict { .. }))),
+        "the origin window shows the sheet"
+    );
+
+    // A is not the last window, so it closes while the job keeps waiting; the
+    // prompt is re-hosted in B.
+    assert!(cx_a.simulate_close(), "a non-last window closes without asking");
+    view_a.update_in(&mut cx_a, |_, window, _| window.remove_window());
+    cx_b.run_until_parked();
+    assert_eq!(cx_b.update(|_, cx| cx.windows().len()), 1, "A closed, B stayed");
+    assert!(
+        view_b.read_with(&cx_b, |this, _| matches!(this.sheet, Some(Sheet::Conflict { .. }))),
+        "the surviving window shows the waiting conflict"
+    );
+
+    // Dismissing keeps the job waiting; Activity brings the sheet back.
+    cx_b.simulate_keystrokes("escape");
+    cx_b.run_until_parked();
+    assert!(!view_b.read_with(&cx_b, |this, _| matches!(this.sheet, Some(Sheet::Conflict { .. }))));
+    assert!(cx_b.read(|cx| cx.global::<Operations>().prompt.is_some()), "the job is still waiting");
+    view_b.update(&mut cx_b, |this, cx| {
+        this.show_activity = true;
+        cx.notify();
+    });
+    cx_b.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let resolve: &'static str = format!("activity-resolve-{}", job.0).leak();
+    assert!(cx_b.debug_bounds(resolve).is_some(), "Activity offers Resolve");
+    let handle = cx_b.update(|window, _| window.window_handle().downcast::<CrowWindow>().expect("B handle"));
+    cx_b.cx.update(|cx| crate::operations::present_prompt_in(handle, cx));
+    cx_b.run_until_parked();
+    assert!(
+        view_b.read_with(&cx_b, |this, _| matches!(this.sheet, Some(Sheet::Conflict { .. }))),
+        "Resolve reopens the sheet"
+    );
+
+    let stale = ConflictKey { attempt: key.attempt + 1, ..key };
+    assert!(
+        !cx_b.cx.update(|cx| crate::operations::resolve_prompt(job, stale, Resolution::KeepBoth, false, cx)),
+        "an obsolete attempt is ignored"
+    );
+    assert!(cx_b.read(|cx| cx.global::<Operations>().prompt.is_some()), "the current prompt stays");
+    assert!(
+        cx_b.cx.update(|cx| crate::operations::resolve_prompt(job, key, Resolution::KeepBoth, false, cx)),
+        "the current attempt is accepted"
+    );
+    settle(&view_b, &mut cx_b);
+    assert_eq!(
+        std::fs::read_to_string(root.join("alpha/notes.txt")).ok().as_deref(),
+        Some("already here"),
+        "Keep Both leaves the original"
+    );
+    assert!(root.join("alpha/notes 2.txt").exists(), "the copy landed under a free name");
+}
+
+#[gpui::test]
+fn a_result_after_navigation_does_not_move_the_new_selection(cx: &mut TestAppContext) {
+    let root = fixture("late-result");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<Operations>().test_hold_planning = true);
+    view.update_in(&mut cx, |this, window, cx| {
+        this.run_request(copy_request(&[root.join("notes.txt")], root.join("beta")), window, cx);
+    });
+    // The request was submitted from the root; the tab moves to the copy's target
+    // folder before the job finishes.
+    let beta = root.join("beta");
+    view.update(&mut cx, |this, cx| {
+        this.pane().update(cx, |pane, cx| pane.navigate(beta.clone(), cx));
+    });
+
+    cx.update(|_, cx| crate::operations::release_planning(cx));
+    settle(&view, &mut cx);
+    assert!(root.join("beta/notes.txt").exists(), "the copy still happened");
+    assert_ne!(
+        selected(&view, &cx).as_deref(),
+        Some("notes.txt"),
+        "a result from the old surface does not move the new tab's selection"
+    );
+    assert_eq!(cx.read(|cx| cx.global::<Operations>().undo_stack.len()), 1, "the finished job is undoable");
+}
+
+#[gpui::test]
+fn a_paused_head_keeps_the_queue_and_activity_actions_follow_it(cx: &mut TestAppContext) {
+    let root = fixture("paused-queue");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| {
+        crate::operations::test_active_in(
+            cx,
+            copy_request(&[root.join("notes.txt")], root.join("beta")),
+            crate::operations::JobPhase::Paused,
+            crow_fs::ops::Progress { done_items: 1, total_items: 4, total_bytes: 0, ..Default::default() },
+        );
+    });
+    cx.update(|_, cx| {
+        crate::operations::enqueue(copy_request(&[root.join("notes.txt")], root.join("alpha")), None, cx)
+    });
+    assert_eq!(cx.read(|cx| cx.global::<Operations>().queue.len()), 1, "later work waits behind a paused head");
+
+    cx.update(|_, cx| crate::operations::resume_active(cx));
+    assert_eq!(
+        cx.read(|cx| cx.global::<Operations>().active.as_ref().map(|active| active.phase)),
+        Some(crate::operations::JobPhase::Running)
+    );
+
+    // A paused request that the worker has not acknowledged is released in place.
+    cx.update(|_, cx| {
+        if let Some(active) = cx.global_mut::<Operations>().active.as_mut() {
+            active.phase = crate::operations::JobPhase::PauseRequested;
+        }
+    });
+    cx.update(|_, cx| crate::operations::resume_active(cx));
+    assert_eq!(
+        cx.read(|cx| cx.global::<Operations>().active.as_ref().map(|active| active.phase)),
+        Some(crate::operations::JobPhase::Running)
+    );
+
+    view.update(&mut cx, |this, cx| {
+        this.show_activity = true;
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    let queued_id = cx.read(|cx| cx.global::<Operations>().queue.front().expect("one waiting").id);
+    cx.update(|_, cx| crate::operations::cancel_queued(queued_id, cx));
+    assert!(cx.read(|cx| cx.global::<Operations>().queue.is_empty()));
+    assert!(cx.read(|cx| cx.global::<Operations>().log.iter().any(|entry| entry.cancelled)));
+    assert!(cx.read(|cx| cx.global::<Operations>().undo_stack.is_empty()), "a cancelled queued job has no Undo");
+
+    cx.update(|_, cx| crate::operations::cancel_active(cx));
+    assert!(cx.read(|cx| cx.global::<Operations>().active.is_none()));
+    assert_eq!(
+        cx.read(|cx| cx.global::<Operations>().log.iter().filter(|entry| entry.cancelled).count()),
+        2,
+        "the queued and active cancellations are both logged"
+    );
+}
+
+#[gpui::test]
+fn only_a_worker_acknowledgement_pauses_the_head(cx: &mut TestAppContext) {
+    let root = fixture("pause-ack");
+    let (_view, mut cx) = open(cx, &root);
+    let (_, engine) = cx.cx.update(|cx| {
+        crate::operations::test_active_in(
+            cx,
+            copy_request(&[root.join("notes.txt")], root.join("beta")),
+            crate::operations::JobPhase::Running,
+            crow_fs::ops::Progress { done_items: 1, total_items: 4, total_bytes: 10, ..Default::default() },
+        )
+    });
+    cx.cx.update(crate::operations::pause_active);
+    assert_eq!(
+        cx.read(|cx| cx.global::<Operations>().active.as_ref().map(|active| active.phase)),
+        Some(crate::operations::JobPhase::PauseRequested),
+        "Pause waits for the worker"
+    );
+    cx.cx.update(|cx| {
+        crate::operations::test_deliver(
+            JobEvent::PauseAcknowledged {
+                job_id: engine,
+                progress: crow_fs::ops::Progress {
+                    done_items: 1,
+                    total_items: 4,
+                    done_bytes: 5,
+                    total_bytes: 10,
+                    ..Default::default()
+                },
+            },
+            cx,
+        )
+    });
+    assert_eq!(
+        cx.read(|cx| cx.global::<Operations>().active.as_ref().map(|active| active.phase)),
+        Some(crate::operations::JobPhase::Paused)
+    );
+
+    cx.cx.update(crate::operations::resume_active);
+    assert_eq!(
+        cx.read(|cx| cx.global::<Operations>().active.as_ref().map(|active| active.phase)),
+        Some(crate::operations::JobPhase::Running)
+    );
+    cx.cx.update(|cx| {
+        crate::operations::test_deliver(
+            JobEvent::PauseAcknowledged {
+                job_id: engine,
+                progress: crow_fs::ops::Progress { done_items: 1, total_items: 4, ..Default::default() },
+            },
+            cx,
+        )
+    });
+    assert_eq!(
+        cx.read(|cx| cx.global::<Operations>().active.as_ref().map(|active| active.phase)),
+        Some(crate::operations::JobPhase::Running),
+        "a late acknowledgement cannot pause a resumed job"
+    );
+    clear_running(&mut cx);
+}
+
+#[gpui::test]
+fn cancelling_a_planning_head_logs_and_does_not_copy(cx: &mut TestAppContext) {
+    let root = fixture("cancel-planning");
+    let (view, mut cx) = open(cx, &root);
+    cx.cx.update(|cx| cx.global_mut::<Operations>().test_hold_planning = true);
+    cx.cx.update(|cx| {
+        crate::operations::enqueue(copy_request(&[root.join("notes.txt")], root.join("beta")), None, cx);
+    });
+    assert_eq!(
+        cx.read(|cx| cx.global::<Operations>().active.as_ref().map(|active| active.phase)),
+        Some(crate::operations::JobPhase::Planning)
+    );
+    cx.cx.update(crate::operations::cancel_active);
+    assert_eq!(
+        cx.read(|cx| cx.global::<Operations>().active.as_ref().map(|active| active.phase)),
+        Some(crate::operations::JobPhase::Cancelling)
+    );
+    cx.cx.update(crate::operations::release_planning);
+    settle(&view, &mut cx);
+    assert!(cx.read(|cx| cx.global::<Operations>().active.is_none()));
+    assert!(!root.join("beta/notes.txt").exists(), "nothing was copied");
+    assert!(cx.read(|cx| cx.global::<Operations>().log.iter().any(|entry| entry.cancelled)));
+}
+
+#[gpui::test]
+fn a_failed_plan_advances_the_next_request(cx: &mut TestAppContext) {
+    let root = fixture("failed-plan");
+    let (view, mut cx) = open(cx, &root);
+    cx.cx.update(|cx| cx.global_mut::<Operations>().test_hold_planning = true);
+    cx.cx.update(|cx| {
+        crate::operations::enqueue(copy_request(&[root.join("missing.txt")], root.join("beta")), None, cx);
+        crate::operations::enqueue(copy_request(&[root.join("notes.txt")], root.join("alpha/inner")), None, cx);
+    });
+    cx.cx.update(crate::operations::release_planning);
+    settle(&view, &mut cx);
+    assert!(root.join("alpha/inner/notes.txt").exists(), "the next request still runs");
+    let log = cx.read(|cx| cx.global::<Operations>().log.clone());
+    assert_eq!(log.len(), 2, "the failure and the success are both listed");
+    assert!(log[0].error.as_deref().is_some_and(|error| error.contains("missing.txt")), "{:?}", log[0].error);
+    assert!(log[1].error.is_none());
+    assert!(cx.read(|cx| cx.global::<Operations>().active.is_none()));
+}
+
+#[gpui::test]
+fn the_fuzz_jail_refuses_a_queued_plan_and_still_advances(cx: &mut TestAppContext) {
+    let root = fixture("jail-queue");
+    let (view, mut cx) = open(cx, &root);
+    let outside = PathBuf::from("/tmp/crow-outside-the-jail");
+    cx.cx.update(|cx| {
+        cx.global_mut::<Operations>().jail = Some(root.to_path_buf());
+        crate::operations::enqueue(Request::Trash { paths: Arc::from([outside.clone()]) }, None, cx);
+        crate::operations::enqueue(copy_request(&[root.join("notes.txt")], root.join("beta")), None, cx);
+    });
+    settle(&view, &mut cx);
+    assert!(cx.read(|cx| cx.global::<Operations>().refused.iter().any(|path| path == &outside)));
+    let log = cx.read(|cx| cx.global::<Operations>().log.clone());
+    assert!(
+        log.iter()
+            .any(|entry| entry.error.as_deref().is_some_and(|error| error.contains("Refused outside the fuzz tree"))),
+        "the refusal is logged"
+    );
+    assert!(root.join("beta/notes.txt").exists(), "the queued transfer still runs");
+    assert!(cx.read(|cx| cx.global::<Operations>().active.is_none()));
+}
+
+#[gpui::test]
+fn confirming_close_at_a_conflict_cancels_it(cx: &mut TestAppContext) {
+    let root = fixture("close-conflict");
+    let (view, mut cx) = open(cx, &root);
+    let (_, engine) = cx.cx.update(|cx| {
+        crate::operations::test_active_in(
+            cx,
+            copy_request(&[root.join("notes.txt")], root.join("alpha")),
+            crate::operations::JobPhase::Running,
+            crow_fs::ops::Progress { total_items: 1, total_bytes: 1, ..Default::default() },
+        )
+    });
+    cx.cx.update(|cx| {
+        crate::operations::test_deliver(JobEvent::Conflict(conflict_at(engine, 1, root.join("alpha/notes.txt"))), cx)
+    });
+    assert!(view.read_with(&cx, |this, _| matches!(this.sheet, Some(Sheet::Conflict { .. }))));
+
+    assert!(!cx.simulate_close(), "the close asks first");
+    assert!(view.read_with(&cx, |this, _| matches!(this.sheet, Some(Sheet::StopOperation { .. }))));
+    cx.simulate_keystrokes("enter");
+    cx.executor().advance_clock(Duration::from_millis(50));
+    cx.run_until_parked();
+    assert!(cx.read(|cx| cx.global::<Operations>().active.is_none()));
+    assert!(cx.read(|cx| cx.global::<Operations>().prompt.is_none()), "the waiting conflict is gone");
+    assert!(cx.read(|cx| cx.global::<Operations>().log.iter().any(|entry| entry.cancelled)));
+}
+
+#[gpui::test]
+fn confirming_close_stops_a_paused_head_and_the_queue(app: &mut TestAppContext) {
+    let root = fixture("close-paused");
+    let (view, mut cx) = open(app, &root);
+    cx.update(|_, cx| {
+        crate::operations::test_active_in(
+            cx,
+            copy_request(&[root.join("notes.txt")], root.join("beta")),
+            crate::operations::JobPhase::Paused,
+            crow_fs::ops::Progress { done_items: 1, total_items: 2, ..Default::default() },
+        );
+        crate::operations::enqueue(copy_request(&[root.join("notes.txt")], root.join("alpha")), None, cx);
+    });
+    cx.simulate_keystrokes("cmd-w");
+    app.run_until_parked();
+    assert_eq!(app.update(|cx| cx.windows().len()), 1, "the close asks first");
+    assert!(view.read_with(&cx, |this, _| matches!(this.sheet, Some(Sheet::StopOperation { .. }))));
+
+    cx.simulate_keystrokes("enter");
+    cx.executor().advance_clock(Duration::from_millis(50));
+    app.run_until_parked();
+    assert_eq!(app.update(|cx| cx.windows().len()), 0, "the window closes after cleanup");
+    assert!(app.read(|cx| cx.global::<Operations>().is_idle()), "nothing keeps running");
+    assert_eq!(
+        app.read(|cx| cx.global::<Operations>().log.iter().filter(|entry| entry.cancelled).count()),
+        2,
+        "the queue and the paused head both log cancelled"
+    );
+}
+
+#[gpui::test]
+fn only_the_current_conflict_attempt_is_accepted(cx: &mut TestAppContext) {
+    let root = fixture("conflict-attempt");
+    let (view, mut cx) = open(cx, &root);
+    let (job, engine) = cx.update(|_, cx| {
+        crate::operations::test_active_in(
+            cx,
+            copy_request(&[root.join("notes.txt")], root.join("alpha")),
+            crate::operations::JobPhase::Running,
+            crow_fs::ops::Progress { total_items: 1, total_bytes: 1, ..Default::default() },
+        )
+    });
+    let target = root.join("alpha/notes.txt");
+    let first = conflict_at(engine, 1, target.clone());
+    cx.cx.update(|cx| crate::operations::test_deliver(JobEvent::Conflict(first.clone()), cx));
+    assert_eq!(cx.read(|cx| cx.global::<Operations>().prompt.as_ref().map(|prompt| prompt.key())), Some(first.key));
+    assert!(view.read_with(&cx, |this, _| matches!(this.sheet, Some(Sheet::Conflict { .. }))));
+
+    let second = conflict_at(engine, 2, target);
+    cx.cx.update(|cx| crate::operations::test_deliver(JobEvent::Conflict(second.clone()), cx));
+    assert_eq!(
+        cx.read(|cx| cx.global::<Operations>().prompt.as_ref().map(|prompt| prompt.key())),
+        Some(second.key),
+        "the new attempt is the current one"
+    );
+    assert!(
+        !cx.cx.update(|cx| crate::operations::resolve_prompt(job, first.key, Resolution::KeepBoth, false, cx)),
+        "an old attempt is ignored even with the same job and item"
+    );
+    assert!(cx.read(|cx| cx.global::<Operations>().prompt.is_some()), "the current prompt stays");
+    assert!(
+        cx.cx.update(|cx| crate::operations::resolve_prompt(job, second.key, Resolution::KeepBoth, false, cx)),
+        "the current attempt is accepted"
+    );
+    assert!(!view.read_with(&cx, |this, _| matches!(this.sheet, Some(Sheet::Conflict { .. }))), "no stacked sheets");
+    assert_eq!(
+        cx.read(|cx| cx.global::<Operations>().active.as_ref().map(|active| active.phase)),
+        Some(crate::operations::JobPhase::Running)
+    );
+}
+
+#[gpui::test]
+fn a_cancelled_terminal_keeps_its_committed_prefix_undoable(cx: &mut TestAppContext) {
+    let root = fixture("cancel-prefix");
+    let (view, mut cx) = open(cx, &root);
+    let (_, engine) = cx.update(|_, cx| {
+        crate::operations::test_active_in(
+            cx,
+            copy_request(&[root.join("notes.txt")], root.join("beta")),
+            crate::operations::JobPhase::Running,
+            crow_fs::ops::Progress { total_items: 2, total_bytes: 10, ..Default::default() },
+        )
+    });
+    let copied = root.join("beta/notes.txt");
+    std::fs::write(&copied, "hello\n").expect("create the committed prefix");
+    let outcome = Arc::new(Outcome {
+        record: Record { label: "Copy 2 items to beta".to_owned(), steps: vec![Step::Created(copied.clone())] },
+        error: None,
+        cancelled: true,
+    });
+    cx.cx.update(|cx| crate::operations::test_deliver(JobEvent::Terminal { job_id: engine, outcome }, cx));
+    assert!(cx.read(|cx| cx.global::<Operations>().active.is_none()));
+    assert_eq!(cx.read(|cx| cx.global::<Operations>().undo_stack.len()), 1, "the committed prefix is undoable");
+    assert!(cx.read(|cx| cx.global::<Operations>().log[0].cancelled));
+
+    view.update(&mut cx, |this, cx| {
+        this.show_activity = true;
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    cx.update(|_, cx| crate::operations::undo(None, cx, |_, _| {}));
+    settle(&view, &mut cx);
+    assert!(!copied.exists(), "Undo reverses the committed prefix");
 }
 
 #[gpui::test]

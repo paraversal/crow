@@ -80,6 +80,9 @@ pub struct RunningView {
     pub detail: SharedString,
     pub fraction: f32,
     pub percent: u8,
+    pub queued: usize,
+    /// Planning has no totals yet; the bar shows a moving segment.
+    pub indeterminate: bool,
 }
 
 impl RunningView {
@@ -89,14 +92,39 @@ impl RunningView {
             if p.total_bytes > 0 { (p.done_bytes, p.total_bytes) } else { (p.done_items as u64, p.total_items as u64) };
         let fraction = if total == 0 { 0.0 } else { (done as f32 / total as f32).clamp(0.0, 1.0) };
         let percent = (fraction * 100.0).round() as u8;
-        let detail = if p.total_bytes > 0 {
+        let mut detail = if running.planning {
+            "Planning…".to_owned()
+        } else if running.waiting {
+            "Waiting for your choice".to_owned()
+        } else if p.total_bytes > 0 {
             format!("{} · {percent} %", crow_fs::human_size_pair(p.done_bytes, p.total_bytes))
         } else if p.total_items == 0 {
             String::new()
         } else {
             format!("{} of {} items · {percent} %", p.done_items, p.total_items)
         };
-        Self { label: operations::running_label(&running.label).into(), detail: detail.into(), fraction, percent }
+        if running.pausing {
+            detail = if detail.is_empty() { "Pausing…".to_owned() } else { format!("Pausing… · {detail}") };
+        } else if running.paused {
+            detail = if detail.is_empty() { "Paused".to_owned() } else { format!("Paused · {detail}") };
+        }
+        if running.queued == 1 {
+            detail = if detail.is_empty() { "1 waiting".to_owned() } else { format!("{detail} · 1 waiting") };
+        } else if running.queued > 1 {
+            detail = if detail.is_empty() {
+                format!("{} waiting", running.queued)
+            } else {
+                format!("{detail} · {} waiting", running.queued)
+            };
+        }
+        Self {
+            label: operations::running_label(&running.label).into(),
+            detail: detail.into(),
+            fraction,
+            percent,
+            queued: running.queued,
+            indeterminate: running.planning,
+        }
     }
 }
 
@@ -405,6 +433,7 @@ pub fn fit_to_window(state: &mut BarState, window: &Window) {
             measure(&running.label)
                 + px(10.)
                 + if running.detail.is_empty() { px(0.) } else { measure(&running.detail) + px(10.) }
+                + px(14. + 4. + 10. + 10.)
                 + px(12. + 6.)
                 + measure("Cancel")
                 + cap("esc")
@@ -594,12 +623,42 @@ fn cancel_button(cx: &App) -> gpui::Stateful<gpui::Div> {
         .bg(color(theme.role("surface-raised")))
         .text_color(color(theme.role("fg")))
         .hover(move |style| style.bg(hover))
-        .on_click(|_, _, cx| operations::cancel_running(cx))
+        .on_click(|_, _, cx| operations::cancel_active(cx))
         .child("Cancel");
     if let Some(keys) = keys.clone() {
         button = button.child(Keycap::text(keys, KeycapWeight::Text));
     }
     with_tooltip(button, "Cancel operation", keys)
+}
+
+/// Opens Activity from the status bar; the queued count rides beside the icon.
+fn activity_button(queued: usize, cx: &App) -> gpui::Stateful<gpui::Div> {
+    let theme = cx.global::<Ui>().theme.clone();
+    let hover = color_alpha(theme.role("fg"), 0x14);
+    let hover_theme = theme.clone();
+    let label = if queued == 0 { "Show Activity".to_owned() } else { format!("Show Activity, {queued} waiting") };
+    let button = div()
+        .id("bar-activity")
+        .debug_selector(|| "bar-activity".into())
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .h(px(20.))
+        .px(px(5.))
+        .rounded(px(5.))
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .text_color(color(theme.role("fg-muted")))
+        .hover(move |style| style.bg(hover).text_color(color(hover_theme.role("fg"))))
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::ToggleActivity), cx))
+        .child(icons::glyph(Glyph::List, 14., "fg-muted", &theme))
+        // A fixed slot: the queue count must not move Cancel as it changes.
+        .child(div().w(px(10.)).flex().justify_center().text_size(px(10.)).child(if queued == 0 {
+            String::new()
+        } else {
+            queued.to_string()
+        }));
+    with_tooltip(button, label.clone(), None)
 }
 
 /// Text that gives way with an ellipsis when the transient slot is squeezed.
@@ -940,6 +999,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
                 .aria_max_numeric_value(100.)
                 .child(shrinking_text(label.clone()).text_color(fg))
                 .children((!detail.is_empty()).then(|| div().flex_none().text_color(muted).child(detail)));
+            group = group.child(activity_button(running.queued, cx).flex_none());
             group = group.child(cancel_button(cx).flex_none());
             (Some(label), Some(group.into_any_element()))
         }
@@ -998,6 +1058,26 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
     });
 
     let progress: Option<AnyElement> = match &state.primary {
+        Primary::Running(running) if running.indeterminate => {
+            let segment = div()
+                .id("bar-progress")
+                .debug_selector(|| "bar-progress".into())
+                .absolute()
+                .top_0()
+                .left_0()
+                .h(px(2.))
+                .w(relative(0.3))
+                .bg(color(theme.role("accent")));
+            Some(
+                segment
+                    .with_animation(
+                        "bar-progress-planning",
+                        Animation::new(Duration::from_millis(900)).repeat_synced(),
+                        |el, t| el.left(relative(t * 0.7)),
+                    )
+                    .into_any_element(),
+            )
+        }
         Primary::Running(running) => Some(
             div()
                 .id("bar-progress")
@@ -1148,15 +1228,16 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
 mod tests {
     use super::*;
     use crow_fs::ops::Progress;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
 
     fn running(label: &str, progress: Progress) -> Running {
         Running {
             label: label.to_owned(),
             progress,
-            cancel: Arc::new(AtomicBool::new(false)),
-            started: std::time::Instant::now(),
+            queued: 0,
+            planning: false,
+            pausing: false,
+            paused: false,
+            waiting: false,
         }
     }
 
