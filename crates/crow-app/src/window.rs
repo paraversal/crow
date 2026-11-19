@@ -2381,7 +2381,17 @@ impl Render for CrowWindow {
         let palette = self.render_palette(window, cx);
         let center: gpui::AnyElement = match &self.search {
             Some(search) => div().flex_1().min_w_0().h_full().child(search.clone()).into_any_element(),
-            None => div().flex_1().min_w_0().h_full().child(self.pane().clone()).into_any_element(),
+            None => {
+                let pane = self.pane().clone();
+                if list_view {
+                    let mut width = window.viewport_size().width - self.side_panes.left_width();
+                    if preview.is_some() {
+                        width -= self.side_panes.right_width();
+                    }
+                    pane.update(cx, |pane, _| pane.set_list_width(width));
+                }
+                div().flex_1().min_w_0().h_full().child(pane).into_any_element()
+            }
         };
         div()
             .id("crow")

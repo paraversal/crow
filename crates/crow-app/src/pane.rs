@@ -75,6 +75,7 @@ fn first_visible_row(handle: &UniformListScrollHandle) -> usize {
 /// Space between the list header's line and the first row, so a highlighted first row's
 /// rounded corners don't meet the straight line and leave dark wedges at its ends.
 pub(crate) const LIST_TOP_INSET: f32 = 4.0;
+const LIST_SIDE_INSET: f32 = 8.0;
 /// Left padding before a row's disclosure chevron, and the indent per tree level.
 const NAME_INSET: f32 = 4.0;
 const INDENT: f32 = 18.0;
@@ -321,6 +322,7 @@ pub struct Pane {
     /// The list view's columns after Name, and the widths shared by header and rows.
     columns: Vec<Arc<dyn Column>>,
     table: TableLayout,
+    list_width: Pixels,
     resize: Option<ResizeDrag>,
     preview: Option<Preview>,
     preview_generation: u64,
@@ -439,6 +441,7 @@ impl Pane {
             focus: cx.focus_handle(),
             table: default_table(&columns),
             columns,
+            list_width: Pixels::ZERO,
             resize: None,
             preview: None,
             preview_generation: 0,
@@ -671,13 +674,9 @@ impl Pane {
         self.filtering.as_ref().map(|filtering| filtering.input.read(cx).focus_handle(cx))
     }
 
-    /// The list table's column widths, fitted to the list's width from the last frame.
-    fn table_widths(&self) -> Vec<f32> {
-        match self.list_bounds.get() {
-            // Rows and header sit 8 px in from each side (`mx_2`).
-            Some(bounds) => self.table.fitted(f32::from(bounds.size.width) - 16.0),
-            None => self.table.columns().iter().map(|c| c.width).collect(),
-        }
+    /// The containing window sets this before rendering the pane.
+    pub(crate) fn set_list_width(&mut self, width: Pixels) {
+        self.list_width = width;
     }
 
     /// Whether a row is being renamed.
@@ -2637,6 +2636,7 @@ impl Pane {
 
     fn render_table_rows(
         &mut self,
+        widths: &[f32],
         range: Range<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2711,9 +2711,6 @@ impl Pane {
             plugin_value: Some(&plugin_value),
             plugin_version: Some(&plugin_version),
         };
-        let widths = self.table_widths();
-        // Columns hidden for a narrow pane have width 0; the last shown one stretches.
-        let last = widths.iter().rposition(|w| *w > 0.0).unwrap_or(0);
         let folder = self.folders[0].read(cx);
         let list_folder = self.folders[0].clone();
         let motion = self.view_motion.as_ref().and_then(|motion| motion.progress(mode, now).map(|t| (motion, t)));
@@ -2833,7 +2830,7 @@ impl Pane {
                     .aria_selected(selected)
                     .when(cursor == Some(ix), |row| row.aria_active_descendant())
                     .h(px(ROW_HEIGHT))
-                    .mx_2()
+                    .mx(px(LIST_SIDE_INSET))
                     .relative()
                     .flex()
                     .items_center()
@@ -3064,8 +3061,8 @@ impl Pane {
                         let opacity = dim * cell.opacity * metadata_fade;
                         let fade = cell.fade.filter(|_| mode != Effective::Off);
                         let cell = div()
-                            .when(i + 1 == last, |cell| cell.flex_1().min_w(width))
-                            .when(i + 1 != last, |cell| cell.w(width).flex_none())
+                            .w(width)
+                            .flex_none()
                             .px(px(CELL_PADDING))
                             .overflow_hidden()
                             .whitespace_nowrap()
@@ -3092,11 +3089,10 @@ impl Pane {
             .collect()
     }
 
-    fn render_table_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_table_header(&self, widths: &[f32], cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let sort = self.sort;
-        let widths = self.table_widths();
-        // Columns hidden for a narrow pane have width 0; the last shown one stretches.
+        // Columns hidden for a narrow pane have width 0.
         let last = widths.iter().rposition(|w| *w > 0.0).unwrap_or(0);
         let border = color(theme.role("border"));
         // (title, sort key, alignment) for the name column and each shown column.
@@ -3113,7 +3109,7 @@ impl Pane {
             .debug_selector(|| "table-header".into())
             .h(px(28.))
             .flex_none()
-            .mx_2()
+            .mx(px(LIST_SIDE_INSET))
             .flex()
             .items_center()
             .text_size(px(12.))
@@ -3135,8 +3131,8 @@ impl Pane {
                 .aria_label(format!("{title}{}", if sorted { ", sorted" } else { "" }))
                 .relative()
                 .h_full()
-                .when(i == last, |cell| cell.flex_1().min_w(width))
-                .when(i != last, |cell| cell.w(width).flex_none())
+                .w(width)
+                .flex_none()
                 .pl(px(if i == 0 { NAME_INSET + TRIANGLE_WIDTH + 8.0 } else { CELL_PADDING }))
                 .pr(px(CELL_PADDING))
                 .flex()
@@ -3156,7 +3152,7 @@ impl Pane {
                         .when(align == Align::Right, |t| t.text_right())
                         .child(title),
                 )
-                .child(div().w(px(10.)).flex_none().child(chevron))
+                .when(key.is_some(), |cell| cell.child(div().w(px(10.)).flex_none().child(chevron)))
                 // The divider's grab area, a little wider than the line.
                 .when(i != last, |cell| {
                     cell.child(
@@ -4040,7 +4036,7 @@ impl Ghosts<'_> {
 
 /// The name column plus the shown columns, at their default widths.
 fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
-    let mut columns = vec![ColumnWidth { id: "name".into(), width: 300.0, min_width: 140.0 }];
+    let mut columns = vec![ColumnWidth { id: "name".into(), width: 220.0, min_width: 140.0 }];
     columns.extend(shown.iter().map(|c| ColumnWidth {
         id: c.id().to_owned(),
         width: c.width(),
@@ -4170,11 +4166,12 @@ impl Render for Pane {
                 let field = self.render_filter_field(FilterPlace::List, window, cx);
                 let no_matches = self.render_no_matches(cx);
                 let footer = self.render_filter_footer(FilterPlace::List, cx);
+                let widths = self.table.fitted(f32::from(self.list_width) - 2.0 * LIST_SIDE_INSET);
                 div()
                     .size_full()
                     .flex()
                     .flex_col()
-                    .child(self.render_table_header(cx))
+                    .child(self.render_table_header(&widths, cx))
                     .children(field)
                     .child({
                         let bounds = self.list_bounds.clone();
@@ -4243,11 +4240,13 @@ impl Render for Pane {
                                     .when(self.tip_inset, |body| body.pb(px(crate::tips::INSET)))
                                     .children(glide_fill)
                                     .child({
-                                        let mut list =
-                                            uniform_list("entries", rows, cx.processor(Self::render_table_rows))
-                                                .track_scroll(&scroll)
-                                                .pt(px(LIST_TOP_INSET))
-                                                .flex_1();
+                                        let render_rows = cx.processor(move |this, range, window, cx| {
+                                            this.render_table_rows(&widths, range, window, cx)
+                                        });
+                                        let mut list = uniform_list("entries", rows, render_rows)
+                                            .track_scroll(&scroll)
+                                            .pt(px(LIST_TOP_INSET))
+                                            .flex_1();
                                         if let Some(plugin_rows) = self.plugin_row_decoration(0, cx) {
                                             list = list.with_decoration(plugin_rows);
                                         }
@@ -4262,15 +4261,8 @@ impl Render for Pane {
                             .flex_1()
                             .flex()
                             .flex_col()
-                            .on_children_prepainted(move |children, window, _| {
-                                let new = children.first().copied();
-                                // The table fits its columns to this width; a new width
-                                // needs one more frame to draw them fitted.
-                                // (A refresh during the draw itself is ignored, hence next frame.)
-                                if new.map(|b| b.size.width) != bounds.get().map(|b| b.size.width) {
-                                    window.on_next_frame(|window, _| window.refresh());
-                                }
-                                bounds.set(new);
+                            .on_children_prepainted(move |children, _, _| {
+                                bounds.set(children.first().copied());
                             })
                             // The list's own scroll handler runs first (deeper hitbox), so
                             // the offset read here is this event's.

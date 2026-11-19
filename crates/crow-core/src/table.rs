@@ -24,8 +24,8 @@ pub struct ResizeDrag {
 }
 
 impl TableLayout {
-    /// The first column is the name column. It follows the pane's width (`fitted`);
-    /// the others keep the widths they were dragged to.
+    /// The first column is Name. Its width is a target for fitting, while the
+    /// other columns' widths are their preferred sizes.
     pub fn new(columns: Vec<ColumnWidth>) -> Self {
         Self { columns }
     }
@@ -43,14 +43,16 @@ impl TableLayout {
         self.columns.iter().map(|c| c.width).sum()
     }
 
-    /// The widths to draw in `available` points, as Finder does: Name takes what the
-    /// other columns leave, down to its minimum; past that the others give way from the
-    /// right, each down to its own minimum; past that whole columns are hidden from the
-    /// right (width `0.0`) so no cell is ever cut off at the pane's edge. Name always shows.
+    /// The widths to draw in `available` points. Name takes the remaining space
+    /// and metadata gives way from the right to reach Name's target width. When
+    /// space is tighter, Name can shrink to its minimum before whole columns
+    /// hide from the right (width `0.0`).
     pub fn fitted(&self, available: f32) -> Vec<f32> {
         let mut widths: Vec<f32> = self.columns.iter().map(|c| c.width).collect();
         let Some(name) = self.columns.first() else { return widths };
-        let mut deficit = name.min_width + widths[1..].iter().sum::<f32>() - available;
+        let metadata_minimum: f32 = self.columns[1..].iter().map(|c| c.min_width).sum();
+        let name_target = (available - metadata_minimum).clamp(name.min_width, name.width);
+        let mut deficit = name_target + widths[1..].iter().sum::<f32>() - available;
         for (width, column) in widths.iter_mut().zip(&self.columns).skip(1).rev() {
             if deficit <= 0.0 {
                 break;
@@ -70,7 +72,7 @@ impl TableLayout {
         let others: f32 = widths[1..].iter().sum();
         // Alone, Name fits the pane exactly, even below its minimum: its text ellipsizes.
         let floor = if others > 0.0 { name.min_width } else { 0.0 };
-        widths[0] = (available - others).max(floor).floor();
+        widths[0] = (available - others).max(floor);
         widths
     }
 
@@ -98,7 +100,7 @@ mod tests {
 
     fn layout() -> TableLayout {
         TableLayout::new(vec![
-            ColumnWidth { id: "name".into(), width: 300.0, min_width: 120.0 },
+            ColumnWidth { id: "name".into(), width: 200.0, min_width: 120.0 },
             ColumnWidth { id: "size".into(), width: 80.0, min_width: 50.0 },
             ColumnWidth { id: "kind".into(), width: 150.0, min_width: 60.0 },
         ])
@@ -130,12 +132,12 @@ mod tests {
     fn name_follows_the_pane_width() {
         let t = layout();
         assert_eq!(t.fitted(800.0), vec![570.0, 80.0, 150.0], "wide: Name takes the room");
-        assert_eq!(t.fitted(400.0), vec![170.0, 80.0, 150.0], "narrow: Name gives way first");
-        assert_eq!(t.fitted(300.0), vec![120.0, 80.0, 100.0], "then the others, from the right");
-        assert_eq!(t.fitted(240.0), vec![120.0, 60.0, 60.0], "never below their minimums");
+        assert_eq!(t.fitted(400.0), vec![200.0, 80.0, 120.0], "Kind gives way to preserve Name's target");
+        assert_eq!(t.fitted(300.0), vec![190.0, 50.0, 60.0], "Name can shrink when metadata reaches its minimum");
+        assert_eq!(t.fitted(230.0), vec![120.0, 50.0, 60.0], "at every minimum");
         assert_eq!(t.fitted(200.0), vec![150.0, 50.0, 0.0], "then whole columns hide from the right");
         assert_eq!(t.fitted(100.0), vec![100.0, 0.0, 0.0], "Name always shows, fitted to the pane");
-        assert_eq!(t.total_width(), 530.0, "fitting never changes the stored widths");
+        assert_eq!(t.total_width(), 430.0, "fitting never changes the stored widths");
     }
 
     #[test]
@@ -144,7 +146,7 @@ mod tests {
         let drag = t.begin_resize(1, 0.0).unwrap();
         t.drag_to(&drag, -500.0);
         assert_eq!(t.width_of("size"), Some(50.0));
-        assert_eq!(t.total_width(), 300.0 + 50.0 + 150.0);
+        assert_eq!(t.total_width(), 200.0 + 50.0 + 150.0);
     }
 
     #[test]

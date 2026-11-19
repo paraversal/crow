@@ -632,7 +632,7 @@ impl Column for KindColumn {
         "Kind"
     }
     fn width(&self) -> f32 {
-        150.0
+        112.0
     }
     fn sort_key(&self) -> Option<SortKey> {
         Some(SortKey::Kind)
