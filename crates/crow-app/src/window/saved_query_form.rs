@@ -41,6 +41,16 @@ pub(crate) struct SavedQueryForm {
     subscriptions: Vec<Subscription>,
 }
 
+/// A tag field that stays comma-separated for ordinary names; a name containing
+/// a comma is shown as a JSON string array so editing it cannot split the value.
+fn tag_field_text(tags: &[String]) -> String {
+    if tags.iter().any(|tag| tag.contains(',')) {
+        serde_json::to_string(tags).unwrap_or_default()
+    } else {
+        tags.join(", ")
+    }
+}
+
 fn field<T: 'static>(
     value: String,
     placeholder: &'static str,
@@ -66,7 +76,7 @@ impl SavedQueryForm {
                 search.hidden_flags(),
                 search.exclusions_value(),
                 search.predicate_values(),
-                search.tag_values().join(", "),
+                tag_field_text(search.tag_values()),
             )
         });
         let (scope, matching, text, hidden, exclusions, predicates, tags) = match &search_state {
@@ -91,7 +101,7 @@ impl SavedQueryForm {
                         (saved.include_hidden, saved.enter_hidden_folders),
                         saved.exclusions,
                         (saved.kind.clone(), saved.modified_within_days),
-                        saved.tags.join(", "),
+                        tag_field_text(&saved.tags),
                     )
                 },
             ),
@@ -178,9 +188,14 @@ impl SavedQueryForm {
                     .map_err(|_| "Modified within must be a positive whole number of days".to_owned())?,
             )
         };
-        let tags = crow_core::normalize_tags(
-            self.tags.read(cx).text().split(',').map(str::trim).filter(|tag| !tag.is_empty()),
-        )?;
+        let tags_text = self.tags.read(cx).text().trim().to_owned();
+        let tags = if tags_text.starts_with('[') {
+            let values: Vec<String> = serde_json::from_str(&tags_text)
+                .map_err(|_| "Tags must be a comma-separated list or a JSON array of strings".to_owned())?;
+            crow_core::normalize_tags(values)?
+        } else {
+            crow_core::normalize_tags(tags_text.split(',').map(str::trim).filter(|tag| !tag.is_empty()))?
+        };
         let id = match &self.id {
             Some(id) => id.clone(),
             None => SavedQuery::allocate_id(&name, &cx.global::<Ui>().saved_queries),
@@ -583,5 +598,16 @@ impl CrowWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         form.render(window, cx, Self::saved_form_action)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_comma_inside_a_tag_uses_a_json_array() {
+        assert_eq!(tag_field_text(&["Work".into(), "review".into()]), "Work, review");
+        assert_eq!(tag_field_text(&["Work".into(), "a,b".into()]), r#"["Work","a,b"]"#);
     }
 }
