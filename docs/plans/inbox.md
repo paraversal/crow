@@ -1,10 +1,8 @@
-# Plans inbox
+# Crow inbox
 
-Unsorted work. New triage items wait here until they get a tag and a milestone folder; finished plans move to `done/`. Current milestones: [`m8/`](m8/README.md) (Finder parity), [`m9/`](m9/README.md) (Phase 2); M8.5's index is in [`done/m8.5/`](done/m8.5/README.md).
+Untriaged ideas go here. Move accepted milestone work to the [roadmap](../ROADMAP.md).
 
-Format: one line per item, with a tag (`f` feature · `p` performance · `ui` UI improvement · `b` bug · `d` future direction · `s` setting), the source, and what is unclear. An item moves out when a milestone index names it and a plan exists (or the index says which piece will plan it).
-
-## Untriaged
-
-- `f` Custom keybindings: let the user set, see and persist a key for a command (the F7 answer asked for a bindable Open Terminal Here; F7 shipped the command with no key). Source: F7 Q1, 2026-11-17. Unclear: config shape (`settings.toml` table vs its own file), how conflicts between layers are reported, and whether it waits for the M9 settings/plugin work.
-- The first 2026-11-17 list is triaged in [`m8/README.md`](m8/README.md#triage-2026-11-17); the Phase 2 items are in [`m9/README.md`](m9/README.md). The second 2026-11-17 list is triaged in [`m8/README.md`](m8/README.md#triage-2026-11-17-second-list): Empty Trash is F7.6, the test temp-dir leak is M9 P9, and search reliability is now its own milestone, [`done/m8.5/README.md`](done/m8.5/README.md).
+- **Custom keybindings.** Let users set, see, and persist a key for a command, including Open Terminal Here. Decide on the config format and how to report conflicts across keymap layers.
+- **Settings categories.** Try a persistent tab bar for Appearance, Behaviour, Search, Plugins, and Files. Include preview provider selection and a place for plugin settings. Keep live `views.toml` preferences and make configuration errors visible across tabs. Confirm categories, tab persistence, and the plugin settings contract before implementation.
+- **Sidebar text filter.** Filter native and contributed sidebar sections. Plan matching, focus, cursor fallback, and Escape together. The existing `/` binding filters the file pane.
+- **Design-board follow-ups.** Line icons per favorite, clock icons in Recent, syntax highlighting and line numbers in previews, 196 px columns, a stronger focused-column tint, and a scope token in the search field. See the [UI design overview](ui-overhaul/README.md).
