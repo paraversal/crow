@@ -511,6 +511,24 @@ impl Pane {
         self.history.current()
     }
 
+    /// The icon source this pane shows: the focused folder's `views.toml`
+    /// override, else `settings.toml`'s pack.
+    pub fn icon_source(&self, cx: &gpui::App) -> String {
+        self.folders
+            .get(self.focused)
+            .and_then(|folder| folder.read(cx).icon_source().map(str::to_owned))
+            .unwrap_or_else(|| cx.global::<Ui>().settings.icon_pack.clone())
+    }
+
+    fn icon_resolver(&self, column: usize, cx: &gpui::App) -> crate::icon_packs::Resolver {
+        let source = self
+            .folders
+            .get(column)
+            .and_then(|folder| folder.read(cx).icon_source().map(str::to_owned))
+            .unwrap_or_else(|| cx.global::<Ui>().settings.icon_pack.clone());
+        crate::icon_packs::Resolver::for_source(cx, &source)
+    }
+
     fn focused_folder(&self) -> &Entity<Folder> {
         &self.folders[self.focused]
     }
@@ -1268,6 +1286,17 @@ impl Pane {
             return;
         }
         let resolved = ui.views.resolve(&key.2);
+        let sources: Vec<(Entity<Folder>, Option<String>)> = self
+            .folders
+            .iter()
+            .map(|folder| {
+                let dir = folder.read(cx).dir().to_path_buf();
+                (folder.clone(), ui.views.resolve(&dir).icon_source.map(|(source, _)| source))
+            })
+            .collect();
+        for (folder, source) in sources {
+            folder.update(cx, |folder, _| folder.set_icon_source(source));
+        }
         self.applied_view = Some(key);
         self.apply_sort(resolved.sort(), cx);
         let ids: Vec<&str> = self.columns.iter().map(|c| c.id()).collect();
@@ -1359,7 +1388,9 @@ impl Pane {
 
     fn push_folder(&mut self, dir: PathBuf, auto_select: bool, cx: &mut Context<Self>) {
         let (hidden, sort) = (self.show_hidden, self.sort);
+        let icon_source = cx.global::<Ui>().views.resolve(&dir).icon_source.map(|(source, _)| source);
         let folder = cx.new(|cx| Folder::new(dir, hidden, sort, auto_select, cx));
+        folder.update(cx, |folder, _| folder.set_icon_source(icon_source));
         self.subscriptions
             .push(cx.subscribe(&folder, |this, folder, event, cx| this.on_folder_event(folder, event, cx)));
         self.folders.push(folder);
@@ -2665,6 +2696,7 @@ impl Pane {
         let font_size = px(ui.settings.font_size);
         let mode = ui.feedback.mode;
         let now = Instant::now();
+        let icons = self.icon_resolver(0, cx);
         let muted = color(theme.role("fg-muted"));
         let stripe = color_alpha(theme.role("surface"), 0x70);
         let rule = color_alpha(theme.role("fg"), 0x30);
@@ -2786,7 +2818,7 @@ impl Pane {
                 let moving = motion.and_then(|(motion, t)| motion.row(list_folder.entity_id(), &entry.path, t));
                 let moving_fill = moving.filter(|row| selected && row.tracks_selection());
                 let fade = motion.filter(|_| moving.is_none()).map_or(1.0, |(_, t)| 0.4 + 0.6 * t);
-                let icon = row_icon(&entry, look, theme, dim, cloud).into_any_element();
+                let icon = row_icon(&entry, look, theme, dim, cloud, &icons).into_any_element();
                 let icon = match moving {
                     Some(row) => row.icon(icon),
                     None => icon,
@@ -3195,6 +3227,7 @@ impl Pane {
         let muted = color(theme.role("fg-muted"));
         let rule = color_alpha(theme.role("fg"), 0x30);
         let Some(folder) = self.folders.get(k).map(|f| f.read(cx)) else { return Vec::new() };
+        let icons = self.icon_resolver(k, cx);
         let folder_id = self.folders[k].entity_id();
         let motion = self
             .view_motion
@@ -3295,7 +3328,7 @@ impl Pane {
                 let moving = motion.and_then(|(motion, t)| motion.row(folder_id, &entry.path, t));
                 let moving_fill = moving.filter(|row| selected && row.tracks_selection());
                 let fade = motion.filter(|_| moving.is_none()).map_or(1.0, |(_, t)| 0.4 + 0.6 * t);
-                let icon = row_icon(&entry, look, theme, dim, cloud).into_any_element();
+                let icon = row_icon(&entry, look, theme, dim, cloud, &icons).into_any_element();
                 let icon = match moving {
                     Some(row) => row.icon(icon),
                     None => icon,
@@ -3538,6 +3571,7 @@ impl Pane {
             let has_field = field.is_some();
             let glide =
                 mode == Effective::Full && self.view_motion.is_none() && k == focused && self.focus.is_focused(window);
+            let icons = self.icon_resolver(k, cx);
             let body = match no_matches {
                 Some(block) => block,
                 None => {
@@ -3550,6 +3584,7 @@ impl Pane {
                             scroll: &scroll,
                             theme: &theme,
                             font_size,
+                            icons: &icons,
                             side_inset: 4.0,
                             top_inset: 0.0,
                         }
@@ -3699,6 +3734,7 @@ impl Pane {
         // PREVIEW_COLUMN_WIDTH when they don't (the strip scrolls instead).
         let visible = self.info.read(cx).visible();
         if visible && let Some((entry, items)) = self.preview_parts(cx) {
+            let icons = self.icon_resolver(self.focused, cx);
             let tab = self.info.read(cx).tab();
             let label = match tab {
                 InfoTab::Preview => self.preview_label(cx).unwrap_or_default(),
@@ -3726,10 +3762,17 @@ impl Pane {
                             items,
                             size,
                         };
-                        preview::folder_summary(summary, &theme).into_any_element()
+                        preview::folder_summary(summary, &theme, &icons).into_any_element()
                     } else {
-                        preview::contents(&entry, self.preview(cx), &theme, size, self.cloud_status(&entry.path, cx))
-                            .into_any_element()
+                        preview::contents(
+                            &entry,
+                            self.preview(cx),
+                            &theme,
+                            size,
+                            self.cloud_status(&entry.path, cx),
+                            &icons,
+                        )
+                        .into_any_element()
                     }
                 }
                 InfoTab::Info => self.info.clone().into_any_element(),
@@ -3891,17 +3934,26 @@ fn with_island_rounding<E: Styled>(element: E, island: Option<IslandEdges>) -> E
 }
 
 /// The file icon with the trash glyph drawn over it while a row is swallowed.
-fn row_icon(entry: &Entry, look: Look, theme: &Theme, dim: f32, cloud: Option<CloudStatus>) -> Div {
-    div()
-        .relative()
-        .size(px(16.))
-        .flex_none()
-        .child(
-            div()
-                .opacity((1.0 - look.trash) * dim)
-                .children(cloud_icon(cloud, &entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.)))),
-        )
-        .when(look.trash > 0.0, |slot| {
+fn row_icon(
+    entry: &Entry,
+    look: Look,
+    theme: &Theme,
+    dim: f32,
+    cloud: Option<CloudStatus>,
+    icons: &crate::icon_packs::Resolver,
+) -> Div {
+    let packed = (!crate::style::native_cloud_icon(cloud, &entry.path))
+        .then(|| icons.resolve(&entry.path, entry.is_dir, entry.is_package()))
+        .flatten();
+    let content = match packed {
+        Some(icon) => crate::icons::pack_glyph(&icon.asset, 16., color(icon.color.rgb(theme))).into_any_element(),
+        None => div()
+            .children(cloud_icon(cloud, &entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.))))
+            .into_any_element(),
+    };
+    div().relative().size(px(16.)).flex_none().child(div().opacity((1.0 - look.trash) * dim).child(content)).when(
+        look.trash > 0.0,
+        |slot| {
             slot.child(
                 div().absolute().inset_0().flex().items_center().justify_center().opacity(look.trash).child(glyph(
                     Glyph::Trash,
@@ -3910,11 +3962,12 @@ fn row_icon(entry: &Entry, look: Look, theme: &Theme, dim: f32, cloud: Option<Cl
                     theme,
                 )),
             )
-        })
+        },
+    )
 }
 
 /// A row drawn over the list while its swallow finishes after the listing dropped it.
-fn ghost_row(entry: &Entry, look: Look, theme: &Theme, font_size: Pixels) -> Div {
+fn ghost_row(entry: &Entry, look: Look, theme: &Theme, font_size: Pixels, icons: &crate::icon_packs::Resolver) -> Div {
     div()
         .h(px(ROW_HEIGHT))
         .w_full()
@@ -3929,6 +3982,7 @@ fn ghost_row(entry: &Entry, look: Look, theme: &Theme, font_size: Pixels) -> Div
             theme,
             content_opacity(entry.hidden, false),
             entry.dataless.then_some(CloudStatus::NotDownloaded),
+            icons,
         ))
         .child(
             div()
@@ -3949,6 +4003,7 @@ struct Ghosts<'a> {
     scroll: &'a UniformListScrollHandle,
     theme: &'a Theme,
     font_size: Pixels,
+    icons: &'a crate::icon_packs::Resolver,
     side_inset: f32,
     top_inset: f32,
 }
@@ -3976,7 +4031,7 @@ impl Ghosts<'_> {
                     .h(px(ROW_HEIGHT))
                     .overflow_hidden()
                     .debug_selector(|| format!("ghost-{}", effect.entry.name))
-                    .child(ghost_row(&effect.entry, look, self.theme, self.font_size))
+                    .child(ghost_row(&effect.entry, look, self.theme, self.font_size, self.icons))
                     .into_any_element()
             })
             .collect()
@@ -4128,6 +4183,7 @@ impl Render for Pane {
                             None => {
                                 let ghosts = {
                                     let folder = self.folders[0].read(cx);
+                                    let icons = self.icon_resolver(0, cx);
                                     Ghosts {
                                         folder,
                                         mode,
@@ -4135,6 +4191,7 @@ impl Render for Pane {
                                         scroll: &scroll,
                                         theme: &theme,
                                         font_size,
+                                        icons: &icons,
                                         side_inset: 8.0,
                                         top_inset: LIST_TOP_INSET,
                                     }

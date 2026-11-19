@@ -131,7 +131,52 @@ fn register() {
 
 The pack file and its glyph references must be declared bundle assets. Changing the pack
 TOML or a declared glyph changes the package digest, withdraws the old generation and
-returns the package to pending approval. P3A validates the pack format and glyph contents.
+returns the package to pending approval. The pack is selected by its namespaced id,
+`<plugin-id>.<pack-id>` (for example `example.pack.theme`).
+
+The pack format is versioned and data-only:
+
+```toml
+api = 1
+id = "theme"          # optional; informational for a plugin pack
+name = "Theme"
+
+[item]
+"~/work/vendor.txt" = { icon = "vendor.svg", color = "accent" }
+
+[file_name]
+"Cargo.toml" = { icon = "cargo.svg", color = "accent" }
+
+[folder_name]
+"src" = { icon = "src.svg", color = "base0D" }
+
+[extension]
+rs = { icon = "rust.svg", color = "base09" }
+
+[type]
+"public.image" = { icon = "image.svg", color = "base0E" }
+
+[generic]
+file = { icon = "file.svg", color = "fg-muted" }
+folder = { icon = "folder.svg", color = "base0D" }
+```
+
+Resolution is first match wins: exact item path, exact file name, exact folder name,
+ASCII-case-folded extension, ASCII-case-folded UTType identifier (exact type first, then
+the types it conforms to, so `public.image` covers PNG and JPEG), then generic file or
+folder. Names match the raw path bytes exactly; a non-UTF-8 name falls through to the
+later tiers. `color` is optional and defaults to `fg`; it names one of the theme's roles
+or a palette hue (`base08`–`base0F`, `base12`–`base17`).
+
+`icon` is a relative path to an `.svg` in the pack. Each glyph must be a regular file
+(no symlinks), stay inside the pack folder, be at most 256 KiB, and the pack may total
+at most 8 MiB across 512 glyphs. Glyphs must be UTF-8 SVG without scripts, embedded
+images, `<style>` elements, external `href`s, event attributes or external CSS
+references. An unknown role, missing asset, bad path or malformed glyph rejects the
+whole pack; Crow keeps the last good pack snapshot and reports the error. Removing a
+pack or disabling its plugin falls back to native icons and keeps the configured id.
+Local packs live in `icon-packs/<id>/pack.toml` under the config folder and use the
+folder name as their id; an id is lowercase letters, digits and hyphens.
 
 Computed functions receive one map:
 

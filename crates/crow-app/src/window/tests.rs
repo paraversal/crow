@@ -997,6 +997,175 @@ fn app_icon_setting_switches_the_dock_icon_live(cx: &mut TestAppContext) {
     }
 }
 
+#[gpui::test]
+fn icon_packs_follow_settings_and_view_layers_without_re_reading(cx: &mut TestAppContext) {
+    const GLYPH: &str =
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/></svg>"#;
+    let root = fixture("icon-packs-window");
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("fixture");
+    std::fs::create_dir(root.join("src")).expect("fixture");
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        let config = cx.global::<Ui>().config_dir.clone();
+        let home = cx.global::<Ui>().home.clone();
+        let pack = config.join("icon-packs/sample");
+        std::fs::create_dir_all(&pack).expect("pack dir");
+        std::fs::write(
+            pack.join("pack.toml"),
+            r#"
+api = 1
+name = "Sample"
+[file_name]
+"Cargo.toml" = { icon = "cargo.svg", color = "accent" }
+[folder_name]
+"src" = { icon = "src.svg", color = "base0D" }
+"#,
+        )
+        .expect("pack");
+        std::fs::write(pack.join("cargo.svg"), GLYPH).expect("glyph");
+        std::fs::write(pack.join("src.svg"), GLYPH).expect("glyph");
+        std::fs::write(config.join("settings.toml"), "icon_pack = \"sample\"\n").expect("settings");
+        crate::ui::reload_config(cx);
+        let snapshot = crate::icon_packs::load_catalog(&config, &home).expect("catalog");
+        cx.global_mut::<crate::icon_packs::IconPacks>().install_for_tests(snapshot);
+    });
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("pack-glyph").is_some(), "the pack's glyph draws in the list");
+
+    // The snapshot owns the bytes: deleting the pack cannot change this frame.
+    std::fs::remove_dir_all(config_dir(&cx).join("icon-packs/sample")).expect("remove pack");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("pack-glyph").is_some(), "no render-time file read");
+
+    // An explicit native layer wins over settings.toml.
+    write_config(&view, &mut cx, "views.toml", "[defaults]\nicon_source = \"native\"\n");
+    assert!(cx.debug_bounds("pack-glyph").is_none(), "native at the defaults layer wins");
+
+    // A rule for this folder selects the pack again; the folder layer inherits it.
+    let views = format!(
+        "[defaults]\nicon_source = \"native\"\n[[rule]]\npath = \"{}\"\nicon_source = \"sample\"\n",
+        root.display()
+    );
+    write_config(&view, &mut cx, "views.toml", &views);
+    assert!(cx.debug_bounds("pack-glyph").is_some(), "the folder's rule selects the pack");
+
+    // Native in settings.toml draws Finder's icons even while the pack is installed.
+    write_config(&view, &mut cx, "views.toml", "[defaults]\n");
+    cx.update(|_, cx| {
+        cx.global_mut::<Ui>().settings.icon_pack = "native".into();
+        cx.refresh_windows();
+    });
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("pack-glyph").is_none(), "native in settings.toml wins");
+
+    // A missing configured pack falls back to native and keeps the setting.
+    cx.update(|_, cx| {
+        cx.global_mut::<Ui>().settings.icon_pack = "missing".into();
+        cx.refresh_windows();
+    });
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("pack-glyph").is_none(), "a missing pack uses native icons");
+    cx.update(|_, cx| {
+        let ui = cx.global::<Ui>();
+        assert_eq!(ui.settings.icon_pack, "missing", "the configured id is kept");
+    });
+
+    // A plugin-declared pack uses the same resolver and falls back when it goes.
+    let plugin_pack = std::sync::Arc::from(
+        b"api = 1\n[file_name]\n\"Cargo.toml\" = { icon = \"cargo.svg\", color = \"base0E\" }\n".as_slice(),
+    );
+    let mut assets = std::collections::HashMap::new();
+    assets.insert("cargo.svg".to_owned(), std::sync::Arc::from(GLYPH.as_bytes()));
+    let plugin = crate::icon_packs::TestPluginPack { key: "example.pack.theme".into(), pack: plugin_pack, assets };
+    cx.update(|_, cx| {
+        let config = cx.global::<Ui>().config_dir.clone();
+        let home = cx.global::<Ui>().home.clone();
+        let snapshot = crate::icon_packs::load_catalog_with(&config, &home, &[plugin]).expect("plugin catalog");
+        cx.global_mut::<crate::icon_packs::IconPacks>().install_for_tests(snapshot);
+        cx.global_mut::<Ui>().settings.icon_pack = "example.pack.theme".into();
+        cx.refresh_windows();
+    });
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("pack-glyph").is_some(), "a plugin-declared pack draws");
+
+    cx.update(|_, cx| {
+        let config = cx.global::<Ui>().config_dir.clone();
+        let home = cx.global::<Ui>().home.clone();
+        let empty = crate::icon_packs::load_catalog_with(&config, &home, &[] as &[crate::icon_packs::TestPluginPack])
+            .expect("empty catalog");
+        cx.global_mut::<crate::icon_packs::IconPacks>().install_for_tests(empty);
+        cx.refresh_windows();
+    });
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("pack-glyph").is_none(), "removing the plugin pack restores native icons");
+    cx.update(|_, cx| {
+        assert_eq!(cx.global::<Ui>().settings.icon_pack, "example.pack.theme", "the choice is kept");
+    });
+}
+
+/// Wait until the icon loader publishes an error, and return its text.
+fn wait_for_icon_error(cx: &mut VisualTestContext) -> Option<String> {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        if let Some(error) = cx.read(|cx| {
+            cx.try_global::<crate::icon_packs::IconPacks>()
+                .and_then(|packs| packs.error().map(|error| error.to_string()))
+        }) {
+            return Some(error);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    None
+}
+
+/// Wait until a reload succeeds and the error state is clear.
+fn wait_for_icon_success(cx: &mut VisualTestContext) {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        let error = cx.read(|cx| {
+            cx.try_global::<crate::icon_packs::IconPacks>()
+                .and_then(|packs| packs.error().map(|error| error.to_string()))
+        });
+        if error.is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the fixed icon pack never loaded");
+}
+
+#[gpui::test]
+fn fixing_an_icon_pack_clears_its_sticky_status_error(cx: &mut TestAppContext) {
+    const GLYPH: &str =
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/></svg>"#;
+    let root = fixture("icon-pack-error-clears");
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        let config = cx.global::<Ui>().config_dir.clone();
+        let pack = config.join("icon-packs/sample");
+        std::fs::create_dir_all(&pack).expect("pack dir");
+        std::fs::write(pack.join("pack.toml"), "api = 1\n[generic]\nfile = { icon = \"x.svg\", color = \"nope\" }")
+            .expect("broken pack");
+        std::fs::write(config.join("settings.toml"), "icon_pack = \"sample\"\n").expect("settings");
+        crate::ui::reload_config(cx);
+        crate::icon_packs::reload(cx);
+    });
+    let error = wait_for_icon_error(&mut cx).expect("the broken pack reports");
+    let message = cx.read(|cx| cx.global::<crate::operations::Operations>().message.clone());
+    assert!(message.as_ref().is_some_and(|(text, is_error)| *is_error && text.as_ref() == error), "{message:?}");
+
+    let pack = config_dir(&cx).join("icon-packs/sample");
+    std::fs::write(pack.join("x.svg"), GLYPH).expect("glyph");
+    std::fs::write(pack.join("pack.toml"), "api = 1\n[generic]\nfile = { icon = \"x.svg\" }").expect("fixed pack");
+    cx.update(|_, cx| crate::icon_packs::reload(cx));
+    wait_for_icon_success(&mut cx);
+    settle(&view, &mut cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("pack-glyph").is_some(), "the fixed pack draws");
+    assert!(
+        cx.read(|cx| cx.global::<crate::operations::Operations>().message.is_none()),
+        "a successful reload drops the error it put in the status line"
+    );
+}
+
 fn favorites_toml(paths: &[&Path]) -> String {
     let items: String = paths.iter().map(|p| format!("  {{ path = \"{}\" }},\n", p.display())).collect();
     format!("[[group]]\nname = \"Favorites\"\nitems = [\n{items}]\n[recent]\nshow = false\n")
@@ -2622,6 +2791,36 @@ fn sidebar_favorites_and_recent_use_the_board_icons(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("sidebar-folder-icon-0").is_some(), "the favorite's folder is a line icon");
     assert!(cx.debug_bounds("sidebar-clock-icon-2").is_some(), "Recent's clock is a line icon");
+}
+
+#[gpui::test]
+fn sidebar_favorites_use_a_pack_unless_they_have_their_own_icon(cx: &mut TestAppContext) {
+    const GLYPH: &str =
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/></svg>"#;
+    let root = fixture("sidebar-pack-icons");
+    let alpha = root.join("alpha");
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        let config = cx.global::<Ui>().config_dir.clone();
+        let home = cx.global::<Ui>().home.clone();
+        let pack = config.join("icon-packs/sample");
+        std::fs::create_dir_all(&pack).expect("pack dir");
+        std::fs::write(pack.join("pack.toml"), "api = 1\n[folder_name]\nalpha = { icon = \"alpha.svg\" }\n")
+            .expect("pack");
+        std::fs::write(pack.join("alpha.svg"), GLYPH).expect("glyph");
+        std::fs::write(config.join("settings.toml"), "icon_pack = \"sample\"\n").expect("settings");
+        crate::ui::reload_config(cx);
+        let snapshot = crate::icon_packs::load_catalog(&config, &home).expect("catalog");
+        cx.global_mut::<crate::icon_packs::IconPacks>().install_for_tests(snapshot);
+    });
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha]));
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("sidebar-pack-icon-0").is_some(), "the favorite uses the pack's folder glyph");
+    assert!(cx.debug_bounds("sidebar-folder-icon-0").is_none(), "the line folder glyph is replaced");
+
+    let own = favorites_toml(&[&alpha]).replace("{ path =", "{ icon = \"★\", path =");
+    write_config(&view, &mut cx, "sidebar.toml", &own);
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("sidebar-pack-icon-0").is_none(), "a favorite's own icon wins");
 }
 
 #[gpui::test]

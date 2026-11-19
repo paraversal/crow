@@ -977,6 +977,11 @@ impl CrowWindow {
             cx.try_global::<crate::cloud_status::CloudStatusService>()
                 .and_then(|service| service.0.read(cx).status(&entry.path))
         });
+        let source = match &self.search {
+            Some(search) => search.read(cx).icon_source(cx),
+            None => self.pane().read(cx).icon_source(cx),
+        };
+        let resolver = crate::icon_packs::Resolver::for_source(cx, &source);
         let label = match tab {
             InfoTab::Preview => {
                 entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview, folder_size, cloud))
@@ -986,7 +991,9 @@ impl CrowWindow {
         };
         let body = match tab {
             InfoTab::Preview => match entry {
-                Some(entry) => preview::contents(entry, preview, theme, folder_size, cloud).into_any_element(),
+                Some(entry) => {
+                    preview::contents(entry, preview, theme, folder_size, cloud, &resolver).into_any_element()
+                }
                 None => div().into_any_element(),
             },
             InfoTab::Info => self.info.clone().into_any_element(),
@@ -1552,6 +1559,17 @@ impl CrowWindow {
             (_, false) => "newest first",
         };
         let columns = resolved.columns.0.join(", ");
+        let packs = cx.try_global::<crate::icon_packs::IconPacks>();
+        let (icon_value, icon_source) = match &resolved.icon_source {
+            Some((source, from)) => {
+                (packs.map_or_else(|| source.clone(), |packs| packs.display_name(source)), from.to_string())
+            }
+            None => (
+                packs.map_or_else(|| ui.settings.icon_pack.clone(), |packs| packs.display_name(&ui.settings.icon_pack)),
+                "settings.toml".to_owned(),
+            ),
+        };
+        let pack_error = packs.and_then(|packs| packs.error().cloned());
         let lines: Vec<(&str, String, String)> = vec![
             ("View", mode.into(), view_source),
             ("Sort", sort_title(resolved.sort.0).into(), resolved.sort.1.to_string()),
@@ -1562,6 +1580,7 @@ impl CrowWindow {
                 resolved.folders_first.1.to_string(),
             ),
             ("Columns", columns, resolved.columns.1.to_string()),
+            ("Icons", icon_value, icon_source),
         ];
         let rules = if resolved.matched_rules.is_empty() {
             "No rules in views.toml match this folder.".to_owned()
@@ -1605,6 +1624,14 @@ impl CrowWindow {
                         .child(div().flex_1().text_size(px(12.)).text_color(color(muted)).child(source))
                 }))
                 .child(div().pt_1().text_size(px(12.)).text_color(color(muted)).child(rules))
+                .when_some(pack_error, |sheet, error| {
+                    sheet.child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(color(theme.role("error")))
+                            .child(format!("{error} (last good icons kept)")),
+                    )
+                })
                 .child(
                     div()
                         .flex()

@@ -8,6 +8,7 @@ description = "Crow's UI-free model: settings, tabs, history"
 
 [dependencies]
 crow-fs.workspace = true
+crow-theme.workspace = true
 globset = "0.4"
 serde.workspace = true
 serde_json.workspace = true

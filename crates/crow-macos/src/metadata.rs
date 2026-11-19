@@ -22,7 +22,7 @@ use objc2_quick_look_thumbnailing::{
     QLThumbnailGenerationRequest, QLThumbnailGenerationRequestRepresentationTypes, QLThumbnailGenerator,
     QLThumbnailRepresentation,
 };
-use objc2_uniform_type_identifiers::UTType;
+use objc2_uniform_type_identifiers::{UTType, UTTypeFolder};
 
 use crate::ns_url;
 
@@ -30,6 +30,11 @@ use crate::ns_url;
 type KindCache = Mutex<HashMap<(String, bool), Arc<str>>>;
 
 static KINDS: LazyLock<KindCache> = LazyLock::new(Default::default);
+
+/// UTType identifiers by (lowercased extension, is folder), including misses.
+type TypeCache = Mutex<HashMap<(String, bool), Option<Arc<[Arc<str>]>>>>;
+
+static TYPES: LazyLock<TypeCache> = LazyLock::new(Default::default);
 
 /// Finder's "Kind" for a file extension (`"Markdown Document"`, `"Folder"`, …),
 /// localized by the system and cached per extension.
@@ -60,6 +65,50 @@ fn fallback_kind(ext: &str, is_dir: bool) -> String {
         (true, _) => "Folder".into(),
         (false, "") => "Document".into(),
         (false, ext) => format!("{} file", ext.to_uppercase()),
+    }
+}
+
+/// The system UTType for an extension and every type it conforms to, exact
+/// type first (`public.png`, then `public.image`, `public.data`, …). `None`
+/// when the system only knows a dynamic type. Cached per extension and safe
+/// off the main thread, like `kind_name`.
+pub fn type_identifiers(ext: &str, is_folder: bool) -> Option<Arc<[Arc<str>]>> {
+    let key = (ext.to_ascii_lowercase(), is_folder);
+    if let Some(hit) = TYPES.lock().ok().and_then(|types| types.get(&key).cloned()) {
+        return hit;
+    }
+    let identifiers: Option<Arc<[Arc<str>]>> = autoreleasepool(|_| {
+        if is_folder {
+            // SAFETY: the UTType constants are immutable for the process lifetime.
+            Some(type_chain(unsafe { UTTypeFolder }))
+        } else {
+            UTType::typeWithFilenameExtension(&NSString::from_str(&key.0))
+                .filter(|kind| !kind.isDynamic())
+                .map(|kind| type_chain(&kind))
+        }
+    });
+    if let Ok(mut types) = TYPES.lock() {
+        types.insert(key, identifiers.clone());
+    }
+    identifiers
+}
+
+fn type_chain(content_type: &UTType) -> Arc<[Arc<str>]> {
+    let mut identifiers = vec![Arc::from(content_type.identifier().to_string())];
+    for supertype in content_type.supertypes().iter() {
+        identifiers.push(Arc::from(supertype.identifier().to_string()));
+    }
+    identifiers[1..].sort_by(|a, b| type_rank(a).cmp(&type_rank(b)).then_with(|| a.cmp(b)));
+    identifiers.dedup();
+    Arc::from(identifiers)
+}
+
+/// Generic roots sort last so `public.image` wins over `public.data` when a
+/// pack maps both.
+fn type_rank(identifier: &str) -> u8 {
+    match identifier {
+        "public.data" | "public.item" | "public.content" => 2,
+        _ => 0,
     }
 }
 
@@ -224,6 +273,19 @@ mod tests {
         assert_ne!(&*kind_name("md", false), "MD file", "the system knows Markdown");
         assert_eq!(&*kind_name("zzqq", false), "ZZQQ file", "unknown extensions get a readable fallback");
         assert!(Arc::ptr_eq(&kind_name("md", false), &kind_name("MD", false)), "cached case-insensitively");
+    }
+
+    #[test]
+    fn type_identifiers_come_from_the_system_and_include_supertypes() {
+        let folder = type_identifiers("", true).expect("folders have a type");
+        assert_eq!(&*folder[0], "public.folder");
+        let markdown = type_identifiers("md", false).expect("Markdown has a type");
+        assert!(markdown.contains(&Arc::from("public.text")), "{markdown:?}");
+        assert!(type_identifiers("zzqq", false).is_none(), "a dynamic type is not a stable pack key");
+        assert!(Arc::ptr_eq(
+            &type_identifiers("MD", false).expect("cached"),
+            &type_identifiers("md", false).expect("cached")
+        ));
     }
 
     #[test]

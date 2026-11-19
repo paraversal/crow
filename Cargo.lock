@@ -1161,6 +1161,7 @@ name = "crow-core"
 version = "0.1.0"
 dependencies = [
  "crow-fs",
+ "crow-theme",
  "globset",
  "serde",
  "serde_json",
