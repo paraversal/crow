@@ -16230,3 +16230,57 @@ fn a_drop_on_a_scrolled_folder_search_result_lands_in_that_result(cx: &mut TestA
     finder_drop(&view, &mut cx, at, outside.join("notes.txt"));
     assert!(expected.join("notes.txt").exists(), "the file landed in the result under the pointer");
 }
+
+/// Hover a native drag at `at` until the background volume reads have landed,
+/// then report what the drag cursor shows.
+fn drag_cursor_operation(
+    cx: &mut VisualTestContext,
+    at: gpui::Point<gpui::Pixels>,
+    source: PathBuf,
+    modifiers: gpui::Modifiers,
+) -> Option<gpui::DragOperation> {
+    cx.simulate_event(external_entered(at, source, modifiers));
+    cx.run_until_parked();
+    cx.simulate_event(external_pending(at, modifiers));
+    cx.run_until_parked();
+    let shown = cx.update(|window, _| window.file_drop_operation());
+    cx.simulate_event(gpui::FileDropEvent::Exited);
+    cx.run_until_parked();
+    shown
+}
+
+#[gpui::test]
+fn the_drag_cursor_shows_a_move_within_a_volume_and_a_copy_with_option(cx: &mut TestAppContext) {
+    let root = fixture("drag-cursor-same-volume");
+    let outside = fixture("drag-cursor-same-volume-source");
+    let (_view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "off");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let alpha = cx.debug_bounds("row-alpha").expect("alpha row").center();
+    let source = outside.join("notes.txt");
+    assert_eq!(
+        drag_cursor_operation(&mut cx, alpha, source.clone(), Default::default()),
+        Some(gpui::DragOperation::Move)
+    );
+    let option = gpui::Modifiers { alt: true, ..Default::default() };
+    assert_eq!(drag_cursor_operation(&mut cx, alpha, source, option), Some(gpui::DragOperation::Copy));
+}
+
+#[gpui::test]
+fn the_drag_cursor_shows_a_copy_across_volumes(cx: &mut TestAppContext) {
+    // `/dev` is its own device on macOS and holds a real folder, `fd`; nothing is dropped.
+    let outside = fixture("drag-cursor-cross-volume-source");
+    let (view, mut cx) = open(cx, &outside);
+    set_motion(&mut cx, "off");
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(PathBuf::from("/dev"), cx));
+    settle(&view, &mut cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let fd = cx.debug_bounds("row-fd").expect("the fd folder row").center();
+    assert_eq!(
+        drag_cursor_operation(&mut cx, fd, outside.join("notes.txt"), Default::default()),
+        Some(gpui::DragOperation::Copy),
+        "Finder shows a copy when the drop would copy"
+    );
+}

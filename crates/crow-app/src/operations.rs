@@ -58,6 +58,25 @@ impl DropOptions {
     }
 }
 
+/// The operation a drop performs when every source is (or is not) on the
+/// target's volume: what the native drag cursor shows. `None` when the source
+/// offers nothing the drop could do.
+pub fn drop_operation(options: DropOptions, same_volume: bool) -> Option<gpui::DragOperation> {
+    options.requested(same_volume).map(|kind| match kind {
+        DropKind::Move => gpui::DragOperation::Move,
+        DropKind::Copy => gpui::DragOperation::Copy,
+    })
+}
+
+/// The volume `path` lives on, for the drag cursor: the item itself for a
+/// source (a dragged link moves the link), the resolved folder for a target.
+pub fn volume_of(path: &Path, follow: bool) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    // io-ok: only called from the drag cursor's background device reads
+    let metadata = if follow { path.metadata() } else { path.symlink_metadata() };
+    metadata.ok().map(|metadata| metadata.dev())
+}
+
 /// What dropping `paths` on the folder `into` does, like Finder: a move within a
 /// volume, a copy across volumes; Option forces a copy. Items already in `into`,
 /// folders dropped onto themselves or into their own contents (after resolving
@@ -1438,6 +1457,18 @@ mod tests {
             Some(DropKind::Copy),
             "copy-only sources copy on the same volume"
         );
+    }
+
+    #[test]
+    fn the_drag_cursor_shows_what_the_drop_does() {
+        let options = DropOptions::default();
+        assert_eq!(drop_operation(options, true), Some(gpui::DragOperation::Move));
+        assert_eq!(drop_operation(options, false), Some(gpui::DragOperation::Copy), "a copy across volumes");
+        let option = DropOptions { copy: true, ..options };
+        assert_eq!(drop_operation(option, true), Some(gpui::DragOperation::Copy), "Option copies");
+        let move_only = DropOptions { allow_copy: false, ..options };
+        assert_eq!(drop_operation(move_only, false), Some(gpui::DragOperation::Move), "a move-only source moves");
+        assert_eq!(drop_operation(DropOptions { copy: true, ..move_only }, true), None, "no copy to offer");
     }
 
     #[test]

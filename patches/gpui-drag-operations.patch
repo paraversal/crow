@@ -119,8 +119,22 @@ index cfb1410..27d62af 100644
      },
      /// The user has stopped dragging the files over the window.
      Exited,
+diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
+index 1f344f2..126898d 100644
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -1379,6 +1379,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+         false
+     }
+     fn set_edited(&mut self, _edited: bool) {}
++    /// The operation the drag cursor shows for the current native drag update;
++    /// `None` leaves the platform's own choice.
++    fn set_file_drop_operation(&self, _operation: Option<crate::DragOperation>) {}
+     fn set_document_path(&self, _path: Option<&std::path::Path>) {}
+     fn toggle_simple_fullscreen(&self) {}
+     fn is_simple_fullscreen(&self) -> bool {
 diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
-index 68afa43..b59d861 100644
+index 68afa43..a43cc2a 100644
 --- a/crates/gpui/src/window.rs
 +++ b/crates/gpui/src/window.rs
 @@ -11,7 +11,7 @@ use crate::{
@@ -132,25 +146,28 @@ index 68afa43..b59d861 100644
      Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
      Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
      MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintedPath, Path,
-@@ -1347,6 +1347,9 @@ pub struct Window {
+@@ -1347,6 +1347,11 @@ pub struct Window {
      pub(crate) pending_input_observers: SingleSubscriberSet<AnyObserver>,
      prompt: Option<RenderablePromptHandle>,
      drag_return: Option<DragReturn>,
 +    /// The operations from the most recent native drag update. A drop listener
 +    /// runs after `active_drag` is consumed, so it cannot read them from there.
 +    file_drop_operations: ExternalDragOperations,
++    /// The operation the app asked the drag cursor to show for this update.
++    file_drop_operation: Option<crate::DragOperation>,
      pub(crate) client_inset: Option<Pixels>,
      /// The hitbox that has captured the pointer, if any.
      /// While captured, mouse events route to this hitbox regardless of hit testing.
-@@ -2480,6 +2483,7 @@ impl Window {
+@@ -2480,6 +2485,8 @@ impl Window {
              pending_input_observers: SingleSubscriberSet::new(),
              prompt: None,
              drag_return: None,
 +            file_drop_operations: ExternalDragOperations::default(),
++            file_drop_operation: None,
              client_inset: None,
              image_cache_stack: Vec::new(),
              captured_hitbox: None,
-@@ -3776,6 +3780,11 @@ impl Window {
+@@ -3776,6 +3783,24 @@ impl Window {
          self.modifiers
      }
  
@@ -159,10 +176,23 @@ index 68afa43..b59d861 100644
 +        self.file_drop_operations
 +    }
 +
++    /// Choose the operation the drag cursor shows for the current native drag
++    /// update, e.g. a copy across volumes. It resets on every update, so set it
++    /// from the pointer handler each time; `None` keeps the platform's choice.
++    pub fn set_file_drop_operation(&mut self, operation: Option<crate::DragOperation>) {
++        self.file_drop_operation = operation;
++        self.platform_window.set_file_drop_operation(operation);
++    }
++
++    /// The operation set for the current native drag update, if any.
++    pub fn file_drop_operation(&self) -> Option<crate::DragOperation> {
++        self.file_drop_operation
++    }
++
      /// Returns true if the last input event was keyboard-based (key press, tab navigation, etc.)
      /// This is used for focus-visible styling to show focus indicators only for keyboard navigation.
      pub fn last_input_was_keyboard(&self) -> bool {
-@@ -6079,6 +6088,10 @@ impl Window {
+@@ -6079,6 +6104,10 @@ impl Window {
          self.last_input_modality = match &event {
              PlatformInput::KeyDown(_) => InputModality::Keyboard,
              PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
@@ -173,7 +203,7 @@ index 68afa43..b59d861 100644
              PlatformInput::Touch(_) => InputModality::Touch,
              _ => self.last_input_modality,
          };
-@@ -6134,8 +6147,10 @@ impl Window {
+@@ -6134,8 +6163,11 @@ impl Window {
              // Translate dragging and dropping of external files from the operating system
              // to internal drag and drop events.
              PlatformInput::FileDrop(file_drop) => match file_drop {
@@ -182,10 +212,11 @@ index 68afa43..b59d861 100644
                      self.mouse_position = position;
 +                    self.modifiers = modifiers;
 +                    self.file_drop_operations = operations;
++                    self.file_drop_operation = None;
                      let source_window = self.handle.window_id();
                      if !cx.restore_platform_drag(source_window) && cx.active_drag.is_none() {
                          cx.active_drag = Some(AnyDrag {
-@@ -6145,29 +6160,40 @@ impl Window {
+@@ -6145,29 +6177,41 @@ impl Window {
                              cursor_style: None,
                              external_payload_source: None,
                              origin: None,
@@ -204,6 +235,7 @@ index 68afa43..b59d861 100644
                      self.mouse_position = position;
 +                    self.modifiers = modifiers;
 +                    self.file_drop_operations = operations;
++                    self.file_drop_operation = None;
 +                    if let Some(drag) = cx.active_drag.as_mut() {
 +                        drag.operations = operations;
 +                    }
@@ -324,7 +356,7 @@ index e21f019..be0eab2 100644
                      drop(state);
                      window.handle_input(input);
 diff --git a/crates/gpui_macos/src/window.rs b/crates/gpui_macos/src/window.rs
-index b3492c0..19c8ccc 100644
+index b3492c0..1aa387c 100644
 --- a/crates/gpui_macos/src/window.rs
 +++ b/crates/gpui_macos/src/window.rs
 @@ -8,13 +8,14 @@ use anyhow::Result;
@@ -349,7 +381,7 @@ index b3492c0..19c8ccc 100644
  };
  #[cfg(any(test, feature = "test-support"))]
  use image::RgbaImage;
-@@ -689,6 +690,10 @@ struct MacWindowState {
+@@ -689,6 +690,12 @@ struct MacWindowState {
      keystroke_for_do_command: Option<Keystroke>,
      do_command_handled: Option<bool>,
      external_files_dragged: bool,
@@ -357,19 +389,33 @@ index b3492c0..19c8ccc 100644
 +    /// can report a stale mask in `performDragOperation:`, so the submit uses these.
 +    external_drag_modifiers: Modifiers,
 +    external_drag_operations: ExternalDragOperations,
++    /// The operation the app chose to show for the current drag update.
++    external_drag_display: Option<DragOperation>,
      // Whether the next left-mouse click is also the focusing click.
      first_mouse: bool,
      // When true, the whole content view is reported as app-owned titlebar content via
-@@ -1201,6 +1206,8 @@ impl MacWindow {
+@@ -1201,6 +1208,9 @@ impl MacWindow {
                  keystroke_for_do_command: None,
                  do_command_handled: None,
                  external_files_dragged: false,
 +                external_drag_modifiers: Modifiers::default(),
 +                external_drag_operations: ExternalDragOperations::default(),
++                external_drag_display: None,
                  first_mouse: false,
                  app_owns_titlebar_drag,
                  fullscreen_restore_bounds: Bounds::default(),
-@@ -3797,9 +3804,42 @@ fn screen_point_to_gpui_point(this: &AnyObject, position: NSPoint) -> Point<Pixe
+@@ -1987,6 +1997,10 @@ impl PlatformWindow for MacWindow {
+         false
+     }
+ 
++    fn set_file_drop_operation(&self, operation: Option<DragOperation>) {
++        self.0.lock().external_drag_display = operation;
++    }
++
+     fn set_edited(&mut self, edited: bool) {
+         unsafe {
+             let window = self.0.lock().native_window;
+@@ -3797,9 +3811,50 @@ fn screen_point_to_gpui_point(this: &AnyObject, position: NSPoint) -> Point<Pixe
      point(px(window_x as f32), px(window_y as f32))
  }
  
@@ -397,12 +443,20 @@ index b3492c0..19c8ccc 100644
 +    (modifiers, operations)
 +}
 +
-+/// The operation AppKit should show for this update. Option always asks for a
-+/// copy; otherwise the source's move wins when it is offered.
++/// The operation AppKit should show for this update. The app's choice for
++/// this update wins when the source offers it (a copy across volumes);
++/// otherwise Option asks for a copy and the source's move wins when offered.
 +fn accepted_drag_operation(
 +    modifiers: Modifiers,
 +    operations: ExternalDragOperations,
++    chosen: Option<DragOperation>,
 +) -> NSDragOperation {
++    if let Some(chosen) = chosen.filter(|chosen| operations.contains(*chosen)) {
++        return match chosen {
++            DragOperation::Copy => NSDragOperation::Copy,
++            DragOperation::Move => NSDragOperation::Move,
++        };
++    }
 +    if modifiers.alt || !operations.contains(DragOperation::Move) {
 +        if operations.copy {
 +            NSDragOperation::Copy
@@ -415,7 +469,7 @@ index b3492c0..19c8ccc 100644
  }
  
  extern "C" fn dragging_entered(
-@@ -3807,17 +3847,21 @@ extern "C" fn dragging_entered(
+@@ -3807,17 +3862,23 @@ extern "C" fn dragging_entered(
      _: Sel,
      dragging_info: *mut AnyObject,
  ) -> NSDragOperation {
@@ -425,25 +479,28 @@ index b3492c0..19c8ccc 100644
      let position = drag_event_position(&window_state, dragging_info);
      let paths = external_paths_from_event(dragging_info);
 -    if let Some(event) = paths.map(|paths| FileDropEvent::Entered { position, paths })
+-        && send_file_drop_event(window_state, event)
 +    let (modifiers, operations) = drag_modifiers_and_operations(dragging_info);
-+    {
-+        let mut lock = window_state.lock();
-+        lock.external_drag_modifiers = modifiers;
-+        lock.external_drag_operations = operations;
-+    }
-+    if let Some(event) =
-+        paths.map(|paths| FileDropEvent::Entered { position, paths, modifiers, operations })
-         && send_file_drop_event(window_state, event)
      {
 -        if is_source_window {
 -            return NSDragOperation::Move;
 -        }
 -        return NSDragOperation::Copy;
-+        return accepted_drag_operation(modifiers, operations);
++        let mut lock = window_state.lock();
++        lock.external_drag_modifiers = modifiers;
++        lock.external_drag_operations = operations;
++        lock.external_drag_display = None;
++    }
++    if let Some(event) =
++        paths.map(|paths| FileDropEvent::Entered { position, paths, modifiers, operations })
++        && send_file_drop_event(window_state.clone(), event)
++    {
++        let chosen = window_state.lock().external_drag_display;
++        return accepted_drag_operation(modifiers, operations, chosen);
      }
      NSDragOperation::None
  }
-@@ -3827,15 +3871,17 @@ extern "C" fn dragging_updated(
+@@ -3827,15 +3888,22 @@ extern "C" fn dragging_updated(
      _: Sel,
      dragging_info: *mut AnyObject,
  ) -> NSDragOperation {
@@ -462,13 +519,18 @@ index b3492c0..19c8ccc 100644
 +        let mut lock = window_state.lock();
 +        lock.external_drag_modifiers = modifiers;
 +        lock.external_drag_operations = operations;
++        lock.external_drag_display = None;
 +    }
-+    if send_file_drop_event(window_state, FileDropEvent::Pending { position, modifiers, operations }) {
-+        accepted_drag_operation(modifiers, operations)
++    if send_file_drop_event(
++        window_state.clone(),
++        FileDropEvent::Pending { position, modifiers, operations },
++    ) {
++        let chosen = window_state.lock().external_drag_display;
++        accepted_drag_operation(modifiers, operations, chosen)
      } else {
          NSDragOperation::None
      }
-@@ -3853,7 +3899,12 @@ extern "C" fn perform_drag_operation(
+@@ -3853,7 +3921,12 @@ extern "C" fn perform_drag_operation(
  ) -> Bool {
      let window_state = unsafe { get_window_state(this) };
      let position = drag_event_position(&window_state, dragging_info);
@@ -482,7 +544,7 @@ index b3492c0..19c8ccc 100644
  }
  
  fn external_paths_from_event(dragging_info: *mut AnyObject) -> Option<ExternalPaths> {
-@@ -3914,10 +3965,17 @@ extern "C" fn dragging_session_ended(
+@@ -3914,10 +3987,17 @@ extern "C" fn dragging_session_ended(
      // SAFETY: AppKit invokes this selector on the GPUIWindow instance registered in build_classes,
      // which always has WINDOW_STATE_IVAR initialized to the owning MacWindowState.
      let window_state = unsafe { get_window_state(this) };

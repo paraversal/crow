@@ -1,7 +1,7 @@
 //! One Crow window: title bar, tabs, sidebar, the active pane, preview and path bar.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -215,7 +215,20 @@ pub struct CrowWindow {
     /// The destination under the pointer during a drag, for surfaces whose
     /// hover outline the window draws (Back, path bar, search results).
     drop_hover: Option<DropHit>,
+    /// Volumes of the current native drag's sources and targets, read off the
+    /// main thread, so the drag cursor can show a copy across volumes.
+    drag_devices: DragDevices,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Device numbers for one drag, filled in by background reads.
+#[derive(Default)]
+struct DragDevices {
+    /// The readable sources' devices, once read.
+    sources: Option<Vec<u64>>,
+    targets: HashMap<PathBuf, Option<u64>>,
+    reading: HashSet<PathBuf>,
+    reading_sources: bool,
 }
 
 /// View ▸ Theme…: "System" first, then every theme in the index. Moving the
@@ -350,6 +363,7 @@ impl CrowWindow {
             path_hits: Default::default(),
             back_bounds: Default::default(),
             drop_hover: None,
+            drag_devices: DragDevices::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -1471,6 +1485,7 @@ impl CrowWindow {
             Some(id) => id,
             None => {
                 self.drag_epoch = Some(now);
+                self.drag_devices = DragDevices::default();
                 self.drag_tab = self.active_tab_id();
                 self.drag_pane = Some(self.pane().clone());
                 let pane = self.pane().read(cx);
@@ -1482,6 +1497,7 @@ impl CrowWindow {
         let elapsed = self.drag_now(cx);
         let hit = self.drop_hit_at(position, None, cx);
         let target = hit.as_ref().and_then(DropHit::spring_target);
+        self.show_drop_operation(id, hit.as_ref(), window, cx);
         self.set_drop_hover(hit, cx);
         let pointer = (f32::from(position.x), f32::from(position.y));
         match self.drag.observe(id, pointer, target, elapsed) {
@@ -1495,6 +1511,70 @@ impl CrowWindow {
             Some(_) => {}
         }
         cx.notify();
+    }
+
+    /// Tell the native drag cursor what a drop on `hit` would do, like Finder: a
+    /// copy across volumes, a move within one, a copy with Option. Devices are
+    /// read in the background once per path and drag; until they are known the
+    /// platform keeps its own choice for this update.
+    fn show_drop_operation(
+        &mut self,
+        session: crow_core::drag::DragId,
+        hit: Option<&DropHit>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sources) = cx.active_drag_value::<ExternalPaths>().map(|paths| paths.paths().to_vec()) else {
+            return;
+        };
+        let Some(target) = hit.and_then(DropHit::path).cloned() else { return };
+        let devices = &mut self.drag_devices;
+        if devices.sources.is_none() && !devices.reading_sources {
+            devices.reading_sources = true;
+            let task = cx.background_spawn(async move {
+                sources.iter().filter_map(|path| operations::volume_of(path, false)).collect::<Vec<_>>()
+            });
+            cx.spawn(async move |this, cx| {
+                let read = task.await;
+                this.update(cx, |this, _| {
+                    if this.drag.active() == Some(session) {
+                        this.drag_devices.sources = Some(read);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        if !devices.targets.contains_key(&target) && devices.reading.insert(target.clone()) {
+            let path = target.clone();
+            let task = cx.background_spawn(async move { operations::volume_of(&path, true) });
+            let path = target.clone();
+            cx.spawn(async move |this, cx| {
+                let read = task.await;
+                this.update(cx, |this, _| {
+                    if this.drag.active() == Some(session) {
+                        this.drag_devices.reading.remove(&path);
+                        this.drag_devices.targets.insert(path, read);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        let (Some(sources), Some(Some(target))) = (devices.sources.as_ref(), devices.targets.get(&target)) else {
+            return;
+        };
+        if sources.is_empty() {
+            return;
+        }
+        let allowed = window.file_drop_operations();
+        let options = operations::DropOptions {
+            copy: window.modifiers().alt,
+            allow_move: allowed.move_,
+            allow_copy: allowed.copy,
+        };
+        let same_volume = sources.iter().all(|source| source == target);
+        window.set_file_drop_operation(operations::drop_operation(options, same_volume));
     }
 
     /// Remember the hovered destination; the search list draws its own outline
@@ -1614,6 +1694,7 @@ impl CrowWindow {
         self.drag_tab = None;
         let pane = self.drag_pane.take();
         self.drag_epoch = None;
+        self.drag_devices = DragDevices::default();
         self.drag_timer_token = None;
         self.clear_spring_cue(cx);
         self.set_drop_hover(None, cx);
@@ -1675,6 +1756,7 @@ impl CrowWindow {
         self.drag_tab = None;
         let owner = self.drag_pane.take();
         self.drag_epoch = None;
+        self.drag_devices = DragDevices::default();
         self.drag_timer_token = None;
         self.clear_spring_cue(cx);
         self.set_drop_hover(None, cx);
