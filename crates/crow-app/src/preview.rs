@@ -509,13 +509,15 @@ pub fn folder_summary(summary: FolderSummary<'_>, theme: &Theme, resolver: &crat
         .flex()
         .flex_col()
         .gap_3()
-        .child(
-            div()
-                .h(px(220.))
-                .flex()
-                .items_center()
-                .justify_center()
-        )
+        .child(div().h(px(220.)).flex().items_center().justify_center().child(path_icon(
+            resolver,
+            summary.path,
+            true,
+            false,
+            None,
+            theme,
+            128.,
+        )))
         .child(
             div()
                 .flex()
