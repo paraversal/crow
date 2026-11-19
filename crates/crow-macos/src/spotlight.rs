@@ -36,14 +36,18 @@ pub struct SpotlightPredicate {
     pub name_contains: Option<String>,
 }
 
-/// Escape a `mdfind` quoted-literal value. Spotlight accepts `*`, `?`, `&`, `(`
-/// and `)` literally inside quotes; a quote or backslash must be escaped.
+/// Escape a `mdfind` quoted-literal value. `&`, `(` and `)` are literal inside
+/// quotes; `*` and `?` are wildcards even there, and a quote or backslash needs
+/// escaping. Verified with `mdfind` on macOS 27: `"star*tag"` also matched a
+/// file tagged `starXXtag`, while `"star\*tag"` matched only the literal name.
 pub fn escape_literal(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
+            '*' => out.push_str("\\*"),
+            '?' => out.push_str("\\?"),
             _ => out.push(ch),
         }
     }
@@ -162,13 +166,15 @@ mod tests {
     #[test]
     fn tag_and_name_terms_are_escaped_literals() {
         let predicate = SpotlightPredicate {
-            tags: vec!["say \"hi\"".into(), "a\\b".into()],
+            tags: vec!["say \"hi\"".into(), "a\\b".into(), "star*tag".into(), "q?tag".into()],
             name_contains: Some("wo*rk?".into()),
             ..Default::default()
         };
         assert_eq!(
             predicate.expression().as_deref(),
-            Some(r#"kMDItemFSName == "*wo\*rk\?*"cd && kMDItemUserTags == "say \"hi\"" && kMDItemUserTags == "a\\b""#)
+            Some(
+                r#"kMDItemFSName == "*wo\*rk\?*"cd && kMDItemUserTags == "say \"hi\"" && kMDItemUserTags == "a\\b" && kMDItemUserTags == "star\*tag" && kMDItemUserTags == "q\?tag""#
+            )
         );
         assert_eq!(SpotlightPredicate::default().expression(), None);
     }
