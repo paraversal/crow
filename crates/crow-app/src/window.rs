@@ -253,7 +253,7 @@ impl CrowWindow {
                     // The pointer can stay over the path while another app is active;
                     // the pill must not stay on screen with it.
                     this.path_hovered = false;
-                    this.side_panes.finish();
+                    this.finish_side_pane_resize(cx);
                     cx.notify();
                 }
             }),
@@ -1001,12 +1001,13 @@ impl CrowWindow {
             .relative()
             .flex_none()
             .h_full()
+            .flex()
             .flex_col()
             .border_l_1()
             .border_color(color(theme.role("border")))
             .child(info_pane::tab_strip(&self.info, theme, cx))
             .child(side_panes::splitter(side_panes::Side::Right, self.info.read(cx).splitter_focus(), theme))
-            .child(div().id("info-body").flex_1().min_h_0().p_4().overflow_y_scroll().child(body))
+            .child(info_pane::tab_body(&self.info, body, cx))
     }
 
     /// Which element owns the keys, for the bar's hints.
@@ -1818,7 +1819,7 @@ impl CrowWindow {
                 }
             }
             SearchEvent::Reveal(path) => {
-                self.pane().update(cx, |pane, cx| pane.reveal(path.clone(), cx));
+                self.pane().update(cx, |pane, cx| pane.reveal_search_result(path.clone(), cx));
                 self.close_search(window, cx);
                 self.focus_center(window, cx);
             }
@@ -2284,7 +2285,11 @@ impl Render for CrowWindow {
             let (dir, revision, dirs) = self.pane().read(cx).sidebar_plugin_dirs(walking, cx);
             self.sidebar.update(cx, |s, cx| s.set_plugin_dirs(dir, dirs, revision, cx));
         }
-        self.side_panes.layout(window.viewport_size().width, self.info.read(cx).preferred_width);
+        self.side_panes.layout(
+            window.viewport_size().width,
+            cx.global::<Ui>().settings.window.sidebar_width,
+            self.info.read(cx).preferred_width,
+        );
         let sidebar = div()
             .relative()
             .h_full()
@@ -2357,18 +2362,16 @@ impl Render for CrowWindow {
             .aria_label("Crow")
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
                 if event.pressed_button == Some(MouseButton::Left) {
-                    if let Some((side, width)) = this.side_panes.drag_to(event.position.x) {
-                        this.set_side_pane_width(side, Some(width), cx);
-                    }
+                    this.drag_side_pane(event.position.x, cx);
                 } else {
-                    this.side_panes.finish();
+                    this.finish_side_pane_resize(cx);
                 }
                 if cx.has_active_drag() {
                     this.pane().update(cx, |pane, cx| pane.update_drag_target(event.position, cx));
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.side_panes.finish()))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| this.side_panes.finish()))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.finish_side_pane_resize(cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.finish_side_pane_resize(cx)))
             // keys::context_stack (KeyScope::Window) mirrors this; every overlay nests under it.
             .key_context("Crow")
             .on_action(cx.listener(Self::run_plugin_command))

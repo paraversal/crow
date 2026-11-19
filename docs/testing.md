@@ -481,6 +481,7 @@ region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 | Mark letters | With `keymap = "vim"`, favorites with a `key` show the letter on the right; `m x` on another folder moves it; Finder layer shows none. |
 | Sidebar Recent walk | ⌥↓ to Recent and arrow through it: the rows keep their order while you move. Tab out: the folder you stayed on counts as a visit; folders you only passed don't. |
 | Sidebar groups | Tab into the sidebar: Option-Up/Down jump to the first row of the previous/next group (Favorites groups, Recent, Locations); the center follows. |
+| Pane dividers | Drag either divider, release and move away. The highlight clears, and a keyboard-focused divider still shows its highlight. Reopen Crow and check that the left sidebar remembers its width. Double-click the divider and relaunch to check that the default width was saved. |
 
 ### Pane
 
@@ -653,6 +654,9 @@ In the bundled app (`./scripts/bundle.sh`), FireBox dark and Solarized Light, ea
 | Reduce Motion | With `motion = "auto"`, toggle System Settings ▸ Accessibility ▸ Reduce Motion: Full ↔ Low without a relaunch. |
 | Sounds off | System Settings ▸ Sound: "Play user interface sound effects" off → no sounds except the alert. Alert volume low → Crow's sounds are as quiet as Finder's (NSSound follows the output volume; Q7). |
 | Sheets and tips | Cmd-K, Cmd-J, ⇧⌘G and the theme picker fade in (140 ms Full, 120 Low); a tip rises 8 px and fades in Full, fades in Low. Tooltips still appear without motion. |
+| Right pane tabs | Switch Preview, Info and Git Diff (with the Git provider enabled) in List, Columns and search. Full glides the underline and fades the new body in with a 6 px nudge. Low fades in place. Off changes in one frame. The pane stays at its current size and the new tab is active immediately. |
+| Folder view switch | In a long folder, select an item partway down and switch List ↔ Columns with Cmd-2 and Cmd-3. Full moves matching visible icons, names and selection fills. Low fades, Off snaps. Try a quick reversal and press Down immediately. Check that automatic per-folder view changes do not start the morph. |
+| Column and result reveal | In Columns, select a file and then a folder. Full brings the new child content out from its divider; Low fades it in place. Use Cmd-R on a search result and check the tint pulse is on the destination row, including one well down a long listing. Off changes both instantly. |
 | Expand and collapse | List view, a folder with a few items: → or the triangle. Full: the triangle turns, the rows below slide down and the new rows show from the top as the gap opens; ← slides the rows below back up. Low: the new rows fade in, nothing moves. Off: one frame. A folder with hundreds of items opens without a long slide. |
 | Hidden items | A folder with dotfiles (Home): hidden files and folders show dimmed (icon, name and every column) in list and column view, in light and dark themes; selected, the fill stays full and the name stays readable; renaming one shows the field at full contrast. |
 | Glide | Full, hold ↓: the selection fill follows within one row and settles; ⌘A shows every row selected. Trackpad scroll a long list and a short one that fits: the fill stays on the cursor row and never drifts; the cursor never moves. |

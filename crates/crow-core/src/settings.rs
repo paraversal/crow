@@ -99,6 +99,8 @@ view_per_folder = true
 # Size of every new window, in points. Restored sessions keep their own sizes.
 width = 1200
 height = 760
+# Last chosen left sidebar width, in points (140–480).
+sidebar_width = 210
 "#;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -259,11 +261,12 @@ impl AppIcon {
 pub struct WindowDefaults {
     pub width: u32,
     pub height: u32,
+    pub sidebar_width: u32,
 }
 
 impl Default for WindowDefaults {
     fn default() -> Self {
-        Self { width: 1200, height: 760 }
+        Self { width: 1200, height: 760, sidebar_width: 210 }
     }
 }
 
@@ -446,7 +449,7 @@ mod tests {
         fs::write(dir.join("settings.toml"), "keymap = \"vim\"\nfuture_option = 3\n[window]\nwidth = 900\n").unwrap();
         let s = load_settings(&dir).expect("loads");
         assert_eq!(s.keymap, KeymapLayer::Vim);
-        assert_eq!(s.window, WindowDefaults { width: 900, height: 760 });
+        assert_eq!(s.window, WindowDefaults { width: 900, ..WindowDefaults::default() });
         assert_eq!(s.theme_id(), None);
     }
 

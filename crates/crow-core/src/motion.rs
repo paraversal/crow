@@ -174,6 +174,7 @@ pub enum Fx {
     Receive,
     Arrive,
     Refuse,
+    Reveal,
 }
 
 impl Fx {
@@ -238,6 +239,11 @@ pub mod ms {
     pub const COPY: u64 = 1600;
     pub const COPY_FADE: u64 = 320;
     pub const DISCLOSE: u64 = 180;
+    pub const PANEL_TAB: u64 = 155;
+    pub const VIEW_CHANGE: u64 = 245;
+    pub const CHILD_COLUMN: u64 = 145;
+    pub const NAVIGATION_LOW: u64 = 120;
+    pub const REVEAL: u64 = 300;
 }
 
 pub fn ease_in(t: f32) -> f32 {
@@ -250,6 +256,18 @@ pub fn ease_out(t: f32) -> f32 {
 
 pub fn ease_in_out(t: f32) -> f32 {
     if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
+}
+
+/// Eased progress of an in-flight transition. Low uses the shorter fade time.
+pub fn navigation_progress(mode: Effective, started: Instant, now: Instant, full_ms: u64) -> Option<f32> {
+    let ms = match mode {
+        Effective::Off => return None,
+        Effective::Low => ms::NAVIGATION_LOW,
+        Effective::Full => full_ms,
+    };
+    let elapsed = now.saturating_duration_since(started);
+    let duration = Duration::from_millis(ms);
+    (elapsed < duration).then(|| ease_out(elapsed.as_secs_f32() / duration.as_secs_f32()))
 }
 
 /// How row effect `fx` looks in phase `phase` at progress `t` (already eased per phase).
@@ -316,6 +334,7 @@ pub fn look(mode: Effective, fx: Fx, phase: usize, t: f32) -> Look {
             look.tint = 1.0 - ease_in(t);
             look.tint_kind = Tint::Error;
         }
+        (Effective::Full | Effective::Low, Fx::Reveal, _) => look.tint = 1.0 - ease_out(t),
     }
     look
 }
@@ -346,6 +365,7 @@ pub fn phases(mode: Effective, fx: Fx) -> Vec<Duration> {
         (Effective::Full, Fx::Receive) => vec![d(ms::MOVE_FLY), d(ms::RECEIVE)],
         (Effective::Full, Fx::Arrive) => vec![d(ms::ARRIVE_OPEN), d(ms::ARRIVE_IN), d(ms::ARRIVE_TINT)],
         (Effective::Full, Fx::Refuse) => vec![d(ms::REFUSE)],
+        (Effective::Full | Effective::Low, Fx::Reveal) => vec![d(ms::REVEAL)],
         (Effective::Low, Fx::Trash | Fx::MoveOut) => vec![d(ms::LOW_OUT)],
         (Effective::Low, Fx::Receive | Fx::Arrive | Fx::Refuse) => vec![d(ms::LOW_TINT)],
     }
@@ -440,7 +460,7 @@ mod tests {
     }
 
     const MODES: [Effective; 3] = [Effective::Off, Effective::Low, Effective::Full];
-    const FX: [Fx; 6] = [Fx::Idle, Fx::Trash, Fx::MoveOut, Fx::Receive, Fx::Arrive, Fx::Refuse];
+    const FX: [Fx; 7] = [Fx::Idle, Fx::Trash, Fx::MoveOut, Fx::Receive, Fx::Arrive, Fx::Refuse, Fx::Reveal];
 
     fn resting(look: &Look) -> bool {
         look.height == 1.0 && look.opacity == 1.0 && look.dx == 0.0 && look.tint == 0.0

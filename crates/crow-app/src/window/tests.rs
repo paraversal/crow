@@ -458,24 +458,31 @@ fn column_preview_fills_the_rest(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn side_dividers_resize_the_current_window(cx: &mut TestAppContext) {
+fn side_dividers_resize_and_left_width_persists(app: &mut TestAppContext) {
     let root = fixture("side-dividers");
-    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    let (view, mut cx) = open_sized(app, &root, 1280., 800.);
     settle(&view, &mut cx);
     let start = cx.debug_bounds("sidebar-resize").expect("sidebar divider").center();
     let end = start + gpui::point(px(60.), px(0.));
     let modifiers = gpui::Modifiers::default();
+    let config = cx.read(|cx| cx.global::<Ui>().config_dir.clone());
+    let saved_width = || crow_core::load_settings(&config).expect("read settings").window.sidebar_width;
     cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
     cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), modifiers);
+    assert_eq!(cx.debug_bounds("sidebar").unwrap().size.width, px(270.));
+    assert_eq!(saved_width(), 210, "dragging only previews the width");
     cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
     settle(&view, &mut cx);
     assert_eq!(cx.debug_bounds("sidebar").unwrap().size.width, px(270.));
-    cx.simulate_keystrokes("left");
+    assert_eq!(saved_width(), 270);
+    cx.simulate_keystrokes("left left");
     settle(&view, &mut cx);
-    assert_eq!(cx.debug_bounds("sidebar").unwrap().size.width, px(254.));
+    assert_eq!(cx.debug_bounds("sidebar").unwrap().size.width, px(238.));
+    assert_eq!(saved_width(), 238, "fast edits save in input order");
     cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
     assert_eq!(cx.debug_bounds("sidebar").unwrap().size.width, px(210.));
+    assert_eq!(saved_width(), 210);
 
     let start = cx.debug_bounds("preview-resize").expect("preview divider").center();
     let end = start - gpui::point(px(45.), px(0.));
@@ -487,6 +494,60 @@ fn side_dividers_resize_the_current_window(cx: &mut TestAppContext) {
     pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
     settle(&view, &mut cx);
     assert_eq!(cx.debug_bounds("preview-column").unwrap().size.width, px(345.));
+
+    let start = cx.debug_bounds("sidebar-resize").expect("sidebar divider").center();
+    let end = start + gpui::point(px(180.), px(0.));
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), modifiers);
+    cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+    settle(&view, &mut cx);
+    assert_eq!(saved_width(), 390);
+    let new_window = cx.update(|_, cx| {
+        ui::reload_config(cx);
+        super::open(root.join("alpha"), false, None, cx).expect("open another window")
+    });
+    let new_view = new_window.root(app).expect("root view");
+    let mut other = VisualTestContext::from_window(new_window.into(), app);
+    settle(&new_view, &mut other);
+    assert_eq!(other.debug_bounds("sidebar").unwrap().size.width, px(390.));
+    assert_eq!(other.debug_bounds("preview").unwrap().size.width, px(300.));
+    app.simulate_window_resize(new_window.into(), size(px(640.), px(500.)));
+    settle(&new_view, &mut other);
+    assert_eq!(other.debug_bounds("sidebar").unwrap().size.width, px(350.));
+    assert_eq!(saved_width(), 390, "clamping to the window does not change the preference");
+}
+
+#[gpui::test]
+fn side_divider_highlight_follows_hover_or_keyboard_focus(cx: &mut TestAppContext) {
+    let root = fixture("side-divider-highlight");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    let highlighted = |cx: &mut VisualTestContext, divider| {
+        let bounds = cx.debug_bounds(divider).expect("divider");
+        cx.update(|window, cx| {
+            let bounds = bounds.scale(window.scale_factor());
+            let accent = color(cx.global::<Ui>().theme.role("accent")).opacity(0.25).into();
+            window.painted_quads().iter().any(|quad| quad.bounds == bounds && quad.background == accent)
+        })
+    };
+    let modifiers = gpui::Modifiers::default();
+    for (divider, dx) in [("sidebar-resize", 60.), ("preview-resize", -45.)] {
+        let start = cx.debug_bounds(divider).expect("divider").center();
+        let end = start + gpui::point(px(dx), px(0.));
+        cx.simulate_mouse_move(start, None, modifiers);
+        settle(&view, &mut cx);
+        assert!(highlighted(&mut cx, divider), "{divider} highlights on hover");
+
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), modifiers);
+        cx.simulate_mouse_up(end, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(end + gpui::point(px(20.), px(0.)), None, modifiers);
+        settle(&view, &mut cx);
+        assert!(!highlighted(&mut cx, divider), "{divider} clears when the pointer leaves after release");
+
+        cx.simulate_keystrokes("left");
+        settle(&view, &mut cx);
+        assert!(highlighted(&mut cx, divider), "{divider} shows keyboard focus");
+    }
 }
 
 #[gpui::test]
@@ -1996,6 +2057,60 @@ fn toolbar_view_buttons_switch_views(cx: &mut TestAppContext) {
     cx.simulate_click(list.center(), gpui::Modifiers::default());
     settle(&view, &mut cx);
     assert_eq!(mode(&cx), ViewMode::List);
+}
+
+#[gpui::test]
+fn folder_view_motion_matches_visible_paths_and_keeps_keys_live(cx: &mut TestAppContext) {
+    let root = fixture("view-morph");
+    for i in 0..100 {
+        std::fs::write(root.join(format!("file-{i:03}.txt")), "").unwrap();
+    }
+    let (view, mut cx) = open_sized(cx, &root, 840., 500.);
+    set_motion(&mut cx, "full");
+    let old = cx.debug_bounds("row-alpha").expect("alpha in list");
+    let old_fill = cx.debug_bounds("glide").expect("the visible selection before the change");
+    cx.simulate_keystrokes("cmd-3");
+    let p = pane(&view, &cx);
+    let tracked = p.read_with(&cx, |pane, _| pane.view_motion_origin(&root.join("alpha"))).expect("visible match");
+    assert_eq!(tracked, old_fill);
+    assert!(p.read_with(&cx, |pane, _| pane.view_motion_origin(&root.join("file-099.txt"))).is_none());
+    let row = cx.debug_bounds("column-0-row-alpha").expect("the destination is interactive immediately");
+    assert!(row.top() < old.top(), "the column hitbox is already in its final place");
+    let selection = cx.update(|window, cx| {
+        let shade = crate::style::active_selection(&cx.global::<Ui>().theme).into();
+        let top = row.top().scale(window.scale_factor());
+        let width = row.size.width.scale(window.scale_factor());
+        window
+            .painted_quads()
+            .iter()
+            .any(|quad| quad.background == shade && quad.bounds.top() > top && quad.bounds.size.width > width)
+    });
+    assert!(selection, "the selection is painted between the two layouts");
+
+    cx.simulate_keystrokes("cmd-2 cmd-3 cmd-2 down");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+    assert_eq!(p.read_with(&cx, |pane, _| pane.mode()), ViewMode::List);
+    let persisted = crow_core::load_views(&config_dir(&cx), &crow_core::home()).unwrap();
+    assert_eq!(persisted.resolve(&root).view.0, ViewMode::List);
+}
+
+#[gpui::test]
+fn opening_a_child_column_reveals_its_body_in_the_existing_slot(cx: &mut TestAppContext) {
+    let root = fixture("column-reveal");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 700.);
+    set_motion(&mut cx, "full");
+    cx.simulate_keystrokes("cmd-3 down down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+    let parent = cx.debug_bounds("column-0").expect("parent column");
+    cx.simulate_keystrokes("up");
+    let child = cx.debug_bounds("column-1").expect("the child has its final width");
+    let body = cx.debug_bounds("column-reveal-content-1").expect("the child starts its reveal");
+    assert_eq!(cx.debug_bounds("column-0"), Some(parent));
+    assert!(body.left() < child.left() && body.left() >= child.left() - px(8.));
+    cx.simulate_keystrokes("right");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("beta"));
 }
 
 #[gpui::test]
@@ -5173,6 +5288,7 @@ fn search_result_return_navigates_and_closes(cx: &mut TestAppContext) {
 fn search_result_cmd_r_reveals_the_file(cx: &mut TestAppContext) {
     let root = fixture("search-reveal");
     let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "full");
     cx.simulate_keystrokes("cmd-f");
     cx.simulate_input("notes");
     wait_for_search(&view, &mut cx);
@@ -5183,6 +5299,7 @@ fn search_result_cmd_r_reveals_the_file(cx: &mut TestAppContext) {
     assert!(view.read_with(&cx, |w, _| w.search.is_none()));
     assert_eq!(dir(&view, &cx), root);
     assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.effects(cx)), [("notes.txt".into(), Fx::Reveal)]);
 }
 
 #[gpui::test]
@@ -8052,6 +8169,42 @@ fn info_opens_when_the_default_is_off(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_some(), "⇧⌘P shows it again");
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Preview, "⇧⌘P shows the Preview tab");
+}
+
+#[gpui::test]
+fn right_pane_tab_motion_keeps_the_body_in_its_slot(cx: &mut TestAppContext) {
+    let root = fixture("info-tab-motion");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 700.);
+    set_motion(&mut cx, "full");
+    let original = cx.debug_bounds("info-body").expect("Preview body");
+    let preview = cx.debug_bounds("info-tab-preview").expect("Preview tab");
+    let info = cx.debug_bounds("info-tab-info").expect("Info tab");
+    cx.simulate_click(info.center(), gpui::Modifiers::default());
+    assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
+    assert_eq!(cx.debug_bounds("info-body"), Some(original));
+    let incoming = cx.debug_bounds("info-tab-content-in-motion").expect("the new Info body is already live");
+    assert!(incoming.left() > original.left() + px(16.));
+    let underline = cx.update(|window, cx| {
+        let scale = window.scale_factor();
+        let shade = color(cx.global::<Ui>().theme.role("accent")).into();
+        let right_edge = info.left().scale(scale);
+        window.painted_quads().iter().any(|quad| {
+            quad.background == shade
+                && quad.bounds.size.height == px(2.).scale(scale)
+                && quad.bounds.left() >= preview.left().scale(scale)
+                && quad.bounds.left() < right_edge
+        })
+    });
+    assert!(underline, "the underline is between tabs");
+
+    set_motion(&mut cx, "low");
+    cx.simulate_click(preview.center(), gpui::Modifiers::default());
+    let faded = cx.debug_bounds("info-tab-content-in-motion").expect("Low still fades");
+    assert_eq!(faded.left(), original.left() + px(16.));
+
+    set_motion(&mut cx, "off");
+    cx.simulate_click(info.center(), gpui::Modifiers::default());
+    assert!(cx.debug_bounds("info-tab-content-in-motion").is_none());
 }
 
 #[gpui::test]

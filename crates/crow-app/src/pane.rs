@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crow_core::motion::{Effective, Fx, Look};
+use crow_core::motion::{self, Effective, Fx, Look};
 use crow_core::{
     Align, Column, ColumnCell, ColumnContext, ColumnWidth, EnterAction, History, KeymapLayer, KnownSize, ResizeDrag,
     TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS, TableLayout, TipId, ViewChange, ViewMode,
@@ -59,7 +59,9 @@ use crate::ui::Ui;
 use crow_fs::ops::Request;
 
 mod pane_filter;
+mod view_motion;
 use pane_filter::FilterPlace;
+use view_motion::ViewMotion;
 
 pub(crate) const ROW_HEIGHT: f32 = 24.0;
 
@@ -353,6 +355,9 @@ pub struct Pane {
     drop_target: Option<DropTarget>,
     /// Column view: each column's list viewport, captured at prepaint.
     column_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
+    presented_layout: Option<(ViewMode, EntityId)>,
+    view_motion: Option<ViewMotion>,
+    child_reveal: Option<(EntityId, Instant)>,
     /// The column and row a drag would drop on in column view.
     drop_column: Option<(usize, usize)>,
     mark_pending: Option<MarkPending>,
@@ -461,6 +466,9 @@ impl Pane {
             drop_row: None,
             drop_target: None,
             column_bounds: Rc::new(RefCell::new(HashMap::new())),
+            presented_layout: None,
+            view_motion: None,
+            child_reveal: None,
             drop_column: None,
             mark_pending: None,
             filtering: None,
@@ -747,6 +755,11 @@ impl Pane {
         self.focused_folder().read(cx).animating(Instant::now())
     }
 
+    #[cfg(test)]
+    pub fn view_motion_origin(&self, path: &Path) -> Option<Bounds<Pixels>> {
+        self.view_motion.as_ref()?.captured_row(path)
+    }
+
     /// The feedback effects running on the focused folder's rows, for tests.
     #[cfg(test)]
     pub fn effects(&self, cx: &gpui::App) -> Vec<(String, Fx)> {
@@ -959,6 +972,13 @@ impl Pane {
         if let Some(parent) = path.parent().map(Path::to_path_buf) {
             self.navigate(parent, cx);
             self.folders[0].update(cx, |f, _| f.select_after_load(path));
+        }
+    }
+
+    pub fn reveal_search_result(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(parent) = path.parent().map(Path::to_path_buf) {
+            self.navigate(parent, cx);
+            self.folders[0].update(cx, |folder, _| folder.reveal_after_load(path));
         }
     }
 
@@ -1212,7 +1232,21 @@ impl Pane {
     /// Switch view as the user asked (Cmd-2, Cmd-3), and remember it for the folder
     /// shown, unless views don't follow folders: then it is this window's alone.
     pub fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
-        if self.apply_mode(mode, cx) && cx.global::<Ui>().settings.view_per_folder {
+        if self.mode == mode {
+            return;
+        }
+        let motion = ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, Instant::now(), cx);
+        self.apply_mode(mode, cx);
+        self.view_motion = motion;
+        self.child_reveal = None;
+        let folder = self.focused_folder().read(cx);
+        if let Some(ix) = folder.cursor_ix() {
+            folder.scroll().scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
+        if mode == ViewMode::Columns {
+            self.strip_scroll.scroll_to_item(self.focused);
+        }
+        if cx.global::<Ui>().settings.view_per_folder {
             self.remember(ViewChange::View(mode), cx);
         }
     }
@@ -1267,6 +1301,8 @@ impl Pane {
         if self.mode == mode {
             return false;
         }
+        self.view_motion = None;
+        self.child_reveal = None;
         self.drop_filter(cx);
         self.mode = mode;
         match mode {
@@ -1293,6 +1329,8 @@ impl Pane {
     }
 
     fn enter(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        self.view_motion = None;
+        self.child_reveal = None;
         if self.filtering.take().is_some() {
             // Navigating away ends the filter session like Esc does.
             self.emit_filter_end(cx);
@@ -1385,6 +1423,9 @@ impl Pane {
         }
         match event {
             FolderEvent::SelectionChanged => {
+                if k == self.focused {
+                    self.view_motion = None;
+                }
                 let (surface, dir, paths) = {
                     let folder = folder.read(cx);
                     (folder.plugin_surface(), folder.dir().to_path_buf(), folder.selected_paths())
@@ -1447,8 +1488,16 @@ impl Pane {
         match child {
             Some(path) if next_matches(self, &path) => {}
             Some(path) => {
+                let opens_child = k == self.focused
+                    && k + 1 == self.folders.len()
+                    && self.presented_layout == Some((ViewMode::Columns, self.folders[k].entity_id()))
+                    && self.view_motion.is_none()
+                    && cx.global::<Ui>().feedback.mode != Effective::Off;
                 self.truncate(k + 1, cx);
                 self.push_folder(path, false, cx);
+                if opens_child {
+                    self.child_reveal = Some((self.folders[k + 1].entity_id(), Instant::now()));
+                }
             }
             None => self.truncate(k + 1, cx),
         }
@@ -2307,6 +2356,9 @@ impl Pane {
     /// A pointer or touch scroll in folder `k`'s list: suggest `/` once a long
     /// folder is scrolled well past its first screen.
     fn on_list_scroll(&mut self, k: usize, cx: &mut Context<Self>) {
+        if self.view_motion.take().is_some() {
+            cx.notify();
+        }
         if self.filtering.is_some() || !crate::tips::wants(TipId::Filter, cx) {
             return;
         }
@@ -2617,7 +2669,7 @@ impl Pane {
         let stripe = color_alpha(theme.role("surface"), 0x70);
         let rule = color_alpha(theme.role("fg"), 0x30);
         let active = self.focus.is_focused(window);
-        let glide = mode == Effective::Full && active;
+        let glide = mode == Effective::Full && self.view_motion.is_none() && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let size = |entry: &Entry| size_snapshot.get(&entry.path).copied();
         let column_cx = ColumnContext {
@@ -2632,6 +2684,7 @@ impl Pane {
         let last = widths.iter().rposition(|w| *w > 0.0).unwrap_or(0);
         let folder = self.folders[0].read(cx);
         let list_folder = self.folders[0].clone();
+        let motion = self.view_motion.as_ref().and_then(|motion| motion.progress(mode, now).map(|t| (motion, t)));
         let selected_entries = folder.selected_entries();
         let total = folder.row_count();
         let cursor = folder.cursor_ix();
@@ -2730,6 +2783,14 @@ impl Pane {
                 let reveal = folder.disclosure_opacity(ix, now);
                 let turn = folder.chevron_turn(&entry.path, now).unwrap_or(if expanded { 1.0 } else { 0.0 });
                 let island = edges.get(ix - flags_first).copied().flatten();
+                let moving = motion.and_then(|(motion, t)| motion.row(list_folder.entity_id(), &entry.path, t));
+                let moving_fill = moving.filter(|row| selected && row.tracks_selection());
+                let fade = motion.filter(|_| moving.is_none()).map_or(1.0, |(_, t)| 0.4 + 0.6 * t);
+                let icon = row_icon(&entry, look, theme, dim, cloud).into_any_element();
+                let icon = match moving {
+                    Some(row) => row.icon(icon),
+                    None => icon,
+                };
                 let row = div()
                     .id(ix)
                     // Only visible rows exist, so each row tells VoiceOver where it sits in the folder.
@@ -2778,9 +2839,12 @@ impl Pane {
                         )
                     })
                     .when(shift != 0.0, |row| row.top(px(shift)))
-                    .when(look.opacity * reveal < 1.0, |row| row.opacity(look.opacity * reveal))
+                    .when(look.opacity * reveal * fade < 1.0, |row| row.opacity(look.opacity * reveal * fade))
                     .when(ix % 2 == 1 && !(selected && glide && cursor == Some(ix)), |row| row.bg(stripe))
-                    .when(draws_selection_fill(selected, glide, cursor == Some(ix)), |row| row.bg(selection_bg))
+                    .when(moving_fill.is_none() && draws_selection_fill(selected, glide, cursor == Some(ix)), |row| {
+                        row.bg(selection_bg)
+                    })
+                    .children(moving_fill.map(|moving| moving.selection(selection_bg, island)))
                     .when_some(tint, |row, tint| {
                         row.child(with_island_rounding(div().absolute().inset_0().bg(tint), island))
                     })
@@ -2845,7 +2909,7 @@ impl Pane {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .overflow_hidden()
+                            .when(moving.is_none(), |cell| cell.overflow_hidden())
                             .child(if entry.is_dir && !entry.is_package() {
                                 let path = entry.path.clone();
                                 let pane = list_folder.clone();
@@ -2878,7 +2942,7 @@ impl Pane {
                             } else {
                                 div().w(px(TRIANGLE_WIDTH)).flex_none().into_any_element()
                             })
-                            .child(row_icon(&entry, look, theme, dim, cloud))
+                            .child(icon)
                             .child(
                                 div()
                                     .debug_selector(|| format!("row-name-{}", entry.name))
@@ -2895,34 +2959,40 @@ impl Pane {
                                     .flex()
                                     .items_center()
                                     .gap_1()
-                                    .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
-                                        Some(r) => div()
-                                            .flex_1()
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, _, _| this.rename_pressed = true),
-                                            )
-                                            .child(r.input.clone())
-                                            .into_any_element(),
-                                        None => match ranges {
-                                            Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
-                                                .min_w_0()
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .child(highlight_text(
-                                                    name.text.clone(),
-                                                    &ranges,
-                                                    theme,
-                                                    selected && active,
-                                                ))
+                                    .child({
+                                        let label = match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                                            Some(r) => div()
+                                                .flex_1()
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, _| this.rename_pressed = true),
+                                                )
+                                                .child(r.input.clone())
                                                 .into_any_element(),
-                                            _ => div()
-                                                .min_w_0()
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .child(name.text.clone())
-                                                .into_any_element(),
-                                        },
+                                            None => match ranges {
+                                                Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .child(highlight_text(
+                                                        name.text.clone(),
+                                                        &ranges,
+                                                        theme,
+                                                        selected && active,
+                                                    ))
+                                                    .into_any_element(),
+                                                _ => div()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .child(name.text.clone())
+                                                    .into_any_element(),
+                                            },
+                                        };
+                                        match moving {
+                                            Some(row) => row.label(label),
+                                            None => label,
+                                        }
                                     })
                                     .children(crate::cloud_status::badge(cloud, theme))
                                     .when(has_decorations, |cell| {
@@ -2958,7 +3028,8 @@ impl Pane {
                 row.children(cells.into_iter().enumerate().filter(|(i, _)| widths[i + 1] > 0.0).map(
                     |(i, (cell, align))| {
                         let width = px(widths[i + 1]);
-                        let opacity = dim * cell.opacity;
+                        let metadata_fade = motion.filter(|_| moving.is_some()).map_or(1.0, |(_, t)| 0.4 + 0.6 * t);
+                        let opacity = dim * cell.opacity * metadata_fade;
                         let fade = cell.fade.filter(|_| mode != Effective::Off);
                         let cell = div()
                             .when(i + 1 == last, |cell| cell.flex_1().min_w(width))
@@ -3118,12 +3189,18 @@ impl Pane {
         let now = Instant::now();
         // Spec: only the focused column shows its selection in the accent color.
         let active = k == self.focused && self.focus.is_focused(window);
-        let glide = mode == Effective::Full && active;
+        let glide = mode == Effective::Full && self.view_motion.is_none() && active;
         let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
         let subtle = color(theme.role("fg-subtle"));
         let muted = color(theme.role("fg-muted"));
         let rule = color_alpha(theme.role("fg"), 0x30);
         let Some(folder) = self.folders.get(k).map(|f| f.read(cx)) else { return Vec::new() };
+        let folder_id = self.folders[k].entity_id();
+        let motion = self
+            .view_motion
+            .as_ref()
+            .filter(|_| k == self.focused)
+            .and_then(|motion| motion.progress(mode, now).map(|t| (motion, t)));
         let width = COLUMN_WIDTH;
         let total = folder.row_count();
         let scope = crate::plugins::ScopeKey::Folder(folder.dir().to_path_buf());
@@ -3215,6 +3292,14 @@ impl Pane {
                     cloud.and_then(CloudStatus::spoken_suffix).map(|suffix| format!(", {suffix}")).unwrap_or_default();
                 let flash_tint = is_flash.then(|| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
                 let island = edges.get(ix - flags_first).copied().flatten();
+                let moving = motion.and_then(|(motion, t)| motion.row(folder_id, &entry.path, t));
+                let moving_fill = moving.filter(|row| selected && row.tracks_selection());
+                let fade = motion.filter(|_| moving.is_none()).map_or(1.0, |(_, t)| 0.4 + 0.6 * t);
+                let icon = row_icon(&entry, look, theme, dim, cloud).into_any_element();
+                let icon = match moving {
+                    Some(row) => row.icon(icon),
+                    None => icon,
+                };
                 div()
                     .id(ix)
                     .role(Role::ListBoxOption)
@@ -3264,8 +3349,11 @@ impl Pane {
                         )
                     })
                     .when(shift != 0.0, |row| row.top(px(shift)))
-                    .when(look.opacity < 1.0, |row| row.opacity(look.opacity))
-                    .when(draws_selection_fill(selected, glide, cursor == Some(ix)), |row| row.bg(selection_bg))
+                    .when(look.opacity * fade < 1.0, |row| row.opacity(look.opacity * fade))
+                    .when(moving_fill.is_none() && draws_selection_fill(selected, glide, cursor == Some(ix)), |row| {
+                        row.bg(selection_bg)
+                    })
+                    .children(moving_fill.map(|moving| moving.selection(selection_bg, island)))
                     .when_some(tint, |row, tint| {
                         row.child(with_island_rounding(div().absolute().inset_0().bg(tint), island))
                     })
@@ -3326,7 +3414,7 @@ impl Pane {
                             this.open_selected(cx);
                         }
                     }))
-                    .child(row_icon(&entry, look, theme, dim, cloud))
+                    .child(icon)
                     .child(
                         div()
                             .debug_selector(|| format!("column-{k}-row-name-{}", entry.name))
@@ -3340,29 +3428,40 @@ impl Pane {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(match self.renaming.as_ref().filter(|r| r.path == entry.path) {
-                                Some(r) => div()
-                                    .flex_1()
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, _| this.rename_pressed = true),
-                                    )
-                                    .child(r.input.clone())
-                                    .into_any_element(),
-                                None => match ranges {
-                                    Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
+                            .child({
+                                let label = match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                                    Some(r) => div()
                                         .flex_1()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .child(highlight_text(name.text.clone(), &ranges, theme, selected && active))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, _| this.rename_pressed = true),
+                                        )
+                                        .child(r.input.clone())
                                         .into_any_element(),
-                                    _ => div()
-                                        .flex_1()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .child(name.text.clone())
-                                        .into_any_element(),
-                                },
+                                    None => match ranges {
+                                        Some(ranges) if ranges.iter().any(|range| !range.is_empty()) => div()
+                                            .flex_1()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .child(highlight_text(
+                                                name.text.clone(),
+                                                &ranges,
+                                                theme,
+                                                selected && active,
+                                            ))
+                                            .into_any_element(),
+                                        _ => div()
+                                            .flex_1()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .child(name.text.clone())
+                                            .into_any_element(),
+                                    },
+                                };
+                                match moving {
+                                    Some(row) => row.label(label),
+                                    None => label,
+                                }
                             })
                             .children(crate::cloud_status::badge(cloud, theme))
                             .when(has_decorations, |cell| {
@@ -3437,7 +3536,8 @@ impl Pane {
                 (None, None, None)
             };
             let has_field = field.is_some();
-            let glide = mode == Effective::Full && k == focused && self.focus.is_focused(window);
+            let glide =
+                mode == Effective::Full && self.view_motion.is_none() && k == focused && self.focus.is_focused(window);
             let body = match no_matches {
                 Some(block) => block,
                 None => {
@@ -3508,6 +3608,33 @@ impl Pane {
                         .children(ghosts)
                         .into_any_element()
                 }
+            };
+            let body = if let Some(t) = self.child_reveal.and_then(|(id, started)| {
+                (id == folder.entity_id())
+                    .then(|| motion::navigation_progress(mode, started, now, motion::ms::CHILD_COLUMN))
+                    .flatten()
+            }) {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .debug_selector(move || format!("column-reveal-content-{k}"))
+                            .when(mode == Effective::Full, |body| body.left(px(-8.0 * (1.0 - t))))
+                            .opacity(0.3 + 0.7 * t)
+                            .child(body),
+                    )
+                    .into_any_element()
+            } else {
+                body
             };
             strip =
                 strip.child(
@@ -3624,6 +3751,7 @@ impl Pane {
                         column.flex_none().w(width.min(window.viewport_size().width / 2.))
                     })
                     .h_full()
+                    .flex()
                     .flex_col()
                     .child(info_pane::tab_strip(&self.info, &theme, cx))
                     .child(crate::window::side_panes::splitter(
@@ -3631,7 +3759,7 @@ impl Pane {
                         &splitter_focus,
                         &theme,
                     ))
-                    .child(div().id("info-body").flex_1().min_h_0().p_4().overflow_y_scroll().child(body)),
+                    .child(info_pane::tab_body(&self.info, body, cx)),
             );
         }
         strip
@@ -3931,6 +4059,26 @@ impl Render for Pane {
             (ui.feedback.mode, px(ui.settings.font_size), ui.theme.clone())
         };
         let now = Instant::now();
+        let focused_id = self.focused_folder().entity_id();
+        if self.view_motion.as_ref().is_some_and(|motion| {
+            motion.folder == focused_id
+                && self.renaming.is_none()
+                && !cx.has_active_drag()
+                && motion.progress(mode, now).is_some()
+        }) {
+            window.request_animation_frame();
+        } else {
+            self.view_motion = None;
+        }
+        if self.child_reveal.is_some_and(|(id, started)| {
+            self.index_of(id).is_some()
+                && motion::navigation_progress(mode, started, now, motion::ms::CHILD_COLUMN).is_some()
+        }) {
+            window.request_animation_frame();
+        } else {
+            self.child_reveal = None;
+        }
+        self.presented_layout = Some((self.mode, focused_id));
         if cx
             .global::<Operations>()
             .clipboard
@@ -3940,7 +4088,7 @@ impl Render for Pane {
         {
             window.request_animation_frame();
         }
-        let glide = mode == Effective::Full && self.focus.is_focused(window);
+        let glide = mode == Effective::Full && self.view_motion.is_none() && self.focus.is_focused(window);
         // The field is inside the list now: while it has focus, the list's actions must be
         // off the focus path so AppKit's menu equivalents let those keys through.
         let filter_focused = self
