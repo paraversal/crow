@@ -170,6 +170,7 @@ impl ResolvedView {
     }
 }
 
+#[derive(Clone)]
 struct Rule {
     pattern: String,
     matchers: Vec<GlobMatcher>,
@@ -177,6 +178,7 @@ struct Rule {
 }
 
 /// The parsed `views.toml`.
+#[derive(Clone)]
 pub struct Views {
     defaults: ViewLayer,
     rules: Vec<Rule>,

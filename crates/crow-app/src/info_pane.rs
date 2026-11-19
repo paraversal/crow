@@ -5,15 +5,19 @@
 //! listing and render at once. Permissions, owner/group and tags load off the
 //! main thread; a result for a previous selection is dropped by generation.
 
+use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
+use crow_core::motion::{self, Effective};
 use crow_fs::{CloudStatus, Entry};
 use crow_theme::Theme;
 use gpui::{
-    AnyElement, App, Context, Div, Entity, EventEmitter, FontWeight, IntoElement, Render, Role, Subscription, Window,
-    div, prelude::*, px,
+    AnyElement, App, Bounds, Context, Div, Entity, EventEmitter, FontWeight, IntoElement, Render, Role, Subscription,
+    Window, canvas, div, fill, point, prelude::*, px, size,
 };
 
 use crate::cloud_status::{self, CloudStatusService};
@@ -32,6 +36,27 @@ pub enum InfoTab {
     Preview,
     Info,
     GitDiff,
+}
+
+#[derive(Clone, Copy)]
+struct TabMotion {
+    started: Instant,
+    mode: Effective,
+    from: f32,
+    to: f32,
+}
+
+impl TabMotion {
+    fn progress(self, mode: Effective, now: Instant) -> Option<f32> {
+        if self.mode != mode {
+            return None;
+        }
+        motion::navigation_progress(mode, self.started, now, motion::ms::PANEL_TAB)
+    }
+
+    fn position(self, t: f32) -> f32 {
+        self.from + (self.to - self.from) * t
+    }
 }
 
 /// What the Info tab describes: one item, or a selection's summary.
@@ -124,6 +149,8 @@ struct GitDiffView {
 
 pub struct InfoPane {
     tab: InfoTab,
+    tab_motion: Option<TabMotion>,
+    tab_strip_drawn: Cell<bool>,
     pub(crate) preferred_width: Option<gpui::Pixels>,
     splitter_focus: gpui::FocusHandle,
     git_diff: Option<GitDiffView>,
@@ -173,6 +200,8 @@ impl InfoPane {
         let cloud_subscription = cloud_service.map(|service| cx.observe(&service, |_, _, cx| cx.notify()));
         Self {
             tab: InfoTab::Preview,
+            tab_motion: None,
+            tab_strip_drawn: Cell::new(false),
             preferred_width: None,
             splitter_focus: cx.focus_handle(),
             git_diff: None,
@@ -351,6 +380,16 @@ impl InfoPane {
 
     pub fn set_tab(&mut self, tab: InfoTab, cx: &mut Context<Self>) {
         if self.tab != tab {
+            let now = Instant::now();
+            let mode = cx.global::<Ui>().feedback.mode;
+            self.tab_motion = (self.tab_strip_drawn.get() && mode != Effective::Off).then(|| {
+                let from = self.tab as u8 as f32;
+                let from = self
+                    .tab_motion
+                    .and_then(|motion| motion.progress(mode, now).map(|t| motion.position(t)))
+                    .unwrap_or(from);
+                TabMotion { started: now, mode, from, to: tab as u8 as f32 }
+            });
             self.tab = tab;
             if tab != InfoTab::Info {
                 self.drop_plugin_info(cx);
@@ -364,6 +403,8 @@ impl InfoPane {
             self.visible = visible;
             self.explicit = visible;
             if !visible {
+                self.tab_strip_drawn.set(false);
+                self.tab_motion = None;
                 self.drop_plugin_info(cx);
             }
             cx.notify();
@@ -396,6 +437,10 @@ impl InfoPane {
             if !self.explicit || self.visible != default {
                 self.visible = default;
                 self.explicit = false;
+                if !default {
+                    self.tab_strip_drawn.set(false);
+                    self.tab_motion = None;
+                }
             }
             cx.notify();
         }
@@ -531,7 +576,12 @@ impl InfoPane {
 /// The tab strip at the top of the right column. Shared by list view, column view
 /// and search so the two tabs look and behave the same everywhere.
 pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::Stateful<Div> {
-    let selected = info.read(cx).tab;
+    let pane = info.read(cx);
+    pane.tab_strip_drawn.set(true);
+    let selected = pane.tab;
+    let mode = cx.global::<Ui>().feedback.mode;
+    let active = pane.tab_motion.and_then(|motion| motion.progress(mode, Instant::now()).map(|t| (motion, t)));
+    let underline = active.filter(|_| mode == Effective::Full);
     let tab = |id: &'static str, label: &'static str, value: InfoTab| {
         let info = info.clone();
         div()
@@ -547,7 +597,7 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
             .text_size(px(12.))
             .text_color(if selected == value { color(theme.role("fg")) } else { color(theme.role("fg-muted")) })
             .border_b_2()
-            .border_color(if selected == value {
+            .border_color(if selected == value && underline.is_none() {
                 color(theme.role("accent"))
             } else {
                 color_alpha(theme.role("accent"), 0)
@@ -557,12 +607,22 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
             })
             .child(label)
     };
-    div()
+    let git = crate::git::provider_enabled(cx);
+    let count = if git { 3 } else { 2 };
+    let tab_bounds = underline.map(|_| Rc::new(RefCell::new(Vec::<Bounds<gpui::Pixels>>::new())));
+    let strip = div()
+        .when_some(tab_bounds.clone(), |strip, recorded| {
+            strip.on_children_prepainted(move |mut bounds, _, _| {
+                bounds.truncate(count);
+                *recorded.borrow_mut() = bounds;
+            })
+        })
         .id("info-tabs")
         .debug_selector(|| "info-tabs".into())
         .role(Role::TabList)
         .aria_label("Preview and Info")
         .h(px(TAB_STRIP_HEIGHT))
+        .relative()
         .flex_none()
         .flex()
         .items_stretch()
@@ -572,9 +632,52 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
         .border_color(color(theme.role("border")))
         .child(tab("info-tab-preview", "Preview", InfoTab::Preview))
         .child(tab("info-tab-info", "Info", InfoTab::Info))
-        .when(crate::git::provider_enabled(cx), |tabs| {
-            tabs.child(tab("info-tab-git-diff", "Git Diff", InfoTab::GitDiff))
+        .when(git, |tabs| tabs.child(tab("info-tab-git-diff", "Git Diff", InfoTab::GitDiff)));
+    if let Some(((motion, t), tabs)) = underline.zip(tab_bounds) {
+        let position = motion.position(t);
+        let accent = color(theme.role("accent"));
+        strip.child(
+            canvas(
+                |_, window, _| window.request_animation_frame(),
+                move |_, (), window, _| {
+                    let tabs = tabs.borrow();
+                    let position = position.clamp(0.0, (count - 1) as f32);
+                    let (left, right) = (position.floor() as usize, position.ceil() as usize);
+                    let (Some(from), Some(to)) = (tabs.get(left), tabs.get(right)) else { return };
+                    let t = position.fract();
+                    let x = from.left() + (to.left() - from.left()) * t;
+                    let width = from.size.width + (to.size.width - from.size.width) * t;
+                    window.paint_quad(fill(Bounds::new(point(x, from.bottom() - px(2.)), size(width, px(2.))), accent));
+                },
+            )
+            .absolute()
+            .inset_0(),
+        )
+    } else {
+        strip.when(active.is_some(), |strip| {
+            strip.child(canvas(|_, window, _| window.request_animation_frame(), |_, (), _, _| ()).absolute().inset_0())
         })
+    }
+}
+
+/// The active tab owns the scroll view and its controls from the first frame.
+/// Fade its content through the pane background while the underline tracks the tab.
+pub fn tab_body(info: &Entity<InfoPane>, body: AnyElement, cx: &App) -> gpui::Stateful<Div> {
+    let mode = cx.global::<Ui>().feedback.mode;
+    let motion = info.read(cx).tab_motion;
+    let motion = motion.and_then(|motion| motion.progress(mode, Instant::now()).map(|t| (motion, t)));
+    let body = if let Some((motion, t)) = motion {
+        div()
+            .relative()
+            .debug_selector(|| "info-tab-content-in-motion".into())
+            .when(mode == Effective::Full, |body| body.left(px(6.0 * (motion.to - motion.from).signum() * (1.0 - t))))
+            .opacity(0.25 + t * 0.75)
+            .child(body)
+            .into_any_element()
+    } else {
+        body
+    };
+    div().id("info-body").debug_selector(|| "info-body".into()).flex_1().min_h_0().p_4().overflow_y_scroll().child(body)
 }
 
 #[allow(clippy::too_many_arguments)]

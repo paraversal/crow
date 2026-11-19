@@ -223,7 +223,7 @@ pub struct Folder {
     /// row now at that index (or the new last row) becomes the cursor, as in Finder.
     cursor_before_apply: Option<(usize, PathBuf)>,
     /// After going up or back, Finder selects the folder you came from.
-    select_after_load: Option<PathBuf>,
+    select_after_load: Option<(PathBuf, bool)>,
     /// Items an operation produced: selected as soon as they appear in the listing.
     select_when_present: Vec<PathBuf>,
     /// The mode their Arrive effect plays in.
@@ -1074,7 +1074,12 @@ impl Folder {
     }
 
     pub fn select_after_load(&mut self, path: PathBuf) {
-        self.select_after_load = Some(path);
+        self.select_after_load = Some((path, false));
+    }
+
+    /// Search's Reveal Result uses the same deferred selection, with a tint pulse.
+    pub fn reveal_after_load(&mut self, path: PathBuf) {
+        self.select_after_load = Some((path, true));
     }
 
     pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
@@ -1256,11 +1261,19 @@ impl Folder {
     /// Returns whether it selected something (an operation result, not a removal).
     fn apply_pending_selection(&mut self, cx: &mut Context<Self>) -> bool {
         let mut selected = false;
-        if let Some(target) = self.select_after_load.clone()
+        if let Some((target, pulse)) = self.select_after_load.clone()
             && let Some(entry) = self.entries.iter().find(|entry| entry.path == target)
         {
             self.select_after_load = None;
             self.selection_totals = Self::entry_totals(entry);
+            let mode = cx.try_global::<crate::ui::Ui>().map_or(Effective::Off, |ui| ui.feedback.mode);
+            if pulse
+                && mode != Effective::Off
+                && let Some(ix) = self.index_of_path(&target)
+            {
+                self.effects.push(RowEffect::new(target.clone(), Fx::Reveal, mode, ix, entry.clone()));
+                self.schedule_effect_clear(cx);
+            }
             self.selection.select_only(target);
             self.selection_changed(cx);
             selected = true;
@@ -1591,6 +1604,10 @@ impl Folder {
         }
         let pending_selected = self.apply_pending_selection(cx);
         if let ApplyKind::Full { prune } = kind {
+            if !self.loading && self.select_after_load.as_ref().is_some_and(|(_, pulse)| *pulse) {
+                // A search hit can disappear before we open its folder.
+                self.select_after_load = None;
+            }
             // Only the first full load selects the first item. After that a removal
             // selects the row now at the cursor's old index
             // (`select_next_after_removal`), never the top of the folder.

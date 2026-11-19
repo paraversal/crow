@@ -12,7 +12,8 @@ use crow_core::{
     Settings, SidebarConfig, TipsMode, Views, load_settings, load_sidebar, load_views,
 };
 use crow_theme::Theme;
-use gpui::{App, AppContext, Global, SharedString};
+use futures::{FutureExt, future::Shared};
+use gpui::{App, AppContext, Global, SharedString, Task};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::feedback::{self, Feedback};
@@ -20,6 +21,14 @@ use crate::style::variant_of;
 
 const FADE: Duration = Duration::from_millis(500);
 const FADE_REDUCED_MOTION: Duration = Duration::from_millis(150);
+
+#[derive(Clone)]
+enum ConfigSnapshot {
+    Settings(Settings),
+    Views(Views),
+}
+
+type ConfigWrite = Shared<Task<Result<ConfigSnapshot, String>>>;
 
 pub struct Ui {
     pub settings: Settings,
@@ -58,6 +67,8 @@ pub struct Ui {
     pub themes_dir: PathBuf,
     pub themes_state_dir: PathBuf,
     pub config_dir: PathBuf,
+    config_writes: [Option<ConfigWrite>; VIEWS + 1],
+    config_write_revision: [u64; VIEWS + 1],
     pub state_dir: PathBuf,
     pub home: PathBuf,
     /// One message per config file that doesn't load; shown in the status line until fixed.
@@ -99,6 +110,8 @@ impl Ui {
             themes_dir: crow_theme::themes_dir(),
             themes_state_dir: crow_theme::state_dir(),
             config_dir,
+            config_writes: Default::default(),
+            config_write_revision: Default::default(),
             state_dir,
             home,
             errors: Default::default(),
@@ -154,18 +167,32 @@ impl Ui {
 
     /// Reload `settings.toml`; a broken file keeps the last good settings. True if anything changed.
     fn load_settings(&mut self) -> bool {
-        match load_settings(&self.config_dir) {
+        if self.config_writes[SETTINGS].is_some() {
+            return false;
+        }
+        self.apply_loaded_settings(load_settings(&self.config_dir).map_err(|error| error.to_string()))
+    }
+
+    fn apply_loaded_settings(&mut self, result: Result<Settings, String>) -> bool {
+        match result {
             Ok(settings) => {
                 let changed = settings != self.settings;
                 self.settings = settings;
                 self.set_error(SETTINGS, Ok(())) || changed
             }
-            Err(e) => self.set_error(SETTINGS, Err(e.to_string())),
+            Err(error) => self.set_error(SETTINGS, Err(error)),
         }
     }
 
     pub fn load_views(&mut self) -> bool {
-        match load_views(&self.config_dir, &self.home) {
+        if self.config_writes[VIEWS].is_some() {
+            return false;
+        }
+        self.apply_loaded_views(load_views(&self.config_dir, &self.home))
+    }
+
+    fn apply_loaded_views(&mut self, result: Result<Views, String>) -> bool {
+        match result {
             Ok(views) => {
                 self.views = views;
                 self.views_generation += 1;
@@ -237,6 +264,15 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     ui.target = theme.clone();
     ui.theme = theme;
     cx.set_global(ui);
+    cx.on_app_quit(|cx| {
+        let pending = cx.global::<Ui>().config_writes.clone();
+        async move {
+            for pending in pending.into_iter().flatten() {
+                let _ = pending.await;
+            }
+        }
+    })
+    .detach();
     crate::folder_sizes::init_at(cx, cache_dir, true);
     crate::cloud_status::init_at(cx);
     crate::git::init_at(cx);
@@ -479,6 +515,7 @@ pub enum SettingChange {
     ViewPerFolder(bool),
     WindowWidth(u32),
     WindowHeight(u32),
+    SidebarWidth(u32),
 }
 
 /// Apply `change` in memory, update everything that follows from it, and write
@@ -507,6 +544,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             SettingChange::ViewPerFolder(value) => replace(&mut settings.view_per_folder, *value),
             SettingChange::WindowWidth(value) => replace(&mut settings.window.width, *value),
             SettingChange::WindowHeight(value) => replace(&mut settings.window.height, *value),
+            SettingChange::SidebarWidth(value) => replace(&mut settings.window.sidebar_width, *value),
         }
     };
     if !changed {
@@ -619,6 +657,13 @@ fn write_setting(change: SettingChange, cx: &mut App) {
             write_config(
                 SETTINGS,
                 move |config, _| crow_core::save_table_number(config, "window", "height", i64::from(value)),
+                cx,
+            );
+        }
+        SettingChange::SidebarWidth(value) => {
+            write_config(
+                SETTINGS,
+                move |config, _| crow_core::save_table_number(config, "window", "sidebar_width", i64::from(value)),
                 cx,
             );
         }
@@ -907,6 +952,45 @@ pub fn refresh_volumes(cx: &mut App) {
 fn write_config(which: usize, write: impl FnOnce(&Path, &Path) -> Result<(), String> + Send + 'static, cx: &mut App) {
     let ui = cx.global::<Ui>();
     let (config_dir, home) = (ui.config_dir.clone(), ui.home.clone());
+    if matches!(which, SETTINGS | VIEWS) {
+        let ui = cx.global_mut::<Ui>();
+        let previous = ui.config_writes[which].take();
+        ui.config_write_revision[which] += 1;
+        let revision = ui.config_write_revision[which];
+        // Each edit reads and replaces the same file. Queue them in input order
+        // and publish only the last snapshot so rapid key presses stay responsive.
+        let task = cx
+            .background_spawn(async move {
+                if let Some(previous) = previous {
+                    let _ = previous.await;
+                }
+                write(&config_dir, &home)?;
+                if which == SETTINGS {
+                    load_settings(&config_dir).map(ConfigSnapshot::Settings).map_err(|error| error.to_string())
+                } else {
+                    load_views(&config_dir, &home).map(ConfigSnapshot::Views)
+                }
+            })
+            .shared();
+        cx.global_mut::<Ui>().config_writes[which] = Some(task.clone());
+        cx.spawn(async move |cx| {
+            let result = task.await;
+            cx.update(|cx| {
+                if cx.global::<Ui>().config_write_revision[which] == revision {
+                    let ui = cx.global_mut::<Ui>();
+                    ui.config_writes[which] = None;
+                    match result {
+                        Ok(ConfigSnapshot::Settings(settings)) => ui.apply_loaded_settings(Ok(settings)),
+                        Ok(ConfigSnapshot::Views(views)) => ui.apply_loaded_views(Ok(views)),
+                        Err(error) => ui.set_error(which, Err(error)),
+                    };
+                    cx.refresh_windows();
+                }
+            });
+        })
+        .detach();
+        return;
+    }
     let task = cx.background_spawn(async move { write(&config_dir, &home) });
     cx.spawn(async move |cx| {
         let result = task.await;
@@ -914,9 +998,6 @@ fn write_config(which: usize, write: impl FnOnce(&Path, &Path) -> Result<(), Str
             let ui = cx.global_mut::<Ui>();
             match result {
                 Ok(()) => match which {
-                    VIEWS => {
-                        ui.load_views();
-                    }
                     SIDEBAR => {
                         ui.load_sidebar();
                         refresh_recent(cx);
@@ -924,9 +1005,7 @@ fn write_config(which: usize, write: impl FnOnce(&Path, &Path) -> Result<(), Str
                     EXCLUDE => {
                         ui.load_exclude();
                     }
-                    _ => {
-                        ui.load_settings();
-                    }
+                    _ => unreachable!("settings and views writes use the queues"),
                 },
                 Err(e) => {
                     ui.set_error(which, Err(e));

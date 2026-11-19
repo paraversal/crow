@@ -69,7 +69,7 @@ Crow ships an optional, read-only Git package. Approve it once in Settings ▸ P
 
 To show the **Lines** column, open `views.toml` from Settings ▸ Files and add `"git.lines-changed"` to the existing `columns` list under `[defaults]` or in a folder or rule override. Press Cmd-2 for list view. Lines adds insertions and deletions across staged and unstaged edits for each eligible file.
 
-In List view, right-click the header or choose View ▸ Choose List Columns to change the visible columns for this folder or set the default. Drag the left sidebar or right Preview/Info divider to resize it for the current window. Double-click a divider to reset it.
+In List view, right-click the header or choose View ▸ Choose List Columns to change the visible columns for this folder or set the default. Drag the left sidebar or right Preview/Info divider to resize it. Crow saves the left sidebar width as `sidebar_width` under `[window]` in `settings.toml` and uses it across windows and launches. The right pane width is per window. Double-click a divider to reset it.
 
 Pin a worktree root to see its branch, changed-path count and ahead/behind from the last fetch. On a wider sidebar, small change sets also show separate insertion and deletion totals when Git can count them. Select a pin's Git badge or a changed folder's badge to open Review Git Changes. The File menu and command palette also open the review sheet, where Pinned Repositories shows changes across all pins. Select a changed file and open the Git Diff tab in the right pane for staged and unstaged text changes.
 
@@ -81,7 +81,10 @@ previews each theme as you move through the list; Apply to All Apps (Cmd-Return)
 Motion follows `motion`: `"auto"` (default) uses Full unless macOS Reduce Motion is on, then Low;
 `"off"` changes state in one frame; `"low"` fades opacity and color only; `"full"` also moves —
 a trashed row's icon becomes a trash and swallows the name, a move pulses its target, results
-arrive, the selection fill glides between rows, and sheets and tips fade in. `sound` picks
+arrive, the selection fill glides between rows, and sheets and tips fade in. Explicit List and
+Columns switches move matching visible items into place. The right pane's tab underline glides,
+new child columns reveal beside their parent, and Reveal Result (`⌘R`) pulses the destination row.
+`sound` picks
 `"crow"` (Finder's trash sounds plus soft ticks for move, new folder, undo and copy), `"finder"`
 (only the sounds Finder itself makes) or `"off"`. The two are separate settings; macOS
 "Play user interface sound effects" off silences everything but the alert. `crow --motion-lab`

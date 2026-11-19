@@ -1,12 +1,18 @@
-//! Per-window widths and divider gestures for the sidebar and Preview/Info.
+//! Layout and divider gestures for the sidebar and Preview/Info.
 
 use gpui::{
     Context, CursorStyle, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Role, div, prelude::*, px,
 };
 
-use crate::style::color;
+use crate::{
+    style::color,
+    ui::{self, SettingChange},
+};
 
 use super::CrowWindow;
+
+const LEFT_MIN: u32 = 140;
+const LEFT_MAX: u32 = 480;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Side {
@@ -27,11 +33,26 @@ struct Drag {
     side: Side,
     origin: Pixels,
     width: Pixels,
+    position: Pixels,
+}
+
+impl Drag {
+    fn current_width(&self) -> Pixels {
+        self.width + (self.position - self.origin) * self.side.direction()
+    }
+
+    fn resized_left(&self) -> Option<u32> {
+        (matches!(self.side, Side::Left) && self.position != self.origin)
+            .then(|| left_width_setting(self.current_width()))
+    }
+}
+
+fn left_width_setting(width: Pixels) -> u32 {
+    (f32::from(width).round() as u32).clamp(LEFT_MIN, LEFT_MAX)
 }
 
 pub(super) struct SidePanes {
     pub(super) left_focus: FocusHandle,
-    preferred_left: Option<Pixels>,
     left: Pixels,
     right: Pixels,
     drag: Option<Drag>,
@@ -39,11 +60,12 @@ pub(super) struct SidePanes {
 
 impl SidePanes {
     pub(super) fn new(cx: &mut Context<CrowWindow>) -> Self {
-        Self { left_focus: cx.focus_handle(), preferred_left: None, left: px(210.), right: px(300.), drag: None }
+        Self { left_focus: cx.focus_handle(), left: px(210.), right: px(300.), drag: None }
     }
 
-    pub(super) fn layout(&mut self, viewport: Pixels, preferred_right: Option<Pixels>) {
-        self.left = self.preferred_left.unwrap_or(px(210.)).min((viewport - px(290.)).max(px(140.)));
+    pub(super) fn layout(&mut self, viewport: Pixels, preferred_left: u32, preferred_right: Option<Pixels>) {
+        let left = self.drag.as_ref().and_then(Drag::resized_left).unwrap_or(preferred_left).clamp(LEFT_MIN, LEFT_MAX);
+        self.left = px(left as f32).min((viewport - px(290.)).max(px(LEFT_MIN as f32)));
         self.right = preferred_right.unwrap_or(px(300.)).min((viewport - self.left - px(130.)).max(px(160.)));
     }
 
@@ -55,20 +77,37 @@ impl SidePanes {
         self.right
     }
 
-    pub(super) fn drag_to(&self, x: Pixels) -> Option<(Side, Pixels)> {
-        let drag = self.drag.as_ref()?;
-        Some((drag.side, drag.width + (x - drag.origin) * drag.side.direction()))
-    }
-
-    pub(super) fn finish(&mut self) {
-        self.drag = None;
+    fn drag_to(&mut self, x: Pixels) -> Option<(Side, Pixels)> {
+        let drag = self.drag.as_mut()?;
+        drag.position = x;
+        Some((drag.side, drag.current_width()))
     }
 }
 
 impl CrowWindow {
-    pub(super) fn set_side_pane_width(&mut self, side: Side, width: Option<Pixels>, cx: &mut Context<Self>) {
+    pub(super) fn drag_side_pane(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        match self.side_panes.drag_to(x) {
+            Some((Side::Left, _)) => cx.notify(),
+            Some((Side::Right, width)) => self.set_side_pane_width(Side::Right, Some(width), cx),
+            None => {}
+        }
+    }
+
+    pub(super) fn finish_side_pane_resize(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.side_panes.drag.take() else { return };
+        if let Some(width) = drag.resized_left() {
+            ui::set_setting(SettingChange::SidebarWidth(width), cx);
+        }
+        cx.notify();
+    }
+
+    fn set_side_pane_width(&mut self, side: Side, width: Option<Pixels>, cx: &mut Context<Self>) {
         match side {
-            Side::Left => self.side_panes.preferred_left = width.map(|width| width.clamp(px(140.), px(480.))),
+            Side::Left => {
+                let width =
+                    width.map(left_width_setting).unwrap_or_else(|| crow_core::WindowDefaults::default().sidebar_width);
+                ui::set_setting(SettingChange::SidebarWidth(width), cx);
+            }
             Side::Right => {
                 self.info.update(cx, |info, cx| {
                     info.preferred_width = width.map(|width| width.clamp(px(160.), px(640.)));
@@ -102,13 +141,16 @@ pub(crate) fn splitter(side: Side, focus: &FocusHandle, theme: &crow_theme::Them
         .when(matches!(side, Side::Left), |handle| handle.right_0())
         .when(matches!(side, Side::Right), |handle| handle.left_0())
         .hover(move |handle| handle.bg(line.opacity(0.25)))
-        .focus(|style| style.bg(line.opacity(0.25)))
+        // The splitter moves under the pointer as it resizes. Refresh when the
+        // hover listener sees the new hitbox, even if no mouse move hit that box.
+        .on_hover(|_, window, _| window.refresh())
+        .focus_visible(|style| style.bg(line.opacity(0.25)))
         .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, window, cx| {
             let Some(handle) = window.root::<CrowWindow>().flatten() else { return };
             handle.update(cx, |this, cx| {
                 window.focus(&focus, cx);
                 if event.click_count > 1 {
-                    this.side_panes.finish();
+                    this.side_panes.drag = None;
                     this.set_side_pane_width(side, None, cx);
                 } else {
                     let width = match side {
@@ -120,7 +162,8 @@ pub(crate) fn splitter(side: Side, focus: &FocusHandle, theme: &crow_theme::Them
                         }
                         Side::Right => this.side_panes.right,
                     };
-                    this.side_panes.drag = Some(Drag { side, origin: event.position.x, width });
+                    let origin = event.position.x;
+                    this.side_panes.drag = Some(Drag { side, origin, width, position: origin });
                 }
             });
             cx.stop_propagation();
