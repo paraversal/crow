@@ -99,6 +99,19 @@ pub fn open(cx: &mut App) {
     {
         cx.global_mut::<Ui>().settings_folder = Some(dir);
     }
+    if !cx.windows().iter().any(|handle| handle.downcast::<crate::window::CrowWindow>().is_some()) {
+        cx.global_mut::<Ui>().settings_folder = None;
+    }
+    open_window(cx);
+}
+
+/// Open from a browser action, which already has access to the invoking pane.
+pub(crate) fn open_for_folder(dir: std::path::PathBuf, cx: &mut App) {
+    cx.global_mut::<Ui>().settings_folder = Some(dir);
+    open_window(cx);
+}
+
+fn open_window(cx: &mut App) {
     if let Some(handle) = cx.windows().into_iter().find_map(|handle| handle.downcast::<SettingsWindow>()) {
         handle
             .update(cx, |this, window, cx| {
@@ -748,7 +761,7 @@ pub struct SettingsWindow {
     preview_add_ids: Vec<String>,
     preview_add_scroll: ScrollHandle,
     preview_rule_scroll: ScrollHandle,
-    preview_added_rule: Option<(usize, String)>,
+    preview_write_pending: bool,
     preview_rule_type_ahead: TypeAhead,
     preview_add_type_ahead: TypeAhead,
     preview_message: Option<SharedString>,
@@ -970,7 +983,7 @@ impl SettingsWindow {
             preview_add_ids: Vec::new(),
             preview_add_scroll: ScrollHandle::new(),
             preview_rule_scroll: ScrollHandle::new(),
-            preview_added_rule: None,
+            preview_write_pending: false,
             preview_rule_type_ahead: TypeAhead::default(),
             preview_add_type_ahead: TypeAhead::default(),
             preview_message: None,
@@ -2069,14 +2082,14 @@ impl SettingsWindow {
         let key = sort_key_at(self.sort_cursor);
         let current = cx.global::<Ui>().views.defaults_layer().sort.unwrap_or_default();
         if current != key {
-            ui::save_defaults_change(DefaultsChange::SortKey(key), cx);
+            ui::save_defaults_change(DefaultsChange::SortKey(key), None, cx);
         }
     }
 
     fn select_default_view(&mut self, index: usize, cx: &mut Context<Self>) {
         let mode = if index == 0 { ViewMode::List } else { ViewMode::Columns };
         if cx.global::<Ui>().views.defaults_layer().view != Some(mode) {
-            ui::save_defaults_change(DefaultsChange::View(mode), cx);
+            ui::save_defaults_change(DefaultsChange::View(mode), None, cx);
         }
     }
 
@@ -2088,14 +2101,14 @@ impl SettingsWindow {
             _ => (raw != Some(false)).then_some(DefaultsChange::Ascending(Some(false))),
         };
         if let Some(change) = change {
-            ui::save_defaults_change(change, cx);
+            ui::save_defaults_change(change, None, cx);
         }
     }
 
     fn toggle_default_folders_first(&mut self, cx: &mut Context<Self>) {
         let raw = cx.global::<Ui>().views.defaults_layer().folders_first;
         let next = !raw.unwrap_or(true);
-        ui::save_defaults_change(DefaultsChange::FoldersFirst(next), cx);
+        ui::save_defaults_change(DefaultsChange::FoldersFirst(next), None, cx);
     }
 
     fn commit_theme(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -4334,6 +4347,26 @@ preview_providers = ["example.one.preview"]
             "the descriptor id enters the draft list"
         );
         focus_control(&view, &mut vcx, ControlId::PreviewRulePattern);
+        vcx.simulate_input("~/[");
+        draw(&mut vcx);
+        let before = views_text(&vcx);
+        vcx.simulate_keystrokes("enter");
+        for _ in 0..200 {
+            vcx.run_until_parked();
+            if view.read_with(&vcx, |view, _| !view.preview_write_pending) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(views_text(&vcx), before);
+        assert!(view.read_with(&vcx, |view, cx| view.preview_inheritance_text(cx)).contains("rule"));
+        assert_eq!(view.read_with(&vcx, |view, _| view.preview_pattern_text.clone()), "~/[");
+        assert_eq!(
+            view.read_with(&vcx, |view, cx| view.preview_state_for_tests(cx).4),
+            ["example.p1b-fixture.sample-preview"]
+        );
+        assert!(vcx.read_global::<Ui, _>(|ui, _| ui.views_error().is_none()));
+        vcx.simulate_keystrokes("cmd-a");
         vcx.simulate_input("~/Pictures/**");
         draw(&mut vcx);
         focus_control(&view, &mut vcx, ControlId::PreviewAddRule);

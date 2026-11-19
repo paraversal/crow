@@ -38,11 +38,9 @@ impl SettingsWindow {
         cx.global::<Ui>().views.rules()
     }
 
-    fn current_rule(&self, cx: &App) -> Option<crow_core::RuleInfo> {
+    fn current_rule(&self, cx: &App) -> Option<&crow_core::RuleLocator> {
         let locator = self.preview_rule.as_ref()?;
-        self.preview_rules(cx).into_iter().find(|rule| {
-            rule.index == locator.index && rule.pattern == locator.pattern && rule.fingerprint == locator.fingerprint
-        })
+        (cx.global::<Ui>().views.rule_locator(locator.index).as_ref() == Some(locator)).then_some(locator)
     }
 
     fn rule_target_ready(&self, cx: &App) -> bool {
@@ -52,26 +50,11 @@ impl SettingsWindow {
     /// A rule selected earlier can move or change outside the app. Switch to a
     /// fresh new-rule target instead of aiming at the new occupant of the index.
     pub(super) fn repair_preview_target(&mut self, cx: &App) {
-        if let Some((index, pattern)) = self.preview_added_rule.clone() {
-            let rules = self.preview_rules(cx);
-            if let Some(rule) = rules.iter().find(|rule| rule.index == index && rule.pattern == pattern) {
-                self.preview_rule = cx.global::<Ui>().views.rule_locator(rule.index);
-                self.preview_rule_new = false;
-                self.preview_added_rule = None;
-                self.preview_message = None;
-            }
-        }
-        if self.preview_scope != PreviewScope::Rule {
+        if self.preview_scope != PreviewScope::Rule || self.preview_write_pending {
             return;
         }
-        if let Some(locator) = self.preview_rule.clone() {
-            let rules = self.preview_rules(cx);
-            let current = rules.iter().any(|rule| {
-                rule.index == locator.index
-                    && rule.pattern == locator.pattern
-                    && rule.fingerprint == locator.fingerprint
-            });
-            if !current {
+        if self.preview_rule.is_some() {
+            if self.current_rule(cx).is_none() {
                 self.preview_rule = None;
                 self.preview_rule_new = true;
                 self.preview_new_providers.clear();
@@ -121,14 +104,14 @@ impl SettingsWindow {
                     };
                 }
                 let Some(rule) = self.current_rule(cx) else { return ListState::default() };
-                let raw = views.rule_preview_providers(rule.index).flatten();
+                let raw = rule.layer.preview_providers.clone();
                 let defaults = views.defaults_layer().preview_providers.clone().unwrap_or_default();
                 let ids = raw.clone().unwrap_or_else(|| defaults.clone());
                 ListState {
                     ids,
                     raw,
                     inherited: Some(format!(
-                        "Inherited for matching folders: {} from [defaults]; earlier rules may change it",
+                        "Inherited for matching folders: {} from [defaults]; other matching rules may override it",
                         describe_providers(&defaults)
                     )),
                 }
@@ -274,6 +257,7 @@ impl SettingsWindow {
         }
         self.preview_picker_pending = true;
         cx.notify();
+        let origin = (self.category, self.query.clone(), self.preview_folder.clone());
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -284,6 +268,13 @@ impl SettingsWindow {
             let result = receiver.await;
             this.update_in(cx, |this, window, cx| {
                 this.preview_picker_pending = false;
+                if this.preview_scope != PreviewScope::Folder
+                    || (this.category, &this.query, &this.preview_folder) != (origin.0, &origin.1, &origin.2)
+                    || !this.visible_controls(cx).contains(&ControlId::PreviewChooseFolder)
+                {
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(Ok(Some(paths))) => {
                         if let Some(folder) = paths.into_iter().next() {
@@ -309,42 +300,88 @@ impl SettingsWindow {
         .detach();
     }
 
-    fn commit_preview_list(&mut self, providers: Vec<String>, cx: &mut Context<Self>) {
+    fn can_write_preview(&self, cx: &App) -> bool {
+        !self.preview_write_pending && cx.global::<Ui>().views_error().is_none()
+    }
+
+    fn preview_completion(
+        &mut self,
+        updated_rule: Option<crow_core::RuleLocator>,
+        cx: &mut Context<Self>,
+    ) -> ui::ViewsWriteCompletion {
+        self.preview_write_pending = true;
+        self.preview_message = None;
+        cx.notify();
+        let entity = cx.entity().downgrade();
+        Box::new(move |outcome, cx| {
+            entity
+                .update(cx, |this, cx| {
+                    this.preview_write_pending = false;
+                    match outcome {
+                        Ok(()) => {
+                            if let Some(rule) = updated_rule
+                                && this.preview_rule.as_ref().is_some_and(|selected| {
+                                    selected.index == rule.index && selected.pattern == rule.pattern
+                                })
+                            {
+                                this.preview_rule = Some(rule);
+                            }
+                        }
+                        Err(error) => this.preview_message = Some(error.into()),
+                    }
+                    cx.notify();
+                })
+                .ok();
+        })
+    }
+
+    fn commit_preview_list(&mut self, providers: Option<Vec<String>>, cx: &mut Context<Self>) {
         match self.preview_scope {
             PreviewScope::Defaults => {
-                ui::save_defaults_change(crow_core::DefaultsChange::PreviewProviders(providers), cx);
+                let change = providers.map_or(
+                    crow_core::DefaultsChange::InheritPreviewProviders,
+                    crow_core::DefaultsChange::PreviewProviders,
+                );
+                let completion = self.preview_completion(None, cx);
+                ui::save_defaults_change(change, Some(completion), cx);
             }
             PreviewScope::Folder => {
                 let Some(folder) = self.preview_folder.clone() else { return };
-                ui::save_folder_preview_providers(folder, Some(providers), cx);
+                let completion = self.preview_completion(None, cx);
+                ui::save_folder_preview_providers(folder, providers, completion, cx);
             }
             PreviewScope::Rule if self.preview_rule_new => {
-                self.preview_new_providers = providers;
+                self.preview_new_providers = providers.unwrap_or_default();
                 cx.notify();
             }
             PreviewScope::Rule => {
-                let Some(locator) = self.preview_rule.clone() else { return };
-                ui::save_rule_preview_providers(locator, Some(providers), cx);
+                let Some(locator) = self.current_rule(cx).cloned() else { return };
+                let mut updated = locator.clone();
+                updated.layer.preview_providers = providers.clone();
+                let completion = self.preview_completion(Some(updated), cx);
+                ui::save_rule_preview_providers(locator, providers, completion, cx);
             }
         }
     }
 
     pub(super) fn preview_add_provider(&mut self, id: String, cx: &mut Context<Self>) {
-        let mut providers = self.preview_list_state(cx).ids;
-        if providers.contains(&id) {
+        if !self.can_write_preview(cx) || !self.preview_add_options(cx).iter().any(|(available, _)| available == &id) {
             return;
         }
+        let mut providers = self.preview_list_state(cx).ids;
         providers.push(id);
-        self.commit_preview_list(providers, cx);
+        self.commit_preview_list(Some(providers), cx);
     }
 
-    /// Add from the ids the menu row was drawn with.
     pub(super) fn preview_add_provider_at(&mut self, ids: &[String], index: usize, cx: &mut Context<Self>) {
         let Some(id) = ids.get(index).cloned() else { return };
         self.preview_add_provider(id, cx);
     }
 
     pub(super) fn preview_remove_provider(&mut self, cx: &mut Context<Self>) {
+        if !self.can_write_preview(cx) {
+            return;
+        }
         let mut providers = self.preview_list_state(cx).ids;
         if providers.is_empty() {
             return;
@@ -352,10 +389,13 @@ impl SettingsWindow {
         let index = self.preview_list_cursor.min(providers.len() - 1);
         providers.remove(index);
         self.preview_list_cursor = index.min(providers.len().saturating_sub(1));
-        self.commit_preview_list(providers, cx);
+        self.commit_preview_list(Some(providers), cx);
     }
 
     pub(super) fn preview_move_provider(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if !self.can_write_preview(cx) {
+            return;
+        }
         let mut providers = self.preview_list_state(cx).ids;
         if providers.len() < 2 {
             return;
@@ -367,31 +407,19 @@ impl SettingsWindow {
         }
         providers.swap(current, next);
         self.preview_list_cursor = next;
-        self.commit_preview_list(providers, cx);
+        self.commit_preview_list(Some(providers), cx);
     }
 
     pub(super) fn preview_clear(&mut self, cx: &mut Context<Self>) {
-        match self.preview_scope {
-            PreviewScope::Defaults => {
-                ui::save_defaults_change(crow_core::DefaultsChange::InheritPreviewProviders, cx);
-            }
-            PreviewScope::Folder => {
-                let Some(folder) = self.preview_folder.clone() else { return };
-                ui::save_folder_preview_providers(folder, None, cx);
-            }
-            PreviewScope::Rule if self.preview_rule_new => {
-                self.preview_new_providers.clear();
-                self.preview_list_cursor = 0;
-                cx.notify();
-            }
-            PreviewScope::Rule => {
-                let Some(locator) = self.preview_rule.clone() else { return };
-                ui::save_rule_preview_providers(locator, None, cx);
-            }
+        if self.can_write_preview(cx) {
+            self.commit_preview_list(None, cx);
         }
     }
 
     pub(super) fn preview_add_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_write_preview(cx) || self.preview_scope != PreviewScope::Rule || !self.preview_rule_new {
+            return;
+        }
         let pattern = self.preview_pattern_text.trim().to_owned();
         if pattern.is_empty() {
             self.preview_message = Some("A path rule needs a pattern.".into());
@@ -404,13 +432,55 @@ impl SettingsWindow {
             return;
         }
         let index = self.preview_rules(cx).len();
-        ui::add_preview_rule(pattern.clone(), self.preview_new_providers.clone(), cx);
-        self.preview_added_rule = Some((index, pattern.clone()));
-        self.preview_new_providers.clear();
-        self.preview_pattern_text.clear();
-        self.preview_pattern.update(cx, |input, cx| input.set_text("", window, cx));
-        self.preview_message = Some(format!("Added a preview rule after the {index} existing rules.").into());
+        let providers = self.preview_new_providers.clone();
+        let handle = window.window_handle().downcast::<SettingsWindow>().expect("Settings window");
+        self.preview_write_pending = true;
+        self.preview_message = None;
         cx.notify();
+        let completion_pattern = pattern.clone();
+        let completion_providers = providers.clone();
+        ui::add_preview_rule(
+            index,
+            pattern,
+            providers,
+            Box::new(move |outcome, cx| {
+                handle
+                    .update(cx, |this, window, cx| {
+                        this.preview_write_pending = false;
+                        match outcome {
+                            Ok(())
+                                if this.preview_scope == PreviewScope::Rule
+                                    && this.preview_rule_new
+                                    && this.preview_pattern_text == completion_pattern =>
+                            {
+                                let selected = cx.global::<Ui>().views.rule_locator(index).filter(|rule| {
+                                    rule.pattern == completion_pattern
+                                        && rule.layer.preview_providers.as_ref() == Some(&completion_providers)
+                                });
+                                if let Some(selected) = selected {
+                                    let restore_focus = matches!(
+                                        this.focused_control(window),
+                                        Some(ControlId::PreviewRulePattern | ControlId::PreviewAddRule)
+                                    );
+                                    this.preview_rule = Some(selected);
+                                    this.preview_rule_new = false;
+                                    this.preview_pattern_text.clear();
+                                    this.preview_new_providers.clear();
+                                    this.preview_pattern.update(cx, |input, cx| input.set_text("", window, cx));
+                                    if restore_focus {
+                                        window.focus(&this.handle(ControlId::PreviewRuleSelect), cx);
+                                    }
+                                }
+                            }
+                            Ok(()) => {}
+                            Err(error) => this.preview_message = Some(error.into()),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+            }),
+            cx,
+        );
     }
 
     pub(super) fn on_preview_pattern_event(
@@ -447,11 +517,7 @@ impl SettingsWindow {
                 rule.pattern.clone()
             });
             let locator = views.rule_locator(rule.index);
-            if self.preview_rule.as_ref().is_some_and(|current| {
-                current.index == rule.index
-                    && current.pattern == rule.pattern
-                    && current.fingerprint == rule.fingerprint
-            }) {
+            if locator.is_some() && self.preview_rule == locator {
                 selected = Some(locators.len());
             }
             locators.push(locator);
@@ -484,9 +550,7 @@ impl SettingsWindow {
     }
 
     pub(super) fn open_preview_add_menu(&mut self, cx: &mut Context<Self>) {
-        let options = self.preview_add_options(cx);
-        self.preview_add_labels = options.into_iter().map(|(_, title)| title).collect();
-        self.preview_add_ids = self.preview_add_options(cx).into_iter().map(|(id, _)| id).collect();
+        (self.preview_add_ids, self.preview_add_labels) = self.preview_add_options(cx).into_iter().unzip();
         self.preview_add_cursor = 0;
         self.preview_add_scroll.scroll_to_item(0);
         self.menu = Some(ControlId::PreviewAdd);
@@ -540,15 +604,13 @@ impl SettingsWindow {
         index: usize,
         cx: &mut Context<Self>,
     ) {
+        if self.preview_write_pending {
+            return;
+        }
         let Some(option) = options.get(index).cloned() else { return };
         match option {
             Some(locator) => {
-                let rules = self.preview_rules(cx);
-                let current = rules.iter().any(|rule| {
-                    rule.index == locator.index
-                        && rule.pattern == locator.pattern
-                        && rule.fingerprint == locator.fingerprint
-                });
+                let current = cx.global::<Ui>().views.rule_locator(locator.index).as_ref() == Some(&locator);
                 if !current {
                     self.preview_rule = None;
                     self.preview_rule_new = true;
@@ -614,7 +676,7 @@ impl SettingsWindow {
         let text = match self.preview_scope {
             PreviewScope::Defaults => match &state.raw {
                 Some(list) if list.is_empty() => "Native only (an explicit empty list).".to_owned(),
-                Some(_) => "This list replaces the built-in Native fallback.".to_owned(),
+                Some(_) => "Crow tries these providers in order, then falls back to Native.".to_owned(),
                 None => "Inherited: the built-in Native fallback.".to_owned(),
             },
             PreviewScope::Folder => match (&self.preview_folder, &state.raw) {
@@ -683,12 +745,23 @@ impl SettingsWindow {
                         .flex_col()
                         .gap(px(2.))
                         .text_size(px(12.))
-                        .child(div().text_color(color(theme.role("fg"))).child(folder_text))
-                        .children(
-                            browser.map(|text| {
-                                div().text_size(px(11.)).text_color(color(theme.role("fg-muted"))).child(text)
-                            }),
+                        .child(
+                            div()
+                                .id("settings-preview-folder-target")
+                                .role(Role::Label)
+                                .aria_label(folder_text.clone())
+                                .text_color(color(theme.role("fg")))
+                                .child(folder_text),
                         )
+                        .children(browser.map(|text| {
+                            div()
+                                .id("settings-preview-browser-folder")
+                                .role(Role::Label)
+                                .aria_label(text.clone())
+                                .text_size(px(11.))
+                                .text_color(color(theme.role("fg-muted")))
+                                .child(text)
+                        }))
                         .into_any_element(),
                 );
                 let use_current = controls::button(

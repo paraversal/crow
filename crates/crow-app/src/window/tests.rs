@@ -11391,6 +11391,14 @@ fn apply_settings_and_check(
 }
 
 #[gpui::test]
+fn settings_shortcut_captures_the_invoking_browser_folder(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("settings-invoking-folder", 1);
+    let (_, mut bcx) = open(cx, &tree.path);
+    bcx.simulate_keystrokes("cmd-,");
+    assert_eq!(bcx.read_global::<crate::ui::Ui, _>(|ui, _| ui.settings_folder.clone()), Some(tree.path.clone()));
+}
+
+#[gpui::test]
 fn settings_default_view_reaches_two_browser_windows(cx: &mut TestAppContext) {
     let tree = fuzz_tree("settings-two-windows", 4);
     let (first, fcx) = open(cx, &tree.path);
@@ -11410,7 +11418,7 @@ fn settings_default_view_reaches_two_browser_windows(cx: &mut TestAppContext) {
     assert_eq!(pane(&first, &fcx).read_with(&fcx, |pane, _| pane.mode()), ViewMode::List);
     assert_eq!(pane(&second_view, &scx).read_with(&scx, |pane, _| pane.mode()), ViewMode::List);
 
-    fcx.cx.update(|cx| crate::ui::save_defaults_change(crow_core::DefaultsChange::View(ViewMode::Columns), cx));
+    fcx.cx.update(|cx| crate::ui::save_defaults_change(crow_core::DefaultsChange::View(ViewMode::Columns), None, cx));
     for _ in 0..400 {
         fcx.cx.run_until_parked();
         if pane(&first, &fcx).read_with(&fcx, |pane, _| pane.mode()) == ViewMode::Columns

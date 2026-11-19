@@ -1086,6 +1086,17 @@ pub fn refresh_volumes(cx: &mut App) {
 /// Write a config file off the main thread, then reload it here. A failure shows
 /// in the status line like any other config problem.
 fn write_config(which: usize, write: impl FnOnce(&Path, &Path) -> Result<(), String> + Send + 'static, cx: &mut App) {
+    write_config_with_completion(which, write, None, cx);
+}
+
+pub type ViewsWriteCompletion = Box<dyn FnOnce(Result<(), String>, &mut App)>;
+
+fn write_config_with_completion(
+    which: usize,
+    write: impl FnOnce(&Path, &Path) -> Result<(), String> + Send + 'static,
+    completion: Option<ViewsWriteCompletion>,
+    cx: &mut App,
+) {
     let ui = cx.global::<Ui>();
     let (config_dir, home) = (ui.config_dir.clone(), ui.home.clone());
     if matches!(which, SETTINGS | VIEWS) {
@@ -1112,15 +1123,20 @@ fn write_config(which: usize, write: impl FnOnce(&Path, &Path) -> Result<(), Str
         cx.spawn(async move |cx| {
             let result = task.await;
             cx.update(|cx| {
+                let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
                 if cx.global::<Ui>().config_write_revision[which] == revision {
                     let ui = cx.global_mut::<Ui>();
                     ui.config_writes[which] = None;
                     match result {
                         Ok(ConfigSnapshot::Settings(settings)) => ui.apply_loaded_settings(Ok(settings)),
                         Ok(ConfigSnapshot::Views(views)) => ui.apply_loaded_views(Ok(views)),
-                        Err(error) => ui.set_error(which, Err(error)),
+                        Err(error) if completion.is_none() => ui.set_error(which, Err(error)),
+                        Err(_) => false,
                     };
                     cx.refresh_windows();
+                }
+                if let Some(completion) = completion {
+                    completion(outcome, cx);
                 }
             });
         })
@@ -1155,31 +1171,59 @@ fn write_config(which: usize, write: impl FnOnce(&Path, &Path) -> Result<(), Str
 
 /// Change `[defaults]` in views.toml. The queued reload publishes a new views
 /// generation, so browser panes and Why This View apply it like any edit.
-pub fn save_defaults_change(change: crow_core::DefaultsChange, cx: &mut App) {
-    write_config(VIEWS, move |config, _| crow_core::save_defaults_change(config, change), cx);
+pub fn save_defaults_change(change: crow_core::DefaultsChange, completion: Option<ViewsWriteCompletion>, cx: &mut App) {
+    write_config_with_completion(
+        VIEWS,
+        move |config, home| crow_core::save_defaults_change(config, home, change),
+        completion,
+        cx,
+    );
 }
 
 /// Set or clear one folder's preview-provider list.
-pub fn save_folder_preview_providers(dir: PathBuf, providers: Option<Vec<String>>, cx: &mut App) {
-    write_config(
+pub fn save_folder_preview_providers(
+    dir: PathBuf,
+    providers: Option<Vec<String>>,
+    completion: ViewsWriteCompletion,
+    cx: &mut App,
+) {
+    write_config_with_completion(
         VIEWS,
         move |config, home| crow_core::save_folder_preview_providers(config, home, &dir, providers),
+        Some(completion),
         cx,
     );
 }
 
 /// Set or clear one path rule's preview-provider list, proving the rule identity.
-pub fn save_rule_preview_providers(locator: crow_core::RuleLocator, providers: Option<Vec<String>>, cx: &mut App) {
-    write_config(
+pub fn save_rule_preview_providers(
+    locator: crow_core::RuleLocator,
+    providers: Option<Vec<String>>,
+    completion: ViewsWriteCompletion,
+    cx: &mut App,
+) {
+    write_config_with_completion(
         VIEWS,
         move |config, home| crow_core::save_rule_preview_providers(config, home, &locator, providers),
+        Some(completion),
         cx,
     );
 }
 
 /// Append a preview-only path rule after the existing rules.
-pub fn add_preview_rule(pattern: String, providers: Vec<String>, cx: &mut App) {
-    write_config(VIEWS, move |config, home| crow_core::add_preview_rule(config, home, &pattern, providers), cx);
+pub fn add_preview_rule(
+    index: usize,
+    pattern: String,
+    providers: Vec<String>,
+    completion: ViewsWriteCompletion,
+    cx: &mut App,
+) {
+    write_config_with_completion(
+        VIEWS,
+        move |config, home| crow_core::add_preview_rule(config, home, index, &pattern, providers),
+        Some(completion),
+        cx,
+    );
 }
 
 /// Remember a view change as `dir`'s own setting.
