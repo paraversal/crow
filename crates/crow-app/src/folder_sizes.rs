@@ -636,13 +636,22 @@ fn spawn_saver(cache: Arc<RwLock<Cache>>, path: PathBuf, rx: Receiver<()>) {
 /// that is only written on quit loses every measurement if the app crashes.
 /// Returns false when the sender is gone.
 fn wait_for_save(rx: &Receiver<()>, debounce: Duration, max: Duration) -> bool {
-    let deadline = Instant::now() + max;
+    wait_for_save_with(|timeout| rx.recv_timeout(timeout), Instant::now, debounce, max)
+}
+
+fn wait_for_save_with(
+    mut receive: impl FnMut(Duration) -> Result<(), RecvTimeoutError>,
+    now: impl Fn() -> Instant,
+    debounce: Duration,
+    max: Duration,
+) -> bool {
+    let deadline = now() + max;
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = deadline.saturating_duration_since(now());
         if left.is_zero() {
             return true;
         }
-        match rx.recv_timeout(left.min(debounce)) {
+        match receive(left.min(debounce)) {
             Ok(()) => {}
             Err(RecvTimeoutError::Timeout) => return true,
             Err(RecvTimeoutError::Disconnected) => return false,
@@ -830,32 +839,19 @@ mod tests {
 
     #[test]
     fn a_steady_stream_of_signals_saves_at_the_cap_not_never() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let (tx, rx) = mpsc::channel();
-        let stop = Arc::new(AtomicBool::new(false));
-        let started = Arc::new(std::sync::Barrier::new(2));
-        let sender = {
-            let stop = stop.clone();
-            let started = started.clone();
-            std::thread::spawn(move || {
-                tx.send(()).unwrap();
-                started.wait();
-                while !stop.load(Ordering::Relaxed) {
-                    if tx.send(()).is_err() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-            })
+        let started = Instant::now();
+        let elapsed = std::cell::Cell::new(Duration::ZERO);
+        let cap = Duration::from_millis(100);
+        let signal_interval = Duration::from_millis(7);
+
+        let receive = |timeout: Duration| {
+            assert!(elapsed.get() < cap, "waited for another signal after the cap");
+            elapsed.set(elapsed.get() + timeout.min(signal_interval));
+            if timeout < signal_interval { Err(RecvTimeoutError::Timeout) } else { Ok(()) }
         };
-        started.wait();
-        let at = Instant::now();
-        assert!(wait_for_save(&rx, Duration::from_millis(30), Duration::from_millis(100)));
-        let elapsed = at.elapsed();
-        stop.store(true, Ordering::Relaxed);
-        sender.join().unwrap();
-        assert!(elapsed >= Duration::from_millis(90), "waited for the cap: {elapsed:?}");
-        assert!(elapsed < Duration::from_millis(500), "did not starve: {elapsed:?}");
+
+        assert!(wait_for_save_with(receive, || started + elapsed.get(), Duration::from_millis(30), cap));
+        assert_eq!(elapsed.get(), cap, "saved at the cap while signals were still arriving");
     }
 
     #[test]
