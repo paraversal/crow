@@ -160,6 +160,7 @@ pub struct SearchView {
     run_started: SystemTime,
     /// The saved-queries generation this session last applied.
     saved_generation: u64,
+    saved_removed: bool,
     /// The display title: the saved name, or the folder's name for the overlay.
     title: String,
     /// The predicates resolved from the saved record, evaluated by the engine.
@@ -172,6 +173,8 @@ pub struct SearchView {
     seen: std::collections::HashSet<PathBuf>,
     /// A refresh keeps the old snapshot until a complete generation proves removals.
     refreshing: bool,
+    refresh_names: usize,
+    refresh_other: usize,
     /// The last accepted snapshot is older than the file system or a failed run.
     stale: bool,
     /// The session is the active visible destination (watchers rerun only then).
@@ -491,9 +494,7 @@ impl SearchView {
                     this.show_skipped = false;
                     cx.notify();
                 } else if this.saved.is_some() {
-                    // Q remains the tab's location; only the field's local state changes.
-                    this.show_skipped = false;
-                    cx.notify();
+                    cx.emit(SearchEvent::FocusResults);
                 } else {
                     cx.emit(SearchEvent::Close);
                 }
@@ -526,7 +527,9 @@ impl SearchView {
             if this.exclude_generation != exclude_generation {
                 this.exclude_generation = exclude_generation;
                 this.skip_label = skip_label(&cx.global::<Ui>().exclude);
-                this.refresh_now(cx);
+                if !this.everything {
+                    this.refresh_now(cx);
+                }
             }
             if this.saved.is_some() {
                 let generation = cx.global::<Ui>().saved_queries_generation;
@@ -553,11 +556,14 @@ impl SearchView {
             spec_generation: 0,
             run_started: SystemTime::now(),
             saved_generation,
+            saved_removed: false,
             predicates,
             metadata_only: false,
             metadata_capped: false,
             seen: std::collections::HashSet::new(),
             refreshing: false,
+            refresh_names: 0,
+            refresh_other: 0,
             stale: false,
             active: true,
             dirty: false,
@@ -628,8 +634,8 @@ impl SearchView {
         search
     }
 
-    /// A bounded clock for rolling-date queries, plus a slow backstop for This
-    /// Mac (where no recursive watcher is practical). Inactive tabs skip ticks.
+    /// A bounded clock for rolling-date queries and locations without a
+    /// recursive watcher. Inactive tabs skip ticks.
     fn spawn_clock(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let mut ticks = 0u64;
@@ -641,9 +647,10 @@ impl SearchView {
                         return;
                     }
                     let rolling = this.predicates.modified_within.is_some();
-                    let this_mac_backstop = this.scope == Scope::ThisMac && ticks.is_multiple_of(5);
-                    if rolling || this_mac_backstop {
-                        this.refresh_now(cx);
+                    let backstop = (this.scope != Scope::Folder || this.watch.is_none()) && ticks.is_multiple_of(5);
+                    if rolling || backstop {
+                        this.dirty = true;
+                        this.refresh_dirty(cx);
                     }
                 });
                 if keep.is_err() {
@@ -659,7 +666,12 @@ impl SearchView {
     #[cfg(test)]
     pub fn mark_dirty(&mut self, cx: &mut Context<Self>) {
         self.dirty = true;
-        if self.active {
+        self.refresh_dirty(cx);
+    }
+
+    /// A watcher tick during a scan schedules one follow-up after it settles.
+    fn refresh_dirty(&mut self, cx: &mut Context<Self>) {
+        if self.active && self.dirty && !self.searching && !self.watch_debounce_running {
             self.dirty = false;
             self.refresh_now(cx);
         }
@@ -669,8 +681,7 @@ impl SearchView {
         self.saved.as_ref()?;
         match self.scope {
             Scope::Folder => Some(self.folder.clone()),
-            Scope::Home => Some(self.home.clone()),
-            Scope::ThisMac => None,
+            Scope::Home | Scope::ThisMac => None,
         }
     }
 
@@ -695,19 +706,22 @@ impl SearchView {
         self.watch_root = Some(root.clone());
         let since = crow_macos::current_event_id();
         let (tx, mut rx) = unbounded();
-        let Some(watch) = crow_macos::watch(since, Duration::from_millis(250), move |events| {
+        let Some(root_name) = root.to_str() else { return };
+        let Some(watch) = crow_macos::watch_under(root_name, since, Duration::from_millis(250), move |events| {
             let _ = tx.unbounded_send(events);
         }) else {
             return;
         };
         self.watch = Some(watch);
-        let watched_root = root;
         cx.spawn(async move |this, cx| {
             while let Some(events) = rx.next().await {
-                if !events.iter().any(|event| event.path.starts_with(&watched_root)) {
+                if events.is_empty() {
                     continue;
                 }
                 let _ = this.update(cx, |this, cx| {
+                    if this.watch_root.as_ref() != Some(&root) {
+                        return;
+                    }
                     this.dirty = true;
                     if this.watch_debounce_running {
                         return;
@@ -717,10 +731,7 @@ impl SearchView {
                         cx.background_executor().timer(Duration::from_millis(300)).await;
                         let _ = this.update(cx, |this, cx| {
                             this.watch_debounce_running = false;
-                            if this.active && this.dirty {
-                                this.dirty = false;
-                                this.refresh_now(cx);
-                            }
+                            this.refresh_dirty(cx);
                         });
                     })
                     .detach();
@@ -760,6 +771,8 @@ impl SearchView {
     pub fn cancel(&mut self, _: &mut App) {
         self.control.cancel();
         self.generation += 1;
+        self.searching = false;
+        self.refreshing = false;
     }
 
     pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
@@ -885,7 +898,7 @@ impl SearchView {
         if query.trim().is_empty() && self.predicates.is_empty() {
             return;
         }
-        self.start_search_mode(&query, true, cx);
+        self.start_search_mode(&query, self.saved.is_some(), cx);
     }
 
     /// The saved record changed in `saved-queries.toml` (or this session just
@@ -895,16 +908,26 @@ impl SearchView {
         let Some(id) = self.saved_query_id() else { return };
         let Some(saved) = cx.global::<Ui>().saved_queries.get(&id).cloned() else {
             self.cancel(cx);
+            self.saved_removed = true;
             self.error = Some("This saved search was removed.".into());
+            self.watch = None;
+            self.watch_root = None;
             cx.notify();
             return;
         };
-        if self.saved.as_ref() == Some(&saved) {
+        if self.saved.as_ref() == Some(&saved) && !self.saved_removed {
             return;
         }
+        self.saved_removed = false;
+        self.apply_saved_spec(&saved, cx);
+        self.refresh_now(cx);
+        cx.notify();
+    }
+
+    fn apply_saved_spec(&mut self, saved: &SavedQuery, cx: &mut Context<Self>) {
         self.saved = Some(saved.clone());
         self.title = saved.name.clone();
-        self.predicates = predicates_for_saved(&saved);
+        self.predicates = predicates_for_saved(saved);
         self.scope = match saved.scope {
             SavedScope::Folder => Scope::Folder,
             SavedScope::Home => Scope::Home,
@@ -922,9 +945,12 @@ impl SearchView {
             SavedScope::Folder => saved.root_path(&self.home).ok().flatten().unwrap_or_else(|| self.home.clone()),
             SavedScope::Home | SavedScope::ThisMac => self.home.clone(),
         };
+        self.folder_label = crate::style::display_name(&self.folder);
         self.spec_generation += 1;
-        self.input.update(cx, |input, cx| input.set_text_silent(saved.text.clone(), cx));
-        self.refresh_now(cx);
+        self.input.update(cx, |input, cx| {
+            input.set_text_silent(saved.text.clone(), cx);
+            input.set_placeholder(self.scope.label(&self.folder_label), cx);
+        });
     }
 
     fn exclusions_changed(&mut self, everything: bool) {
@@ -996,30 +1022,38 @@ impl SearchView {
     }
 
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
-        let was = self.active;
+        if self.active == active {
+            return;
+        }
         self.active = active;
-        if active && !was {
-            // A hidden tab deferred watcher and clock work; becoming visible starts
-            // a fresh generation while retaining the last accepted snapshot.
+        if active {
             self.dirty = false;
             self.refresh_now(cx);
+        } else {
+            self.cancel(cx);
+            self.watch = None;
+            self.watch_root = None;
+        }
+    }
+
+    pub fn leave_destination(&mut self, cx: &mut Context<Self>) {
+        self.set_active(false, cx);
+        if let Some(saved) = self.saved.clone() {
+            self.apply_saved_spec(&saved, cx);
         }
     }
 
     fn start_search_mode(&mut self, query: &str, refresh: bool, cx: &mut Context<Self>) {
-        self.control.cancel();
-        self.generation += 1;
+        if !self.active || self.saved_removed {
+            return;
+        }
+        self.cancel(cx);
         let generation = self.generation;
         let control = Control::new();
         self.control = control.clone();
         let query = query.trim().to_owned();
         let metadata_only = query.is_empty() && !self.predicates.is_empty();
-        if query.is_empty() && !metadata_only {
-            self.searching = false;
-            self.refreshing = false;
-            cx.notify();
-            return;
-        }
+        let idle = query.is_empty() && !metadata_only;
         self.metadata_only = metadata_only;
         self.run_id = RunId {
             session: self.session_id,
@@ -1040,8 +1074,10 @@ impl SearchView {
         self.show_skipped = false;
         self.cloud_skipped = 0;
         self.seen.clear();
+        self.refresh_names = 0;
+        self.refresh_other = 0;
         self.stale = false;
-        if refresh {
+        if refresh && !idle {
             self.refreshing = true;
             // Keep the selected real path across a refresh. If it disappears, the
             // completion picks the nearest surviving row.
@@ -1063,6 +1099,11 @@ impl SearchView {
             self.weak_count = 0;
             self.clear_preview(cx);
             self.preview_generation += 1;
+        }
+        if idle {
+            self.publish_count(cx);
+            cx.notify();
+            return;
         }
         self.searching = true;
         self.ensure_watch(cx);
@@ -1181,9 +1222,7 @@ impl SearchView {
             let mut slice = std::time::Instant::now();
             while let Some(update) = rx.next().await {
                 let keep = this.update(cx, |this, cx| {
-                    if this.run_id == run_id {
-                        this.apply(update, cx);
-                    }
+                    this.apply(update, cx);
                 });
                 if keep.is_err() {
                     break;
@@ -1199,7 +1238,7 @@ impl SearchView {
     }
 
     fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
-        if update.run_id() != &self.run_id {
+        if update.run_id() != &self.run_id || update.run_id().run_generation != self.generation {
             return;
         }
         let _span = tracing::debug_span!("search batch").entered();
@@ -1210,6 +1249,7 @@ impl SearchView {
             Update::Hits(_, _) if self.names_capped => {}
             Update::Hits(hits, _) => self.add_hits(hits, cx),
             Update::Done(summary, _) => self.finish(summary, cx),
+            Update::Spotlight(_, _) if self.names_capped => {}
             Update::Spotlight(hits, _) => self.add_spotlight(hits, cx),
             Update::SpotlightDone(result, _) => {
                 if let Err(error) = result {
@@ -1229,6 +1269,7 @@ impl SearchView {
                 );
                 self.searching = false;
                 self.publish_count(cx);
+                self.refresh_dirty(cx);
                 cx.notify();
             }
         }
@@ -1245,7 +1286,14 @@ impl SearchView {
         if let Some(error) = summary.error {
             self.error = Some(error.into());
         }
-        let complete = !summary.cancelled && !summary.capped && self.error.is_none() && !self.names_capped;
+        let unreadable = self.skipped.iter().any(|skip| matches!(skip.reason, SkipReason::Unreadable(_)));
+        self.contents_stopped |= summary.contents_stopped;
+        let complete = !summary.cancelled
+            && !summary.capped
+            && !unreadable
+            && self.error.is_none()
+            && !self.names_capped
+            && !self.contents_stopped;
         self.finish_refresh(complete, cx);
         tracing::debug!(
             target: "crow::search",
@@ -1265,6 +1313,7 @@ impl SearchView {
         );
         self.searching = false;
         self.publish_count(cx);
+        self.refresh_dirty(cx);
         cx.notify();
     }
 
@@ -1273,28 +1322,48 @@ impl SearchView {
     /// marked stale instead of silently losing changes.
     fn finish_refresh(&mut self, complete: bool, cx: &mut Context<Self>) {
         if self.refreshing {
-            if complete {
+            if complete || self.metadata_capped || self.names_capped || self.contents_stopped {
                 self.prune_unseen();
             } else {
                 self.stale = true;
+                let limit = if self.metadata_only { MAX_STRONG_ROWS } else { MAX_STRONG_ROWS + MAX_OTHER_ROWS };
+                self.results.truncate(limit);
             }
+            if self.metadata_only {
+                self.metadata_order_dirty = true;
+            } else if self.scope != Scope::ThisMac {
+                self.results.sort_by_key(|row| {
+                    let rank = if row.strong_name {
+                        0
+                    } else if row.name_match {
+                        2
+                    } else {
+                        1
+                    };
+                    (rank, std::cmp::Reverse(if row.strong_name { row.score } else { 0 }))
+                });
+            }
+            self.reindex_rows();
             self.refreshing = false;
         }
         if self.metadata_only {
             self.sort_metadata_results();
         }
-        if self.selection.cursor().is_some_and(|path| !self.by_path.contains_key(path)) {
-            if self.results.is_empty() {
-                self.selection.clear();
-                self.cursor = 0;
-                self.bump_selection(cx);
-            } else {
-                let index = self.cursor.min(self.results.len() - 1);
-                let path = self.results[index].path.clone();
-                self.selection.select_only(path);
-                self.bump_selection(cx);
-                self.cursor = index;
-            }
+        let selected = self.selection.len();
+        let cursor = self.selection.cursor().cloned();
+        self.selection.retain(|path| self.by_path.contains_key(path));
+        if let Some(&index) = self.selection.cursor().and_then(|path| self.by_path.get(path)) {
+            self.cursor = index;
+        } else if self.results.is_empty() {
+            self.cursor = 0;
+        } else {
+            self.cursor = self.cursor.min(self.results.len() - 1);
+            self.selection.select_only(self.results[self.cursor].path.clone());
+        }
+        if self.selection.len() != selected || self.selection.cursor() != cursor.as_ref() {
+            self.bump_selection(cx);
+            self.clear_preview(cx);
+            self.load_preview(cx);
         }
     }
 
@@ -1305,7 +1374,6 @@ impl SearchView {
         }
         let seen = std::mem::take(&mut self.seen);
         self.results.retain(|row| seen.contains(&row.path));
-        self.reindex_rows();
     }
 
     fn reindex_rows(&mut self) {
@@ -1342,6 +1410,10 @@ impl SearchView {
     }
 
     fn add_hits(&mut self, hits: Vec<Hit>, cx: &mut Context<Self>) {
+        if self.refreshing {
+            self.add_refresh_hits(hits, cx);
+            return;
+        }
         let query = self.query(cx);
         let mut changed = false;
         let mut fresh: Vec<Row> = Vec::new();
@@ -1349,7 +1421,6 @@ impl SearchView {
         let mut fresh_strong = 0usize;
         let mut fresh_others = 0usize;
         for hit in hits {
-            self.seen.insert(hit.path.clone());
             // Compute the rank once: the budgets and the row both need it.
             let strong_name = match &hit.kind {
                 HitKind::Name { ranges } => is_strong_name(&hit.path, ranges, &query),
@@ -1442,6 +1513,60 @@ impl SearchView {
             self.publish_count(cx);
             cx.notify();
         }
+    }
+
+    /// Update retained paths in place while the replacement generation streams.
+    /// Only paths accepted in this generation consume its row budgets.
+    fn add_refresh_hits(&mut self, hits: Vec<Hit>, cx: &mut Context<Self>) {
+        let query = self.query(cx);
+        let root = (self.scope == Scope::Folder).then_some(self.folder.as_path());
+        for hit in hits {
+            if self.seen.contains(&hit.path) {
+                let row = &mut self.results[self.by_path[&hit.path]];
+                if let HitKind::Content { line, text, ranges, .. } = hit.kind
+                    && row.content.as_ref().is_none_or(|(best, _, _)| line < *best)
+                {
+                    row.set_content((line, text, ranges));
+                }
+                continue;
+            }
+            let strong = match &hit.kind {
+                HitKind::Name { ranges } => is_strong_name(&hit.path, ranges, &query),
+                HitKind::Metadata { .. } => true,
+                HitKind::Content { .. } => false,
+            };
+            if strong {
+                if self.refresh_names == MAX_STRONG_ROWS {
+                    self.names_capped = true;
+                    self.control.cancel();
+                    break;
+                }
+                self.refresh_names += 1;
+            } else {
+                if self.refresh_other == MAX_OTHER_ROWS {
+                    self.dropped += 1;
+                    continue;
+                }
+                self.refresh_other += 1;
+                if self.refresh_other == MAX_OTHER_ROWS && !self.contents_stopped {
+                    self.contents_stopped = true;
+                    self.control.stop_contents();
+                    if self.matching == Match::Contents {
+                        self.control.cancel();
+                    }
+                }
+            }
+            self.seen.insert(hit.path.clone());
+            let row = Row::from_hit(hit, &self.home, root, strong);
+            if let Some(&index) = self.by_path.get(&row.path) {
+                self.results[index] = row;
+            } else {
+                self.by_path.insert(row.path.clone(), self.results.len());
+                self.results.push(row);
+            }
+        }
+        self.publish_count(cx);
+        cx.notify();
     }
 
     /// The other budget filled: stop the engine's content reads. In Contents
@@ -1557,10 +1682,12 @@ impl SearchView {
             {
                 continue;
             }
-            if self.by_path.contains_key(&hit.path) {
+            if !self.seen.insert(hit.path.clone()) {
                 continue;
             }
-            if self.results.len() >= MAX_STRONG_ROWS {
+            if self.seen.len() > MAX_STRONG_ROWS {
+                self.seen.remove(&hit.path);
+                self.control.cancel();
                 self.names_capped = true;
                 self.metadata_capped |= self.metadata_only;
                 break;
@@ -1569,10 +1696,13 @@ impl SearchView {
                 self.first_hit_ms = Some(self.started.elapsed().as_millis() as u64);
             }
             self.hit_count += 1;
-            self.seen.insert(hit.path.clone());
             let row = Row::from_spotlight(hit, &query, &self.home);
-            self.by_path.insert(row.path.clone(), self.results.len());
-            self.results.push(row);
+            if let Some(&index) = self.by_path.get(&row.path) {
+                self.results[index] = row;
+            } else {
+                self.by_path.insert(row.path.clone(), self.results.len());
+                self.results.push(row);
+            }
             changed = true;
         }
         self.name_count = self.results.len();
@@ -2218,7 +2348,7 @@ impl SearchView {
         }
         self.everything = on;
         let query = self.query(cx);
-        if !query.trim().is_empty() {
+        if !query.trim().is_empty() || !self.predicates.is_empty() {
             self.start_search(&query, cx);
         }
     }
@@ -2352,6 +2482,22 @@ impl SearchView {
 
     fn delete_permanently(&mut self, _: &DeletePermanently, _: &mut Window, cx: &mut Context<Self>) {
         self.trash_selected(true, cx);
+    }
+
+    pub fn run_command(&mut self, command: crate::palette::CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::palette::CommandId;
+        match command {
+            CommandId::Open => self.open_selected(cx),
+            CommandId::SearchReveal => self.reveal_selected(cx),
+            CommandId::QuickLook => self.quick_look_selected(cx),
+            CommandId::Copy => self.copy_selected(false, cx),
+            CommandId::Cut => self.copy_selected(true, cx),
+            CommandId::CopyPath => self.copy_path(&CopyPath, window, cx),
+            CommandId::MoveToTrash => self.trash_selected(false, cx),
+            CommandId::DeletePermanently => self.trash_selected(true, cx),
+            CommandId::SelectAll => self.select_all(&SelectAll, window, cx),
+            _ => {}
+        }
     }
 
     // ----- rendering -----

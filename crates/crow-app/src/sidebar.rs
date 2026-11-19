@@ -394,7 +394,7 @@ pub struct Sidebar {
     count_worker: Option<Task<()>>,
     count_cancel: Arc<AtomicBool>,
     count_revision: u64,
-    count_generation: u64,
+    count_generation: (u64, u64),
     count_done: HashSet<SavedQueryId>,
 }
 
@@ -436,7 +436,7 @@ impl Sidebar {
             count_worker: None,
             count_cancel: Arc::new(AtomicBool::new(false)),
             count_revision: 0,
-            count_generation: 0,
+            count_generation: (0, 0),
             count_done: HashSet::new(),
         }
     }
@@ -467,7 +467,7 @@ impl Sidebar {
             }
             return;
         }
-        let generation = ui.saved_queries_generation;
+        let generation = (ui.saved_queries_generation, ui.exclude_generation);
         if self.count_generation != generation {
             self.count_generation = generation;
             self.count_done.clear();
@@ -1189,6 +1189,7 @@ impl Sidebar {
     /// stale result; the live row and section revision are checked again on the
     /// main thread.
     fn navigate_row(&mut self, index: usize, nav: SidebarNav, cx: &mut Context<Self>) {
+        self.cursor_key = None;
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
         let generation = self.navigation_generation;
         let Some(row) = self.selectable(cx).into_iter().nth(index) else { return };
@@ -1704,6 +1705,7 @@ impl Render for Sidebar {
                         .hover(move |style| style.text_color(color(fg)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.cursor = i;
+                            this.cursor_key = None;
                             ui::edit_sidebar(
                                 SidebarEdit::SetSectionCollapsed { id: id.clone(), collapsed: !collapsed },
                                 cx,
@@ -1725,7 +1727,8 @@ impl Render for Sidebar {
             let droppable = matches!(&row, Row::Favorite(..) | Row::Recent(_) | Row::Volume(_));
             kinds.push((droppable.then_some(DropTarget::Row(i)), favorite_slot));
             let path = row.path().map(Path::to_path_buf).unwrap_or_default();
-            let has_path = row.path().is_some();
+            let navigable = row.location().is_some();
+            let current_description = if row.path().is_some() { "current folder" } else { "current saved query" };
             let cursor = i == self.cursor;
             let mut look = looks.next().expect("one look per selectable row");
             let pin = row.path().and_then(|path| pin_summaries.get(path)).filter(|_| matches!(row, Row::Favorite(..)));
@@ -1765,7 +1768,7 @@ impl Render for Sidebar {
                 .aria_position_in_set(i + 1)
                 .aria_size_of_set(selectable_count)
                 .aria_selected(cursor)
-                .when(look.current, |row| row.aria_description("current folder"))
+                .when(look.current, |row| row.aria_description(current_description))
                 .when(cursor, |row| row.aria_active_descendant())
                 .px_2()
                 .py(px(3.))
@@ -1787,9 +1790,10 @@ impl Render for Sidebar {
                         return;
                     }
                     this.cursor = i;
-                    if has_path {
+                    if navigable {
                         this.navigate_row(i, SidebarNav::Open, cx);
                     }
+                    cx.notify();
                 }))
                 .when(droppable, |item| {
                     item.on_drop({
@@ -1887,7 +1891,7 @@ impl Render for Sidebar {
                                 .into_any_element()
                         }
                     }
-                    None if has_path => div()
+                    None if navigable => div()
                         .w(px(16.))
                         .children(icon(&path, true, 16).map(|i| img(i).size(px(16.))))
                         .into_any_element(),

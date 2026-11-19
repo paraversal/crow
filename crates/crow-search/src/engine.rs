@@ -108,11 +108,18 @@ impl Batcher {
 pub struct Control {
     cancel: Arc<AtomicBool>,
     stop_contents: Arc<AtomicBool>,
+    parent_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Control {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Let a longer-lived worker stop this search without tying its own lifetime
+    /// to this search's result cap.
+    pub fn with_parent_cancel(cancel: Arc<AtomicBool>) -> Self {
+        Self { parent_cancel: Some(cancel), ..Self::default() }
     }
 
     /// Stop the walk and every read.
@@ -122,6 +129,7 @@ impl Control {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+            || self.parent_cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::Relaxed))
     }
 
     /// The walk's cancel flag, for APIs that take one (Spotlight's `mdfind`).

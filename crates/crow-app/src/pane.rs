@@ -118,6 +118,7 @@ pub enum PaneEvent {
     DestinationChanged,
     /// The saved destination's band asked for its edit form.
     SaveSearch,
+    FocusSidebar,
     /// Vim marks: `m x` (set) or `'x` (jump) for the letter `key`.
     Mark {
         key: char,
@@ -631,6 +632,11 @@ impl Pane {
     /// The real folder this tab shows, if it is a folder destination.
     pub fn folder(&self) -> Option<&Path> {
         self.location().as_folder()
+    }
+
+    /// The real folder the user is in, including the focused column in Columns.
+    pub fn focused_path(&self, cx: &gpui::App) -> Option<PathBuf> {
+        self.folder().map(|_| self.current_dir(cx))
     }
 
     /// The tab's folder: the list view's folder, or the column view's root.
@@ -1166,6 +1172,7 @@ impl Pane {
             let ui = cx.global::<Ui>();
             let Some(spec) = ui.saved_queries.get(&id).cloned() else {
                 // A deleted id stays in history as an unavailable destination.
+                window.focus(&self.focus, cx);
                 return;
             };
             (ui.home.clone(), spec)
@@ -1190,7 +1197,7 @@ impl Pane {
         if let Some(id) = self.active_saved.take()
             && let Some(session) = self.saved_sessions.get(&id)
         {
-            session.view.update(cx, |view, cx| view.set_active(false, cx));
+            session.view.update(cx, |view, cx| view.leave_destination(cx));
         }
     }
 
@@ -1219,7 +1226,9 @@ impl Pane {
         match event {
             SearchEvent::Close => {}
             SearchEvent::FocusResults => {
-                view.update(cx, |search, cx| search.focus_results(window, cx));
+                if !view.update(cx, |search, cx| search.focus_results(window, cx)) {
+                    cx.emit(PaneEvent::FocusSidebar);
+                }
             }
             SearchEvent::Open { path, is_dir } => {
                 if *is_dir {
@@ -1310,7 +1319,7 @@ impl Pane {
     }
 
     pub fn open_parent(&mut self, cx: &mut Context<Self>) {
-        let Some(child) = self.location().as_folder().map(Path::to_path_buf) else { return };
+        let Some(child) = self.focused_path(cx) else { return };
         if let Some(parent) = child.parent().map(Path::to_path_buf) {
             self.navigate(parent, cx);
             self.folders[0].update(cx, |f, _| f.select_after_load(child));
@@ -5519,6 +5528,8 @@ impl Render for Pane {
         if let Some(message) = self.saved_unavailable(cx) {
             let theme = cx.global::<Ui>().theme.clone();
             return div()
+                .id("saved-query-unavailable")
+                .track_focus(&self.focus)
                 .size_full()
                 .flex()
                 .flex_col()

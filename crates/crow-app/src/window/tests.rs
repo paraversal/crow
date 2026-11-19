@@ -13987,3 +13987,50 @@ fn two_tabs_keep_their_own_saved_destination_sessions(cx: &mut TestAppContext) {
         crow_core::Location::SavedQuery(id)
     );
 }
+
+#[gpui::test]
+fn saved_sidebar_rows_open_independently_by_mouse_and_keyboard(cx: &mut TestAppContext) {
+    let root = fixture("saved-query-sidebar-activation");
+    std::fs::write(root.join("doc.pdf"), b"x").expect("write pdf");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &saved_sidebar_toml(&root));
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &saved_queries_toml(&[
+            ("pdfs", "PDFs", &root.display().to_string(), Some("pdf")),
+            ("text", "Text", &root.display().to_string(), Some("text")),
+        ]),
+    );
+    wait_for_selector(&view, &mut cx, "sidebar-3");
+    click_selector(&mut cx, "sidebar-2");
+    wait_for_pane_search(&view, &mut cx);
+    let active_id =
+        |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |pane, _| pane.location().saved_query_id().cloned());
+    assert_eq!(active_id(&cx).unwrap().as_str(), "pdfs");
+    click_selector(&mut cx, "sidebar-3");
+    wait_for_pane_search(&view, &mut cx);
+    assert_eq!(active_id(&cx).unwrap().as_str(), "text");
+
+    cx.simulate_keystrokes("cmd-f tab tab up");
+    assert_eq!(active_id(&cx).unwrap().as_str(), "text", "an arrow alone never opens a query");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    wait_for_pane_search(&view, &mut cx);
+    assert_eq!(active_id(&cx).unwrap().as_str(), "pdfs");
+}
+
+#[gpui::test]
+fn clearing_search_clears_the_result_selection(cx: &mut TestAppContext) {
+    let root = fixture("search-clear-selection");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search");
+    assert!(!search.read_with(&cx, |search, _| search.result_paths()).is_empty());
+    cx.simulate_keystrokes("cmd-f cmd-backspace");
+    assert!(search.read_with(&cx, |search, _| search.result_paths()).is_empty());
+    assert!(search.read_with(&cx, |search, _| search.selected_entry()).is_none());
+}

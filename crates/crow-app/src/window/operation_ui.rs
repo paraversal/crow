@@ -398,7 +398,7 @@ impl CrowWindow {
             }
             Sheet::SavedQuery(form) => (
                 if form.id.is_some() { "Edit Saved Search" } else { "Save Search" }.to_owned(),
-                self.render_saved_query_form(form, cx),
+                self.render_saved_query_form(form, window, cx),
             ),
             Sheet::Onboarding { show, no, .. } => (
                 "Show tips as you go?".to_owned(),
@@ -528,7 +528,7 @@ impl CrowWindow {
             .aria_label(title.clone())
             // keys::context_stack (KeyScope::Sheet) mirrors this.
             .key_context("Sheet")
-            .track_focus(sheet.focus())
+            .when(!matches!(sheet, Sheet::SavedQuery(_)), |panel| panel.track_focus(sheet.focus()))
             .on_action(cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.confirm_sheet(window, cx)))
             .on_action(cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_sheet(window, cx)))
             .when(matches!(sheet, Sheet::Onboarding { .. }), |panel| panel.on_key_down(onboarding_tab))

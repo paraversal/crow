@@ -27,6 +27,7 @@ const FADE_REDUCED_MOTION: Duration = Duration::from_millis(150);
 enum ConfigSnapshot {
     Settings(Settings),
     Views(Views),
+    SavedQueries(SavedQueries),
 }
 
 type ConfigWrite = Shared<Task<Result<ConfigSnapshot, String>>>;
@@ -62,10 +63,6 @@ impl SavedQueryCounts {
             label.push('…');
         }
         Some(label)
-    }
-
-    pub fn remove(&mut self, id: &SavedQueryId) {
-        self.counts.remove(id);
     }
 
     pub fn retain(&mut self, ids: &[SavedQueryId]) {
@@ -118,8 +115,8 @@ pub struct Ui {
     pub themes_dir: PathBuf,
     pub themes_state_dir: PathBuf,
     pub config_dir: PathBuf,
-    config_writes: [Option<ConfigWrite>; VIEWS + 1],
-    config_write_revision: [u64; VIEWS + 1],
+    config_writes: [Option<ConfigWrite>; SAVED_QUERIES + 1],
+    config_write_revision: [u64; SAVED_QUERIES + 1],
     pub state_dir: PathBuf,
     pub home: PathBuf,
     /// The Settings category last chosen, read once at startup. The window maps
@@ -202,7 +199,7 @@ impl Ui {
         ui.load_views();
         ui.load_sidebar();
         ui.load_exclude();
-        ui.load_saved_queries();
+        ui.apply_loaded_saved_queries(load_saved_queries(&ui.config_dir, &ui.home));
         ui.feedback = Feedback::read(&ui.settings);
         ui
     }
@@ -334,8 +331,8 @@ impl Ui {
     }
 
     /// Reload `saved-queries.toml`; a broken file keeps the last good set.
-    pub fn load_saved_queries(&mut self) -> bool {
-        match load_saved_queries(&self.config_dir, &self.home) {
+    fn apply_loaded_saved_queries(&mut self, result: Result<SavedQueries, String>) -> bool {
+        match result {
             Ok(queries) => {
                 let changed = queries != self.saved_queries;
                 let ids: Vec<SavedQueryId> = queries.queries.iter().map(|query| query.id.clone()).collect();
@@ -606,8 +603,7 @@ pub fn reload_config(cx: &mut App) {
     ui.load_views();
     let sidebar = ui.load_sidebar();
     let exclude = ui.load_exclude();
-    let saved_queries = ui.load_saved_queries();
-    if settings || sidebar || exclude || saved_queries {
+    if settings || sidebar || exclude {
         tracing::info!("config reloaded");
     }
     if sidebar {
@@ -623,6 +619,7 @@ pub fn reload_config(cx: &mut App) {
     if icon_changed {
         crate::icon_packs::reload(cx);
     }
+    reload_saved_queries(cx);
     refresh_feedback(cx);
     refresh_app_icon(cx);
     crate::plugins::reload(cx);
@@ -1176,7 +1173,7 @@ fn write_config_with_completion(
 ) {
     let ui = cx.global::<Ui>();
     let (config_dir, home) = (ui.config_dir.clone(), ui.home.clone());
-    if matches!(which, SETTINGS | VIEWS) {
+    if matches!(which, SETTINGS | VIEWS | SAVED_QUERIES) {
         let ui = cx.global_mut::<Ui>();
         let previous = ui.config_writes[which].take();
         ui.config_write_revision[which] += 1;
@@ -1189,10 +1186,11 @@ fn write_config_with_completion(
                     let _ = previous.await;
                 }
                 write(&config_dir, &home)?;
-                if which == SETTINGS {
-                    load_settings(&config_dir).map(ConfigSnapshot::Settings).map_err(|error| error.to_string())
-                } else {
-                    load_views(&config_dir, &home).map(ConfigSnapshot::Views)
+                match which {
+                    SETTINGS => load_settings(&config_dir).map(ConfigSnapshot::Settings).map_err(|e| e.to_string()),
+                    VIEWS => load_views(&config_dir, &home).map(ConfigSnapshot::Views),
+                    SAVED_QUERIES => load_saved_queries(&config_dir, &home).map(ConfigSnapshot::SavedQueries),
+                    _ => unreachable!("queued config file"),
                 }
             })
             .shared();
@@ -1207,7 +1205,8 @@ fn write_config_with_completion(
                     match result {
                         Ok(ConfigSnapshot::Settings(settings)) => ui.apply_loaded_settings(Ok(settings)),
                         Ok(ConfigSnapshot::Views(views)) => ui.apply_loaded_views(Ok(views)),
-                        Err(error) if completion.is_none() => ui.set_error(which, Err(error)),
+                        Ok(ConfigSnapshot::SavedQueries(queries)) => ui.apply_loaded_saved_queries(Ok(queries)),
+                        Err(error) if completion.is_none() || which == SAVED_QUERIES => ui.set_error(which, Err(error)),
                         Err(_) => false,
                     };
                     cx.refresh_windows();
@@ -1234,10 +1233,7 @@ fn write_config_with_completion(
                     EXCLUDE => {
                         ui.load_exclude();
                     }
-                    SAVED_QUERIES => {
-                        ui.load_saved_queries();
-                    }
-                    _ => unreachable!("settings and views writes use the queues"),
+                    _ => unreachable!("queued writes handled above"),
                 },
                 Err(e) => {
                     ui.set_error(which, Err(e));
@@ -1249,59 +1245,45 @@ fn write_config_with_completion(
     .detach();
 }
 
-/// Write one saved search, then reload the file and every window. A failure is
-/// a config error in the status line; the last good set stays.
-pub fn save_saved_query(query: crow_core::SavedQuery, completion: Option<SavedQueryWriteCompletion>, cx: &mut App) {
-    let (config_dir, home) = {
-        let ui = cx.global::<Ui>();
-        (ui.config_dir.clone(), ui.home.clone())
-    };
-    let task = cx.background_spawn(async move { crow_core::save_saved_query(&config_dir, &home, &query) });
+/// Reload the saved-query file without blocking the UI or publishing a read
+/// that started before a newer edit.
+fn reload_saved_queries(cx: &mut App) {
+    let ui = cx.global_mut::<Ui>();
+    if ui.config_writes[SAVED_QUERIES].is_some() {
+        return;
+    }
+    ui.config_write_revision[SAVED_QUERIES] += 1;
+    let revision = ui.config_write_revision[SAVED_QUERIES];
+    let (config, home) = (ui.config_dir.clone(), ui.home.clone());
+    let task = cx.background_spawn(async move { load_saved_queries(&config, &home) });
     cx.spawn(async move |cx| {
         let result = task.await;
         cx.update(|cx| {
             let ui = cx.global_mut::<Ui>();
-            match &result {
-                Ok(()) => {
-                    ui.load_saved_queries();
-                }
-                Err(error) => {
-                    ui.set_error(SAVED_QUERIES, Err(error.clone()));
-                }
+            if ui.config_write_revision[SAVED_QUERIES] == revision && ui.apply_loaded_saved_queries(result) {
+                cx.refresh_windows();
             }
-            if let Some(completion) = completion {
-                completion(result, cx);
-            }
-            cx.refresh_windows();
         });
     })
     .detach();
 }
 
+pub fn save_saved_query(query: crow_core::SavedQuery, completion: Option<SavedQueryWriteCompletion>, cx: &mut App) {
+    write_config_with_completion(
+        SAVED_QUERIES,
+        move |config, home| crow_core::save_saved_query(config, home, &query),
+        completion,
+        cx,
+    );
+}
+
 pub fn remove_saved_query(id: SavedQueryId, completion: Option<SavedQueryWriteCompletion>, cx: &mut App) {
-    let config_dir = cx.global::<Ui>().config_dir.clone();
-    let task_id = id.clone();
-    let task = cx.background_spawn(async move { crow_core::remove_saved_query(&config_dir, &task_id) });
-    cx.spawn(async move |cx| {
-        let result = task.await;
-        cx.update(|cx| {
-            let ui = cx.global_mut::<Ui>();
-            match &result {
-                Ok(()) => {
-                    ui.load_saved_queries();
-                    ui.saved_query_counts.remove(&id);
-                }
-                Err(error) => {
-                    ui.set_error(SAVED_QUERIES, Err(error.clone()));
-                }
-            }
-            if let Some(completion) = completion {
-                completion(result, cx);
-            }
-            cx.refresh_windows();
-        });
-    })
-    .detach();
+    write_config_with_completion(
+        SAVED_QUERIES,
+        move |config, _| crow_core::remove_saved_query(config, &id),
+        completion,
+        cx,
+    );
 }
 
 pub type SavedQueryWriteCompletion = Box<dyn FnOnce(Result<(), String>, &mut App)>;

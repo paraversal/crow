@@ -208,7 +208,7 @@ impl CrowWindow {
         let home = cx.global::<Ui>().home.clone();
         let (cwd, here, subfolders) = {
             let pane = self.pane().read(cx);
-            let cwd = pane.folder().map(Path::to_path_buf).unwrap_or_else(|| home.clone());
+            let cwd = pane.focused_path(cx).unwrap_or_else(|| home.clone());
             let subfolders = if pane.folder().is_some() { pane.subfolders(cx) } else { Vec::new() };
             (cwd.clone(), crate::style::display_name(&cwd), subfolders)
         };
@@ -399,7 +399,7 @@ impl CrowWindow {
         let query: String = query.chars().take(palette::MAX_QUERY_CHARS).collect();
         let query = query.as_str();
         let home = cx.global::<Ui>().home.clone();
-        let cwd = self.pane().read(cx).folder().map(Path::to_path_buf).unwrap_or_else(|| home.clone());
+        let cwd = self.pane().read(cx).focused_path(cx).unwrap_or_else(|| home.clone());
         let show_hidden = self.show_hidden;
         let search_includes_hidden = cx.global::<Ui>().settings.search_includes_hidden;
         let command_listing = (self.palette.as_ref().map(|palette| palette.mode) == Some(PaletteMode::Commands))
@@ -665,7 +665,7 @@ impl CrowWindow {
         let Some(palette) = self.palette.as_ref() else { return };
         let typed = palette.input.read(cx).text().to_owned();
         let home = cx.global::<Ui>().home.clone();
-        let cwd = self.pane().read(cx).folder().map(Path::to_path_buf).unwrap_or_else(|| home.clone());
+        let cwd = self.pane().read(cx).focused_path(cx).unwrap_or_else(|| home.clone());
         let task = cx.background_spawn(async move {
             let cleaned = crow_core::clean_pasted_path(&typed).unwrap_or_else(|| typed.clone());
             let target = crow_core::resolve_typed(&cleaned, &cwd, &home);

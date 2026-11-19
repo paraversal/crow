@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crow_core::{Exclude, SavedMatch, SavedQuery, SavedScope};
+use crow_core::{Exclude, SavedExclusions, SavedMatch, SavedQuery, SavedScope};
 use crow_search::{Control, Predicates, Query, RuleSet};
 
 use crate::search::{predicates_for_saved, spotlight_expression_for};
@@ -26,7 +26,7 @@ pub fn count_saved_query(
     query: &SavedQuery,
     home: &std::path::Path,
     exclude: &Exclude,
-    cancel: &AtomicBool,
+    cancel: &Arc<AtomicBool>,
 ) -> CountResult {
     if cancel.load(Ordering::Relaxed) {
         return CountResult::default();
@@ -55,7 +55,7 @@ fn count_engine(
     predicates: &Predicates,
     home: &std::path::Path,
     exclude: &Exclude,
-    cancel: &AtomicBool,
+    cancel: &Arc<AtomicBool>,
 ) -> CountResult {
     let rules = match RuleSet::from_config(exclude, home) {
         Ok(rules) => Arc::new(rules),
@@ -72,11 +72,11 @@ fn count_engine(
         enter_hidden_folders: query.enter_hidden_folders,
         include_hidden: query.include_hidden,
         rules,
-        everything: false,
+        everything: query.exclusions == SavedExclusions::Everything,
         read_gate: None,
         predicates: predicates.clone(),
     };
-    let control = Control::new();
+    let control = Control::with_parent_cancel(cancel.clone());
     let mut paths: HashSet<PathBuf> = HashSet::new();
     let mut partial = false;
     let summary = crow_search::search(
@@ -84,41 +84,50 @@ fn count_engine(
         &query,
         |batch| {
             for hit in batch {
-                if paths.len() >= COUNT_CAP {
+                if paths.len() == COUNT_CAP && !paths.contains(&hit.path) {
                     partial = true;
                     control.cancel();
                     return;
                 }
                 paths.insert(hit.path);
             }
-            if cancel.load(Ordering::Relaxed) {
-                control.cancel();
-            }
         },
         &control,
     );
-    CountResult { count: paths.len() as u64, partial: partial || summary.capped || summary.cancelled }
+    CountResult {
+        count: paths.len() as u64,
+        partial: partial
+            || summary.capped
+            || summary.cancelled
+            || summary.error.is_some()
+            || summary.skipped.iter().any(|skip| matches!(skip.reason, crow_search::SkipReason::Unreadable(_))),
+    }
 }
 
 fn count_spotlight(query: &SavedQuery, text: &str, predicates: &Predicates, cancel: &AtomicBool) -> CountResult {
     let run_started = std::time::SystemTime::now();
     let mut paths: HashSet<PathBuf> = HashSet::new();
     let mut partial = false;
+    let local_cancel = AtomicBool::new(false);
     let mut sink = |batch: Vec<crow_macos::SpotlightHit>| {
+        if cancel.load(Ordering::Relaxed) {
+            local_cancel.store(true, Ordering::Relaxed);
+            return;
+        }
         for hit in batch {
-            if paths.len() >= COUNT_CAP {
-                partial = true;
-                cancel.store(true, Ordering::Relaxed);
-                return;
-            }
             if predicates.matches(&hit.path, hit.is_dir, hit.modified, run_started) {
+                if paths.len() == COUNT_CAP && !paths.contains(&hit.path) {
+                    partial = true;
+                    local_cancel.store(true, Ordering::Relaxed);
+                    return;
+                }
                 paths.insert(hit.path);
             }
         }
     };
     let result = if text.is_empty() {
         match spotlight_expression_for(predicates) {
-            Some(expression) => crow_macos::spotlight_expression(&expression, &mut sink, cancel),
+            Some(expression) => crow_macos::spotlight_expression(&expression, &mut sink, &local_cancel),
             None => return CountResult::default(),
         }
     } else if query.matching == SavedMatch::Contents {
@@ -126,7 +135,7 @@ fn count_spotlight(query: &SavedQuery, text: &str, predicates: &Predicates, canc
         // config validator, so a hand-edited file simply counts nothing here.
         return CountResult { count: 0, partial: false };
     } else {
-        crow_macos::spotlight_names(text, &mut sink, cancel)
+        crow_macos::spotlight_names(text, &mut sink, &local_cancel)
     };
     CountResult { count: paths.len() as u64, partial: partial || result.is_err() }
 }
@@ -157,7 +166,7 @@ mod tests {
             kind: Some(crow_core::SavedKind::Pdf),
             modified_within_days: None,
         };
-        let count = count_saved_query(&query, &root, &Exclude::default(), &AtomicBool::new(false));
+        let count = count_saved_query(&query, &root, &Exclude::default(), &Arc::new(AtomicBool::new(false)));
         assert_eq!(count, CountResult { count: 2, partial: false });
     }
 }

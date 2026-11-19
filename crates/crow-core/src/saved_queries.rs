@@ -448,32 +448,39 @@ fn query_tables(doc: &mut toml_edit::DocumentMut) -> Result<&mut ArrayOfTables, 
 }
 
 fn write_query(table: &mut Table, query: &SavedQuery) {
-    table["id"] = value(query.id.as_str());
-    table["name"] = value(query.name.as_str());
-    table["scope"] = value(query.scope.key());
+    set_query_value(table, "id", value(query.id.as_str()));
+    set_query_value(table, "name", value(query.name.as_str()));
+    set_query_value(table, "scope", value(query.scope.key()));
     match query.root.as_deref() {
-        Some(root) if !root.trim().is_empty() => table["root"] = value(root),
+        Some(root) if !root.trim().is_empty() => set_query_value(table, "root", value(root)),
         _ => {
             table.remove("root");
         }
     }
-    table["text"] = value(query.text.as_str());
-    table["match"] = value(query.matching.key());
-    table["include_hidden"] = value(query.include_hidden);
-    table["enter_hidden_folders"] = value(query.enter_hidden_folders);
-    table["exclusions"] = value(query.exclusions.key());
+    set_query_value(table, "text", value(query.text.as_str()));
+    set_query_value(table, "match", value(query.matching.key()));
+    set_query_value(table, "include_hidden", value(query.include_hidden));
+    set_query_value(table, "enter_hidden_folders", value(query.enter_hidden_folders));
+    set_query_value(table, "exclusions", value(query.exclusions.key()));
     match &query.kind {
-        Some(kind) => table["kind"] = value(kind.key()),
+        Some(kind) => set_query_value(table, "kind", value(kind.key())),
         None => {
             table.remove("kind");
         }
     }
     match query.modified_within_days {
-        Some(days) => table["modified_within_days"] = value(i64::from(days)),
+        Some(days) => set_query_value(table, "modified_within_days", value(i64::from(days))),
         None => {
             table.remove("modified_within_days");
         }
     }
+}
+
+fn set_query_value(table: &mut Table, key: &str, mut item: Item) {
+    if let (Some(old), Some(new)) = (table.get(key).and_then(Item::as_value), item.as_value_mut()) {
+        *new.decor_mut() = old.decor().clone();
+    }
+    table[key] = item;
 }
 
 #[cfg(test)]

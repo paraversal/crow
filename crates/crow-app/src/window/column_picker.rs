@@ -47,7 +47,7 @@ impl CrowWindow {
         if self.search.is_some() || self.pane().read(cx).mode() != crow_core::ViewMode::List {
             return;
         }
-        let folder = self.pane().read(cx).current_dir(cx);
+        let Some(folder) = self.pane().read(cx).focused_path(cx) else { return };
         let columns = cx.global::<Ui>().views.resolve(&folder).columns.0;
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
