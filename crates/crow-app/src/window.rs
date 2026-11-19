@@ -1322,7 +1322,7 @@ impl CrowWindow {
 
     fn render_bottom_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let state = self.bar_state(window, cx);
-        bottom_bar::render(state, self.pane().clone(), self.path_hovered, cx.entity(), cx)
+        bottom_bar::render(state, self.pane().clone(), self.path_hovered, cx)
     }
 
     // ----- contextual tips -----
@@ -2769,6 +2769,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::go_to_folder))
             .on_action(cx.listener(Self::edit_path))
+            .on_action(cx.listener(Self::path_edit_go))
             .on_action(cx.listener(|this, _: &PathHover, _, cx| {
                 this.path_hovered = true;
                 cx.notify();

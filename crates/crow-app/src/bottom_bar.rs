@@ -726,13 +726,7 @@ fn hover_path(hovered: &bool, window: &mut Window, cx: &mut App) {
 }
 
 /// One bar: path · transient · counts.
-pub fn render(
-    state: BarState,
-    pane: Entity<Pane>,
-    hovered: bool,
-    owner: Entity<crate::window::CrowWindow>,
-    cx: &mut App,
-) -> impl IntoElement + use<> {
+pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) -> impl IntoElement + use<> {
     let ui = cx.global::<Ui>();
     let theme = ui.theme.clone();
     let border = color(theme.role("border"));
@@ -1162,7 +1156,6 @@ pub fn render(
         // field keeps its keys-only affordance.
         let go = explorer.then(|| {
             let go_theme = theme.clone();
-            let go_owner = owner.clone();
             with_tooltip(
                 div()
                     .id("path-go")
@@ -1179,7 +1172,7 @@ pub fn render(
                     .hover(move |style| style.bg(hover))
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
-                        go_owner.update(cx, |this, cx| this.confirm_path_edit(window, cx));
+                        window.dispatch_action(Box::new(crate::actions::PathEditGo), cx);
                     })
                     .child(icons::glyph(Glyph::ChevronRight, 14., "fg", &go_theme)),
                 "Go",

@@ -9082,6 +9082,10 @@ fn explorer_path_bar_selects_the_path_and_the_chevron_goes(cx: &mut TestAppConte
     settle(&view, &mut cx);
     let go = cx.debug_bounds("path-go").expect("the Go chevron is laid out");
     assert_eq!(go.size, gpui::size(px(20.), px(20.)), "it is a 20 px button inside the field");
+    let elements = cx.update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec());
+    let go_button = elements.iter().find(|element| element.selector.as_deref() == Some("path-go")).expect("Go button");
+    assert_eq!(go_button.role, Some(gpui::Role::Button));
+    assert_eq!(go_button.label.as_deref(), Some("Go"), "the chevron has an accessible Go label");
     cx.simulate_click(go.center(), Default::default());
     settle(&view, &mut cx);
     assert_eq!(dir(&view, &cx), root.join("alpha"), "the chevron goes to the typed folder");

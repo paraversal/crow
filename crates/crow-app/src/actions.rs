@@ -144,6 +144,8 @@ actions!(
         GoToFolder,
         /// ⌘L or a double-click on empty path space: edit the path in the bottom bar.
         EditPath,
+        /// Explorer's Go chevron: confirm the path field, exactly as Return does.
+        PathEditGo,
         /// The path bar's hover state, so the pill can fade.
         PathHover,
         PathUnhover,
