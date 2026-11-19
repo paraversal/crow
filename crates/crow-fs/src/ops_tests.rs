@@ -4,8 +4,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::ops::*;
 
@@ -46,6 +47,10 @@ impl Fixture {
     }
 
     fn file(&self, rel: &str, content: &str) -> PathBuf {
+        self.file_bytes(rel, content.as_bytes())
+    }
+
+    fn file_bytes(&self, rel: &str, content: &[u8]) -> PathBuf {
         let p = self.path(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, content).unwrap();
@@ -420,4 +425,822 @@ fn moving_across_volumes_copies_then_removes_the_source() {
     assert_eq!(after_undo.get("src/tree/sub/b.txt").map(String::as_str), Some("b"));
     assert!(!after_undo.keys().any(|k| k.starts_with("dest/tree")), "the moved copy went back");
     assert_eq!(after_undo.into_iter().filter(|(k, _)| k != "dest").collect::<BTreeMap<_, _>>(), before);
+}
+
+// ----- job engine -----
+
+#[derive(Default)]
+struct EventState {
+    events: Vec<JobEvent>,
+    terminal: bool,
+}
+
+struct EventLog {
+    state: Mutex<EventState>,
+    cv: Condvar,
+}
+
+impl EventLog {
+    fn new() -> Self {
+        Self { state: Mutex::new(EventState::default()), cv: Condvar::new() }
+    }
+
+    fn push(&self, event: JobEvent) {
+        let mut state = self.state.lock().unwrap();
+        if matches!(event, JobEvent::Terminal { .. }) {
+            state.terminal = true;
+        }
+        state.events.push(event);
+        self.cv.notify_all();
+    }
+
+    fn wait_for(&self, predicate: impl Fn(&JobEvent) -> bool) -> JobEvent {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if let Some(event) = state.events.iter().find(|event| predicate(event)) {
+                return event.clone();
+            }
+            assert!(!state.terminal, "terminal before the expected event: {:?}", state.events);
+            let now = Instant::now();
+            assert!(now < deadline, "timed out waiting; events: {:?}", state.events);
+            let (next, _) = self.cv.wait_timeout(state, deadline - now).unwrap();
+            state = next;
+        }
+    }
+
+    fn terminal(&self) -> Arc<Outcome> {
+        match self.wait_for(|event| matches!(event, JobEvent::Terminal { .. })) {
+            JobEvent::Terminal { outcome, .. } => outcome,
+            _ => unreachable!(),
+        }
+    }
+
+    fn events(&self) -> Vec<JobEvent> {
+        self.state.lock().unwrap().events.clone()
+    }
+}
+
+struct Harness {
+    job: Job,
+    log: Arc<EventLog>,
+}
+
+impl Harness {
+    fn terminal(&self) -> Arc<Outcome> {
+        self.log.terminal()
+    }
+}
+
+#[derive(Default)]
+struct GateState {
+    reached: bool,
+    released: bool,
+}
+
+struct Gate {
+    state: Mutex<GateState>,
+    cv: Condvar,
+}
+
+impl Gate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self { state: Mutex::new(GateState::default()), cv: Condvar::new() })
+    }
+
+    fn reach(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.reached = true;
+        self.cv.notify_all();
+        while !state.released {
+            state = self.cv.wait(state).unwrap();
+        }
+    }
+
+    fn wait_reached(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut state = self.state.lock().unwrap();
+        while !state.reached {
+            let now = Instant::now();
+            assert!(now < deadline, "the transfer never reached the test gate");
+            let (next, _) = self.cv.wait_timeout(state, deadline - now).unwrap();
+            state = next;
+        }
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.released = true;
+        self.cv.notify_all();
+    }
+}
+
+fn gate_hook(gate: &Arc<Gate>) -> Arc<dyn Fn() + Send + Sync> {
+    let gate = gate.clone();
+    Arc::new(move || gate.reach())
+}
+
+fn job_options(hooks: TestHooks) -> JobOptions {
+    JobOptions { progress_interval: Duration::ZERO, hooks: Some(hooks), ..Default::default() }
+}
+
+impl Fixture {
+    fn start_plan(&self, plan: Plan, options: JobOptions) -> Harness {
+        let log = Arc::new(EventLog::new());
+        let sink = log.clone();
+        let job = Job::spawn(plan, options, Arc::new(FolderTrash(self.path(".trash"))), move |event| sink.push(event))
+            .expect("spawn job");
+        Harness { job, log }
+    }
+
+    fn start(&self, request: Request, options: JobOptions) -> Harness {
+        self.start_plan(plan(request).expect("plan"), options)
+    }
+}
+
+fn stage_container(f: &Fixture, dir: &str) -> PathBuf {
+    std::fs::read_dir(f.path(dir))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(".crow-partial-")))
+        .expect("a staging container")
+}
+
+#[test]
+fn a_paused_copy_resumes_the_staged_transfer() {
+    let f = Fixture::new("job-pause");
+    let data = vec![b'x'; 8 * 1024 * 1024];
+    f.file_bytes("src/big.bin", &data);
+    let dest = f.dir("dest");
+    let gate = Gate::new();
+    let options =
+        job_options(TestHooks { on_first_bytes: Some(gate_hook(&gate)), no_clone: true, ..Default::default() });
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/big.bin")]), into: dest.clone() }).unwrap();
+    let harness = f.start_plan(planned, options);
+
+    gate.wait_reached();
+    assert!(harness.job.pause(), "a transfer accepts a pause");
+    gate.release();
+    let ack = harness.log.wait_for(|event| matches!(event, JobEvent::PauseAcknowledged { .. }));
+    let paused_bytes = match ack {
+        JobEvent::PauseAcknowledged { progress, .. } => progress.done_bytes,
+        _ => unreachable!(),
+    };
+    assert!(paused_bytes > 0 && paused_bytes < data.len() as u64, "paused inside the transfer: {paused_bytes}");
+
+    let stage = stage_container(&f, "dest");
+    let staged = std::fs::metadata(stage.join("item")).unwrap().len();
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(std::fs::metadata(stage.join("item")).unwrap().len(), staged, "bytes stay put while paused");
+    assert!(!dest.join("big.bin").exists(), "the target is untouched while paused");
+
+    harness.job.resume();
+    let outcome = harness.terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert!(!outcome.cancelled);
+    assert_eq!(std::fs::read(dest.join("big.bin")).unwrap(), data);
+    assert_eq!(
+        harness.log.events().iter().filter(|event| matches!(event, JobEvent::Terminal { .. })).count(),
+        1,
+        "exactly one terminal outcome"
+    );
+    assert!(
+        !std::fs::read_dir(&dest)
+            .unwrap()
+            .any(|entry| { entry.unwrap().file_name().to_string_lossy().starts_with(".crow-partial-") }),
+        "the stage is removed after commit"
+    );
+}
+
+#[test]
+fn a_paused_copy_cancels_and_removes_only_its_stage() {
+    let f = Fixture::new("job-pause-cancel");
+    let data = vec![b'y'; 8 * 1024 * 1024];
+    f.file_bytes("src/big.bin", &data);
+    let dest = f.dir("dest");
+    let gate = Gate::new();
+    let options =
+        job_options(TestHooks { on_first_bytes: Some(gate_hook(&gate)), no_clone: true, ..Default::default() });
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/big.bin")]), into: dest.clone() }).unwrap();
+    let harness = f.start_plan(planned, options);
+
+    gate.wait_reached();
+    assert!(harness.job.pause());
+    gate.release();
+    harness.log.wait_for(|event| matches!(event, JobEvent::PauseAcknowledged { .. }));
+    harness.job.cancel();
+    let outcome = harness.terminal();
+    assert!(outcome.cancelled, "{outcome:?}");
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert!(outcome.record.steps.is_empty());
+    assert!(!dest.join("big.bin").exists());
+    assert!(
+        !std::fs::read_dir(&dest)
+            .unwrap()
+            .any(|entry| { entry.unwrap().file_name().to_string_lossy().starts_with(".crow-partial-") }),
+        "the stage is gone"
+    );
+    assert_eq!(std::fs::read(f.path("src/big.bin")).unwrap(), data, "the source is untouched");
+}
+
+#[test]
+fn a_late_conflict_wait_is_keyed_and_current() {
+    let f = Fixture::new("job-late");
+    f.file("src/a.txt", "new");
+    let dest = f.dir("dest");
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    f.file("dest/a.txt", "occupied");
+    let harness = f.start_plan(planned, JobOptions { progress_interval: Duration::ZERO, ..Default::default() });
+
+    let event = harness.log.wait_for(|event| matches!(event, JobEvent::Conflict { .. }));
+    let conflict = match event {
+        JobEvent::Conflict(conflict) => conflict,
+        _ => unreachable!(),
+    };
+    assert_eq!(conflict.reason, ConflictReason::Appeared);
+    assert_eq!(conflict.target, dest.join("a.txt"));
+    assert_eq!(f.snapshot()["dest/a.txt"], "occupied", "the occupant is untouched while waiting");
+    assert!(!harness.job.resolve(ConflictKey { attempt: 999, ..conflict.key }, Resolution::Skip, false));
+    assert!(harness.job.resolve(conflict.key, Resolution::KeepBoth, false));
+
+    let outcome = harness.terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(f.snapshot()["dest/a.txt"], "occupied");
+    assert_eq!(f.snapshot()["dest/a 2.txt"], "new");
+}
+
+#[test]
+fn resolving_for_an_old_attempt_is_a_no_op() {
+    let f = Fixture::new("job-stale");
+    f.file("src/a.txt", "new");
+    f.file("dest/a.txt", "old");
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: f.dir("dest") }).unwrap();
+    let harness = f.start_plan(planned, JobOptions { progress_interval: Duration::ZERO, ..Default::default() });
+    let first = match harness.log.wait_for(|event| matches!(event, JobEvent::Conflict { .. })) {
+        JobEvent::Conflict(conflict) => conflict,
+        _ => unreachable!(),
+    };
+    // Replace the occupant, then answer the old attempt: the engine must notice
+    // the change and ask again rather than trash the new occupant.
+    f.file("dest/a.txt", "different");
+    assert!(harness.job.resolve(first.key, Resolution::Replace, false));
+    let second = match harness
+        .log
+        .wait_for(|event| matches!(event, JobEvent::Conflict(conflict) if conflict.reason == ConflictReason::Changed))
+    {
+        JobEvent::Conflict(conflict) => conflict,
+        _ => unreachable!(),
+    };
+    assert_ne!(second.key, first.key);
+    assert!(!harness.job.resolve(first.key, Resolution::Skip, false), "the old key is stale");
+    assert!(harness.job.resolve(second.key, Resolution::Skip, false));
+    let outcome = harness.terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(f.snapshot()["dest/a.txt"], "different", "the new occupant is preserved");
+    assert_eq!(f.snapshot()["src/a.txt"], "new");
+}
+
+#[test]
+fn an_approved_target_replaced_while_paused_reopens_the_conflict() {
+    let f = Fixture::new("job-approved-changed");
+    f.file("src/a.txt", "new");
+    let dest = f.dir("dest");
+    f.file("dest/a.txt", "old");
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    let gate = Gate::new();
+    let mut options =
+        job_options(TestHooks { after_stage: Some(gate_hook(&gate)), no_clone: true, ..Default::default() });
+    options.resolutions.insert(dest.join("a.txt"), Resolution::Replace);
+    let harness = f.start_plan(planned, options);
+
+    gate.wait_reached();
+    assert!(harness.job.pause());
+    gate.release();
+    harness.log.wait_for(|event| matches!(event, JobEvent::PauseAcknowledged { .. }));
+    std::fs::remove_file(dest.join("a.txt")).unwrap();
+    f.file("dest/a.txt", "new occupant");
+    harness.job.resume();
+
+    let conflict = match harness
+        .log
+        .wait_for(|event| matches!(event, JobEvent::Conflict(conflict) if conflict.reason == ConflictReason::Changed))
+    {
+        JobEvent::Conflict(conflict) => conflict,
+        _ => unreachable!(),
+    };
+    assert!(harness.job.resolve(conflict.key, Resolution::Skip, false));
+    let outcome = harness.terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert!(outcome.record.steps.is_empty(), "the old approval was discarded, not applied");
+    assert_eq!(f.snapshot()["dest/a.txt"], "new occupant");
+    assert!(!f.snapshot().contains_key("dest/a 2.txt"));
+}
+
+#[test]
+fn a_cancel_during_final_placement_keeps_the_committed_step() {
+    let f = Fixture::new("job-cancel-commit");
+    f.file("src/a.txt", "a");
+    let dest = f.dir("dest");
+    let gate = Gate::new();
+    let options = job_options(TestHooks { before_commit: Some(gate_hook(&gate)), ..Default::default() });
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    let harness = f.start_plan(planned, options);
+    gate.wait_reached();
+    harness.job.cancel();
+    gate.release();
+    let outcome = harness.terminal();
+    assert!(outcome.cancelled, "{outcome:?}");
+    assert_eq!(outcome.record.steps.len(), 1, "the placement finished its journal step");
+    assert_eq!(f.snapshot()["dest/a.txt"], "a");
+}
+
+#[test]
+fn keep_both_retries_a_collision() {
+    let f = Fixture::new("job-keep-both-race");
+    f.file("src/a.txt", "new");
+    let dest = f.dir("dest");
+    f.file("dest/a.txt", "old");
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    let gate = Gate::new();
+    let mut options = job_options(TestHooks { before_commit: Some(gate_hook(&gate)), ..Default::default() });
+    options.resolutions.insert(dest.join("a.txt"), Resolution::KeepBoth);
+    let harness = f.start_plan(planned, options);
+    gate.wait_reached();
+    f.file("dest/a 2.txt", "raced");
+    gate.release();
+    let outcome = harness.terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(f.snapshot()["dest/a.txt"], "old");
+    assert_eq!(f.snapshot()["dest/a 2.txt"], "raced");
+    assert_eq!(f.snapshot()["dest/a 3.txt"], "new");
+}
+
+fn xattrs(path: &Path) -> String {
+    String::from_utf8_lossy(&std::process::Command::new("/usr/bin/xattr").arg("-l").arg(path).output().unwrap().stdout)
+        .into_owned()
+}
+
+fn acl(path: &Path) -> String {
+    String::from_utf8_lossy(&std::process::Command::new("/bin/ls").arg("-led").arg(path).output().unwrap().stdout)
+        .into_owned()
+}
+
+#[test]
+fn metadata_xattrs_and_acl_survive_both_copy_paths() {
+    use std::os::unix::fs::MetadataExt;
+    let f = Fixture::new("job-metadata");
+    let tree = f.dir("src/tree");
+    f.file("src/tree/meta.txt", "metadata");
+    std::fs::create_dir_all(tree.join("sub")).unwrap();
+    f.file("src/tree/sub/deep.txt", "deep");
+    std::os::unix::fs::symlink("/nonexistent/crow-target", tree.join("dangling")).unwrap();
+    let meta = tree.join("meta.txt");
+    assert!(
+        std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "user.crow-test", "hello", meta.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read", meta.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let source_meta = std::fs::metadata(&meta).unwrap();
+
+    for (dest, no_clone) in [("dest-clone", false), ("dest-noclone", true)] {
+        let out = f
+            .start(
+                Request::Copy { paths: paths(vec![tree.clone()]), into: f.dir(dest) },
+                job_options(TestHooks { no_clone, ..Default::default() }),
+            )
+            .terminal();
+        assert!(out.error.is_none(), "{dest}: {:?}", out.error);
+        let copy = f.path(&format!("{dest}/tree/meta.txt"));
+        let copied = std::fs::metadata(&copy).unwrap();
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "metadata");
+        assert_eq!(copied.mtime(), source_meta.mtime());
+        assert_eq!(copied.mtime_nsec(), source_meta.mtime_nsec());
+        assert_eq!(copied.mode(), source_meta.mode());
+        assert!(xattrs(&copy).contains("user.crow-test: hello"), "{dest}: {}", xattrs(&copy));
+        assert!(acl(&copy).contains("everyone allow read"), "{dest}: {}", acl(&copy));
+        assert!(std::fs::symlink_metadata(f.path(&format!("{dest}/tree/dangling"))).unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_link(f.path(&format!("{dest}/tree/dangling"))).unwrap(),
+            Path::new("/nonexistent/crow-target")
+        );
+    }
+}
+
+#[test]
+fn a_cross_volume_move_keeps_the_destination_when_the_source_cannot_be_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("job-source-kept");
+    f.file("src/tree/a.txt", "a");
+    let dest = f.dir("dest");
+    let gate = Gate::new();
+    let options = job_options(TestHooks {
+        force_cross_device: true,
+        before_source_retire: Some(gate_hook(&gate)),
+        no_clone: true,
+        ..Default::default()
+    });
+    let planned = plan(Request::Move { paths: paths(vec![f.path("src/tree")]), into: dest.clone() }).unwrap();
+    let harness = f.start_plan(planned, options);
+    gate.wait_reached();
+    std::fs::set_permissions(f.path("src"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    gate.release();
+    let outcome = harness.terminal();
+    std::fs::set_permissions(f.path("src"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(outcome.error, Some(OpError::SourceKept { .. })), "{:?}", outcome.error);
+    assert_eq!(f.snapshot()["dest/tree/a.txt"], "a", "the complete destination stays");
+    assert!(f.path("src/tree").exists(), "the source was not fully retired");
+    assert!(matches!(outcome.record.steps.as_slice(), [Step::Created(target)] if *target == dest.join("tree")));
+    undo(&outcome.record, &f.trash).unwrap();
+    assert!(!f.path("dest/tree").exists(), "the partial record is undoable");
+}
+
+#[test]
+fn a_failed_placement_restores_the_old_target() {
+    let f = Fixture::new("job-restore");
+    f.file("src/a.txt", "new");
+    let dest = f.dir("dest");
+    f.file("dest/a.txt", "old");
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    let gate = Gate::new();
+    let mut options =
+        job_options(TestHooks { after_replace_trash: Some(gate_hook(&gate)), no_clone: true, ..Default::default() });
+    options.resolutions.insert(dest.join("a.txt"), Resolution::Replace);
+    let harness = f.start_plan(planned, options);
+    gate.wait_reached();
+    let stage = stage_container(&f, "dest");
+    std::fs::remove_file(stage.join("item")).unwrap();
+    gate.release();
+    let outcome = harness.terminal();
+    assert!(outcome.error.is_some(), "the placement failed");
+    assert!(outcome.record.steps.is_empty(), "a fully restored replacement has no step");
+    assert_eq!(f.snapshot()["dest/a.txt"], "old", "the old target is back");
+    assert!(
+        !std::fs::read_dir(&dest)
+            .unwrap()
+            .any(|entry| { entry.unwrap().file_name().to_string_lossy().starts_with(".crow-partial-") })
+    );
+}
+
+#[test]
+fn a_blocked_restore_keeps_the_recoverable_trash_step() {
+    let f = Fixture::new("job-restore-blocked");
+    f.file("src/a.txt", "new");
+    let dest = f.dir("dest");
+    f.file("dest/a.txt", "old");
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    let gate = Gate::new();
+    let mut options =
+        job_options(TestHooks { after_replace_trash: Some(gate_hook(&gate)), no_clone: true, ..Default::default() });
+    options.resolutions.insert(dest.join("a.txt"), Resolution::Replace);
+    let harness = f.start_plan(planned, options);
+    gate.wait_reached();
+    f.file("dest/a.txt", "new occupant");
+    gate.release();
+    let outcome = harness.terminal();
+    let (trashed, original) = match &outcome.error {
+        Some(OpError::RestoreBlocked { target, trashed, .. }) => (trashed.clone(), target.clone()),
+        other => panic!("expected a blocked restore, got {other:?}"),
+    };
+    assert_eq!(original, dest.join("a.txt"));
+    assert_eq!(f.snapshot()["dest/a.txt"], "new occupant", "the new occupant is preserved");
+    assert_eq!(std::fs::read_to_string(&trashed).unwrap(), "old", "the old target is recoverable");
+    assert!(
+        matches!(outcome.record.steps.as_slice(), [Step::Trashed { original: o, trashed: t }] if *o == original && *t == trashed)
+    );
+}
+
+#[test]
+fn apply_to_all_answers_later_conflicts() {
+    let f = Fixture::new("job-apply-all");
+    f.file("src/a.txt", "A");
+    f.file("src/b.txt", "B");
+    let dest = f.dir("dest");
+    f.file("dest/a.txt", "old A");
+    f.file("dest/b.txt", "old B");
+    let planned =
+        plan(Request::Copy { paths: paths(vec![f.path("src/a.txt"), f.path("src/b.txt")]), into: dest.clone() })
+            .unwrap();
+    let harness = f.start_plan(planned, JobOptions { progress_interval: Duration::ZERO, ..Default::default() });
+    let first = match harness.log.wait_for(|event| matches!(event, JobEvent::Conflict { .. })) {
+        JobEvent::Conflict(conflict) => conflict,
+        _ => unreachable!(),
+    };
+    assert!(harness.job.resolve(first.key, Resolution::Replace, true));
+    let auto =
+        match harness.log.wait_for(|event| matches!(event, JobEvent::Conflict(conflict) if conflict.auto.is_some())) {
+            JobEvent::Conflict(conflict) => conflict,
+            _ => unreachable!(),
+        };
+    assert_eq!(auto.auto, Some(Resolution::Replace));
+    assert_eq!(auto.policy, Some(Resolution::Replace));
+    let outcome = harness.terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(f.snapshot()["dest/a.txt"], "A");
+    assert_eq!(f.snapshot()["dest/b.txt"], "B");
+    assert_eq!(outcome.record.steps.len(), 4, "trash + create for each item");
+    undo(&outcome.record, &f.trash).unwrap();
+    assert_eq!(f.snapshot()["dest/a.txt"], "old A");
+    assert_eq!(f.snapshot()["dest/b.txt"], "old B");
+}
+
+#[test]
+fn cancelling_after_one_commit_leaves_an_undoable_prefix() {
+    let f = Fixture::new("job-prefix");
+    f.file("src/a.txt", "A");
+    f.file("src/b.txt", "B");
+    let dest = f.dir("dest");
+    let gate = Gate::new();
+    let options = job_options(TestHooks { after_commit: Some(gate_hook(&gate)), no_clone: true, ..Default::default() });
+    let planned =
+        plan(Request::Copy { paths: paths(vec![f.path("src/a.txt"), f.path("src/b.txt")]), into: dest.clone() })
+            .unwrap();
+    let harness = f.start_plan(planned, options);
+    gate.wait_reached();
+    harness.job.cancel();
+    gate.release();
+    let outcome = harness.terminal();
+    assert!(outcome.cancelled);
+    assert_eq!(outcome.record.steps.len(), 1);
+    assert_eq!(f.snapshot().get("dest/a.txt").map(String::as_str), Some("A"));
+    assert!(!f.snapshot().contains_key("dest/b.txt"));
+    undo(&outcome.record, &f.trash).unwrap();
+    assert!(!f.path("dest/a.txt").exists(), "the committed prefix is undoable");
+}
+
+#[test]
+fn a_source_change_while_paused_fails_before_the_target_is_touched() {
+    let f = Fixture::new("job-source-changed");
+    f.file("src/a.txt", "one");
+    let dest = f.dir("dest");
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    let gate = Gate::new();
+    let options = job_options(TestHooks { after_stage: Some(gate_hook(&gate)), no_clone: true, ..Default::default() });
+    let harness = f.start_plan(planned, options);
+    gate.wait_reached();
+    assert!(harness.job.pause());
+    gate.release();
+    harness.log.wait_for(|event| matches!(event, JobEvent::PauseAcknowledged { .. }));
+    f.file("src/a.txt", "one and a half");
+    harness.job.resume();
+    let outcome = harness.terminal();
+    assert!(matches!(outcome.error, Some(OpError::SourceChanged(_))), "{:?}", outcome.error);
+    assert!(!f.snapshot().contains_key("dest/a.txt"));
+    assert!(outcome.record.steps.is_empty());
+    assert!(
+        !std::fs::read_dir(&dest)
+            .unwrap()
+            .any(|entry| { entry.unwrap().file_name().to_string_lossy().starts_with(".crow-partial-") })
+    );
+}
+
+#[test]
+fn a_case_folded_target_is_a_conflict() {
+    let f = Fixture::new("job-case-fold");
+    f.file("src/a.txt", "new");
+    let dest = f.dir("dest");
+    f.file("dest/A.txt", "old");
+    if !dest.join("a.txt").exists() {
+        eprintln!("the test volume is case-sensitive; skipping the case-folded alias");
+        return;
+    }
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    assert!(planned.items[0].conflict, "the case-folded name is taken");
+    let mut options = JobOptions { progress_interval: Duration::ZERO, ..Default::default() };
+    options.resolutions.insert(dest.join("a.txt"), Resolution::KeepBoth);
+    let outcome = f.start_plan(planned, options).terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(f.snapshot()["dest/A.txt"], "old");
+    assert_eq!(f.snapshot()["dest/a 2.txt"], "new");
+}
+
+#[test]
+fn a_dangling_symlink_is_copied_as_a_link() {
+    let f = Fixture::new("job-dangling");
+    let src = f.dir("src");
+    std::os::unix::fs::symlink("/nonexistent/crow-target", src.join("link")).unwrap();
+    let out = f
+        .start(
+            Request::Copy { paths: paths(vec![src]), into: f.dir("dest") },
+            job_options(TestHooks { no_clone: true, ..Default::default() }),
+        )
+        .terminal();
+    assert!(out.error.is_none(), "{:?}", out.error);
+    let copied = f.path("dest/src/link");
+    assert!(std::fs::symlink_metadata(&copied).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read_link(copied).unwrap(), Path::new("/nonexistent/crow-target"));
+}
+
+#[test]
+fn duplicate_basenames_are_planned_as_conflicts_and_duplicates_get_unique_names() {
+    let f = Fixture::new("job-duplicates");
+    f.file("one/a.txt", "1");
+    f.file("two/a.txt", "2");
+    let dest = f.dir("dest");
+    let planned =
+        plan(Request::Copy { paths: paths(vec![f.path("one/a.txt"), f.path("two/a.txt")]), into: dest.clone() })
+            .unwrap();
+    assert_eq!(planned.items[0].target, dest.join("a.txt"));
+    assert_eq!(planned.items[1].target, dest.join("a.txt"));
+    assert!(!planned.items[0].conflict);
+    assert!(planned.items[1].conflict);
+    let mut options = JobOptions { progress_interval: Duration::ZERO, ..Default::default() };
+    options.resolutions.insert(dest.join("a.txt"), Resolution::KeepBoth);
+    let outcome = f.start_plan(planned, options).terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(f.snapshot()["dest/a.txt"], "1");
+    assert_eq!(f.snapshot()["dest/a 2.txt"], "2");
+
+    let planned = plan(Request::Duplicate { paths: paths(vec![f.path("one/a.txt"), f.path("two/a.txt")]) }).unwrap();
+    assert_eq!(planned.items[0].target, f.path("one/a copy.txt"));
+    assert_eq!(planned.items[1].target, f.path("two/a copy.txt"));
+    let outcome =
+        f.start_plan(planned, JobOptions { progress_interval: Duration::ZERO, ..Default::default() }).terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert!(f.path("one/a copy.txt").exists());
+    assert!(f.path("two/a copy.txt").exists());
+}
+
+#[test]
+fn nesting_through_a_symlink_is_refused() {
+    let f = Fixture::new("job-nested-link");
+    f.dir("root/sub");
+    std::os::unix::fs::symlink(f.path("root"), f.path("root/link")).unwrap();
+    assert!(matches!(
+        plan(Request::Copy { paths: paths(vec![f.path("root")]), into: f.path("root/link/sub") }),
+        Err(OpError::IntoItself(_))
+    ));
+    assert!(matches!(
+        plan(Request::Copy { paths: paths(vec![f.path("root")]), into: f.path("root/sub/nope") }),
+        Err(OpError::Io(..))
+    ));
+}
+
+#[test]
+fn a_cancelled_plan_stops_measuring() {
+    let f = Fixture::new("job-plan-cancel");
+    for i in 0..100 {
+        f.file(&format!("src/{i}.txt"), "x");
+    }
+    let cancel = AtomicBool::new(true);
+    assert!(matches!(
+        plan_cancellable(Request::Copy { paths: paths(vec![f.path("src")]), into: f.dir("dest") }, &cancel),
+        Err(OpError::Cancelled)
+    ));
+}
+
+#[test]
+fn pause_is_unavailable_while_waiting_on_a_conflict() {
+    let f = Fixture::new("job-pause-conflict");
+    f.file("src/a.txt", "new");
+    f.file("dest/a.txt", "old");
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: f.path("dest") }).unwrap();
+    let harness = f.start_plan(planned, JobOptions { progress_interval: Duration::ZERO, ..Default::default() });
+    let conflict = match harness.log.wait_for(|event| matches!(event, JobEvent::Conflict { .. })) {
+        JobEvent::Conflict(conflict) => conflict,
+        _ => unreachable!(),
+    };
+    assert!(!harness.job.pause(), "Pause is unavailable while a conflict waits");
+    assert!(harness.job.resolve(conflict.key, Resolution::Skip, false));
+    harness.terminal();
+}
+
+#[test]
+fn a_clone_acknowledges_pause_after_the_clone() {
+    let f = Fixture::new("job-clone-pause");
+    f.file("src/a.txt", "clone me");
+    let dest = f.dir("dest");
+    let gate = Gate::new();
+    let options = job_options(TestHooks { after_stage: Some(gate_hook(&gate)), ..Default::default() });
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    let harness = f.start_plan(planned, options);
+    gate.wait_reached();
+    assert!(harness.job.pause());
+    gate.release();
+    let ack = harness.log.wait_for(|event| matches!(event, JobEvent::PauseAcknowledged { .. }));
+    let done = match ack {
+        JobEvent::PauseAcknowledged { progress, .. } => progress.done_bytes,
+        _ => unreachable!(),
+    };
+    assert_eq!(done, 8, "the clone is complete before the pause is acknowledged");
+    assert!(!dest.join("a.txt").exists(), "the clone is still staged");
+    harness.job.resume();
+    let outcome = harness.terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"clone me");
+}
+
+#[test]
+fn cancelling_while_a_conflict_waits_leaves_the_target_alone() {
+    let f = Fixture::new("job-cancel-conflict");
+    f.file("src/a.txt", "new");
+    f.file("dest/a.txt", "old");
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: f.path("dest") }).unwrap();
+    let harness = f.start_plan(planned, JobOptions { progress_interval: Duration::ZERO, ..Default::default() });
+    harness.log.wait_for(|event| matches!(event, JobEvent::Conflict { .. }));
+    harness.job.cancel();
+    let outcome = harness.terminal();
+    assert!(outcome.cancelled);
+    assert!(outcome.record.steps.is_empty());
+    assert_eq!(f.snapshot()["dest/a.txt"], "old");
+    assert_eq!(f.snapshot()["src/a.txt"], "new");
+}
+
+#[test]
+fn special_files_are_refused_in_planning() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let f = Fixture::new("job-special");
+    let fifo = f.path("src/fifo");
+    std::fs::create_dir_all(fifo.parent().unwrap()).unwrap();
+    let path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path and a normal mode.
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    assert!(matches!(
+        plan(Request::Copy { paths: paths(vec![fifo]), into: f.dir("dest") }),
+        Err(OpError::Unsupported(..))
+    ));
+}
+
+#[test]
+fn copying_into_a_file_is_refused() {
+    let f = Fixture::new("job-into-file");
+    f.file("src/a.txt", "a");
+    f.file("not-a-folder", "nope");
+    assert!(matches!(
+        plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: f.path("not-a-folder") }),
+        Err(OpError::NotAFolder(_))
+    ));
+}
+
+#[test]
+fn replace_stages_before_trashing_the_old_target() {
+    struct ProbeTrash {
+        inner: FolderTrash,
+        parent: PathBuf,
+    }
+
+    impl Trash for ProbeTrash {
+        fn trash(&self, path: &Path) -> io::Result<PathBuf> {
+            let staged = std::fs::read_dir(&self.parent)
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with(".crow-partial-"));
+            assert!(staged, "Replace must stage the new bytes before touching the old target");
+            self.inner.trash(path)
+        }
+    }
+
+    let f = Fixture::new("stage-before-trash");
+    f.file("src/a.txt", "new");
+    let dest = f.dir("dest");
+    f.file("dest/a.txt", "old");
+    let request = Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() };
+    let planned = plan(request).unwrap();
+    let trash = ProbeTrash { inner: FolderTrash(f.path(".trash")), parent: dest.clone() };
+    let resolutions = HashMap::from([(dest.join("a.txt"), Resolution::Replace)]);
+    let outcome = execute(&planned, &resolutions, &trash, &AtomicBool::new(false), &mut |_| {});
+    ok(&outcome);
+    assert_eq!(f.snapshot()["dest/a.txt"], "new");
+    assert_eq!(std::fs::read_dir(f.path(".trash")).unwrap().count(), 1);
+}
+
+#[test]
+fn a_target_swapped_between_verify_and_trash_is_restored() {
+    let f = Fixture::new("job-swap-before-trash");
+    f.file("src/a.txt", "new");
+    let dest = f.dir("dest");
+    f.file("dest/a.txt", "approved old");
+    let planned = plan(Request::Copy { paths: paths(vec![f.path("src/a.txt")]), into: dest.clone() }).unwrap();
+    let gate = Gate::new();
+    let mut options =
+        job_options(TestHooks { before_replace_trash: Some(gate_hook(&gate)), no_clone: true, ..Default::default() });
+    options.resolutions.insert(dest.join("a.txt"), Resolution::Replace);
+    let harness = f.start_plan(planned, options);
+    gate.wait_reached();
+    // This is the Q1 boundary: the approval covered the old inode, but the
+    // Trash call will move whatever is at the path now.
+    std::fs::remove_file(dest.join("a.txt")).unwrap();
+    f.file("dest/a.txt", "new occupant");
+    gate.release();
+    let conflict = match harness
+        .log
+        .wait_for(|event| matches!(event, JobEvent::Conflict(conflict) if conflict.reason == ConflictReason::Changed))
+    {
+        JobEvent::Conflict(conflict) => conflict,
+        _ => unreachable!(),
+    };
+    assert!(harness.job.resolve(conflict.key, Resolution::Skip, false));
+    let outcome = harness.terminal();
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert!(outcome.record.steps.is_empty(), "the swapped occupant was restored, not recorded");
+    assert_eq!(f.snapshot()["dest/a.txt"], "new occupant");
 }

@@ -2,14 +2,16 @@
 //!
 //! Three stages, so nothing touches the disk before the user has seen what will happen:
 //! 1. [`plan`] turns a request into items and marks conflicts. Read-only.
-//! 2. [`execute`] carries out the plan with the user's conflict choices, reporting
-//!    progress and stopping cleanly when cancelled.
+//! 2. [`Job`] carries out the plan with ordered events, pause/cancel gates and
+//!    conflict decisions; [`execute`] is the synchronous compatibility adapter.
 //! 3. [`undo`] reverses a finished (or partly finished) operation from its [`Record`].
 //!
 //! Safety rules, enforced here rather than trusted to callers:
-//! - Nothing is ever overwritten in place. Copies are written under a temporary
-//!   name and renamed into place with `RENAME_EXCL`, which fails rather than replace.
-//! - "Replace" first moves the existing item to the Trash, so it can be undone.
+//! - Nothing is ever overwritten in place. Copies are written into an exclusively
+//!   created private container beside the target and renamed into place with
+//!   `RENAME_EXCL`, which fails rather than replace.
+//! - "Replace" stages the new bytes before moving the approved target to the Trash,
+//!   so a failed copy cannot destroy the old item.
 //! - A cancelled or failed copy leaves no partial item behind; the source is untouched.
 //! - A move across volumes deletes the source only after the copy is complete.
 //! - Undo refuses to overwrite anything that appeared in the meantime.
@@ -19,7 +21,16 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+mod job;
+
+#[cfg(test)]
+pub(crate) use job::FORCE_CROSS_DEVICE;
+#[cfg(test)]
+pub(crate) use job::TestHooks;
+pub use job::execute;
+pub use job::{Conflict, ConflictKey, ConflictReason, Job, JobEvent, JobId, JobOptions};
 
 /// Moves items to the Trash. The app uses macOS's Trash (so Finder can Put Back);
 /// tests use a plain folder.
@@ -71,6 +82,71 @@ pub enum Resolution {
     Skip,
 }
 
+/// What kind of object a path names, without following a symlink.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    File,
+    Dir,
+    Symlink,
+    Other,
+}
+
+/// A no-follow identity snapshot, for detecting that a source or target changed.
+/// `dev`/`ino`/`kind` are the object; the rest are change indicators.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub dev: u64,
+    pub ino: u64,
+    pub kind: EntryKind,
+    pub size: u64,
+    pub mtime: i64,
+    pub mtime_nsec: i64,
+    pub ctime: i64,
+    pub ctime_nsec: i64,
+}
+
+impl FileIdentity {
+    /// The same filesystem object. A rename (into the Trash, for example) changes
+    /// ctime, so only these fields survive the move.
+    pub fn same_object(&self, other: &Self) -> bool {
+        self.dev == other.dev && self.ino == other.ino && self.kind == other.kind
+    }
+
+    /// The same object after a rename: inode, type and the content indicators
+    /// that a rename preserves. This also catches an inode reused by a new file.
+    pub fn same_after_rename(&self, other: &Self) -> bool {
+        self.same_object(other)
+            && self.size == other.size
+            && self.mtime == other.mtime
+            && self.mtime_nsec == other.mtime_nsec
+    }
+}
+
+fn identity(path: &Path) -> io::Result<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = path.symlink_metadata()?;
+    let file_type = meta.file_type();
+    let kind = if file_type.is_symlink() {
+        EntryKind::Symlink
+    } else if file_type.is_dir() {
+        EntryKind::Dir
+    } else if file_type.is_file() {
+        EntryKind::File
+    } else {
+        EntryKind::Other
+    };
+    Ok(FileIdentity {
+        dev: meta.dev(),
+        ino: meta.ino(),
+        kind,
+        size: meta.len(),
+        mtime: meta.mtime(),
+        mtime_nsec: meta.mtime_nsec(),
+        ctime: meta.ctime(),
+        ctime_nsec: meta.ctime_nsec(),
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedItem {
     pub source: Option<PathBuf>,
@@ -79,6 +155,11 @@ pub struct PlannedItem {
     pub conflict: bool,
     /// Bytes to copy or move, for progress.
     pub bytes: u64,
+    /// The source at planning time, for a recheck before commit.
+    pub source_identity: Option<FileIdentity>,
+    /// The conflicting target at planning time. A different object at execution
+    /// means the user's plan-time choice no longer applies.
+    pub target_identity: Option<FileIdentity>,
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +227,7 @@ impl Record {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Outcome {
     /// Everything that was done, even if the operation stopped early, so it can be undone.
     pub record: Record,
@@ -153,7 +235,7 @@ pub struct Outcome {
     pub cancelled: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum OpError {
     InvalidName(String),
     NameTaken(PathBuf),
@@ -162,7 +244,25 @@ pub enum OpError {
     /// Undo found something in the way and stopped rather than overwrite it.
     WouldOverwrite(PathBuf),
     NotUndoable,
-    Io(PathBuf, io::Error),
+    NotAFolder(PathBuf),
+    Cancelled,
+    /// The source changed while it was being read; the target is untouched.
+    SourceChanged(PathBuf),
+    /// A replacement's old target is in the Trash and could not be put back.
+    RestoreBlocked {
+        target: PathBuf,
+        trashed: PathBuf,
+        error: Arc<io::Error>,
+    },
+    /// A cross-volume move put the destination in place but could not remove the source.
+    SourceKept {
+        source: PathBuf,
+        target: PathBuf,
+        error: Arc<io::Error>,
+    },
+    /// This filesystem has no verified primitive for the operation.
+    Unsupported(PathBuf, &'static str),
+    Io(PathBuf, Arc<io::Error>),
 }
 
 impl fmt::Display for OpError {
@@ -175,6 +275,21 @@ impl fmt::Display for OpError {
             OpError::NotFound(p) => write!(f, "“{}” no longer exists", name(p)),
             OpError::WouldOverwrite(p) => write!(f, "Undo stopped: “{}” is in the way", name(p)),
             OpError::NotUndoable => write!(f, "This can't be undone"),
+            OpError::NotAFolder(p) => write!(f, "“{}” is not a folder", name(p)),
+            OpError::Cancelled => write!(f, "Cancelled"),
+            OpError::SourceChanged(p) => write!(f, "“{}” changed while it was being copied", name(p)),
+            OpError::RestoreBlocked { target, trashed, error } => {
+                write!(f, "“{}” couldn't be put back from the Trash at “{}”: {error}", name(target), trashed.display())
+            }
+            OpError::SourceKept { source, target, error } => {
+                write!(
+                    f,
+                    "“{}” was copied to “{}”, but the original couldn't be removed: {error}",
+                    name(source),
+                    name(target)
+                )
+            }
+            OpError::Unsupported(p, what) => write!(f, "“{}”: {what} isn't supported on this volume", name(p)),
             OpError::Io(p, e) => write!(f, "“{}”: {e}", name(p)),
         }
     }
@@ -183,7 +298,7 @@ impl fmt::Display for OpError {
 impl std::error::Error for OpError {}
 
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> OpError + '_ {
-    move |e| OpError::Io(path.to_path_buf(), e)
+    move |e| OpError::Io(path.to_path_buf(), Arc::new(e))
 }
 
 // ----- names -----
@@ -259,28 +374,98 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Bytes under `path` (for progress), not following links.
-fn tree_size(path: &Path) -> u64 {
-    let Ok(meta) = path.symlink_metadata() else { return 0 };
-    if !meta.is_dir() {
-        return meta.len();
+/// Finder's duplicate name, also avoiding names this plan already claimed.
+fn copy_name_avoiding(dir: &Path, name: &str, is_dir: bool, reserved: &HashMap<PathBuf, ()>) -> PathBuf {
+    let (stem, ext) = split_name(name, is_dir);
+    (1..)
+        .map(|n| if n == 1 { format!("{stem} copy{ext}") } else { format!("{stem} copy {n}{ext}") })
+        .map(|n| dir.join(n))
+        .find(|p| !exists(p) && !reserved.contains_key(p))
+        .expect("an unbounded sequence has a free name")
+}
+
+/// Bytes under `path` (for progress), not following links. Cancellation is
+/// checked inside the traversal, so planning a huge folder is interruptible.
+fn tree_size(path: &Path, cancel: &AtomicBool) -> Result<u64, OpError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(OpError::Cancelled);
     }
-    std::fs::read_dir(path).map_or(0, |d| d.filter_map(Result::ok).map(|e| tree_size(&e.path())).sum())
+    let meta = path.symlink_metadata().map_err(io_err(path))?;
+    if !meta.is_dir() {
+        let file_type = meta.file_type();
+        if !file_type.is_file() && !file_type.is_symlink() {
+            return Err(OpError::Unsupported(path.to_path_buf(), "copying this file type"));
+        }
+        return Ok(meta.len());
+    }
+    let mut total = 0;
+    for entry in std::fs::read_dir(path).map_err(io_err(path))? {
+        let entry = entry.map_err(io_err(path))?;
+        let child = entry.path();
+        total += tree_size(&child, cancel)?;
+    }
+    Ok(total)
+}
+
+fn target_identity(path: &Path) -> Result<Option<FileIdentity>, OpError> {
+    match identity(path) {
+        Ok(id) => Ok(Some(id)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io_err(path)(e)),
+    }
+}
+
+/// Whether `into` is the source or lies inside it. The canonical check closes
+/// the symlink-to-parent case; a source symlink is copied as a link, so it
+/// cannot contain the destination.
+fn into_itself(source: &Path, into: &Path) -> bool {
+    if into.starts_with(source) {
+        return true;
+    }
+    let Ok(meta) = source.symlink_metadata() else { return false };
+    if !meta.is_dir() {
+        return false;
+    }
+    match (std::fs::canonicalize(source), std::fs::canonicalize(into)) {
+        (Ok(source), Ok(into)) => into.starts_with(source),
+        _ => false,
+    }
 }
 
 // ----- planning -----
 
 /// Work out what `request` would do, without changing anything.
 pub fn plan(request: Request) -> Result<Plan, OpError> {
+    static NEVER: AtomicBool = AtomicBool::new(false);
+    plan_cancellable(request, &NEVER)
+}
+
+/// [`plan`], with a cancellation check between entries and inside tree measurement.
+pub fn plan_cancellable(request: Request, cancel: &AtomicBool) -> Result<Plan, OpError> {
     let count = |n: usize| if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
     let dir_name = |p: &Path| p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into());
+    let mut reserved: HashMap<PathBuf, ()> = HashMap::new();
     let (items, label) = match &request {
         Request::NewFolder { parent } => (
-            vec![PlannedItem { source: None, target: untitled_folder(parent), conflict: false, bytes: 0 }],
+            vec![PlannedItem {
+                source: None,
+                target: untitled_folder(parent),
+                conflict: false,
+                bytes: 0,
+                source_identity: None,
+                target_identity: None,
+            }],
             "New Folder".into(),
         ),
         Request::NewFile { parent } => (
-            vec![PlannedItem { source: None, target: untitled_file(parent), conflict: false, bytes: 0 }],
+            vec![PlannedItem {
+                source: None,
+                target: untitled_file(parent),
+                conflict: false,
+                bytes: 0,
+                source_identity: None,
+                target_identity: None,
+            }],
             "New File".into(),
         ),
         Request::Rename { path, new_name } => {
@@ -294,31 +479,54 @@ pub fn plan(request: Request) -> Result<Plan, OpError> {
                 return Err(OpError::NameTaken(target));
             }
             let label = format!("Rename “{}” to “{new_name}”", file_name(path)?);
-            (vec![PlannedItem { source: Some(path.clone()), target, conflict: false, bytes: 0 }], label)
+            (
+                vec![PlannedItem {
+                    source: Some(path.clone()),
+                    target,
+                    conflict: false,
+                    bytes: 0,
+                    source_identity: None,
+                    target_identity: None,
+                }],
+                label,
+            )
         }
         Request::Duplicate { paths } => {
-            let items = paths
-                .iter()
-                .map(|p| {
-                    let parent = p.parent().ok_or_else(|| OpError::NotFound(p.clone()))?;
-                    Ok(PlannedItem {
-                        source: Some(p.clone()),
-                        target: copy_name(parent, &file_name(p)?, p.is_dir()),
-                        conflict: false,
-                        bytes: tree_size(p),
-                    })
-                })
-                .collect::<Result<Vec<_>, OpError>>()?;
+            let mut items = Vec::new();
+            for path in paths.iter() {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(OpError::Cancelled);
+                }
+                let source = identity(path).map_err(io_err(path))?;
+                let parent = path.parent().ok_or_else(|| OpError::NotFound(path.clone()))?;
+                let is_dir = path.is_dir();
+                let target = copy_name_avoiding(parent, &file_name(path)?, is_dir, &reserved);
+                reserved.insert(target.clone(), ());
+                items.push(PlannedItem {
+                    source: Some(path.clone()),
+                    target,
+                    conflict: false,
+                    bytes: tree_size(path, cancel)?,
+                    source_identity: Some(source),
+                    target_identity: None,
+                });
+            }
             (items, format!("Duplicate {}", count(paths.len())))
         }
         Request::Copy { paths, into } | Request::Move { paths, into } => {
             let moving = matches!(request, Request::Move { .. });
+            match std::fs::metadata(into) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => return Err(OpError::NotAFolder(into.clone())),
+                Err(e) => return Err(io_err(into)(e)),
+            }
             let mut items = Vec::new();
             for source in paths.iter() {
-                if !exists(source) {
-                    return Err(OpError::NotFound(source.clone()));
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(OpError::Cancelled);
                 }
-                if into.starts_with(source) {
+                let source_meta = identity(source).map_err(io_err(source))?;
+                if into_itself(source, into) {
                     return Err(OpError::IntoItself(source.clone()));
                 }
                 let name = file_name(source)?;
@@ -327,12 +535,21 @@ pub fn plan(request: Request) -> Result<Plan, OpError> {
                     continue; // already there
                 }
                 // Copying into its own folder makes a copy, as Duplicate does.
-                let target = if target == *source { copy_name(into, &name, source.is_dir()) } else { target };
+                let target = if target == *source {
+                    copy_name_avoiding(into, &name, source.is_dir(), &reserved)
+                } else {
+                    target
+                };
+                let target_identity = target_identity(&target)?;
+                let conflict = target_identity.is_some() || reserved.contains_key(&target);
+                reserved.insert(target.clone(), ());
                 items.push(PlannedItem {
                     source: Some(source.clone()),
-                    conflict: exists(&target),
+                    conflict,
                     target,
-                    bytes: tree_size(source),
+                    bytes: tree_size(source, cancel)?,
+                    source_identity: Some(source_meta),
+                    target_identity,
                 });
             }
             let verb = if moving { "Move" } else { "Copy" };
@@ -341,14 +558,28 @@ pub fn plan(request: Request) -> Result<Plan, OpError> {
         Request::Trash { paths } => (
             paths
                 .iter()
-                .map(|p| PlannedItem { source: Some(p.clone()), target: p.clone(), conflict: false, bytes: 0 })
+                .map(|p| PlannedItem {
+                    source: Some(p.clone()),
+                    target: p.clone(),
+                    conflict: false,
+                    bytes: 0,
+                    source_identity: None,
+                    target_identity: None,
+                })
                 .collect(),
             format!("Move {} to Trash", count(paths.len())),
         ),
         Request::DeletePermanently { paths } => (
             paths
                 .iter()
-                .map(|p| PlannedItem { source: Some(p.clone()), target: p.clone(), conflict: false, bytes: 0 })
+                .map(|p| PlannedItem {
+                    source: Some(p.clone()),
+                    target: p.clone(),
+                    conflict: false,
+                    bytes: 0,
+                    source_identity: None,
+                    target_identity: None,
+                })
                 .collect(),
             format!("Delete {} permanently", count(paths.len())),
         ),
@@ -374,23 +605,29 @@ pub fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
             Err(io::Error::last_os_error())
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
-        if exists(to) {
-            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let (f, t) = (CString::new(from.as_os_str().as_bytes())?, CString::new(to.as_os_str().as_bytes())?);
+        // SAFETY: both are valid NUL-terminated paths for the duration of the call.
+        if unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) }
+            == 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
         }
-        std::fs::rename(from, to)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (from, to);
+        Err(io::Error::new(io::ErrorKind::Unsupported, "no verified no-clobber rename on this platform"))
     }
 }
 
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn temp_beside(target: &Path) -> PathBuf {
-    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    target.with_file_name(format!(".crow-partial-{}-{n}", std::process::id()))
-}
-
-fn remove_tree(path: &Path) -> io::Result<()> {
+/// Remove a file, symlink or tree. Missing is success.
+pub(crate) fn remove_tree(path: &Path) -> io::Result<()> {
     match path.symlink_metadata() {
         Ok(m) if m.is_dir() => std::fs::remove_dir_all(path),
         Ok(_) => std::fs::remove_file(path),
@@ -399,257 +636,9 @@ fn remove_tree(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Copy `source` to `target` (which must be free): write under a temporary name,
-/// then rename into place. On error or cancel the temporary copy is removed.
-/// `on_bytes` gets the bytes copied so far within this item.
-fn copy_into_place(
-    source: &Path,
-    target: &Path,
-    cancel: &AtomicBool,
-    on_bytes: &mut dyn FnMut(u64),
-) -> Result<(), OpError> {
-    let temp = temp_beside(target);
-    let copied = copy_tree(source, &temp, cancel, on_bytes);
-    let placed = copied.and_then(|()| rename_no_clobber(&temp, target).map_err(io_err(target)));
-    if placed.is_err()
-        && let Err(e) = remove_tree(&temp)
-    {
-        warn(&format!("could not remove partial copy {}: {e}", temp.display()));
-    }
-    placed
-}
-
 /// crow-fs has no logging dependency; failures to clean up are rare enough for stderr.
-fn warn(message: &str) {
+pub(crate) fn warn(message: &str) {
     eprintln!("crow-fs: {message}");
-}
-
-#[cfg(target_os = "macos")]
-fn copy_tree(source: &Path, dest: &Path, cancel: &AtomicBool, on_bytes: &mut dyn FnMut(u64)) -> Result<(), OpError> {
-    use std::ffi::{CString, c_char, c_int, c_void};
-    use std::os::unix::ffi::OsStrExt;
-
-    struct Context<'a> {
-        cancel: &'a AtomicBool,
-        on_bytes: &'a mut dyn FnMut(u64),
-        finished_files: u64,
-    }
-
-    extern "C" fn callback(
-        what: c_int,
-        stage: c_int,
-        state: libc::copyfile_state_t,
-        _src: *const c_char,
-        _dst: *const c_char,
-        ctx: *mut c_void,
-    ) -> c_int {
-        // SAFETY: ctx is the &mut Context passed below, alive for the whole copyfile call.
-        let ctx = unsafe { &mut *ctx.cast::<Context>() };
-        if ctx.cancel.load(Ordering::Relaxed) {
-            return libc::COPYFILE_QUIT;
-        }
-        if what == libc::COPYFILE_COPY_DATA && stage == libc::COPYFILE_PROGRESS {
-            let mut copied: libc::off_t = 0;
-            // SAFETY: state is valid during the callback; COPIED writes one off_t.
-            unsafe { libc::copyfile_state_get(state, libc::COPYFILE_STATE_COPIED as u32, (&raw mut copied).cast()) };
-            (ctx.on_bytes)(ctx.finished_files + copied.max(0) as u64);
-        }
-        if what == libc::COPYFILE_RECURSE_FILE && stage == libc::COPYFILE_FINISH {
-            let mut copied: libc::off_t = 0;
-            // SAFETY: as above.
-            unsafe { libc::copyfile_state_get(state, libc::COPYFILE_STATE_COPIED as u32, (&raw mut copied).cast()) };
-            ctx.finished_files += copied.max(0) as u64;
-            (ctx.on_bytes)(ctx.finished_files);
-        }
-        libc::COPYFILE_CONTINUE
-    }
-
-    let (src, dst) = (
-        CString::new(source.as_os_str().as_bytes()).map_err(|e| OpError::Io(source.to_path_buf(), e.into()))?,
-        CString::new(dest.as_os_str().as_bytes()).map_err(|e| OpError::Io(dest.to_path_buf(), e.into()))?,
-    );
-    let mut ctx = Context { cancel, on_bytes, finished_files: 0 };
-    let flags = libc::COPYFILE_METADATA
-        | libc::COPYFILE_DATA
-        | libc::COPYFILE_RECURSIVE
-        | libc::COPYFILE_CLONE
-        | libc::COPYFILE_NOFOLLOW
-        | libc::COPYFILE_EXCL;
-    // SAFETY: the state is freed below; callback and context outlive the copyfile call.
-    let rc = unsafe {
-        let state = libc::copyfile_state_alloc();
-        libc::copyfile_state_set(state, libc::COPYFILE_STATE_STATUS_CB as u32, callback as *const c_void);
-        libc::copyfile_state_set(state, libc::COPYFILE_STATE_STATUS_CTX as u32, (&raw mut ctx).cast());
-        let rc = libc::copyfile(src.as_ptr(), dst.as_ptr(), state, flags);
-        libc::copyfile_state_free(state);
-        rc
-    };
-    if cancel.load(Ordering::Relaxed) {
-        return Err(OpError::Io(source.to_path_buf(), io::Error::from(io::ErrorKind::Interrupted)));
-    }
-    if rc == 0 { Ok(()) } else { Err(OpError::Io(source.to_path_buf(), io::Error::last_os_error())) }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn copy_tree(source: &Path, dest: &Path, cancel: &AtomicBool, on_bytes: &mut dyn FnMut(u64)) -> Result<(), OpError> {
-    let meta = source.symlink_metadata().map_err(io_err(source))?;
-    if cancel.load(Ordering::Relaxed) {
-        return Err(OpError::Io(source.to_path_buf(), io::Error::from(io::ErrorKind::Interrupted)));
-    }
-    if meta.is_dir() {
-        std::fs::create_dir(dest).map_err(io_err(dest))?;
-        for entry in std::fs::read_dir(source).map_err(io_err(source))?.filter_map(Result::ok) {
-            copy_tree(&entry.path(), &dest.join(entry.file_name()), cancel, on_bytes)?;
-        }
-        Ok(())
-    } else {
-        let n = std::fs::copy(source, dest).map_err(io_err(source))?;
-        on_bytes(n);
-        Ok(())
-    }
-}
-
-/// Tests flip this to take the across-volumes path without a second volume.
-#[cfg(test)]
-pub(crate) static FORCE_CROSS_DEVICE: AtomicBool = AtomicBool::new(false);
-
-/// Move without replacing anything; across volumes, copy then delete the source.
-fn move_item(from: &Path, to: &Path, cancel: &AtomicBool, on_bytes: &mut dyn FnMut(u64)) -> Result<(), OpError> {
-    #[cfg(test)]
-    let renamed = if FORCE_CROSS_DEVICE.load(Ordering::Relaxed) {
-        Err(io::Error::from(io::ErrorKind::CrossesDevices))
-    } else {
-        rename_no_clobber(from, to)
-    };
-    #[cfg(not(test))]
-    let renamed = rename_no_clobber(from, to);
-    match renamed {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-            copy_into_place(from, to, cancel, on_bytes)?;
-            // The copy is complete and in place; only now is the source removed.
-            remove_tree(from).map_err(io_err(from))
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(OpError::NameTaken(to.to_path_buf())),
-        Err(e) => Err(OpError::Io(from.to_path_buf(), e)),
-    }
-}
-
-// ----- execution -----
-
-/// Carry out `plan`. `resolutions` maps a conflicting target to the user's choice
-/// (missing entries keep both). Stops at the first error or when `cancel` is set;
-/// the returned record covers everything that was done either way.
-pub fn execute(
-    plan: &Plan,
-    resolutions: &HashMap<PathBuf, Resolution>,
-    trash: &dyn Trash,
-    cancel: &AtomicBool,
-    progress: &mut dyn FnMut(&Progress),
-) -> Outcome {
-    let mut record = Record { label: plan.label.clone(), steps: Vec::new() };
-    let mut p = Progress { total_items: plan.items.len(), total_bytes: plan.total_bytes, ..Progress::default() };
-    for item in &plan.items {
-        if cancel.load(Ordering::Relaxed) {
-            return Outcome { record, error: None, cancelled: true };
-        }
-        p.current = item.source.clone().unwrap_or_else(|| item.target.clone());
-        progress(&p);
-        let before = p.done_bytes;
-        let result = {
-            let mut on_bytes = |n: u64| {
-                p.done_bytes = before + n.min(item.bytes);
-                progress(&p);
-            };
-            run_item(&plan.request, item, resolutions, trash, cancel, &mut on_bytes, &mut record.steps)
-        };
-        p.done_bytes = before + item.bytes;
-        match result {
-            Ok(()) => {
-                p.done_items += 1;
-                progress(&p);
-            }
-            Err(e) => {
-                let cancelled = cancel.load(Ordering::Relaxed);
-                return Outcome { record, error: (!cancelled).then_some(e), cancelled };
-            }
-        }
-    }
-    Outcome { record, error: None, cancelled: false }
-}
-
-fn run_item(
-    request: &Request,
-    item: &PlannedItem,
-    resolutions: &HashMap<PathBuf, Resolution>,
-    trash: &dyn Trash,
-    cancel: &AtomicBool,
-    on_bytes: &mut dyn FnMut(u64),
-    steps: &mut Vec<Step>,
-) -> Result<(), OpError> {
-    let target = &item.target;
-    match request {
-        Request::NewFolder { .. } => {
-            std::fs::create_dir(target).map_err(io_err(target))?;
-            steps.push(Step::Created(target.clone()));
-        }
-        Request::NewFile { .. } => {
-            // `create_new` never replaces a file that appeared since planning.
-            std::fs::OpenOptions::new().write(true).create_new(true).open(target).map_err(io_err(target))?;
-            steps.push(Step::Created(target.clone()));
-        }
-        Request::Rename { path, .. } => {
-            if same_file(path, target) {
-                // Case-only rename: the "existing" target is the item itself.
-                std::fs::rename(path, target).map_err(io_err(path))?;
-            } else {
-                rename_no_clobber(path, target).map_err(|e| match e.kind() {
-                    io::ErrorKind::AlreadyExists => OpError::NameTaken(target.clone()),
-                    _ => OpError::Io(path.clone(), e),
-                })?;
-            }
-            steps.push(Step::Moved { from: path.clone(), to: target.clone() });
-        }
-        Request::Duplicate { .. } | Request::Copy { .. } | Request::Move { .. } => {
-            let source = item.source.as_ref().ok_or_else(|| OpError::NotFound(target.clone()))?;
-            if !exists(source) {
-                return Err(OpError::NotFound(source.clone()));
-            }
-            let mut target = target.clone();
-            if exists(&target) {
-                match resolutions.get(&target).copied().unwrap_or_default() {
-                    Resolution::Skip => return Ok(()),
-                    Resolution::KeepBoth => {
-                        let parent = target.parent().ok_or_else(|| OpError::NotFound(target.clone()))?;
-                        target = keep_both_name(parent, &file_name(&target)?, source.is_dir());
-                    }
-                    Resolution::Replace => {
-                        let trashed = trash.trash(&target).map_err(io_err(&target))?;
-                        steps.push(Step::Trashed { original: target.clone(), trashed });
-                    }
-                }
-            }
-            if matches!(request, Request::Move { .. }) {
-                move_item(source, &target, cancel, on_bytes)?;
-                steps.push(Step::Moved { from: source.clone(), to: target });
-            } else {
-                copy_into_place(source, &target, cancel, on_bytes)?;
-                steps.push(Step::Created(target));
-            }
-        }
-        Request::Trash { .. } => {
-            if !exists(target) {
-                return Err(OpError::NotFound(target.clone()));
-            }
-            let trashed = trash.trash(target).map_err(io_err(target))?;
-            steps.push(Step::Trashed { original: target.clone(), trashed });
-        }
-        Request::DeletePermanently { .. } => {
-            remove_tree(target).map_err(io_err(target))?;
-            steps.push(Step::Deleted(target.clone()));
-        }
-    }
-    Ok(())
 }
 
 // ----- undo -----
@@ -680,7 +669,7 @@ pub fn undo(record: &Record, trash: &dyn Trash) -> Result<Record, OpError> {
                 if same_file(from, to) {
                     std::fs::rename(to, from).map_err(io_err(to))?;
                 } else {
-                    move_item(to, from, &never, &mut |_| {})?;
+                    job::move_item(to, from, &never, &mut |_| {})?;
                 }
                 reversed.steps.push(Step::Moved { from: to.clone(), to: from.clone() });
             }
@@ -688,7 +677,7 @@ pub fn undo(record: &Record, trash: &dyn Trash) -> Result<Record, OpError> {
                 if exists(original) {
                     return Err(OpError::WouldOverwrite(original.clone()));
                 }
-                move_item(trashed, original, &never, &mut |_| {})?;
+                job::move_item(trashed, original, &never, &mut |_| {})?;
                 reversed.steps.push(Step::Moved { from: trashed.clone(), to: original.clone() });
             }
             Step::Deleted(path) => return Err(OpError::NotFound(path.clone())),

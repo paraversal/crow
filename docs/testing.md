@@ -102,7 +102,15 @@ everything (24 runs), and compares the panel's result paths, footer and skipped 
 The operation engine (`crates/crow-fs/src/ops_tests.rs`) is tested against real temp folders:
 every operation and its undo, each conflict choice, cancelling midway, a read-only destination,
 a source vanishing mid-operation, undo refusing to overwrite, a forced cross-volume move,
-and 40 randomized rounds of "do, undo, compare the tree".
+and 40 randomized rounds of "do, undo, compare the tree". The job engine's deterministic
+gates cover a pause acknowledged inside a byte callback, a clone paused after it completes,
+cancel while paused and while a conflict waits, a late conflict keyed by attempt, a stale
+answer, apply-to-all, an approved target replaced while paused, a source changed while
+paused, Keep Both collision retry, a Replace whose placement fails and is restored (or whose
+restore is blocked), a cross-volume move that keeps its destination when the source cannot be
+retired, metadata/xattrs/ACL on clone and non-clone copies, case-folded targets, dangling
+symlinks, special files refused in planning, and undo of a committed prefix. Pause/Resume
+through the bundled UI is P5B's hand check.
 
 ## Test and fuzz reports
 
