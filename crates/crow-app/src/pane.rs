@@ -2014,9 +2014,8 @@ impl Pane {
                     let surfaces = &mut cx.global_mut::<crate::plugins::Plugins>().surfaces;
                     if paths.is_empty() {
                         surfaces.bump_scope(surface, scope.clone(), 0, Instant::now());
-                    }
-                    for path in paths {
-                        surfaces.invalidate_path(&scope, path);
+                    } else {
+                        surfaces.invalidate_paths(&scope, paths);
                     }
                     surfaces.notify_files_changed(scope, dir.display().to_string(), Instant::now());
                 }
@@ -3659,7 +3658,7 @@ impl Pane {
             let versions = range
                 .clone()
                 .filter_map(|ix| folder.row(ix))
-                .map(|(entry, _)| (entry.path.clone(), folder.plugin_entry_version(entry)))
+                .map(|(entry, _)| (entry.path.clone(), folder.plugin_row_version(entry)))
                 .collect::<HashMap<_, _>>();
             (crate::plugins::ScopeKey::Folder(folder.dir().to_path_buf()), versions)
         };
@@ -4238,7 +4237,7 @@ impl Pane {
             let versions = indices
                 .iter()
                 .filter_map(|ix| folder.row(*ix))
-                .map(|(entry, _)| (entry.path.clone(), folder.plugin_entry_version(entry)))
+                .map(|(entry, _)| (entry.path.clone(), folder.plugin_row_version(entry)))
                 .collect::<HashMap<_, _>>();
             (crate::plugins::ScopeKey::Folder(folder.dir().to_path_buf()), versions)
         };
@@ -4784,7 +4783,7 @@ impl Pane {
         let versions: HashMap<PathBuf, u64> = range
             .clone()
             .filter_map(|ix| folder.row(ix))
-            .map(|(entry, _)| (entry.path.clone(), folder.plugin_entry_version(entry)))
+            .map(|(entry, _)| (entry.path.clone(), folder.plugin_row_version(entry)))
             .collect();
         let decoration_ids = crate::plugins::decoration_ids(cx);
         let presentations: HashMap<PathBuf, crate::plugins::RowPresentation> = versions

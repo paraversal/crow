@@ -714,9 +714,10 @@ impl<'a> Runner<'a> {
         mut decision: Decision,
         attempt: &mut u32,
     ) -> Result<Commit, Stop> {
+        let source = item.source.as_deref().unwrap_or(place_from);
         loop {
             self.checkpoint()?;
-            self.recheck_source(item.source.as_deref().unwrap_or(place_from), item)?;
+            self.recheck_source(source, item)?;
             #[cfg(test)]
             self.fire_hook(|h| h.before_commit.clone());
             match decision.clone() {
@@ -730,20 +731,14 @@ impl<'a> Runner<'a> {
                                 Ok(None) => continue,
                                 Err(error) => return Err(Stop::Failed(error)),
                             };
-                            decision = self.conflict_for(
-                                place_from,
-                                &target,
-                                observed,
-                                ConflictReason::Appeared,
-                                None,
-                                attempt,
-                            )?;
+                            decision =
+                                self.conflict_for(source, &target, observed, ConflictReason::Appeared, None, attempt)?;
                         }
                         Err(e) => return failed(op_io(&target, e)),
                     },
                     Ok(Some(observed)) => {
                         decision =
-                            self.conflict_for(place_from, &target, observed, ConflictReason::Appeared, None, attempt)?;
+                            self.conflict_for(source, &target, observed, ConflictReason::Appeared, None, attempt)?;
                     }
                     Err(error) => return Err(Stop::Failed(error)),
                 },
@@ -771,7 +766,7 @@ impl<'a> Runner<'a> {
                     match current {
                         Some(current) if current != approved => {
                             decision = self.conflict_for(
-                                place_from,
+                                source,
                                 &target,
                                 current,
                                 ConflictReason::Changed,
@@ -801,7 +796,7 @@ impl<'a> Runner<'a> {
                                             Err(error) => return Err(Stop::Failed(error)),
                                         };
                                         decision = self.conflict_for(
-                                            place_from,
+                                            source,
                                             &target,
                                             observed,
                                             ConflictReason::Appeared,
@@ -823,7 +818,7 @@ impl<'a> Runner<'a> {
                                             Err(error) => return Err(Stop::Failed(error)),
                                         };
                                         decision = self.conflict_for(
-                                            place_from,
+                                            source,
                                             &target,
                                             observed,
                                             ConflictReason::Changed,
@@ -876,7 +871,7 @@ impl<'a> Runner<'a> {
                                     Err(error) => return Err(Stop::Failed(error)),
                                 };
                                 decision = self.conflict_for(
-                                    place_from,
+                                    source,
                                     &target,
                                     observed,
                                     ConflictReason::Appeared,

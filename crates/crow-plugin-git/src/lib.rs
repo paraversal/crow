@@ -231,7 +231,7 @@ impl EntryStatus {
 }
 
 /// One immutable status snapshot for a repository generation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatusSnapshot {
     pub identity: RepositoryIdentity,
     pub head: HeadInfo,

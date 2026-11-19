@@ -44,7 +44,7 @@ use crate::style::{
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::{self, SettingChange, Ui, reload_theme};
 use crow_fs::Entry;
-use crow_fs::ops::{Plan, Request, Resolution};
+use crow_fs::ops::{Request, Resolution};
 
 /// Open a window on `dir`. New windows share one size from settings and step
 /// 24 pt down and right from the previous one, so they never land at random sizes.
@@ -168,6 +168,8 @@ pub struct CrowWindow {
     /// A sheet asking before an operation runs (conflicts, permanent delete).
     sheet: Option<Sheet>,
     show_activity: bool,
+    activity_focus: FocusHandle,
+    activity_controls: HashMap<(&'static str, u64), FocusHandle>,
     /// "Why this view?", while open.
     why: Option<FocusHandle>,
     picker: Option<ThemePicker>,
@@ -244,6 +246,12 @@ impl CrowWindow {
         let release_sidebar = sidebar.clone();
         let release_info = info.clone();
         let owner = cx.entity_id();
+        // The red button and Cmd-W ask the coordinator before a last window closes
+        // over pending work; GPUI calls this before tearing anything down.
+        let close_owner = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            close_owner.update(cx, |this, cx| this.window_should_close(window, cx)).unwrap_or(true)
+        });
         let subscriptions = vec![
             cx.observe(&pane, |_, _, cx| cx.notify()),
             cx.subscribe_in(&pane, window, |this, _, event, window, cx| this.on_pane_event(event, window, cx)),
@@ -300,6 +308,8 @@ impl CrowWindow {
             search_includes_hidden,
             sheet,
             show_activity: false,
+            activity_focus: cx.focus_handle(),
+            activity_controls: HashMap::new(),
             why: None,
             picker: None,
             palette: None,
@@ -369,6 +379,9 @@ impl CrowWindow {
             if let Sheet::Onboarding { show, no, .. } = sheet {
                 allowed.push(("sheet choice", show.clone()));
                 allowed.push(("sheet choice", no.clone()));
+            }
+            if let Sheet::Conflict { controls, .. } = sheet {
+                allowed.extend(controls.iter().cloned().map(|focus| ("conflict control", focus)));
             }
         } else if let Some(palette) = &self.palette {
             allowed.push(("palette", palette.input.read(cx).focus_handle(cx)));
@@ -460,6 +473,10 @@ impl CrowWindow {
             closed.update(cx, |pane, cx| pane.release_listings(cx));
         } else {
             // The last tab closes the window; Crow stays running with no windows.
+            // Pending work asks first, or the window stays open with its tab.
+            if !self.window_should_close(window, cx) {
+                return;
+            }
             // Release its listing before the window drops.
             self.pane().update(cx, |pane, cx| pane.release_listings(cx));
             window.remove_window();
@@ -1218,8 +1235,8 @@ impl CrowWindow {
 
         let primary = if let Some(hint) = pane.pending_hint() {
             Primary::Pending(hint)
-        } else if let Some(running) = &ops.running {
-            Primary::Running(RunningView::new(running))
+        } else if let Some(running) = ops.running() {
+            Primary::Running(RunningView::new(&running))
         } else if let Some((message, false)) = &ops.message {
             Primary::Message(message.clone())
         } else {
@@ -1269,7 +1286,7 @@ impl CrowWindow {
             status: None,
             status_spoken: None,
         };
-        if ops.running.is_none()
+        if !ops.has_pending()
             && ops.message.is_none()
             && self.path_edit.is_none()
             && self.palette.is_none()
@@ -1408,10 +1425,14 @@ fn home_relative(path: &Path) -> String {
 
 /// A question to answer before an operation runs, or before one is cut off.
 enum Sheet {
-    Conflicts {
-        plan: Plan,
-        choices: Vec<Resolution>,
+    /// One app-wide conflict question, shown by whichever window owns it.
+    Conflict {
         focus: FocusHandle,
+        controls: [FocusHandle; 6],
+        job: crate::operations::RequestId,
+        key: crow_fs::ops::ConflictKey,
+        choice: Resolution,
+        all: bool,
     },
     ConfirmDelete {
         paths: Arc<[PathBuf]>,
@@ -1422,9 +1443,10 @@ enum Sheet {
         folders: Vec<PathBuf>,
         focus: FocusHandle,
     },
-    /// Quitting would stop the running operation partway.
+    /// Quitting or closing the last window would stop the queue partway.
     StopOperation {
         focus: FocusHandle,
+        intent: crate::operations::StopIntent,
     },
     /// The first launch asks whether tips should show.
     Onboarding {
@@ -1439,7 +1461,7 @@ enum Sheet {
 impl Sheet {
     fn focus(&self) -> &FocusHandle {
         match self {
-            Sheet::Conflicts { focus, .. }
+            Sheet::Conflict { focus, .. }
             | Sheet::ConfirmDelete { focus, .. }
             | Sheet::ConfirmEmptyTrash { focus, .. }
             | Sheet::StopOperation { focus, .. }
@@ -1534,6 +1556,13 @@ impl CrowWindow {
         if matches!(self.sheet, Some(Sheet::Onboarding { .. })) {
             let show = cx.global::<Ui>().settings.tips == TipsMode::Auto;
             crate::onboarding::answer(show, cx);
+        }
+        if matches!(self.sheet, Some(Sheet::Conflict { .. }))
+            && let Some(prompt) = cx.global_mut::<Operations>().prompt.as_mut()
+            && prompt.host == Some(window.window_handle().window_id())
+        {
+            // The job keeps waiting; Activity can bring the sheet back.
+            prompt.host = None;
         }
         self.sheet = None;
         self.focus_center(window, cx);
@@ -2384,8 +2413,7 @@ impl CrowWindow {
                 }
             }
             CommandId::ToggleActivity => {
-                self.show_activity = !self.show_activity;
-                cx.notify();
+                self.toggle_activity(window, cx);
             }
             CommandId::RemoveFromSidebar
             | CommandId::MoveFavoriteUp
@@ -2560,12 +2588,16 @@ impl Render for CrowWindow {
         // rule the fuzzer's focus invariant checks.
         if !self.refocus_overlay {
             let surfaces = self.overlay_focus_surfaces(cx);
-            if !surfaces.is_empty() && !surfaces.iter().any(|(_, handle)| Some(handle) == window.focused(cx).as_ref()) {
+            if !surfaces.is_empty()
+                && !self.activity_owns_focus(window, cx)
+                && !surfaces.iter().any(|(_, handle)| Some(handle) == window.focused(cx).as_ref())
+            {
                 self.refocus_overlay = true;
                 cx.defer_in(window, |this, window, cx| {
                     this.refocus_overlay = false;
                     let surfaces = this.overlay_focus_surfaces(cx);
                     if !surfaces.is_empty()
+                        && !this.activity_owns_focus(window, cx)
                         && !surfaces.iter().any(|(_, handle)| Some(handle) == window.focused(cx).as_ref())
                     {
                         window.focus(&surfaces[0].1, cx);
@@ -2674,7 +2706,7 @@ impl Render for CrowWindow {
             None => None,
         };
         let sheet = self.render_sheet(window, cx);
-        let activity = self.show_activity.then(|| self.render_activity(cx));
+        let activity = self.show_activity.then(|| self.render_activity(window, cx));
         let why = self.render_why(cx);
         let picker = self.render_picker(cx);
         let git_review = self.render_git_review(cx);
@@ -2758,8 +2790,8 @@ impl Render for CrowWindow {
             .on_action(cx.listener(|this, _: &crate::actions::CancelOperation, window, cx| {
                 // Esc stops a running operation first; with none, it closes an open search
                 // from wherever focus is (the sidebar, say).
-                if cx.global::<Operations>().running.is_some() {
-                    operations::cancel_running(cx);
+                if cx.global::<Operations>().has_active() {
+                    operations::cancel_active(cx);
                 } else if let Some(search) = &this.search
                     && search.update(cx, |search, cx| {
                         let closed = search.close_skipped();
@@ -2810,9 +2842,8 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::save_search))
             .on_action(cx.listener(Self::edit_saved_search))
             .on_action(cx.listener(Self::remove_saved_search))
-            .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, _, cx| {
-                this.show_activity = !this.show_activity;
-                cx.notify();
+            .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, window, cx| {
+                this.toggle_activity(window, cx);
             }))
             .size_full()
             .flex()
@@ -2930,7 +2961,7 @@ impl CrowWindow {
     /// an operation is running; `fuzz::settle` waits on this.
     pub fn is_busy(&self, cx: &App) -> bool {
         self.tabs.iter().any(|(_, pane)| pane.read(cx).is_settling(cx))
-            || cx.global::<crate::operations::Operations>().running.is_some()
+            || cx.global::<crate::operations::Operations>().is_settling()
     }
 
     /// The H1 invariants. Cursor/selection rows, focus and modals are checked
@@ -3007,7 +3038,7 @@ impl CrowWindow {
                         allowed.push(("path field", edit.input.read(cx).focus_handle(cx)));
                     }
                 }
-                if !allowed.iter().any(|(_, handle)| handle == &focused) {
+                if !self.activity_owns_focus(window, cx) && !allowed.iter().any(|(_, handle)| handle == &focused) {
                     let surface = allowed.first().map_or("expected", |(name, _)| name);
                     out.push(Violation::new(
                         "focus",

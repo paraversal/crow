@@ -112,6 +112,17 @@ Replace and its undo, a symlinked parent counted as the same folder, a cross-vol
 keeps its destination when the source cannot be retired, monotonic progress,
 metadata/xattrs/ACL on clone and non-clone copies, case-folded targets, dangling symlinks,
 special files refused in planning, and undo of a committed prefix.
+`window/tests.rs` covers the app-wide coordinator: two windows share one ordered queue,
+planning is held or released deterministically, a paused head keeps later work waiting,
+Pause waits for the worker's acknowledgement and a late acknowledgement is ignored,
+cancelling a planning head logs without copying, a failed plan or jail refusal advances
+the next request, a conflict is re-hosted when its origin window closes and only the
+current job/item/attempt is accepted, Activity lists active before queued jobs, the bar
+shows the queue and the indeterminate planning state, and Activity and the conflict sheet
+work by mouse and keyboard. Result highlighting stays with the original folder surface,
+including after navigation away and back. A cancelled terminal keeps its committed prefix
+undoable. A confirmed close cancels paused and conflict-waiting jobs, refuses late submissions,
+and waits for cleanup. Empty Trash releases the queue even if its window closes meanwhile.
 Pause/Resume through the bundled UI is P5B's hand check.
 
 ## Test and fuzz reports
@@ -616,8 +627,10 @@ Run on a bundle built from the branch, in light and dark, at 640 px and wide.
 | Drop in | Drag files from Finder onto a Crow list, onto a column, and onto sidebar rows and group titles: the target keeps one steady highlight while the pointer moves within it; same disk moves, other disk copies, Option copies. Drag a row from Crow's own list the same way. |
 | Trash and Put Back | Cmd-Delete a file in Crow, then use Finder's Put Back on it in the Trash. |
 | Finder clipboard | Copy in Crow, paste in Finder; copy in Finder, paste in Crow. Above 1000 selected items the status says "(Crow only)": Crow's own paste works, Finder keeps its previous clipboard. |
-| Activity | Cmd-Option-L lists recent operations; Undo on an older one works or explains why not. |
+| Activity | Cmd-Option-L lists active and queued jobs before recent operations; Pause/Resume works on a large copy, Cancel drops a queued job, and Undo on an older terminal entry works or explains why not. The bar's list icon opens the same panel and shows the queued count. |
+| Conflict ownership | Copy two files with an existing target into the current folder, dismiss the conflict sheet with Esc, then reopen it with Resolve in Activity. Tab to Resolve and press Space. In the sheet, Tab and Shift-Tab reach each choice, Apply to all remaining, Decide Later, and Continue. Close the window that first showed the sheet while another window is open. The sheet appears there, and an answer for an older attempt does nothing. |
 | Close during an operation | Copy a large folder to another disk, then ⌘W the only window (or click its red button, or ⌘Q): a sheet asks. Esc keeps the copy running; Return stops it and closes (or quits) once it has wound down. With a second window open, closing one does not ask. |
+| Git refresh | With Git enabled, open a subfolder with a visible ignored file. Once its styling appears, touch another file in the open folder and then touch a file in a sibling folder in the same worktree. The ignored row and Git status stay steady. Remove its ignore rule and check that the ignored styling clears. Disable Git and check that all remaining Git decorations clear immediately. |
 
 ### Command line
 

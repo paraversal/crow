@@ -1,17 +1,33 @@
 //! File-operation UI: request planning, sheets, Activity and quit coordination.
 //!
 //! `Sheet` itself, `close_sheet`, onboarding and the shared focus surfaces stay
-//! in `window.rs`; this module owns the operation content and dispatch. One
-//! operation coordinator remains app-wide in `operations.rs` pending P5B.
+//! in `window.rs`; this module owns the operation content and dispatch. The
+//! app-wide queue and its active job live in `operations.rs`.
 
 use super::*;
 use crate::actions::MoveToTrash;
+use crate::operations::{self, JobPhase, Maintenance, Origin, RequestId, StopIntent};
 use crow_core::motion::Fx;
+use crow_fs::ops::{ConflictKey, Resolution};
 
-/// Quit, unless an operation is running: then the active Crow window asks first.
-/// With no window open, one opens at the launch folder to ask.
+fn cycle_focus(controls: &[FocusHandle], forward: bool, window: &mut Window, cx: &mut App) {
+    if controls.is_empty() {
+        return;
+    }
+    let current = controls.iter().position(|control| control.is_focused(window));
+    let next = match (current, forward) {
+        (Some(index), true) => (index + 1) % controls.len(),
+        (Some(index), false) => (index + controls.len() - 1) % controls.len(),
+        (None, true) => 0,
+        (None, false) => controls.len() - 1,
+    };
+    window.focus(&controls[next], cx);
+}
+
+/// Quit, unless work is pending: then the active Crow window asks first. With no
+/// window open, one opens at the launch folder to ask.
 pub(crate) fn quit(cx: &mut App) {
-    if cx.global::<Operations>().running.is_none() {
+    if !cx.global::<Operations>().has_pending() {
         cx.quit();
         return;
     }
@@ -22,48 +38,125 @@ pub(crate) fn quit(cx: &mut App) {
     match target {
         // Deferred: ⌘Q and the palette dispatch from inside that window's own update.
         Some(handle) => cx.defer(move |cx| {
-            if handle.update(cx, |this, window, cx| this.ask_to_stop(window, cx)).is_err() {
-                cx.quit();
+            if handle.update(cx, |this, window, cx| this.ask_to_stop(StopIntent::Quit, window, cx)).is_err() {
+                stop_then(StopIntent::Quit, None, cx);
             }
         }),
         None => match open(launch_folder(cx), false, None, cx) {
             Some(handle) => cx.defer(move |cx| {
-                if handle.update(cx, |this, window, cx| this.ask_to_stop(window, cx)).is_err() {
-                    stop_then_quit(cx);
+                if handle.update(cx, |this, window, cx| this.ask_to_stop(StopIntent::Quit, window, cx)).is_err() {
+                    stop_then(StopIntent::Quit, None, cx);
                 }
             }),
-            None => stop_then_quit(cx),
+            None => stop_then(StopIntent::Quit, None, cx),
         },
     }
 }
 
-/// Cancel the running operation, wait for it to wind down (its undo record lands in
-/// the log), then quit.
-fn stop_then_quit(cx: &mut App) {
-    operations::cancel_running(cx);
+/// Cancel every waiting request and the head, wait for the active worker's
+/// terminal cleanup, then quit or close the window.
+fn stop_then(intent: StopIntent, handle: Option<gpui::WindowHandle<CrowWindow>>, cx: &mut App) {
+    if cx.global::<Operations>().stopping {
+        return;
+    }
+    operations::cancel_all(cx);
     cx.spawn(async move |cx| {
-        while cx.update(|cx| cx.global::<Operations>().running.is_some()) {
+        while cx.update(|cx| !cx.global::<Operations>().is_idle()) {
             cx.background_executor().timer(std::time::Duration::from_millis(30)).await;
         }
-        cx.update(|cx| cx.quit());
+        cx.update(|cx| match intent {
+            StopIntent::Quit => cx.quit(),
+            StopIntent::Close => {
+                if let Some(handle) = handle {
+                    handle
+                        .update(cx, |this, window, cx| {
+                            this.pane().update(cx, |pane, cx| pane.release_listings(cx));
+                            window.remove_window();
+                        })
+                        .ok();
+                }
+                cx.global_mut::<Operations>().stopping = false;
+            }
+        });
     })
     .detach();
 }
 
 impl CrowWindow {
-    fn ask_to_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn activity_owns_focus(&self, window: &Window, cx: &App) -> bool {
+        self.sheet.is_none() && self.show_activity && self.activity_focus.contains_focused(window, cx)
+    }
+
+    pub(super) fn toggle_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sheet.is_some() {
+            return;
+        }
+        if self.activity_owns_focus(window, cx) {
+            self.focus_center(window, cx);
+        }
+        self.show_activity = !self.show_activity;
+        if self.show_activity {
+            window.focus(&self.activity_focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// A red close or Cmd-W on the last tab: ask before cutting off pending work.
+    pub(super) fn window_should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !operations::is_last_crow_window(window.window_handle().window_id(), cx) {
+            return true;
+        }
+        if cx.global::<Operations>().stopping {
+            return false;
+        }
+        if !cx.global::<Operations>().has_pending() {
+            return true;
+        }
+        self.ask_to_stop(StopIntent::Close, window, cx);
+        false
+    }
+
+    fn ask_to_stop(&mut self, intent: StopIntent, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.sheet, Some(Sheet::StopOperation { .. })) {
             return;
         }
+        // The stop sheet replaces a conflict sheet rather than stacking on it; the
+        // job keeps waiting if the user keeps working.
+        if matches!(self.sheet, Some(Sheet::Conflict { .. }))
+            && let Some(prompt) = cx.global_mut::<Operations>().prompt.as_mut()
+        {
+            prompt.host = None;
+        }
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.sheet = Some(Sheet::StopOperation { focus });
+        self.sheet = Some(Sheet::StopOperation { focus, intent });
+        // A conflict sheet in another window must not stack with this question.
+        cx.defer(|cx| operations::dismiss_prompt_sheets(None, cx));
         window.activate_window();
         cx.notify();
     }
 
-    /// Plan in the background; ask first when there are conflicts or the change is
-    /// permanent; otherwise run it.
+    /// Whether `tab` is the active tab and still shows `dir`.
+    pub(crate) fn origin_is_current(&self, origin: &Origin, cx: &App) -> bool {
+        let active = self.tabs.iter().nth(self.tabs.active_index()).map(|(id, _)| id);
+        active == Some(origin.tab)
+            && self.pane().read(cx).current_dir(cx) == origin.dir
+            && self.operation_surface(cx) == origin.surface
+    }
+
+    fn operation_surface(&self, cx: &App) -> crate::plugins::SurfaceId {
+        self.active_search(cx)
+            .map_or_else(|| self.pane().read(cx).current_plugin_surface(cx), |search| search.read(cx).plugin_surface())
+    }
+
+    fn origin(&self, window: &Window, cx: &App) -> Option<Origin> {
+        let pane = self.pane();
+        let tab = self.tabs.iter().find(|(_, candidate)| *candidate == pane).map(|(tab, _)| tab)?;
+        let window = window.window_handle().downcast::<CrowWindow>()?;
+        Some(Origin { window, tab, dir: pane.read(cx).current_dir(cx), surface: self.operation_surface(cx) })
+    }
+
+    /// A permanent delete asks first; everything else enters the app-wide queue.
     pub(super) fn run_request(&mut self, request: Request, window: &mut Window, cx: &mut Context<Self>) {
         if let Request::DeletePermanently { paths } = request {
             let focus = cx.focus_handle();
@@ -72,80 +165,130 @@ impl CrowWindow {
             cx.notify();
             return;
         }
-        cx.spawn_in(window, async move |this, cx| {
-            let planned = cx.background_spawn(async move { crow_fs::ops::plan(request) }).await;
-            this.update_in(cx, |this, window, cx| match planned {
-                Err(e) => {
-                    operations::message(e.to_string(), true, cx);
-                    cx.notify();
-                }
-                Ok(plan) if plan.items.is_empty() => {}
-                Ok(plan) if plan.conflicts().next().is_some() => {
-                    let focus = cx.focus_handle();
-                    window.focus(&focus, cx);
-                    let choices = vec![Resolution::KeepBoth; plan.conflicts().count()];
-                    this.sheet = Some(Sheet::Conflicts { plan, choices, focus });
-                    cx.notify();
-                }
-                Ok(plan) => this.start(plan, HashMap::new(), cx),
-            })
-            .ok();
-        })
-        .detach();
+        operations::enqueue(request, self.origin(window, cx), cx);
+        cx.notify();
     }
 
-    fn start(&mut self, plan: Plan, resolutions: HashMap<PathBuf, Resolution>, cx: &mut Context<Self>) {
-        let rename_result = matches!(plan.request, Request::NewFolder { .. } | Request::NewFile { .. });
-        if rename_result {
+    /// The head began: row effects belong to the moment the engine starts, not
+    /// to the key press that queued it.
+    pub(crate) fn job_started(&mut self, request: &Request, cx: &mut Context<Self>) {
+        if matches!(request, Request::NewFolder { .. } | Request::NewFile { .. }) {
             // The new item must be visible: a filter that hides it would hide the
             // rename field that follows (findings #10).
             self.pane().update(cx, |pane, cx| pane.clear_filter_for_new_item(cx));
         }
-        let trash_paths = match &plan.request {
-            Request::Trash { paths } => Some(&paths[..]),
-            _ => None,
-        };
-        let move_paths = match &plan.request {
-            Request::Move { paths, into } => Some((&paths[..], into.as_path())),
-            _ => None,
-        };
-        // Only the error callback needs an owned copy; the effects borrow the plan.
-        let failed_paths = match &plan.request {
-            Request::Trash { paths }
-            | Request::Move { paths, .. }
-            | Request::Copy { paths, .. }
-            | Request::Duplicate { paths } => Some(paths.clone()),
-            _ => None,
-        };
         let pane = self.pane().downgrade();
-        // The effect starts with the operation, not the key press: a conflict or a
-        // delete sheet may have come first, and a second operation is refused.
-        if cx.global::<Operations>().running.is_none() {
-            if let Some(paths) = trash_paths {
+        match request {
+            Request::Trash { paths } => {
                 pane.update(cx, |pane, cx| pane.start_effect(paths, Fx::Trash, cx)).ok();
             }
-            if let Some((paths, into)) = move_paths {
+            Request::Move { paths, into } => {
                 pane.update(cx, |pane, cx| pane.start_effect(paths, Fx::MoveOut, cx)).ok();
                 // The folder the items land in pulses, in the list and in the sidebar.
-                let into = into.to_path_buf();
+                let into = into.clone();
                 pane.update(cx, |pane, cx| pane.start_effect(std::slice::from_ref(&into), Fx::Receive, cx)).ok();
                 self.sidebar.update(cx, |sidebar, cx| sidebar.pulse(into, cx));
             }
+            _ => {}
         }
-        operations::execute(plan, resolutions, cx, move |record, error, cx| {
-            if error.is_some()
-                && let Some(paths) = &failed_paths
-            {
-                // Whatever is still there refuses.
-                pane.update(cx, |pane, cx| pane.start_effect(paths, Fx::Refuse, cx)).ok();
+    }
+
+    /// The head reached a terminal state: select what it produced only while the
+    /// original tab still shows the original folder.
+    pub(crate) fn job_finished(
+        &mut self,
+        request: &Request,
+        results: Vec<PathBuf>,
+        rename: bool,
+        failed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = self.pane().downgrade();
+        if failed
+            && let Some(paths) = match request {
+                Request::Trash { paths }
+                | Request::Move { paths, .. }
+                | Request::Copy { paths, .. }
+                | Request::Duplicate { paths } => Some(paths.clone()),
+                _ => None,
             }
-            let results = record.results();
-            pane.update(cx, |pane, cx| {
-                pane.show_results(results, rename_result, cx);
-                pane.refresh_saved(cx);
-            })
-            .ok();
+        {
+            // Whatever is still there refuses.
+            pane.update(cx, |pane, cx| pane.start_effect(&paths, Fx::Refuse, cx)).ok();
+        }
+        pane.update(cx, |pane, cx| {
+            pane.show_results(results, rename, cx);
+            pane.refresh_saved(cx);
+        })
+        .ok();
+    }
+
+    /// Show the app-wide conflict prompt in this window. Returns false when this
+    /// window already owns a sheet or no prompt is waiting.
+    pub(crate) fn show_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.sheet.is_some() {
+            return false;
+        }
+        let Some(prompt) = cx.global::<Operations>().prompt.clone() else { return false };
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.sheet = Some(Sheet::Conflict {
+            focus,
+            controls: std::array::from_fn(|_| cx.focus_handle()),
+            job: prompt.job,
+            key: prompt.key(),
+            choice: Resolution::KeepBoth,
+            all: false,
         });
+        if let Some(prompt) = cx.global_mut::<Operations>().prompt.as_mut() {
+            prompt.host = Some(window.window_handle().window_id());
+        }
+        window.activate_window();
+        cx.notify();
+        true
+    }
+
+    /// A prompt's job advanced or moved windows: keep a matching sheet current.
+    pub(crate) fn refresh_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(prompt) = cx.global::<Operations>().prompt.clone() else { return false };
+        match &self.sheet {
+            Some(Sheet::Conflict { job, key, .. }) if *job == prompt.job && *key == prompt.key() => {
+                cx.notify();
+                true
+            }
+            Some(Sheet::Conflict { .. }) => {
+                // A newer attempt (or job) replaced the question; show that one.
+                self.sheet = None;
+                self.show_conflict(window, cx)
+            }
+            Some(_) => false,
+            None => self.show_conflict(window, cx),
+        }
+    }
+
+    /// Drop a conflict sheet without answering its job. `Some(key)` only drops the
+    /// matching attempt; `None` drops any.
+    pub(crate) fn dismiss_conflict_sheet(
+        &mut self,
+        key: Option<ConflictKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let matches = match &self.sheet {
+            Some(Sheet::Conflict { key: current, .. }) => key.is_none_or(|key| key == *current),
+            _ => false,
+        };
+        if !matches {
+            return;
+        }
+        self.sheet = None;
+        if let Some(prompt) = cx.global_mut::<Operations>().prompt.as_mut()
+            && prompt.host == Some(window.window_handle().window_id())
+        {
+            prompt.host = None;
+        }
+        self.focus_center(window, cx);
+        cx.notify();
     }
 
     pub(super) fn undo(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
@@ -179,6 +322,11 @@ impl CrowWindow {
     /// first: an empty Trash says so without asking.
     pub(super) fn empty_trash(&mut self, _: &EmptyTrash, window: &mut Window, cx: &mut Context<Self>) {
         if self.sheet.is_some() {
+            return;
+        }
+        if !cx.global::<Operations>().is_idle() {
+            operations::message("Another operation is still running", true, cx);
+            cx.notify();
             return;
         }
         let home = cx.global::<Ui>().home.clone();
@@ -215,42 +363,40 @@ impl CrowWindow {
     /// Remove every folder's items in the background, then report and play the
     /// sound. Failures leave the rest removed and name what stayed.
     fn run_empty_trash(&mut self, folders: Vec<PathBuf>, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
+        if !operations::begin_maintenance(Maintenance::EmptyTrash, cx) {
+            return;
+        }
+        cx.spawn(async move |_, cx| {
             let report = cx.background_spawn(async move { crow_fs::trash::empty(&folders) }).await;
             let (text, is_error) = crate::trash::message(&report);
             let play = report.removed > 0;
-            this.update(cx, |_, cx| {
+            cx.update(|cx| {
                 operations::message(text, is_error, cx);
                 if play {
                     crate::feedback::play(crow_core::motion::Event::EmptyTrash, cx);
                 }
-                cx.notify();
-            })
-            .ok();
+                operations::end_maintenance(cx);
+            });
         })
         .detach();
     }
 
-    fn confirm_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn confirm_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.sheet, Some(Sheet::SavedQuery(_))) {
             self.confirm_saved_query_form(window, cx);
             return;
         }
         match self.sheet.take() {
-            Some(Sheet::Conflicts { plan, choices, .. }) => {
-                let targets: Vec<PathBuf> = plan.conflicts().map(|i| i.target.clone()).collect();
-                let resolutions = targets.into_iter().zip(choices).collect();
-                self.start(plan, resolutions, cx);
+            Some(Sheet::Conflict { job, key, choice, all, .. }) => {
+                operations::resolve_prompt(job, key, choice, all, cx);
             }
             Some(Sheet::ConfirmDelete { paths, .. }) => {
-                match crow_fs::ops::plan(Request::DeletePermanently { paths }) {
-                    Ok(plan) => self.start(plan, HashMap::new(), cx),
-                    Err(e) => operations::message(e.to_string(), true, cx),
-                }
+                operations::enqueue(Request::DeletePermanently { paths }, self.origin(window, cx), cx);
             }
             Some(Sheet::ConfirmEmptyTrash { folders, .. }) => self.run_empty_trash(folders, cx),
-            Some(Sheet::StopOperation { .. }) => {
-                stop_then_quit(cx);
+            Some(Sheet::StopOperation { intent, .. }) => {
+                let handle = window.window_handle().downcast::<CrowWindow>();
+                stop_then(intent, handle, cx);
                 return;
             }
             Some(Sheet::SavedQuery(_)) => {}
@@ -267,18 +413,34 @@ impl CrowWindow {
         cx.notify();
     }
 
-    fn set_choice(&mut self, index: Option<usize>, choice: Resolution, cx: &mut Context<Self>) {
-        if let Some(Sheet::Conflicts { choices, .. }) = &mut self.sheet {
-            match index {
-                Some(i) => {
-                    if let Some(c) = choices.get_mut(i) {
-                        *c = choice;
-                    }
-                }
-                None => choices.iter_mut().for_each(|c| *c = choice),
-            }
+    fn set_conflict_choice(&mut self, choice: Resolution, all: bool, cx: &mut Context<Self>) {
+        if let Some(Sheet::Conflict { choice: current, all: every, .. }) = &mut self.sheet {
+            *current = choice;
+            *every = all;
             cx.notify();
         }
+    }
+
+    fn activate_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Sheet::Conflict { controls, choice, all, .. }) = &self.sheet {
+            match controls.iter().position(|control| control.is_focused(window)) {
+                Some(index @ 0..=2) => {
+                    let choice = [Resolution::KeepBoth, Resolution::Replace, Resolution::Skip][index];
+                    self.set_conflict_choice(choice, *all, cx);
+                    return;
+                }
+                Some(3) => {
+                    self.set_conflict_choice(*choice, !*all, cx);
+                    return;
+                }
+                Some(4) => {
+                    self.close_sheet(window, cx);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.confirm_sheet(window, cx);
     }
 
     pub(super) fn render_sheet(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -363,21 +525,28 @@ impl CrowWindow {
                     )
                     .into_any_element(),
             ),
-            Sheet::StopOperation { .. } => {
-                let label = cx
-                    .global::<Operations>()
-                    .running
-                    .as_ref()
-                    .map_or_else(|| "The operation".to_owned(), |r| operations::running_label(&r.label));
-                let (verb, confirm) = ("Quitting", "Stop and Quit");
+            Sheet::StopOperation { intent, .. } => {
+                let label = operations::stop_label(cx);
+                let queued = cx.global::<Operations>().queued_count();
+                let (verb, confirm) = match intent {
+                    StopIntent::Quit => ("Quitting", "Stop and Quit"),
+                    StopIntent::Close => ("Closing", "Stop and Close"),
+                };
+                let waiting = if queued == 0 {
+                    String::new()
+                } else if queued == 1 {
+                    " One more request is waiting; it is cancelled too.".to_owned()
+                } else {
+                    format!(" {queued} more requests are waiting; they are cancelled too.")
+                };
                 (
-                    format!("{label} is still running"),
+                    format!("{label} is still in progress"),
                     div()
                         .flex()
                         .flex_col()
                         .gap_3()
                         .child(div().text_color(color(muted)).child(format!(
-                            "{verb} would cut it off. Stop it cleanly first? Items already finished stay (Undo can reverse them); the one in progress is left out, never half done."
+                            "{verb} would cut it off. Stop it cleanly first? Items already finished stay (Undo can reverse them); the one in progress is left out, never half done.{waiting}"
                         )))
                         .child(
                             div()
@@ -425,99 +594,133 @@ impl CrowWindow {
                     )
                     .into_any_element(),
             ),
-            Sheet::Conflicts { plan, choices, .. } => {
-                let into = plan
-                    .items
-                    .first()
-                    .and_then(|i| i.target.parent())
-                    .map(crate::style::display_name)
-                    .unwrap_or_default();
-                let rows: Vec<(usize, String, Resolution)> = plan
-                    .conflicts()
-                    .zip(choices.iter().copied())
-                    .enumerate()
-                    .map(|(i, (item, choice))| {
-                        (
-                            i,
-                            item.target.file_name().map_or_else(String::new, |name| {
-                                crate::style::display_text(&name.to_string_lossy()).into_owned()
-                            }),
-                            choice,
-                        )
-                    })
-                    .collect();
-                let option = |row: usize,
-                              label: &'static str,
-                              value: Resolution,
-                              current: Resolution,
-                              cx: &mut Context<Self>| {
-                    let on = value == current;
-                    div()
-                        .id(("choice", row * 3 + value as usize))
-                        .role(Role::RadioButton)
-                        .aria_label(label)
-                        .aria_selected(on)
-                        .px_2()
-                        .rounded_sm()
-                        .text_size(px(12.))
-                        .when(on, |o| o.bg(active_selection(&theme)).text_color(color(fg)))
-                        .on_click(cx.listener(move |this, _, _, cx| this.set_choice(Some(row), value, cx)))
-                        .child(label)
-                };
-                let n = rows.len();
-                (
-                    if n == 1 {
-                        format!("An item named “{}” already exists in “{into}”", rows[0].1)
-                    } else {
-                        format!("{n} items already exist in “{into}”")
-                    },
-                    div()
+            Sheet::Conflict { job, key, choice, all, controls, .. } => {
+                let prompt = cx
+                    .global::<Operations>()
+                    .prompt
+                    .clone()
+                    .filter(|prompt| prompt.job == *job && prompt.key() == *key);
+                if let Some(prompt) = prompt {
+                    let conflict = &prompt.conflict;
+                    let name = conflict.target.file_name().map_or_else(String::new, |name| {
+                        crate::style::display_text(&name.to_string_lossy()).into_owned()
+                    });
+                    let into = conflict
+                        .target
+                        .parent()
+                        .map(crate::style::display_name)
+                        .unwrap_or_default();
+                    let reason = match conflict.reason {
+                        crow_fs::ops::ConflictReason::Exists => "This item already exists in the folder.",
+                        crow_fs::ops::ConflictReason::Appeared => "This item appeared while the operation was running.",
+                        crow_fs::ops::ConflictReason::Changed => {
+                            "The item at this location changed. Choose again."
+                        }
+                    };
+                    let choice = *choice;
+                    let all = *all;
+                    let option = |value: Resolution, label: &'static str, focus: &FocusHandle, cx: &mut Context<Self>| {
+                        let on = value == choice;
+                        div()
+                            .id(("conflict-choice", value as usize))
+                            .track_focus(focus)
+                            .focus_visible(|style| style.shadow(cursor_ring(&theme)))
+                            .role(Role::RadioButton)
+                            .aria_label(label)
+                            .aria_selected(on)
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .text_size(px(12.))
+                            .when(on, |option| option.bg(active_selection(&theme)).text_color(color(fg)))
+                            .when(!on, |option| option.bg(color(theme.role("surface-raised"))))
+                            .on_click(cx.listener(move |this, _, _, cx| this.set_conflict_choice(value, all, cx)))
+                            .child(label)
+                    };
+                    let apply_all = div()
+                        .id("conflict-all")
+                        .track_focus(&controls[3])
+                        .focus_visible(|style| style.shadow(cursor_ring(&theme)))
+                        .role(Role::CheckBox)
+                        .aria_label("Apply to all remaining conflicts")
+                        .aria_toggled(if all { gpui::Toggled::True } else { gpui::Toggled::False })
                         .flex()
-                        .flex_col()
+                        .items_center()
                         .gap_2()
-                        .children(rows.into_iter().map(|(i, name, choice)| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(name))
-                                .child(option(i, "Keep Both", Resolution::KeepBoth, choice, cx))
-                                .child(option(i, "Replace", Resolution::Replace, choice, cx))
-                                .child(option(i, "Skip", Resolution::Skip, choice, cx))
-                        }))
-                        .child(div().text_size(px(12.)).text_color(color(muted)).child(
-                            "Keep Both adds a number to the new name. Replace moves the existing item to the Trash.",
+                        .text_size(px(12.))
+                        .text_color(color(muted))
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_conflict_choice(choice, !all, cx)))
+                        .child(div().w(px(14.)).h(px(14.)).rounded_sm().border_1().border_color(color(theme.role("border"))).when(
+                            all,
+                            |box_| box_.bg(color(accent)),
                         ))
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .pt_2()
-                                .child(button("all-keep", "Keep Both for All".into(), false, None).on_click(
-                                    cx.listener(|this, _, _, cx| this.set_choice(None, Resolution::KeepBoth, cx)),
-                                ))
-                                .child(button("all-skip", "Skip All".into(), false, None).on_click(
-                                    cx.listener(|this, _, _, cx| this.set_choice(None, Resolution::Skip, cx)),
-                                ))
-                                .child(div().flex_1())
-                                .child(
-                                    button("sheet-cancel", "Cancel".into(), false, None)
+                        .child("Apply to all remaining conflicts");
+                    (
+                        format!("“{name}” already exists in “{into}”"),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(div().text_color(color(muted)).child(reason))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(option(Resolution::KeepBoth, "Keep Both", &controls[0], cx))
+                                    .child(option(Resolution::Replace, "Replace", &controls[1], cx))
+                                    .child(option(Resolution::Skip, "Skip", &controls[2], cx)),
+                            )
+                            .child(div().text_size(px(12.)).text_color(color(muted)).child(
+                                "Keep Both adds a number to the new name. Replace moves the existing item to the Trash.",
+                            ))
+                            .child(apply_all)
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        button("sheet-cancel", "Decide Later".into(), false, Some(&controls[4]))
+                                            .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
+                                    )
+                                    .child(
+                                        button("sheet-confirm", "Continue".into(), true, Some(&controls[5]))
+                                            .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
+                                    ),
+                            )
+                            .into_any_element(),
+                    )
+                } else {
+                    (
+                        "This conflict is no longer waiting".to_owned(),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(div().text_color(color(muted)).child("Another answer or a stop already settled it."))
+                            .child(
+                                div().flex().justify_end().child(
+                                    button("sheet-cancel", "Close".into(), false, None)
                                         .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
-                                )
-                                .child(
-                                    button("sheet-confirm", "Continue".into(), true, None)
-                                        .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
                                 ),
-                        )
-                        .into_any_element(),
-                )
+                            )
+                            .into_any_element(),
+                    )
+                }
             }
         };
-        let onboarding_tab = cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-            if event.keystroke.key == "tab" {
-                this.move_onboarding_focus(!event.keystroke.modifiers.shift, window, cx);
-                cx.stop_propagation();
+        let sheet_tab = cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+            if event.keystroke.key != "tab" {
+                return;
             }
+            let forward = !event.keystroke.modifiers.shift;
+            if let Some(Sheet::Conflict { controls, .. }) = &this.sheet {
+                cycle_focus(controls, forward, window, cx);
+                cx.notify();
+            } else {
+                this.move_onboarding_focus(forward, window, cx);
+            }
+            cx.stop_propagation();
         });
         Some(chrome::sheet(
             chrome::sheet_panel(
@@ -529,9 +732,13 @@ impl CrowWindow {
             // keys::context_stack (KeyScope::Sheet) mirrors this.
             .key_context("Sheet")
             .when(!matches!(sheet, Sheet::SavedQuery(_)), |panel| panel.track_focus(sheet.focus()))
-            .on_action(cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.confirm_sheet(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.activate_sheet(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_sheet(window, cx)))
-            .when(matches!(sheet, Sheet::Onboarding { .. }), |panel| panel.on_key_down(onboarding_tab))
+            .when(matches!(sheet, Sheet::Onboarding { .. } | Sheet::Conflict { .. }), |panel| {
+                panel.on_key_down(sheet_tab)
+            })
             .p_4()
             // The first-launch question sits a little lower than the other
             // sheets, so it reads as an invitation rather than an alert.
@@ -547,10 +754,24 @@ impl CrowWindow {
         ))
     }
 
-    /// Recent operations, newest first, each with its own Undo.
-    pub(super) fn render_activity(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// Active and queued jobs first, then recent terminal outcomes newest first.
+    pub(super) fn render_activity(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let muted = color(theme.role("fg-muted"));
+        let border = color(theme.role("border"));
+        let (active, queued, running, prompt_job, idle) = {
+            let ops = cx.global::<Operations>();
+            let active = ops.active.as_ref().map(|active| {
+                (active.id, active.label.clone(), active.phase, active.pause_supported, active.conflict.is_some())
+            });
+            let queued: Vec<(RequestId, String)> =
+                ops.queue.iter().map(|queued| (queued.id, queued.label.clone())).collect();
+            let running = ops.running().map(|mut running| {
+                running.queued = 0;
+                running
+            });
+            (active, queued, running, ops.prompt.as_ref().map(|prompt| prompt.job), ops.is_idle())
+        };
         let entries: Vec<(usize, String, String, bool)> = cx
             .global::<Operations>()
             .log
@@ -572,28 +793,137 @@ impl CrowWindow {
                 (i, label, format!("{} {state}", when.format("%H:%M")), e.record.is_undoable() && !e.undone)
             })
             .collect();
-        div()
-            .id("activity")
-            .role(Role::List)
-            .aria_label("Activity")
-            .absolute()
-            .top(px(BAND_HEIGHT))
-            .right(px(12.))
-            .w(px(360.))
-            .max_h(px(420.))
-            .overflow_y_scroll()
-            .p_3()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .rounded_lg()
-            .bg(color(theme.role("surface")))
-            .border_1()
-            .border_color(color(theme.role("border")))
-            .shadow_lg()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Activity"))
-            .when(entries.is_empty(), |list| list.child(div().text_color(muted).child("Nothing yet")))
-            .children(entries.into_iter().map(|(i, label, when, undoable)| {
+        let mut previous = std::mem::take(&mut self.activity_controls);
+        let mut controls = Vec::new();
+        let mut pill = |id: (&'static str, u64), label: &'static str, primary: bool, cx: &Context<Self>| {
+            let debug = format!("{}-{}", id.0, id.1);
+            let focus = previous.remove(&id).unwrap_or_else(|| cx.focus_handle());
+            controls.push(focus.clone());
+            self.activity_controls.insert(id, focus.clone());
+            div()
+                .id(id)
+                .debug_selector(move || debug.clone())
+                .track_focus(&focus)
+                .focus_visible(|style| style.shadow(cursor_ring(&theme)))
+                .role(Role::Button)
+                .aria_label(label)
+                .px_2()
+                .py(px(2.))
+                .rounded_sm()
+                .text_size(px(11.))
+                .bg(color(if primary { theme.role("accent") } else { theme.role("surface-raised") }))
+                .text_color(color(if primary { theme.role("on-accent") } else { theme.role("fg") }))
+                .child(label)
+        };
+        let active_row = active.map(|(id, label, phase, pause_supported, has_conflict)| {
+            let detail = running.as_ref().map_or_else(String::new, |running| {
+                let view = crate::bottom_bar::RunningView::new(running);
+                view.detail.to_string()
+            });
+            let (state, aria) = match phase {
+                JobPhase::Queued => ("Waiting".to_owned(), "Waiting".to_owned()),
+                JobPhase::Planning => ("Planning…".to_owned(), "Planning".to_owned()),
+                JobPhase::Running => (detail.clone(), "Running".to_owned()),
+                JobPhase::PauseRequested => ("Pausing…".to_owned(), "Pausing".to_owned()),
+                JobPhase::Paused => (detail, "Paused".to_owned()),
+                JobPhase::AwaitingConflict => {
+                    ("Waiting for your choice".to_owned(), "Waiting for your choice".to_owned())
+                }
+                JobPhase::Cancelling => ("Stopping…".to_owned(), "Stopping".to_owned()),
+            };
+            let label = crate::style::display_text(&operations::running_label(&label)).into_owned();
+            div()
+                .id(("activity-active", id.0))
+                .debug_selector(move || format!("activity-active-{}", id.0))
+                .role(Role::ListItem)
+                .aria_label(format!("{label}, {aria}"))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+                        .child(div().text_size(px(11.)).text_color(muted).child(state)),
+                )
+                .when(phase == JobPhase::Running && pause_supported, |row| {
+                    row.child(pill(("activity-pause-resume", id.0), "Pause", false, cx).on_click(cx.listener(
+                        move |_, _, _, cx| {
+                            if cx.global::<Operations>().active_id() == Some(id) {
+                                operations::pause_active(cx);
+                            }
+                        },
+                    )))
+                })
+                .when(matches!(phase, JobPhase::Paused | JobPhase::PauseRequested), |row| {
+                    row.child(pill(("activity-pause-resume", id.0), "Resume", false, cx).on_click(cx.listener(
+                        move |_, _, _, cx| {
+                            if cx.global::<Operations>().active_id() == Some(id) {
+                                operations::resume_active(cx);
+                            }
+                        },
+                    )))
+                })
+                .when(has_conflict && prompt_job == Some(id), |row| {
+                    row.child(pill(("activity-resolve", id.0), "Resolve", true, cx).on_click(cx.listener(
+                        move |_, _, window, cx| {
+                            if let Some(handle) = window.window_handle().downcast::<CrowWindow>() {
+                                cx.defer(move |cx| {
+                                    if cx.global::<Operations>().prompt.as_ref().is_some_and(|prompt| prompt.job == id)
+                                    {
+                                        operations::present_prompt_in(handle, cx);
+                                    }
+                                });
+                            }
+                        },
+                    )))
+                })
+                .when(phase != JobPhase::Cancelling, |row| {
+                    row.child(pill(("activity-cancel", id.0), "Cancel", false, cx).on_click(cx.listener(
+                        move |_, _, _, cx| {
+                            if cx.global::<Operations>().active_id() == Some(id) {
+                                operations::cancel_active(cx);
+                            }
+                        },
+                    )))
+                })
+        });
+        let queued_rows: Vec<gpui::AnyElement> = queued
+            .into_iter()
+            .map(|(id, label)| {
+                let label = crate::style::display_text(&label).into_owned();
+                div()
+                    .id(("activity-queued", id.0))
+                    .debug_selector(move || format!("activity-queued-{}", id.0))
+                    .role(Role::ListItem)
+                    .aria_label(format!("{label}, waiting"))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+                            .child(div().text_size(px(11.)).text_color(muted).child("Waiting")),
+                    )
+                    .child(
+                        pill(("activity-cancel-queued", id.0), "Cancel", false, cx)
+                            .on_click(cx.listener(move |_, _, _, cx| operations::cancel_queued(id, cx))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let active_row = active_row.map(IntoElement::into_any_element);
+        let has_history = !entries.is_empty();
+        let history: Vec<_> = entries
+            .into_iter()
+            .map(|(i, label, when, undoable)| {
                 div()
                     .id(("activity-entry", i))
                     .role(Role::ListItem)
@@ -609,19 +939,63 @@ impl CrowWindow {
                             .child(label)
                             .child(div().text_size(px(11.)).text_color(muted).child(when)),
                     )
-                    .when(undoable, |row| {
+                    .when(undoable && idle, |row| {
                         row.child(
-                            div()
-                                .id(("activity-undo", i))
-                                .role(Role::Button)
-                                .aria_label("Undo")
-                                .px_2()
-                                .rounded_sm()
-                                .bg(color(theme.role("surface-raised")))
-                                .on_click(cx.listener(move |this, _, _, cx| this.undo(Some(i), cx)))
-                                .child("Undo"),
+                            pill(("activity-undo", i as u64), "Undo", false, cx)
+                                .on_click(cx.listener(move |this, _, _, cx| this.undo(Some(i), cx))),
                         )
                     })
+            })
+            .collect();
+        if previous.values().any(|focus| focus.is_focused(window)) {
+            cx.defer_in(window, |this, window, cx| {
+                if this.show_activity && this.sheet.is_none() {
+                    window.focus(&this.activity_focus, cx);
+                }
+            });
+        }
+        let forward_controls = controls.clone();
+        div()
+            .id("activity")
+            .track_focus(&self.activity_focus)
+            .on_action(move |_: &SwitchFocus, window, cx| {
+                cycle_focus(&forward_controls, true, window, cx);
+                cx.stop_propagation();
+            })
+            .on_key_down(move |event, window, cx| {
+                if event.keystroke.key == "tab" && event.keystroke.modifiers.shift {
+                    cycle_focus(&controls, false, window, cx);
+                    cx.stop_propagation();
+                }
+            })
+            .on_action(cx.listener(|this, _: &crate::actions::CancelOperation, window, cx| {
+                this.toggle_activity(window, cx);
+                cx.stop_propagation();
             }))
+            .role(Role::List)
+            .aria_label("Activity")
+            .absolute()
+            .top(px(BAND_HEIGHT))
+            .right(px(12.))
+            .w(px(360.))
+            .max_h(px(420.))
+            .overflow_y_scroll()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_lg()
+            .bg(color(theme.role("surface")))
+            .border_1()
+            .border_color(border)
+            .shadow_lg()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Activity"))
+            .when(active_row.is_none() && queued_rows.is_empty() && !has_history, |list| {
+                list.child(div().text_color(muted).child("Nothing yet"))
+            })
+            .children(active_row)
+            .children(queued_rows)
+            .when(has_history, |list| list.child(div().h(px(1.)).bg(border).my_1()))
+            .children(history)
     }
 }

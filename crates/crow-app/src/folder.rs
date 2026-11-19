@@ -452,8 +452,7 @@ impl Folder {
         self.plugin_surface
     }
 
-    /// The scope's contribution epoch. It changes on a relist or watcher apply,
-    /// so a replaced same-path entry gets a new cache key.
+    /// The current listing revision, including applied watcher batches.
     pub fn plugin_scope_version(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.generation.hash(&mut hasher);
@@ -462,8 +461,19 @@ impl Folder {
     }
 
     pub fn plugin_entry_version(&self, entry: &Entry) -> u64 {
+        self.plugin_version(entry, self.plugin_scope_version())
+    }
+
+    /// Ready row values survive named watcher batches for other paths. The
+    /// coordinator invalidates reported paths and checks the listing revision
+    /// separately for in-flight replies.
+    pub fn plugin_row_version(&self, entry: &Entry) -> u64 {
+        self.plugin_version(entry, self.generation)
+    }
+
+    fn plugin_version(&self, entry: &Entry, revision: u64) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.plugin_scope_version().hash(&mut hasher);
+        revision.hash(&mut hasher);
         entry.path.hash(&mut hasher);
         entry.size.hash(&mut hasher);
         entry.is_dir.hash(&mut hasher);
@@ -1895,10 +1905,10 @@ impl Folder {
             }
             let (hidden, sort) = (self.show_hidden, self.sort);
             let child = cx.new(|cx| Folder::new(path.clone(), hidden, sort, false, cx));
-            let subscription = cx.subscribe(&child, |this, _, event, cx| {
-                if matches!(event, FolderEvent::Loaded | FolderEvent::Changed) {
-                    this.child_changed(cx);
-                }
+            let subscription = cx.subscribe(&child, |this, _, event, cx| match event {
+                FolderEvent::Loaded | FolderEvent::Changed => this.child_changed(cx),
+                FolderEvent::WatcherApplied { paths } => cx.emit(FolderEvent::WatcherApplied { paths: paths.clone() }),
+                _ => {}
             });
             self.expanded.insert(path.clone());
             self.children.insert(path, ChildFolder { folder: child, _subscription: subscription });
