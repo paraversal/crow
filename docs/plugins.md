@@ -171,11 +171,12 @@ or a palette hue (`base08`–`base0F`, `base12`–`base17`).
 `icon` is a relative path to an `.svg` in the pack. Each glyph must be a regular file
 (no symlinks), stay inside the pack folder, be at most 256 KiB, and the pack may total
 at most 8 MiB across 512 glyphs. Glyphs must be UTF-8 SVG without scripts, embedded
-images, external `href`s, event attributes or external CSS references. An unknown role,
-missing asset, bad path or malformed glyph rejects the whole pack; Crow keeps the last
-good pack snapshot and reports the error. Removing a pack or disabling its plugin falls
-back to native icons and keeps the configured id. Local packs live in
-`icon-packs/<id>/pack.toml` under the config folder and use the folder name as their id.
+images, `<style>` elements, external `href`s, event attributes or external CSS
+references. An unknown role, missing asset, bad path or malformed glyph rejects the
+whole pack; Crow keeps the last good pack snapshot and reports the error. Removing a
+pack or disabling its plugin falls back to native icons and keeps the configured id.
+Local packs live in `icon-packs/<id>/pack.toml` under the config folder and use the
+folder name as their id; an id is lowercase letters, digits and hyphens.
 
 Computed functions receive one map:
 

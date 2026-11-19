@@ -109,7 +109,6 @@ impl Resolver {
 /// carrying the newest request may publish.
 pub struct IconPacks {
     snapshot: Arc<IconSnapshot>,
-    published: u64,
     request: u64,
     loading: bool,
     queued: bool,
@@ -123,7 +122,6 @@ impl Default for IconPacks {
     fn default() -> Self {
         Self {
             snapshot: Arc::new(IconSnapshot::default()),
-            published: 0,
             request: 0,
             loading: false,
             queued: false,
@@ -219,13 +217,27 @@ fn finish_load(cx: &mut App, generation: u64, result: Result<IconSnapshot, Strin
     let error = cx.global::<IconPacks>().error.clone();
     if changed {
         cx.refresh_windows();
+        // Status errors stay until something replaces them. A successful load
+        // that follows a failure is that something: drop the error text we put
+        // there, but leave an unrelated message alone.
+        if error.is_none() {
+            let previous = cx.global_mut::<IconPacks>().reported_error.take();
+            let still_shown = previous.is_some_and(|previous| {
+                cx.try_global::<crate::operations::Operations>().is_some_and(|operations| {
+                    operations.message.as_ref().is_some_and(|(text, is_error)| *is_error && text.as_ref() == previous)
+                })
+            });
+            if still_shown {
+                crate::operations::clear_message(cx);
+            }
+        }
     }
     if let Some(error) = error
         && cx.global::<IconPacks>().reported_error.as_deref() != Some(error.as_ref())
     {
         cx.global_mut::<IconPacks>().reported_error = Some(error.to_string());
         if cx.try_global::<crate::operations::Operations>().is_some() {
-            crate::operations::message(format!("Icon pack: {error}"), true, cx);
+            crate::operations::message(error, true, cx);
         }
     }
 }
@@ -241,9 +253,7 @@ impl IconPacks {
             Ok(mut snapshot) => {
                 snapshot.generation = generation;
                 self.snapshot = Arc::new(snapshot);
-                self.published = generation;
                 self.error = None;
-                self.reported_error = None;
                 true
             }
             Err(error) => {
@@ -263,7 +273,6 @@ impl IconPacks {
     pub(crate) fn install_for_tests(&mut self, snapshot: IconSnapshot) {
         self.request = self.request.wrapping_add(1);
         self.snapshot = Arc::new(snapshot);
-        self.published = self.request;
         self.error = None;
     }
 

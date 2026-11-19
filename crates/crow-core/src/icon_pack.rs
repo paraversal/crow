@@ -255,7 +255,7 @@ impl IconPack {
         !self.type_id.is_empty()
     }
 
-    /// Every glyph file this pack references, once, in sorted order.
+    /// Every glyph file this pack references, once, in tier order.
     pub fn assets(&self) -> impl Iterator<Item = &str> {
         let mut seen = BTreeSet::new();
         self.entries().map(|entry| entry.icon.as_str()).filter(move |icon| seen.insert(*icon))

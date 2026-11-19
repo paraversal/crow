@@ -1048,8 +1048,16 @@ name = "Sample"
     write_config(&view, &mut cx, "views.toml", &views);
     assert!(cx.debug_bounds("pack-glyph").is_some(), "the folder's rule selects the pack");
 
-    // A missing configured pack falls back to native and keeps the setting.
+    // Native in settings.toml draws Finder's icons even while the pack is installed.
     write_config(&view, &mut cx, "views.toml", "[defaults]\n");
+    cx.update(|_, cx| {
+        cx.global_mut::<Ui>().settings.icon_pack = "native".into();
+        cx.refresh_windows();
+    });
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("pack-glyph").is_none(), "native in settings.toml wins");
+
+    // A missing configured pack falls back to native and keeps the setting.
     cx.update(|_, cx| {
         cx.global_mut::<Ui>().settings.icon_pack = "missing".into();
         cx.refresh_windows();
@@ -1092,6 +1100,70 @@ name = "Sample"
     cx.update(|_, cx| {
         assert_eq!(cx.global::<Ui>().settings.icon_pack, "example.pack.theme", "the choice is kept");
     });
+}
+
+/// Wait until the icon loader publishes an error, and return its text.
+fn wait_for_icon_error(cx: &mut VisualTestContext) -> Option<String> {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        if let Some(error) = cx.read(|cx| {
+            cx.try_global::<crate::icon_packs::IconPacks>()
+                .and_then(|packs| packs.error().map(|error| error.to_string()))
+        }) {
+            return Some(error);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    None
+}
+
+/// Wait until a reload succeeds and the error state is clear.
+fn wait_for_icon_success(cx: &mut VisualTestContext) {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        let error = cx.read(|cx| {
+            cx.try_global::<crate::icon_packs::IconPacks>()
+                .and_then(|packs| packs.error().map(|error| error.to_string()))
+        });
+        if error.is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the fixed icon pack never loaded");
+}
+
+#[gpui::test]
+fn fixing_an_icon_pack_clears_its_sticky_status_error(cx: &mut TestAppContext) {
+    const GLYPH: &str =
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/></svg>"#;
+    let root = fixture("icon-pack-error-clears");
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        let config = cx.global::<Ui>().config_dir.clone();
+        let pack = config.join("icon-packs/sample");
+        std::fs::create_dir_all(&pack).expect("pack dir");
+        std::fs::write(pack.join("pack.toml"), "api = 1\n[generic]\nfile = { icon = \"x.svg\", color = \"nope\" }")
+            .expect("broken pack");
+        std::fs::write(config.join("settings.toml"), "icon_pack = \"sample\"\n").expect("settings");
+        crate::ui::reload_config(cx);
+        crate::icon_packs::reload(cx);
+    });
+    let error = wait_for_icon_error(&mut cx).expect("the broken pack reports");
+    let message = cx.read(|cx| cx.global::<crate::operations::Operations>().message.clone());
+    assert!(message.as_ref().is_some_and(|(text, is_error)| *is_error && text.as_ref() == error), "{message:?}");
+
+    let pack = config_dir(&cx).join("icon-packs/sample");
+    std::fs::write(pack.join("x.svg"), GLYPH).expect("glyph");
+    std::fs::write(pack.join("pack.toml"), "api = 1\n[generic]\nfile = { icon = \"x.svg\" }").expect("fixed pack");
+    cx.update(|_, cx| crate::icon_packs::reload(cx));
+    wait_for_icon_success(&mut cx);
+    settle(&view, &mut cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("pack-glyph").is_some(), "the fixed pack draws");
+    assert!(
+        cx.read(|cx| cx.global::<crate::operations::Operations>().message.is_none()),
+        "a successful reload drops the error it put in the status line"
+    );
 }
 
 fn favorites_toml(paths: &[&Path]) -> String {

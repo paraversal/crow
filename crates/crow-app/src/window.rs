@@ -1629,7 +1629,7 @@ impl CrowWindow {
                         div()
                             .text_size(px(12.))
                             .text_color(color(theme.role("error")))
-                            .child(format!("Icon pack: {error} (last good icons kept)")),
+                            .child(format!("{error} (last good icons kept)")),
                     )
                 })
                 .child(
