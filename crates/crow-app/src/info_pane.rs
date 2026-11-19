@@ -117,6 +117,8 @@ type Loader = Arc<dyn Fn(&InfoTarget) -> LoadedInfo + Send + Sync>;
 
 pub struct InfoPane {
     tab: InfoTab,
+    pub(crate) preferred_width: Option<gpui::Pixels>,
+    splitter_focus: gpui::FocusHandle,
     /// The column's visibility in this window; `default` is `settings.show_preview`.
     visible: bool,
     /// The user opened or closed the column with ⌘I or ⇧⌘P, not the setting. A narrow
@@ -143,6 +145,10 @@ fn observe_sizes(cx: &mut Context<InfoPane>) {
 }
 
 impl InfoPane {
+    pub fn splitter_focus(&self) -> &gpui::FocusHandle {
+        &self.splitter_focus
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         let default = cx.global::<Ui>().settings.show_preview;
         let pane = Self::with_default(default, Arc::new(real_load), cx);
@@ -157,6 +163,8 @@ impl InfoPane {
         let cloud_subscription = cloud_service.map(|service| cx.observe(&service, |_, _, cx| cx.notify()));
         Self {
             tab: InfoTab::Preview,
+            preferred_width: None,
+            splitter_focus: cx.focus_handle(),
             visible: default,
             explicit: false,
             default,

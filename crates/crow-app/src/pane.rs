@@ -3575,17 +3575,29 @@ impl Pane {
                 }
                 InfoTab::Info => self.info.clone().into_any_element(),
             };
+            let (preferred_width, splitter_focus) = {
+                let info = self.info.read(cx);
+                (info.preferred_width, info.splitter_focus().clone())
+            };
             strip = strip.child(
                 div()
                     .id("preview-column")
                     .debug_selector(|| "preview-column".into())
                     .role(Role::Group)
                     .aria_label(label)
-                    .flex_1()
-                    .min_w(px(PREVIEW_COLUMN_WIDTH))
+                    .relative()
+                    .when_none(&preferred_width, |column| column.flex_1().min_w(px(PREVIEW_COLUMN_WIDTH)))
+                    .when_some(preferred_width, |column, width| {
+                        column.flex_none().w(width.min(window.viewport_size().width / 2.))
+                    })
                     .h_full()
                     .flex_col()
                     .child(info_pane::tab_strip(&self.info, &theme, cx))
+                    .child(crate::window::side_panes::splitter(
+                        crate::window::side_panes::Side::Right,
+                        &splitter_focus,
+                        &theme,
+                    ))
                     .child(div().id("info-body").flex_1().min_h_0().p_4().overflow_y_scroll().child(body)),
             );
         }

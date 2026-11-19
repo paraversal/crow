@@ -1833,7 +1833,7 @@ impl Render for Sidebar {
             .on_action(cx.listener(Self::collapse_section))
             .on_action(cx.listener(Self::eject_cursor))
             .debug_selector(|| "sidebar".into())
-            .w(px(210.))
+            .w_full()
             .flex_none()
             .h_full()
             .px_2()

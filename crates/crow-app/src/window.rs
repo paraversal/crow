@@ -154,6 +154,7 @@ pub struct CrowWindow {
     sidebar: Entity<Sidebar>,
     /// The right column's tab choice and Info target, shared by every tab.
     info: Entity<InfoPane>,
+    side_panes: side_panes::SidePanes,
     /// Benchmark runs leave Recent alone, so its saves don't land in the measurement.
     bench: bool,
     show_hidden: bool,
@@ -250,6 +251,7 @@ impl CrowWindow {
                     // The pointer can stay over the path while another app is active;
                     // the pill must not stay on screen with it.
                     this.path_hovered = false;
+                    this.side_panes.finish();
                     cx.notify();
                 }
             }),
@@ -281,6 +283,7 @@ impl CrowWindow {
             tabs: Tabs::new(pane),
             sidebar,
             info,
+            side_panes: side_panes::SidePanes::new(cx),
             bench,
             show_hidden,
             search_includes_hidden,
@@ -950,13 +953,15 @@ impl CrowWindow {
             .debug_selector(|| "preview".into())
             .role(Role::Group)
             .aria_label(label)
-            .w(px(300.))
+            .w(self.side_panes.right_width())
+            .relative()
             .flex_none()
             .h_full()
             .flex_col()
             .border_l_1()
             .border_color(color(theme.role("border")))
             .child(info_pane::tab_strip(&self.info, theme, cx))
+            .child(side_panes::splitter(side_panes::Side::Right, self.info.read(cx).splitter_focus(), theme))
             .child(div().id("info-body").flex_1().min_h_0().p_4().overflow_y_scroll().child(body))
     }
 
@@ -2232,7 +2237,14 @@ impl Render for CrowWindow {
             let (dir, revision, dirs) = self.pane().read(cx).sidebar_plugin_dirs(walking, cx);
             self.sidebar.update(cx, |s, cx| s.set_plugin_dirs(dir, dirs, revision, cx));
         }
-        let sidebar = self.sidebar.clone();
+        self.side_panes.layout(window.viewport_size().width, self.info.read(cx).preferred_width);
+        let sidebar = div()
+            .relative()
+            .h_full()
+            .flex_none()
+            .w(self.side_panes.left_width())
+            .child(self.sidebar.clone())
+            .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme));
         let search_preview = self.search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);
         // A narrow search hides the column by default; ⌘I or ⇧⌘P still opens it.
@@ -2295,10 +2307,19 @@ impl Render for CrowWindow {
             .role(Role::Application)
             .aria_label("Crow")
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    if let Some((side, width)) = this.side_panes.drag_to(event.position.x) {
+                        this.set_side_pane_width(side, Some(width), cx);
+                    }
+                } else {
+                    this.side_panes.finish();
+                }
                 if cx.has_active_drag() {
                     this.pane().update(cx, |pane, cx| pane.update_drag_target(event.position, cx));
                 }
             }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.side_panes.finish()))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| this.side_panes.finish()))
             // keys::context_stack (KeyScope::Window) mirrors this; every overlay nests under it.
             .key_context("Crow")
             .on_action(cx.listener(Self::run_plugin_command))
@@ -2608,6 +2629,7 @@ fn missing_focus_violation(focus_required: bool) -> Option<crate::fuzz::Violatio
 pub(crate) mod operation_ui;
 mod palette_view;
 mod path_edit;
+pub(crate) mod side_panes;
 
 #[cfg(test)]
 mod tests;
