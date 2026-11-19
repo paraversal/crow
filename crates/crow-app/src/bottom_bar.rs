@@ -28,7 +28,7 @@ use crate::text_input::{self, Complete, Confirm, TextInput};
 use crate::ui::Ui;
 use crate::usage;
 use crow_core::motion::{self, Effective};
-use crow_core::{HintsMode, idle_hint_visible};
+use crow_core::{HintsMode, PathBarMode, idle_hint_visible};
 use crow_fs::human_size;
 
 /// The bar's height; tips sit above it.
@@ -45,6 +45,8 @@ pub struct BarState {
     /// A virtual destination's title (a saved search): the path slot shows this
     /// instead of a path, and it is not editable or draggable.
     pub virtual_path: Option<SharedString>,
+    /// The breadcrumb style chosen in `settings.toml`.
+    pub path_bar: PathBarMode,
     /// The path field while ⌘L edits it; the segments give way to it.
     pub editing: Option<Entity<TextInput>>,
     /// The most the transient slot may take, so the path keeps its first and last
@@ -330,6 +332,10 @@ const GAP: f32 = 14.;
 /// caret, while the hints keep their room.
 const PATH_FIELD_MIN: f32 = 180.;
 
+/// The Explorer Go button's extra width while editing: its 20 px target and the
+/// field's 14 px gap. Crow has no button, so its field keeps the older minimum.
+const PATH_GO_WIDTH: f32 = 34.;
+
 /// How the bar shares its room this frame.
 #[derive(Debug, PartialEq)]
 pub struct Fit {
@@ -466,20 +472,19 @@ pub fn fit_to_window(state: &mut BarState, window: &Window) {
     };
     // The field spans the left section: the bar less the counts and one gap.
     state.field_width = (bar - fixed + px(GAP)).max(px(0.));
-    let base_fit = if state.editing.is_some() {
-        // The field takes the left section: the input's minimum plus the hints inside
-        // it and the field's 12 px padding on both sides and 14 px gap.
-        let field_min = px(PATH_FIELD_MIN + 38.) + hint_widths.iter().copied().sum::<Pixels>();
-        fit(bar, fixed, &[field_min], ellipsis, other, &hint_widths)
-    } else {
-        path_fit
-    };
+    // The field takes the left section: the input's minimum plus the hints inside
+    // it, the Explorer Go button, and the field's 12 px padding on both sides and
+    // 14 px gaps.
+    let field_min = px(PATH_FIELD_MIN + 38.)
+        + if state.path_bar == PathBarMode::Explorer { px(PATH_GO_WIDTH) } else { px(0.) }
+        + hint_widths.iter().copied().sum::<Pixels>();
+    let base_fit =
+        if state.editing.is_some() { fit(bar, fixed, &[field_min], ellipsis, other, &hint_widths) } else { path_fit };
     // The status slot is the first to yield: it only appears when it costs no
     // hint and no path segment.
     let fit = if let Some(text) = &state.status {
         let with_status = other + measure(text) + px(GAP);
         let status_fit = if state.editing.is_some() {
-            let field_min = px(PATH_FIELD_MIN + 38.) + hint_widths.iter().copied().sum::<Pixels>();
             fit(bar, fixed, &[field_min], ellipsis, with_status, &hint_widths)
         } else {
             fit(bar, fixed, &segments, ellipsis, with_status, &hint_widths)
@@ -721,7 +726,13 @@ fn hover_path(hovered: &bool, window: &mut Window, cx: &mut App) {
 }
 
 /// One bar: path · transient · counts.
-pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) -> impl IntoElement + use<> {
+pub fn render(
+    state: BarState,
+    pane: Entity<Pane>,
+    hovered: bool,
+    owner: Entity<crate::window::CrowWindow>,
+    cx: &mut App,
+) -> impl IntoElement + use<> {
     let ui = cx.global::<Ui>();
     let theme = ui.theme.clone();
     let border = color(theme.role("border"));
@@ -732,6 +743,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
     let parts = state.path.parts;
     let virtual_path = state.virtual_path.clone();
     let path_is_virtual = virtual_path.is_some();
+    let explorer = state.path_bar == PathBarMode::Explorer;
     let fg_path = fg;
     let last_is_dir = state.path.last_is_dir;
 
@@ -896,11 +908,23 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
             .border_color(transparent_black())
             .bg(transparent_black())
             .children(children);
+        // Explorer's breadcrumb is a field at rest: the same surface and border the
+        // hover pill uses, at full alpha. A virtual destination is not editable, so
+        // it keeps the plain label. Crow fades the pill in only on hover.
+        let outlined = explorer && !path_is_virtual;
+        let rest_alpha = if outlined { 0xff } else { 0 };
         let pill = if ui.feedback.mode == Effective::Off {
-            pill.into_any_element()
+            if outlined {
+                pill.bg(color(pill_theme.role("surface")))
+                    .border_color(color(pill_theme.role("border")))
+                    .into_any_element()
+            } else {
+                pill.into_any_element()
+            }
         } else {
             pill.with_spring("path-pill", SpringAnimation::new(path_spring()).to(hovered), move |el, phase| {
-                let alpha = (phase.0.clamp(0., 1.) * 255.) as u8;
+                let hover_alpha = (phase.0.clamp(0., 1.) * 255.) as u8;
+                let alpha = rest_alpha.max(hover_alpha);
                 el.bg(color_alpha(pill_theme.role("surface"), alpha))
                     .border_color(color_alpha(pill_theme.role("border"), alpha))
             })
@@ -1133,6 +1157,35 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
                 )
                 .into_any_element()
         };
+        // Explorer's field carries a Go chevron; it dispatches the same confirmation
+        // as Return, so both share the background check and refusal path. Crow's
+        // field keeps its keys-only affordance.
+        let go = explorer.then(|| {
+            let go_theme = theme.clone();
+            let go_owner = owner.clone();
+            with_tooltip(
+                div()
+                    .id("path-go")
+                    .debug_selector(|| "path-go".into())
+                    .role(Role::Button)
+                    .aria_label("Go")
+                    .aria_keyshortcuts("Return")
+                    .flex_none()
+                    .size(px(20.))
+                    .rounded(px(4.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .hover(move |style| style.bg(hover))
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        go_owner.update(cx, |this, cx| this.confirm_path_edit(window, cx));
+                    })
+                    .child(icons::glyph(Glyph::ChevronRight, 14., "fg", &go_theme)),
+                "Go",
+                None,
+            )
+        });
         let field = div()
             .id("bar-path")
             .debug_selector(|| "bar-path".into())
@@ -1163,6 +1216,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
                     .items_center()
                     .child(input),
             )
+            .children(go)
             .child(field_hints);
         let field = if ui.feedback.mode == Effective::Off {
             field.into_any_element()

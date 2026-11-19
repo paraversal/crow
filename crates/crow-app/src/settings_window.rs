@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use crow_core::motion::{self, Effective, Event, MotionMode, SoundSet};
 use crow_core::{
-    AppIcon, DefaultsChange, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, SearchMatch, TipsMode, ViewMode,
+    AppIcon, DefaultsChange, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, PathBarMode, SearchMatch, TipsMode,
+    ViewMode,
 };
 use crow_fs::SortKey;
 use crow_plugin::{PluginEntry, PluginHandle, PluginState};
@@ -157,6 +158,7 @@ enum ControlId {
     Theme,
     AppIcon,
     IconPack,
+    PathBar,
     FontFamily,
     FontSize,
     Terminal,
@@ -207,10 +209,11 @@ enum ControlId {
 impl ControlId {
     /// Every control, used to build focus handles. Reading order comes from
     /// `catalog::units`, so a category can be reordered without touching this.
-    const ALL: [ControlId; 48] = [
+    const ALL: [ControlId; 49] = [
         ControlId::Theme,
         ControlId::AppIcon,
         ControlId::IconPack,
+        ControlId::PathBar,
         ControlId::FontFamily,
         ControlId::FontSize,
         ControlId::Keymap,
@@ -263,6 +266,7 @@ impl ControlId {
             ControlId::Theme => "settings-theme",
             ControlId::AppIcon => "settings-app-icon",
             ControlId::IconPack => "settings-icon-pack",
+            ControlId::PathBar => "settings-path-bar",
             ControlId::FontFamily => "settings-font-family",
             ControlId::FontSize => "settings-font-size",
             ControlId::Terminal => "settings-terminal",
@@ -327,6 +331,7 @@ impl ControlId {
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
+            | ControlId::PathBar
             | ControlId::ShowHidden
             | ControlId::SearchHidden
             | ControlId::SearchMatch
@@ -354,6 +359,7 @@ impl ControlId {
             ControlId::Theme => "Theme",
             ControlId::AppIcon => "App icon",
             ControlId::IconPack => "Icon pack",
+            ControlId::PathBar => "Path bar",
             ControlId::FontFamily => "Font",
             ControlId::FontSize => "Font size",
             ControlId::Terminal => "Terminal app",
@@ -417,6 +423,7 @@ impl ControlId {
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
+            | ControlId::PathBar
             | ControlId::Motion
             | ControlId::Sound
             | ControlId::SearchMatch
@@ -458,6 +465,7 @@ impl ControlId {
             ControlId::IconPack => {
                 "Native, local icon-packs and approved plugin packs; a folder's views.toml source wins."
             }
+            ControlId::PathBar => "Crow fades in an editor over the breadcrumb; Explorer keeps a visible path field.",
             ControlId::FontFamily => "Installed families; System follows macOS.",
             ControlId::FontSize => "10 to 24 points.",
             ControlId::Terminal => {
@@ -1556,6 +1564,7 @@ impl SettingsWindow {
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
+            | ControlId::PathBar
             | ControlId::Motion
             | ControlId::Sound
             | ControlId::SearchMatch
@@ -1572,6 +1581,7 @@ impl SettingsWindow {
             | ControlId::Hints
             | ControlId::Tips
             | ControlId::FolderSizes
+            | ControlId::PathBar
             | ControlId::Motion
             | ControlId::SearchMatch
             | ControlId::Sound => {
@@ -1845,6 +1855,7 @@ impl SettingsWindow {
             ControlId::Hints => (hints_index(cx.global::<Ui>().settings.hints), 3),
             ControlId::Tips => (tips_index(cx.global::<Ui>().settings.tips), 2),
             ControlId::FolderSizes => (folder_sizes_index(cx.global::<Ui>().settings.folder_sizes), 2),
+            ControlId::PathBar => (path_bar_index(cx.global::<Ui>().settings.path_bar), 2),
             ControlId::SearchMatch => (search_match_index(cx.global::<Ui>().settings.search_match), 3),
             ControlId::Motion => (motion_index(cx.global::<Ui>().settings.motion), 4),
             ControlId::Sound => (sound_index(cx.global::<Ui>().settings.sound), 3),
@@ -1868,6 +1879,9 @@ impl SettingsWindow {
             ControlId::Tips => SettingChange::Tips(if index == 0 { TipsMode::Auto } else { TipsMode::Off }),
             ControlId::FolderSizes => {
                 SettingChange::FolderSizes(if index == 0 { FolderSizesMode::Off } else { FolderSizesMode::Visible })
+            }
+            ControlId::PathBar => {
+                SettingChange::PathBar(if index == 0 { PathBarMode::Crow } else { PathBarMode::Explorer })
             }
             ControlId::SearchMatch => SettingChange::SearchMatch(match index {
                 0 => SearchMatch::All,
@@ -2342,6 +2356,7 @@ impl SettingsWindow {
                 ControlId::Hints => Some(hints_index(settings.hints)),
                 ControlId::Tips => Some(tips_index(settings.tips)),
                 ControlId::FolderSizes => Some(folder_sizes_index(settings.folder_sizes)),
+                ControlId::PathBar => Some(path_bar_index(settings.path_bar)),
                 ControlId::SearchMatch => Some(search_match_index(settings.search_match)),
                 ControlId::Motion => Some(motion_index(settings.motion)),
                 ControlId::Sound => Some(sound_index(settings.sound)),
@@ -2491,6 +2506,17 @@ impl Render for SettingsWindow {
                 .text_color(color(theme.role("error")))
                 .child(error)
         }));
+
+        let path_bar_select =
+            select_callback(cx, |this, index, window, cx| this.select_segment(ControlId::PathBar, index, window, cx));
+        let path_bar_row = controls::segmented(
+            self.meta(ControlId::PathBar, cx),
+            &["Crow", "Explorer"],
+            path_bar_index(settings.path_bar),
+            self.style(ControlId::PathBar, window, &theme),
+            path_bar_select,
+            None,
+        );
 
         let terminal_row = controls::text_field(
             self.meta(ControlId::Terminal, cx),
@@ -2754,6 +2780,7 @@ impl Render for SettingsWindow {
         rows.insert(ControlId::Theme, theme_row.into_any_element());
         rows.insert(ControlId::AppIcon, app_icon_row.into_any_element());
         rows.insert(ControlId::IconPack, icon_row.into_any_element());
+        rows.insert(ControlId::PathBar, path_bar_row.into_any_element());
         rows.insert(ControlId::FontFamily, font_row.into_any_element());
         rows.insert(ControlId::FontSize, font_size_row.into_any_element());
         rows.insert(ControlId::Keymap, keymap_row.into_any_element());
@@ -3214,6 +3241,13 @@ fn folder_sizes_index(value: FolderSizesMode) -> usize {
     match value {
         FolderSizesMode::Off => 0,
         FolderSizesMode::Visible => 1,
+    }
+}
+
+fn path_bar_index(value: PathBarMode) -> usize {
+    match value {
+        PathBarMode::Crow => 0,
+        PathBarMode::Explorer => 1,
     }
 }
 
@@ -4520,6 +4554,39 @@ preview_providers = ["example.one.preview"]
         vcx.update(|_, cx| ui::reload_config(cx));
         vcx.run_until_parked();
         assert_eq!(state(&view, &vcx, ControlId::Enter).selected, Some(1), "a reload keeps the control");
+    }
+
+    #[gpui::test]
+    fn path_bar_control_writes_only_its_line_and_survives_reload(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        let dir = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+        std::fs::write(dir.join("settings.toml"), "# mine\npath_bar = \"crow\" # bottom bar\nkeymap = \"vim\"\n")
+            .expect("external edit");
+        vcx.update(|_, cx| ui::reload_config(cx));
+        vcx.run_until_parked();
+        focus_control(&view, &mut vcx, ControlId::PathBar);
+        assert_eq!(state(&view, &vcx, ControlId::PathBar).selected, Some(0), "Crow is the default");
+        let before = settings_text(&vcx);
+
+        vcx.simulate_keystrokes("right");
+        assert_eq!(state(&view, &vcx, ControlId::PathBar).selected, Some(1));
+        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.path_bar), PathBarMode::Explorer);
+        wait_for(&vcx, "path_bar = \"explorer\"");
+        let after = settings_text(&vcx);
+        assert!(after.contains("\npath_bar = \"explorer\" # bottom bar\n"), "{after}");
+        assert!(after.contains("\nkeymap = \"vim\"\n"), "an unrelated key stays: {after}");
+        let changed: Vec<_> = before.lines().zip(after.lines()).filter(|(a, b)| a != b).collect();
+        assert_eq!(changed.len(), 1, "only one line changes: {changed:?}");
+
+        vcx.update(|_, cx| ui::reload_config(cx));
+        vcx.run_until_parked();
+        assert_eq!(state(&view, &vcx, ControlId::PathBar).selected, Some(1), "a reload keeps the control");
+
+        // An external edit back to Crow updates the segmented control.
+        std::fs::write(dir.join("settings.toml"), "# mine\npath_bar = \"crow\" # bottom bar\n").expect("external edit");
+        vcx.update(|_, cx| ui::reload_config(cx));
+        vcx.run_until_parked();
+        assert_eq!(state(&view, &vcx, ControlId::PathBar).selected, Some(0), "Crow shows again");
     }
 
     #[gpui::test]

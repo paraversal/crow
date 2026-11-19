@@ -86,9 +86,10 @@ impl CrowWindow {
         cx.notify();
     }
 
-    /// Return in the path field: go to the folder, or reveal the file. A path that
-    /// doesn't exist beeps and leaves the field open, with the reason in the bar.
-    fn confirm_path_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Return in the path field, or the Explorer Go chevron: go to the folder, or
+    /// reveal the file. A path that doesn't exist beeps and leaves the field open,
+    /// with the reason in the bar.
+    pub(crate) fn confirm_path_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(edit) = &self.path_edit else { return };
         let input = edit.input.clone();
         let typed = input.read(cx).text().to_owned();

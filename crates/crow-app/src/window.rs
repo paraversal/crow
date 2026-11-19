@@ -1276,6 +1276,7 @@ impl CrowWindow {
             count,
             path,
             virtual_path,
+            path_bar: ui.settings.path_bar,
             editing: self.path_edit.as_ref().map(|edit| edit.input.clone()),
             transient_max: None,
             pill_width: px(0.),
@@ -1321,7 +1322,7 @@ impl CrowWindow {
 
     fn render_bottom_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let state = self.bar_state(window, cx);
-        bottom_bar::render(state, self.pane().clone(), self.path_hovered, cx)
+        bottom_bar::render(state, self.pane().clone(), self.path_hovered, cx.entity(), cx)
     }
 
     // ----- contextual tips -----
