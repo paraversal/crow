@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::UNIX_EPOCH;
 
 use gix::bstr::BStr;
 use gix::status::plumbing::index_as_worktree::traits::SubmoduleStatus;
@@ -54,10 +53,6 @@ impl RepositoryIdentity {
         let common_dir = gix::path::realpath_opts(repo.common_dir(), &current_dir, gix::path::realpath::MAX_SYMLINKS)?;
         let linked_worktree = git_dir != common_dir && git_dir.components().any(|part| part.as_os_str() == "worktrees");
         Ok(Self { worktree, git_dir, common_dir, linked_worktree })
-    }
-
-    pub fn owns(&self, path: &Path) -> bool {
-        path.strip_prefix(&self.worktree).is_ok()
     }
 
     /// Raw repository-relative bytes for `path`, or `None` when it belongs elsewhere.
@@ -154,16 +149,17 @@ fn count_commits(repo: &gix::Repository, tip: gix::hash::ObjectId, base: gix::ha
     Ok(count)
 }
 
+/// Variants are ordered by display precedence, strongest first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StatusKind {
     Unmerged,
     Deleted,
     Renamed,
     Added,
-    Modified,
-    TypeChange,
-    Untracked,
     IntentToAdd,
+    TypeChange,
+    Modified,
+    Untracked,
     Ignored,
 }
 
@@ -207,10 +203,6 @@ pub struct EntryStatus {
 }
 
 impl EntryStatus {
-    pub fn is_clean(&self) -> bool {
-        !self.ignored && self.index.is_none() && self.worktree.is_none()
-    }
-
     pub fn is_changed(&self) -> bool {
         !self.ignored && (self.index.is_some() || self.worktree.is_some())
     }
@@ -222,44 +214,19 @@ impl EntryStatus {
     /// The one badge a row shows, using the plan's precedence:
     /// conflict > deletion/rename > add > modify > untracked > ignored.
     pub fn badge(&self) -> Option<StatusKind> {
-        let all = [self.index, self.worktree];
-        if self.is_unmerged() {
-            return Some(StatusKind::Unmerged);
-        }
-        if all.contains(&Some(StatusKind::Deleted)) {
-            return Some(StatusKind::Deleted);
-        }
-        if all.contains(&Some(StatusKind::Renamed)) {
-            return Some(StatusKind::Renamed);
-        }
-        if all.contains(&Some(StatusKind::Added)) || all.contains(&Some(StatusKind::IntentToAdd)) {
-            return Some(StatusKind::Added);
-        }
-        if all.contains(&Some(StatusKind::TypeChange)) {
-            return Some(StatusKind::TypeChange);
-        }
-        if all.contains(&Some(StatusKind::Modified)) {
-            return Some(StatusKind::Modified);
-        }
-        if all.contains(&Some(StatusKind::Untracked)) {
-            return Some(StatusKind::Untracked);
-        }
-        self.ignored.then_some(StatusKind::Ignored)
+        [self.index, self.worktree]
+            .into_iter()
+            .flatten()
+            .min()
+            .map(|kind| if kind == StatusKind::IntentToAdd { StatusKind::Added } else { kind })
+            .or_else(|| self.ignored.then_some(StatusKind::Ignored))
     }
 
-    /// Index-side and worktree-side labels for Info, e.g. `staged modified, unstaged deleted`.
-    pub fn details(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        if let Some(kind) = self.index {
-            out.push(format!("staged {}", kind.label()));
-        }
-        if let Some(kind) = self.worktree {
-            out.push(format!("unstaged {}", kind.label()));
-        }
-        if self.ignored {
-            out.push("ignored".to_owned());
-        }
-        out
+    pub fn can_count_lines(&self) -> bool {
+        self.is_changed()
+            && !self.is_unmerged()
+            && !matches!(self.index, Some(StatusKind::Deleted | StatusKind::Untracked | StatusKind::IntentToAdd))
+            && !matches!(self.worktree, Some(StatusKind::Deleted | StatusKind::Untracked))
     }
 }
 
@@ -269,19 +236,21 @@ pub struct StatusSnapshot {
     pub identity: RepositoryIdentity,
     pub head: HeadInfo,
     pub entries: BTreeMap<PathBuf, EntryStatus>,
+    /// The strongest change below each affected folder, relative to the worktree root.
+    pub affected_folders: BTreeMap<PathBuf, StatusKind>,
     pub changed_count: usize,
     /// The first line of `HEAD`'s commit message, bounded for display.
     pub last_commit: Option<String>,
     /// True when the worktree is cloud-backed and status would require content
     /// reads; Crow shows "status unavailable" instead of risking hydration.
     pub unavailable: bool,
-    /// The caller's repository generation, copied for invalidation.
-    pub epoch: u64,
 }
 
 impl StatusSnapshot {
-    pub fn lookup(&self, relative: &Path) -> Option<&EntryStatus> {
-        self.entries.get(relative)
+    pub fn lookup_with_ignored_ancestors(&self, relative: &Path) -> Option<&EntryStatus> {
+        self.entries.get(relative).or_else(|| {
+            relative.ancestors().skip(1).find_map(|parent| self.entries.get(parent).filter(|status| status.ignored))
+        })
     }
 }
 
@@ -290,22 +259,23 @@ impl StatusSnapshot {
 /// instead. P8 owns the per-file read proof; this path check is the conservative
 /// project-level gate.
 pub fn is_cloud_backed_worktree(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    text.contains("/Library/Mobile Documents/")
-        || text.contains("/com~apple~CloudDocs")
-        || text.contains("/Library/CloudStorage/")
+    path.ancestors().any(|ancestor| {
+        ["Library/Mobile Documents", "com~apple~CloudDocs", "Library/CloudStorage"]
+            .iter()
+            .any(|suffix| ancestor.ends_with(suffix))
+    })
 }
 
 /// A snapshot with branch and identity but no status reads.
-pub fn unavailable_snapshot(repo: &gix::Repository, epoch: u64) -> gix::Result<StatusSnapshot> {
+pub fn unavailable_snapshot(repo: &gix::Repository) -> gix::Result<StatusSnapshot> {
     Ok(StatusSnapshot {
         identity: RepositoryIdentity::from_repo(repo)?,
         head: head_info(repo)?,
         entries: BTreeMap::new(),
+        affected_folders: BTreeMap::new(),
         changed_count: 0,
         last_commit: None,
         unavailable: true,
-        epoch,
     })
 }
 
@@ -318,21 +288,12 @@ pub fn open_worktree(worktree: &Path) -> gix::Result<gix::Repository> {
     Ok(repo)
 }
 
-/// Walk up from `start` to the nearest worktree that is inside `root` (inclusive).
-pub fn find_enclosing_worktree(start: &Path, root: &Path) -> Option<PathBuf> {
-    let start = std::fs::canonicalize(start).ok()?;
-    let root = std::fs::canonicalize(root).ok()?;
-    let mut candidate = start.as_path();
-    loop {
-        if !candidate.starts_with(&root) {
-            return None;
-        }
-        let dot_git = candidate.join(".git");
-        if dot_git.is_dir() || dot_git.is_file() {
-            return Some(candidate.to_owned());
-        }
-        candidate = candidate.parent()?;
-    }
+/// Walk up from a canonical folder to the nearest repository marker.
+pub fn enclosing_worktree(folder: &Path) -> Option<PathBuf> {
+    folder
+        .ancestors()
+        .find(|candidate| candidate.join(".git").metadata().is_ok_and(|meta| meta.is_dir() || meta.is_file()))
+        .map(Path::to_path_buf)
 }
 
 fn safe_filter_options(repo: &gix::Repository) -> gix::Result<gix::filter::plumbing::pipeline::Options> {
@@ -369,7 +330,11 @@ fn safe_resource_cache(
 }
 
 /// Compute the combined status without running repository-configured filters.
-pub fn status_snapshot(repo: &gix::Repository, epoch: u64, cancel: &AtomicBool) -> gix::Result<StatusSnapshot> {
+pub fn status_snapshot(repo: &gix::Repository, cancel: &AtomicBool) -> gix::Result<StatusSnapshot> {
+    let check_cancel = || -> gix::Result<()> {
+        if cancel.load(Ordering::Relaxed) { Err(gix::error::message("status cancelled").into()) } else { Ok(()) }
+    };
+    check_cancel()?;
     let identity = RepositoryIdentity::from_repo(repo)?;
     let head = head_info(repo)?;
     let index = repo.index_or_empty()?;
@@ -380,6 +345,7 @@ pub fn status_snapshot(repo: &gix::Repository, epoch: u64, cancel: &AtomicBool) 
         entry.index = Some(staged.kind);
         entry.renamed_from = staged.renamed_from;
     }
+    check_cancel()?;
     for worktree in worktree_status(repo, &index, cancel)? {
         let entry = entries.entry(worktree.path).or_default();
         if worktree.ignored {
@@ -391,14 +357,39 @@ pub fn status_snapshot(repo: &gix::Repository, epoch: u64, cancel: &AtomicBool) 
             entry.worktree = Some(worktree.kind);
         }
     }
-    let changed_count = entries.values().filter(|entry| entry.is_changed()).count();
+    check_cancel()?;
+    let mut changed_count = 0;
+    let mut affected_folders = BTreeMap::new();
+    for (path, status) in &entries {
+        let Some(kind) = status.badge().filter(|_| status.is_changed()) else { continue };
+        check_cancel()?;
+        changed_count += 1;
+        mark_parent_folders(&mut affected_folders, path, kind);
+        if let Some(source) = &status.renamed_from {
+            mark_parent_folders(&mut affected_folders, source, StatusKind::Renamed);
+        }
+    }
     let last_commit = repo.head_commit().ok().and_then(|commit| {
         let title = commit.message().ok()?.title;
         let title = String::from_utf8_lossy(title);
         let title = title.trim();
-        (!title.is_empty()).then(|| title.chars().take(120).collect())
+        (!title.is_empty()).then(|| title.chars().take(120).map(|c| if c.is_control() { ' ' } else { c }).collect())
     });
-    Ok(StatusSnapshot { identity, head, entries, changed_count, last_commit, unavailable: false, epoch })
+    Ok(StatusSnapshot { identity, head, entries, affected_folders, changed_count, last_commit, unavailable: false })
+}
+
+fn mark_parent_folders(folders: &mut BTreeMap<PathBuf, StatusKind>, path: &Path, kind: StatusKind) {
+    for parent in path.ancestors().skip(1).take_while(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(previous) = folders.get_mut(parent) {
+            // Ancestors already have this strong a badge too.
+            if *previous <= kind {
+                break;
+            }
+            *previous = kind;
+        } else {
+            folders.insert(parent.to_path_buf(), kind);
+        }
+    }
 }
 
 struct StagedEntry {
@@ -415,13 +406,11 @@ fn staged_status(
     let head_tree = repo.head_tree_id_or_empty()?;
     let mut lhs: gix::index::State = repo.index_from_tree(&head_tree)?.into();
     lhs.sort_entries();
-    let mut rhs = index.clone();
-    rhs.sort_entries();
     let mut search = repo
-        .pathspec(false, None::<&str>, false, &rhs, gix::worktree::stack::state::attributes::Source::IdMapping)?
+        .pathspec(false, None::<&str>, false, index, gix::worktree::stack::state::attributes::Source::IdMapping)?
         .into_parts()
         .0;
-    let mut cache = safe_resource_cache(repo, &rhs, gix::diff::blob::pipeline::Mode::ToGit, None, None)?;
+    let mut cache = safe_resource_cache(repo, index, gix::diff::blob::pipeline::Mode::ToGit, None, None)?;
     let mut out = Vec::new();
     let mut attributes = |_: &BStr,
                           _: gix::filter::plumbing::attributes::glob::pattern::Case,
@@ -429,15 +418,15 @@ fn staged_status(
                           _: &mut gix::filter::plumbing::attributes::search::Outcome| false;
     gix::diff::index(
         &lhs,
-        &rhs,
+        index,
         |change| {
             if cancel.load(Ordering::Relaxed) {
                 return Ok(std::ops::ControlFlow::Break(()));
             }
             match &change {
-                gix::diff::index::ChangeRef::Addition { location, entry_mode, .. } => out.push(StagedEntry {
+                gix::diff::index::ChangeRef::Addition { location, .. } => out.push(StagedEntry {
                     path: path_from_bstr(location)?,
-                    kind: added_kind(*entry_mode),
+                    kind: StatusKind::Added,
                     renamed_from: None,
                 }),
                 gix::diff::index::ChangeRef::Deletion { location, .. } => out.push(StagedEntry {
@@ -482,10 +471,6 @@ fn staged_status(
         &mut attributes,
     )?;
     Ok(out)
-}
-
-fn added_kind(_: gix::index::entry::Mode) -> StatusKind {
-    StatusKind::Added
 }
 
 struct WorktreeEntry {
@@ -617,6 +602,7 @@ pub struct LineCounts {
     pub removals: u32,
 }
 
+#[derive(Clone, Copy)]
 struct DiffSide<'a> {
     id: Option<gix::hash::ObjectId>,
     mode: gix::index::entry::Mode,
@@ -637,6 +623,7 @@ fn counts_for(
         _ => None,
     };
     let (Some(old_kind), Some(new_kind)) = (kind(old.mode), kind(new.mode)) else { return Ok(None) };
+    cache.clear_resource_cache_keep_allocation();
     cache.set_resource(
         old.id.unwrap_or_else(|| gix::hash::ObjectId::null(repo.object_hash())),
         old_kind,
@@ -655,114 +642,72 @@ fn counts_for(
     Ok(platform.line_counts()?.map(|stats| LineCounts { insertions: stats.insertions, removals: stats.removals }))
 }
 
-/// Staged line counts: HEAD tree versus the index. `renamed_from` is the
-/// snapshot's rename source; without it a renamed destination looks like an addition.
-pub fn staged_line_counts(
-    repo: &gix::Repository,
-    path: &Path,
-    renamed_from: Option<&Path>,
-) -> gix::Result<Option<LineCounts>> {
-    if std::fs::metadata(repo.workdir().unwrap_or(Path::new("")).join(path))
-        .is_ok_and(|m| m.len() > MAX_LINE_DIFF_BYTES)
-    {
-        return Ok(None);
-    }
-    let index = repo.index_or_empty()?;
-    let new_path = gix::path::into_bstr(path)?;
-    let old_path = renamed_from.map(gix::path::into_bstr).transpose()?.unwrap_or_else(|| new_path.clone());
-    let tree = repo.head_tree_id_or_empty()?;
-    let tree_entry = repo
-        .find_tree(tree)?
-        .lookup_entry_by_path(gix::path::from_bstr(old_path.as_ref())?)?
-        .map(|entry| entry.detach());
-    let index_entry = index.entry_by_path(new_path.as_ref()).cloned();
-    let old = tree_entry.as_ref().map(|entry| (entry.oid, mode_from_tree(entry.mode.into())));
-    let new = index_entry.as_ref().map(|entry| (entry.id, entry.mode));
-    if old.is_none() && new.is_none() {
-        return Ok(None);
-    }
-    let mut cache = safe_resource_cache(repo, &index, gix::diff::blob::pipeline::Mode::ToGit, None, None)?;
-    counts_for(
-        &mut cache,
-        DiffSide {
-            id: old.map(|(id, _)| id),
-            mode: old.map(|(_, mode)| mode).unwrap_or(gix::index::entry::Mode::FILE),
-            path: old_path.as_ref(),
-        },
-        DiffSide {
-            id: new.map(|(id, _)| id),
-            mode: new.map(|(_, mode)| mode).unwrap_or(gix::index::entry::Mode::FILE),
-            path: new_path.as_ref(),
-        },
-        repo,
-    )
+/// Reuse the index, HEAD tree and filter-free diff setup for a visible batch.
+pub struct LineDiff<'repo> {
+    repo: &'repo gix::Repository,
+    index: gix::worktree::Index,
+    head: gix::Tree<'repo>,
+    staged: gix::diff::blob::Platform,
+    unstaged: gix::diff::blob::Platform,
 }
 
-/// Unstaged line counts: the index versus the worktree file.
-pub fn unstaged_line_counts(repo: &gix::Repository, path: &Path) -> gix::Result<Option<LineCounts>> {
-    let workdir =
-        repo.workdir().ok_or_else(|| gix::Error::from_error(gix::error::message("repository has no worktree")))?;
-    let live = workdir.join(path);
-    match std::fs::symlink_metadata(&live) {
-        Ok(metadata) if metadata.file_type().is_file() && metadata.len() <= MAX_LINE_DIFF_BYTES => {}
-        _ => return Ok(None),
+impl<'repo> LineDiff<'repo> {
+    pub fn new(repo: &'repo gix::Repository) -> gix::Result<Self> {
+        let workdir =
+            repo.workdir().ok_or_else(|| gix::Error::from_error(gix::error::message("repository has no worktree")))?;
+        let index = repo.index_or_empty()?;
+        let mode = gix::diff::blob::pipeline::Mode::ToGit;
+        let staged = safe_resource_cache(repo, &index, mode, None, None)?;
+        let unstaged = safe_resource_cache(repo, &index, mode, None, Some(workdir.to_owned()))?;
+        let head = repo.find_tree(repo.head_tree_id_or_empty()?)?;
+        Ok(Self { repo, index, head, staged, unstaged })
     }
-    let index = repo.index_or_empty()?;
-    let rela = gix::path::into_bstr(path)?;
-    let Some(entry) = index.entry_by_path(rela.as_ref()).cloned() else { return Ok(None) };
-    let mut cache = safe_resource_cache(
-        repo,
-        &index,
-        gix::diff::blob::pipeline::Mode::ToWorktreeAndBinaryToText,
-        None,
-        Some(workdir.to_owned()),
-    )?;
-    counts_for(
-        &mut cache,
-        DiffSide { id: Some(entry.id), mode: entry.mode, path: rela.as_ref() },
-        DiffSide { id: None, mode: entry.mode, path: rela.as_ref() },
-        repo,
-    )
-}
 
-/// Combined changed line count for one file: staged plus unstaged, both sides eligible.
-pub fn line_counts(
-    repo: &gix::Repository,
-    path: &Path,
-    renamed_from: Option<&Path>,
-) -> gix::Result<Option<LineCounts>> {
-    let staged = staged_line_counts(repo, path, renamed_from)?;
-    let unstaged = unstaged_line_counts(repo, path)?;
-    match (staged, unstaged) {
-        (None, None) => Ok(None),
-        (staged, unstaged) => {
-            let staged = staged.unwrap_or(LineCounts { insertions: 0, removals: 0 });
-            let unstaged = unstaged.unwrap_or(LineCounts { insertions: 0, removals: 0 });
-            Ok(Some(LineCounts {
-                insertions: staged.insertions.saturating_add(unstaged.insertions),
-                removals: staged.removals.saturating_add(unstaged.removals),
-            }))
+    pub fn counts(&mut self, snapshot: &StatusSnapshot, relative: &Path) -> gix::Result<Option<LineCounts>> {
+        let Some(status) = snapshot.entries.get(relative).filter(|entry| entry.can_count_lines()) else {
+            return Ok(None);
+        };
+        let path = gix::path::into_bstr(relative)?;
+        let index = self.index.entry_by_path(path.as_ref());
+        let new = DiffSide {
+            id: index.map(|entry| entry.id),
+            mode: index.map_or(gix::index::entry::Mode::FILE, |entry| entry.mode),
+            path: path.as_ref(),
+        };
+        let mut total = LineCounts { insertions: 0, removals: 0 };
+        if status.index.is_some() {
+            let old_path = status.renamed_from.as_deref().unwrap_or(relative);
+            let entry = self.head.lookup_entry_by_path(old_path)?;
+            let Some(staged) = counts_for(
+                &mut self.staged,
+                DiffSide {
+                    id: entry.as_ref().map(|entry| entry.object_id()),
+                    mode: entry
+                        .as_ref()
+                        .map_or(gix::index::entry::Mode::FILE, |entry| mode_from_tree(entry.mode().into())),
+                    path: gix::path::into_bstr(old_path)?.as_ref(),
+                },
+                new,
+                self.repo,
+            )?
+            else {
+                return Ok(None);
+            };
+            total = staged;
         }
+        if status.worktree.is_some() {
+            let live = self.repo.workdir().expect("a worktree").join(relative);
+            if !std::fs::symlink_metadata(live).is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_LINE_DIFF_BYTES) {
+                return Ok(None);
+            }
+            let Some(unstaged) = counts_for(&mut self.unstaged, new, DiffSide { id: None, ..new }, self.repo)? else {
+                return Ok(None);
+            };
+            total.insertions = total.insertions.saturating_add(unstaged.insertions);
+            total.removals = total.removals.saturating_add(unstaged.removals);
+        }
+        Ok(Some(total))
     }
-}
-
-/// Line counts for one row, honoring the snapshot's eligibility rules: only
-/// changed tracked text entries with both sides readable can report a count.
-pub fn line_counts_for(
-    repo: &gix::Repository,
-    snapshot: &StatusSnapshot,
-    relative: &Path,
-) -> gix::Result<Option<LineCounts>> {
-    let Some(entry) = snapshot.lookup(relative) else { return Ok(None) };
-    if !entry.is_changed() || entry.ignored || entry.is_unmerged() {
-        return Ok(None);
-    }
-    if matches!(entry.index, Some(StatusKind::Deleted | StatusKind::Untracked | StatusKind::IntentToAdd))
-        || matches!(entry.worktree, Some(StatusKind::Deleted | StatusKind::Untracked))
-    {
-        return Ok(None);
-    }
-    line_counts(repo, relative, entry.renamed_from.as_deref())
 }
 
 fn mode_from_tree(mode: gix::object::tree::EntryKind) -> gix::index::entry::Mode {
@@ -873,31 +818,6 @@ pub fn is_pruned_package(name: &OsStr) -> bool {
         name,
         "node_modules" | "target" | "Pods" | "DerivedData" | ".build" | ".venv" | "venv" | "__pycache__"
     )
-}
-
-/// True when a worktree's metadata changed in a way that invalidates status.
-/// The app uses this against watcher paths; `None` means "relist the worktree".
-pub fn metadata_paths(identity: &RepositoryIdentity) -> Vec<PathBuf> {
-    let mut out = vec![
-        identity.worktree.join(".gitattributes"),
-        identity.worktree.join(".gitignore"),
-        identity.git_dir.join("index"),
-        identity.git_dir.join("HEAD"),
-        identity.git_dir.join("packed-refs"),
-        identity.git_dir.join("exclude"),
-        identity.common_dir.join("config"),
-        identity.common_dir.join("info").join("exclude"),
-        identity.common_dir.join("info").join("attributes"),
-    ];
-    out.push(identity.common_dir.join("refs"));
-    out
-}
-
-/// Age of the index file, for cheap cache comparisons; `None` when absent.
-pub fn index_stamp(identity: &RepositoryIdentity) -> Option<(u64, u128)> {
-    let metadata = std::fs::metadata(identity.git_dir.join("index")).ok()?;
-    let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_nanos();
-    Some((metadata.len(), modified))
 }
 
 #[cfg(test)]

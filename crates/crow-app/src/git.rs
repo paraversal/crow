@@ -5,22 +5,23 @@
 //! window; rows, status and Info read the cache and never touch disk. One
 //! recursive watcher per active repository coalesces FSEvents refreshes.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use crow_core::{SectionDestination, SectionRow};
 use crow_plugin::{EntryHostData, RepositoryData};
-use crow_plugin_git::{LineCounts, RepositoryIdentity, StatusKind, StatusSnapshot};
+use crow_plugin_git::{LineCounts, RepositoryIdentity, StatusSnapshot};
 use gpui::{App, AppContext as _, Global};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 /// How many unknown folder scopes may be scanning at once.
-const MAX_PENDING_FOLDERS: usize = 8;
-/// How many line jobs one poll may start, and rows one job may contain.
+const MAX_PENDING_SCANS: usize = 8;
+/// How many line batches can run concurrently, and rows started per poll.
 const MAX_LINE_JOBS: usize = 4;
 const MAX_LINE_ROWS: usize = 64;
 /// A repository watcher burst is merged for this long before rescanning.
@@ -32,12 +33,12 @@ struct FolderCache {
     checked: Instant,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct FolderRepo {
     worktree: PathBuf,
     /// The requested folder's path relative to the worktree, for mapping row
     /// paths even when the request used a symlinked alias (e.g. /var vs /private/var).
-    relative_prefix: PathBuf,
+    alias_prefix: Option<PathBuf>,
 }
 
 /// A known repository is rechecked on focus/render after this long; its watcher
@@ -46,26 +47,23 @@ struct FolderRepo {
 const REPO_TTL: Duration = Duration::from_secs(30);
 const NO_REPO_TTL: Duration = Duration::from_secs(2);
 
-#[derive(Clone, Debug)]
-struct CachedLines {
-    version: u64,
-    counts: Option<LineCounts>,
+struct RepoCache {
+    snapshot: Option<Arc<StatusSnapshot>>,
+    checked: Instant,
 }
 
-#[derive(Clone, Debug)]
-struct LineWant {
-    version: u64,
-    renamed_from: Option<PathBuf>,
-    /// The row's absolute path as the view knows it (which may use a symlinked alias).
-    row_path: PathBuf,
+struct RepoWatch {
+    worktree: PathBuf,
+    changed: Arc<AtomicBool>,
+    watcher: Option<RecommendedWatcher>,
 }
 
 enum GitEvent {
-    Folder { generation: u64, folder: PathBuf, snapshot: Option<Arc<StatusSnapshot>>, relative_prefix: PathBuf },
-    Repo { generation: u64, worktree: PathBuf, snapshot: Option<Arc<StatusSnapshot>> },
-    Lines { generation: u64, worktree: PathBuf, results: Vec<(PathBuf, PathBuf, u64, Option<LineCounts>)> },
-    Project { generation: u64, project: ProjectRow },
-    ProjectsDone { generation: u64, truncated: bool },
+    Repo { worktree: PathBuf, snapshot: Option<Arc<StatusSnapshot>> },
+    Watch { changed: Arc<AtomicBool>, watcher: Option<RecommendedWatcher> },
+    Lines { worktree: PathBuf, snapshot: Arc<StatusSnapshot>, results: Vec<(PathBuf, Option<LineCounts>)> },
+    Project { scan: Arc<AtomicBool>, project: ProjectRow },
+    ProjectsDone { scan: Arc<AtomicBool>, truncated: bool },
 }
 
 #[derive(Clone, Debug)]
@@ -79,27 +77,21 @@ struct ProjectRow {
 
 pub struct Git {
     enabled: bool,
-    generation: u64,
     folders: HashMap<PathBuf, FolderCache>,
-    snapshots: HashMap<PathBuf, Arc<StatusSnapshot>>,
+    repos: HashMap<PathBuf, RepoCache>,
     pending_folders: HashSet<PathBuf>,
     pending_repos: HashSet<PathBuf>,
-    dirty: HashSet<PathBuf>,
-    next_scan: HashMap<PathBuf, Instant>,
-    lines: HashMap<(PathBuf, PathBuf), CachedLines>,
-    wanted_lines: HashMap<(PathBuf, PathBuf), LineWant>,
+    dirty: HashMap<PathBuf, Instant>,
+    cancel: Arc<AtomicBool>,
+    lines: HashMap<(PathBuf, PathBuf), Option<LineCounts>>,
+    wanted_lines: HashMap<(PathBuf, PathBuf), HashSet<PathBuf>>,
     pending_lines: HashSet<(PathBuf, PathBuf)>,
-    watchers: HashMap<PathBuf, RecommendedWatcher>,
-    active: Option<PathBuf>,
-    watch_quiet_until: HashMap<PathBuf, Instant>,
+    pending_line_jobs: usize,
+    watch: Option<RepoWatch>,
     project_roots: Vec<PathBuf>,
     project_rows: HashMap<PathBuf, ProjectRow>,
-    project_pending: bool,
     project_truncated: bool,
-    project_cancel: std::sync::Arc<AtomicBool>,
-    projects_checked: Option<Instant>,
-    watch_tx: Sender<PathBuf>,
-    watch_rx: Receiver<PathBuf>,
+    project_cancel: Arc<AtomicBool>,
     tx: Sender<GitEvent>,
     rx: Receiver<GitEvent>,
 }
@@ -107,34 +99,47 @@ pub struct Git {
 impl Global for Git {}
 
 pub fn init_at(cx: &mut App) {
-    let (tx, rx) = channel();
-    let (watch_tx, watch_rx) = channel();
-    cx.set_global(Git {
-        enabled: false,
-        generation: 0,
-        folders: HashMap::new(),
-        snapshots: HashMap::new(),
-        pending_folders: HashSet::new(),
-        pending_repos: HashSet::new(),
-        dirty: HashSet::new(),
-        next_scan: HashMap::new(),
-        lines: HashMap::new(),
-        wanted_lines: HashMap::new(),
-        pending_lines: HashSet::new(),
-        watchers: HashMap::new(),
-        active: None,
-        watch_quiet_until: HashMap::new(),
-        project_roots: Vec::new(),
-        project_rows: HashMap::new(),
-        project_pending: false,
-        project_truncated: false,
-        project_cancel: std::sync::Arc::new(AtomicBool::new(false)),
-        projects_checked: None,
-        watch_tx,
-        watch_rx,
-        tx,
-        rx,
-    });
+    cx.set_global(Git::new(false));
+}
+
+impl Git {
+    fn new(enabled: bool) -> Self {
+        let (tx, rx) = channel();
+        Self {
+            enabled,
+            folders: HashMap::new(),
+            repos: HashMap::new(),
+            pending_folders: HashSet::new(),
+            pending_repos: HashSet::new(),
+            dirty: HashMap::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            lines: HashMap::new(),
+            wanted_lines: HashMap::new(),
+            pending_lines: HashSet::new(),
+            pending_line_jobs: 0,
+            watch: None,
+            project_roots: Vec::new(),
+            project_rows: HashMap::new(),
+            project_truncated: false,
+            project_cancel: Arc::new(AtomicBool::new(false)),
+            tx,
+            rx,
+        }
+    }
+
+    fn snapshot(&self, worktree: &Path) -> Option<&Arc<StatusSnapshot>> {
+        self.repos.get(worktree)?.snapshot.as_ref()
+    }
+
+    fn queue_repo_if_stale(&mut self, worktree: &Path) {
+        let fresh = self.repos.get(worktree).is_some_and(|cache| {
+            let ttl = if cache.snapshot.is_some() { REPO_TTL } else { NO_REPO_TTL };
+            cache.checked.elapsed() < ttl
+        });
+        if !fresh && !self.pending_repos.contains(worktree) && !self.dirty.contains_key(worktree) {
+            self.dirty.insert(worktree.to_path_buf(), Instant::now());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -142,41 +147,17 @@ pub fn init_for_tests(cx: &mut App) {
     init_at(cx);
 }
 
-fn scanning_allowed(cx: &App) -> bool {
-    cx.try_global::<Git>().is_some_and(|git| git.enabled)
-}
-
-/// Follow the plugin inventory: no provider work while the bundled package is
-/// absent, pending approval, disabled or failed.
+/// Follow the bundled package's approved runtime state.
 pub fn sync_enabled(cx: &mut App) {
     let running = crate::plugins::bundled_git_running(cx);
     let Some(git) = cx.try_global::<Git>() else { return };
     if git.enabled == running {
         return;
     }
-    let git = cx.global_mut::<Git>();
-    git.enabled = running;
-    git.generation = git.generation.wrapping_add(1);
-    if !running {
-        git.folders.clear();
-        git.snapshots.clear();
-        git.pending_folders.clear();
-        git.pending_repos.clear();
-        git.dirty.clear();
-        git.next_scan.clear();
-        git.lines.clear();
-        git.wanted_lines.clear();
-        git.pending_lines.clear();
-        git.watchers.clear();
-        git.active = None;
-        git.watch_quiet_until.clear();
-        git.project_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        git.project_roots.clear();
-        git.project_rows.clear();
-        git.project_pending = false;
-        git.project_truncated = false;
-        git.projects_checked = None;
-    }
+    git.cancel.store(true, Ordering::Relaxed);
+    git.project_cancel.store(true, Ordering::Relaxed);
+    // Old jobs own senders to the retired channel.
+    cx.set_global(Git::new(running));
     crate::plugins::invalidate_git(cx);
     cx.refresh_windows();
 }
@@ -186,9 +167,8 @@ pub fn sync_enabled(cx: &mut App) {
 pub fn repository_data(cx: &mut App, folder: &Path) -> Option<RepositoryData> {
     request_folder(cx, folder);
     let git = cx.try_global::<Git>()?;
-    let worktree = git.folders.get(folder)?.repo.as_ref()?.worktree.clone();
-    let snapshot = git.snapshots.get(&worktree)?;
-    Some(repository_data_from(snapshot))
+    let worktree = &git.folders.get(folder)?.repo.as_ref()?.worktree;
+    Some(repository_data_from(git.snapshot(worktree)?))
 }
 
 fn repository_data_from(snapshot: &StatusSnapshot) -> RepositoryData {
@@ -212,118 +192,120 @@ fn repository_data_from(snapshot: &StatusSnapshot) -> RepositoryData {
 }
 
 /// One row's host data. `None` means clean (no contribution).
-pub fn entry_host(cx: &mut App, folder: &Path, path: &Path, version: u64, want_lines: bool) -> Option<EntryHostData> {
+pub fn entry_host(cx: &mut App, folder: &Path, path: &Path, is_dir: bool, want_lines: bool) -> Option<EntryHostData> {
     request_folder(cx, folder);
-    let git = cx.global_mut::<Git>();
+    let git = cx.try_global::<Git>()?;
     let repo = git.folders.get(folder)?.repo.as_ref()?;
-    let worktree = repo.worktree.clone();
-    let snapshot = git.snapshots.get(&worktree)?.clone();
-    let relative = match path.strip_prefix(&worktree) {
-        Ok(relative) => relative.to_path_buf(),
-        Err(_) => repo.relative_prefix.join(path.strip_prefix(folder).ok()?),
+    let snapshot = git.snapshot(&repo.worktree)?;
+    let relative = match &repo.alias_prefix {
+        Some(prefix) => Cow::Owned(prefix.join(path.strip_prefix(folder).ok()?)),
+        None => Cow::Borrowed(path.strip_prefix(&repo.worktree).ok()?),
     };
-    let status = match snapshot.lookup(&relative) {
-        Some(status) => status.clone(),
-        None => {
-            // A file inside an ignored directory has no own status entry; the
-            // directory's rule still applies to the row.
-            let mut parent = relative.parent();
-            let mut ignored = false;
-            while let Some(path) = parent {
-                if snapshot.lookup(path).is_some_and(|status| status.ignored) {
-                    ignored = true;
-                    break;
-                }
-                parent = path.parent();
-            }
-            if ignored {
-                crow_plugin_git::EntryStatus { ignored: true, ..Default::default() }
-            } else {
-                return None;
-            }
-        }
-    };
-    if status.is_clean() {
-        return None;
+    let status = snapshot.lookup_with_ignored_ancestors(&relative);
+    if is_dir
+        && status.is_none_or(|status| !status.is_changed())
+        && let Some(kind) = snapshot.affected_folders.get(relative.as_ref())
+    {
+        return Some(EntryHostData {
+            handle: crow_core::EntryHandle(1),
+            badge: kind.badge().to_owned(),
+            label: format!("contains {} paths", kind.label()),
+            index: None,
+            worktree: None,
+            ignored: false,
+            lines_changed: None,
+        });
     }
-    let badge = status.badge().map(|kind| kind.badge().to_owned()).unwrap_or_default();
-    let label = status.badge().map(|kind| kind.label().to_owned()).unwrap_or_default();
-    let index = status.index.map(|kind| kind.label().to_owned());
-    let worktree_status = status.worktree.map(|kind| kind.label().to_owned());
-    let eligible = status.is_changed()
-        && !status.ignored
-        && !status.is_unmerged()
-        && !matches!(status.index, Some(StatusKind::Deleted | StatusKind::Untracked | StatusKind::IntentToAdd))
-        && !matches!(status.worktree, Some(StatusKind::Deleted | StatusKind::Untracked));
-    let lines = if eligible && want_lines {
-        let key = (worktree.clone(), relative.clone());
-        match git.lines.get(&key) {
-            Some(cached) if cached.version == version => cached.counts,
-            _ => {
-                git.wanted_lines.insert(
-                    key,
-                    LineWant { version, renamed_from: status.renamed_from.clone(), row_path: path.to_path_buf() },
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-    Some(EntryHostData {
+    let status = status?;
+    let badge = status.badge();
+    let mut data = EntryHostData {
         handle: crow_core::EntryHandle(1),
-        badge,
-        label,
-        index,
-        worktree: worktree_status,
+        badge: badge.map(|kind| kind.badge().to_owned()).unwrap_or_default(),
+        label: badge.map(|kind| kind.label().to_owned()).unwrap_or_default(),
+        index: status.index.map(|kind| kind.label().to_owned()),
+        worktree: status.worktree.map(|kind| kind.label().to_owned()),
         ignored: status.ignored,
-        lines_changed: lines.map(|counts| counts.insertions.saturating_add(counts.removals)),
-    })
+        lines_changed: None,
+    };
+    if want_lines && status.can_count_lines() {
+        let key = (repo.worktree.clone(), relative.into_owned());
+        if let Some(counts) = git.lines.get(&key) {
+            data.lines_changed = counts.map(|counts| counts.insertions.saturating_add(counts.removals));
+        } else {
+            // Several windows may request the same Git path through different aliases.
+            cx.global_mut::<Git>().wanted_lines.entry(key).or_default().insert(path.to_path_buf());
+        }
+    }
+    Some(data)
 }
 
-pub fn request_folder(cx: &mut App, folder: &Path) {
-    if !scanning_allowed(cx) {
+fn request_folder(cx: &mut App, folder: &Path) {
+    let Some(git) = cx.try_global::<Git>().filter(|git| git.enabled) else { return };
+    if let Some(cache) = git.folders.get(folder) {
+        let ttl = if cache.repo.is_some() { REPO_TTL } else { NO_REPO_TTL };
+        if cache.checked.elapsed() < ttl {
+            return;
+        }
+    }
+    if git.pending_folders.len() >= MAX_PENDING_SCANS || git.pending_folders.contains(folder) {
         return;
     }
     let folder = folder.to_path_buf();
-    let Some(git) = cx.try_global::<Git>() else { return };
-    let fresh = git.folders.get(&folder).is_some_and(|cached| {
-        let ttl = if cached.repo.is_some() { REPO_TTL } else { NO_REPO_TTL };
-        cached.checked.elapsed() < ttl
+    let cancel = git.cancel.clone();
+    cx.global_mut::<Git>().pending_folders.insert(folder.clone());
+    let task = cx.background_spawn(async move {
+        let repo = resolve_folder(&folder);
+        (folder, repo)
     });
-    if fresh || git.pending_folders.contains(&folder) {
-        return;
-    }
-    if git.pending_folders.len() >= MAX_PENDING_FOLDERS {
-        return;
-    }
-    let sender = git.tx.clone();
-    let generation = git.generation;
-    {
-        let git = cx.global_mut::<Git>();
-        git.pending_folders.insert(folder.clone());
-    }
-    cx.background_spawn(async move {
-        let (snapshot, relative_prefix) = scan_folder(&folder);
-        sender.send(GitEvent::Folder { generation, folder, snapshot, relative_prefix }).ok();
+    cx.spawn(async move |cx| {
+        let (folder, repo) = task.await;
+        cx.update(|cx| {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let git = cx.global_mut::<Git>();
+            git.pending_folders.remove(&folder);
+            let watch = repo.as_ref().and_then(|repo| {
+                git.queue_repo_if_stale(&repo.worktree);
+                git.snapshot(&repo.worktree).map(|snapshot| snapshot.identity.clone())
+            });
+            let now = Instant::now();
+            let old_repo = git.folders.get(&folder).and_then(|cache| cache.repo.as_ref());
+            let changed = old_repo != repo.as_ref();
+            let invalidated = changed && old_repo.is_some();
+            git.folders.insert(folder, FolderCache { repo, checked: now });
+            if let Some(identity) = watch {
+                ensure_watch(cx, identity);
+            }
+            request_repos(cx, now);
+            if invalidated {
+                crate::plugins::invalidate_git(cx);
+            }
+            if changed {
+                cx.refresh_windows();
+            }
+        });
     })
     .detach();
 }
 
-fn scan_folder(folder: &Path) -> (Option<Arc<StatusSnapshot>>, PathBuf) {
+fn resolve_folder(folder: &Path) -> Option<FolderRepo> {
+    let canonical = std::fs::canonicalize(folder).ok()?; // io-ok: inside background_spawn
+    let worktree = crow_plugin_git::enclosing_worktree(&canonical)?;
+    let relative = canonical.strip_prefix(&worktree).ok()?;
+    let alias_prefix = (folder.strip_prefix(&worktree).ok() != Some(relative)).then(|| relative.to_path_buf());
+    Some(FolderRepo { worktree, alias_prefix })
+}
+
+fn scan_repository(worktree: &Path, cancel: &AtomicBool) -> Option<StatusSnapshot> {
     let started = Instant::now();
-    let Some(worktree) = crow_plugin_git::find_enclosing_worktree(folder, Path::new("/")) else {
-        return (None, PathBuf::new());
-    };
-    let Ok(repo) = crow_plugin_git::open_worktree(&worktree) else { return (None, PathBuf::new()) };
-    let snapshot = match if crow_plugin_git::is_cloud_backed_worktree(&worktree) {
-        crow_plugin_git::unavailable_snapshot(&repo, 0)
+    let repo = crow_plugin_git::open_worktree(worktree).ok()?;
+    let snapshot = if crow_plugin_git::is_cloud_backed_worktree(worktree) {
+        crow_plugin_git::unavailable_snapshot(&repo)
     } else {
-        crow_plugin_git::status_snapshot(&repo, 0, &AtomicBool::new(false))
-    } {
-        Ok(snapshot) => snapshot,
-        Err(_) => return (None, PathBuf::new()),
-    };
+        crow_plugin_git::status_snapshot(&repo, cancel)
+    }
+    .ok()?;
     tracing::info!(
         target: "crow::git",
         path = %snapshot.identity.worktree.display(),
@@ -332,243 +314,195 @@ fn scan_folder(folder: &Path) -> (Option<Arc<StatusSnapshot>>, PathBuf) {
         elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
         "git status"
     );
-    let relative_prefix = std::fs::canonicalize(folder) // io-ok: inside background_spawn
-        .ok()
-        .and_then(|folder| folder.strip_prefix(&snapshot.identity.worktree).ok().map(Path::to_path_buf))
-        .unwrap_or_default();
-    (Some(Arc::new(snapshot)), relative_prefix)
+    Some(snapshot)
 }
 
-fn request_repo(cx: &mut App, worktree: PathBuf) {
-    if !scanning_allowed(cx) {
-        return;
-    }
-    let Some(git) = cx.try_global::<Git>() else { return };
-    if git.pending_repos.contains(&worktree) || !git.dirty.contains(&worktree) {
-        return;
-    }
-    let now = Instant::now();
-    if git.next_scan.get(&worktree).is_some_and(|next| *next > now) {
-        return;
-    }
+fn request_repos(cx: &mut App, now: Instant) {
+    let git = cx.global_mut::<Git>();
+    let jobs: Vec<_> = git
+        .dirty
+        .iter()
+        .filter(|(path, due)| **due <= now && !git.pending_repos.contains(*path))
+        .take(MAX_PENDING_SCANS.saturating_sub(git.pending_repos.len()))
+        .map(|(path, _)| path.clone())
+        .collect();
     let sender = git.tx.clone();
-    let generation = git.generation;
-    {
-        let git = cx.global_mut::<Git>();
+    let cancel = git.cancel.clone();
+    for worktree in &jobs {
+        git.dirty.remove(worktree);
         git.pending_repos.insert(worktree.clone());
-        git.next_scan.insert(worktree.clone(), now + WATCH_DEBOUNCE);
     }
+    for worktree in jobs {
+        let sender = sender.clone();
+        let cancel = cancel.clone();
+        cx.background_spawn(async move {
+            let snapshot = scan_repository(&worktree, &cancel).map(Arc::new);
+            sender.send(GitEvent::Repo { worktree, snapshot }).ok();
+        })
+        .detach();
+    }
+}
+
+fn ensure_watch(cx: &mut App, identity: RepositoryIdentity) {
+    let git = cx.global_mut::<Git>();
+    if git.watch.as_ref().is_some_and(|watch| watch.worktree == identity.worktree) {
+        return;
+    }
+    let changed = Arc::new(AtomicBool::new(false));
+    let sender = git.tx.clone();
+    git.watch = Some(RepoWatch { worktree: identity.worktree.clone(), changed: changed.clone(), watcher: None });
     cx.background_spawn(async move {
-        let started = Instant::now();
-        let snapshot = crow_plugin_git::open_worktree(&worktree).ok().and_then(|repo| {
-            let snapshot = if crow_plugin_git::is_cloud_backed_worktree(&worktree) {
-                crow_plugin_git::unavailable_snapshot(&repo, 0)
-            } else {
-                crow_plugin_git::status_snapshot(&repo, 0, &AtomicBool::new(false))
-            };
-            snapshot.ok().map(Arc::new)
-        });
-        if let Some(snapshot) = &snapshot {
-            tracing::info!(
-                target: "crow::git",
-                path = %snapshot.identity.worktree.display(),
-                entries = snapshot.entries.len(),
-                changed = snapshot.changed_count,
-                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-                "git status"
-            );
-        }
-        sender.send(GitEvent::Repo { generation, worktree, snapshot }).ok();
+        let watcher = watch_repository(&identity, changed.clone());
+        sender.send(GitEvent::Watch { changed, watcher }).ok();
     })
     .detach();
 }
 
-fn ensure_watch(git: &mut Git, identity: &RepositoryIdentity) {
-    if git.watchers.contains_key(&identity.worktree) {
-        git.active = Some(identity.worktree.clone());
-        return;
-    }
-    git.watchers.clear();
-    let worktree = identity.worktree.clone();
-    let tx = git.watch_tx.clone();
-    let mut watcher = match notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-        if result.is_ok() {
-            tx.send(worktree.clone()).ok();
+fn watch_repository(identity: &RepositoryIdentity, changed: Arc<AtomicBool>) -> Option<RecommendedWatcher> {
+    let mut watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if event.is_ok() {
+            changed.store(true, Ordering::Relaxed);
         }
     }) {
         Ok(watcher) => watcher,
         Err(error) => {
             tracing::warn!("git watch: {error}");
-            return;
+            return None;
         }
     };
-    for path in [&identity.worktree, &identity.git_dir, &identity.common_dir] {
-        if let Err(error) = watcher.watch(path, RecursiveMode::Recursive) {
+    let mut paths = watcher.paths_mut();
+    let worktree = &identity.worktree;
+    let common = &identity.common_dir;
+    let mut watch_paths = vec![worktree];
+    if !common.starts_with(worktree) {
+        watch_paths.push(common);
+    }
+    if !identity.git_dir.starts_with(worktree) && !identity.git_dir.starts_with(common) {
+        watch_paths.push(&identity.git_dir);
+    }
+    for path in watch_paths {
+        if let Err(error) = paths.add(path, RecursiveMode::Recursive) {
             tracing::warn!("git watch {}: {error}", path.display());
         }
     }
-    let _ = watcher.watch(&identity.common_dir.join("refs"), RecursiveMode::Recursive);
-    git.watchers.insert(identity.worktree.clone(), watcher);
-    git.watch_quiet_until.insert(identity.worktree.clone(), Instant::now() + WATCH_DEBOUNCE * 2);
-    git.active = Some(identity.worktree.clone());
+    if let Err(error) = paths.commit() {
+        tracing::warn!("git watch {}: {error}", identity.worktree.display());
+    }
+    Some(watcher)
 }
 
 /// Drain background results and watcher events. Called by the 100 ms app poll.
 pub fn poll(cx: &mut App) {
-    if cx.try_global::<Git>().is_none_or(|git| !git.enabled) {
-        return;
-    }
-    let watched: Vec<PathBuf> = {
-        let git = cx.global::<Git>();
-        git.watch_rx.try_iter().collect()
-    };
-    if !watched.is_empty() {
-        let git = cx.global_mut::<Git>();
-        let now = Instant::now();
-        for worktree in watched {
-            if git.watch_quiet_until.get(&worktree).is_none_or(|until| now >= *until) {
-                git.dirty.insert(worktree);
-            }
-        }
-    }
+    let Some(git) = cx.try_global::<Git>().filter(|git| git.enabled) else { return };
     let now = Instant::now();
-    let dirty: Vec<PathBuf> = {
-        let git = cx.global::<Git>();
-        git.dirty
-            .iter()
-            .filter(|worktree| git.next_scan.get(*worktree).is_none_or(|next| *next <= now))
-            .cloned()
-            .collect()
-    };
-    for worktree in dirty {
-        request_repo(cx, worktree);
+    let events: Vec<_> = git.rx.try_iter().collect();
+    let git = cx.global_mut::<Git>();
+    if let Some(watch) = &git.watch
+        && watch.changed.swap(false, Ordering::Relaxed)
+    {
+        git.dirty.insert(watch.worktree.clone(), now + WATCH_DEBOUNCE);
     }
-    schedule_lines(cx);
 
-    let events: Vec<GitEvent> = {
-        let git = cx.global_mut::<Git>();
-        git.rx.try_iter().collect()
-    };
-    let mut invalidated = false;
+    let mut status_changed = false;
+    let mut projects_changed = false;
     let mut line_paths = Vec::new();
+    let mut watch = None;
     for event in events {
-        let generation = cx.global::<Git>().generation;
         match event {
-            GitEvent::Folder { generation: event_generation, folder, snapshot, relative_prefix }
-                if event_generation == generation =>
-            {
-                let git = cx.global_mut::<Git>();
-                git.pending_folders.remove(&folder);
-                match snapshot {
-                    Some(snapshot) => {
-                        let worktree = snapshot.identity.worktree.clone();
-                        ensure_watch(git, &snapshot.identity);
-                        git.folders.insert(
-                            folder,
-                            FolderCache {
-                                repo: Some(FolderRepo { worktree: worktree.clone(), relative_prefix }),
-                                checked: Instant::now(),
-                            },
-                        );
-                        git.snapshots.insert(worktree.clone(), snapshot);
-                        git.dirty.remove(&worktree);
-                        invalidated = true;
-                    }
-                    None => {
-                        git.folders.insert(folder, FolderCache { repo: None, checked: Instant::now() });
-                    }
-                }
-            }
-            GitEvent::Repo { generation: event_generation, worktree, snapshot } if event_generation == generation => {
-                let git = cx.global_mut::<Git>();
+            GitEvent::Repo { worktree, snapshot } => {
                 git.pending_repos.remove(&worktree);
-                git.dirty.remove(&worktree);
-                match snapshot {
-                    Some(snapshot) => {
-                        ensure_watch(git, &snapshot.identity);
-                        git.snapshots.insert(worktree.clone(), snapshot);
-                        invalidated = true;
-                    }
-                    None => {
-                        git.snapshots.remove(&worktree);
-                        invalidated = true;
+                let changed = snapshot.is_some() || git.snapshot(&worktree).is_some();
+                if let Some(snapshot) = &snapshot {
+                    watch = Some(snapshot.identity.clone());
+                }
+                if changed {
+                    git.lines.retain(|(repo, _), _| repo != &worktree);
+                    git.wanted_lines.retain(|(repo, _), _| repo != &worktree);
+                }
+                git.repos.insert(worktree, RepoCache { snapshot, checked: now });
+                status_changed |= changed;
+            }
+            GitEvent::Watch { changed, watcher } => {
+                if let Some(watch) = &mut git.watch
+                    && Arc::ptr_eq(&watch.changed, &changed)
+                {
+                    watch.watcher = watcher;
+                }
+            }
+            GitEvent::Lines { worktree, snapshot, results } => {
+                git.pending_line_jobs -= 1;
+                let current = git.snapshot(&worktree).is_some_and(|active| Arc::ptr_eq(active, &snapshot));
+                for (relative, counts) in results {
+                    let key = (worktree.clone(), relative);
+                    git.pending_lines.remove(&key);
+                    if current {
+                        line_paths.extend(git.wanted_lines.remove(&key).into_iter().flatten());
+                        git.lines.insert(key, counts);
                     }
                 }
             }
-            GitEvent::Lines { generation: event_generation, worktree, results } if event_generation == generation => {
-                let git = cx.global_mut::<Git>();
-                for (row_path, relative, version, counts) in results {
-                    git.pending_lines.remove(&(worktree.clone(), relative.clone()));
-                    git.lines.insert((worktree.clone(), relative.clone()), CachedLines { version, counts });
-                    line_paths.push(row_path);
-                }
+            GitEvent::Project { scan, project } if Arc::ptr_eq(&scan, &git.project_cancel) => {
+                git.project_rows.insert(project.path.clone(), project);
+                projects_changed = true;
             }
-            GitEvent::Project { generation: event_generation, project } if event_generation == generation => {
-                cx.global_mut::<Git>().project_rows.insert(project.path.clone(), project);
-                invalidated = true;
-            }
-            GitEvent::ProjectsDone { generation: event_generation, truncated } if event_generation == generation => {
-                let git = cx.global_mut::<Git>();
-                git.project_pending = false;
+            GitEvent::ProjectsDone { scan, truncated } if Arc::ptr_eq(&scan, &git.project_cancel) => {
                 git.project_truncated = truncated;
-                git.projects_checked = Some(Instant::now());
-                invalidated = true;
+                projects_changed = true;
             }
             _ => {}
         }
     }
-    if invalidated {
+    if let Some(identity) = watch {
+        ensure_watch(cx, identity);
+    }
+    request_repos(cx, now);
+    schedule_lines(cx);
+    if status_changed {
         crate::plugins::invalidate_git(cx);
+    } else if !line_paths.is_empty() {
+        crate::plugins::invalidate_git_lines(cx, &line_paths);
     }
-    let line_changed = !line_paths.is_empty();
-    for path in line_paths {
-        crate::plugins::invalidate_git_path(cx, &path);
-    }
-    if invalidated || line_changed {
+    if status_changed || projects_changed || !line_paths.is_empty() {
         cx.refresh_windows();
     }
 }
 
 fn schedule_lines(cx: &mut App) {
-    let keys: Vec<(PathBuf, PathBuf)> = {
-        let git = cx.global::<Git>();
-        git.wanted_lines.keys().filter(|key| !git.pending_lines.contains(*key)).cloned().collect()
-    };
-    type LineJob = (PathBuf, PathBuf, u64, Option<PathBuf>);
-    let mut groups: HashMap<PathBuf, Vec<LineJob>> = HashMap::new();
-    let mut rows = 0usize;
-    {
-        let git = cx.global_mut::<Git>();
-        for key in keys {
-            if rows >= MAX_LINE_ROWS || groups.len() >= MAX_LINE_JOBS {
-                break;
-            }
-            if git.pending_lines.contains(&key) {
-                continue;
-            }
-            let Some(want) = git.wanted_lines.remove(&key) else { continue };
-            git.pending_lines.insert(key.clone());
-            groups.entry(key.0).or_default().push((want.row_path, key.1, want.version, want.renamed_from));
-            rows += 1;
-        }
-    }
-    if groups.is_empty() {
+    let git = cx.global_mut::<Git>();
+    let available = MAX_LINE_JOBS.saturating_sub(git.pending_line_jobs);
+    if available == 0 {
         return;
     }
-    let sender = cx.global::<Git>().tx.clone();
-    let generation = cx.global::<Git>().generation;
+    let mut groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    for (worktree, relative) in
+        git.wanted_lines.keys().filter(|key| !git.pending_lines.contains(*key)).take(MAX_LINE_ROWS)
+    {
+        if groups.len() == available && !groups.contains_key(worktree) {
+            continue;
+        }
+        groups.entry(worktree.clone()).or_default().push(relative.clone());
+    }
+    git.pending_line_jobs += groups.len();
+    let sender = git.tx.clone();
+    let cancel = git.cancel.clone();
     for (worktree, rows) in groups {
+        let git = cx.global_mut::<Git>();
+        git.pending_lines.extend(rows.iter().map(|relative| (worktree.clone(), relative.clone())));
+        let snapshot = git.snapshot(&worktree).expect("lines need a snapshot").clone();
         let sender = sender.clone();
+        let cancel = cancel.clone();
         cx.background_spawn(async move {
             let repo = crow_plugin_git::open_worktree(&worktree).ok();
-            let mut results = Vec::with_capacity(rows.len());
-            for (row_path, relative, version, renamed_from) in rows {
-                let counts = repo.as_ref().and_then(|repo| {
-                    crow_plugin_git::line_counts(repo, &relative, renamed_from.as_deref()).ok().flatten()
-                });
-                results.push((row_path, relative, version, counts));
-            }
-            sender.send(GitEvent::Lines { generation, worktree, results }).ok();
+            let mut diff = repo.as_ref().and_then(|repo| crow_plugin_git::LineDiff::new(repo).ok());
+            let results = rows
+                .into_iter()
+                .take_while(|_| !cancel.load(Ordering::Relaxed))
+                .map(|relative| {
+                    let counts = diff.as_mut().and_then(|diff| diff.counts(&snapshot, &relative).ok().flatten());
+                    (relative, counts)
+                })
+                .collect();
+            sender.send(GitEvent::Lines { worktree, snapshot, results }).ok();
         })
         .detach();
     }
@@ -578,13 +512,6 @@ fn schedule_lines(cx: &mut App) {
 pub fn host_data(cx: &mut App, folder: &Path, entries: Vec<EntryHostData>) -> Option<crow_plugin::HostData> {
     let repository = repository_data(cx, folder)?;
     Some(crow_plugin::HostData { repository: Some(repository), entries })
-}
-
-/// A single entry for Info, including status and line counts.
-pub fn info_host(cx: &mut App, folder: &Path, path: &Path) -> Option<EntryHostData> {
-    let mut entry = entry_host(cx, folder, path, 0, false)?;
-    entry.handle = crow_core::EntryHandle(1);
-    Some(entry)
 }
 
 /// The native Projects section's rows for the configured roots. Starts one
@@ -635,29 +562,16 @@ pub fn refresh_projects(cx: &mut App) {
 }
 
 fn start_projects(cx: &mut App, roots: Vec<PathBuf>) {
-    let Some(git) = cx.try_global::<Git>() else { return };
-    if roots.is_empty() {
-        let git = cx.global_mut::<Git>();
-        git.project_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        git.project_roots.clear();
-        git.project_rows.clear();
-        git.project_pending = false;
-        git.project_truncated = false;
-        git.projects_checked = Some(Instant::now());
-        return;
-    }
-    let generation = git.generation;
+    let Some(git) = cx.try_global::<Git>().filter(|git| git.enabled) else { return };
     let sender = git.tx.clone();
-    let cancel = std::sync::Arc::new(AtomicBool::new(false));
-    let old = std::mem::replace(&mut cx.global_mut::<Git>().project_cancel, cancel.clone());
-    old.store(true, std::sync::atomic::Ordering::Relaxed);
-    {
-        let git = cx.global_mut::<Git>();
-        git.project_roots = roots.clone();
-        git.project_rows.clear();
-        git.project_pending = true;
-        git.project_truncated = false;
-        git.projects_checked = None;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let git = cx.global_mut::<Git>();
+    std::mem::replace(&mut git.project_cancel, cancel.clone()).store(true, Ordering::Relaxed);
+    git.project_roots.clone_from(&roots);
+    git.project_rows.clear();
+    git.project_truncated = false;
+    if roots.is_empty() {
+        return;
     }
     cx.background_spawn(async move {
         let report = crow_plugin_git::discover(
@@ -665,10 +579,10 @@ fn start_projects(cx: &mut App, roots: Vec<PathBuf>) {
             crow_plugin_git::DiscoveryLimits { max_depth: 6, max_directories: 20_000, max_repositories: 200 },
             &cancel,
             |found| {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                if cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                let Ok(metadata) = std::fs::metadata(&found.identity.worktree) else { return }; // io-ok: inside background_spawn // io-ok: inside background_spawn
+                let Ok(metadata) = std::fs::metadata(&found.identity.worktree) else { return }; // io-ok: inside background_spawn
                 use std::os::unix::fs::MetadataExt;
                 let head = match &found.head.state {
                     crow_plugin_git::HeadState::Branch { name } => name.clone(),
@@ -681,14 +595,12 @@ fn start_projects(cx: &mut App, roots: Vec<PathBuf>) {
                     None
                 } else {
                     crow_plugin_git::open_worktree(&found.identity.worktree).ok().and_then(|repo| {
-                        crow_plugin_git::status_snapshot(&repo, 0, &AtomicBool::new(false))
-                            .ok()
-                            .map(|snapshot| snapshot.changed_count)
+                        crow_plugin_git::status_snapshot(&repo, &cancel).ok().map(|snapshot| snapshot.changed_count)
                     })
                 };
                 sender
                     .send(GitEvent::Project {
-                        generation,
+                        scan: cancel.clone(),
                         project: ProjectRow {
                             path: found.identity.worktree,
                             identity: (metadata.dev(), metadata.ino()),
@@ -700,7 +612,7 @@ fn start_projects(cx: &mut App, roots: Vec<PathBuf>) {
                     .ok();
             },
         );
-        sender.send(GitEvent::ProjectsDone { generation, truncated: report.truncated }).ok();
+        sender.send(GitEvent::ProjectsDone { scan: cancel, truncated: report.truncated }).ok();
     })
     .detach();
 }
@@ -731,6 +643,10 @@ pub fn project_folders(cx: &App) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+pub fn is_lines_column(id: &crow_core::ExtensionId) -> bool {
+    is_git_plugin(&id.plugin) && id.local.as_str() == "lines-changed"
+}
+
 pub fn is_git_plugin(plugin: &crow_core::PluginId) -> bool {
     plugin.as_str() == PLUGIN_ID
 }
@@ -747,9 +663,7 @@ mod tests {
 
     #[cfg(test)]
     pub fn set_enabled_for_test(cx: &mut App, enabled: bool) {
-        let git = cx.global_mut::<Git>();
-        git.enabled = enabled;
-        git.generation = git.generation.wrapping_add(1);
+        cx.set_global(Git::new(enabled));
     }
 
     #[gpui::test]
@@ -758,7 +672,10 @@ mod tests {
         cx.update(crate::ui::init_for_tests);
         let temp = tempfile::TempDir::new().unwrap();
         let repo = temp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
+        let sibling = repo.join("sub");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let alias = repo.join("alias");
+        std::os::unix::fs::symlink("sub", &alias).unwrap();
         let git = |args: &[&str]| {
             let out = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
             assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
@@ -766,10 +683,10 @@ mod tests {
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.name", "Crow Test"]);
         git(&["config", "user.email", "crow@example.invalid"]);
-        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        std::fs::write(sibling.join("a.txt"), "a\n").unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-q", "-m", "base"]);
-        std::fs::write(repo.join("a.txt"), "b\n").unwrap();
+        std::fs::write(sibling.join("a.txt"), "b\n").unwrap();
 
         cx.update(|cx| set_enabled_for_test(cx, true));
         cx.update(|cx| request_folder(cx, &repo));
@@ -786,11 +703,30 @@ mod tests {
         let data = snapshot.expect("repository snapshot");
         assert_eq!(data.branch.as_deref(), Some("main"));
         assert_eq!(data.changed, 1);
+        cx.update(|cx| {
+            let folder = entry_host(cx, &repo, &sibling, true, true).unwrap();
+            assert_eq!(folder.badge, "M");
+            assert_eq!(folder.label, "contains modified paths");
+            assert_eq!((folder.index, folder.worktree, folder.lines_changed), (None, None, None));
+            assert!(cx.global::<Git>().wanted_lines.is_empty());
+        });
+        let canonical = std::fs::canonicalize(&repo).unwrap();
+        let original = cx.read_global::<Git, _>(|git, _| git.snapshot(&canonical).unwrap().clone());
+        let alias = canonical.join("alias");
+        // Resolve the second folder before checking the repository cache.
+        cx.update(|cx| request_folder(cx, &alias));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(repository_data(cx, &alias).unwrap().changed, 1);
+            let git = cx.global::<Git>();
+            assert!(Arc::ptr_eq(git.snapshot(&canonical).unwrap(), &original));
+            assert!(git.pending_repos.is_empty(), "a sibling folder must reuse the existing scan");
+        });
         let mut host = None;
         for _ in 0..200 {
             cx.update(poll);
             cx.run_until_parked();
-            if let Some(row) = cx.update(|cx| entry_host(cx, &repo, &repo.join("a.txt"), 1, true))
+            if let Some(row) = cx.update(|cx| entry_host(cx, &alias, &alias.join("a.txt"), false, true))
                 && row.lines_changed.is_some()
             {
                 host = Some(row);
@@ -801,42 +737,94 @@ mod tests {
         let host = host.expect("row host data with line counts");
         assert_eq!(host.badge, "M");
         assert_eq!(host.lines_changed, Some(2));
+
+        cx.run_until_parked();
+        cx.update(poll);
+        assert!(cx.read_global::<Git, _>(|git, _| git.watch.as_ref().unwrap().watcher.is_some()));
+        git(&["add", "sub/a.txt"]);
+        for _ in 0..200 {
+            cx.update(poll);
+            cx.run_until_parked();
+            if let Some(row) = cx.update(|cx| entry_host(cx, &alias, &alias.join("a.txt"), false, false))
+                && row.index.as_deref() == Some("modified")
+            {
+                assert_eq!(row.worktree, None);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the repository watcher did not pick up the changed Git index");
     }
 
     #[gpui::test]
-    fn stale_generation_events_are_dropped(cx: &mut gpui::TestAppContext) {
+    fn stale_line_results_are_dropped(cx: &mut gpui::TestAppContext) {
         cx.update(crate::ui::init_for_tests);
         cx.update(|cx| set_enabled_for_test(cx, true));
-        let (tx, generation) = cx.update(|cx| {
-            let git = cx.global::<Git>();
-            (git.tx.clone(), git.generation)
+        let worktree = PathBuf::from("/tmp/repo");
+        let snapshot = Arc::new(StatusSnapshot {
+            identity: RepositoryIdentity {
+                worktree: worktree.clone(),
+                git_dir: worktree.join(".git"),
+                common_dir: worktree.join(".git"),
+                linked_worktree: false,
+            },
+            head: crow_plugin_git::HeadInfo {
+                state: crow_plugin_git::HeadState::Unborn { branch: "main".into() },
+                upstream: None,
+            },
+            entries: Default::default(),
+            affected_folders: Default::default(),
+            changed_count: 0,
+            last_commit: None,
+            unavailable: false,
         });
-        tx.send(GitEvent::Lines {
-            generation: generation.wrapping_sub(1),
-            worktree: PathBuf::from("/tmp/repo"),
-            results: vec![(
-                PathBuf::from("/tmp/repo/a.txt"),
-                PathBuf::from("a.txt"),
-                1,
-                Some(LineCounts { insertions: 1, removals: 1 }),
-            )],
-        })
-        .unwrap();
+        let current = Arc::new((*snapshot).clone());
+        let tx = cx.update(|cx| {
+            let git = cx.global_mut::<Git>();
+            git.repos.insert(worktree.clone(), RepoCache { snapshot: Some(current.clone()), checked: Instant::now() });
+            git.tx.clone()
+        });
+        let send = |cx: &mut gpui::TestAppContext, snapshot| {
+            cx.update(|cx| cx.global_mut::<Git>().pending_line_jobs += 1);
+            tx.send(GitEvent::Lines {
+                worktree: worktree.clone(),
+                snapshot,
+                results: vec![(PathBuf::from("a.txt"), None)],
+            })
+            .unwrap();
+        };
+        send(cx, snapshot);
         cx.update(poll);
-        assert!(cx.read_global::<Git, _>(|git, _| git.lines.is_empty()), "a pre-disable line result is stale");
-        tx.send(GitEvent::Lines {
-            generation,
-            worktree: PathBuf::from("/tmp/repo"),
-            results: vec![(
-                PathBuf::from("/tmp/repo/a.txt"),
-                PathBuf::from("a.txt"),
-                1,
-                Some(LineCounts { insertions: 1, removals: 1 }),
-            )],
-        })
-        .unwrap();
+        assert!(cx.read_global::<Git, _>(|git, _| git.lines.is_empty()));
+        send(cx, current);
         cx.update(poll);
         assert_eq!(cx.read_global::<Git, _>(|git, _| git.lines.len()), 1);
+    }
+
+    #[gpui::test]
+    fn replaced_projects_scans_cannot_publish(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::ui::init_for_tests);
+        cx.update(|cx| set_enabled_for_test(cx, true));
+        cx.update(|cx| {
+            let git = cx.global::<Git>();
+            let stale = git.project_cancel.clone();
+            let tx = git.tx.clone();
+            start_projects(cx, Vec::new());
+            tx.send(GitEvent::Project {
+                scan: stale.clone(),
+                project: ProjectRow {
+                    path: PathBuf::from("/tmp/old"),
+                    identity: (1, 2),
+                    head: "main".into(),
+                    changed: Some(0),
+                    unavailable: false,
+                },
+            })
+            .unwrap();
+            tx.send(GitEvent::ProjectsDone { scan: stale, truncated: true }).unwrap();
+        });
+        cx.update(poll);
+        assert!(cx.update(|cx| projects_rows(cx, Vec::new(), Path::new("/tmp"))).is_empty());
     }
 
     #[gpui::test]
@@ -848,7 +836,7 @@ mod tests {
             git.folders.insert(
                 PathBuf::from("/tmp/repo"),
                 FolderCache {
-                    repo: Some(FolderRepo { worktree: PathBuf::from("/tmp/repo"), relative_prefix: PathBuf::new() }),
+                    repo: Some(FolderRepo { worktree: PathBuf::from("/tmp/repo"), alias_prefix: None }),
                     checked: Instant::now(),
                 },
             );

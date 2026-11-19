@@ -288,47 +288,28 @@ impl PluginHost {
             }
             return;
         }
-        match verdict {
+        let (state, detail) = match verdict {
             GrantVerdict::Authorized(fs) => {
-                let (state, has_worker) = {
-                    let record = self.runtime.get(id).unwrap();
-                    (record.state, record.worker.is_some())
-                };
-                if let Some(record) = self.runtime.get_mut(id) {
-                    record.read_allowed = fs.permits_read();
-                }
-                // Paused and Failed stay sticky for this snapshot; Retry is
-                // the only path that asks for a fresh generation.
-                if matches!(state, PluginState::Paused | PluginState::Failed) {
+                let record = self.runtime.get_mut(id).unwrap();
+                record.read_allowed = fs.permits_read();
+                // Paused and Failed stay sticky for this snapshot; Retry starts a new generation.
+                if matches!(record.state, PluginState::Paused | PluginState::Failed)
+                    || matches!(record.state, PluginState::Starting | PluginState::Running) && record.worker.is_some()
+                {
                     return;
                 }
-                if matches!(state, PluginState::Starting | PluginState::Running) && has_worker {
-                    return;
-                }
-                let snapshot = self.runtime.get(id).unwrap().snapshot.clone();
+                let snapshot = record.snapshot.clone();
                 self.start_worker(id, snapshot, fs);
+                return;
             }
-            GrantVerdict::Missing => {
-                self.withdraw_worker(id);
-                if let Some(record) = self.runtime.get_mut(id) {
-                    record.state = PluginState::PendingApproval;
-                    record.detail = None;
-                }
-            }
-            GrantVerdict::Disabled => {
-                self.withdraw_worker(id);
-                if let Some(record) = self.runtime.get_mut(id) {
-                    record.state = PluginState::Disabled;
-                    record.detail = None;
-                }
-            }
-            GrantVerdict::Mismatch(detail) => {
-                self.withdraw_worker(id);
-                if let Some(record) = self.runtime.get_mut(id) {
-                    record.state = PluginState::PendingApproval;
-                    record.detail = detail;
-                }
-            }
+            GrantVerdict::Missing => (PluginState::PendingApproval, None),
+            GrantVerdict::Disabled => (PluginState::Disabled, None),
+            GrantVerdict::Mismatch(detail) => (PluginState::PendingApproval, detail),
+        };
+        self.withdraw_worker(id);
+        if let Some(record) = self.runtime.get_mut(id) {
+            record.state = state;
+            record.detail = detail;
         }
     }
 
@@ -569,6 +550,19 @@ impl PluginHost {
                     RequestErrorKind::InvalidInput,
                     "use Notify for hooks and registration for icon packs",
                 ),
+            );
+            return;
+        }
+        if input.host.is_some()
+            && !self
+                .runtime
+                .get(&extension.plugin)
+                .is_some_and(|record| self.embedded.iter().any(|snapshot| Arc::ptr_eq(snapshot, &record.snapshot)))
+        {
+            self.finish_error(
+                &extension,
+                stamp,
+                RequestError::new(RequestErrorKind::Capability, "host data requires a bundled plugin"),
             );
             return;
         }
@@ -1877,6 +1871,17 @@ fn run(ctx) { hold_worker("cancel-queued"); #{ kind: "copy_text", text: "ran" } 
         };
         assert_eq!(error.kind, kind, "{}", error.message);
         assert!(error.message.contains(contains), "{}", error.message);
+    }
+
+    #[test]
+    fn installed_plugins_cannot_receive_bundled_host_data() {
+        let mut harness = Harness::new(&[("example.a", COMMAND)]);
+        harness.approve("example.a");
+        let generation = harness.entry("example.a").generation;
+        let input = RequestInput { host: Some(crate::dto::HostData::default()), ..Harness::input() };
+        let ticket = harness.submit_evaluate("example.a", "copy", generation, input);
+        let (_, _, result) = harness.wait_terminal(&ticket);
+        assert_rejection(result, RequestErrorKind::Capability, "requires a bundled plugin");
     }
 
     #[test]

@@ -137,7 +137,6 @@ pub enum PluginEffect {
 }
 
 struct CommandTicket {
-    stamp: RequestStamp,
     ticket: TicketProbe,
     extension: ExtensionId,
     window: WindowId,
@@ -199,15 +198,6 @@ impl RowCache {
         self.evict();
     }
 
-    fn remove_path_any(&mut self, path: &Path) {
-        let keys: Vec<RowKey> = self.values.keys().filter(|key| key.path == path).cloned().collect();
-        for key in keys {
-            if let Some(old) = self.values.remove(&key) {
-                self.bytes = self.bytes.saturating_sub(old.value.bytes());
-            }
-        }
-    }
-
     fn evict(&mut self) {
         while self.values.len() > MAX_ROW_VALUES || self.bytes > MAX_ROW_BYTES {
             let Some((key, _)) =
@@ -221,41 +211,27 @@ impl RowCache {
         }
     }
 
-    fn remove_extension(&mut self, extension: &ExtensionId) {
-        let keys: Vec<RowKey> = self.values.keys().filter(|key| &key.extension == extension).cloned().collect();
-        for key in keys {
-            if let Some(row) = self.values.remove(&key) {
-                self.bytes = self.bytes.saturating_sub(row.value.bytes());
+    fn remove_matching(&mut self, mut remove: impl FnMut(&RowKey) -> bool) {
+        self.values.retain(|key, row| {
+            if remove(key) {
+                self.bytes -= row.value.bytes();
+                false
+            } else {
+                true
             }
-        }
+        });
+    }
+
+    fn remove_extension(&mut self, extension: &ExtensionId) {
+        self.remove_matching(|key| &key.extension == extension);
     }
 
     fn remove_plugin(&mut self, plugin: &PluginId) {
-        let keys: Vec<RowKey> = self.values.keys().filter(|key| &key.extension.plugin == plugin).cloned().collect();
-        for key in keys {
-            if let Some(row) = self.values.remove(&key) {
-                self.bytes = self.bytes.saturating_sub(row.value.bytes());
-            }
-        }
-    }
-
-    fn remove_path(&mut self, scope: &ScopeKey, path: &Path) {
-        let keys: Vec<RowKey> =
-            self.values.keys().filter(|key| &key.scope == scope && key.path.as_path() == path).cloned().collect();
-        for key in keys {
-            if let Some(row) = self.values.remove(&key) {
-                self.bytes = self.bytes.saturating_sub(row.value.bytes());
-            }
-        }
+        self.remove_matching(|key| &key.extension.plugin == plugin);
     }
 
     fn remove_scope(&mut self, scope: &ScopeKey) {
-        let keys: Vec<RowKey> = self.values.keys().filter(|key| &key.scope == scope).cloned().collect();
-        for key in keys {
-            if let Some(row) = self.values.remove(&key) {
-                self.bytes = self.bytes.saturating_sub(row.value.bytes());
-            }
-        }
+        self.remove_matching(|key| &key.scope == scope);
     }
 
     fn len(&self) -> usize {
@@ -306,39 +282,12 @@ struct InfoBinding {
 }
 
 enum TicketKind {
-    Preview {
-        surface: SurfaceId,
-        sender: futures::channel::oneshot::Sender<RequestResult>,
-    },
-    Sidebar {
-        surface: SurfaceId,
-        scope: ScopeKey,
-        revision: u64,
-        descriptor: ExtensionId,
-        entries: HashMap<EntryHandle, (PathBuf, (u64, u64))>,
-    },
-    Info {
-        surface: SurfaceId,
-        scope: ScopeKey,
-        revision: u64,
-        descriptor: ExtensionId,
-    },
-    Status {
-        surface: SurfaceId,
-        scope: ScopeKey,
-        revision: u64,
-        descriptor: ExtensionId,
-    },
-    Rows {
-        surface: SurfaceId,
-        scope: ScopeKey,
-        scope_version: u64,
-        descriptor: ExtensionId,
-        entries: Vec<(EntryHandle, PathBuf, u64)>,
-    },
-    Hook {
-        scope: Option<ScopeKey>,
-    },
+    Preview { surface: SurfaceId, sender: futures::channel::oneshot::Sender<RequestResult> },
+    Sidebar { surface: SurfaceId, scope: ScopeKey, revision: u64, entries: HashMap<EntryHandle, (PathBuf, (u64, u64))> },
+    Info { surface: SurfaceId, scope: ScopeKey, revision: u64 },
+    Status { surface: SurfaceId, scope: ScopeKey, revision: u64 },
+    Rows { surface: SurfaceId, scope: ScopeKey, scope_version: u64, entries: Vec<(EntryHandle, PathBuf, u64)> },
+    Hook { scope: Option<ScopeKey> },
 }
 
 enum TicketProbe {
@@ -366,7 +315,6 @@ impl TicketProbe {
 }
 
 struct PassiveTicket {
-    stamp: RequestStamp,
     ticket: TicketProbe,
     extension: ExtensionId,
     kind: TicketKind,
@@ -403,7 +351,6 @@ struct PendingRows {
     context_revision: u64,
     descriptors: Vec<ExtensionId>,
     rows: Vec<RowInput>,
-    repository: Option<crow_plugin::RepositoryData>,
 }
 
 /// The coordinator. One instance lives behind the app's `Plugins` global.
@@ -674,10 +621,14 @@ impl PluginSurfaces {
             {
                 continue;
             }
+            let bundled_git = crate::git::is_git_plugin(&descriptor.plugin);
+            if bundled_git && host.is_none() {
+                continue;
+            }
             let input = RequestInput {
                 snapshot: Snapshot { scope: bounded(display), selection: None, entries: Vec::new() },
                 excerpt: None,
-                host: host.clone(),
+                host: host.as_ref().filter(|_| bundled_git).cloned(),
             };
             match handle.try_evaluate(descriptor.clone(), published.generation, revision, input) {
                 Ok(ticket) => {
@@ -691,10 +642,9 @@ impl PluginSurfaces {
                     self.tickets.insert(
                         ticket.stamp(),
                         PassiveTicket {
-                            stamp: ticket.stamp(),
                             ticket: TicketProbe::Real(ticket),
                             extension: descriptor.clone(),
-                            kind: TicketKind::Status { surface, scope: scope.clone(), revision, descriptor },
+                            kind: TicketKind::Status { surface, scope: scope.clone(), revision },
                         },
                     );
                 }
@@ -758,10 +708,14 @@ impl PluginSurfaces {
             {
                 continue;
             }
+            let bundled_git = crate::git::is_git_plugin(&descriptor.plugin);
+            if bundled_git && host.is_none() {
+                continue;
+            }
             let input = RequestInput {
                 snapshot: Snapshot { scope: bounded(display), selection: None, entries: vec![entry.clone()] },
                 excerpt: None,
-                host: host.clone(),
+                host: host.as_ref().filter(|_| bundled_git).cloned(),
             };
             match handle.try_evaluate(descriptor.clone(), published.generation, revision, input) {
                 Ok(ticket) => {
@@ -772,10 +726,9 @@ impl PluginSurfaces {
                     self.tickets.insert(
                         ticket.stamp(),
                         PassiveTicket {
-                            stamp: ticket.stamp(),
                             ticket: TicketProbe::Real(ticket),
                             extension: descriptor.clone(),
-                            kind: TicketKind::Info { surface, scope: scope.clone(), revision, descriptor },
+                            kind: TicketKind::Info { surface, scope: scope.clone(), revision },
                         },
                     );
                 }
@@ -853,16 +806,9 @@ impl PluginSurfaces {
                 self.tickets.insert(
                     ticket.stamp(),
                     PassiveTicket {
-                        stamp: ticket.stamp(),
                         ticket: TicketProbe::Real(ticket),
                         extension: descriptor.clone(),
-                        kind: TicketKind::Sidebar {
-                            surface,
-                            scope,
-                            revision,
-                            descriptor: descriptor.clone(),
-                            entries: table,
-                        },
+                        kind: TicketKind::Sidebar { surface, scope, revision, entries: table },
                     },
                 );
             }
@@ -896,7 +842,6 @@ impl PluginSurfaces {
                 self.tickets.insert(
                     ticket.stamp(),
                     PassiveTicket {
-                        stamp: ticket.stamp(),
                         ticket: TicketProbe::Real(ticket),
                         extension: descriptor.clone(),
                         kind: TicketKind::Preview { surface, sender },
@@ -924,12 +869,9 @@ impl PluginSurfaces {
         context_revision: u64,
         descriptors: Vec<ExtensionId>,
         rows: Vec<RowInput>,
-        repository: Option<crow_plugin::RepositoryData>,
     ) {
-        self.pending_rows.insert(
-            surface,
-            PendingRows { scope, scope_version, scope_display, context_revision, descriptors, rows, repository },
-        );
+        self.pending_rows
+            .insert(surface, PendingRows { scope, scope_version, scope_display, context_revision, descriptors, rows });
     }
 
     /// Submit the latest queued demand. Replacing (not appending) per surface
@@ -946,7 +888,6 @@ impl PluginSurfaces {
                 demand.context_revision,
                 &demand.descriptors,
                 demand.rows,
-                demand.repository,
                 now,
             );
         }
@@ -965,7 +906,6 @@ impl PluginSurfaces {
         context_revision: u64,
         descriptors: &[ExtensionId],
         rows: Vec<RowInput>,
-        repository: Option<crow_plugin::RepositoryData>,
         now: Instant,
     ) {
         let state = self.surfaces.entry(surface).or_insert_with(|| SurfaceState {
@@ -977,9 +917,9 @@ impl PluginSurfaces {
         if state.scope != scope || state.scope_version != scope_version {
             state.scope = scope.clone();
             state.scope_version = scope_version;
-            state.versions.clear();
         }
         state.seen = now;
+        state.versions.clear();
         for row in &rows {
             state.versions.insert(row.path.clone(), row.version);
         }
@@ -1033,6 +973,7 @@ impl PluginSurfaces {
             }
             let mut entries = Vec::with_capacity(rows.len().min(MAX_BATCH));
             let mut refs = Vec::with_capacity(rows.len().min(MAX_BATCH));
+            let bundled_git = crate::git::is_git_plugin(&descriptor.plugin);
             let mut host_entries = Vec::new();
             let mut selection_handle = None;
             for row in &rows {
@@ -1041,7 +982,7 @@ impl PluginSurfaces {
                 }
                 // A clean Git row has no contribution; asking the worker for it
                 // would turn a folder scroll into hundreds of empty round trips.
-                if crate::git::is_git_plugin(&descriptor.plugin) && row.git.is_none() {
+                if bundled_git && row.git.is_none() {
                     continue;
                 }
                 // Demand is the misses only. A cached value, hit or empty,
@@ -1067,7 +1008,7 @@ impl PluginSurfaces {
                     size: row.size,
                     kind: bounded(&row.kind),
                 });
-                if let Some(git) = &row.git {
+                if bundled_git && let Some(git) = &row.git {
                     let mut git = git.clone();
                     git.handle = handle;
                     host_entries.push(git);
@@ -1077,8 +1018,7 @@ impl PluginSurfaces {
             if entries.is_empty() {
                 continue;
             }
-            let host = crate::git::is_git_plugin(&descriptor.plugin)
-                .then(|| crow_plugin::HostData { repository: repository.clone(), entries: host_entries.clone() });
+            let host = bundled_git.then_some(crow_plugin::HostData { repository: None, entries: host_entries });
             let input = RequestInput {
                 snapshot: Snapshot { scope: bounded(scope_display), selection: selection_handle, entries },
                 excerpt: None,
@@ -1090,16 +1030,9 @@ impl PluginSurfaces {
                     self.tickets.insert(
                         ticket.stamp(),
                         PassiveTicket {
-                            stamp: ticket.stamp(),
                             ticket: TicketProbe::Real(ticket),
                             extension: descriptor.clone(),
-                            kind: TicketKind::Rows {
-                                surface,
-                                scope: scope.clone(),
-                                scope_version,
-                                descriptor: descriptor.clone(),
-                                entries: refs,
-                            },
+                            kind: TicketKind::Rows { surface, scope: scope.clone(), scope_version, entries: refs },
                         },
                     );
                     self.retry_at = None;
@@ -1125,14 +1058,7 @@ impl PluginSurfaces {
     ) {
         self.commands.insert(
             ticket.stamp(),
-            CommandTicket {
-                stamp: ticket.stamp(),
-                ticket: TicketProbe::Real(ticket),
-                extension,
-                window,
-                capture,
-                entries,
-            },
+            CommandTicket { ticket: TicketProbe::Real(ticket), extension, window, capture, entries },
         );
     }
 
@@ -1142,11 +1068,10 @@ impl PluginSurfaces {
         &mut self,
         extension: &ExtensionId,
         stamp: RequestStamp,
-        result: RequestResult,
+        result: &RequestResult,
     ) -> Option<(WindowId, ExtensionId, PluginEffect, CommandCapture)> {
         let ticket = self.commands.remove(&stamp)?;
         if &ticket.extension != extension
-            || ticket.stamp != stamp
             || ticket.ticket.is_cancelled()
             || self.current_extension(extension, stamp.generation).is_none()
         {
@@ -1154,10 +1079,10 @@ impl PluginSurfaces {
             return None;
         }
         let effect = match result {
-            RequestResult::Intent(CommandIntent::Message(text)) => PluginEffect::Message(text),
-            RequestResult::Intent(CommandIntent::CopyText(text)) => PluginEffect::CopyText(text),
+            RequestResult::Intent(CommandIntent::Message(text)) => PluginEffect::Message(text.clone()),
+            RequestResult::Intent(CommandIntent::CopyText(text)) => PluginEffect::CopyText(text.clone()),
             RequestResult::Intent(CommandIntent::Reveal(handle)) => {
-                let (path, identity) = ticket.entries.get(&handle)?.clone();
+                let (path, identity) = ticket.entries.get(handle)?.clone();
                 PluginEffect::Reveal { path, identity: identity? }
             }
             RequestResult::Unit | RequestResult::Error(_) | RequestResult::Refresh => return None,
@@ -1201,7 +1126,7 @@ impl PluginSurfaces {
             self.counters.rejected_tickets += 1;
             return false;
         };
-        if &ticket.extension != extension || ticket.stamp != stamp || ticket.ticket.is_cancelled() {
+        if &ticket.extension != extension || ticket.ticket.is_cancelled() {
             self.counters.rejected_tickets += 1;
             return false;
         }
@@ -1215,7 +1140,7 @@ impl PluginSurfaces {
                 false
             }
             (
-                TicketKind::Sidebar { surface, scope, revision, descriptor, entries },
+                TicketKind::Sidebar { surface, scope, revision, entries },
                 result @ (RequestResult::Values(_) | RequestResult::Unit),
             ) => {
                 let rows = match result {
@@ -1245,13 +1170,13 @@ impl PluginSurfaces {
                     self.counters.rejected_tickets += 1;
                     return false;
                 }
-                binding.seen.insert(descriptor.clone());
-                let changed = binding.values.get(&descriptor) != Some(&rows);
-                binding.values.insert(descriptor, rows);
+                binding.seen.insert(extension.clone());
+                let changed = binding.values.get(extension) != Some(&rows);
+                binding.values.insert(extension.clone(), rows);
                 changed
             }
             (
-                TicketKind::Info { surface, scope, revision, descriptor },
+                TicketKind::Info { surface, scope, revision },
                 result @ (RequestResult::Values(_) | RequestResult::Unit),
             ) => {
                 let rows = match result {
@@ -1267,13 +1192,13 @@ impl PluginSurfaces {
                     self.counters.rejected_tickets += 1;
                     return false;
                 }
-                binding.seen.insert(descriptor.clone());
-                let changed = binding.values.get(&descriptor) != Some(&rows);
-                binding.values.insert(descriptor, rows);
+                binding.seen.insert(extension.clone());
+                let changed = binding.values.get(extension) != Some(&rows);
+                binding.values.insert(extension.clone(), rows);
                 changed
             }
             (
-                TicketKind::Status { surface, scope, revision, descriptor },
+                TicketKind::Status { surface, scope, revision },
                 result @ (RequestResult::Values(_) | RequestResult::Unit),
             ) => {
                 let text = match result {
@@ -1291,18 +1216,18 @@ impl PluginSurfaces {
                     self.counters.rejected_tickets += 1;
                     return false;
                 }
-                binding.seen.insert(descriptor.clone());
-                if binding.values.get(&descriptor) == Some(&text) {
+                binding.seen.insert(extension.clone());
+                if binding.values.get(extension) == Some(&text) {
                     return false;
                 }
-                binding.values.insert(descriptor, text);
+                binding.values.insert(extension.clone(), text);
                 true
             }
             (
-                TicketKind::Rows { surface, scope, scope_version, descriptor, entries },
+                TicketKind::Rows { surface, scope, scope_version, entries },
                 result @ (RequestResult::Values(_) | RequestResult::Unit),
             ) => {
-                let kind = self.kind_of(&descriptor);
+                let kind = self.kind_of(extension);
                 let by_handle = match result {
                     RequestResult::Unit => HashMap::new(),
                     RequestResult::Values(values) => {
@@ -1330,7 +1255,7 @@ impl PluginSurfaces {
                     if state.versions.get(&path).copied() != Some(version) {
                         continue;
                     }
-                    let key = RowKey { extension: descriptor.clone(), generation, scope: scope.clone(), path, version };
+                    let key = RowKey { extension: extension.clone(), generation, scope: scope.clone(), path, version };
                     let value = by_handle.get(&handle).map_or_else(RowValue::empty, |value| RowValue {
                         text: value.text.clone(),
                         spoken: value.spoken.clone(),
@@ -1399,7 +1324,7 @@ impl PluginSurfaces {
     }
 
     pub fn invalidate_path(&mut self, scope: &ScopeKey, path: &Path) {
-        self.rows.remove_path(scope, path);
+        self.rows.remove_matching(|key| &key.scope == scope && key.path == path);
         for state in self.surfaces.values_mut() {
             if &state.scope == scope {
                 state.versions.remove(path);
@@ -1411,6 +1336,16 @@ impl PluginSurfaces {
     /// values and let the next visible pass ask again.
     pub fn invalidate_plugin(&mut self, plugin: &PluginId) {
         self.rows.remove_plugin(plugin);
+        self.tickets.retain(|_, ticket| {
+            let keep = &ticket.extension.plugin != plugin;
+            if !keep {
+                ticket.ticket.cancel();
+            }
+            keep
+        });
+        for demand in self.pending_rows.values_mut() {
+            demand.descriptors.retain(|id| &id.plugin != plugin);
+        }
         for binding in self.status.values_mut() {
             binding.values.retain(|id, _| &id.plugin != plugin);
             binding.seen.retain(|id| &id.plugin != plugin);
@@ -1425,8 +1360,26 @@ impl PluginSurfaces {
         }
     }
 
-    pub fn invalidate_path_everywhere(&mut self, path: &Path) {
-        self.rows.remove_path_any(path);
+    pub fn invalidate_git_lines(&mut self, paths: &[PathBuf]) {
+        let paths: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        self.rows
+            .remove_matching(|key| crate::git::is_lines_column(&key.extension) && paths.contains(key.path.as_path()));
+        self.tickets.retain(|_, ticket| {
+            if crate::git::is_lines_column(&ticket.extension)
+                && matches!(&ticket.kind, TicketKind::Rows { entries, .. }
+                    if entries.iter().any(|(_, path, _)| paths.contains(path.as_path())))
+            {
+                ticket.ticket.cancel();
+                false
+            } else {
+                true
+            }
+        });
+        for demand in self.pending_rows.values_mut() {
+            if demand.rows.iter().any(|row| paths.contains(row.path.as_path())) {
+                demand.descriptors.retain(|id| !crate::git::is_lines_column(id));
+            }
+        }
     }
 
     pub fn bump_scope(&mut self, surface: SurfaceId, scope: ScopeKey, scope_version: u64, _now: Instant) {
@@ -1539,7 +1492,6 @@ impl PluginSurfaces {
                         self.tickets.insert(
                             ticket.stamp(),
                             PassiveTicket {
-                                stamp: ticket.stamp(),
                                 ticket: TicketProbe::Real(ticket),
                                 extension: descriptor.id.clone(),
                                 kind: TicketKind::Hook { scope: event_scope.clone() },
@@ -1584,7 +1536,6 @@ impl PluginSurfaces {
         self.tickets.insert(
             stamp,
             PassiveTicket {
-                stamp,
                 ticket: TicketProbe::Flag(cancelled),
                 extension,
                 kind: TicketKind::Hook { scope: Some(scope) },
@@ -1660,10 +1611,9 @@ impl PluginSurfaces {
         self.tickets.insert(
             stamp,
             PassiveTicket {
-                stamp,
                 ticket: TicketProbe::Flag(cancelled),
-                extension: extension.clone(),
-                kind: TicketKind::Rows { surface, scope, scope_version, descriptor: extension, entries },
+                extension,
+                kind: TicketKind::Rows { surface, scope, scope_version, entries },
             },
         );
     }
@@ -1685,7 +1635,6 @@ impl PluginSurfaces {
         self.commands.insert(
             stamp,
             CommandTicket {
-                stamp,
                 ticket: TicketProbe::Flag(cancelled),
                 extension,
                 window: gpui::WindowId::from(1),
@@ -1809,7 +1758,6 @@ mod tests {
                 selected: false,
                 git: None,
             }],
-            None,
             Instant::now(),
         );
         surfaces.track_rows_for_test(
@@ -1908,7 +1856,6 @@ mod tests {
             4,
             &[],
             vec![],
-            None,
             Instant::now(),
         );
         assert!(!surfaces.finish(
@@ -1988,6 +1935,25 @@ mod tests {
     }
 
     #[test]
+    fn provider_invalidation_drops_ready_work_from_the_old_snapshot() {
+        let column = descriptor(ExtensionKind::Column, "lines");
+        let scope = ScopeKey::Folder(PathBuf::from("/tmp"));
+        let path = PathBuf::from("/tmp/a.txt");
+        let surface = new_surface();
+        let mut surfaces = PluginSurfaces::default();
+        start_row(&mut surfaces, running(5, vec![column.clone()]), &column, surface, &scope, &path, 1, stamp(5, 1));
+
+        surfaces.invalidate_plugin(&column.id.plugin);
+        assert!(!surfaces.finish(
+            &column.id,
+            stamp(5, 1),
+            RequestResult::Values(ContributionValues::Column(vec![value(1, "stale")])),
+            Instant::now(),
+        ));
+        assert!(surfaces.row_value(&column.id, &scope, &path, 1).is_none());
+    }
+
+    #[test]
     fn owner_close_and_drop_clear_pending_tickets() {
         let column = descriptor(ExtensionKind::Column, "lines");
         let scope = ScopeKey::Folder(PathBuf::from("/tmp"));
@@ -2015,28 +1981,29 @@ mod tests {
         let surface = new_surface();
         let mut surfaces = PluginSurfaces::default();
         surfaces.publish_inventory(&running(5, vec![column.clone()]));
-        let rows = vec![RowInput {
-            path: PathBuf::from("/tmp/a.txt"),
-            version: 1,
-            name: "a.txt".into(),
-            is_dir: false,
-            size: 1,
-            kind: "Text".into(),
-            selected: false,
-            git: None,
-        }];
-        surfaces.observe_rows(
-            None,
-            surface,
-            scope.clone(),
-            9,
-            "/tmp",
-            3,
-            std::slice::from_ref(&column.id),
-            rows,
-            None,
-            Instant::now(),
-        );
+        for index in 0..128 {
+            surfaces.observe_rows(
+                None,
+                surface,
+                scope.clone(),
+                9,
+                "/tmp",
+                3,
+                std::slice::from_ref(&column.id),
+                vec![RowInput {
+                    path: PathBuf::from(format!("/tmp/{index}.txt")),
+                    version: 1,
+                    name: "a.txt".into(),
+                    is_dir: false,
+                    size: 1,
+                    kind: "Text".into(),
+                    selected: false,
+                    git: None,
+                }],
+                Instant::now(),
+            );
+        }
+        assert_eq!(surfaces.surfaces[&surface].versions.len(), 1);
         assert_eq!(surfaces.pending_tickets(), 0, "no service handle means no submission");
         assert_eq!(surfaces.counters().submitted_rows, 0);
     }
@@ -2080,7 +2047,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         let (window, _, effect, got) = surfaces
-            .finish_command(&command.id, stamp(5, 1), RequestResult::Intent(CommandIntent::Reveal(EntryHandle(1))))
+            .finish_command(&command.id, stamp(5, 1), &RequestResult::Intent(CommandIntent::Reveal(EntryHandle(1))))
             .unwrap();
         assert_eq!(window, gpui::WindowId::from(1));
         assert_eq!(effect, PluginEffect::Reveal { path: path.clone(), identity: (3, 4) });
@@ -2095,7 +2062,7 @@ mod tests {
         );
         assert!(
             surfaces
-                .finish_command(&command.id, stamp(5, 2), RequestResult::Intent(CommandIntent::Reveal(EntryHandle(1))))
+                .finish_command(&command.id, stamp(5, 2), &RequestResult::Intent(CommandIntent::Reveal(EntryHandle(1))))
                 .is_none()
         );
 
@@ -2109,7 +2076,7 @@ mod tests {
         surfaces.publish_inventory(&running(6, vec![command.clone()]));
         assert!(
             surfaces
-                .finish_command(&command.id, stamp(5, 3), RequestResult::Intent(CommandIntent::Message("x".into())))
+                .finish_command(&command.id, stamp(5, 3), &RequestResult::Intent(CommandIntent::Message("x".into())))
                 .is_none()
         );
 
@@ -2123,12 +2090,12 @@ mod tests {
         );
         assert!(
             surfaces
-                .finish_command(&command.id, stamp(5, 4), RequestResult::Intent(CommandIntent::Reveal(EntryHandle(9))))
+                .finish_command(&command.id, stamp(5, 4), &RequestResult::Intent(CommandIntent::Reveal(EntryHandle(9))))
                 .is_none()
         );
         assert!(
             surfaces
-                .finish_command(&command.id, stamp(5, 4), RequestResult::Intent(CommandIntent::Message("dup".into())))
+                .finish_command(&command.id, stamp(5, 4), &RequestResult::Intent(CommandIntent::Message("dup".into())))
                 .is_none()
         );
     }

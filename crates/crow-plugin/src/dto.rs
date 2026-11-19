@@ -128,33 +128,23 @@ impl RequestInput {
             }
         }
         if let Some(host) = &self.host {
-            let bounded = |text: &str, what: &str| {
+            let bounded = |text: Option<&str>, what: &str| {
+                let text = text.unwrap_or_default();
                 if text.len() > limits.max_display_bytes || text.chars().any(char::is_control) {
                     return Err(format!("{what} is not bounded plain text"));
                 }
-                Ok(())
+                Ok(text.len())
             };
+            let mut host_bytes = 0usize;
             if let Some(repository) = &host.repository {
-                if let Some(branch) = &repository.branch {
-                    bounded(branch, "repository branch")?;
-                }
-                if let Some(head) = &repository.head {
-                    bounded(head, "repository head")?;
-                }
-                if let Some(last_commit) = &repository.last_commit {
-                    bounded(last_commit, "last commit")?;
-                }
+                host_bytes = bounded(repository.branch.as_deref(), "repository branch")?
+                    + bounded(repository.head.as_deref(), "repository head")?
+                    + bounded(repository.last_commit.as_deref(), "last commit")?;
             }
             if host.entries.len() > limits.max_entries_per_call {
                 return Err(format!("host data has more than {} entries", limits.max_entries_per_call));
             }
             let mut host_handles = std::collections::HashSet::new();
-            let mut host_bytes = 0usize;
-            if let Some(repository) = &host.repository {
-                host_bytes = repository.branch.as_ref().map_or(0, String::len)
-                    + repository.head.as_ref().map_or(0, String::len)
-                    + repository.last_commit.as_ref().map_or(0, String::len);
-            }
             for entry in &host.entries {
                 if !handles.contains(&entry.handle) {
                     return Err(format!("host data handle {} is not in the snapshot", entry.handle.0));
@@ -165,17 +155,11 @@ impl RequestInput {
                 if entry.badge.len() > limits.max_badge_bytes || entry.badge.chars().any(char::is_control) {
                     return Err(format!("badge for handle {} is not bounded plain text", entry.handle.0));
                 }
-                bounded(&entry.label, "entry label")?;
-                if let Some(index) = &entry.index {
-                    bounded(index, "index status")?;
-                }
-                if let Some(worktree) = &entry.worktree {
-                    bounded(worktree, "worktree status")?;
-                }
                 host_bytes = host_bytes
-                    .saturating_add(entry.badge.len() + entry.label.len())
-                    .saturating_add(entry.index.as_ref().map_or(0, String::len))
-                    .saturating_add(entry.worktree.as_ref().map_or(0, String::len))
+                    .saturating_add(entry.badge.len())
+                    .saturating_add(bounded(Some(&entry.label), "entry label")?)
+                    .saturating_add(bounded(entry.index.as_deref(), "index status")?)
+                    .saturating_add(bounded(entry.worktree.as_deref(), "worktree status")?)
                     .saturating_add(32);
             }
             if host_bytes > limits.max_host_bytes {

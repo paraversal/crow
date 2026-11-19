@@ -60,15 +60,11 @@ impl UniformListDecoration for PluginRows {
             (folder.plugin_scope_version(), folder.dir().to_path_buf(), rows)
         };
         let dir = scope_display;
-        let repository = crate::git::repository_data(cx, &dir);
-        let want_lines = self
-            .descriptors
-            .iter()
-            .any(|id| crate::git::is_git_plugin(&id.plugin) && id.local.as_str() == "lines-changed");
+        let want_lines = self.descriptors.iter().any(crate::git::is_lines_column);
         let rows = rows
             .into_iter()
             .map(|mut row| {
-                row.git = crate::git::entry_host(cx, &dir, &row.path, row.version, want_lines);
+                row.git = crate::git::entry_host(cx, &dir, &row.path, row.is_dir, want_lines);
                 row
             })
             .collect();
@@ -81,7 +77,6 @@ impl UniformListDecoration for PluginRows {
                 0,
                 self.descriptors.clone(),
                 rows,
-                repository,
             );
         }
         div().into_any_element()

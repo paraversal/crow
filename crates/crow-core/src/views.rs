@@ -35,6 +35,7 @@ pub const DEFAULT_VIEWS: &str = r#"# Crow view settings. Changes apply when you 
 #                                 newest and largest first otherwise)
 #   folders_first = true | false
 #   columns = ["modified", "size", "kind", "added"]   list view columns after Name
+#     Include "git.lines-changed" for Lines when the bundled Git plugin is enabled.
 #   preview_providers = ["example.pack.preview"]       plugin previews tried before native
 
 [defaults]

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
-use crow_plugin_git::{DiscoveryLimits, HeadState, StatusKind, discover, head_info, line_counts_for, status_snapshot};
+use crow_plugin_git::{DiscoveryLimits, HeadState, LineDiff, StatusKind, discover, head_info, status_snapshot};
 
 struct Repo {
     dir: PathBuf,
@@ -69,7 +69,7 @@ impl Repo {
     }
 
     fn snapshot(&self) -> crow_plugin_git::StatusSnapshot {
-        status_snapshot(&self.open(), 7, &AtomicBool::new(false)).unwrap()
+        status_snapshot(&self.open(), &AtomicBool::new(false)).unwrap()
     }
 }
 
@@ -185,6 +185,11 @@ fn assert_oracle(repo: &Repo) {
     assert_eq!(actual(&snapshot), expected);
 }
 
+fn index_stamp(identity: &crow_plugin_git::RepositoryIdentity) -> Option<(u64, std::time::SystemTime)> {
+    let metadata = std::fs::metadata(identity.git_dir.join("index")).ok()?;
+    Some((metadata.len(), metadata.modified().ok()?))
+}
+
 #[test]
 fn status_matches_porcelain_and_never_writes_the_index() {
     let repo = Repo::new("staged");
@@ -203,15 +208,52 @@ fn status_matches_porcelain_and_never_writes_the_index() {
 
     let expected = porcelain(&repo);
     let identity = crow_plugin_git::RepositoryIdentity::from_repo(&repo.open()).unwrap();
-    let before = crow_plugin_git::index_stamp(&identity);
+    let before = index_stamp(&identity);
     let snapshot = repo.snapshot();
-    let after = crow_plugin_git::index_stamp(&identity);
+    let after = index_stamp(&identity);
     assert_eq!(before, after, "status must not write the index");
     assert_eq!(actual(&snapshot), expected);
     assert_eq!(snapshot.changed_count, 5);
     assert_eq!(snapshot.entries[Path::new("both.txt")].index, Some(StatusKind::Modified));
     assert_eq!(snapshot.entries[Path::new("both.txt")].worktree, Some(StatusKind::Modified));
     assert_eq!(snapshot.entries[Path::new("renamed.txt")].renamed_from.as_deref(), Some(Path::new("old.txt")));
+}
+
+#[test]
+fn changes_mark_parent_folders_with_the_strongest_badge() {
+    let repo = Repo::new("folder-badges");
+    repo.write(".gitignore", b"*.log\n");
+    repo.write("docs/plans/m1.md", b"original plan\n");
+    repo.write("docs-copy/clean.txt", b"unchanged\n");
+    repo.write("old/sub/move.txt", b"moved to another folder\n");
+    repo.write("removed/sub/gone.txt", b"deleted from disk\n");
+    repo.commit("base");
+
+    repo.write("docs/new/draft.md", b"untracked\n");
+    repo.write("docs/plans/m1.md", b"updated plan\n");
+    repo.write("ignored/sub/cache.log", b"ignored\n");
+    std::fs::create_dir_all(repo.dir.join("new/sub")).unwrap();
+    repo.git(&["mv", "old/sub/move.txt", "new/sub/move.txt"]);
+    std::fs::remove_file(repo.dir.join("removed/sub/gone.txt")).unwrap();
+
+    let snapshot = repo.snapshot();
+    assert_eq!(snapshot.changed_count, 4);
+    assert_eq!(
+        snapshot.affected_folders,
+        BTreeMap::from([
+            ("docs".into(), StatusKind::Modified),
+            ("docs/new".into(), StatusKind::Untracked),
+            ("docs/plans".into(), StatusKind::Modified),
+            ("new".into(), StatusKind::Renamed),
+            ("new/sub".into(), StatusKind::Renamed),
+            ("old".into(), StatusKind::Renamed),
+            ("old/sub".into(), StatusKind::Renamed),
+            ("removed".into(), StatusKind::Deleted),
+            ("removed/sub".into(), StatusKind::Deleted),
+        ])
+    );
+    repo.commit("accept changes");
+    assert!(repo.snapshot().affected_folders.is_empty());
 }
 
 #[test]
@@ -230,7 +272,7 @@ fn conflict_ignored_and_binary_statuses_are_typed() {
     let snapshot = repo.snapshot();
     assert_eq!(snapshot.entries[Path::new("c.txt")].badge(), Some(StatusKind::Unmerged));
     assert_eq!(snapshot.changed_count, 1);
-    assert_eq!(line_counts_for(&repo.open(), &snapshot, Path::new("c.txt")).unwrap(), None);
+    assert_eq!(LineDiff::new(&repo.open()).unwrap().counts(&snapshot, Path::new("c.txt")).unwrap(), None);
 
     let ignored = Repo::new("ignored");
     ignored.write(".gitignore", b"*.log\nbuild/\n");
@@ -266,7 +308,7 @@ fn external_filters_are_never_invoked() {
     std::fs::remove_file(&sentinel).ok();
 
     let snapshot = repo.snapshot();
-    let counts = line_counts_for(&repo.open(), &snapshot, Path::new("f.txt")).unwrap();
+    let counts = LineDiff::new(&repo.open()).unwrap().counts(&snapshot, Path::new("f.txt")).unwrap();
     assert_eq!(counts, Some(crow_plugin_git::LineCounts { insertions: 1, removals: 1 }));
     assert!(!sentinel.exists(), "the repo-local clean filter must not run");
     assert_eq!(snapshot.entries[Path::new("f.txt")].badge(), Some(StatusKind::Modified));
@@ -287,18 +329,49 @@ fn line_counts_match_git_numstat_and_skip_ineligible_rows() {
     repo.write("untracked.txt", b"new\n");
 
     let snapshot = repo.snapshot();
-    let both = line_counts_for(&repo.open(), &snapshot, Path::new("both.txt")).unwrap().unwrap();
+    let both = LineDiff::new(&repo.open()).unwrap().counts(&snapshot, Path::new("both.txt")).unwrap().unwrap();
     let numstat = repo.git(&["diff", "--numstat", "HEAD"]);
     let line = numstat.lines().find(|line| line.ends_with("both.txt")).unwrap();
     let fields: Vec<&str> = line.split('\t').collect();
     assert_eq!(format!("{}\t{}", both.insertions, both.removals), format!("{}\t{}", fields[0], fields[1]));
 
-    assert_eq!(line_counts_for(&repo.open(), &snapshot, Path::new("bin.dat")).unwrap(), None);
-    assert_eq!(line_counts_for(&repo.open(), &snapshot, Path::new("untracked.txt")).unwrap(), None);
+    assert_eq!(LineDiff::new(&repo.open()).unwrap().counts(&snapshot, Path::new("bin.dat")).unwrap(), None);
+    assert_eq!(LineDiff::new(&repo.open()).unwrap().counts(&snapshot, Path::new("untracked.txt")).unwrap(), None);
     assert_eq!(
-        line_counts_for(&repo.open(), &snapshot, Path::new("renamed.txt")).unwrap(),
+        LineDiff::new(&repo.open()).unwrap().counts(&snapshot, Path::new("renamed.txt")).unwrap(),
         Some(crow_plugin_git::LineCounts { insertions: 0, removals: 0 })
     );
+}
+
+#[test]
+fn a_binary_staged_side_cannot_be_hidden_by_a_text_worktree_diff() {
+    let repo = Repo::new("binary-to-text");
+    repo.write("mixed.txt", b"bin\0ary");
+    repo.commit("base");
+    repo.write("mixed.txt", b"one\n");
+    repo.git(&["add", "mixed.txt"]);
+    repo.write("mixed.txt", b"two\n");
+
+    let snapshot = repo.snapshot();
+    let repository = repo.open();
+    let mut diff = LineDiff::new(&repository).unwrap();
+    assert_eq!(diff.counts(&snapshot, Path::new("mixed.txt")).unwrap(), None);
+}
+
+#[test]
+fn forced_text_attributes_cannot_exceed_the_line_diff_budget() {
+    let repo = Repo::new("large-text");
+    repo.write(".gitattributes", b"large.dat diff\n");
+    repo.commit("base");
+    let oversized = vec![b'x'; crow_plugin_git::MAX_LINE_DIFF_BYTES as usize + 1];
+    repo.write("large.dat", &oversized);
+    repo.git(&["add", "large.dat"]);
+    repo.write("large.dat", b"now small\n");
+
+    let snapshot = repo.snapshot();
+    let repository = repo.open();
+    let mut diff = LineDiff::new(&repository).unwrap();
+    assert_eq!(diff.counts(&snapshot, Path::new("large.dat")).unwrap(), None);
 }
 
 #[test]
@@ -315,7 +388,7 @@ fn linked_worktrees_and_raw_paths_keep_their_identity() {
     let head = head_info(&linked).unwrap();
     assert_eq!(head.state, HeadState::Branch { name: "feature".into() });
     std::fs::write(worktree.join("a.txt"), b"changed\n").unwrap();
-    let snapshot = status_snapshot(&linked, 1, &AtomicBool::new(false)).unwrap();
+    let snapshot = status_snapshot(&linked, &AtomicBool::new(false)).unwrap();
     assert_eq!(snapshot.entries[Path::new("a.txt")].badge(), Some(StatusKind::Modified));
 
     // APFS rejects invalid UTF-8 names, so the live path check uses a valid
@@ -431,7 +504,7 @@ fn cloud_backed_worktrees_are_identified_and_skip_status_reads() {
     repo.write("a.txt", b"a\n");
     repo.commit("base");
     repo.write("a.txt", b"b\n");
-    let snapshot = crow_plugin_git::unavailable_snapshot(&repo.open(), 4).unwrap();
+    let snapshot = crow_plugin_git::unavailable_snapshot(&repo.open()).unwrap();
     assert!(snapshot.unavailable);
     assert!(snapshot.entries.is_empty());
     assert_eq!(snapshot.changed_count, 0);

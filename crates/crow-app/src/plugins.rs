@@ -88,9 +88,9 @@ pub fn bundled_git_running(cx: &App) -> bool {
     })
 }
 
-pub fn invalidate_git_path(cx: &mut App, path: &std::path::Path) {
+pub fn invalidate_git_lines(cx: &mut App, paths: &[PathBuf]) {
     if cx.try_global::<Plugins>().is_some() {
-        cx.global_mut::<Plugins>().surfaces.invalidate_path_everywhere(path);
+        cx.global_mut::<Plugins>().surfaces.invalidate_git_lines(paths);
     }
 }
 
@@ -198,7 +198,7 @@ pub fn poll(cx: &mut App) {
             HostEvent::Inventory(_) => {}
             HostEvent::Status { message, error, .. } => messages.push((message, error)),
             HostEvent::RequestFinished { extension, stamp, result } => {
-                let command = cx.global_mut::<Plugins>().surfaces.finish_command(&extension, stamp, result.clone());
+                let command = cx.global_mut::<Plugins>().surfaces.finish_command(&extension, stamp, &result);
                 if let Some((window, extension, effect, capture)) = command {
                     results.push(crate::actions::PluginCommandResult { window, extension, effect, capture });
                 } else {
@@ -430,7 +430,7 @@ pub fn request_info(
     };
     let host = crate::git::repository_data(cx, scope.path()).map(|repository| crow_plugin::HostData {
         repository: Some(repository),
-        entries: crate::git::info_host(cx, scope.path(), &entry.path).into_iter().collect(),
+        entries: crate::git::entry_host(cx, scope.path(), &entry.path, entry.is_dir, false).into_iter().collect(),
     });
     cx.global_mut::<Plugins>().surfaces.request_info(
         handle.as_ref(),

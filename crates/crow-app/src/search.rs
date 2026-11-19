@@ -280,6 +280,10 @@ impl UniformListDecoration for PluginSearchRows {
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
+        let descriptors = crate::plugins::decoration_ids(cx);
+        if descriptors.is_empty() {
+            return div().into_any_element();
+        }
         let (surface, scope, scope_version, display, rows) = {
             let view = self.view.read(cx);
             (
@@ -297,13 +301,12 @@ impl UniformListDecoration for PluginSearchRows {
             .into_iter()
             .map(|mut row| {
                 if let Some(parent) = row.path.parent() {
-                    row.git = crate::git::entry_host(cx, parent, &row.path, row.version, false);
+                    row.git = crate::git::entry_host(cx, parent, &row.path, row.is_dir, false);
                 }
                 row
             })
             .collect();
-        let descriptors = crate::plugins::decoration_ids(cx);
-        if !descriptors.is_empty() && !rows.is_empty() && cx.try_global::<crate::plugins::Plugins>().is_some() {
+        if !rows.is_empty() {
             cx.global_mut::<crate::plugins::Plugins>().surfaces.queue_rows(
                 surface,
                 scope,
@@ -312,7 +315,6 @@ impl UniformListDecoration for PluginSearchRows {
                 0,
                 descriptors,
                 rows,
-                None,
             );
         }
         div().into_any_element()
