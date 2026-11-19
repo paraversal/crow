@@ -75,6 +75,7 @@ fn count_engine(
         everything: query.exclusions == SavedExclusions::Everything,
         read_gate: None,
         predicates: predicates.clone(),
+        tag_reader: Some(crate::tags::reader()),
     };
     let control = Control::with_parent_cancel(cancel.clone());
     let mut paths: HashSet<PathBuf> = HashSet::new();
@@ -100,6 +101,7 @@ fn count_engine(
             || summary.capped
             || summary.cancelled
             || summary.error.is_some()
+            || summary.tag_errors > 0
             || summary.skipped.iter().any(|skip| matches!(skip.reason, crow_search::SkipReason::Unreadable(_))),
     }
 }
@@ -114,8 +116,9 @@ fn count_spotlight(query: &SavedQuery, text: &str, predicates: &Predicates, canc
             local_cancel.store(true, Ordering::Relaxed);
             return;
         }
+        let known_tags = (!predicates.tags.is_empty()).then_some(predicates.tags.as_slice());
         for hit in batch {
-            if predicates.matches(&hit.path, hit.is_dir, hit.modified, run_started) {
+            if predicates.matches_with_tags(&hit.path, hit.is_dir, hit.modified, run_started, known_tags) {
                 if paths.len() == COUNT_CAP && !paths.contains(&hit.path) {
                     partial = true;
                     local_cancel.store(true, Ordering::Relaxed);
@@ -125,8 +128,8 @@ fn count_spotlight(query: &SavedQuery, text: &str, predicates: &Predicates, canc
             }
         }
     };
-    let result = if text.is_empty() {
-        match spotlight_expression_for(predicates) {
+    let result = if text.is_empty() || !predicates.tags.is_empty() {
+        match spotlight_expression_for(predicates, text) {
             Some(expression) => crow_macos::spotlight_expression(&expression, &mut sink, &local_cancel),
             None => return CountResult::default(),
         }
@@ -165,6 +168,7 @@ mod tests {
             exclusions: crow_core::SavedExclusions::Configured,
             kind: Some(crow_core::SavedKind::Pdf),
             modified_within_days: None,
+            tags: Vec::new(),
         };
         let count = count_saved_query(&query, &root, &Exclude::default(), &Arc::new(AtomicBool::new(false)));
         assert_eq!(count, CountResult { count: 2, partial: false });

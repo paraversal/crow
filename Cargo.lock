@@ -1169,6 +1169,7 @@ dependencies = [
  "toml 1.2.1+spec-1.1.0",
  "toml_edit 0.25.19+spec-1.1.0",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]

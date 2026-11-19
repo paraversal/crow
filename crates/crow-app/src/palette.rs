@@ -11,14 +11,14 @@ use crow_search::FuzzyMatcher;
 use gpui::{Action, NoAction, SharedString};
 
 use crate::actions::{
-    AddToSidebar, CalculateFolderSizes, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate,
-    EditPath, EditSavedSearch, EditSettings, Eject, EmptyTrash, GoBack, GoForward, GoToFolder, IconCaptionLines,
-    IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash,
-    NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, OpenSettings, OpenTerminal, PasteFiles,
-    PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, RemoveSavedSearch, Rename, ResetFolderView, SaveSearch,
-    SearchEverything, SearchHome, SearchReveal, SelectAll, ShowCommandPalette, ShowInFinder, ShowInfo, ShowSearch,
-    ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles, TogglePreview, Undo,
-    UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList, WhyThisView,
+    AddToSidebar, CalculateFolderSizes, ChooseTags, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently,
+    Duplicate, EditPath, EditSavedSearch, EditSettings, Eject, EmptyTrash, GoBack, GoForward, GoToFolder,
+    IconCaptionLines, IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard, MoveFavoriteDown,
+    MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, OpenSettings,
+    OpenTerminal, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, RemoveSavedSearch, Rename,
+    ResetFolderView, SaveSearch, SearchEverything, SearchHome, SearchReveal, SelectAll, ShowCommandPalette,
+    ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles,
+    TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -113,6 +113,7 @@ pub enum CommandId {
     OpenTerminal,
     SelectAll,
     StartFilter,
+    ChooseTags,
     Undo,
     Redo,
     AddToSidebar,
@@ -205,6 +206,7 @@ impl CommandId {
             CommandId::OpenTerminal => "open-terminal",
             CommandId::SelectAll => "select-all",
             CommandId::StartFilter => "start-filter",
+            CommandId::ChooseTags => "choose-tags",
             CommandId::Undo => "undo",
             CommandId::Redo => "redo",
             CommandId::AddToSidebar => "add-to-sidebar",
@@ -459,6 +461,14 @@ pub const COMMANDS: &[Command] = &[
         action: &StartFilter,
         scope: KeyScope::List,
         menu: Some(MenuSlot { menu: MenuName::Edit, section: 2, title: "Filter This Folder" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::ChooseTags,
+        label: "Filter by Tag…",
+        action: &ChooseTags,
+        scope: KeyScope::List,
+        menu: Some(MenuSlot { menu: MenuName::Edit, section: 2, title: "Filter by Tag…" }),
         palette: true,
     },
     Command {

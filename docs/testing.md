@@ -392,6 +392,7 @@ cargo run --release -p crow-app -- --bench-search target/fixture-search-200k
 cargo run --release -p crow-app -- --bench-search target/fixture-search-200k backup
 cargo run --release -p crow-app -- --bench-search target/fixture-search-200k file-01-02 --names
 cargo test --release -p crow-app --bin crow palette::tests::path_completion_filters_many_files -- --nocapture
+cargo test --release -p crow-app bench_tag_filter_100k -- --ignored --nocapture
 ```
 
 The palette test reports matcher time for five partials over 78k names. Compare release times
@@ -403,6 +404,11 @@ with `main` on the same machine. The full palette refresh budget is in the manua
 engine bench and does not apply the panel's result budgets. `--make-search-corpus` writes the
 deterministic tree the `crow-search` corpus cases use; the unreadable folder in it is mode 000, so
 remove it with `chmod -R u+rwx` first.
+
+`bench_tag_filter_100k` applies a synthetic tag filter to the 100k fixture and prints the first
+background batch and the settled snapshot. It reads no real metadata, so it measures Crow's scan,
+classification and row-build work; the tag predicate itself is read through the injected reader.
+The idle cost is the ordinary `--bench` run, since the tag control only exists inside `/`.
 
 `--bench` scrolls 600 frames and prints first paint, load time and frame times.
 `CROW_BENCH_VIEW=icons` (or `list`/`columns`/`gallery`) forces the view for that run, so the

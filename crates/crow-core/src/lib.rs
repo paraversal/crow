@@ -19,6 +19,7 @@ mod settings;
 mod sidebar;
 mod table;
 mod tabs;
+mod tags;
 mod tips;
 mod usage;
 mod views;
@@ -58,6 +59,7 @@ pub use sidebar::{
 };
 pub use table::{ColumnWidth, ResizeDrag, TableLayout};
 pub use tabs::{TabId, Tabs};
+pub use tags::{MAX_TAG_LEN, MAX_TAGS, normalize_tag, normalize_tags, tags_contain_all, validate_tag};
 pub use tips::{
     TIP_COOLDOWN, TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS, TIPS_FILE, TipBook, TipId, TipState, ZeroMatchStreak,
 };

@@ -6,10 +6,11 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 #[cfg(test)]
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{self, Effective, Fx, Look};
@@ -25,6 +26,9 @@ use gpui::{
 use crate::folder_sizes::FolderSizes;
 use crate::info_pane::{SelectionSummary, TAG_SCAN_CAP};
 use crate::style::kind;
+
+/// Candidates whose tags are read in one background batch.
+const TAG_SCAN_CHUNK: usize = 256;
 
 /// Show what has been read so far at most this often while a big folder loads.
 const PARTIAL_EVERY: Duration = Duration::from_millis(50);
@@ -204,6 +208,12 @@ enum Load {
     Done(std::io::Result<(Vec<Entry>, f64)>),
 }
 
+#[derive(Clone, Debug)]
+enum TagFact {
+    Tags(Arc<[String]>),
+    Error,
+}
+
 pub struct Folder {
     dir: PathBuf,
     /// This folder's `views.toml` icon source, if a layer set one.
@@ -239,6 +249,22 @@ pub struct Folder {
     show_hidden: bool,
     /// Name filter (list/column view): shown rows are this folder's matches, flat.
     filter: Option<String>,
+    /// Finder tags every row must carry (NFD). Empty means no tag constraint.
+    tag_filter: Vec<String>,
+    /// The coherent snapshot for the active tag constraint. `Some(empty)` while
+    /// the first scan runs; never `None` unless no tag constraint is active.
+    tag_matches: Option<Arc<HashSet<PathBuf>>>,
+    tag_scanning: bool,
+    tag_errors: usize,
+    tag_scanned: usize,
+    tag_scan_started: Option<Instant>,
+    tag_first_batch_ms: Option<f64>,
+    tag_scan_generation: u64,
+    tag_scan_cancel: Arc<AtomicBool>,
+    /// Tag facts by path, invalidated by watcher batches and relists. Name
+    /// filter changes reuse it, so typing never rereads metadata.
+    tag_cache: Arc<Mutex<HashMap<PathBuf, TagFact>>>,
+    tag_reader: Arc<dyn crow_search::TagReader>,
     /// List and column views flatten expanded folders into the rows. The icon
     /// grid shows only this folder's direct entries, so it turns the tree off
     /// without closing the expanded folders (turning it back on restores them).
@@ -355,6 +381,17 @@ impl Folder {
             type_select_gen: 0,
             show_hidden,
             filter: None,
+            tag_filter: Vec::new(),
+            tag_matches: None,
+            tag_scanning: false,
+            tag_errors: 0,
+            tag_scanned: 0,
+            tag_scan_started: None,
+            tag_first_batch_ms: None,
+            tag_scan_generation: 0,
+            tag_scan_cancel: Arc::new(AtomicBool::new(false)),
+            tag_cache: Arc::new(Mutex::new(HashMap::new())),
+            tag_reader: crate::tags::reader(),
             show_tree: true,
             match_ranges: Arc::new(Vec::new()),
             children: HashMap::new(),
@@ -456,7 +493,7 @@ impl Folder {
     /// reads rows must wait, because an apply swaps the entries before its rows.
     #[cfg(any(test, feature = "fuzz"))]
     pub fn is_settling(&self) -> bool {
-        self.loading || self.rows_pending > 0 || self.reconciling
+        self.loading || self.rows_pending > 0 || self.reconciling || self.tag_scanning
     }
 
     /// True while any folder open inside this one is still settling.
@@ -869,6 +906,204 @@ impl Folder {
     /// The active name filter, if any.
     pub fn filter(&self) -> Option<&str> {
         self.filter.as_deref()
+    }
+
+    pub fn tag_filter(&self) -> &[String] {
+        &self.tag_filter
+    }
+
+    pub fn tag_scanning(&self) -> bool {
+        self.tag_scanning
+    }
+
+    pub fn tag_errors(&self) -> usize {
+        self.tag_errors
+    }
+
+    pub fn tag_scanned(&self) -> usize {
+        self.tag_scanned
+    }
+
+    /// Milliseconds from starting a tag scan to its first completed batch, for
+    /// the 100k bench. The first committed snapshot is the settled one by design.
+    #[cfg(test)]
+    pub fn tag_first_batch_ms(&self) -> Option<f64> {
+        self.tag_first_batch_ms
+    }
+
+    /// Every selected tag must be present; the name filter still applies on top.
+    pub fn set_tag_filter(&mut self, tags: Vec<String>, cx: &mut Context<Self>) {
+        let mut normalized: Vec<String> = Vec::new();
+        for tag in tags {
+            let tag = crow_core::normalize_tag(&tag);
+            if !normalized.contains(&tag) {
+                normalized.push(tag);
+            }
+        }
+        if self.tag_filter == normalized {
+            return;
+        }
+        self.tag_filter = normalized;
+        self.tag_scan_generation = self.tag_scan_generation.wrapping_add(1);
+        if self.tag_filter.is_empty() {
+            self.tag_scan_cancel.store(true, Ordering::Relaxed);
+            self.tag_matches = None;
+            self.tag_scanning = false;
+            self.tag_errors = 0;
+            self.tag_scanned = 0;
+        } else {
+            // Show a coherent (possibly empty) snapshot for the new constraint
+            // while the scan runs; never the old constraint's rows.
+            self.tag_matches.get_or_insert_with(|| Arc::new(HashSet::new()));
+            self.tag_scanning = true;
+            self.tag_errors = 0;
+            self.tag_scanned = 0;
+        }
+        self.rebuild_rows(cx);
+        self.prune_selection(cx);
+        self.settle_cursor(cx);
+        if !self.tag_filter.is_empty() {
+            self.start_tag_scan(cx);
+        }
+        cx.emit(FolderEvent::Changed);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn set_tag_reader_for_test(&mut self, reader: Arc<dyn crow_search::TagReader>) {
+        self.tag_reader = reader;
+    }
+
+    fn invalidate_tag_cache(&self, paths: Option<&[PathBuf]>) {
+        if let Ok(mut cache) = self.tag_cache.lock() {
+            if let Some(paths) = paths {
+                for path in paths {
+                    cache.remove(path);
+                }
+            } else {
+                cache.clear();
+            }
+        }
+    }
+
+    /// Read tags for every candidate in bounded batches, off the main thread.
+    /// A newer tag constraint, listing or cancellation discards this snapshot.
+    fn start_tag_scan(&mut self, cx: &mut Context<Self>) {
+        if self.tag_filter.is_empty() {
+            return;
+        }
+        self.tag_scan_generation = self.tag_scan_generation.wrapping_add(1);
+        let generation = self.tag_scan_generation;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let previous = std::mem::replace(&mut self.tag_scan_cancel, cancel.clone());
+        previous.store(true, Ordering::Relaxed);
+        self.tag_scanning = true;
+        self.tag_errors = 0;
+        self.tag_scanned = 0;
+        self.tag_scan_started = Some(Instant::now());
+        self.tag_first_batch_ms = None;
+        let entries = self.entries.clone();
+        let total = entries.len();
+        let selected = self.tag_filter.clone();
+        let cache = self.tag_cache.clone();
+        let reader = self.tag_reader.clone();
+        cx.spawn(async move |this, cx| {
+            let mut matches: HashSet<PathBuf> = HashSet::new();
+            let mut errors = 0usize;
+            let mut scanned = 0usize;
+            while scanned < total {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                let end = (scanned + TAG_SCAN_CHUNK).min(total);
+                let chunk: Vec<PathBuf> = entries[scanned..end].iter().map(|entry| entry.path.clone()).collect();
+                let (found, failed) = cx
+                    .background_spawn({
+                        let cache = cache.clone();
+                        let reader = reader.clone();
+                        let selected = selected.clone();
+                        let cancel = cancel.clone();
+                        async move {
+                            let mut found: Vec<PathBuf> = Vec::new();
+                            let mut failed = 0usize;
+                            for path in chunk {
+                                if cancel.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                let cached = cache.lock().ok().and_then(|cache| cache.get(&path).cloned());
+                                let fact = match cached {
+                                    Some(fact) => fact,
+                                    None => {
+                                        let fact = match reader.read_tags(&path) {
+                                            Ok(tags) => TagFact::Tags(
+                                                tags.into_iter()
+                                                    .map(|tag| crow_core::normalize_tag(&tag))
+                                                    .collect::<Vec<_>>()
+                                                    .into(),
+                                            ),
+                                            Err(_) => TagFact::Error,
+                                        };
+                                        if let Ok(mut cache) = cache.lock() {
+                                            cache.insert(path.clone(), fact.clone());
+                                        }
+                                        fact
+                                    }
+                                };
+                                match fact {
+                                    TagFact::Tags(tags) => {
+                                        if crow_core::tags_contain_all(&tags, &selected) {
+                                            found.push(path);
+                                        }
+                                    }
+                                    TagFact::Error => failed += 1,
+                                }
+                            }
+                            (found, failed)
+                        }
+                    })
+                    .await;
+                matches.extend(found);
+                errors += failed;
+                scanned = end;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if this.tag_scan_generation != generation {
+                            return false;
+                        }
+                        this.tag_scanned = scanned;
+                        if this.tag_first_batch_ms.is_none() {
+                            this.tag_first_batch_ms =
+                                this.tag_scan_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    return;
+                }
+            }
+            this.update(cx, |this, cx| {
+                if this.tag_scan_generation != generation {
+                    return;
+                }
+                if !Arc::ptr_eq(&this.entries, &entries) {
+                    // The listing moved while tags were read: redo against it.
+                    this.start_tag_scan(cx);
+                    return;
+                }
+                this.tag_matches = Some(Arc::new(matches));
+                this.tag_errors = errors;
+                this.tag_scanning = false;
+                this.rebuild_rows(cx);
+                this.prune_selection(cx);
+                this.settle_cursor(cx);
+                cx.emit(FolderEvent::Changed);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The first filter match in shown row `ix`'s name, as byte offsets into it.
@@ -1582,7 +1817,16 @@ impl Folder {
         if let Some(stats) = stats {
             self.start_removed_effects(stats, cx);
         }
+        if let Some(stats) = stats {
+            let changed: Vec<PathBuf> = stats.iter().map(|(path, _)| path.clone()).collect();
+            self.invalidate_tag_cache(Some(&changed));
+        } else {
+            self.invalidate_tag_cache(None);
+        }
         self.replace_entries_arc(entries, cx);
+        if !self.tag_filter.is_empty() {
+            self.start_tag_scan(cx);
+        }
         if !self.effects.is_empty() {
             // Only the effect paths matter (at most MAX_EFFECTS); hashing every
             // listing path cloned 100k paths on every apply with an effect running.
@@ -1674,7 +1918,7 @@ impl Folder {
             }
             None => None,
         };
-        let built = build_rows(&self.entries, &children, filter, self.show_tree);
+        let built = build_rows(&self.entries, &children, filter, self.tag_matches.as_deref(), self.show_tree);
         self.assign_rows(built);
     }
 
@@ -1706,6 +1950,7 @@ impl Folder {
         let entries = self.entries.clone();
         let children = self.child_rows(cx);
         let filter = self.filter.clone();
+        let tag_matches = self.tag_matches.clone();
         let show_tree = self.show_tree;
         let generation = self.generation;
         let rows_generation = self.rows_generation;
@@ -1715,7 +1960,7 @@ impl Folder {
                     let lower = filter.as_ref().map(|query| query.to_lowercase());
                     let filter =
                         filter.as_ref().zip(lower.as_ref()).map(|(query, lower)| (query.as_str(), lower.as_str()));
-                    build_rows(&snapshot, &children, filter, show_tree)
+                    build_rows(&snapshot, &children, filter, tag_matches.as_deref(), show_tree)
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -2537,18 +2782,32 @@ fn apply_folder_sizes(entries: &mut [Entry], sizes: &HashMap<PathBuf, u64>) {
 
 /// Flatten `entries` and the open children into the rows the list view draws.
 /// Free of entities so an apply can run it on the background executor.
-fn build_rows(entries: &[Entry], children: &ChildRows, filter: Option<(&str, &str)>, show_tree: bool) -> Rows {
-    if let Some((filter, lower)) = filter {
+fn build_rows(
+    entries: &[Entry],
+    children: &ChildRows,
+    filter: Option<(&str, &str)>,
+    tag_matches: Option<&HashSet<PathBuf>>,
+    show_tree: bool,
+) -> Rows {
+    if filter.is_some() || tag_matches.is_some() {
         let mut rows = Vec::new();
         let mut ranges = Vec::new();
         for (i, entry) in entries.iter().enumerate() {
-            let range = name_match(&entry.name, filter, lower);
+            if tag_matches.is_some_and(|tags| !tags.contains(&entry.path)) {
+                continue;
+            }
+            let range = filter.and_then(|(filter, lower)| name_match(&entry.name, filter, lower));
             // The predicate keeps today's shown set. `name_match` only adds the
             // highlight, and can fail where full-string lowercasing differs.
-            let shown = if entry.name.is_ascii() && filter.is_ascii() {
-                range.is_some()
-            } else {
-                name_matches(&entry.name, filter, lower)
+            let shown = match filter {
+                Some((filter, lower)) => {
+                    if entry.name.is_ascii() && filter.is_ascii() {
+                        range.is_some()
+                    } else {
+                        name_matches(&entry.name, filter, lower)
+                    }
+                }
+                None => true,
             };
             if !shown {
                 continue;

@@ -84,6 +84,7 @@ fn oracle_agrees_on_random_trees() {
                             everything,
                             read_gate: None,
                             predicates: Predicates::default(),
+                            tag_reader: None,
                         };
                         let (engine_hits, engine_skips) = run_engine(&tree, &query);
                         let (oracle_hits, oracle_skips) = run_oracle(&tree, &query);

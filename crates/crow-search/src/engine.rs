@@ -22,6 +22,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crow_fs::{ReadDecision, ReadGate, ReadHint};
 
+use crate::TagReader;
 use crate::predicates::{Kind, MetadataKey, Predicates};
 use crate::rules::RuleSet;
 
@@ -170,6 +171,9 @@ pub struct Query {
     /// Saved-search predicates. Empty for a plain Cmd-F query; evaluated once
     /// per candidate before any name match or content read.
     pub predicates: Predicates,
+    /// Reads Finder tags when `predicates.tags` is non-empty. None makes every
+    /// candidate fail a tag predicate (unreadable metadata).
+    pub tag_reader: Option<Arc<dyn TagReader>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -221,6 +225,9 @@ pub struct Summary {
     /// The walk was cancelled (by the app or a caller). An incomplete run cannot
     /// prove that previous results have disappeared.
     pub cancelled: bool,
+    /// Candidates whose tags could not be read; they cannot satisfy a tag
+    /// predicate, so the result set is narrower than the folder.
+    pub tag_errors: u64,
 }
 
 /// A folder the walk did not enter, and why.
@@ -393,6 +400,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
     let cloud_skipped = Arc::new(AtomicU64::new(0));
     let metadata_heap = Arc::new(Mutex::new(BinaryHeap::<MetadataEntry>::new()));
     let metadata_matched = Arc::new(AtomicU64::new(0));
+    let tag_errors = Arc::new(AtomicU64::new(0));
     let walker = build_walker(root, visit_hidden, rules, skipped.clone(), control.clone());
     let (tx, rx) = mpsc::channel::<Vec<Hit>>();
 
@@ -401,7 +409,9 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
     let cloud_skipped_thread = cloud_skipped.clone();
     let metadata_thread = metadata_heap.clone();
     let metadata_matched_thread = metadata_matched.clone();
+    let tag_errors_thread = tag_errors.clone();
     let predicates = query.predicates.clone();
+    let tag_reader = query.tag_reader.clone();
     let read_gate = query.read_gate.clone();
     std::thread::scope(|scope| {
         scope.spawn(move || {
@@ -413,7 +423,9 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                 let cloud_skipped = cloud_skipped_thread.clone();
                 let metadata_heap = metadata_thread.clone();
                 let metadata_matched = metadata_matched_thread.clone();
+                let tag_errors = tag_errors_thread.clone();
                 let predicates = predicates.clone();
+                let tag_reader = tag_reader.clone();
                 let gate = read_gate.clone();
                 let names = names.clone();
                 let pattern = content_pattern.clone();
@@ -452,7 +464,28 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
                     let name = name.to_string_lossy();
                     let hidden = is_hidden(name.as_ref(), metadata.as_ref());
                     let path = entry.path();
-                    if !predicates.matches(path, is_dir, modified, run_started) {
+                    // Kind and age are cheap; tags are a metadata read, so only do
+                    // it for candidates that already passed them.
+                    let mut tags: Option<Vec<String>> = None;
+                    if !predicates.tags.is_empty() {
+                        if !predicates.matches_cheap(path, is_dir, modified, run_started) {
+                            return WalkState::Continue;
+                        }
+                        let read = tag_reader
+                            .as_ref()
+                            .map(|reader| reader.read_tags(path))
+                            .unwrap_or_else(|| Err("no tag metadata provider".to_owned()));
+                        match read {
+                            Ok(values) => {
+                                tags = Some(values.into_iter().map(|tag| crow_core::normalize_tag(&tag)).collect())
+                            }
+                            Err(_) => {
+                                tag_errors.fetch_add(1, Ordering::Relaxed);
+                                return WalkState::Continue;
+                            }
+                        }
+                    }
+                    if !predicates.matches_with_tags(path, is_dir, modified, run_started, tags.as_deref()) {
                         return WalkState::Continue;
                     }
                     if metadata_only {
@@ -592,6 +625,7 @@ pub fn search(root: &Path, query: &Query, mut sink: impl FnMut(Vec<Hit>), contro
         cloud_skipped: cloud_skipped.load(Ordering::Relaxed),
         capped: metadata_only && matched > MAX_METADATA_RESULTS as u64,
         cancelled: control.is_cancelled(),
+        tag_errors: tag_errors.load(Ordering::Relaxed),
     }
 }
 
@@ -964,6 +998,7 @@ mod tests {
             everything,
             read_gate: None,
             predicates: Predicates::default(),
+            tag_reader: None,
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -1050,7 +1085,12 @@ mod tests {
             rules: rules(),
             everything: false,
             read_gate: Some(gate.clone()),
-            predicates: Predicates { kind: Some(Kind::Pdf), modified_within: Some(Duration::from_secs(30 * 86_400)) },
+            predicates: Predicates {
+                kind: Some(Kind::Pdf),
+                modified_within: Some(Duration::from_secs(30 * 86_400)),
+                tags: Vec::new(),
+            },
+            tag_reader: None,
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -1075,7 +1115,12 @@ mod tests {
             rules: rules(),
             everything: false,
             read_gate: Some(gate.clone()),
-            predicates: Predicates { kind: Some(Kind::Pdf), modified_within: Some(Duration::from_secs(30 * 86_400)) },
+            predicates: Predicates {
+                kind: Some(Kind::Pdf),
+                modified_within: Some(Duration::from_secs(30 * 86_400)),
+                tags: Vec::new(),
+            },
+            tag_reader: None,
         };
         let mut hits = Vec::new();
         let summary = search(&root, &query, |batch| hits.extend(batch), &control);
@@ -1099,7 +1144,8 @@ mod tests {
             rules: rules(),
             everything: false,
             read_gate: None,
-            predicates: Predicates { kind: Some(Kind::Text), modified_within: None },
+            predicates: Predicates { kind: Some(Kind::Text), modified_within: None, tags: Vec::new() },
+            tag_reader: None,
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -1170,6 +1216,7 @@ mod tests {
             everything: true,
             read_gate: Some(gate),
             predicates: Predicates::default(),
+            tag_reader: None,
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -1201,6 +1248,7 @@ mod tests {
             everything: true,
             read_gate: Some(gate.clone()),
             predicates: Predicates::default(),
+            tag_reader: None,
         };
         let control = Control::new();
         let summary = search(&root, &query, |_| {}, &control);
@@ -1330,6 +1378,7 @@ mod tests {
             everything: false,
             read_gate: None,
             predicates: Predicates::default(),
+            tag_reader: None,
         };
         let control = Control::new();
         let summary = search(&root, &query, |batch| hits.extend(batch), &control);
@@ -1347,6 +1396,7 @@ mod tests {
             everything: true,
             read_gate: None,
             predicates: Predicates::default(),
+            tag_reader: None,
         };
         let summary = search(&root, &query, |batch| hits.extend(batch), &control);
         assert_eq!(paths(&hits), [root.join("visible.txt")], "Search everything keeps dot entries out");
@@ -1534,6 +1584,7 @@ mod tests {
             everything: true,
             read_gate: None,
             predicates: Predicates::default(),
+            tag_reader: None,
         };
         let control = Control::new();
         let (tx, rx) = mpsc::channel();
@@ -1566,6 +1617,7 @@ mod tests {
             everything: true,
             read_gate: None,
             predicates: Predicates::default(),
+            tag_reader: None,
         };
         let control = Control::new();
         let mut batches: Vec<Vec<bool>> = Vec::new();
@@ -1612,6 +1664,7 @@ mod tests {
             everything: true,
             read_gate: None,
             predicates: Predicates::default(),
+            tag_reader: None,
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -1636,6 +1689,7 @@ mod tests {
             everything: true,
             read_gate: None,
             predicates: Predicates::default(),
+            tag_reader: None,
         };
         let control = Control::new();
         let mut batches = Vec::new();
@@ -1691,6 +1745,7 @@ mod tests {
             everything: false,
             read_gate: None,
             predicates: Predicates::default(),
+            tag_reader: None,
         };
         let control = Control::new();
         control.cancel();
@@ -1715,6 +1770,7 @@ mod tests {
             everything: true,
             read_gate: None,
             predicates: Predicates::default(),
+            tag_reader: None,
         };
         let control = Control::new();
         let mut hits = Vec::new();
@@ -1755,6 +1811,7 @@ mod tests {
             everything: true,
             read_gate: None,
             predicates: Predicates::default(),
+            tag_reader: None,
         };
         (root, query)
     }
@@ -1821,6 +1878,51 @@ mod tests {
         }
         let elapsed = started.elapsed();
         assert!(elapsed < std::time::Duration::from_millis(500), "10k scores took {elapsed:?}");
+    }
+
+    struct FakeTags(std::collections::HashMap<PathBuf, Result<Vec<String>, String>>);
+
+    impl crate::TagReader for FakeTags {
+        fn read_tags(&self, path: &Path) -> Result<Vec<String>, String> {
+            self.0.get(path).cloned().unwrap_or_else(|| Ok(Vec::new()))
+        }
+    }
+
+    #[test]
+    fn tag_predicates_require_every_value_and_count_unreadable_entries() {
+        let root = root("tag-predicate");
+        for name in ["both.txt", "work.txt", "lower.txt", "unreadable.txt", "untagged.txt"] {
+            write(&root, name, b"x");
+        }
+        let both = root.join("both.txt");
+        let work = root.join("work.txt");
+        let lower = root.join("lower.txt");
+        let unreadable = root.join("unreadable.txt");
+        let untagged = root.join("untagged.txt");
+        let mut tags = std::collections::HashMap::new();
+        tags.insert(both.clone(), Ok(vec!["Work".into(), "Cafe\u{0301}".into()]));
+        tags.insert(work, Ok(vec!["Work".into()]));
+        tags.insert(lower, Ok(vec!["work".into(), "Café".into()]));
+        tags.insert(unreadable, Err("no permission".into()));
+        tags.insert(untagged, Ok(Vec::new()));
+        let query = Query {
+            names: None,
+            contents: None,
+            enter_hidden_folders: false,
+            include_hidden: true,
+            rules: rules(),
+            everything: false,
+            read_gate: None,
+            predicates: Predicates { kind: None, modified_within: None, tags: vec!["Work".into(), "Café".into()] },
+            tag_reader: Some(Arc::new(FakeTags(tags))),
+        };
+        let mut hits = Vec::new();
+        let summary = search(&root, &query, |batch| hits.extend(batch), &Control::new());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, both);
+        assert_eq!(summary.tag_errors, 1, "the unreadable candidate is reported, not silently accepted");
+        assert!(hits.iter().all(|hit| matches!(hit.kind, HitKind::Metadata { .. })));
+        fs::remove_dir_all(root).expect("remove fixture");
     }
 
     /// The cached form must match what `Utf32Str::new` built before it: an emoji,

@@ -29,6 +29,7 @@ pub(crate) struct SavedQueryForm {
     pub(crate) text: Entity<TextInput>,
     pub(crate) kind: Entity<TextInput>,
     pub(crate) days: Entity<TextInput>,
+    pub(crate) tags: Entity<TextInput>,
     pub(crate) scope: SavedScope,
     pub(crate) matching: SavedMatch,
     pub(crate) include_hidden: bool,
@@ -65,11 +66,12 @@ impl SavedQueryForm {
                 search.hidden_flags(),
                 search.exclusions_value(),
                 search.predicate_values(),
+                search.tag_values().join(", "),
             )
         });
-        let (scope, matching, text, hidden, exclusions, predicates) = match &search_state {
-            Some((scope, matching, text, hidden, exclusions, predicates)) => {
-                (*scope, *matching, text.clone(), *hidden, *exclusions, predicates.clone())
+        let (scope, matching, text, hidden, exclusions, predicates, tags) = match &search_state {
+            Some((scope, matching, text, hidden, exclusions, predicates, tags)) => {
+                (*scope, *matching, text.clone(), *hidden, *exclusions, predicates.clone(), tags.clone())
             }
             None => existing.as_ref().map_or(
                 (
@@ -79,6 +81,7 @@ impl SavedQueryForm {
                     (true, false),
                     SavedExclusions::Configured,
                     (None, None),
+                    String::new(),
                 ),
                 |saved| {
                     (
@@ -88,6 +91,7 @@ impl SavedQueryForm {
                         (saved.include_hidden, saved.enter_hidden_folders),
                         saved.exclusions,
                         (saved.kind.clone(), saved.modified_within_days),
+                        saved.tags.join(", "),
                     )
                 },
             ),
@@ -111,6 +115,7 @@ impl SavedQueryForm {
         let kind =
             field(kind.map(|kind| kind.key().to_owned()).unwrap_or_default(), "pdf, image, rs…", "Kind predicate", cx);
         let days = field(days.map(|days| days.to_string()).unwrap_or_default(), "30", "Modified within days", cx);
+        let tags = field(tags, "Work, review", "Tag predicates", cx);
         Self {
             focus,
             id: existing.as_ref().map(|saved| saved.id.clone()),
@@ -119,6 +124,7 @@ impl SavedQueryForm {
             text,
             kind,
             days,
+            tags,
             scope,
             matching,
             include_hidden: hidden.0,
@@ -172,6 +178,9 @@ impl SavedQueryForm {
                     .map_err(|_| "Modified within must be a positive whole number of days".to_owned())?,
             )
         };
+        let tags = crow_core::normalize_tags(
+            self.tags.read(cx).text().split(',').map(str::trim).filter(|tag| !tag.is_empty()),
+        )?;
         let id = match &self.id {
             Some(id) => id.clone(),
             None => SavedQuery::allocate_id(&name, &cx.global::<Ui>().saved_queries),
@@ -188,6 +197,7 @@ impl SavedQueryForm {
             exclusions: self.exclusions,
             kind,
             modified_within_days,
+            tags,
         };
         query.validate(&cx.global::<Ui>().home)?;
         Ok(query)
@@ -198,7 +208,7 @@ impl SavedQueryForm {
         window: &mut Window,
         cx: &mut Context<T>,
     ) {
-        for field in [&self.name, &self.root, &self.text, &self.kind, &self.days] {
+        for field in [&self.name, &self.root, &self.text, &self.kind, &self.days, &self.tags] {
             self.subscriptions.push(cx.subscribe_in(field, window, move |host, _, event, window, cx| {
                 let action = match event {
                     TextInputEvent::Confirmed => FormChange::Save,
@@ -217,7 +227,7 @@ impl SavedQueryForm {
         if self.scope == SavedScope::Folder {
             stops.push(self.root.read(cx).focus_handle(cx));
         }
-        stops.extend([&self.text, &self.kind, &self.days].map(|input| input.read(cx).focus_handle(cx)));
+        stops.extend([&self.text, &self.kind, &self.days, &self.tags].map(|input| input.read(cx).focus_handle(cx)));
         stops.extend(
             self.controls[3..]
                 .iter()
@@ -475,6 +485,7 @@ impl SavedQueryForm {
             .child(row("Text", form.text.clone()))
             .child(row("Kind", form.kind.clone()))
             .child(row("Modified within", form.days.clone()))
+            .child(row("Tags", form.tags.clone()))
             .child(option_row(
                 "Match",
                 vec![

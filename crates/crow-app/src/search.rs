@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crow_core::{
     Exclude, KeymapLayer, SavedExclusions, SavedKind, SavedMatch, SavedQuery, SavedQueryId, SavedScope, SearchMatch,
-    Selection, SetName,
+    Selection, SetName, TagId,
 };
 use crow_fs::ops::Request;
 use crow_fs::{AllowAll, CloudStatus, Entry, ReadGate};
@@ -149,8 +149,11 @@ pub enum SearchEvent {
 impl EventEmitter<SearchEvent> for SearchView {}
 
 pub struct SearchView {
-    /// The saved record this session shows; `None` is the transient Cmd-F overlay.
+    /// The saved record this session shows; `None` is the transient Cmd-F overlay
+    /// or a Tag destination.
     saved: Option<SavedQuery>,
+    /// A Tag destination: a fixed tag predicate over Spotlight's index.
+    tag: Option<TagId>,
     /// A unique owner id, so a reply can name its tab/session.
     session_id: u64,
     /// Bumped when the persisted spec is replaced by an external edit.
@@ -239,6 +242,8 @@ pub struct SearchView {
     weak_count: usize,
     /// Content matches unavailable because their file is a cloud placeholder.
     cloud_skipped: u64,
+    /// Candidates whose tags could not be read for a tag predicate.
+    tag_errors: u64,
     /// This view's id in the cloud-status service's visible-row sources.
     cloud_source: u64,
     /// This view's plugin demand source.
@@ -400,7 +405,7 @@ fn next_session_id() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-pub(crate) fn spotlight_expression_for(predicates: &crow_search::Predicates) -> Option<String> {
+pub(crate) fn spotlight_expression_for(predicates: &crow_search::Predicates, text: &str) -> Option<String> {
     let content_type = match predicates.kind.as_ref() {
         Some(crow_search::Kind::Folder) => Some("public.folder"),
         Some(crow_search::Kind::File) => Some("public.data"),
@@ -420,6 +425,8 @@ pub(crate) fn spotlight_expression_for(predicates: &crow_search::Predicates) -> 
         content_type,
         extension,
         modified_within_secs: predicates.modified_within.map(|window| window.as_secs()),
+        tags: predicates.tags.clone(),
+        name_contains: (!text.is_empty()).then(|| text.to_owned()),
     }
     .expression()
 }
@@ -436,7 +443,7 @@ pub(crate) fn predicates_for_saved(saved: &SavedQuery) -> crow_search::Predicate
         SavedKind::Text => crow_search::Kind::Text,
         SavedKind::Extension(extension) => crow_search::Kind::Extension(extension.clone()),
     });
-    crow_search::Predicates { kind, modified_within: saved.modified_within().ok().flatten() }
+    crow_search::Predicates { kind, modified_within: saved.modified_within().ok().flatten(), tags: saved.tags.clone() }
 }
 
 impl SearchView {
@@ -450,7 +457,7 @@ impl SearchView {
         everything: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::build(folder, home, show_hidden, query, everything, None, cx)
+        Self::build(folder, home, show_hidden, query, everything, None, None, cx)
     }
 
     /// A saved-query destination owned by a tab. Scope, match, hidden and
@@ -462,9 +469,16 @@ impl SearchView {
         };
         let query_text = query.text.clone();
         let everything = query.exclusions == SavedExclusions::Everything;
-        Self::build(folder, home, query.enter_hidden_folders, query_text, everything, Some(query), cx)
+        Self::build(folder, home, query.enter_hidden_folders, query_text, everything, Some(query), None, cx)
     }
 
+    /// A Finder tag destination: every indexed item with the tag, names through
+    /// Spotlight. The text field can narrow that set; the tag stays fixed.
+    pub fn tag(tag: TagId, home: PathBuf, show_hidden: bool, cx: &mut Context<Self>) -> Self {
+        Self::build(home.clone(), home, show_hidden, String::new(), true, None, Some(tag), cx)
+    }
+
+    #[allow(clippy::too_many_arguments)] // the saved/tag constructors share one setup path
     fn build(
         folder: PathBuf,
         home: PathBuf,
@@ -472,13 +486,18 @@ impl SearchView {
         query: String,
         everything: bool,
         saved: Option<SavedQuery>,
+        tag: Option<TagId>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.on_release(Self::clear_preview).detach();
         let folder_label = crate::style::display_name(&folder);
-        let placeholder = match &saved {
-            Some(saved) => format!("Search {}", saved.name),
-            None => Scope::Folder.label(&folder_label).to_string(),
+        let placeholder = if let Some(tag) = &tag {
+            format!("Search {}", tag.as_str())
+        } else {
+            match &saved {
+                Some(saved) => format!("Search {}", saved.name),
+                None => Scope::Folder.label(&folder_label).to_string(),
+            }
         };
         let input = cx.new(|cx| TextInput::new(query.clone(), placeholder, cx).bare().with_role(Role::SearchInput));
         let focus = cx.focus_handle();
@@ -493,7 +512,7 @@ impl SearchView {
                 if this.show_skipped {
                     this.show_skipped = false;
                     cx.notify();
-                } else if this.saved.is_some() {
+                } else if this.saved.is_some() || this.tag.is_some() {
                     cx.emit(SearchEvent::FocusResults);
                 } else {
                     cx.emit(SearchEvent::Close);
@@ -504,9 +523,14 @@ impl SearchView {
         });
         let exclude_generation = cx.global::<Ui>().exclude_generation;
         let skip_label_value = skip_label(&cx.global::<Ui>().exclude);
-        let search_includes_hidden =
-            saved.as_ref().map_or(cx.global::<Ui>().settings.search_includes_hidden, |saved| saved.include_hidden);
-        let matching =
+        let search_includes_hidden = if tag.is_some() {
+            true
+        } else {
+            saved.as_ref().map_or(cx.global::<Ui>().settings.search_includes_hidden, |saved| saved.include_hidden)
+        };
+        let matching = if tag.is_some() {
+            Match::Names
+        } else {
             match saved.as_ref().map_or(cx.global::<Ui>().settings.search_match, |saved| match saved.matching {
                 SavedMatch::All => SearchMatch::All,
                 SavedMatch::Names => SearchMatch::Names,
@@ -515,12 +539,17 @@ impl SearchView {
                 SearchMatch::All => Match::All,
                 SearchMatch::Names => Match::Names,
                 SearchMatch::Contents => Match::Contents,
-            };
-        let scope = saved.as_ref().map_or(Scope::Folder, |saved| match saved.scope {
-            SavedScope::Folder => Scope::Folder,
-            SavedScope::Home => Scope::Home,
-            SavedScope::ThisMac => Scope::ThisMac,
-        });
+            }
+        };
+        let scope = if tag.is_some() {
+            Scope::ThisMac
+        } else {
+            saved.as_ref().map_or(Scope::Folder, |saved| match saved.scope {
+                SavedScope::Folder => Scope::Folder,
+                SavedScope::Home => Scope::Home,
+                SavedScope::ThisMac => Scope::ThisMac,
+            })
+        };
         let saved_generation = cx.global::<Ui>().saved_queries_generation;
         let ui_subscription = cx.observe_global::<Ui>(move |this, cx| {
             let exclude_generation = cx.global::<Ui>().exclude_generation;
@@ -548,10 +577,20 @@ impl SearchView {
             }
             None => (0, None),
         };
-        let predicates = saved.as_ref().map(predicates_for_saved).unwrap_or_default();
-        let title = saved.as_ref().map_or(folder_label.clone(), |saved| saved.name.clone());
+        let predicates = if let Some(tag) = &tag {
+            crow_search::Predicates { tags: vec![tag.as_str().to_owned()], ..Default::default() }
+        } else {
+            saved.as_ref().map(predicates_for_saved).unwrap_or_default()
+        };
+        let everything = if tag.is_some() { true } else { everything };
+        let title = if let Some(tag) = &tag {
+            tag.as_str().to_owned()
+        } else {
+            saved.as_ref().map_or(folder_label.clone(), |saved| saved.name.clone())
+        };
         let mut search = Self {
             saved: saved.clone(),
+            tag,
             session_id: next_session_id(),
             spec_generation: 0,
             run_started: SystemTime::now(),
@@ -607,6 +646,7 @@ impl SearchView {
             content_count: 0,
             weak_count: 0,
             cloud_skipped: 0,
+            tag_errors: 0,
             cloud_source,
             plugin_surface: crate::plugins::new_surface(),
             preview: None,
@@ -625,10 +665,10 @@ impl SearchView {
             focus_attached: false,
             metadata_order_dirty: false,
         };
-        if !query.trim().is_empty() || (saved.is_some() && !search.predicates.is_empty()) {
+        if !query.trim().is_empty() || ((saved.is_some() || search.tag.is_some()) && !search.predicates.is_empty()) {
             search.start_search(&query, cx);
         }
-        if search.saved.is_some() {
+        if search.saved.is_some() || search.tag.is_some() {
             search.spawn_clock(cx);
         }
         search
@@ -643,7 +683,7 @@ impl SearchView {
                 cx.background_executor().timer(Duration::from_secs(60)).await;
                 ticks += 1;
                 let keep = this.update(cx, |this, cx| {
-                    if !this.active || this.saved.is_none() {
+                    if !this.active || (this.saved.is_none() && this.tag.is_none()) {
                         return;
                     }
                     let rolling = this.predicates.modified_within.is_some();
@@ -898,13 +938,16 @@ impl SearchView {
         if query.trim().is_empty() && self.predicates.is_empty() {
             return;
         }
-        self.start_search_mode(&query, self.saved.is_some(), cx);
+        self.start_search_mode(&query, self.saved.is_some() || self.tag.is_some(), cx);
     }
 
     /// The saved record changed in `saved-queries.toml` (or this session just
     /// became visible after being hidden). Replace the spec and rerun, keeping a
     /// surviving selected path.
     fn reload_saved_spec(&mut self, cx: &mut Context<Self>) {
+        if self.tag.is_some() {
+            return;
+        }
         let Some(id) = self.saved_query_id() else { return };
         let Some(saved) = cx.global::<Ui>().saved_queries.get(&id).cloned() else {
             self.cancel(cx);
@@ -969,8 +1012,24 @@ impl SearchView {
         &self.title
     }
 
-    pub fn is_saved_destination(&self) -> bool {
-        self.saved.is_some()
+    pub fn is_destination(&self) -> bool {
+        self.saved.is_some() || self.tag.is_some()
+    }
+
+    /// The tag predicate the form should prefill when saving from this session.
+    pub fn tag_values(&self) -> &[String] {
+        &self.predicates.tags
+    }
+
+    /// Deliver a batch from an older run. The window tests use this instead of
+    /// sleeping: a stale folder/title/spec generation must be ignored.
+    #[cfg(test)]
+    pub fn inject_stale_spotlight_for_test(&mut self, hits: Vec<crow_macos::SpotlightHit>, cx: &mut Context<Self>) {
+        let mut stale = self.run_id.clone();
+        stale.location = None;
+        stale.spec_generation = stale.spec_generation.wrapping_sub(1);
+        stale.run_generation = stale.run_generation.wrapping_sub(1);
+        self.apply(Update::Spotlight(hits, stale), cx);
     }
 
     /// The field text, including a destination's temporary draft.
@@ -1073,6 +1132,7 @@ impl SearchView {
         self.first_hit_ms = None;
         self.show_skipped = false;
         self.cloud_skipped = 0;
+        self.tag_errors = 0;
         self.seen.clear();
         self.refresh_names = 0;
         self.refresh_other = 0;
@@ -1132,7 +1192,14 @@ impl SearchView {
         if self.scope == Scope::ThisMac {
             let query_text = query.clone();
             let predicates = self.predicates.clone();
-            let expression = if query_text.is_empty() { spotlight_expression_for(&predicates) } else { None };
+            // A tag predicate turns the text into one raw expression: `mdfind -name`
+            // cannot be combined with metadata attributes. Without tags, keep the
+            // established `-name` stream.
+            let expression = if query_text.is_empty() || !predicates.tags.is_empty() {
+                spotlight_expression_for(&predicates, &query_text)
+            } else {
+                None
+            };
             let effects = crate::effects::effects(cx);
             let cancel = control.cancel_flag();
             let run = run_id.clone();
@@ -1197,6 +1264,7 @@ impl SearchView {
                 everything: self.everything,
                 read_gate,
                 predicates: self.predicates.clone(),
+                tag_reader: Some(crate::tags::reader()),
             };
             let run_for_hits = run_id.clone();
             let run_for_done = run_id.clone();
@@ -1278,6 +1346,7 @@ impl SearchView {
     fn finish(&mut self, summary: Summary, cx: &mut Context<Self>) {
         let scanned = summary.scanned;
         self.cloud_skipped = summary.cloud_skipped;
+        self.tag_errors = summary.tag_errors;
         self.metadata_capped = summary.capped;
         let skipped = summary.skipped.len();
         // Every reason is listed: rules, hidden folders, packages and
@@ -1675,10 +1744,14 @@ impl SearchView {
 
     fn add_spotlight(&mut self, hits: Vec<crow_macos::SpotlightHit>, cx: &mut Context<Self>) {
         let query = self.query(cx);
+        // A tag expression already made Spotlight enforce every selected tag;
+        // the client-side pass only has to prove kind and age. Without tags, the
+        // hit's tags were never read, and the predicate does not ask for them.
+        let known_tags = (!self.predicates.tags.is_empty()).then_some(self.predicates.tags.as_slice());
         let mut changed = false;
         for hit in hits {
             if !self.predicates.is_empty()
-                && !self.predicates.matches(&hit.path, hit.is_dir, hit.modified, self.run_started)
+                && !self.predicates.matches_with_tags(&hit.path, hit.is_dir, hit.modified, self.run_started, known_tags)
             {
                 continue;
             }
@@ -2108,7 +2181,7 @@ impl SearchView {
     }
 
     fn set_scope(&mut self, scope: Scope, cx: &mut Context<Self>) {
-        if self.scope == scope {
+        if self.tag.is_some() || self.scope == scope {
             return;
         }
         self.scope = scope;
@@ -2125,7 +2198,7 @@ impl SearchView {
 
     /// Store the user's choice and rerun the current query. Spotlight ignores it.
     pub fn set_match(&mut self, matching: Match, cx: &mut Context<Self>) {
-        if self.scope == Scope::ThisMac || self.matching == matching {
+        if self.tag.is_some() || self.scope == Scope::ThisMac || self.matching == matching {
             return;
         }
         self.matching = matching;
@@ -2354,6 +2427,9 @@ impl SearchView {
     }
 
     fn search_everything(&mut self, _: &SearchEverything, _: &mut Window, cx: &mut Context<Self>) {
+        if self.tag.is_some() {
+            return;
+        }
         self.set_everything(!self.everything, cx);
     }
 
@@ -2577,7 +2653,7 @@ impl SearchView {
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(SearchEvent::Save)))
                 .child(save_label),
         );
-        if self.saved.is_some() {
+        if self.saved.is_some() || self.tag.is_some() {
             // The destination title stays visible; Done would imply closing the tab.
             band = band.child(
                 div()
@@ -2925,6 +3001,7 @@ impl SearchView {
             stale: self.stale,
             dropped: self.dropped,
             cloud_skipped: self.cloud_skipped,
+            tag_errors: self.tag_errors,
             error: self.error.as_deref(),
         })
     }
@@ -3755,6 +3832,7 @@ struct FooterState<'a> {
     stale: bool,
     dropped: usize,
     cloud_skipped: u64,
+    tag_errors: u64,
     error: Option<&'a str>,
 }
 
@@ -3779,6 +3857,10 @@ fn results_text(hits: usize, files: usize) -> String {
     }
 }
 
+fn tag_text(n: u64) -> String {
+    if n == 0 { String::new() } else { format!(" · {n} with unreadable tags") }
+}
+
 fn footer_summary(state: FooterState<'_>) -> String {
     if let Some(error) = state.error {
         return error.lines().next().unwrap_or(error).to_owned();
@@ -3786,29 +3868,30 @@ fn footer_summary(state: FooterState<'_>) -> String {
     if state.names_capped {
         return format!("First {MAX_STRONG_ROWS} name matches · refine the search");
     }
+    let tags = tag_text(state.tag_errors);
     if state.metadata_capped {
         let results = results_text(state.hits, state.files);
-        return format!("{results} · first {} matches; partial results", crow_search::MAX_METADATA_RESULTS);
+        return format!("{results} · first {} matches; partial results{tags}", crow_search::MAX_METADATA_RESULTS);
     }
     if state.contents_stopped {
         let results = results_text(state.hits, state.files);
         let dropped = state.dropped;
         let cloud = cloud_text(state.cloud_skipped);
         return if state.searching {
-            format!("Searching names… {results} · {dropped} more not shown{cloud}")
+            format!("Searching names… {results} · {dropped} more not shown{cloud}{tags}")
         } else if state.matching == Match::Names {
-            format!("{results} · {dropped} more not shown")
+            format!("{results} · {dropped} more not shown{tags}")
         } else {
-            format!("{results} · {dropped} more not shown · contents stopped at {MAX_OTHER_ROWS}{cloud}")
+            format!("{results} · {dropped} more not shown · contents stopped at {MAX_OTHER_ROWS}{cloud}{tags}")
         };
     }
     let prefix = if state.searching { "Searching… " } else { "" };
     let cloud = cloud_text(state.cloud_skipped);
     let stale = if state.stale && !state.searching { " · previous results kept" } else { "" };
     if state.hits == 0 {
-        return if state.searching { "Searching…".to_owned() } else { format!("No results{cloud}{stale}") };
+        return if state.searching { "Searching…".to_owned() } else { format!("No results{cloud}{stale}{tags}") };
     }
-    format!("{prefix}{}{cloud}{stale}", results_text(state.hits, state.files))
+    format!("{prefix}{}{cloud}{stale}{tags}", results_text(state.hits, state.files))
 }
 
 /// "1 folder skipped" / "3 folders skipped", for the footer link and its aria label.
@@ -4099,6 +4182,7 @@ mod tests {
             stale: false,
             dropped,
             cloud_skipped: 0,
+            tag_errors: 0,
             error,
         };
         assert_eq!(footer_summary(state(true, 0, 0, false, false, 0, None)), "Searching…");
@@ -4215,6 +4299,23 @@ mod tests {
         let (text, ranges) = content_excerpt("    \t    needle()", &hit);
         assert_eq!(text, "needle()");
         assert_eq!(&text[ranges[0].clone()], "needle");
+    }
+
+    #[test]
+    fn spotlight_tag_expression_combines_literal_name_and_tags() {
+        let predicates = crow_search::Predicates {
+            kind: None,
+            modified_within: None,
+            tags: vec!["Work".into(), "say \"hi\"".into()],
+        };
+        assert_eq!(
+            spotlight_expression_for(&predicates, "wo*rk?").as_deref(),
+            Some(r#"kMDItemFSName == "*wo\*rk\?*"cd && kMDItemUserTags == "Work" && kMDItemUserTags == "say \"hi\"""#)
+        );
+        assert_eq!(
+            spotlight_expression_for(&predicates, "").as_deref(),
+            Some(r#"kMDItemUserTags == "Work" && kMDItemUserTags == "say \"hi\"""#)
+        );
     }
 
     #[test]
