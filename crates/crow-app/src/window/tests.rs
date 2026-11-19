@@ -12248,6 +12248,23 @@ fn settings_default_view_reaches_two_browser_windows(cx: &mut TestAppContext) {
     assert_eq!(pane(&first, &fcx).read_with(&fcx, |pane, _| pane.mode()), ViewMode::List);
     assert_eq!(pane(&second_view, &scx).read_with(&scx, |pane, _| pane.mode()), ViewMode::List);
 
+    fcx.cx.update(|cx| crate::ui::save_defaults_change(crow_core::DefaultsChange::View(ViewMode::Gallery), None, cx));
+    for _ in 0..400 {
+        fcx.cx.run_until_parked();
+        if pane(&first, &fcx).read_with(&fcx, |pane, _| pane.mode()) == ViewMode::Gallery
+            && pane(&second_view, &scx).read_with(&scx, |pane, _| pane.mode()) == ViewMode::Gallery
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(pane(&first, &fcx).read_with(&fcx, |pane, _| pane.mode()), ViewMode::Gallery);
+    assert_eq!(
+        pane(&second_view, &scx).read_with(&scx, |pane, _| pane.mode()),
+        ViewMode::Gallery,
+        "gallery as defaults reaches every browser window"
+    );
+
     fcx.cx.update(|cx| crate::ui::save_defaults_change(crow_core::DefaultsChange::View(ViewMode::Columns), None, cx));
     for _ in 0..400 {
         fcx.cx.run_until_parked();
