@@ -1,6 +1,6 @@
 # M9 P2 — Read-only Git plugin and Projects progress
 
-Branch: `codex/m9-p2-git-projects` · PR: none · Last updated: 2026-11-19 · State: Ready for critique
+Branch: `codex/m9-p2-git-projects` · PR: [#67](https://github.com/paraversal/file-crow/pull/67) · Last updated: 2026-11-19 · State: PR open
 Base: `7b58509` (M9 P1B, merged as #66). Dependencies merged: P1B `7b58509`; P8 `d5cab1e`; P1A fix in `083d40c`.
 
 ## Status
@@ -84,6 +84,18 @@ Status completion on the clean 100k worktree: 207–242 ms in the background, `e
 - VoiceOver, search-result badges in the live bundle, two windows and a tab switch with a held line job, palette add/remove-root execution, and Projects collapse/visibility edits (all listed as hand checks).
 - The invalid-UTF-8 live path fixture cannot exist on APFS; raw-byte conversion is unit-tested instead.
 
+## Critique
+
+Critic session: 2026-11-19 · Base: `main` at `7b58509` · Head reviewed: `e7b315a`
+
+| Finding | Area | Outcome |
+| --- | --- | --- |
+| Replaced Projects scans and stale line-count replies must never publish into the current view. | Correctness | Fixed and tested in the P2 audit (`e7b315a`). |
+| Local Git index changes must refresh status, and each staged or unstaged diff side must keep its own eligibility. | Correctness | Fixed and tested in the P2 audit (`e7b315a`). |
+| Folder badges should guide navigation with the same status precedence and stable row layout. | UX | Parent-row decorations reuse the existing badges, stop at the worktree boundary, and have tests for mixed changes, cross-folder moves and ignored files (`e7b315a`). |
+
+Verification: independent workspace rerun passed 991 tests with one ignored, and the branch diff passed `git diff --check`. The final P2 bench measured 5 ms warm first paint and 8.63 ms scroll p99 on the 100,000-entry fixture. `main` measured 5 ms and 8.71 ms. Earlier bundle hand checks are recorded above, with remaining checks still open. The user confirmed review was already complete and asked to publish before starting the follow-up.
+
 ## Next
 
-Hand-test the bundle with the pending checks above, then the critique agent opens the PR. The next implementation piece in the M9 order is [P3A](p3a-icon-packs.md).
+Hand-test the bundle with the pending checks above. The separately requested Git and layout follow-up comes next in this chat. The next scheduled implementation piece in the M9 index is [P3A](p3a-icon-packs.md).
