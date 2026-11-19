@@ -331,6 +331,7 @@ impl SearchView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.on_release(Self::clear_preview).detach();
         let folder_label = crate::style::display_name(&folder);
         let placeholder = Scope::Folder.label(&folder_label);
         let input = cx.new(|cx| TextInput::new(query.clone(), placeholder, cx).bare().with_role(Role::SearchInput));
@@ -614,7 +615,7 @@ impl SearchView {
         self.content_count = 0;
         self.weak_count = 0;
         self.cloud_skipped = 0;
-        self.preview = None;
+        self.clear_preview(cx);
         self.preview_generation += 1;
         let query = query.trim();
         if query.is_empty() {
@@ -1018,11 +1019,17 @@ impl SearchView {
         }
     }
 
+    fn clear_preview(&mut self, cx: &mut App) {
+        if let Some(mut loaded) = self.preview.take() {
+            loaded.preview.release_image(cx);
+        }
+    }
+
     /// Load the cursor row's preview off the main thread, unless it is loaded.
     fn load_preview(&mut self, cx: &mut Context<Self>) {
         let surface = self.plugin_surface;
         let Some(row) = self.results.get(self.cursor) else {
-            self.preview = None;
+            self.clear_preview(cx);
             self.preview_generation += 1;
             self.preview_cancel.store(true, Ordering::Relaxed);
             crate::plugins::cancel_previews(surface, cx);
@@ -1030,10 +1037,11 @@ impl SearchView {
         };
         let path = row.path.clone();
         let line = row.content.as_ref().map(|(line, _, _)| *line);
+        let is_dir = row.is_dir;
         if self.preview.as_ref().is_some_and(|loaded| loaded.entry.path == path) {
             return;
         }
-        self.preview = None;
+        self.clear_preview(cx);
         self.preview_generation += 1;
         let generation = self.preview_generation;
         self.preview_cancel.store(true, Ordering::Relaxed);
@@ -1050,7 +1058,7 @@ impl SearchView {
         };
         let requested = path.clone();
         let configured = cx.global::<Ui>().views.resolve(&self.folder).preview_providers.0.clone();
-        let initial_candidates = crate::plugins::preview_candidates(cx, &configured, &path, row.is_dir, false);
+        let initial_candidates = crate::plugins::preview_candidates(cx, &configured, &path, is_dir, false);
         let revision = generation;
         cx.spawn(async move |this, cx| {
             let entry = cx.background_spawn(async move { crow_fs::stat_entry(&requested).ok().flatten() }).await;
@@ -1058,35 +1066,23 @@ impl SearchView {
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
-            let readable =
-                gate.check(&entry.path, crow_fs::ReadHint::for_path(&entry.path)) == crow_fs::ReadDecision::Readable;
-            let plugin = if initial_candidates.is_empty() || !readable || entry.is_symlink {
-                None
-            } else {
-                preview::plugin_preview(
-                    cx,
-                    surface,
-                    initial_candidates,
-                    entry.clone(),
-                    gate.clone(),
-                    cloud,
-                    revision,
-                    cancel.clone(),
-                )
-                .await
-            };
-            if cancel.load(Ordering::Relaxed) {
+            let candidates = if entry.is_symlink { Vec::new() } else { initial_candidates };
+            let Some(preview) = preview::load_with_plugins(
+                cx,
+                surface,
+                candidates,
+                entry.clone(),
+                extensions,
+                gate,
+                cloud,
+                line,
+                revision,
+                preview::ImageSize::Pane,
+                cancel.clone(),
+            )
+            .await
+            else {
                 return;
-            }
-            let preview = match plugin {
-                Some(preview) => preview,
-                None => {
-                    let fetched_entry = entry.clone();
-                    cx.background_spawn(async move {
-                        preview::fetch_at(&fetched_entry, &extensions, line, gate.as_ref(), cloud)
-                    })
-                    .await
-                }
             };
             let loaded = Some(LoadedPreview { entry, preview });
             this.update(cx, |this, cx| {
@@ -1120,7 +1116,7 @@ impl SearchView {
             && let Some(loaded) = self.preview.as_mut().filter(|loaded| loaded.entry.path == row.path)
             && loaded.preview.update_cloud(status)
         {
-            self.preview = None;
+            self.clear_preview(cx);
             self.load_preview(cx);
         }
         cx.notify();
@@ -2936,7 +2932,7 @@ impl Render for SearchView {
         if self.preview_plugin_generation != plugin_generation || self.preview_views_generation != views_generation {
             self.preview_plugin_generation = plugin_generation;
             self.preview_views_generation = views_generation;
-            self.preview = None;
+            self.clear_preview(cx);
             self.load_preview(cx);
         }
         self.request_plugin_status(cx);

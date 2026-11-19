@@ -530,7 +530,7 @@ pub trait Previewer: Send + Sync {
     fn id(&self) -> &'static str;
     /// `gate` is checked immediately before any automatic content read. A
     /// previewer must not open a file when the fresh decision is not `Readable`.
-    fn preview(&self, entry: &Entry, gate: &dyn ReadGate) -> Option<PreviewContent>;
+    fn preview(&self, entry: &Entry, gate: &dyn ReadGate, image_points: u32) -> Option<PreviewContent>;
 }
 
 #[derive(Clone, Default)]
@@ -569,8 +569,8 @@ impl Extensions {
     }
 
     /// The first previewer that has something for `entry`.
-    pub fn preview(&self, entry: &Entry, gate: &dyn ReadGate) -> Option<PreviewContent> {
-        self.previewers.iter().find_map(|p| p.preview(entry, gate))
+    pub fn preview(&self, entry: &Entry, gate: &dyn ReadGate, image_points: u32) -> Option<PreviewContent> {
+        self.previewers.iter().find_map(|p| p.preview(entry, gate, image_points))
     }
 }
 
@@ -696,7 +696,7 @@ impl Previewer for TextPreviewer {
         "text"
     }
 
-    fn preview(&self, entry: &Entry, gate: &dyn ReadGate) -> Option<PreviewContent> {
+    fn preview(&self, entry: &Entry, gate: &dyn ReadGate, _image_points: u32) -> Option<PreviewContent> {
         if entry.is_dir || entry.size == 0 {
             return None;
         }
@@ -780,9 +780,12 @@ mod tests {
         std::fs::write(&long, "ä\n".repeat(10_000)).unwrap();
 
         let ext = Extensions::with_builtins();
-        assert_eq!(ext.preview(&entry_for(&text), &AllowAll), Some(PreviewContent::Text("# Title\n\nbody".into())));
-        assert_eq!(ext.preview(&entry_for(&binary), &AllowAll), None);
-        match ext.preview(&entry_for(&long), &AllowAll) {
+        assert_eq!(
+            ext.preview(&entry_for(&text), &AllowAll, 256),
+            Some(PreviewContent::Text("# Title\n\nbody".into()))
+        );
+        assert_eq!(ext.preview(&entry_for(&binary), &AllowAll, 256), None);
+        match ext.preview(&entry_for(&long), &AllowAll, 256) {
             Some(PreviewContent::Text(t)) => assert_eq!(t.lines().count(), TextPreviewer::MAX_LINES),
             other => panic!("long UTF-8 file should preview, got {other:?}"),
         }
@@ -801,7 +804,7 @@ mod tests {
         let text = dir.join("notes.md");
         std::fs::write(&text, "cloud text\n").unwrap();
         let ext = Extensions::with_builtins();
-        assert_eq!(ext.preview(&entry_for(&text), &Refuse), None);
+        assert_eq!(ext.preview(&entry_for(&text), &Refuse, 256), None);
         assert_eq!(text_excerpt(&text, 1, 1, 3, &Refuse), None);
     }
 

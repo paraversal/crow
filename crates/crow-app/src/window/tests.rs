@@ -2787,6 +2787,286 @@ fn toolbar_view_buttons_switch_views(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn gallery_mode_keeps_selection_filter_and_returns(cx: &mut TestAppContext) {
+    let root = fixture("gallery-mode");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    let mode = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.mode());
+    let names = |cx: &VisualTestContext| rows(&view, cx).into_iter().map(|(name, _)| name).collect::<Vec<_>>();
+
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    assert_eq!(mode(&cx), ViewMode::Gallery);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "the cursor survives the switch");
+    assert!(cx.debug_bounds("gallery-rail").is_some(), "rail is laid out");
+    assert!(cx.debug_bounds("gallery-preview").is_some(), "preview is laid out");
+    let selectors = pane(&view, &cx).read_with(&cx, |p, cx| p.debug_selectors(cx));
+    assert!(
+        cx.debug_bounds("gallery-row-name-beta").is_some(),
+        "the cursor row is mounted: rail={:?} rows={:?}/{:?} selectors={selectors:?}",
+        cx.debug_bounds("gallery-rail"),
+        cx.debug_bounds("gallery-row-beta"),
+        cx.debug_bounds("gallery-row-alpha")
+    );
+    let text = std::fs::read_to_string(config_dir(&cx).join("views.toml")).unwrap();
+    assert!(text.contains("view = \"gallery\""), "Cmd-4 is remembered for the folder: {text}");
+
+    // The filter travels through Gallery and back.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("bet");
+    settle(&view, &mut cx);
+    assert_eq!(names(&cx), vec!["beta"]);
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert_eq!(names(&cx), vec!["alpha", "beta", "notes.txt"]);
+
+    // Icons and List still project their own rows, with the same cursor.
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    assert_eq!(mode(&cx), ViewMode::Icons);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+    cx.simulate_keystrokes("cmd-2");
+    settle(&view, &mut cx);
+    assert_eq!(mode(&cx), ViewMode::List);
+    assert_eq!(names(&cx), vec!["alpha", "beta", "notes.txt"]);
+}
+
+#[gpui::test]
+fn gallery_shows_the_same_text_preview_pipeline(cx: &mut TestAppContext) {
+    let root = fixture("gallery-preview-text");
+    std::fs::write(root.join("code.rs"), "pub fn main() {\n    let n = 42; // note\n}\n").expect("create fixture");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("down down cmd-4");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("code.rs"));
+    wait_for_selector(&view, &mut cx, "preview-code-line-0");
+    assert!(cx.debug_bounds("preview-code-line-2").is_some(), "all three lines are numbered in the gallery cell");
+    assert!(cx.debug_bounds("gallery-cell-code.rs").is_some(), "the preview belongs to the selected file");
+}
+
+#[gpui::test]
+fn gallery_drops_out_of_order_pair_replies(cx: &mut TestAppContext) {
+    let root = fixture("gallery-stale");
+    let alpha = root.join("alpha");
+    let beta = root.join("beta");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    let timeout = std::time::Duration::from_secs(5);
+
+    // Alpha's initial preview is loaded. Hold its next request and force one by
+    // moving the cursor away and back.
+    let alpha_hold = crate::preview::test_hold::install(alpha.clone());
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down up");
+    settle(&view, &mut cx);
+    alpha_hold.0.recv_timeout(timeout).expect("the alpha load starts");
+
+    // Exactly two selected: the second cell starts its own beta request.
+    let beta_hold = crate::preview::test_hold::install(beta.clone());
+    let beta_row = cx.debug_bounds("gallery-row-beta").expect("beta row");
+    cx.simulate_click(beta_row.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    beta_hold.0.recv_timeout(timeout).expect("the beta load starts");
+    assert!(cx.debug_bounds("gallery-cell-alpha").is_some());
+    assert!(cx.debug_bounds("gallery-cell-beta").is_some());
+
+    // A third selection collapses to one cell and replaces both targets.
+    let notes = cx.debug_bounds("gallery-row-notes.txt").expect("notes row");
+    cx.simulate_click(notes.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    wait_for_selector(&view, &mut cx, "gallery-cell-notes.txt");
+
+    // Release the stale cells out of order, newest target already on screen.
+    beta_hold.1.send(()).ok();
+    alpha_hold.1.send(()).ok();
+    cx.run_until_parked();
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("gallery-cell-notes.txt").is_some(), "the live selection stays");
+    assert!(cx.debug_bounds("gallery-cell-alpha").is_none(), "no stale alpha media");
+    assert!(cx.debug_bounds("gallery-cell-beta").is_none(), "no stale beta media");
+}
+
+#[gpui::test]
+fn gallery_folder_preview_samples_children_and_states(cx: &mut TestAppContext) {
+    let root = fixture("gallery-folders");
+    for i in 0..20 {
+        std::fs::write(root.join(format!("many-{i:02}.txt")), "").expect("create fixture");
+    }
+    std::fs::create_dir_all(root.join("many")).expect("create fixture");
+    for i in 0..20 {
+        std::fs::write(root.join(format!("many/child-{i:02}.txt")), "").expect("create fixture");
+    }
+    std::fs::create_dir_all(root.join("locked")).expect("create fixture");
+    std::fs::write(root.join("locked/inside.txt"), "").expect("create fixture");
+    let locked = root.join("locked");
+    let mut permissions = std::fs::metadata(&locked).expect("stat").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o000);
+    std::fs::set_permissions(&locked, permissions).expect("lock folder");
+
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+
+    // alpha has one child: the sample is complete and shows it.
+    wait_for_selector(&view, &mut cx, "gallery-sample-inner");
+    assert!(cx.debug_bounds("gallery-sample-complete").is_some(), "one child is a complete sample");
+
+    // beta is empty.
+    cx.simulate_keystrokes("down");
+    wait_for_selector(&view, &mut cx, "gallery-sample-empty");
+
+    // many has more children than the sample cap.
+    cx.simulate_keystrokes("down down");
+    wait_for_selector(&view, &mut cx, "gallery-sample-partial");
+    let (shown, partial) =
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.gallery_sample_summary()).expect("the folder sample is ready");
+    assert_eq!(shown, 12, "the sample shows the capped number of children");
+    assert!(partial, "more children exist than the sample read");
+
+    // A folder whose root cannot be listed is a distinct state.
+    cx.simulate_keystrokes("up");
+    wait_for_selector(&view, &mut cx, "gallery-sample-error");
+
+    let mut permissions = std::fs::metadata(&locked).expect("stat").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+    std::fs::set_permissions(&locked, permissions).expect("unlock folder");
+}
+
+#[gpui::test]
+fn gallery_folder_sample_respects_cloud_eligibility(cx: &mut TestAppContext) {
+    let root = fixture("gallery-cloud-folder");
+    let alpha = root.join("alpha");
+    let options = WindowOptions::default();
+    let (view, mut cx) = open_with_before(cx, &root, options, move |cx| {
+        crate::cloud_status::set_test_status(cx, alpha, crow_fs::CloudStatus::NotDownloaded);
+    });
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    wait_for_selector(&view, &mut cx, "gallery-sample-unavailable");
+    assert!(cx.debug_bounds("gallery-sample-inner").is_none(), "a placeholder folder is not enumerated");
+}
+
+#[gpui::test]
+fn gallery_selection_transitions_keep_the_pair_in_rail_order(cx: &mut TestAppContext) {
+    let root = fixture("gallery-transitions");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    cx.simulate_keystrokes("cmd-4 cmd-shift-p");
+    settle(&view, &mut cx);
+
+    // Three selected: one preview for the cursor.
+    cx.simulate_keystrokes("cmd-a");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("gallery-cell-alpha").is_some());
+    assert!(cx.debug_bounds("gallery-cell-beta").is_none(), "three or more follows the cursor");
+
+    // Remove notes from the selection: alpha and beta compare, in rail order.
+    let notes = cx.debug_bounds("gallery-row-notes.txt").expect("notes row");
+    cx.simulate_click(notes.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    let alpha = cx.debug_bounds("gallery-cell-alpha").expect("alpha cell");
+    let beta = cx.debug_bounds("gallery-cell-beta").expect("beta cell");
+    assert!(alpha.left() < beta.left(), "the pair follows rail order");
+
+    // One selected: back to a single preview, then the pair again.
+    let beta_row = cx.debug_bounds("gallery-row-beta").expect("beta row");
+    cx.simulate_click(beta_row.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("gallery-cell-alpha").is_some());
+    assert!(cx.debug_bounds("gallery-cell-beta").is_none());
+    cx.simulate_click(beta_row.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("gallery-cell-beta").is_some());
+}
+
+#[gpui::test]
+fn gallery_home_end_and_horizontal_arrows_move_the_rail(cx: &mut TestAppContext) {
+    let root = fixture("gallery-keys");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("end");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+    cx.simulate_keystrokes("home");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    cx.simulate_keystrokes("right down left up");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "Left and Right are row-motion aliases");
+}
+
+#[gpui::test]
+fn gallery_uses_finder_cmd_4_in_the_vim_layer(cx: &mut TestAppContext) {
+    let root = fixture("gallery-vim");
+    let (view, mut cx) = open(cx, &root);
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.mode()), ViewMode::Gallery);
+    cx.simulate_keystrokes("j");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "j moves the rail");
+}
+
+#[gpui::test]
+fn gallery_compares_two_entries_side_by_side_or_stacked(cx: &mut TestAppContext) {
+    let root = fixture("gallery-compare");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    cx.simulate_keystrokes("cmd-4 cmd-shift-p");
+    settle(&view, &mut cx);
+    let beta = cx.debug_bounds("gallery-row-beta").expect("beta row");
+    cx.simulate_click(beta.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.selected_paths(cx).len()), 2);
+    let alpha = cx.debug_bounds("gallery-cell-alpha").expect("left cell");
+    let beta = cx.debug_bounds("gallery-cell-beta").expect("right cell");
+    assert_eq!(alpha.top(), beta.top(), "a wide window puts the pair side by side");
+    assert!(alpha.right() <= beta.left(), "{alpha:?} {beta:?}");
+}
+
+#[gpui::test]
+fn gallery_stacks_a_pair_in_a_narrow_window(cx: &mut TestAppContext) {
+    let root = fixture("gallery-compare-narrow");
+    let (view, mut cx) = open_sized(cx, &root, 640., 800.);
+    cx.simulate_keystrokes("cmd-4 cmd-shift-p");
+    settle(&view, &mut cx);
+    let beta = cx.debug_bounds("gallery-row-beta").expect("beta row");
+    cx.simulate_click(beta.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    let alpha = cx.debug_bounds("gallery-cell-alpha").expect("first cell");
+    let beta = cx.debug_bounds("gallery-cell-beta").expect("second cell");
+    assert!(alpha.bottom() <= beta.top(), "a narrow window stacks the pair: {alpha:?} {beta:?}");
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("info-body").is_some());
+    let alpha = cx.debug_bounds("gallery-cell-alpha").expect("first cell with Info open");
+    assert!(alpha.size.width >= px(120.), "Info leaves room for the preview: {alpha:?}");
+}
+
+#[gpui::test]
+fn gallery_rows_use_the_rail_width_and_scroll_to_home_and_end(cx: &mut TestAppContext) {
+    let root = fixture("gallery-rail-width");
+    for i in 0..100 {
+        std::fs::write(root.join(format!("file-{i:03}.txt")), "").unwrap();
+    }
+    let (view, mut cx) = open_sized(cx, &root, 1280., 520.);
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    let rail = cx.debug_bounds("gallery-rail").expect("rail");
+    let beta = cx.debug_bounds("gallery-row-beta").expect("beta row");
+    let name = cx.debug_bounds("gallery-row-name-beta").expect("beta name");
+    assert!(beta.left() >= rail.left() + px(8.));
+    assert!(beta.right() >= rail.right() - px(10.), "row fills the rail between the gutters");
+    assert!(name.left() >= beta.left() + px(38.), "filename leaves room for the inset thumbnail");
+    cx.simulate_click(gpui::point(rail.right() - px(12.), beta.center().y), gpui::Modifiers::default());
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+    cx.simulate_keystrokes("end");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("gallery-row-notes.txt").is_some());
+    cx.simulate_keystrokes("home");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("gallery-row-alpha").is_some());
+}
+
+#[gpui::test]
 fn folder_view_motion_matches_visible_paths_and_keeps_keys_live(cx: &mut TestAppContext) {
     let root = fixture("view-morph");
     for i in 0..100 {
@@ -3382,17 +3662,35 @@ fn sidebar_favorites_use_a_pack_unless_they_have_their_own_icon(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn columns_are_the_board_width(cx: &mut TestAppContext) {
-    let root = fixture("columns-196");
-    std::fs::create_dir_all(root.join("a very long folder name that used to widen the column"))
-        .expect("create fixture");
-    let (_view, mut cx) = open_sized(cx, &root, 1280.0, 800.0);
-    cx.simulate_keystrokes("cmd-3");
-    cx.run_until_parked();
-    let first = cx.debug_bounds("column-0").expect("first column");
-    assert_eq!(first.size.width, px(196.), "the board's fixed width");
-    let second = cx.debug_bounds("column-1").expect("the selected folder's column");
-    assert_eq!(second.size.width, px(196.), "a long name does not widen the column");
+fn columns_give_names_room_without_changing_width_on_selection(cx: &mut TestAppContext) {
+    let root = fixture("columns-room");
+    std::fs::write(root.join("report with a long descriptive filename.pdf"), "").expect("create fixture");
+    for width in [640., 1380.] {
+        let (view, mut cx) = open_sized(cx, &root, width, 800.);
+        cx.simulate_keystrokes("cmd-3 cmd-i");
+        settle(&view, &mut cx);
+        let first = cx.debug_bounds("column-0").expect("first column");
+        let second = cx.debug_bounds("column-1").expect("the selected folder's column");
+        let name = cx.debug_bounds("column-0-row-name-report with a long descriptive filename.pdf").expect("name");
+        let info = cx.debug_bounds("preview-column").expect("Info");
+        assert_eq!(first.size.width, second.size.width);
+        assert!(info.size.width >= px(300.));
+        if width == 640. {
+            assert_eq!(first.size.width, px(196.), "narrow columns keep their minimum width");
+        } else {
+            assert!(name.size.width >= px(300.), "the wide filename has room to read");
+            let strip = cx.debug_bounds("columns").expect("strip");
+            assert!(info.right() <= strip.right(), "two wide columns and Info fit");
+        }
+
+        cx.simulate_keystrokes("down down");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("column-1").is_none(), "a file has no child column");
+        assert_eq!(cx.debug_bounds("column-0").unwrap().size.width, first.size.width);
+        cx.simulate_keystrokes("cmd-i");
+        settle(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("column-0").unwrap().size.width, first.size.width);
+    }
 }
 
 #[gpui::test]
@@ -4014,6 +4312,18 @@ fn wait_for_preview(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, path:
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     panic!("preview for {} never loaded", path.display());
+}
+
+/// Wait until `selector` is painted, for a background sample or preview.
+fn wait_for_selector(_view: &Entity<CrowWindow>, cx: &mut VisualTestContext, selector: &'static str) {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        if cx.debug_bounds(selector).is_some() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("{selector} never appeared");
 }
 
 /// Click the element with this debug selector, failing if it is not on screen.
@@ -9081,6 +9391,7 @@ fn a_long_cloud_filename_leaves_room_for_the_badge(cx: &mut TestAppContext) {
         let selector = match mode {
             ViewMode::List => format!("row-name-{name}"),
             ViewMode::Columns => format!("column-0-row-name-{name}"),
+            ViewMode::Gallery => format!("gallery-row-name-{name}"),
             ViewMode::Icons => unreachable!(),
         };
         let name_cell = cx.update(|window, _| window.debug_bounds(&selector)).expect("name cell");
@@ -11984,6 +12295,23 @@ fn settings_default_view_reaches_two_browser_windows(cx: &mut TestAppContext) {
     settle(&second_view, &mut scx);
     assert_eq!(pane(&first, &fcx).read_with(&fcx, |pane, _| pane.mode()), ViewMode::List);
     assert_eq!(pane(&second_view, &scx).read_with(&scx, |pane, _| pane.mode()), ViewMode::List);
+
+    fcx.cx.update(|cx| crate::ui::save_defaults_change(crow_core::DefaultsChange::View(ViewMode::Gallery), None, cx));
+    for _ in 0..400 {
+        fcx.cx.run_until_parked();
+        if pane(&first, &fcx).read_with(&fcx, |pane, _| pane.mode()) == ViewMode::Gallery
+            && pane(&second_view, &scx).read_with(&scx, |pane, _| pane.mode()) == ViewMode::Gallery
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(pane(&first, &fcx).read_with(&fcx, |pane, _| pane.mode()), ViewMode::Gallery);
+    assert_eq!(
+        pane(&second_view, &scx).read_with(&scx, |pane, _| pane.mode()),
+        ViewMode::Gallery,
+        "gallery as defaults reaches every browser window"
+    );
 
     fcx.cx.update(|cx| crate::ui::save_defaults_change(crow_core::DefaultsChange::View(ViewMode::Columns), None, cx));
     for _ in 0..400 {

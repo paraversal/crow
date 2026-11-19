@@ -62,6 +62,50 @@ pub fn list_dir(dir: &Path, show_hidden: bool, mut on_batch: impl FnMut(Vec<Entr
     portable::list(dir, show_hidden, &mut on_batch)
 }
 
+/// `list_dir`'s bounded sibling: why a sample is not the whole folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SampleIncomplete {
+    /// The visible-entry cap was reached; the folder has more children.
+    LimitReached { examined: usize },
+    /// The scan guard was reached before the visible-entry cap.
+    ExaminedLimit { examined: usize },
+    /// A cancellation flag was set between entries or batches.
+    Cancelled { examined: usize },
+}
+
+/// A bounded metadata sample of one folder's immediate children.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderSample {
+    /// At most the requested number of visible entries, in raw directory order.
+    pub entries: Vec<Entry>,
+    /// Raw dirents examined, including hidden ones.
+    pub examined: usize,
+    /// Hidden raw dirents among `examined`.
+    pub hidden_examined: usize,
+    /// `None` means the folder was read to EOF.
+    pub incomplete: Option<SampleIncomplete>,
+}
+
+/// List at most `max_entries` visible children, examining at most `max_examined`
+/// raw dirents. Unlike `list_dir`, this stops the directory read once either cap
+/// is reached, so previewing a huge folder does not walk all of it.
+pub fn list_sample(
+    dir: &Path,
+    show_hidden: bool,
+    max_entries: usize,
+    max_examined: Option<usize>,
+    cancel: &crate::sizes::Cancel,
+) -> std::io::Result<FolderSample> {
+    #[cfg(target_os = "macos")]
+    {
+        match bulk::sample(dir, show_hidden, max_entries, max_examined, cancel) {
+            Err(e) if e.raw_os_error() == Some(libc::ENOTSUP) => {}
+            other => return other,
+        }
+    }
+    portable::sample(dir, show_hidden, max_entries, max_examined, cancel)
+}
+
 /// Read one item, for applying a single change without relisting its folder.
 /// `Ok(None)`: it no longer exists.
 pub fn stat_entry(path: &Path) -> std::io::Result<Option<Entry>> {
@@ -95,7 +139,7 @@ pub fn stat_entry(path: &Path) -> std::io::Result<Option<Entry>> {
 }
 
 mod portable {
-    use super::Entry;
+    use super::{Entry, FolderSample, SampleIncomplete};
     use std::path::Path;
 
     pub fn list(dir: &Path, show_hidden: bool, on_batch: &mut dyn FnMut(Vec<Entry>)) -> std::io::Result<()> {
@@ -113,6 +157,40 @@ mod portable {
         on_batch(batch);
         Ok(())
     }
+
+    pub fn sample(
+        dir: &Path,
+        show_hidden: bool,
+        max_entries: usize,
+        max_examined: Option<usize>,
+        cancel: &crate::sizes::Cancel,
+    ) -> std::io::Result<FolderSample> {
+        let mut sample = FolderSample { entries: Vec::new(), examined: 0, hidden_examined: 0, incomplete: None };
+        for dirent in std::fs::read_dir(dir)?.filter_map(Result::ok) {
+            if cancel.is_cancelled() {
+                sample.incomplete = Some(SampleIncomplete::Cancelled { examined: sample.examined });
+                return Ok(sample);
+            }
+            if max_examined.is_some_and(|max| sample.examined >= max) {
+                sample.incomplete = Some(SampleIncomplete::ExaminedLimit { examined: sample.examined });
+                return Ok(sample);
+            }
+            sample.examined += 1;
+            let Ok(Some(entry)) = super::stat_entry(&dirent.path()) else { continue };
+            if entry.hidden {
+                sample.hidden_examined += 1;
+                if !show_hidden {
+                    continue;
+                }
+            }
+            if sample.entries.len() >= max_entries {
+                sample.incomplete = Some(SampleIncomplete::LimitReached { examined: sample.examined });
+                return Ok(sample);
+            }
+            sample.entries.push(entry);
+        }
+        Ok(sample)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -120,7 +198,7 @@ pub(crate) use bulk::list_raw;
 
 #[cfg(target_os = "macos")]
 mod bulk {
-    use super::Entry;
+    use super::{Entry, FolderSample, SampleIncomplete};
     use std::ffi::CString;
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStrExt;
@@ -287,13 +365,52 @@ mod bulk {
             if !batch.is_empty() {
                 on_batch(batch);
             }
+            true
         })
+    }
+
+    pub fn sample(
+        dir: &Path,
+        show_hidden: bool,
+        max_entries: usize,
+        max_examined: Option<usize>,
+        cancel: &crate::sizes::Cancel,
+    ) -> std::io::Result<FolderSample> {
+        let mut sample = FolderSample { entries: Vec::new(), examined: 0, hidden_examined: 0, incomplete: None };
+        list_raw(dir, true, &mut |raw| {
+            for entry in raw {
+                if cancel.is_cancelled() {
+                    sample.incomplete = Some(SampleIncomplete::Cancelled { examined: sample.examined });
+                    return false;
+                }
+                if max_examined.is_some_and(|max| sample.examined >= max) {
+                    sample.incomplete = Some(SampleIncomplete::ExaminedLimit { examined: sample.examined });
+                    return false;
+                }
+                sample.examined += 1;
+                if entry.hidden() {
+                    sample.hidden_examined += 1;
+                    if !show_hidden {
+                        continue;
+                    }
+                }
+                if sample.entries.len() >= max_entries {
+                    sample.incomplete = Some(SampleIncomplete::LimitReached { examined: sample.examined });
+                    return false;
+                }
+                if let Some(entry) = entry.into_entry(true) {
+                    sample.entries.push(entry);
+                }
+            }
+            true
+        })?;
+        Ok(sample)
     }
 
     pub(crate) fn list_raw<'a>(
         dir: &'a Path,
         times: bool,
-        on_batch: &mut dyn FnMut(Vec<RawEntry<'a>>),
+        on_batch: &mut dyn FnMut(Vec<RawEntry<'a>>) -> bool,
     ) -> std::io::Result<()> {
         let c_dir = CString::new(dir.as_os_str().as_bytes())?;
         // SAFETY: c_dir is a valid NUL-terminated path; the fd is closed below on every path.
@@ -311,7 +428,7 @@ mod bulk {
         fd: i32,
         dir: &'a Path,
         times: bool,
-        on_batch: &mut dyn FnMut(Vec<RawEntry<'a>>),
+        on_batch: &mut dyn FnMut(Vec<RawEntry<'a>>) -> bool,
     ) -> std::io::Result<()> {
         let mut attrs = attr_list(common(times), FILE);
         let mut buffer = vec![0u8; BUFFER];
@@ -342,7 +459,9 @@ mod bulk {
                 }
                 at += len;
             }
-            on_batch(batch);
+            if !on_batch(batch) {
+                return Ok(());
+            }
         }
     }
 
@@ -425,6 +544,53 @@ mod tests {
         .unwrap();
         assert_eq!(total, 5000);
         assert!(batches >= 1);
+    }
+
+    #[test]
+    fn sample_stops_at_the_visible_cap_and_reports_partial() {
+        let dir = temp_dir("sample-cap");
+        for i in 0..8 {
+            std::fs::write(dir.join(format!("file-{i}")), "x").unwrap();
+        }
+        std::fs::write(dir.join(".hidden-a"), "").unwrap();
+        std::fs::write(dir.join(".hidden-b"), "").unwrap();
+        let cancel = crate::sizes::Cancel::new();
+        let sample = list_sample(&dir, false, 3, None, &cancel).unwrap();
+        assert_eq!(sample.entries.len(), 3);
+        assert!(sample.hidden_examined <= sample.examined, "hidden entries are counted as examined");
+        assert!(matches!(sample.incomplete, Some(SampleIncomplete::LimitReached { .. })));
+
+        let complete = list_sample(&dir, false, 20, Some(100), &cancel).unwrap();
+        assert_eq!(complete.entries.len(), 8);
+        assert!(complete.hidden_examined >= 2);
+        assert_eq!(complete.incomplete, None);
+    }
+
+    #[test]
+    fn sample_stops_at_the_examined_cap_and_at_cancel() {
+        let dir = temp_dir("sample-examined");
+        for i in 0..20 {
+            std::fs::write(dir.join(format!(".dot-{i}")), "").unwrap();
+        }
+        let cancel = crate::sizes::Cancel::new();
+        let sample = list_sample(&dir, false, 8, Some(4), &cancel).unwrap();
+        assert!(sample.entries.is_empty());
+        assert_eq!(sample.examined, 4);
+        assert!(matches!(sample.incomplete, Some(SampleIncomplete::ExaminedLimit { examined: 4 })));
+
+        cancel.cancel();
+        let stopped = list_sample(&dir, true, 8, Some(100), &cancel).unwrap();
+        assert!(stopped.entries.is_empty());
+        assert!(matches!(stopped.incomplete, Some(SampleIncomplete::Cancelled { .. })));
+    }
+
+    #[test]
+    fn sample_confirms_an_empty_folder() {
+        let dir = temp_dir("sample-empty");
+        let sample = list_sample(&dir, true, 12, Some(64), &crate::sizes::Cancel::new()).unwrap();
+        assert!(sample.entries.is_empty());
+        assert_eq!(sample.examined, 0);
+        assert_eq!(sample.incomplete, None);
     }
 
     #[test]

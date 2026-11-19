@@ -22,7 +22,7 @@ GPUI's test platform: key contexts, history, tabs, hidden files, multiple
 selection, type-to-select (its bottom-bar prefix, timeout, Escape, and staying out of the filter and Vim), sorting, Go to Folder (Shift-Cmd-G into the palette), views kept per window, the column view's focus rules, file operations
 (new folder and new file with inline rename, trash and undo, duplicate, copy and paste, conflicts, permanent delete,
 New File/Folder with a folder or file selected, Open Terminal Here and its failure, Empty Trash and its sheet,
-cancel, empty, partial failure and text-field block), the sidebar's line icons, 196 px columns, the syntax
+cancel, empty, partial failure and text-field block), the sidebar's line icons, responsive Columns view widths, the syntax
 preview's numbered lines,
 drops, the sidebar (reordering, removing, Add to Sidebar, drops on favorites and group titles, Recent,
 twin hints across Favorites and Recent, the current-folder fill and cursor ring, mark letters, the disk
@@ -405,7 +405,7 @@ deterministic tree the `crow-search` corpus cases use; the unreadable folder in 
 remove it with `chmod -R u+rwx` first.
 
 `--bench` scrolls 600 frames and prints first paint, load time and frame times.
-`CROW_BENCH_VIEW=icons` (or `list`/`columns`) forces the view for that run, so the
+`CROW_BENCH_VIEW=icons` (or `list`/`columns`/`gallery`) forces the view for that run, so the
 icon grid is measured on the same fixture and path as the list.
 `--bench-filter <query>` applies the name filter first, so the scroll times are for
 highlighted rows. It needs a GPU, so it runs locally, not in CI. `--make-fixture`
@@ -495,6 +495,7 @@ if Crow asks on first launch. To skip the prompt in a fresh test profile, set
 | Check | How |
 | --- | --- |
 | Column view | Cmd-3: arrows move within a column, Right moves into the selected folder, Left moves back; Left in the leftmost column goes up a folder. Only the focused column's selection is in the accent color. Selecting a file shows its preview as the last column. Cmd-2 returns to the list in the folder you were in. |
+| Gallery view | Cmd-4: the rail shows mixed files and folders with a thumbnail or icon, name, size and modified date; Up/Down, Left/Right, Home/End, Shift and Cmd-click match List, and the filter, cursor and selection survive List ↔ Icons ↔ Gallery. Selecting a folder shows its immediate children without reading their contents; an empty folder, a partial sample, an unreadable folder and an iCloud placeholder each show a distinct state. Select a high-resolution landscape image, then add a portrait image to the selection. Images fit their cells without cropping, two labeled cells appear in rail order, and Cmd-I leaves room for both the rail and stacked previews at 640 pt. At a wide size, the rail aligns size and date, and the highlight and click target span the row. Select three entries: the preview follows the cursor and the full selection still drives file actions and Cmd-I's summary. |
 | Icon view | Cmd-1: tiles show the direct entries only, never inline-expanded children. Open a folder in List, select a child, then Cmd-1: the cursor moves to the direct folder; Cmd-2 restores the open child. Filter, sort, type-to-select, Return, rename, context menu, Preview and drag payloads match List. Arrows follow the tile grid, Shift extends in display order and Cmd-click toggles. |
 | Icon sizes and reflow | View ▸ Icon Size Compact, Standard and Large at 640 px and wide: the tile is fixed per preset, names keep up to two lines, and Compact fits more names. Change size with the cursor near the middle and with it at the bottom: the focused tile stays visible and selected, the filter and cursor survive, and a resize with a drag in flight cancels and restores it. |
 | Icon marquee | Drag from empty space: tiles intersecting the rectangle get the inset preview; reverse and they drop out. Cmd-drag keeps the starting selection, Esc restores it, and dropping the pointer past an edge autoscrolls with the rectangle origin fixed. A watcher reorder or tab/focus change cancels and restores. |
@@ -503,7 +504,7 @@ if Crow asks on first launch. To skip the prompt in a fresh test profile, set
 | Preview column | Column view: the preview takes the rest of the strip, never narrower than 300 px; with a folder under the cursor it shows the folder icon, name, "Folder · n items" and modified; with no matches the folder you are filtering shows the same summary. ⇧⌘P hides it and the columns keep their widths. |
 | Preview pane | Select an image, a PDF, a text file and a folder: thumbnail, text, icon. Tags show for tagged files. |
 | Syntax preview | Select a `.rs`, `.toml`, `.json`, `.js`, `.py` and `.sh` file: the preview shows line numbers and coloured keywords, strings, numbers, types and comments. A search hit still shows its excerpt with the hit line washed. Text previews stop at 80 lines and clip; a 100k folder's scroll is unchanged. |
-| Columns and tint | Cmd-3 at 1280 and 640: every column is 196 px wide and long names truncate. The focused column is tinted with the surface role (lighter in dark themes, darker in light ones) at the board's strength; moving the selection never changes a width. |
+| Columns and tint | Cmd-3 at 1280 and 640: browse columns grow up to 360 px when there is room alongside Info and keep a 196 px minimum. Hover a truncated name to see it in full. The focused column is tinted with the surface role (lighter in dark themes, darker in light ones) at the board's strength; moving the selection never changes a width. |
 | Open Terminal Here | Palette `>open terminal`, right-click a folder, a file and empty space: Terminal opens at the folder (a file's parent; empty space the shown folder). A multi-selection disables the menu line. Set `terminal = "iTerm"` (or a missing app): iTerm opens, or the status line names the failure. |
 | Table | Drag header dividers to resize; click headers to sort and reverse. |
 | List width | Start with Preview open and a wide sidebar. Name has room to show common file names, and the headers align with their rows. Toggle Preview or drag either side divider. As space runs short, metadata columns shrink from the right, then Name can shrink further and whole columns hide. At 640 px no cell runs past the edge. Drag Name's divider to trade space with the next column. |

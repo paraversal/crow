@@ -137,7 +137,7 @@ mod imp {
             for entry in batch {
                 if cancel.is_cancelled() {
                     stopped = true;
-                    return;
+                    return false;
                 }
                 if entry.dev != root_dev {
                     continue;
@@ -153,6 +153,7 @@ mod imp {
                     walk.file(entry.dev, entry.fileid, entry.nlink, entry.size, count);
                 }
             }
+            true
         });
         if result.is_err() {
             // A subfolder that cannot be listed is partial, not fatal; the root

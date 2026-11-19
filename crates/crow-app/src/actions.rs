@@ -150,6 +150,7 @@ actions!(
         ViewAsIcons,
         ViewAsList,
         ViewAsColumns,
+        ViewAsGallery,
         IconSizeCompact,
         IconSizeStandard,
         IconSizeLarge,
@@ -220,6 +221,8 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("down", MoveDown, Some(LIST)),
         KeyBinding::new("alt-up", MoveToFirst, Some(LIST)),
         KeyBinding::new("alt-down", MoveToLast, Some(LIST)),
+        KeyBinding::new("home", MoveToFirst, Some("FileList && !Filter && !TextInput")),
+        KeyBinding::new("end", MoveToLast, Some("FileList && !Filter && !TextInput")),
         KeyBinding::new("shift-up", ExtendUp, Some(LIST)),
         KeyBinding::new("shift-down", ExtendDown, Some(LIST)),
         KeyBinding::new("cmd-a", SelectAll, Some(LIST)),
@@ -271,6 +274,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-1", ViewAsIcons, Some("Crow")),
         KeyBinding::new("cmd-2", ViewAsList, Some("Crow")),
         KeyBinding::new("cmd-3", ViewAsColumns, Some("Crow")),
+        KeyBinding::new("cmd-4", ViewAsGallery, Some("Crow")),
         KeyBinding::new("up", MoveUp, Some("Sidebar")),
         KeyBinding::new("down", MoveDown, Some("Sidebar")),
         KeyBinding::new("enter", OpenSelection, Some("Sidebar")),
@@ -353,6 +357,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-1", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-2", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-3", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-4", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-up", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-[", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-]", NoAction {}, Some("Sheet")),
@@ -492,12 +497,13 @@ mod tests {
     fn sheets_mask_every_view_shortcut() {
         let keymap = keymap();
         let sheet = ["Crow", "Sheet"];
-        for input in ["cmd-1", "cmd-2", "cmd-3"] {
+        for input in ["cmd-1", "cmd-2", "cmd-3", "cmd-4"] {
             // A NoAction binding is consumed by the keymap: nothing is left to dispatch.
             assert!(resolved(&keymap, input, &sheet).is_empty(), "{input} must not change a view behind a sheet");
         }
         let finder = ["Crow", "FileList"];
         assert!(wins(&keymap, "cmd-1", &finder, &ViewAsIcons));
         assert!(wins(&keymap, "cmd-2", &finder, &ViewAsList));
+        assert!(wins(&keymap, "cmd-4", &finder, &ViewAsGallery));
     }
 }

@@ -194,8 +194,17 @@ pub fn format_time_short(t: Option<std::time::SystemTime>) -> String {
     format_time_short_at(t, std::time::SystemTime::now())
 }
 
+/// The Gallery rail leaves the full modified time available to accessibility.
+pub fn format_date_short(t: Option<std::time::SystemTime>) -> String {
+    format_short_at(t, std::time::SystemTime::now(), false)
+}
+
 /// `format_time_short` with an explicit "now", so the buckets are testable.
 pub fn format_time_short_at(t: Option<std::time::SystemTime>, now: std::time::SystemTime) -> String {
+    format_short_at(t, now, true)
+}
+
+fn format_short_at(t: Option<std::time::SystemTime>, now: std::time::SystemTime, show_time: bool) -> String {
     use chrono::Datelike as _;
     let Some(t) = t else { return "—".into() };
     let local: chrono::DateTime<chrono::Local> = t.into();
@@ -203,13 +212,13 @@ pub fn format_time_short_at(t: Option<std::time::SystemTime>, now: std::time::Sy
     let date = local.date_naive();
     let today = now.date_naive();
     if date == today {
-        local.format("Today %H:%M").to_string()
+        if show_time { local.format("Today %H:%M").to_string() } else { "Today".into() }
     } else if Some(date) == today.pred_opt() {
         "Yesterday".into()
     } else if date.year() == today.year() {
         local.format("%-d. %b").to_string()
     } else {
-        local.format("%-d. %b %Y").to_string()
+        local.format(if show_time { "%-d. %b %Y" } else { "%-d %b %y" }).to_string()
     }
 }
 

@@ -11,18 +11,38 @@ use crow_core::{EntryHandle, Excerpt, Extensions, KnownSize, PluginPreview, Prev
 use crow_fs::{CloudStatus, Entry, ReadDecision, ReadGate, ReadHint};
 use crow_plugin::ExcerptInput;
 use crow_theme::Theme;
-use gpui::{Div, FontWeight, HighlightStyle, Image, ImageFormat, Rgba, Role, StyledText, div, img, prelude::*, px};
+use futures::lock::Mutex;
+use gpui::{
+    Div, FontWeight, HighlightStyle, Image, ImageFormat, ObjectFit, RenderImage, Rgba, Role, StyledText, SvgRenderer,
+    div, img, prelude::*, px,
+};
 
 use crate::icons::{Glyph, glyph};
 use crate::style::{cloud_icon, color, color_alpha, display_text, format_time, kind};
 use crate::syntax::{self, Language};
+
+pub enum ImageSize {
+    Pane,
+    /// One bounded Retina rendition works for both comparison layouts and Info.
+    /// Each cell's worker prevents superseded requests from overlapping.
+    Gallery(Arc<Mutex<()>>),
+}
+
+impl ImageSize {
+    pub fn points(&self) -> u32 {
+        match self {
+            Self::Pane => 256,
+            Self::Gallery(_) => 1024,
+        }
+    }
+}
 
 /// What the preview shows for one item, loaded off the main thread.
 #[derive(Clone)]
 pub struct Preview {
     pub path: PathBuf,
     pub content: Option<PreviewContent>,
-    pub image: Option<Arc<Image>>,
+    pub image: Option<Arc<RenderImage>>,
     pub tags: Vec<String>,
     /// The lines around a content hit, when the search asked for one.
     pub excerpt: Option<Excerpt>,
@@ -43,6 +63,13 @@ pub struct PluginPreviewView {
 }
 
 impl Preview {
+    pub fn release_image(&mut self, cx: &mut gpui::App) {
+        if let Some(image) = self.image.take() {
+            // Let the window finish updating before clearing its sprite atlas.
+            cx.defer(move |cx| cx.drop_image(image, None));
+        }
+    }
+
     /// Request one fresh read when a blocked preview learns that the item is local.
     pub fn update_cloud(&mut self, status: CloudStatus) -> bool {
         let retry = self.blocked && status.is_local() && self.cloud != Some(status);
@@ -169,21 +196,122 @@ pub async fn plugin_preview(
     None
 }
 
+/// Test-only holds: a path's next preview request signals that it started and
+/// waits for the test to release it, so stale replies can be released out of order.
+#[cfg(test)]
+pub mod test_hold {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
+
+    struct Hold {
+        started: std::sync::mpsc::Sender<()>,
+        release: futures::channel::oneshot::Receiver<()>,
+    }
+
+    static HOLDS: LazyLock<Mutex<HashMap<PathBuf, Vec<Hold>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Hold the next request for `path`. Returns the "started" receiver and the
+    /// sender that releases it.
+    pub fn install(path: PathBuf) -> (std::sync::mpsc::Receiver<()>, futures::channel::oneshot::Sender<()>) {
+        let (started, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = futures::channel::oneshot::channel();
+        HOLDS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(path)
+            .or_default()
+            .push(Hold { started, release: release_rx });
+        (started_rx, release_tx)
+    }
+
+    pub(super) async fn wait(path: &std::path::Path) {
+        let hold = {
+            let mut holds = HOLDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let hold = holds.get_mut(path).and_then(Vec::pop);
+            if holds.get(path).is_some_and(Vec::is_empty) {
+                holds.remove(path);
+            }
+            hold
+        };
+        if let Some(hold) = hold {
+            let _ = hold.started.send(());
+            let _ = hold.release.await;
+        }
+    }
+}
+
+/// The provider pipeline shared by the Preview pane and Gallery: try the
+/// configured plugin providers in order, then the native previewers. The caller
+/// owns target/generation checks; this only does the bounded work.
+#[allow(clippy::too_many_arguments)]
+pub async fn load_with_plugins(
+    cx: &mut gpui::AsyncApp,
+    surface: crate::plugins::SurfaceId,
+    candidates: Vec<crate::plugins::PreviewCandidate>,
+    entry: Entry,
+    extensions: Arc<Extensions>,
+    gate: Arc<dyn ReadGate>,
+    cloud: Option<CloudStatus>,
+    line: Option<u64>,
+    revision: u64,
+    image_size: ImageSize,
+    cancelled: Arc<AtomicBool>,
+) -> Option<Preview> {
+    #[cfg(test)]
+    test_hold::wait(&entry.path).await;
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    if !candidates.is_empty()
+        && cx
+            .background_spawn({
+                let path = entry.path.clone();
+                let gate = gate.clone();
+                async move { gate.check(&path, ReadHint::for_path(&path)) == ReadDecision::Readable }
+            })
+            .await
+        && !cancelled.load(Ordering::Relaxed)
+        && let Some(preview) =
+            plugin_preview(cx, surface, candidates, entry.clone(), gate.clone(), cloud, revision, cancelled.clone())
+                .await
+    {
+        return Some(preview);
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let image_points = image_size.points();
+    let worker = match image_size {
+        ImageSize::Pane => None,
+        ImageSize::Gallery(worker) => Some(worker.lock_owned().await),
+    };
+    let svg = cx.update(|cx| cx.svg_renderer());
+    cx.background_spawn(async move {
+        let _worker = worker;
+        (!cancelled.load(Ordering::Relaxed))
+            .then(|| fetch_at(&entry, &extensions, line, gate.as_ref(), cloud, image_points, svg))
+    })
+    .await
+}
+
 /// `fetch`, plus the lines around a content hit when the text previewer read it.
 /// `gate` is a fresh read policy; `cloud` is only for the placeholder's text.
-pub fn fetch_at(
+fn fetch_at(
     entry: &Entry,
     extensions: &Extensions,
     line: Option<u64>,
     gate: &dyn ReadGate,
     cloud: Option<CloudStatus>,
+    image_points: u32,
+    svg: SvgRenderer,
 ) -> Preview {
     let _span = tracing::debug_span!("preview load").entered();
     let decision = gate.check(&entry.path, ReadHint::for_path(&entry.path));
     let blocked = decision != ReadDecision::Readable;
-    let content = if blocked { None } else { extensions.preview(entry, gate) };
+    let content = if blocked { None } else { extensions.preview(entry, gate, image_points) };
     let image = match &content {
-        Some(PreviewContent::Image(png)) => Some(Arc::new(Image::from_bytes(ImageFormat::Png, png.to_vec()))),
+        Some(PreviewContent::Image(png)) => Image::from_bytes(ImageFormat::Png, png.to_vec()).to_image_data(svg).ok(),
         _ => None,
     };
     let excerpt = match (&content, line) {
@@ -233,8 +361,9 @@ pub fn spoken(
 }
 
 /// A metadata-only block where a picture or text preview would be. There is no
-/// control here: downloading stays an explicit Finder/user action.
-fn cloud_placeholder(cloud: Option<CloudStatus>, theme: &Theme) -> Div {
+/// control here: downloading stays an explicit Finder/user action. `height`
+/// `None` fills the cell for Gallery.
+fn cloud_placeholder(cloud: Option<CloudStatus>, theme: &Theme, height: Option<gpui::Pixels>) -> Div {
     let (glyph_name, role, text) = match cloud {
         Some(CloudStatus::Downloading) => (Glyph::Cloud, "accent", "Downloading from iCloud…"),
         Some(CloudStatus::NotDownloaded) => (Glyph::Cloud, "fg-muted", "Not downloaded from iCloud"),
@@ -242,7 +371,8 @@ fn cloud_placeholder(cloud: Option<CloudStatus>, theme: &Theme) -> Div {
         _ => (Glyph::CloudOff, "fg-muted", "Preview unavailable for this iCloud item"),
     };
     div()
-        .h(px(220.))
+        .when_some(height, |block, height| block.h(height))
+        .when(height.is_none(), |block| block.size_full())
         .flex()
         .flex_col()
         .items_center()
@@ -251,6 +381,11 @@ fn cloud_placeholder(cloud: Option<CloudStatus>, theme: &Theme) -> Div {
         .text_color(color(theme.role(role)))
         .child(glyph(glyph_name, 64.0, role, theme))
         .child(div().text_size(px(12.)).child(text))
+}
+
+/// Gallery's metadata-only cloud block, without the Preview column's fixed height.
+pub(crate) fn cloud_note(cloud: CloudStatus, theme: &Theme) -> Div {
+    cloud_placeholder(Some(cloud), theme, None)
 }
 
 /// How many lines of a text file the preview draws: the box clips the rest, so
@@ -287,10 +422,11 @@ fn code_line(index: usize, number: u64, text: &str, hit: Option<u64>, language: 
         )
 }
 
-fn plugin_contents(plugin: &PluginPreviewView, theme: &Theme) -> gpui::AnyElement {
+fn plugin_contents(plugin: &PluginPreviewView, theme: &Theme, tall: bool) -> gpui::AnyElement {
     let border = color(theme.role("border"));
     let muted = color(theme.role("fg-muted"));
     let provider = div().text_size(px(11.)).text_color(muted).child(format!("{} preview", plugin.provider));
+    let height = (!tall).then(|| px(220.));
     if let Some(text) = &plugin.preview.text {
         let lines = text
             .lines()
@@ -301,8 +437,9 @@ fn plugin_contents(plugin: &PluginPreviewView, theme: &Theme) -> gpui::AnyElemen
             .flex()
             .flex_col()
             .gap_1()
+            .when(tall, |block| block.size_full().min_h_0())
             .child(provider)
-            .child(code_box(theme, border).children(lines))
+            .child(code_box(theme, border, height).children(lines))
             .into_any_element();
     }
     let table = plugin.preview.table.as_ref().expect("preview has text or table");
@@ -315,11 +452,13 @@ fn plugin_contents(plugin: &PluginPreviewView, theme: &Theme) -> gpui::AnyElemen
         .flex()
         .flex_col()
         .gap_1()
+        .when(tall, |block| block.size_full().min_h_0())
         .child(provider)
         .child(
             div()
                 .id("preview-plugin-table-body")
-                .max_h(px(220.))
+                .when_some(height, |body, height| body.max_h(height))
+                .when(tall, |body| body.flex_1().min_h_0())
                 .overflow_y_scroll()
                 .rounded_md()
                 .border_1()
@@ -334,11 +473,12 @@ fn plugin_contents(plugin: &PluginPreviewView, theme: &Theme) -> gpui::AnyElemen
         .into_any_element()
 }
 
-fn code_box(theme: &Theme, border: Rgba) -> gpui::Stateful<Div> {
+fn code_box(theme: &Theme, border: Rgba, height: Option<gpui::Pixels>) -> gpui::Stateful<Div> {
     div()
         .id("preview-code")
         .debug_selector(|| "preview-code".into())
-        .h(px(220.))
+        .when_some(height, |box_, height| box_.h(height))
+        .when(height.is_none(), |box_| box_.flex_1().min_h_0())
         .p_2()
         .rounded_md()
         .border_1()
@@ -392,9 +532,9 @@ pub fn contents(
     let excerpt = preview.and_then(|p| p.excerpt.as_ref());
     let language = Language::from_path(&entry.path);
     let picture: gpui::AnyElement = if preview.is_some_and(|p| p.plugin.is_some()) {
-        plugin_contents(preview.and_then(|p| p.plugin.as_ref()).expect("checked"), theme)
+        plugin_contents(preview.and_then(|p| p.plugin.as_ref()).expect("checked"), theme, false)
     } else if preview.is_some_and(|p| p.blocked) {
-        cloud_placeholder(preview.and_then(|p| p.cloud).or(cloud), theme).into_any_element()
+        cloud_placeholder(preview.and_then(|p| p.cloud).or(cloud), theme, Some(px(220.))).into_any_element()
     } else {
         match (preview.and_then(|p| p.image.clone()), preview.and_then(|p| p.content.clone())) {
             (Some(image), _) => div()
@@ -409,7 +549,7 @@ pub fn contents(
                 let lines = excerpt.text.lines().take(PREVIEW_TEXT_LINES).enumerate().map(|(i, line)| {
                     code_line(i, excerpt.first_line + i as u64, line, Some(excerpt.hit), language, theme)
                 });
-                code_box(theme, border).children(lines).into_any_element()
+                code_box(theme, border, Some(px(220.))).children(lines).into_any_element()
             }
             (None, Some(PreviewContent::Text(text))) => {
                 let lines = text
@@ -417,7 +557,7 @@ pub fn contents(
                     .take(PREVIEW_TEXT_LINES)
                     .enumerate()
                     .map(|(i, line)| code_line(i, i as u64 + 1, line, None, language, theme));
-                code_box(theme, border).children(lines).into_any_element()
+                code_box(theme, border, Some(px(220.))).children(lines).into_any_element()
             }
             _ => div()
                 .h(px(220.))
@@ -466,6 +606,48 @@ pub fn contents(
             Some(tags) => div().child(tags),
             None => div().text_color(muted).child("No tags"),
         })
+}
+
+/// Gallery's large cell content: the same provider output as the Preview tab,
+/// sized to fill the cell instead of the column's fixed 220-point blocks.
+pub(crate) fn gallery_content(
+    entry: &Entry,
+    preview: Option<&Preview>,
+    theme: &Theme,
+    cloud: Option<CloudStatus>,
+    resolver: &crate::icon_packs::Resolver,
+) -> gpui::AnyElement {
+    let border = color(theme.role("border"));
+    if let Some(plugin) = preview.and_then(|preview| preview.plugin.as_ref()) {
+        return plugin_contents(plugin, theme, true);
+    }
+    if preview.is_some_and(|preview| preview.blocked) {
+        return cloud_placeholder(preview.and_then(|preview| preview.cloud).or(cloud), theme, None).into_any_element();
+    }
+    match (preview.and_then(|preview| preview.image.clone()), preview.and_then(|preview| preview.content.clone())) {
+        (Some(image), _) => div()
+            .size_full()
+            .relative()
+            .debug_selector(|| "gallery-image-frame".into())
+            .child(img(image).absolute().inset_0().size_full().aspect_square().object_fit(ObjectFit::Contain))
+            .into_any_element(),
+        (None, Some(PreviewContent::Text(text))) => {
+            let language = Language::from_path(&entry.path);
+            let lines = text
+                .lines()
+                .take(PREVIEW_TEXT_LINES)
+                .enumerate()
+                .map(|(i, line)| code_line(i, i as u64 + 1, line, None, language, theme));
+            code_box(theme, border, None).children(lines).into_any_element()
+        }
+        _ => div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(path_icon(resolver, &entry.path, entry.is_dir, entry.is_package(), cloud, theme, 160.))
+            .into_any_element(),
+    }
 }
 
 /// A folder's summary in the preview column.
@@ -583,7 +765,15 @@ mod tests {
         let mut entry = entry;
         entry.path = path;
         let ext = Extensions::with_builtins();
-        let blocked = fetch_at(&entry, &ext, None, &Refuse, Some(CloudStatus::NotDownloaded));
+        let blocked = fetch_at(
+            &entry,
+            &ext,
+            None,
+            &Refuse,
+            Some(CloudStatus::NotDownloaded),
+            256,
+            SvgRenderer::new(Arc::new(())),
+        );
         assert!(blocked.blocked);
         assert!(blocked.content.is_none());
         assert!(blocked.image.is_none());
@@ -591,7 +781,8 @@ mod tests {
         assert_eq!(blocked.cloud, Some(CloudStatus::NotDownloaded));
 
         let gate = CountReads(Default::default());
-        let mut ready = fetch_at(&entry, &ext, None, &gate, Some(CloudStatus::Downloaded));
+        let mut ready =
+            fetch_at(&entry, &ext, None, &gate, Some(CloudStatus::Downloaded), 256, SvgRenderer::new(Arc::new(())));
         assert!(!ready.blocked);
         assert!(matches!(ready.content, Some(PreviewContent::Text(_))), "a downloaded file previews");
         assert!(gate.0.load(std::sync::atomic::Ordering::Relaxed) >= 1, "the gate is consulted");

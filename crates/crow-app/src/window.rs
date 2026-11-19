@@ -20,7 +20,7 @@ use crate::actions::{
     Minimize, MoveDown, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover, PathUnhover,
     PluginCommand, PluginCommandResult, PreviousTab, ResetFolderView, SearchEverything, SearchHome, ShowCommandPalette,
     ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, TogglePreview, UseViewAsDefaults,
-    ViewAsColumns, ViewAsIcons, ViewAsList, WhyThisView, Zoom,
+    ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -667,6 +667,10 @@ impl CrowWindow {
         self.pane().update(cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
     }
 
+    fn view_as_gallery(&mut self, _: &ViewAsGallery, _: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| pane.set_mode(ViewMode::Gallery, cx));
+    }
+
     fn icon_size_compact(&mut self, _: &IconSizeCompact, _: &mut Window, cx: &mut Context<Self>) {
         self.pane().update(cx, |pane, cx| pane.set_icon_size(crow_core::IconSize::Compact, cx));
     }
@@ -840,6 +844,18 @@ impl CrowWindow {
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.pane().update(cx, |p, cx| p.set_mode(ViewMode::Columns, cx));
+                })),
+            )
+            .child(
+                with_action_tooltip(
+                    view_button("view-gallery", "as Gallery", Glyph::Gallery, mode == ViewMode::Gallery, &theme),
+                    "View as Gallery",
+                    &ViewAsGallery,
+                    KeyScope::Window,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.pane().update(cx, |p, cx| p.set_mode(ViewMode::Gallery, cx));
                 })),
             );
 
@@ -1592,6 +1608,7 @@ impl CrowWindow {
             ViewMode::Icons => "Icons",
             ViewMode::List => "List",
             ViewMode::Columns => "Columns",
+            ViewMode::Gallery => "Gallery",
         };
         let sort_title = |key: crow_fs::SortKey| match key {
             crow_fs::SortKey::Name => "Name",
@@ -2174,6 +2191,7 @@ impl CrowWindow {
             CommandId::ViewAsIcons => self.view_as_icons(&ViewAsIcons, window, cx),
             CommandId::ViewAsList => self.view_as_list(&ViewAsList, window, cx),
             CommandId::ViewAsColumns => self.view_as_columns(&ViewAsColumns, window, cx),
+            CommandId::ViewAsGallery => self.view_as_gallery(&ViewAsGallery, window, cx),
             CommandId::IconSizeCompact => self.icon_size_compact(&IconSizeCompact, window, cx),
             CommandId::IconSizeStandard => self.icon_size_standard(&IconSizeStandard, window, cx),
             CommandId::IconSizeLarge => self.icon_size_large(&IconSizeLarge, window, cx),
@@ -2376,7 +2394,8 @@ impl Render for CrowWindow {
         let (font, font_size) = (ui_font(&ui.settings.font_family), ui.settings.font_size);
         let title = crate::style::display_name(&self.pane().read(cx).current_dir(cx));
         // The single-folder views share the preview column; column view has its own.
-        let list_view = self.pane().read(cx).mode() != ViewMode::Columns;
+        let mode = self.pane().read(cx).mode();
+        let list_view = mode != ViewMode::Columns;
         window.set_window_title(&title);
         let title_bar = self.render_title_bar(&title, window, cx);
         let tab_bar = (self.tabs.len() > 1).then(|| self.render_tab_bar(cx));
@@ -2395,6 +2414,7 @@ impl Render for CrowWindow {
             window.viewport_size().width,
             cx.global::<Ui>().settings.window.sidebar_width,
             self.info.read(cx).preferred_width,
+            show_preview && self.search.is_none() && mode == ViewMode::Gallery,
         );
         let sidebar = div()
             .relative()
@@ -2462,13 +2482,11 @@ impl Render for CrowWindow {
             Some(search) => div().flex_1().min_w_0().h_full().child(search.clone()).into_any_element(),
             None => {
                 let pane = self.pane().clone();
-                if list_view {
-                    let mut width = window.viewport_size().width - self.side_panes.left_width();
-                    if preview.is_some() {
-                        width -= self.side_panes.right_width();
-                    }
-                    pane.update(cx, |pane, _| pane.set_list_width(width));
+                let mut width = window.viewport_size().width - self.side_panes.left_width();
+                if preview.is_some() {
+                    width -= self.side_panes.right_width();
                 }
+                pane.update(cx, |pane, _| pane.set_content_width(width));
                 div().flex_1().min_w_0().h_full().child(pane).into_any_element()
             }
         };
@@ -2526,6 +2544,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::view_as_icons))
             .on_action(cx.listener(Self::view_as_list))
             .on_action(cx.listener(Self::view_as_columns))
+            .on_action(cx.listener(Self::view_as_gallery))
             .on_action(cx.listener(Self::icon_size_compact))
             .on_action(cx.listener(Self::icon_size_standard))
             .on_action(cx.listener(Self::icon_size_large))

@@ -59,6 +59,7 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
 use crow_fs::ops::Request;
 
+mod gallery;
 mod pane_filter;
 mod view_motion;
 use pane_filter::FilterPlace;
@@ -91,8 +92,9 @@ const NAME_INSET: f32 = 4.0;
 const INDENT: f32 = 18.0;
 const TRIANGLE_WIDTH: f32 = 20.0;
 const CELL_PADDING: f32 = 8.0;
-/// Every column in column view is the board's fixed 196 px; long names truncate.
-const COLUMN_WIDTH: f32 = 196.0;
+/// Browse columns grow with the strip, keeping two readable alongside Preview.
+const COLUMN_MIN_WIDTH: f32 = 196.0;
+const COLUMN_MAX_WIDTH: f32 = 360.0;
 const PREVIEW_COLUMN_WIDTH: f32 = 300.0;
 
 /// Requests the pane can't carry out alone: operations may need a sheet (conflicts,
@@ -364,9 +366,10 @@ pub struct Pane {
     /// The list view's columns after Name, and the widths shared by header and rows.
     columns: Vec<Arc<dyn Column>>,
     table: TableLayout,
-    list_width: Pixels,
+    content_width: Pixels,
     resize: Option<ResizeDrag>,
     preview: Option<Preview>,
+    preview_key: Option<(PathBuf, u64, u32)>,
     preview_generation: u64,
     /// Plugin/views generations at the last preview load, so registration and
     /// `preview_providers` edits refresh an already visible preview.
@@ -397,6 +400,8 @@ pub struct Pane {
     icon_scroll: UniformListScrollHandle,
     icon_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     icon_viewport: Rc<RefCell<Option<IconViewport>>>,
+    /// Gallery: rail scroll, preview pair and folder samples.
+    gallery: gallery::Gallery,
     /// The geometry the last icon frame drew, shared by keys, hit tests and anchors.
     grid: Option<GridGeometry>,
     /// The effective icon size for this pane (from views.toml when folders decide).
@@ -502,9 +507,10 @@ impl Pane {
             focus: cx.focus_handle(),
             table: default_table(&columns),
             columns,
-            list_width: Pixels::ZERO,
+            content_width: Pixels::ZERO,
             resize: None,
             preview: None,
+            preview_key: None,
             preview_generation: 0,
             preview_plugin_generation: 0,
             preview_views_generation: 0,
@@ -530,6 +536,7 @@ impl Pane {
             icon_scroll: UniformListScrollHandle::new(),
             icon_bounds: Rc::new(Cell::new(None)),
             icon_viewport: Rc::new(RefCell::new(None)),
+            gallery: gallery::Gallery::new(),
             grid: None,
             icon_size: IconSize::Standard,
             icon_caption: None,
@@ -539,6 +546,7 @@ impl Pane {
                         "icons" => Some(ViewMode::Icons),
                         "list" => Some(ViewMode::List),
                         "columns" => Some(ViewMode::Columns),
+                        "gallery" => Some(ViewMode::Gallery),
                         _ => None,
                     })
                 })
@@ -761,8 +769,8 @@ impl Pane {
     }
 
     /// The containing window sets this before rendering the pane.
-    pub(crate) fn set_list_width(&mut self, width: Pixels) {
-        self.list_width = width;
+    pub(crate) fn set_content_width(&mut self, width: Pixels) {
+        self.content_width = width;
     }
 
     /// Whether a row is being renamed.
@@ -822,6 +830,17 @@ impl Pane {
                     out.extend(
                         (0..folder.row_count().min(200))
                             .filter_map(|ix| folder.row(ix).map(|(entry, _)| format!("tile-{}", entry.name))),
+                    );
+                }
+            }
+            ViewMode::Gallery => {
+                out.push("gallery-rail".to_owned());
+                out.push("gallery-preview".to_owned());
+                if let Some(folder) = self.folders.first() {
+                    let folder = folder.read(cx);
+                    out.extend(
+                        (0..folder.row_count().min(200))
+                            .filter_map(|ix| folder.row(ix).map(|(entry, _)| format!("gallery-row-{}", entry.name))),
                     );
                 }
             }
@@ -1161,6 +1180,13 @@ impl Pane {
         self.plugin_selection.clear();
         self.plugin_scope = None;
         self.preview_cancel.store(true, Ordering::Relaxed);
+        self.clear_preview(cx);
+        self.preview_key = None;
+        gallery::release(self, cx);
+        if cx.try_global::<crate::plugins::Plugins>().is_some() {
+            let id = self.gallery.replace_surface();
+            cx.global_mut::<crate::plugins::Plugins>().surfaces.drop_surface(id);
+        }
         for folder in &self.folders {
             folder.update(cx, |folder, cx| folder.release_listing(cx));
         }
@@ -1313,9 +1339,11 @@ impl Pane {
             && let Some(preview) = self.preview.as_mut().filter(|preview| preview.path == entry.path)
             && preview.update_cloud(status)
         {
-            self.preview = None;
+            self.clear_preview(cx);
+            self.preview_key = None;
             self.load_preview(cx);
         }
+        gallery::cloud_changed(self, cx);
         cx.notify();
     }
 
@@ -1380,6 +1408,12 @@ impl Pane {
         {
             let count = self.focused_folder().read(cx).row_count();
             self.icon_scroll.scroll_to_item(self.icon_grid(count, cx).row_of(ix), ScrollStrategy::Nearest);
+        }
+        if mode == ViewMode::Gallery {
+            self.gallery.reveal = Some(Instant::now());
+            if let Some(ix) = self.focused_folder().read(cx).cursor_ix() {
+                self.gallery.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+            }
         }
         if cx.global::<Ui>().settings.view_per_folder {
             self.remember(ViewChange::View(mode), cx);
@@ -1455,14 +1489,23 @@ impl Pane {
         self.view_motion = None;
         self.child_reveal = None;
         self.drop_filter(cx);
+        if self.mode == ViewMode::Gallery {
+            gallery::release(self, cx);
+        }
         self.mode = mode;
         match mode {
             // The single-folder views show the folder you were in: the focused
             // column becomes the root. Icons projects its direct entries only.
-            ViewMode::List | ViewMode::Icons => self.collapse_to_focused(mode == ViewMode::List, cx),
+            ViewMode::List | ViewMode::Icons | ViewMode::Gallery => {
+                self.collapse_to_focused(mode == ViewMode::List, cx)
+            }
             ViewMode::Columns => self.update_chain(0, cx),
         }
         self.plugin_scope_changed(cx);
+        if mode == ViewMode::Gallery {
+            self.load_preview(cx);
+            gallery::refresh(self, cx);
+        }
         cx.notify();
         true
     }
@@ -1471,7 +1514,7 @@ impl Pane {
     /// last known viewport height (or the window's) decides the visible rows;
     /// column count and tile bounds only need the width and the listing.
     fn icon_grid(&self, count: usize, cx: &App) -> GridGeometry {
-        let width = f32::from(self.list_width).max(1.0);
+        let width = f32::from(self.content_width).max(1.0);
         let height = self
             .icon_bounds
             .get()
@@ -1554,7 +1597,6 @@ impl Pane {
         self.folders.clear();
         self.subscriptions.clear();
         self.focused = 0;
-        self.preview = None;
         self.preview_generation += 1;
         self.status = None;
         // The folder's view decides the sort before the listing starts.
@@ -1571,7 +1613,7 @@ impl Pane {
     fn push_folder(&mut self, dir: PathBuf, auto_select: bool, cx: &mut Context<Self>) {
         let (hidden, sort) = (self.show_hidden, self.sort);
         let icon_source = cx.global::<Ui>().views.resolve(&dir).icon_source.map(|(source, _)| source);
-        let show_tree = self.mode != ViewMode::Icons;
+        let show_tree = self.mode == ViewMode::List || self.mode == ViewMode::Columns;
         let folder = cx.new(|cx| Folder::new(dir, hidden, sort, auto_select, cx));
         folder.update(cx, |folder, cx| {
             folder.set_icon_source(icon_source);
@@ -1699,9 +1741,19 @@ impl Pane {
                 let count = folder.read(cx).row_count();
                 self.icon_scroll.scroll_to_item(self.icon_grid(count, cx).row_of(ix), ScrollStrategy::Nearest);
             }
-            if k == self.focused {
+            if self.mode == ViewMode::Gallery
+                && k == self.focused
+                && let Some(ix) = folder.read(cx).cursor_ix()
+            {
+                self.gallery.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+            }
+            if k == self.focused && self.mode != ViewMode::Gallery {
                 self.load_preview(cx);
             }
+        }
+        if self.mode == ViewMode::Gallery {
+            self.load_preview(cx);
+            gallery::refresh(self, cx);
         }
         cx.notify();
     }
@@ -1734,18 +1786,39 @@ impl Pane {
         }
     }
 
+    fn clear_preview(&mut self, cx: &mut gpui::App) {
+        if let Some(mut preview) = self.preview.take() {
+            preview.release_image(cx);
+        }
+    }
+
     fn load_preview(&mut self, cx: &mut Context<Self>) {
         let surface = self.current_plugin_surface(cx);
         let Some(entry) = self.cursor_entry(cx) else {
-            self.preview = None;
+            self.clear_preview(cx);
+            self.preview_key = None;
             self.preview_generation += 1;
             self.preview_cancel.store(true, Ordering::Relaxed);
             crate::plugins::cancel_previews(surface, cx);
             return;
         };
-        if self.preview.as_ref().is_some_and(|p| p.path == entry.path) {
-            return;
+        let revision = self.focused_folder().read(cx).plugin_entry_version(&entry);
+        let image_size = if self.mode == ViewMode::Gallery {
+            preview::ImageSize::Gallery(self.gallery.primary_worker.clone())
+        } else {
+            preview::ImageSize::Pane
+        };
+        let image_points = image_size.points();
+        if let Some((path, old_revision, old_points)) = &self.preview_key {
+            if *path == entry.path && *old_revision == revision {
+                if *old_points >= image_points {
+                    return;
+                }
+            } else {
+                self.clear_preview(cx);
+            }
         }
+        self.preview_key = Some((entry.path.clone(), revision, image_points));
         self.preview_generation += 1;
         let generation = self.preview_generation;
         self.preview_cancel.store(true, Ordering::Relaxed);
@@ -1763,38 +1836,26 @@ impl Pane {
             }
             None => (Arc::new(AllowAll) as Arc<dyn ReadGate>, None),
         };
-        let revision = generation;
         cx.spawn(async move |this, cx| {
             let path = entry.path.clone();
-            let readable =
-                gate.check(&entry.path, crow_fs::ReadHint::for_path(&entry.path)) == crow_fs::ReadDecision::Readable;
-            let plugin = if candidates.is_empty() || !readable || cancel.load(Ordering::Relaxed) {
-                None
-            } else {
-                preview::plugin_preview(
-                    cx,
-                    surface,
-                    candidates,
-                    entry.clone(),
-                    gate.clone(),
-                    cloud,
-                    revision,
-                    cancel.clone(),
-                )
-                .await
-            };
+            let fetched = preview::load_with_plugins(
+                cx,
+                surface,
+                candidates,
+                entry,
+                extensions,
+                gate,
+                cloud,
+                None,
+                generation,
+                image_size,
+                cancel.clone(),
+            )
+            .await;
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
-            let fetched = match plugin {
-                Some(preview) => preview,
-                None => {
-                    cx.background_spawn(
-                        async move { preview::fetch_at(&entry, &extensions, None, gate.as_ref(), cloud) },
-                    )
-                    .await
-                }
-            };
+            let Some(fetched) = fetched else { return };
             this.update(cx, |this, cx| {
                 if cancel.load(Ordering::Relaxed) {
                     return;
@@ -1802,9 +1863,11 @@ impl Pane {
                 if this.preview_generation == generation && this.cursor_entry(cx).is_some_and(|e| e.path == path) {
                     let mut fetched = fetched;
                     if this.cloud_status(&path, cx).is_some_and(|status| fetched.update_cloud(status)) {
-                        this.preview = None;
+                        this.clear_preview(cx);
+                        this.preview_key = None;
                         this.load_preview(cx);
                     } else {
+                        this.clear_preview(cx);
                         this.preview = Some(fetched);
                     }
                     cx.notify();
@@ -2069,8 +2132,27 @@ impl Pane {
         self.with_focused(cx, |f, cx| f.select_all(cx));
     }
 
+    fn gallery_row_at(&self, cx: &gpui::App, pointer: Point<Pixels>) -> Option<usize> {
+        let bounds = self.gallery.bounds.get()?;
+        if pointer.x < bounds.left()
+            || pointer.x >= bounds.right()
+            || pointer.y < bounds.top()
+            || pointer.y >= bounds.bottom()
+        {
+            return None;
+        }
+        let folder = self.folders[0].read(cx);
+        let y = pointer.y - bounds.top() + px(shown_offset(&self.gallery.scroll));
+        let row = (f32::from(y) / gallery::ROW_HEIGHT).floor();
+        if row < 0.0 {
+            return None;
+        }
+        let row = row as usize;
+        (row < folder.row_count()).then_some(row)
+    }
+
     /// Column view: move into the column showing the selected folder's contents.
-    fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn move_right(&mut self, _: &MoveRight, window: &mut Window, cx: &mut Context<Self>) {
         match self.mode {
             ViewMode::List => {
                 self.list_right(cx);
@@ -2079,6 +2161,10 @@ impl Pane {
             ViewMode::Icons => {
                 let target = self.icon_neighbor(IconMove::Right, cx);
                 self.with_focused(cx, |f, cx| f.select_only(target, cx));
+                return;
+            }
+            ViewMode::Gallery => {
+                self.move_down(&MoveDown, window, cx);
                 return;
             }
             ViewMode::Columns => {}
@@ -2133,7 +2219,7 @@ impl Pane {
     /// Column view: back to the parent column. The column you leave stays, unselected.
     /// On the leftmost column there is no column to go back to, so the parent folder
     /// is pushed in from the left, with the folder we came from selected in it.
-    fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn move_left(&mut self, _: &MoveLeft, window: &mut Window, cx: &mut Context<Self>) {
         match self.mode {
             ViewMode::List => {
                 self.list_left(cx);
@@ -2142,6 +2228,10 @@ impl Pane {
             ViewMode::Icons => {
                 let target = self.icon_neighbor(IconMove::Left, cx);
                 self.with_focused(cx, |f, cx| f.select_only(target, cx));
+                return;
+            }
+            ViewMode::Gallery => {
+                self.move_up(&MoveUp, window, cx);
                 return;
             }
             ViewMode::Columns => {}
@@ -2539,8 +2629,8 @@ impl Pane {
             }
         };
         let scope = match (self.mode, self.filtering.is_some()) {
-            (ViewMode::List | ViewMode::Icons, false) => KeyScope::List,
-            (ViewMode::List | ViewMode::Icons, true) => KeyScope::ListFiltered,
+            (ViewMode::List | ViewMode::Icons | ViewMode::Gallery, false) => KeyScope::List,
+            (ViewMode::List | ViewMode::Icons | ViewMode::Gallery, true) => KeyScope::ListFiltered,
             (ViewMode::Columns, false) => KeyScope::Columns,
             (ViewMode::Columns, true) => KeyScope::ColumnsFiltered,
         };
@@ -3012,6 +3102,21 @@ impl Pane {
                     None => DropTarget { folder: folder.dir().to_path_buf(), column: 0, rows: None },
                 }
             }
+            ViewMode::Gallery => {
+                let bounds = self.gallery.bounds.get()?;
+                if !bounds.contains(&pointer) {
+                    return None;
+                }
+                let folder = self.folders.first()?.read(cx);
+                match self.gallery_row_at(cx, pointer).and_then(|ix| folder.drop_header(ix)) {
+                    Some(header) => DropTarget {
+                        folder: folder.row(header)?.0.path.clone(),
+                        column: 0,
+                        rows: Some(header..header + 1),
+                    },
+                    None => DropTarget { folder: folder.dir().to_path_buf(), column: 0, rows: None },
+                }
+            }
             ViewMode::Columns => {
                 let column = self
                     .column_bounds
@@ -3086,6 +3191,10 @@ impl Pane {
         if mode == ViewMode::Icons {
             if icon_rows > 0 {
                 icon_scroll.scroll_to_item_strict((bench.frame * 3) % icon_rows, ScrollStrategy::Top);
+            }
+        } else if mode == ViewMode::Gallery {
+            if shown > 0 {
+                self.gallery.scroll.scroll_to_item_strict((bench.frame * 3) % shown, ScrollStrategy::Top);
             }
         } else {
             folder.scroll_strict((bench.frame * 3) % shown);
@@ -4323,6 +4432,7 @@ impl Pane {
     fn render_column_rows(
         &mut self,
         k: usize,
+        width: Pixels,
         range: Range<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -4370,7 +4480,6 @@ impl Pane {
             .as_ref()
             .filter(|_| k == self.focused)
             .and_then(|motion| motion.progress(mode, now).map(|t| (motion, t)));
-        let width = COLUMN_WIDTH;
         let total = folder.row_count();
         let scope = crate::plugins::ScopeKey::Folder(folder.dir().to_path_buf());
         let versions: HashMap<PathBuf, u64> = range
@@ -4385,9 +4494,10 @@ impl Pane {
                 (path.clone(), crate::plugins::row_presentation(cx, &scope, path, *version, &decoration_ids))
             })
             .collect();
-        let has_decorations = !decoration_ids.is_empty();
-        let name_room =
-            px(width - 16.0 - 8.0 - 16.0 - 2.0 * CELL_PADDING - 8.0 - if has_decorations { 32.0 } else { 0.0 });
+        let arrow_width = px(10.);
+        let badge_width = px(32.);
+        // Column border, list gutters, row padding, icon and its gap.
+        let name_room = width - px(1. + 8. + 2. * CELL_PADDING + 16. + 8.);
         let cursor = folder.cursor_ix();
         let range_start = range.start;
         let (flags_first, edges) = {
@@ -4421,10 +4531,18 @@ impl Pane {
         rows.into_iter()
             .map(|(ix, entry, selected)| {
                 let cloud = self.cloud_status(&entry.path, cx).or(entry.dataless.then_some(CloudStatus::NotDownloaded));
-                let room = cloud_status::name_room(cloud, name_room);
-                let name = truncate_middle_parts(&entry.name, room, font_size, window);
-                let ranges = folder.row_match(ix).map(|range| map_range(&name, range));
                 let navigable = entry.is_dir && !entry.is_package();
+                let presentation = presentations.get(&entry.path).cloned().unwrap_or_default();
+                let mut room = cloud_status::name_room(cloud, name_room);
+                if navigable {
+                    room -= arrow_width + px(8.);
+                }
+                if presentation.badge.is_some() {
+                    room -= badge_width + px(4.);
+                }
+                let name = truncate_middle_parts(&entry.name, room.max(px(0.)), font_size, window);
+                let ranges = folder.row_match(ix).map(|range| map_range(&name, range));
+                let renaming = self.renaming.as_ref().filter(|r| r.path == entry.path);
                 let drag_entries = if selected {
                     selected_entries.clone()
                 } else {
@@ -4443,7 +4561,6 @@ impl Pane {
                 let tint = effect_tint(look, theme);
                 let is_flash = flash_flags[ix - range_start];
                 let cut_edge = cut_edges.get(ix - flags_first).copied().flatten();
-                let presentation = presentations.get(&entry.path).cloned().unwrap_or_default();
                 let dim = if presentation.dim {
                     content_opacity(true, false)
                 } else {
@@ -4539,6 +4656,9 @@ impl Pane {
                         )
                     })
                     .debug_selector(|| format!("column-{k}-row-{}", entry.name))
+                    .when(name.cut.is_some() && renaming.is_none(), |row| {
+                        crate::chrome::with_tooltip(row, display_text(&entry.name).into_owned(), None)
+                    })
                     .on_drag(DraggedSelection { entries: drag_entries }, {
                         let handoff = handoff.clone();
                         move |_value, offset, window, cx| {
@@ -4590,6 +4710,7 @@ impl Pane {
                             .relative()
                             .left(px(look.dx))
                             .flex_1()
+                            .min_w_0()
                             .opacity(dim)
                             .when_some(presentation.tint.filter(|_| !selected), |cell, tint| {
                                 cell.text_color(color(theme.role(tint.key())))
@@ -4598,7 +4719,7 @@ impl Pane {
                             .items_center()
                             .gap_1()
                             .child({
-                                let label = match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                                let label = match renaming {
                                     Some(r) => div()
                                         .flex_1()
                                         .on_mouse_down(
@@ -4633,10 +4754,10 @@ impl Pane {
                                 }
                             })
                             .children(crate::cloud_status::badge(cloud, theme))
-                            .when(has_decorations, |cell| {
+                            .when_some(presentation.badge, |cell, text| {
                                 cell.child(
                                     div()
-                                        .w(px(32.))
+                                        .w(badge_width)
                                         .flex_none()
                                         .overflow_hidden()
                                         .whitespace_nowrap()
@@ -4644,7 +4765,7 @@ impl Pane {
                                         .text_size(px(11.))
                                         .text_color(muted)
                                         .id("plugin-row-badge")
-                                        .child(presentation.badge.clone().unwrap_or_default())
+                                        .child(text)
                                         .when(entry.is_dir && presentation.git_badge, |badge| {
                                             let path = entry.path.clone();
                                             badge.role(Role::Button).aria_label("Review folder Git changes").on_click(
@@ -4657,11 +4778,9 @@ impl Pane {
                                 )
                             }),
                     )
-                    .child(div().w(px(10.)).flex_none().opacity(dim).text_color(subtle).child(if navigable {
-                        "›"
-                    } else {
-                        ""
-                    }))
+                    .when(navigable, |row| {
+                        row.child(div().w(arrow_width).flex_none().opacity(dim).text_color(subtle).child("›"))
+                    })
             })
             .collect()
     }
@@ -4675,6 +4794,11 @@ impl Pane {
         let now = Instant::now();
         let border = color(theme.role("border"));
         let focused = self.focused;
+        // Keep widths independent of selection depth and the Info toggle.
+        // Deeper chains still scroll horizontally on narrow windows.
+        let width = px(((f32::from(self.content_width) - PREVIEW_COLUMN_WIDTH) / 2.0)
+            .floor()
+            .clamp(COLUMN_MIN_WIDTH, COLUMN_MAX_WIDTH));
         let mut strip = div()
             .id("columns")
             .debug_selector(|| "columns".into())
@@ -4683,12 +4807,11 @@ impl Pane {
             .overflow_x_scroll()
             .track_scroll(&self.strip_scroll);
         for (k, folder) in self.folders.iter().enumerate() {
-            let (count, shown, width, scroll, title, filtered) = {
+            let (count, shown, scroll, title, filtered) = {
                 let f = folder.read(cx);
                 (
                     f.entries().len(),
                     f.row_count(),
-                    COLUMN_WIDTH,
                     f.scroll().clone(),
                     f.dir().file_name().map_or_else(|| "/".to_owned(), |n| n.to_string_lossy().into_owned()),
                     f.filter().is_some(),
@@ -4764,7 +4887,7 @@ impl Pane {
                                 ("column-list", k),
                                 shown,
                                 cx.processor(move |this, range, window, cx| {
-                                    this.render_column_rows(k, range, window, cx)
+                                    this.render_column_rows(k, width, range, window, cx)
                                 }),
                             )
                             .track_scroll(&scroll)
@@ -4827,7 +4950,7 @@ impl Pane {
                         } else {
                             format!("{title}, {count} items")
                         })
-                        .w(px(width))
+                        .w(width)
                         .flex_none()
                         .h_full()
                         .flex()
@@ -5209,8 +5332,10 @@ impl Render for Pane {
             self.preview_views_generation = views_generation;
             // A registration or provider-list change refreshes the visible preview
             // instead of leaving a withdrawn provider's output on screen.
-            self.preview = None;
+            self.clear_preview(cx);
+            self.preview_key = None;
             self.load_preview(cx);
+            gallery::invalidate(self, cx);
         }
         if self.marquee.is_some() && !self.focus.is_focused(window) {
             self.cancel_marquee(cx);
@@ -5301,7 +5426,7 @@ impl Render for Pane {
             .as_ref()
             .is_some_and(|filtering| filtering.input.read(cx).focus_handle(cx).is_focused(window));
         let mut context = match self.mode {
-            ViewMode::List | ViewMode::Icons => "FileList".to_owned(),
+            ViewMode::List | ViewMode::Icons | ViewMode::Gallery => "FileList".to_owned(),
             ViewMode::Columns => "FileList ColumnView".to_owned(),
         };
         if cx.global::<Ui>().settings.keymap == KeymapLayer::Vim {
@@ -5320,7 +5445,7 @@ impl Render for Pane {
                 let field = self.render_filter_field(FilterPlace::List, window, cx);
                 let no_matches = self.render_no_matches(cx);
                 let footer = self.render_filter_footer(FilterPlace::List, cx);
-                let widths = self.table.fitted(f32::from(self.list_width) - 2.0 * LIST_SIDE_INSET);
+                let widths = self.table.fitted(f32::from(self.content_width) - 2.0 * LIST_SIDE_INSET);
                 div()
                     .size_full()
                     .flex()
@@ -5446,6 +5571,7 @@ impl Render for Pane {
                     .into_any_element()
             }
             ViewMode::Icons => self.render_icons(window, cx).into_any_element(),
+            ViewMode::Gallery => gallery::render(self, window, cx).into_any_element(),
             ViewMode::Columns => self.render_columns(window, cx).into_any_element(),
         };
         let list = div()
@@ -5453,9 +5579,15 @@ impl Render for Pane {
             .debug_selector(|| "file-list".into())
             // In column view the columns are the lists; the focusable wrapper
             // must not repeat the active column's folder name and count.
-            .role(if self.mode == ViewMode::Columns { Role::Group } else { Role::ListBox })
+            .role(if matches!(self.mode, ViewMode::Columns | ViewMode::Gallery) { Role::Group } else { Role::ListBox })
             .aria_label(if self.mode == ViewMode::Columns {
                 "Columns".to_owned()
+            } else if self.mode == ViewMode::Gallery {
+                if filtered {
+                    format!("Gallery, {title}, {shown} of {total} items")
+                } else {
+                    format!("Gallery, {title}, {total} items")
+                }
             } else if filtered {
                 format!("{title}, {shown} of {total} items")
             } else {
@@ -5579,6 +5711,16 @@ impl Pane {
                 gpui::size(px(rect.width), px(rect.height)),
             ));
         }
+        if let Some(name) = selector.strip_prefix("gallery-row-") {
+            let bounds = self.gallery.bounds.get()?;
+            let folder = self.focused_folder().read(cx);
+            let ix = (0..folder.row_count()).find(|ix| folder.row(*ix).is_some_and(|(entry, _)| entry.name == name))?;
+            let top = bounds.top() + px(gallery::ROW_HEIGHT * ix as f32) + px(shown_offset(&self.gallery.scroll));
+            return Some(gpui::Bounds::new(
+                point(bounds.left() + px(LIST_SIDE_INSET), top),
+                gpui::size((bounds.size.width - px(2. * LIST_SIDE_INSET)).max(px(0.)), px(gallery::ROW_HEIGHT)),
+            ));
+        }
         if let Some(name) = selector.strip_prefix("row-") {
             let bounds = self.list_bounds.get()?;
             let folder = self.focused_folder().read(cx);
@@ -5599,6 +5741,11 @@ impl Pane {
             point(column.left() + px(4.), top),
             gpui::size(column.size.width - px(8.), px(ROW_HEIGHT)),
         ))
+    }
+
+    #[cfg(test)]
+    pub fn gallery_sample_summary(&self) -> Option<(usize, bool)> {
+        self.gallery.sample_summary()
     }
 
     /// Every shown folder's cursor and selection must name a listed row.
