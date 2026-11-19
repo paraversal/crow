@@ -31,6 +31,7 @@ pub const TAG_SCAN_CAP: usize = 500;
 pub enum InfoTab {
     Preview,
     Info,
+    GitDiff,
 }
 
 /// What the Info tab describes: one item, or a selection's summary.
@@ -115,8 +116,19 @@ impl EventEmitter<InfoPaneEvent> for InfoPane {}
 
 type Loader = Arc<dyn Fn(&InfoTarget) -> LoadedInfo + Send + Sync>;
 
+struct GitDiffView {
+    snapshot: Arc<crow_plugin_git::StatusSnapshot>,
+    path: PathBuf,
+    result: Option<Result<crow_plugin_git::FileDiff, ()>>,
+}
+
 pub struct InfoPane {
     tab: InfoTab,
+    pub(crate) preferred_width: Option<gpui::Pixels>,
+    splitter_focus: gpui::FocusHandle,
+    git_diff: Option<GitDiffView>,
+    git_diff_task: Option<gpui::Task<()>>,
+    diff_staged: bool,
     /// The column's visibility in this window; `default` is `settings.show_preview`.
     visible: bool,
     /// The user opened or closed the column with ⌘I or ⇧⌘P, not the setting. A narrow
@@ -143,6 +155,10 @@ fn observe_sizes(cx: &mut Context<InfoPane>) {
 }
 
 impl InfoPane {
+    pub fn splitter_focus(&self) -> &gpui::FocusHandle {
+        &self.splitter_focus
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         let default = cx.global::<Ui>().settings.show_preview;
         let pane = Self::with_default(default, Arc::new(real_load), cx);
@@ -157,6 +173,11 @@ impl InfoPane {
         let cloud_subscription = cloud_service.map(|service| cx.observe(&service, |_, _, cx| cx.notify()));
         Self {
             tab: InfoTab::Preview,
+            preferred_width: None,
+            splitter_focus: cx.focus_handle(),
+            git_diff: None,
+            git_diff_task: None,
+            diff_staged: false,
             visible: default,
             explicit: false,
             default,
@@ -213,6 +234,119 @@ impl InfoPane {
         } else {
             false
         }
+    }
+
+    pub fn sync_git_diff(
+        &mut self,
+        source: Option<(Arc<crow_plugin_git::StatusSnapshot>, PathBuf)>,
+        cx: &mut Context<Self>,
+    ) {
+        use crow_plugin_git::{LineDiff, open_worktree};
+        let Some((snapshot, path)) = source else {
+            self.git_diff = None;
+            self.git_diff_task = None;
+            return;
+        };
+        if self
+            .git_diff
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(&current.snapshot, &snapshot) && current.path == path)
+        {
+            return;
+        }
+        // Default to the first available changed layer. The layer controls can then be used without rereading the file.
+        self.diff_staged = snapshot.entries.get(&path).is_some_and(|status| status.worktree.is_none());
+        self.git_diff = Some(GitDiffView { snapshot: snapshot.clone(), path: path.clone(), result: None });
+        let repo = snapshot.identity.worktree.clone();
+        let worker_snapshot = snapshot.clone();
+        let worker_path = path.clone();
+        let task = cx.background_spawn(async move {
+            let repo = open_worktree(&repo).map_err(|_| ())?;
+            LineDiff::new(&repo).and_then(|mut diff| diff.diff(&worker_snapshot, &worker_path)).map_err(|_| ())
+        });
+        self.git_diff_task = Some(cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |info, cx| {
+                if let Some(current) = &mut info.git_diff
+                    && Arc::ptr_eq(&current.snapshot, &snapshot)
+                    && current.path == path
+                {
+                    current.result = Some(result);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    pub fn git_diff_body(entity: &Entity<Self>, theme: &Theme, cx: &App) -> AnyElement {
+        use crow_plugin_git::{DiffLayer, DiffLine};
+        let info = entity.read(cx);
+        let Some(view) = &info.git_diff else {
+            return div().child("Select a changed file to see its Git diff.").into_any_element();
+        };
+        let accent = color(theme.role("accent"));
+        let staged = info.diff_staged;
+        let controls = [false, true].map(|value| {
+            let info = entity.clone();
+            let label = if value { "Staged" } else { "Unstaged" };
+            div()
+                .id(("git-diff-layer", usize::from(value)))
+                .role(Role::Tab)
+                .aria_label(label)
+                .aria_selected(value == staged)
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .when(value == staged, |tab| tab.bg(accent.opacity(0.13)))
+                .child(label)
+                .on_click(move |_, _, cx| {
+                    info.update(cx, |info, cx| {
+                        info.diff_staged = value;
+                        cx.notify();
+                    })
+                })
+        });
+        let body = match view
+            .result
+            .as_ref()
+            .map(|result| result.as_ref().map(|diff| if staged { &diff.staged } else { &diff.unstaged }))
+        {
+            None => div().child("Loading Git diff…"),
+            Some(Err(())) | Some(Ok(DiffLayer::Unavailable)) => div().child("Text diff unavailable"),
+            Some(Ok(DiffLayer::Clean)) => div().child(if staged { "No staged changes" } else { "No unstaged changes" }),
+            Some(Ok(DiffLayer::Text(diff))) if diff.lines.is_empty() => div().child("No line edits"),
+            Some(Ok(DiffLayer::Text(diff))) => {
+                let rows = diff.lines.iter().map(|line| {
+                    let (text, tone) = match line {
+                        DiffLine::Hunk { before, after } => (format!("−{before}  +{after}"), "fg-muted"),
+                        DiffLine::Removed(line) => (format!("− {line}"), "error"),
+                        DiffLine::Added(line) => (format!("+ {line}"), "success"),
+                    };
+                    div().text_color(color(theme.role(tone))).child(text)
+                });
+                div()
+                    .text_size(px(11.))
+                    .font_family("Menlo")
+                    .children(rows)
+                    .when(diff.truncated, |body| body.child(div().child("Showing the first 240 diff lines")))
+            }
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .id("git-diff-layers")
+                    .role(Role::TabList)
+                    .aria_label("Git diff layers")
+                    .flex()
+                    .gap_2()
+                    .children(controls),
+            )
+            .child(body)
+            .into_any_element()
     }
 
     pub fn set_tab(&mut self, tab: InfoTab, cx: &mut Context<Self>) {
@@ -438,6 +572,9 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
         .border_color(color(theme.role("border")))
         .child(tab("info-tab-preview", "Preview", InfoTab::Preview))
         .child(tab("info-tab-info", "Info", InfoTab::Info))
+        .when(crate::git::provider_enabled(cx), |tabs| {
+            tabs.child(tab("info-tab-git-diff", "Git Diff", InfoTab::GitDiff))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]

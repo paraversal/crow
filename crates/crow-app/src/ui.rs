@@ -943,6 +943,10 @@ pub fn save_view_change(dir: PathBuf, change: crow_core::ViewChange, cx: &mut Ap
     write_config(VIEWS, move |config, home| crow_core::save_folder_change(config, home, &dir, change), cx);
 }
 
+pub fn save_default_columns(folder: PathBuf, columns: Vec<String>, cx: &mut App) {
+    write_config(VIEWS, move |config, home| crow_core::save_default_columns(config, home, &folder, columns), cx);
+}
+
 /// Forget `dir`'s own view setting.
 pub fn reset_view(dir: PathBuf, cx: &mut App) {
     write_config(VIEWS, move |config, home| crow_core::reset_folder(config, home, &dir), cx);

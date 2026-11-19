@@ -239,6 +239,8 @@ pub struct StatusSnapshot {
     /// The strongest change below each affected folder, relative to the worktree root.
     pub affected_folders: BTreeMap<PathBuf, StatusKind>,
     pub changed_count: usize,
+    pub has_conflicts: bool,
+    pub renames_by_source: BTreeMap<PathBuf, PathBuf>,
     /// The first line of `HEAD`'s commit message, bounded for display.
     pub last_commit: Option<String>,
     /// True when the worktree is cloud-backed and status would require content
@@ -274,6 +276,8 @@ pub fn unavailable_snapshot(repo: &gix::Repository) -> gix::Result<StatusSnapsho
         entries: BTreeMap::new(),
         affected_folders: BTreeMap::new(),
         changed_count: 0,
+        has_conflicts: false,
+        renames_by_source: BTreeMap::new(),
         last_commit: None,
         unavailable: true,
     })
@@ -359,14 +363,18 @@ pub fn status_snapshot(repo: &gix::Repository, cancel: &AtomicBool) -> gix::Resu
     }
     check_cancel()?;
     let mut changed_count = 0;
+    let mut has_conflicts = false;
+    let mut renames_by_source = BTreeMap::new();
     let mut affected_folders = BTreeMap::new();
     for (path, status) in &entries {
         let Some(kind) = status.badge().filter(|_| status.is_changed()) else { continue };
         check_cancel()?;
         changed_count += 1;
+        has_conflicts |= kind == StatusKind::Unmerged;
         mark_parent_folders(&mut affected_folders, path, kind);
         if let Some(source) = &status.renamed_from {
             mark_parent_folders(&mut affected_folders, source, StatusKind::Renamed);
+            renames_by_source.insert(source.clone(), path.clone());
         }
     }
     let last_commit = repo.head_commit().ok().and_then(|commit| {
@@ -375,7 +383,17 @@ pub fn status_snapshot(repo: &gix::Repository, cancel: &AtomicBool) -> gix::Resu
         let title = title.trim();
         (!title.is_empty()).then(|| title.chars().take(120).map(|c| if c.is_control() { ' ' } else { c }).collect())
     });
-    Ok(StatusSnapshot { identity, head, entries, affected_folders, changed_count, last_commit, unavailable: false })
+    Ok(StatusSnapshot {
+        identity,
+        head,
+        entries,
+        affected_folders,
+        changed_count,
+        has_conflicts,
+        renames_by_source,
+        last_commit,
+        unavailable: false,
+    })
 }
 
 fn mark_parent_folders(folders: &mut BTreeMap<PathBuf, StatusKind>, path: &Path, kind: StatusKind) {
@@ -609,12 +627,12 @@ struct DiffSide<'a> {
     path: &'a BStr,
 }
 
-fn counts_for(
+fn prepare_sides(
     cache: &mut gix::diff::blob::Platform,
     old: DiffSide<'_>,
     new: DiffSide<'_>,
     repo: &gix::Repository,
-) -> gix::Result<Option<LineCounts>> {
+) -> gix::Result<bool> {
     let kind = |mode: gix::index::entry::Mode| match mode {
         gix::index::entry::Mode::FILE | gix::index::entry::Mode::FILE_EXECUTABLE => {
             Some(gix::object::tree::EntryKind::Blob)
@@ -622,7 +640,7 @@ fn counts_for(
         gix::index::entry::Mode::SYMLINK => Some(gix::object::tree::EntryKind::Link),
         _ => None,
     };
-    let (Some(old_kind), Some(new_kind)) = (kind(old.mode), kind(new.mode)) else { return Ok(None) };
+    let (Some(old_kind), Some(new_kind)) = (kind(old.mode), kind(new.mode)) else { return Ok(false) };
     cache.clear_resource_cache_keep_allocation();
     cache.set_resource(
         old.id.unwrap_or_else(|| gix::hash::ObjectId::null(repo.object_hash())),
@@ -638,8 +656,82 @@ fn counts_for(
         gix::diff::blob::ResourceKind::NewOrDestination,
         &repo.objects,
     )?;
+    Ok(true)
+}
+
+fn counts_for(
+    cache: &mut gix::diff::blob::Platform,
+    old: DiffSide<'_>,
+    new: DiffSide<'_>,
+    repo: &gix::Repository,
+) -> gix::Result<Option<LineCounts>> {
+    if !prepare_sides(cache, old, new, repo)? {
+        return Ok(None);
+    }
     let mut platform = gix::object::blob::diff::Platform { resource_cache: cache };
     Ok(platform.line_counts()?.map(|stats| LineCounts { insertions: stats.insertions, removals: stats.removals }))
+}
+
+use gix::diff::blob::{diff_with_slider_heuristics, platform::prepare_diff::Operation};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DiffLayer<T> {
+    Clean,
+    Unavailable,
+    Text(T),
+}
+
+pub struct FileDiff {
+    pub staged: DiffLayer<TextDiff>,
+    pub unstaged: DiffLayer<TextDiff>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct TextDiff {
+    pub lines: Vec<DiffLine>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DiffLine {
+    Hunk { before: u32, after: u32 },
+    Removed(String),
+    Added(String),
+}
+
+fn text_diff_for(
+    cache: &mut gix::diff::blob::Platform,
+    old: DiffSide<'_>,
+    new: DiffSide<'_>,
+    repo: &gix::Repository,
+) -> gix::Result<Option<TextDiff>> {
+    if !prepare_sides(cache, old, new, repo)? {
+        return Ok(None);
+    }
+    let prepared = cache.prepare_diff()?;
+    let Operation::InternalDiff { algorithm } = prepared.operation else { return Ok(None) };
+    let input = prepared.interned_input();
+    let diff = diff_with_slider_heuristics(algorithm, &input);
+    let mut lines = Vec::new();
+    const PREVIEW_LINES: usize = 240;
+    for hunk in diff.hunks() {
+        lines.push(DiffLine::Hunk { before: hunk.before.start + 1, after: hunk.after.start + 1 });
+        let removed = hunk.before.map(|i| (false, input.before[i as usize]));
+        let added = hunk.after.map(|i| (true, input.after[i as usize]));
+        for (added, token) in removed.chain(added) {
+            if lines.len() >= PREVIEW_LINES {
+                lines.truncate(PREVIEW_LINES);
+                return Ok(Some(TextDiff { lines, truncated: true }));
+            }
+            let line: String = String::from_utf8_lossy(input.interner[token])
+                .chars()
+                .take(400)
+                .map(|ch| if ch.is_control() && ch != '\t' { ' ' } else { ch })
+                .collect();
+            lines.push(if added { DiffLine::Added(line) } else { DiffLine::Removed(line) });
+        }
+    }
+    Ok(Some(TextDiff { lines, truncated: false }))
 }
 
 /// Reuse the index, HEAD tree and filter-free diff setup for a visible batch.
@@ -664,8 +756,39 @@ impl<'repo> LineDiff<'repo> {
     }
 
     pub fn counts(&mut self, snapshot: &StatusSnapshot, relative: &Path) -> gix::Result<Option<LineCounts>> {
+        let (staged, unstaged) = self.layers(snapshot, relative, counts_for)?;
+        let mut total = LineCounts { insertions: 0, removals: 0 };
+        for layer in [staged, unstaged] {
+            match layer {
+                DiffLayer::Clean => {}
+                DiffLayer::Unavailable => return Ok(None),
+                DiffLayer::Text(count) => {
+                    total.insertions = total.insertions.saturating_add(count.insertions);
+                    total.removals = total.removals.saturating_add(count.removals);
+                }
+            }
+        }
+        Ok(Some(total))
+    }
+
+    pub fn diff(&mut self, snapshot: &StatusSnapshot, relative: &Path) -> gix::Result<FileDiff> {
+        let (staged, unstaged) = self.layers(snapshot, relative, text_diff_for)?;
+        Ok(FileDiff { staged, unstaged })
+    }
+
+    fn layers<T>(
+        &mut self,
+        snapshot: &StatusSnapshot,
+        relative: &Path,
+        diff: impl Fn(
+            &mut gix::diff::blob::Platform,
+            DiffSide<'_>,
+            DiffSide<'_>,
+            &gix::Repository,
+        ) -> gix::Result<Option<T>>,
+    ) -> gix::Result<(DiffLayer<T>, DiffLayer<T>)> {
         let Some(status) = snapshot.entries.get(relative).filter(|entry| entry.can_count_lines()) else {
-            return Ok(None);
+            return Ok((DiffLayer::Unavailable, DiffLayer::Unavailable));
         };
         let path = gix::path::into_bstr(relative)?;
         let index = self.index.entry_by_path(path.as_ref());
@@ -674,11 +797,10 @@ impl<'repo> LineDiff<'repo> {
             mode: index.map_or(gix::index::entry::Mode::FILE, |entry| entry.mode),
             path: path.as_ref(),
         };
-        let mut total = LineCounts { insertions: 0, removals: 0 };
-        if status.index.is_some() {
+        let staged = if status.index.is_some() {
             let old_path = status.renamed_from.as_deref().unwrap_or(relative);
             let entry = self.head.lookup_entry_by_path(old_path)?;
-            let Some(staged) = counts_for(
+            diff(
                 &mut self.staged,
                 DiffSide {
                     id: entry.as_ref().map(|entry| entry.object_id()),
@@ -690,23 +812,22 @@ impl<'repo> LineDiff<'repo> {
                 new,
                 self.repo,
             )?
-            else {
-                return Ok(None);
-            };
-            total = staged;
-        }
-        if status.worktree.is_some() {
+            .map_or(DiffLayer::Unavailable, DiffLayer::Text)
+        } else {
+            DiffLayer::Clean
+        };
+        let unstaged = if status.worktree.is_some() {
             let live = self.repo.workdir().expect("a worktree").join(relative);
-            if !std::fs::symlink_metadata(live).is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_LINE_DIFF_BYTES) {
-                return Ok(None);
+            if std::fs::symlink_metadata(live).is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_LINE_DIFF_BYTES) {
+                diff(&mut self.unstaged, new, DiffSide { id: None, ..new }, self.repo)?
+                    .map_or(DiffLayer::Unavailable, DiffLayer::Text)
+            } else {
+                DiffLayer::Unavailable
             }
-            let Some(unstaged) = counts_for(&mut self.unstaged, new, DiffSide { id: None, ..new }, self.repo)? else {
-                return Ok(None);
-            };
-            total.insertions = total.insertions.saturating_add(unstaged.insertions);
-            total.removals = total.removals.saturating_add(unstaged.removals);
-        }
-        Ok(Some(total))
+        } else {
+            DiffLayer::Clean
+        };
+        Ok((staged, unstaged))
     }
 }
 

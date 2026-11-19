@@ -21,6 +21,9 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 /// How many unknown folder scopes may be scanning at once.
 const MAX_PENDING_SCANS: usize = 8;
+const MAX_WATCHED_REPOS: usize = 16;
+/// Repo totals share the visible-row diff cache and have their own per-repo limit.
+const MAX_SUMMARY_FILES: usize = 64;
 /// How many line batches can run concurrently, and rows started per poll.
 const MAX_LINE_JOBS: usize = 4;
 const MAX_LINE_ROWS: usize = 64;
@@ -87,7 +90,7 @@ pub struct Git {
     wanted_lines: HashMap<(PathBuf, PathBuf), HashSet<PathBuf>>,
     pending_lines: HashSet<(PathBuf, PathBuf)>,
     pending_line_jobs: usize,
-    watch: Option<RepoWatch>,
+    watches: Vec<RepoWatch>,
     project_roots: Vec<PathBuf>,
     project_rows: HashMap<PathBuf, ProjectRow>,
     project_truncated: bool,
@@ -117,7 +120,7 @@ impl Git {
             wanted_lines: HashMap::new(),
             pending_lines: HashSet::new(),
             pending_line_jobs: 0,
-            watch: None,
+            watches: Vec::new(),
             project_roots: Vec::new(),
             project_rows: HashMap::new(),
             project_truncated: false,
@@ -169,6 +172,83 @@ pub fn repository_data(cx: &mut App, folder: &Path) -> Option<RepositoryData> {
     let git = cx.try_global::<Git>()?;
     let worktree = &git.folders.get(folder)?.repo.as_ref()?.worktree;
     Some(repository_data_from(git.snapshot(worktree)?))
+}
+
+/// Look up the exact folder and return its worktree-relative scope.
+pub fn snapshot_for_folder(cx: &mut App, folder: &Path) -> Option<(Arc<StatusSnapshot>, PathBuf)> {
+    request_folder(cx, folder);
+    let git = cx.try_global::<Git>()?;
+    let repo = git.folders.get(folder)?.repo.as_ref()?;
+    let relative = repo.alias_prefix.as_deref().or_else(|| folder.strip_prefix(&repo.worktree).ok())?;
+    Some((git.snapshot(&repo.worktree)?.clone(), relative.to_owned()))
+}
+
+pub struct PinSummary {
+    pub branch: String,
+    pub badge: String,
+    pub spoken: String,
+}
+
+pub fn pin_summary(cx: &mut App, path: &Path, want_lines: bool) -> Option<PinSummary> {
+    let (snapshot, relative) = snapshot_for_folder(cx, path)?;
+    if !relative.as_os_str().is_empty() {
+        return None;
+    }
+    let data = repository_data_from(&snapshot);
+    let branch = if data.detached {
+        format!("Detached at {}", data.head.as_deref().unwrap_or("HEAD"))
+    } else if data.unborn {
+        format!("{} (unborn)", data.branch.as_deref().unwrap_or("HEAD"))
+    } else {
+        data.branch.unwrap_or_else(|| "HEAD".into())
+    };
+    let mut detail = branch.clone();
+    if let Some((ahead, behind)) = data.ahead.zip(data.behind) {
+        detail.push_str(&format!(" ↑{ahead} ↓{behind}"));
+    }
+    let mut spoken = branch;
+    if let Some((ahead, behind)) = data.ahead.zip(data.behind) {
+        spoken.push_str(&format!(", {ahead} ahead and {behind} behind last fetched upstream"));
+    }
+    let badge = if data.unavailable {
+        spoken.push_str(", Git status unavailable");
+        "—".into()
+    } else {
+        spoken.push_str(&format!(", {} changed paths", data.changed));
+        if snapshot.has_conflicts {
+            spoken.push_str(", contains conflicts");
+            format!("U {}", data.changed)
+        } else {
+            data.changed.to_string()
+        }
+    };
+    if want_lines && data.changed > 0 && snapshot.entries.len() <= MAX_SUMMARY_FILES {
+        let (mut additions, mut removals, mut files) = (0u64, 0u64, 0);
+        let mut pending = false;
+        let git = cx.global_mut::<Git>();
+        for (relative, _) in snapshot.entries.iter().filter(|(_, status)| status.can_count_lines()) {
+            let key = (snapshot.identity.worktree.clone(), relative.clone());
+            match git.lines.get(&key) {
+                Some(Some(counts)) => {
+                    additions += u64::from(counts.insertions);
+                    removals += u64::from(counts.removals);
+                    files += 1;
+                }
+                Some(None) => {}
+                None => {
+                    git.wanted_lines.entry(key).or_default().insert(path.join(relative));
+                    pending = true;
+                }
+            }
+        }
+        if !pending && files > 0 {
+            let partial = if files == data.changed { "" } else { "~" };
+            detail.push_str(&format!(" · {partial}+{additions}/−{removals}"));
+            spoken
+                .push_str(&format!(", {additions} additions and {removals} deletions across {files} countable files"));
+        }
+    }
+    Some(PinSummary { branch: detail, badge, spoken })
 }
 
 fn repository_data_from(snapshot: &StatusSnapshot) -> RepositoryData {
@@ -345,12 +425,17 @@ fn request_repos(cx: &mut App, now: Instant) {
 
 fn ensure_watch(cx: &mut App, identity: RepositoryIdentity) {
     let git = cx.global_mut::<Git>();
-    if git.watch.as_ref().is_some_and(|watch| watch.worktree == identity.worktree) {
+    if let Some(index) = git.watches.iter().position(|watch| watch.worktree == identity.worktree) {
+        let watch = git.watches.remove(index);
+        git.watches.push(watch);
         return;
+    }
+    if git.watches.len() == MAX_WATCHED_REPOS {
+        git.watches.remove(0);
     }
     let changed = Arc::new(AtomicBool::new(false));
     let sender = git.tx.clone();
-    git.watch = Some(RepoWatch { worktree: identity.worktree.clone(), changed: changed.clone(), watcher: None });
+    git.watches.push(RepoWatch { worktree: identity.worktree.clone(), changed: changed.clone(), watcher: None });
     cx.background_spawn(async move {
         let watcher = watch_repository(&identity, changed.clone());
         sender.send(GitEvent::Watch { changed, watcher }).ok();
@@ -397,23 +482,23 @@ pub fn poll(cx: &mut App) {
     let now = Instant::now();
     let events: Vec<_> = git.rx.try_iter().collect();
     let git = cx.global_mut::<Git>();
-    if let Some(watch) = &git.watch
-        && watch.changed.swap(false, Ordering::Relaxed)
-    {
-        git.dirty.insert(watch.worktree.clone(), now + WATCH_DEBOUNCE);
+    for watch in &git.watches {
+        if watch.changed.swap(false, Ordering::Relaxed) {
+            git.dirty.insert(watch.worktree.clone(), now + WATCH_DEBOUNCE);
+        }
     }
 
     let mut status_changed = false;
     let mut projects_changed = false;
     let mut line_paths = Vec::new();
-    let mut watch = None;
+    let mut watches = Vec::new();
     for event in events {
         match event {
             GitEvent::Repo { worktree, snapshot } => {
                 git.pending_repos.remove(&worktree);
                 let changed = snapshot.is_some() || git.snapshot(&worktree).is_some();
                 if let Some(snapshot) = &snapshot {
-                    watch = Some(snapshot.identity.clone());
+                    watches.push(snapshot.identity.clone());
                 }
                 if changed {
                     git.lines.retain(|(repo, _), _| repo != &worktree);
@@ -423,9 +508,7 @@ pub fn poll(cx: &mut App) {
                 status_changed |= changed;
             }
             GitEvent::Watch { changed, watcher } => {
-                if let Some(watch) = &mut git.watch
-                    && Arc::ptr_eq(&watch.changed, &changed)
-                {
+                if let Some(watch) = git.watches.iter_mut().find(|watch| Arc::ptr_eq(&watch.changed, &changed)) {
                     watch.watcher = watcher;
                 }
             }
@@ -452,7 +535,7 @@ pub fn poll(cx: &mut App) {
             _ => {}
         }
     }
-    if let Some(identity) = watch {
+    for identity in watches {
         ensure_watch(cx, identity);
     }
     request_repos(cx, now);
@@ -652,6 +735,11 @@ pub fn is_git_plugin(plugin: &crow_core::PluginId) -> bool {
 }
 
 #[cfg(test)]
+pub fn set_enabled_for_test(cx: &mut App, enabled: bool) {
+    cx.set_global(Git::new(enabled));
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -659,11 +747,6 @@ mod tests {
     fn plugin_id_is_the_bundled_git_package() {
         assert!(is_git_plugin(&crow_core::PluginId::parse("git").unwrap()));
         assert!(!is_git_plugin(&crow_core::PluginId::parse("example.git").unwrap()));
-    }
-
-    #[cfg(test)]
-    pub fn set_enabled_for_test(cx: &mut App, enabled: bool) {
-        cx.set_global(Git::new(enabled));
     }
 
     #[gpui::test]
@@ -704,6 +787,9 @@ mod tests {
         assert_eq!(data.branch.as_deref(), Some("main"));
         assert_eq!(data.changed, 1);
         cx.update(|cx| {
+            let summary = pin_summary(cx, &repo, false).expect("pinned repository summary");
+            assert_eq!(summary.branch, "main");
+            assert_eq!(summary.badge, "1");
             let folder = entry_host(cx, &repo, &sibling, true, true).unwrap();
             assert_eq!(folder.badge, "M");
             assert_eq!(folder.label, "contains modified paths");
@@ -718,6 +804,7 @@ mod tests {
         cx.run_until_parked();
         cx.update(|cx| {
             assert_eq!(repository_data(cx, &alias).unwrap().changed, 1);
+            assert!(pin_summary(cx, &alias, false).is_none(), "pins inside a repository are ordinary folders");
             let git = cx.global::<Git>();
             assert!(Arc::ptr_eq(git.snapshot(&canonical).unwrap(), &original));
             assert!(git.pending_repos.is_empty(), "a sibling folder must reuse the existing scan");
@@ -737,10 +824,12 @@ mod tests {
         let host = host.expect("row host data with line counts");
         assert_eq!(host.badge, "M");
         assert_eq!(host.lines_changed, Some(2));
+        let pin = cx.update(|cx| pin_summary(cx, &repo, true).unwrap());
+        assert_eq!(pin.branch, "main · +1/−1");
 
         cx.run_until_parked();
         cx.update(poll);
-        assert!(cx.read_global::<Git, _>(|git, _| git.watch.as_ref().unwrap().watcher.is_some()));
+        assert!(cx.read_global::<Git, _>(|git, _| git.watches.iter().any(|watch| watch.watcher.is_some())));
         git(&["add", "sub/a.txt"]);
         for _ in 0..200 {
             cx.update(poll);
@@ -775,6 +864,8 @@ mod tests {
             entries: Default::default(),
             affected_folders: Default::default(),
             changed_count: 0,
+            has_conflicts: false,
+            renames_by_source: Default::default(),
             last_commit: None,
             unavailable: false,
         });

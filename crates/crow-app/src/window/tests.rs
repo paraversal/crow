@@ -458,6 +458,77 @@ fn column_preview_fills_the_rest(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn side_dividers_resize_the_current_window(cx: &mut TestAppContext) {
+    let root = fixture("side-dividers");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    let start = cx.debug_bounds("sidebar-resize").expect("sidebar divider").center();
+    let end = start + gpui::point(px(60.), px(0.));
+    let modifiers = gpui::Modifiers::default();
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), modifiers);
+    cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+    settle(&view, &mut cx);
+    assert_eq!(cx.debug_bounds("sidebar").unwrap().size.width, px(270.));
+    cx.simulate_keystrokes("left");
+    settle(&view, &mut cx);
+    assert_eq!(cx.debug_bounds("sidebar").unwrap().size.width, px(254.));
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(cx.debug_bounds("sidebar").unwrap().size.width, px(210.));
+
+    let start = cx.debug_bounds("preview-resize").expect("preview divider").center();
+    let end = start - gpui::point(px(45.), px(0.));
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), modifiers);
+    cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+    settle(&view, &mut cx);
+    assert_eq!(cx.debug_bounds("preview").unwrap().size.width, px(345.));
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+    settle(&view, &mut cx);
+    assert_eq!(cx.debug_bounds("preview-column").unwrap().size.width, px(345.));
+}
+
+#[gpui::test]
+fn git_review_switches_scope_and_closes_from_the_keyboard(cx: &mut TestAppContext) {
+    let root = fixture("git-review-keyboard");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    view.update_in(&mut cx, |this, window, cx| {
+        crate::git::set_enabled_for_test(cx, true);
+        this.open_git_review(root.to_path_buf(), window, cx);
+    });
+    assert!(view.read_with(&cx, |this, _| !this.git_review.as_ref().unwrap().pinned()));
+    cx.simulate_keystrokes("tab");
+    assert!(view.read_with(&cx, |this, _| this.git_review.as_ref().unwrap().pinned()));
+    cx.simulate_keystrokes("escape");
+    assert!(view.read_with(&cx, |this, _| this.git_review.is_none()));
+}
+
+#[gpui::test]
+fn the_column_picker_toggles_list_columns_with_the_keyboard(cx: &mut TestAppContext) {
+    let root = fixture("chooser-keys");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    let at = cx.debug_bounds("table-header").expect("List header").center();
+    let modifiers = gpui::Modifiers::default();
+    cx.simulate_mouse_down(at, gpui::MouseButton::Right, modifiers);
+    cx.simulate_mouse_up(at, gpui::MouseButton::Right, modifiers);
+    assert!(view.read_with(&cx, |this, _| this.column_picker.is_some()));
+    let prior = view.read_with(&cx, |this, _| this.column_picker.as_ref().unwrap().columns_for_test().to_vec());
+    cx.simulate_keystrokes("space");
+    let new = view.read_with(&cx, |this, _| this.column_picker.as_ref().unwrap().columns_for_test().to_vec());
+    assert_ne!(new, prior);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |this, _| this.column_picker.is_none()));
+    cx.update(|_, cx| {
+        let ui = cx.global::<Ui>();
+        assert_eq!(ui.views.resolve(&root).columns.0, new);
+    });
+}
+
+#[gpui::test]
 fn no_matches_show_the_folder_summary(cx: &mut TestAppContext) {
     let root = fixture("no-match-summary");
     let src = root.join("src");

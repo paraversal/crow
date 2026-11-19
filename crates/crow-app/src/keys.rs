@@ -411,11 +411,14 @@ mod tests {
                 CommandId::AddProjectRoot,
                 CommandId::RemoveProjectRoot,
                 CommandId::RefreshProjects,
+                CommandId::ReviewGitChanges,
+                CommandId::ShowGitDiff,
+                CommandId::ChooseListColumns,
             ] {
                 let command = COMMANDS.iter().find(|c| c.id == id).unwrap();
                 assert_eq!(text(command.action, command.scope, cx), None, "{id:?} has no binding");
             }
-            assert_eq!(COMMANDS.len(), expected.len() + 9, "every command is in the table");
+            assert_eq!(COMMANDS.len(), expected.len() + 12, "every command is in the table");
         });
     }
 }

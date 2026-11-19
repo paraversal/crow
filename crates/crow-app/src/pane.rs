@@ -2935,7 +2935,22 @@ impl Pane {
                                                 .text_ellipsis()
                                                 .text_size(px(11.))
                                                 .text_color(muted)
-                                                .child(presentation.badge.clone().unwrap_or_default()),
+                                                .id("plugin-row-badge")
+                                                .child(presentation.badge.clone().unwrap_or_default())
+                                                .when(entry.is_dir && presentation.git_badge, |badge| {
+                                                    let path = entry.path.clone();
+                                                    badge
+                                                        .role(Role::Button)
+                                                        .aria_label("Review folder Git changes")
+                                                        .on_click(move |_, window, cx| {
+                                                            cx.stop_propagation();
+                                                            crate::window::git_review::open_folder(
+                                                                path.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        })
+                                                }),
                                         )
                                     }),
                             ),
@@ -2986,6 +3001,12 @@ impl Pane {
         specs.extend(self.columns.iter().map(|c| (c.title().to_owned(), c.sort_key(), c.align())));
         let mut header = div()
             .id("table-header")
+            .role(Role::Group)
+            .aria_label("List columns")
+            .on_mouse_down(MouseButton::Right, |_, window, cx| {
+                cx.stop_propagation();
+                crate::window::column_picker::open(window, cx);
+            })
             .debug_selector(|| "table-header".into())
             .h(px(28.))
             .flex_none()
@@ -3354,7 +3375,17 @@ impl Pane {
                                         .text_ellipsis()
                                         .text_size(px(11.))
                                         .text_color(muted)
-                                        .child(presentation.badge.clone().unwrap_or_default()),
+                                        .id("plugin-row-badge")
+                                        .child(presentation.badge.clone().unwrap_or_default())
+                                        .when(entry.is_dir && presentation.git_badge, |badge| {
+                                            let path = entry.path.clone();
+                                            badge.role(Role::Button).aria_label("Review folder Git changes").on_click(
+                                                move |_, window, cx| {
+                                                    cx.stop_propagation();
+                                                    crate::window::git_review::open_folder(path.clone(), window, cx);
+                                                },
+                                            )
+                                        }),
                                 )
                             }),
                     )
@@ -3545,6 +3576,7 @@ impl Pane {
             let label = match tab {
                 InfoTab::Preview => self.preview_label(cx).unwrap_or_default(),
                 InfoTab::Info => self.info.read(cx).label(cx),
+                InfoTab::GitDiff => "Git Diff".into(),
             };
             let body = match tab {
                 InfoTab::Preview => {
@@ -3574,6 +3606,11 @@ impl Pane {
                     }
                 }
                 InfoTab::Info => self.info.clone().into_any_element(),
+                InfoTab::GitDiff => InfoPane::git_diff_body(&self.info, &theme, cx),
+            };
+            let (preferred_width, splitter_focus) = {
+                let info = self.info.read(cx);
+                (info.preferred_width, info.splitter_focus().clone())
             };
             strip = strip.child(
                 div()
@@ -3581,11 +3618,19 @@ impl Pane {
                     .debug_selector(|| "preview-column".into())
                     .role(Role::Group)
                     .aria_label(label)
-                    .flex_1()
-                    .min_w(px(PREVIEW_COLUMN_WIDTH))
+                    .relative()
+                    .when_none(&preferred_width, |column| column.flex_1().min_w(px(PREVIEW_COLUMN_WIDTH)))
+                    .when_some(preferred_width, |column, width| {
+                        column.flex_none().w(width.min(window.viewport_size().width / 2.))
+                    })
                     .h_full()
                     .flex_col()
                     .child(info_pane::tab_strip(&self.info, &theme, cx))
+                    .child(crate::window::side_panes::splitter(
+                        crate::window::side_panes::Side::Right,
+                        &splitter_focus,
+                        &theme,
+                    ))
                     .child(div().id("info-body").flex_1().min_h_0().p_4().overflow_y_scroll().child(body)),
             );
         }

@@ -307,6 +307,7 @@ mod tests {
                 "—",
                 "Add to Sidebar",
                 "Eject",
+                "Review Git Changes…",
                 "Show in Finder",
                 "Open Terminal Here",
             ]
@@ -336,6 +337,7 @@ mod tests {
                 "as List",
                 "as Columns",
                 "—",
+                "Choose List Columns…",
                 "Why This View?",
                 "Use as Defaults",
                 "Reset View for This Folder",
@@ -343,6 +345,7 @@ mod tests {
                 "Show Hidden Files",
                 "Hide Preview",
                 "Show Info",
+                "Show Git Diff",
                 "Calculate Folder Sizes",
                 "Show Activity",
                 "Theme…",

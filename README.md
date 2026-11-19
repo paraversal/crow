@@ -69,6 +69,10 @@ Crow ships an optional, read-only Git package. Approve it once in Settings ▸ P
 
 To show the **Lines** column, open `views.toml` from Settings ▸ Files and add `"git.lines-changed"` to the existing `columns` list under `[defaults]` or in a folder or rule override. Press Cmd-2 for list view. Lines adds insertions and deletions across staged and unstaged edits for each eligible file.
 
+In List view, right-click the header or choose View ▸ Choose List Columns to change the visible columns for this folder or set the default. Drag the left sidebar or right Preview/Info divider to resize it for the current window. Double-click a divider to reset it.
+
+Pin a worktree root to see its branch, changed-path count and ahead/behind from the last fetch. On a wider sidebar, small change sets also show separate insertion and deletion totals when Git can count them. Select a pin's Git badge or a changed folder's badge to open Review Git Changes. The File menu and command palette also open the review sheet, where Pinned Repositories shows changes across all pins. Select a changed file and open the Git Diff tab in the right pane for staged and unstaged text changes.
+
 The Projects sidebar section lists repositories found under `[projects]` `roots` in `sidebar.toml` with their branch and changed count. Roots are empty by default and can be managed with the palette's "Add Current Folder as Project Root", "Remove Current Folder from Project Roots" and "Refresh Projects".
 
 Themes come from the global index in `~/.config/themes`. View ▸ Theme… (Cmd-Option-T)

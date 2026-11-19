@@ -315,6 +315,33 @@ fn external_filters_are_never_invoked() {
 }
 
 #[test]
+fn git_diff_keeps_staged_and_unstaged_hunks_separate() {
+    use crow_plugin_git::{DiffLayer, DiffLine};
+    let repo = Repo::new("separate-diff-layers");
+    repo.write("file.txt", b"before\n");
+    repo.commit("base");
+    repo.write("file.txt", b"staged\n");
+    repo.git(&["add", "file.txt"]);
+    repo.write("file.txt", b"unstaged\n");
+    let snapshot = repo.snapshot();
+    let diff = LineDiff::new(&repo.open()).unwrap().diff(&snapshot, Path::new("file.txt")).unwrap();
+    let DiffLayer::Text(staged) = diff.staged else { panic!("expected staged text") };
+    let DiffLayer::Text(unstaged) = diff.unstaged else { panic!("expected unstaged text") };
+    assert_eq!(
+        staged.lines,
+        [DiffLine::Hunk { before: 1, after: 1 }, DiffLine::Removed("before".into()), DiffLine::Added("staged".into())]
+    );
+    assert_eq!(
+        unstaged.lines,
+        [
+            DiffLine::Hunk { before: 1, after: 1 },
+            DiffLine::Removed("staged".into()),
+            DiffLine::Added("unstaged".into())
+        ]
+    );
+}
+
+#[test]
 fn line_counts_match_git_numstat_and_skip_ineligible_rows() {
     let repo = Repo::new("lines");
     repo.write("both.txt", b"one\ntwo\nthree\nfour\n");

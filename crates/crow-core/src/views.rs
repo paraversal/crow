@@ -294,10 +294,11 @@ impl Views {
 }
 
 /// A change to one folder's view, as the user made it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewChange {
     View(ViewMode),
     Sort(Sort),
+    Columns(Vec<String>),
 }
 
 fn mode_name(mode: ViewMode) -> &'static str {
@@ -310,6 +311,19 @@ fn mode_name(mode: ViewMode) -> &'static str {
 fn write_change(table: &mut Table, change: ViewChange) {
     match change {
         ViewChange::View(mode) => table["view"] = value(mode_name(mode)),
+        ViewChange::Columns(columns) => {
+            let old = table.get("columns").and_then(Item::as_array);
+            let mut array = old.cloned().unwrap_or_default();
+            array.clear();
+            for column in columns {
+                if let Some(existing) = old.and_then(|old| old.iter().find(|item| item.as_str() == Some(&column))) {
+                    array.push_formatted(existing.clone());
+                } else {
+                    array.push(column);
+                }
+            }
+            table["columns"] = value(array);
+        }
         ViewChange::Sort(sort) => {
             table["sort"] = value(sort_key_name(sort.key));
             table["ascending"] = value(sort.ascending);
@@ -338,6 +352,20 @@ pub fn save_folder_change(config_dir: &Path, home: &Path, dir: &Path, change: Vi
         let table = folders.entry(&key).or_insert_with(|| Item::Table(Table::new()));
         let table = table.as_table_mut().ok_or_else(|| format!("views.toml: folder \"{key}\" must be a table"))?;
         write_change(table, change);
+        Ok(())
+    })
+}
+
+/// Save the chosen columns to this folder and `[defaults]` in the same write.
+pub fn save_default_columns(config_dir: &Path, home: &Path, dir: &Path, columns: Vec<String>) -> Result<(), String> {
+    edit_toml(&views_path(config_dir), DEFAULT_VIEWS, |doc| {
+        let defaults = doc.entry("defaults").or_insert_with(|| Item::Table(Table::new()));
+        let defaults = defaults.as_table_mut().ok_or_else(|| "views.toml: `defaults` must be a table".to_owned())?;
+        write_change(defaults, ViewChange::Columns(columns.clone()));
+        let key = abbreviate_home(dir, home);
+        let table = folder_tables(doc)?.entry(&key).or_insert_with(|| Item::Table(Table::new()));
+        let table = table.as_table_mut().ok_or_else(|| format!("views.toml: folder {key:?} must be a table"))?;
+        write_change(table, ViewChange::Columns(columns));
         Ok(())
     })
 }

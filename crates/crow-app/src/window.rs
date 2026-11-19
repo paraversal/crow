@@ -154,6 +154,9 @@ pub struct CrowWindow {
     sidebar: Entity<Sidebar>,
     /// The right column's tab choice and Info target, shared by every tab.
     info: Entity<InfoPane>,
+    side_panes: side_panes::SidePanes,
+    git_review: Option<git_review::GitReview>,
+    column_picker: Option<column_picker::ColumnPicker>,
     /// Benchmark runs leave Recent alone, so its saves don't land in the measurement.
     bench: bool,
     show_hidden: bool,
@@ -250,6 +253,7 @@ impl CrowWindow {
                     // The pointer can stay over the path while another app is active;
                     // the pill must not stay on screen with it.
                     this.path_hovered = false;
+                    this.side_panes.finish();
                     cx.notify();
                 }
             }),
@@ -281,6 +285,9 @@ impl CrowWindow {
             tabs: Tabs::new(pane),
             sidebar,
             info,
+            side_panes: side_panes::SidePanes::new(cx),
+            git_review: None,
+            column_picker: None,
             bench,
             show_hidden,
             search_includes_hidden,
@@ -335,12 +342,18 @@ impl CrowWindow {
             allowed.push(("picker", picker.focus.clone()));
         } else if let Some(why) = &self.why {
             allowed.push(("why", why.clone()));
+        } else if let Some(picker) = &self.column_picker {
+            allowed.push(("column picker", picker.focus.clone()));
+        } else if let Some(review) = &self.git_review {
+            allowed.push(("git review", review.focus.clone()));
         } else if let Some(search) = &self.search {
             let search = search.read(cx);
             allowed.push(("search field", search.input_focus_handle(cx)));
             allowed.push(("search results", search.results_focus_handle()));
             // The documented Tab cycle goes field -> results -> sidebar -> field.
             allowed.push(("sidebar", self.sidebar.read(cx).focus_handle(cx)));
+            allowed.push(("sidebar divider", self.side_panes.left_focus.clone()));
+            allowed.push(("preview divider", self.info.read(cx).splitter_focus().clone()));
             // ⌘L can edit the path while search is open; the bar's field owns focus then.
             if let Some(edit) = &self.path_edit {
                 allowed.push(("path field", edit.input.read(cx).focus_handle(cx)));
@@ -493,6 +506,16 @@ impl CrowWindow {
     /// ⌘I: open the column on Info, or close it when Info is already showing.
     /// Unlike ⇧⌘P this does not change the setting, so the column can be opened
     /// in a window whose default is off.
+    fn show_git_diff(&mut self, _: &crate::actions::ShowGitDiff, _: &mut Window, cx: &mut Context<Self>) {
+        if crate::git::provider_enabled(cx) {
+            self.info.update(cx, |info, cx| {
+                info.set_visible(true, cx);
+                info.set_tab(InfoTab::GitDiff, cx);
+            });
+            cx.notify();
+        }
+    }
+
     fn show_info(&mut self, _: &ShowInfo, _: &mut Window, cx: &mut Context<Self>) {
         let info = self.info.clone();
         let (visible, tab) = {
@@ -546,6 +569,28 @@ impl CrowWindow {
             let info = info.read(cx);
             (info.visible(), info.tab())
         };
+        let diff = if visible && tab == InfoTab::GitDiff && crate::git::provider_enabled(cx) {
+            let entry = if let Some(search) = &self.search {
+                search.read(cx).preview_parts().map(|(entry, _)| entry)
+            } else {
+                self.pane().read(cx).cursor_entry(cx)
+            };
+            entry.filter(|entry| !entry.is_dir && !entry.dataless).and_then(|entry| {
+                let folder = entry.path.parent()?;
+                let (snapshot, mut relative) = crate::git::snapshot_for_folder(cx, folder)?;
+                relative.push(entry.path.file_name()?);
+                (!snapshot.unavailable && snapshot.entries.get(&relative).is_some_and(|status| status.is_changed()))
+                    .then_some((snapshot, relative))
+            })
+        } else {
+            None
+        };
+        info.update(cx, |info, cx| {
+            if info.tab() == InfoTab::GitDiff && !crate::git::provider_enabled(cx) {
+                info.set_tab(InfoTab::Preview, cx);
+            }
+            info.sync_git_diff(diff, cx);
+        });
         if !visible || tab != InfoTab::Info {
             return;
         }
@@ -937,6 +982,7 @@ impl CrowWindow {
                 entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview, folder_size, cloud))
             }
             InfoTab::Info => self.info.read(cx).label(cx),
+            InfoTab::GitDiff => "Git Diff".into(),
         };
         let body = match tab {
             InfoTab::Preview => match entry {
@@ -944,19 +990,22 @@ impl CrowWindow {
                 None => div().into_any_element(),
             },
             InfoTab::Info => self.info.clone().into_any_element(),
+            InfoTab::GitDiff => InfoPane::git_diff_body(&self.info, theme, cx),
         };
         div()
             .id("preview")
             .debug_selector(|| "preview".into())
             .role(Role::Group)
             .aria_label(label)
-            .w(px(300.))
+            .w(self.side_panes.right_width())
+            .relative()
             .flex_none()
             .h_full()
             .flex_col()
             .border_l_1()
             .border_color(color(theme.role("border")))
             .child(info_pane::tab_strip(&self.info, theme, cx))
+            .child(side_panes::splitter(side_panes::Side::Right, self.info.read(cx).splitter_focus(), theme))
             .child(div().id("info-body").flex_1().min_h_0().p_4().overflow_y_scroll().child(body))
     }
 
@@ -2014,6 +2063,8 @@ impl CrowWindow {
             CommandId::ToggleHiddenFiles => self.toggle_hidden(&ToggleHiddenFiles, window, cx),
             CommandId::TogglePreview => self.toggle_preview(&TogglePreview, window, cx),
             CommandId::ShowInfo => self.show_info(&ShowInfo, window, cx),
+            CommandId::ShowGitDiff => self.show_git_diff(&crate::actions::ShowGitDiff, window, cx),
+            CommandId::ChooseListColumns => self.choose_list_columns(&crate::actions::ChooseListColumns, window, cx),
             CommandId::CalculateFolderSizes => self.calculate_folder_sizes(&CalculateFolderSizes, window, cx),
             CommandId::OpenParent => self.open_parent(&OpenParent, window, cx),
             CommandId::GoBack => self.go_back(&GoBack, window, cx),
@@ -2057,6 +2108,7 @@ impl CrowWindow {
                 crate::git::refresh_projects(cx);
             }
             CommandId::RefreshProjects => crate::git::refresh_projects(cx),
+            CommandId::ReviewGitChanges => self.review_git_command(&crate::actions::ReviewGitChanges, window, cx),
             CommandId::Quit => operation_ui::quit(cx),
             other => self.pane().update(cx, |pane, cx| pane.run_command(other, window, cx)),
         }
@@ -2232,7 +2284,14 @@ impl Render for CrowWindow {
             let (dir, revision, dirs) = self.pane().read(cx).sidebar_plugin_dirs(walking, cx);
             self.sidebar.update(cx, |s, cx| s.set_plugin_dirs(dir, dirs, revision, cx));
         }
-        let sidebar = self.sidebar.clone();
+        self.side_panes.layout(window.viewport_size().width, self.info.read(cx).preferred_width);
+        let sidebar = div()
+            .relative()
+            .h_full()
+            .flex_none()
+            .w(self.side_panes.left_width())
+            .child(self.sidebar.clone())
+            .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme));
         let search_preview = self.search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);
         // A narrow search hides the column by default; ⌘I or ⇧⌘P still opens it.
@@ -2285,6 +2344,8 @@ impl Render for CrowWindow {
         let activity = self.show_activity.then(|| self.render_activity(cx));
         let why = self.render_why(cx);
         let picker = self.render_picker(cx);
+        let git_review = self.render_git_review(cx);
+        let column_picker = self.render_column_picker(cx);
         let palette = self.render_palette(window, cx);
         let center: gpui::AnyElement = match &self.search {
             Some(search) => div().flex_1().min_w_0().h_full().child(search.clone()).into_any_element(),
@@ -2295,10 +2356,19 @@ impl Render for CrowWindow {
             .role(Role::Application)
             .aria_label("Crow")
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    if let Some((side, width)) = this.side_panes.drag_to(event.position.x) {
+                        this.set_side_pane_width(side, Some(width), cx);
+                    }
+                } else {
+                    this.side_panes.finish();
+                }
                 if cx.has_active_drag() {
                     this.pane().update(cx, |pane, cx| pane.update_drag_target(event.position, cx));
                 }
             }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.side_panes.finish()))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| this.side_panes.finish()))
             // keys::context_stack (KeyScope::Window) mirrors this; every overlay nests under it.
             .key_context("Crow")
             .on_action(cx.listener(Self::run_plugin_command))
@@ -2316,6 +2386,10 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::toggle_hidden))
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::show_info))
+            .when(crate::git::provider_enabled(cx), |root| {
+                root.on_action(cx.listener(Self::review_git_command)).on_action(cx.listener(Self::show_git_diff))
+            })
+            .when(list_view && self.search.is_none(), |root| root.on_action(cx.listener(Self::choose_list_columns)))
             .on_action(cx.listener(Self::calculate_folder_sizes))
             .on_action(cx.listener(Self::open_parent))
             .on_action(cx.listener(Self::go_back))
@@ -2403,6 +2477,8 @@ impl Render for CrowWindow {
             .children(activity)
             .children(why)
             .children(picker)
+            .children(git_review)
+            .children(column_picker)
             .children(palette)
     }
 }
@@ -2605,9 +2681,12 @@ fn missing_focus_violation(focus_required: bool) -> Option<crate::fuzz::Violatio
     focus_required.then(|| crate::fuzz::Violation::new("focus", "nothing is focused"))
 }
 
+pub(crate) mod column_picker;
+pub(crate) mod git_review;
 pub(crate) mod operation_ui;
 mod palette_view;
 mod path_edit;
+pub(crate) mod side_panes;
 
 #[cfg(test)]
 mod tests;
