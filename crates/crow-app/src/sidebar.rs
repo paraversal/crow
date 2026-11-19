@@ -1747,6 +1747,15 @@ impl Render for Sidebar {
                         .ml(px(6.))
                         .text_size(px(11.))
                         .text_color(color(muted))
+                        .role(Role::Button)
+                        .aria_label(format!("Review Git changes for {}", look.label))
+                        .on_click({
+                            let path = path.clone();
+                            move |_, window, cx| {
+                                cx.stop_propagation();
+                                crate::window::git_review::open_folder(path.clone(), window, cx);
+                            }
+                        })
                         .child(pin.badge.clone()),
                     pin.spoken.clone(),
                     None,

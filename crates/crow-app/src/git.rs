@@ -735,6 +735,11 @@ pub fn is_git_plugin(plugin: &crow_core::PluginId) -> bool {
 }
 
 #[cfg(test)]
+pub fn set_enabled_for_test(cx: &mut App, enabled: bool) {
+    cx.set_global(Git::new(enabled));
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -742,11 +747,6 @@ mod tests {
     fn plugin_id_is_the_bundled_git_package() {
         assert!(is_git_plugin(&crow_core::PluginId::parse("git").unwrap()));
         assert!(!is_git_plugin(&crow_core::PluginId::parse("example.git").unwrap()));
-    }
-
-    #[cfg(test)]
-    pub fn set_enabled_for_test(cx: &mut App, enabled: bool) {
-        cx.set_global(Git::new(enabled));
     }
 
     #[gpui::test]

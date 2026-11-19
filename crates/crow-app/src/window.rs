@@ -155,6 +155,7 @@ pub struct CrowWindow {
     /// The right column's tab choice and Info target, shared by every tab.
     info: Entity<InfoPane>,
     side_panes: side_panes::SidePanes,
+    git_review: Option<git_review::GitReview>,
     /// Benchmark runs leave Recent alone, so its saves don't land in the measurement.
     bench: bool,
     show_hidden: bool,
@@ -284,6 +285,7 @@ impl CrowWindow {
             sidebar,
             info,
             side_panes: side_panes::SidePanes::new(cx),
+            git_review: None,
             bench,
             show_hidden,
             search_includes_hidden,
@@ -338,12 +340,16 @@ impl CrowWindow {
             allowed.push(("picker", picker.focus.clone()));
         } else if let Some(why) = &self.why {
             allowed.push(("why", why.clone()));
+        } else if let Some(review) = &self.git_review {
+            allowed.push(("git review", review.focus.clone()));
         } else if let Some(search) = &self.search {
             let search = search.read(cx);
             allowed.push(("search field", search.input_focus_handle(cx)));
             allowed.push(("search results", search.results_focus_handle()));
             // The documented Tab cycle goes field -> results -> sidebar -> field.
             allowed.push(("sidebar", self.sidebar.read(cx).focus_handle(cx)));
+            allowed.push(("sidebar divider", self.side_panes.left_focus.clone()));
+            allowed.push(("preview divider", self.info.read(cx).splitter_focus().clone()));
             // ⌘L can edit the path while search is open; the bar's field owns focus then.
             if let Some(edit) = &self.path_edit {
                 allowed.push(("path field", edit.input.read(cx).focus_handle(cx)));
@@ -2062,6 +2068,7 @@ impl CrowWindow {
                 crate::git::refresh_projects(cx);
             }
             CommandId::RefreshProjects => crate::git::refresh_projects(cx),
+            CommandId::ReviewGitChanges => self.review_git_command(&crate::actions::ReviewGitChanges, window, cx),
             CommandId::Quit => operation_ui::quit(cx),
             other => self.pane().update(cx, |pane, cx| pane.run_command(other, window, cx)),
         }
@@ -2297,6 +2304,7 @@ impl Render for CrowWindow {
         let activity = self.show_activity.then(|| self.render_activity(cx));
         let why = self.render_why(cx);
         let picker = self.render_picker(cx);
+        let git_review = self.render_git_review(cx);
         let palette = self.render_palette(window, cx);
         let center: gpui::AnyElement = match &self.search {
             Some(search) => div().flex_1().min_w_0().h_full().child(search.clone()).into_any_element(),
@@ -2337,6 +2345,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::toggle_hidden))
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::show_info))
+            .when(crate::git::provider_enabled(cx), |root| root.on_action(cx.listener(Self::review_git_command)))
             .on_action(cx.listener(Self::calculate_folder_sizes))
             .on_action(cx.listener(Self::open_parent))
             .on_action(cx.listener(Self::go_back))
@@ -2424,6 +2433,7 @@ impl Render for CrowWindow {
             .children(activity)
             .children(why)
             .children(picker)
+            .children(git_review)
             .children(palette)
     }
 }
@@ -2626,6 +2636,7 @@ fn missing_focus_violation(focus_required: bool) -> Option<crate::fuzz::Violatio
     focus_required.then(|| crate::fuzz::Violation::new("focus", "nothing is focused"))
 }
 
+pub(crate) mod git_review;
 pub(crate) mod operation_ui;
 mod palette_view;
 mod path_edit;

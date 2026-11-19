@@ -307,6 +307,7 @@ mod tests {
                 "—",
                 "Add to Sidebar",
                 "Eject",
+                "Review Git Changes…",
                 "Show in Finder",
                 "Open Terminal Here",
             ]

@@ -490,6 +490,22 @@ fn side_dividers_resize_the_current_window(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn git_review_switches_scope_and_closes_from_the_keyboard(cx: &mut TestAppContext) {
+    let root = fixture("git-review-keyboard");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    settle(&view, &mut cx);
+    view.update_in(&mut cx, |this, window, cx| {
+        crate::git::set_enabled_for_test(cx, true);
+        this.open_git_review(root.to_path_buf(), window, cx);
+    });
+    assert!(view.read_with(&cx, |this, _| !this.git_review.as_ref().unwrap().pinned()));
+    cx.simulate_keystrokes("tab");
+    assert!(view.read_with(&cx, |this, _| this.git_review.as_ref().unwrap().pinned()));
+    cx.simulate_keystrokes("escape");
+    assert!(view.read_with(&cx, |this, _| this.git_review.is_none()));
+}
+
+#[gpui::test]
 fn no_matches_show_the_folder_summary(cx: &mut TestAppContext) {
     let root = fixture("no-match-summary");
     let src = root.join("src");

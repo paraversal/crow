@@ -2935,7 +2935,22 @@ impl Pane {
                                                 .text_ellipsis()
                                                 .text_size(px(11.))
                                                 .text_color(muted)
-                                                .child(presentation.badge.clone().unwrap_or_default()),
+                                                .id("plugin-row-badge")
+                                                .child(presentation.badge.clone().unwrap_or_default())
+                                                .when(entry.is_dir && presentation.git_badge, |badge| {
+                                                    let path = entry.path.clone();
+                                                    badge
+                                                        .role(Role::Button)
+                                                        .aria_label("Review folder Git changes")
+                                                        .on_click(move |_, window, cx| {
+                                                            cx.stop_propagation();
+                                                            crate::window::git_review::open_folder(
+                                                                path.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        })
+                                                }),
                                         )
                                     }),
                             ),
@@ -3354,7 +3369,17 @@ impl Pane {
                                         .text_ellipsis()
                                         .text_size(px(11.))
                                         .text_color(muted)
-                                        .child(presentation.badge.clone().unwrap_or_default()),
+                                        .id("plugin-row-badge")
+                                        .child(presentation.badge.clone().unwrap_or_default())
+                                        .when(entry.is_dir && presentation.git_badge, |badge| {
+                                            let path = entry.path.clone();
+                                            badge.role(Role::Button).aria_label("Review folder Git changes").on_click(
+                                                move |_, window, cx| {
+                                                    cx.stop_propagation();
+                                                    crate::window::git_review::open_folder(path.clone(), window, cx);
+                                                },
+                                            )
+                                        }),
                                 )
                             }),
                     )

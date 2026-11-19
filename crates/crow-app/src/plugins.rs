@@ -367,6 +367,7 @@ fn suffix_matches(path: &Path, suffixes: &[String]) -> bool {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RowPresentation {
     pub badge: Option<String>,
+    pub git_badge: bool,
     pub spoken: Vec<String>,
     pub tint: Option<crow_core::Tint>,
     pub dim: bool,
@@ -598,6 +599,7 @@ pub fn row_presentation(
         let Some(value) = plugins.surfaces.row_value_peek(id, scope, path, version) else { continue };
         if out.badge.is_none() && !value.text.is_empty() {
             out.badge = Some(value.text.clone());
+            out.git_badge = crate::git::is_git_plugin(&id.plugin);
         }
         if out.tint.is_none() {
             out.tint = value.tint;
