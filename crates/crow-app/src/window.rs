@@ -555,6 +555,28 @@ impl CrowWindow {
             let info = info.read(cx);
             (info.visible(), info.tab())
         };
+        let diff = if visible && tab == InfoTab::GitDiff && crate::git::provider_enabled(cx) {
+            let entry = if let Some(search) = &self.search {
+                search.read(cx).preview_parts().map(|(entry, _)| entry)
+            } else {
+                self.pane().read(cx).cursor_entry(cx)
+            };
+            entry.filter(|entry| !entry.is_dir && !entry.dataless).and_then(|entry| {
+                let folder = entry.path.parent()?;
+                let (snapshot, mut relative) = crate::git::snapshot_for_folder(cx, folder)?;
+                relative.push(entry.path.file_name()?);
+                (!snapshot.unavailable && snapshot.entries.get(&relative).is_some_and(|status| status.is_changed()))
+                    .then_some((snapshot, relative))
+            })
+        } else {
+            None
+        };
+        info.update(cx, |info, cx| {
+            if info.tab() == InfoTab::GitDiff && !crate::git::provider_enabled(cx) {
+                info.set_tab(InfoTab::Preview, cx);
+            }
+            info.sync_git_diff(diff, cx);
+        });
         if !visible || tab != InfoTab::Info {
             return;
         }
@@ -946,6 +968,7 @@ impl CrowWindow {
                 entry.map_or_else(|| "Preview".to_owned(), |e| preview::spoken(e, preview, folder_size, cloud))
             }
             InfoTab::Info => self.info.read(cx).label(cx),
+            InfoTab::GitDiff => "Git Diff".into(),
         };
         let body = match tab {
             InfoTab::Preview => match entry {
@@ -953,6 +976,7 @@ impl CrowWindow {
                 None => div().into_any_element(),
             },
             InfoTab::Info => self.info.clone().into_any_element(),
+            InfoTab::GitDiff => InfoPane::git_diff_body(&self.info, theme, cx),
         };
         div()
             .id("preview")

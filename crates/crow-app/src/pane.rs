@@ -3570,6 +3570,7 @@ impl Pane {
             let label = match tab {
                 InfoTab::Preview => self.preview_label(cx).unwrap_or_default(),
                 InfoTab::Info => self.info.read(cx).label(cx),
+                InfoTab::GitDiff => "Git Diff".into(),
             };
             let body = match tab {
                 InfoTab::Preview => {
@@ -3599,6 +3600,7 @@ impl Pane {
                     }
                 }
                 InfoTab::Info => self.info.clone().into_any_element(),
+                InfoTab::GitDiff => InfoPane::git_diff_body(&self.info, &theme, cx),
             };
             let (preferred_width, splitter_focus) = {
                 let info = self.info.read(cx);
