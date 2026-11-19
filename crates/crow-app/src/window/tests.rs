@@ -9048,6 +9048,189 @@ fn path_bar_escape_restores_focus_and_clicking_a_row_cancels(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn explorer_path_bar_selects_the_path_and_the_chevron_goes(cx: &mut TestAppContext) {
+    let root = fixture("path-explorer");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "settings.toml", "path_bar = \"explorer\"\nmotion = \"off\"\n");
+    assert_eq!(bar_state(&view, &mut cx).path_bar, crow_core::PathBarMode::Explorer);
+
+    // Explorer keeps the pencil and the blank-area click.
+    assert!(cx.debug_bounds("path-edit").is_some(), "the edit affordance stays");
+    let bar = cx.debug_bounds("bar-path").expect("path slot");
+    cx.simulate_click(gpui::point(bar.right() - px(8.), bar.center().y), Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(
+        path_edit_text(&view, &cx),
+        Some(root.join("alpha").display().to_string()),
+        "a click edits the shown path"
+    );
+    cx.simulate_input("x");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx).as_deref(), Some("x"), "the whole path was selected");
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+
+    // Cmd-L opens the same field; the Go chevron ran Return's confirmation.
+    cx.simulate_keystrokes("cmd-l");
+    settle(&view, &mut cx);
+    cx.simulate_input(&root.join("alpha").display().to_string());
+    settle(&view, &mut cx);
+    let go = cx.debug_bounds("path-go").expect("the Go chevron is laid out");
+    assert_eq!(go.size, gpui::size(px(20.), px(20.)), "it is a 20 px button inside the field");
+    let elements = cx.update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec());
+    let go_button = elements.iter().find(|element| element.selector.as_deref() == Some("path-go")).expect("Go button");
+    assert_eq!(go_button.role, Some(gpui::Role::Button));
+    assert_eq!(go_button.label.as_deref(), Some("Go"), "the chevron has an accessible Go label");
+    cx.simulate_click(go.center(), Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha"), "the chevron goes to the typed folder");
+    assert_eq!(path_edit_text(&view, &cx), None, "and closes the field");
+
+    // Return still reveals a file in Explorer mode.
+    cx.simulate_keystrokes("cmd-l");
+    cx.simulate_input(&root.join("notes.txt").display().to_string());
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root, "Return goes to a file's folder");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+    assert_eq!(path_edit_text(&view, &cx), None);
+}
+
+#[gpui::test]
+fn path_bar_mode_reload_while_editing_keeps_the_input(cx: &mut TestAppContext) {
+    let root = fixture("path-mode-reload");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-l");
+    settle(&view, &mut cx);
+    let input_id = view.read_with(&cx, |w, _| w.path_edit.as_ref().map(|edit| edit.input.entity_id()));
+    let typed = path_edit_text(&view, &cx);
+    assert!(typed.is_some(), "the field is open");
+    assert!(cx.debug_bounds("path-go").is_none(), "Crow has no Go chevron");
+
+    write_config(&view, &mut cx, "settings.toml", "path_bar = \"explorer\"\n");
+    assert!(path_edit_text(&view, &cx).is_some(), "a live mode reload keeps the field");
+    let after_id = view.read_with(&cx, |w, _| w.path_edit.as_ref().map(|edit| edit.input.entity_id()));
+    assert_eq!(after_id, input_id, "the same TextInput entity");
+    assert_eq!(path_edit_text(&view, &cx), typed, "the typed path survives");
+    assert_eq!(bar_state(&view, &mut cx).path_bar, crow_core::PathBarMode::Explorer);
+    assert!(cx.debug_bounds("path-go").is_some(), "only the decoration changes");
+
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx), None, "Escape still restores the breadcrumb");
+    assert!(cx.debug_bounds("path-segment-0").is_some(), "the breadcrumb returns");
+    assert!(cx.debug_bounds("path-go").is_none(), "Go belongs to the editor");
+    assert_eq!(bar_state(&view, &mut cx).path_bar, crow_core::PathBarMode::Explorer);
+
+    // The reload left a valid editor: Cmd-L and Return still navigate.
+    cx.simulate_keystrokes("cmd-l");
+    cx.simulate_input(&root.join("alpha").display().to_string());
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root.join("alpha"));
+}
+
+#[gpui::test]
+fn explorer_path_bar_is_a_title_for_a_virtual_destination(cx: &mut TestAppContext) {
+    let root = fixture("path-explorer-virtual");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &saved_sidebar_toml(&root));
+    // No PDF in the fixture: the destination has no selected result, so the bar
+    // shows its title rather than inventing a filesystem path.
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &saved_queries_toml(&[("pdfs", "PDFs", &root.display().to_string(), Some("pdf"))]),
+    );
+    write_config(&view, &mut cx, "settings.toml", "path_bar = \"explorer\"\n");
+    cx.simulate_keystrokes("tab down down enter");
+    wait_for_pane_search(&view, &mut cx);
+
+    let state = bar_state(&view, &mut cx);
+    assert_eq!(state.path_bar, crow_core::PathBarMode::Explorer);
+    assert_eq!(state.virtual_path.as_deref(), Some("PDFs"));
+    assert!(cx.debug_bounds("saved-path").is_some(), "the title is shown");
+    assert!(cx.debug_bounds("path-edit").is_none(), "no false edit affordance");
+    assert!(cx.debug_bounds("path-segment-0").is_none(), "no invented filesystem segments");
+    let bar = cx.debug_bounds("bar-path").expect("path slot");
+    cx.simulate_click(gpui::point(bar.right() - px(8.), bar.center().y), Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx), None, "a virtual destination opens no editor");
+}
+
+#[gpui::test]
+fn path_bar_modes_keep_geometry_at_640_with_a_config_error(cx: &mut TestAppContext) {
+    let root = fixture("path-bar-narrow");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    for mode in ["crow", "explorer"] {
+        write_config(&view, &mut cx, "settings.toml", &format!("path_bar = \"{mode}\"\n"));
+        // Break the file after the mode was accepted: the last good mode stays.
+        write_config(&view, &mut cx, "settings.toml", &format!("path_bar = \"{mode}\"\nmotion = \"slow\"\n"));
+        assert!(bar_state(&view, &mut cx).error.is_some(), "{mode}: the config error is shown");
+        for width in [1280., 640.] {
+            cx.simulate_resize(gpui::size(px(width), px(800.)));
+            cx.run_until_parked();
+            assert_eq!(cx.debug_bounds("path-bar").expect("bar").size.height, px(38.), "{mode} at {width}");
+            assert_eq!(cx.debug_bounds("bar-path").expect("slot").size.height, px(32.), "{mode} at {width}");
+            assert!(cx.debug_bounds("path-segment-0").is_some(), "{mode} breadcrumb at {width}");
+            assert!(cx.debug_bounds("path-edit").is_some(), "{mode} pencil at {width}");
+        }
+
+        // The error and the narrow width do not change the editor's slots.
+        cx.simulate_keystrokes("cmd-l");
+        settle(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("path-bar").expect("bar").size.height, px(38.), "{mode} editor bar");
+        assert_eq!(cx.debug_bounds("bar-path").expect("slot").size.height, px(32.), "{mode} editor slot");
+        assert_eq!(cx.debug_bounds("bar-path-field").expect("field").size.height, px(28.), "{mode} editor field");
+        assert_eq!(cx.debug_bounds("path-go").is_some(), mode == "explorer", "{mode} Go button");
+        cx.simulate_keystrokes("escape");
+        settle(&view, &mut cx);
+    }
+}
+
+#[gpui::test]
+fn explorer_path_bar_segments_and_folded_ellipsis_keep_their_drag_payloads(cx: &mut TestAppContext) {
+    let root = fixture("path-explorer-drag");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "settings.toml", "path_bar = \"explorer\"\n");
+    let state = bar_state(&view, &mut cx);
+    let last = state.path.parts.len() - 1;
+    let selector: &'static str = format!("path-segment-{last}").leak();
+    let from = cx.debug_bounds(selector).expect("the last segment").center();
+    assert_eq!(
+        start_drag(&mut cx, from),
+        Some(vec![(root.join("alpha"), true)]),
+        "an Explorer segment still drags the folder it shows"
+    );
+    cx.simulate_mouse_up(from + gpui::point(px(20.), px(0.)), gpui::MouseButton::Left, Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root, "the segment drag does not navigate");
+
+    for width in (380..=1200).rev().step_by(20) {
+        cx.simulate_resize(gpui::size(px(width as f32), px(500.)));
+        cx.run_until_parked();
+        if bar_state(&view, &mut cx).path.hidden.is_some() {
+            break;
+        }
+    }
+    let state = bar_state(&view, &mut cx);
+    let hidden = state.path.hidden.clone().expect("the path folds");
+    let deepest = state.path.parts[hidden.end - 1].1.clone();
+    let from = cx.debug_bounds("path-folded").expect("the … is drawn").center();
+    assert_eq!(
+        start_drag(&mut cx, from),
+        Some(vec![(deepest, true)]),
+        "the … still drags the deepest folder it stands for"
+    );
+    cx.simulate_mouse_up(from + gpui::point(px(20.), px(0.)), gpui::MouseButton::Left, Default::default());
+    settle(&view, &mut cx);
+    assert_eq!(dir(&view, &cx), root, "the folded drag does not navigate");
+}
+
+#[gpui::test]
 fn palette_offers_edit_path(cx: &mut TestAppContext) {
     let root = fixture("path-edit-palette");
     let (view, mut cx) = open(cx, &root);

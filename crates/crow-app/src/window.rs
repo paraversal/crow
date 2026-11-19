@@ -1279,6 +1279,7 @@ impl CrowWindow {
             count,
             path,
             virtual_path,
+            path_bar: ui.settings.path_bar,
             editing: self.path_edit.as_ref().map(|edit| edit.input.clone()),
             transient_max: None,
             pill_width: px(0.),
@@ -2781,6 +2782,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::go_to_folder))
             .on_action(cx.listener(Self::edit_path))
+            .on_action(cx.listener(Self::path_edit_go))
             .on_action(cx.listener(|this, _: &PathHover, _, cx| {
                 this.path_hovered = true;
                 cx.notify();

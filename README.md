@@ -58,7 +58,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), folder sizes (`folder_sizes`: `"off"` or `"visible"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), the icon source (`icon_pack`: `"native"` or a pack id), font, the terminal app Open Terminal Here uses (`terminal`: a name like `"Terminal"` or `"iTerm"`, or a path to an app), hidden files (shown by default), whether search still matches hidden items while they are hidden (`search_includes_hidden`, default on), the mode new searches start in (`search_match`: `"all"`, `"names"` or `"contents"`), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for the preferences it lists; the file stays authoritative and the window follows edits made in a text editor |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), folder sizes (`folder_sizes`: `"off"` or `"visible"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), the icon source (`icon_pack`: `"native"` or a pack id), the bottom bar's path (`path_bar`: `"crow"` for the breadcrumb or `"explorer"` for a visible field), font, the terminal app Open Terminal Here uses (`terminal`: a name like `"Terminal"` or `"iTerm"`, or a path to an app), hidden files (shown by default), whether search still matches hidden items while they are hidden (`search_includes_hidden`, default on), the mode new searches start in (`search_match`: `"all"`, `"names"` or `"contents"`), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for the preferences it lists; the file stays authoritative and the window follows edits made in a text editor |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Also chooses the icons/list/columns/gallery view, the icon size preset and optional icon caption, list columns and plugin preview providers. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), whether Recent and Locations show, `pinned_tags` for Finder tags that should appear even when Spotlight has not indexed a use for them, the order/visibility/collapse state of built-in (`tags`, `saved-queries`, `recent`, `locations`) and plugin sections, and `[projects] roots`, the folders the Projects section scans for Git repositories |
 | `plugins.toml` | One approval record per plugin, including the bundled Git package: `enabled`, package `digest` and the API-1 `fs` capability. Installed bundles live in `plugins/`; see [docs/plugins.md](docs/plugins.md). |
@@ -125,8 +125,8 @@ cancels it exactly like Esc.
 The bottom bar has three slots: the path (⌘L, a click on its empty space or the pencil at the end
 of the path edits it in place; the path's pill fades in on hover and clears when the pointer leaves
 the window, and the field expands across the path and the hints up to the counts; while editing, the
-suffix Tab would complete shows muted after the text; each segment drags the folder or file it shows), a transient
-one (type-to-select letters, hints, operation progress, messages, errors) and counts. While you type a name, the transient slot shows the letters so far, left of the hints. Hints follow
+suffix Tab would complete shows muted after the text; each segment drags the folder or file it shows),
+a transient one (type-to-select letters, hints, operation progress, messages, errors) and counts. While you type a name, the transient slot shows the letters so far, left of the hints. Hints follow
 focus: the path field (`↩` go, `⇥` complete, `esc` cancel), the filter field (Return to matches,
 Esc clear, `⌘F` search deeper), the sidebar (`⌥↑↓` groups, `⇥`/`→` to list, `⌘⌥↑↓` reorder,
 `⌘⌫` remove, `⌘E` eject a disk),
@@ -140,7 +140,10 @@ than instead of it. Counts name the focused folder ("18 items in Documents"), th
 size, or the cursor's sidebar group (while filtering, the field itself says "n of N"). When room
 runs short the path keeps its first and last segments: its middle folds into a "…" (click it for
 the deepest hidden folder, or drag it to drag that folder), then hints drop from the right, then a
-long progress line or error is cut with an ellipsis.
+long progress line or error is cut with an ellipsis. With `path_bar = "explorer"` the breadcrumb
+keeps a visible field outline at rest and the editor adds a Go chevron beside its hints; the chevron
+and Return share the same navigation and error path. A saved-query or tag destination still shows
+only its title, with no path editor.
 
 A contextual tip appears once, bottom right above the bar, when you visibly do something the slow
 way: scrolling a folder of 200+ items ("Type / to filter this folder by name."), two filters in a

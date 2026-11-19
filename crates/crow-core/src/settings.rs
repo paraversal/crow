@@ -62,6 +62,11 @@ app_icon = "refined"
 # plugin pack named <plugin-id>.<pack-id>. views.toml can override this per folder.
 icon_pack = "native"
 
+# The bottom bar's path: "crow" (default) is the Finder-style breadcrumb that
+# turns into a field on Cmd-L or a click. "explorer" keeps it a visible path
+# field with a Go button; Return, Escape and Tab work the same in both.
+path_bar = "crow"
+
 # Interface font. Empty uses the system font.
 font_family = ""
 font_size = 13.0
@@ -263,6 +268,27 @@ impl AppIcon {
     }
 }
 
+/// How the bottom bar shows its path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PathBarMode {
+    /// Finder-style breadcrumb; hover or the pencil reveals editing.
+    #[default]
+    Crow,
+    /// A visible path field with a Go button.
+    Explorer,
+}
+
+impl PathBarMode {
+    /// The value in `settings.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            PathBarMode::Crow => "crow",
+            PathBarMode::Explorer => "explorer",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct WindowDefaults {
@@ -301,6 +327,7 @@ pub struct Settings {
     pub app_icon: AppIcon,
     #[serde(default = "native_icon_pack", deserialize_with = "icon_pack_value")]
     pub icon_pack: String,
+    pub path_bar: PathBarMode,
     pub font_family: String,
     pub font_size: f32,
     pub terminal: String,
@@ -326,6 +353,7 @@ impl Default for Settings {
             sound: SoundSet::Crow,
             app_icon: AppIcon::Refined,
             icon_pack: native_icon_pack(),
+            path_bar: PathBarMode::Crow,
             font_family: String::new(),
             font_size: 13.0,
             terminal: "Terminal".into(),
@@ -481,6 +509,36 @@ mod tests {
         assert_eq!(parsed.icon_pack, "example.pack.theme");
         assert!(toml::from_str::<Settings>("icon_pack = \"My Pack\"").is_err());
         assert!(toml::from_str::<Settings>("icon_pack = \"\"").is_err());
+    }
+
+    #[test]
+    fn path_bar_values_parse_and_default_to_crow() {
+        let parse = |text: &str| toml::from_str::<Settings>(text).expect("parses");
+        assert_eq!(parse("path_bar = \"crow\"").path_bar, PathBarMode::Crow);
+        assert_eq!(parse("path_bar = \"explorer\"").path_bar, PathBarMode::Explorer);
+        assert_eq!(parse("theme = \"system\"").path_bar, PathBarMode::Crow, "an old config is Crow");
+
+        let dir = temp_dir("path-bar-bad");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.toml"), "path_bar = \"windows\"\n").unwrap();
+        let err = load_settings(&dir).expect_err("rejects an unknown mode").to_string();
+        assert!(err.contains("settings.toml"), "{err}");
+        assert!(err.contains("line 1"), "{err}");
+    }
+
+    #[test]
+    fn saving_path_bar_keeps_an_adjacent_comment_and_other_keys() {
+        let dir = temp_dir("save-path-bar");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.toml"), "# mine\npath_bar = \"crow\" # bottom bar\nkeymap = \"vim\"\n").unwrap();
+        let before = fs::read_to_string(dir.join("settings.toml")).unwrap();
+        save_setting(&dir, "path_bar", PathBarMode::Explorer.key()).unwrap();
+        let after = fs::read_to_string(dir.join("settings.toml")).unwrap();
+        assert!(after.contains("\npath_bar = \"explorer\" # bottom bar\n"), "{after}");
+        assert!(after.contains("\nkeymap = \"vim\"\n"), "{after}");
+        let changed: Vec<_> = before.lines().zip(after.lines()).filter(|(a, b)| a != b).collect();
+        assert_eq!(changed.len(), 1, "only the path_bar line changes: {changed:?}");
+        assert_eq!(load_settings(&dir).unwrap().path_bar, PathBarMode::Explorer);
     }
 
     #[test]

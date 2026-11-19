@@ -8,9 +8,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crow_core::motion::{Effective, MotionMode, SoundSet};
 use crow_core::{
-    AppIcon, EnterAction, Exclude, FolderSizesMode, HintsMode, KeymapLayer, Recent, RecentCommands, SavedQueries,
-    SavedQueryId, SearchMatch, Settings, SidebarConfig, TipsMode, Views, load_saved_queries, load_settings,
-    load_sidebar, load_views,
+    AppIcon, EnterAction, Exclude, FolderSizesMode, HintsMode, KeymapLayer, PathBarMode, Recent, RecentCommands,
+    SavedQueries, SavedQueryId, SearchMatch, Settings, SidebarConfig, TipsMode, Views, load_saved_queries,
+    load_settings, load_sidebar, load_views,
 };
 use crow_theme::Theme;
 use futures::{FutureExt, future::Shared};
@@ -669,6 +669,7 @@ pub enum SettingChange {
     Sound(SoundSet),
     AppIcon(AppIcon),
     IconPack(String),
+    PathBar(PathBarMode),
     FontFamily(String),
     FontSize(f32),
     Terminal(String),
@@ -699,6 +700,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             SettingChange::Sound(value) => replace(&mut settings.sound, *value),
             SettingChange::AppIcon(value) => replace(&mut settings.app_icon, *value),
             SettingChange::IconPack(value) => replace(&mut settings.icon_pack, value.clone()),
+            SettingChange::PathBar(value) => replace(&mut settings.path_bar, *value),
             SettingChange::FontFamily(value) => replace(&mut settings.font_family, value.clone()),
             SettingChange::FontSize(value) => replace(&mut settings.font_size, *value),
             SettingChange::Terminal(value) => replace(&mut settings.terminal, value.clone()),
@@ -771,6 +773,9 @@ fn write_setting(change: SettingChange, cx: &mut App) {
         }
         SettingChange::IconPack(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "icon_pack", &value), cx);
+        }
+        SettingChange::PathBar(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "path_bar", value.key()), cx);
         }
         SettingChange::FontFamily(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "font_family", &value), cx);

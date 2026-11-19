@@ -109,6 +109,14 @@ pub(super) const UNITS: &[Unit] = &[
         &[ControlId::IconPack],
     ),
     unit(
+        ControlId::PathBar,
+        Category::Appearance,
+        "Path bar",
+        &["breadcrumb", "explorer", "path", "bottom bar", "path field"],
+        &["path_bar"],
+        &[ControlId::PathBar],
+    ),
+    unit(
         ControlId::FontFamily,
         Category::Appearance,
         "Font",
