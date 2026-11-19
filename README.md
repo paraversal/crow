@@ -3,7 +3,7 @@
 A Finder-style file explorer for macOS, written in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
 It keeps Finder's directness and aims to be faster, more predictable and keyboard-first.
 
-Status: Phase 1 (the "daily driver" MVP) is done: M6, the UI overhaul, M6.5, M7, M8 (Finder parity) and M8.5 (search reliability) are merged. Next is M9 (Phase 2). See [`docs/ROADMAP.md`](docs/ROADMAP.md) for every milestone and item.
+Phase 1 is complete, including the Finder parity and search reliability passes. Phase 2 (M9) is underway. Plugin support, Git Projects and review, and iCloud download status have shipped. See the [roadmap](docs/ROADMAP.md) for milestone status and upcoming work.
 
 ## Build and run
 
@@ -48,6 +48,7 @@ macOS privacy prompts naming Crow.
 | `crates/crow-macos` | The only AppKit code: icons, kinds, tags, thumbnails, Finder names, Quick Look |
 | `crates/crow-search` | Search and exclusion rules (M6) |
 | `crates/crow-plugin` | Versioned Rhai plugin packages, grants and workers (M9) |
+| `crates/crow-plugin-git` | Read-only Git repository status, line counts, and diffs |
 | `crates/crow-theme` | Reader for the global theme index in `~/.config/themes` |
 
 ## Configuration

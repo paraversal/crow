@@ -3,9 +3,9 @@
 Crow is a Finder-style file explorer for macOS in Rust on GPUI (vendored Zed, `vendor/`, fetched by `scripts/fetch-gpui.sh`). Read `README.md` (layout, config, keys) and `docs/testing.md` (tests, bench, hand checks).
 
 ## Working on a plan
-Milestones and fix lists live in `docs/plans/` (M8 pieces in `docs/plans/m8/`, M9's roadmap in `docs/plans/m9/`, the finished UI overhaul index in `docs/plans/ui-overhaul/`). Implement them with the personal `execute-plan` skill: keep `docs/plans/<plan>.progress.md` current after every step, and **ask the user about anything unclear or undecided instead of choosing yourself.**
+Shared milestone status lives in [`docs/ROADMAP.md`](docs/ROADMAP.md) and the [M9 roadmap](docs/plans/m9/README.md). Keep detailed implementation plans, fix lists, and progress logs in the ignored paths under `docs/plans/`. Implement them with the personal `execute-plan` skill. Keep the `<plan>.progress.md` beside its plan current after every step, and **ask the user about anything unclear or undecided instead of choosing yourself.** Give the critic the plan and progress paths at hand-off. From a separate worktree, use the paths in the checkout that holds the local files.
 When the work is done, the executing agent commits locally and stops at "Ready for critique"; a second agent reviews the branch with the personal `critique` skill, fixes what is clearly wrong, and opens the PR.
-Finished plans (merged, with their progress files) move to `docs/plans/done/`: history to learn from, not work to pick up. Things too big for a fix list wait in `docs/plans/inbox.md` or the current milestone's index.
+After merge, record the outcome and PR in the shared roadmap and move the local plan and progress file to `docs/plans/done/`. Keep untriaged work in the [inbox](docs/plans/inbox.md) and milestone-level decisions in the current roadmap.
 Both skills are generic. The Crow specifics are in the next section and win where the two differ.
 
 ## Plans and critique in Crow
@@ -27,10 +27,10 @@ Both skills are generic. The Crow specifics are in the next section and win wher
 
 **Critique: Crow-specific code checks.** The Rules below, item by item. Edge cases: empty and unreadable folders, symlinks, very long names, non-UTF-8 and combining characters, a folder deleted while it's shown. Search `chrome`, `style`, `keys`, `icons`, `crow_core`, `crow_fs` and `crow_search` before accepting new helpers. UI-free logic belongs in `crow-core`/`crow-fs` with unit tests, and AppKit only in `crow-macos`. Consider whether a growing `window.rs` should split. Interaction states must not shift the layout (U1's `cursor_ring` is an inset shadow for this reason).
 
-**Critique: finish.** Commit fixes as `<plan id> critique: <what>`. The PR body lists each item with its approach and how it was verified, plus a Critique section (fixed / user decided / noted, with literal and semantic findings listed separately). End the report with the next piece in the milestone index's order (for M8, "Suggested order" in `docs/plans/m8/README.md`) and the exact request for the executing agent ("execute plan F1"). If the plan feeds a fix list (a milestone's `findings.md`, e.g. `docs/plans/done/m7/findings.md`), count the open and "must fix" findings and say whether the fix batch comes before the next piece.
+**Critique: finish.** Commit fixes as `<plan id> critique: <what>`. The PR body lists each item with its approach and how it was verified, plus a Critique section (fixed / user decided / noted, with literal and semantic findings listed separately). End the report with the next piece from the milestone roadmap and the exact request for the executing agent ("execute plan P3A"). If the plan feeds a fix list (a milestone's `findings.md`, e.g. `docs/plans/done/m7/findings.md`), count the open and "must fix" findings and say whether the fix batch comes before the next piece.
 
 ## Crates
-`crow-app` (GPUI binary: windows, views, actions, keymaps) · `crow-core` (UI-free models: settings, views, sidebar, recent, tabs, selection; pure Rust, unit-tested) · `crow-fs` (listing, sort, watch, file-operation engine with undo) · `crow-macos` (the only AppKit/Foundation code) · `crow-search` (search engine, M6) · `crow-theme` (theme index reader).
+`crow-app` (GPUI binary: windows, views, actions, keymaps) · `crow-core` (UI-free models: settings, views, sidebar, recent, tabs, selection; pure Rust, unit-tested) · `crow-fs` (listing, sort, watch, file-operation engine with undo) · `crow-macos` (the only AppKit/Foundation code) · `crow-search` (search engine) · `crow-plugin` (Rhai package runtime) · `crow-plugin-git` (read-only Git integration) · `crow-theme` (theme index reader).
 
 ## Rules
 - No disk I/O on the main thread (use `background_spawn`, then update on the main thread). Startup loads are the exception.
