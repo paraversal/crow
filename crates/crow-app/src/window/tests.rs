@@ -2171,7 +2171,7 @@ fn icon_view_projects_direct_entries_and_keeps_list_expansion(cx: &mut TestAppCo
     assert_eq!(names(&cx), vec!["alpha", "beta", "notes.txt"], "the grid shows direct entries only");
     assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "the cursor falls back to its direct ancestor");
     let tile = cx.debug_bounds("tile-alpha").expect("the first tile is laid out");
-    assert_eq!(tile.size.width, px(112.), "Standard tiles have a fixed width");
+    assert_eq!(tile.size.width, px(crow_core::IconSize::Standard.metrics().tile_width));
     let text = std::fs::read_to_string(config_dir(&cx).join("views.toml")).unwrap();
     assert!(text.contains("view = \"icons\""), "Cmd-1 is remembered for the folder: {text}");
 
@@ -2197,10 +2197,10 @@ fn icon_grid_arrows_follow_the_tile_geometry(cx: &mut TestAppContext) {
     for i in 0..8 {
         std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
     }
-    let (view, mut cx) = open_sized(cx, &root, 700., 800.);
+    let (view, mut cx) = open_sized(cx, &root, 640., 800.);
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
-    // Hide Preview so the 700 pt window leaves a three-column pane.
+    // Hide Preview so the 640 pt window leaves a three-column pane.
     cx.simulate_keystrokes("cmd-shift-p");
     settle(&view, &mut cx);
     let bounds = |cx: &VisualTestContext, name: &str| {
@@ -2259,7 +2259,7 @@ fn marquee_selects_columns_and_restores_the_start_on_escape(cx: &mut TestAppCont
     for i in 0..8 {
         std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
     }
-    let (view, mut cx) = open_sized(cx, &root, 700., 800.);
+    let (view, mut cx) = open_sized(cx, &root, 640., 800.);
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
@@ -2271,7 +2271,7 @@ fn marquee_selects_columns_and_restores_the_start_on_escape(cx: &mut TestAppCont
     let f0 = bounds(&cx, "f0.txt").center();
     let f2 = bounds(&cx, "f2.txt").center();
     let f7 = bounds(&cx, "f7.txt");
-    let start = gpui::point(list.right() - px(20.), f7.bottom() - px(4.));
+    let start = gpui::point(list.right() - px(2.), f7.bottom() - px(4.));
     let modifiers = gpui::Modifiers::default();
     cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
     cx.simulate_mouse_move(f0, Some(gpui::MouseButton::Left), modifiers);
@@ -2309,7 +2309,7 @@ fn cmd_marquee_keeps_the_starting_selection(cx: &mut TestAppContext) {
     for i in 0..8 {
         std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
     }
-    let (view, mut cx) = open_sized(cx, &root, 700., 800.);
+    let (view, mut cx) = open_sized(cx, &root, 640., 800.);
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
@@ -2320,7 +2320,7 @@ fn cmd_marquee_keeps_the_starting_selection(cx: &mut TestAppContext) {
     };
     let f7 = tile(&cx, "f7.txt");
     let f2 = tile(&cx, "f2.txt").center();
-    let start = gpui::point(list.right() - px(20.), f7.bottom() - px(4.));
+    let start = gpui::point(list.right() - px(2.), f7.bottom() - px(4.));
     let modifiers = gpui::Modifiers { platform: true, ..Default::default() };
     cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
     cx.simulate_mouse_move(f2, Some(gpui::MouseButton::Left), modifiers);
@@ -2354,7 +2354,7 @@ fn a_watch_update_mid_marquee_cancels_and_restores_the_start(cx: &mut TestAppCon
     };
     let f0 = tile(&cx, "f0.txt").center();
     let f7 = tile(&cx, "f7.txt");
-    let start = gpui::point(list.right() - px(20.), f7.bottom() - px(4.));
+    let start = gpui::point(list.right() - px(2.), f7.bottom() - px(4.));
     cx.simulate_mouse_down(start, gpui::MouseButton::Left, Default::default());
     cx.simulate_mouse_move(f0, Some(gpui::MouseButton::Left), Default::default());
     assert!(pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_active()));
@@ -2393,7 +2393,7 @@ fn marquee_edge_autoscroll_reaches_rows_below_the_viewport(cx: &mut TestAppConte
     cx.simulate_keystrokes("cmd-shift-p");
     settle(&view, &mut cx);
     let list = cx.debug_bounds("file-list").expect("icon viewport");
-    let start = gpui::point(list.right() - px(20.), list.bottom() - px(80.));
+    let start = gpui::point(list.right() - px(2.), list.bottom() - px(80.));
     let bottom = gpui::point(list.left() + px(4.), list.bottom() - px(8.));
     cx.simulate_mouse_down(start, gpui::MouseButton::Left, Default::default());
     cx.simulate_mouse_move(bottom, Some(gpui::MouseButton::Left), Default::default());
@@ -2433,7 +2433,7 @@ fn icon_size_presets_keep_the_filter_and_cursor_visible(cx: &mut TestAppContext)
     cx.dispatch_action(crate::actions::IconSizeCompact);
     settle(&view, &mut cx);
     assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.icon_size()), crow_core::IconSize::Compact);
-    assert_eq!(tile(&cx, "f100.txt").size.width, px(88.));
+    assert_eq!(tile(&cx, "f100.txt").size.width, px(crow_core::IconSize::Compact.metrics().tile_width));
     assert_eq!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.filter_query(cx)).as_deref(), Some("f100"));
     assert_eq!(selected(&view, &cx).as_deref(), Some("f100.txt"), "the cursor survives the preset change");
     let here = tile(&cx, "f100.txt");
@@ -2441,11 +2441,34 @@ fn icon_size_presets_keep_the_filter_and_cursor_visible(cx: &mut TestAppContext)
 
     cx.dispatch_action(crate::actions::IconSizeLarge);
     settle(&view, &mut cx);
-    assert_eq!(tile(&cx, "f100.txt").size.width, px(160.));
+    assert_eq!(tile(&cx, "f100.txt").size.width, px(crow_core::IconSize::Large.metrics().tile_width));
     let here = tile(&cx, "f100.txt");
     assert!(here.top() >= list.top() && here.bottom() <= list.bottom(), "Large keeps the focused tile visible");
     let text = std::fs::read_to_string(config_dir(&cx).join("views.toml")).unwrap();
     assert!(text.contains("icon_size = \"large\""), "{text}");
+}
+
+#[gpui::test]
+fn icon_grid_reflow_preserves_the_partially_visible_path_offset(cx: &mut TestAppContext) {
+    let root = long_fixture("icon-scroll-anchor", 200);
+    let (view, mut cx) = open_sized(cx, &root, 640., 500.);
+    cx.simulate_keystrokes("cmd-1 cmd-shift-p");
+    settle(&view, &mut cx);
+    let viewport = cx.debug_bounds("file-list").expect("icon viewport");
+    cx.simulate_event(gpui::ScrollEvent {
+        position: viewport.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-244.))),
+        touch_phase: gpui::TouchPhase::Moved,
+        ..Default::default()
+    });
+    settle(&view, &mut cx);
+    let top = cx.debug_bounds("tile-f006.txt").expect("first visible tile").top();
+    assert!(top < viewport.top() && top > viewport.top() - px(106.));
+
+    cx.simulate_resize(size(px(1050.), px(500.)));
+    settle(&view, &mut cx);
+    let after = cx.debug_bounds("tile-f006.txt").expect("same path after reflow").top();
+    assert_eq!(after, top, "resize preserves the path's pixel offset");
 }
 
 #[gpui::test]
@@ -2463,10 +2486,10 @@ fn icon_caption_reserves_a_line_and_off_removes_it(cx: &mut TestAppContext) {
         pane(&view, &cx).read_with(&cx, |pane, _| pane.icon_caption().map(str::to_owned)).as_deref(),
         Some("git.lines-changed")
     );
-    let plain = px(116.);
+    let plain = px(crow_core::IconSize::Standard.metrics().tile_height);
     let with_caption =
         pane(&view, &cx).read_with(&cx, |pane, cx| pane.debug_selector_bounds("tile-f0.txt", cx)).expect("tile");
-    assert_eq!(with_caption.size.height, plain + px(16.), "the caption reserves one line on every tile");
+    assert_eq!(with_caption.size.height, plain + px(18.), "the caption reserves one line on every tile");
     assert!(
         cx.update(|window, _| window.debug_bounds("caption-slot-f0.txt")).is_some(),
         "the reserved slot is blank while no provider answers"
@@ -2656,7 +2679,7 @@ fn focus_and_tab_changes_cancel_a_marquee(cx: &mut TestAppContext) {
     };
     let f0 = tile(&cx, "f0.txt").center();
     let f11 = tile(&cx, "f11.txt");
-    let start = gpui::point(list.right() - px(20.), f11.bottom() - px(4.));
+    let start = gpui::point(list.right() - px(2.), f11.bottom() - px(4.));
     let modifiers = gpui::Modifiers::default();
 
     cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);

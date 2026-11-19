@@ -12,7 +12,8 @@ use gpui::{
 };
 
 use super::{
-    CELL_PADDING, INDENT, IslandEdges, LIST_TOP_INSET, NAME_INSET, Pane, ROW_HEIGHT, TRIANGLE_WIDTH, shown_offset,
+    CELL_PADDING, ICON_BOX_PADDING, ICON_TILE_GAP, ICON_TILE_TOP, INDENT, IslandEdges, LIST_TOP_INSET, NAME_INSET,
+    Pane, ROW_HEIGHT, TRIANGLE_WIDTH, icon_name_line_height, shown_offset,
 };
 
 pub(super) struct ViewMotion {
@@ -146,23 +147,25 @@ impl ViewMotion {
         }
         let Some(area) = pane.icon_bounds.get() else { return HashMap::new() };
         let folder = folder.read(cx);
-        let grid = pane.grid.unwrap_or_else(|| pane.icon_grid(folder.row_count()));
+        let grid = pane.grid.unwrap_or_else(|| pane.icon_grid(folder.row_count(), cx));
         let metrics = grid.metrics();
         let offset = f32::from(pane.icon_scroll.0.borrow().base_handle.offset().y);
-        let visible = grid.visible_rows(offset.max(0.0));
+        let visible = grid.with_viewport_height(f32::from(area.size.height)).visible_rows(-offset);
+        let first = grid.first_index_of_row(visible.start);
+        let end = grid.first_index_of_row(visible.end).min(folder.row_count());
+        let name_line = icon_name_line_height(cx.global::<crate::ui::Ui>().settings.font_size);
         let in_flight =
             pane.view_motion.as_ref().and_then(|motion| motion.progress(Effective::Full, now).map(|t| (motion, t)));
-        (0..folder.row_count())
-            .filter(|ix| visible.contains(&grid.row_of(*ix)))
+        (first..end)
             .filter_map(|ix| {
                 let (entry, _) = folder.row(ix)?;
                 let rect = grid.tile_rect(ix)?;
                 let left = area.left() + px(rect.x);
-                let top = area.top() + px(rect.y) - px(offset);
-                let icon_size = metrics.icon_size + 8.0;
+                let top = area.top() + px(rect.y + offset);
+                let icon_size = metrics.icon_size + ICON_BOX_PADDING;
                 let icon_left = left + px((metrics.tile_width - icon_size) / 2.0);
-                let icon_y = top + px(4.0 + icon_size / 2.0);
-                let label_y = top + px(4.0 + icon_size + 2.0 + (metrics.tile_height - 4.0 - icon_size - 2.0) / 2.0);
+                let icon_y = top + px(ICON_TILE_TOP + icon_size / 2.0);
+                let label_y = top + px(ICON_TILE_TOP + icon_size + ICON_TILE_GAP + name_line);
                 let target = RowOrigin {
                     icon: point(icon_left, icon_y),
                     label: point(left + px(4.0), label_y),

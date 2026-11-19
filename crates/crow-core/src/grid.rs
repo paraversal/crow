@@ -37,27 +37,27 @@ impl IconSize {
     pub fn metrics(self) -> GridMetrics {
         match self {
             IconSize::Compact => GridMetrics {
-                tile_width: 88.0,
-                tile_height: 92.0,
+                tile_width: 80.0,
+                tile_height: 84.0,
                 icon_size: 40.0,
-                gap: 8.0,
-                inset_x: 12.0,
+                gap: 6.0,
+                inset_x: 8.0,
                 inset_y: 0.0,
             },
             IconSize::Standard => GridMetrics {
-                tile_width: 112.0,
-                tile_height: 116.0,
+                tile_width: 100.0,
+                tile_height: 100.0,
                 icon_size: 56.0,
-                gap: 8.0,
-                inset_x: 12.0,
+                gap: 6.0,
+                inset_x: 8.0,
                 inset_y: 0.0,
             },
             IconSize::Large => GridMetrics {
-                tile_width: 160.0,
-                tile_height: 164.0,
+                tile_width: 144.0,
+                tile_height: 136.0,
                 icon_size: 92.0,
-                gap: 10.0,
-                inset_x: 14.0,
+                gap: 8.0,
+                inset_x: 8.0,
                 inset_y: 0.0,
             },
         }
@@ -125,9 +125,12 @@ pub struct GridGeometry {
 }
 
 impl GridGeometry {
-    pub fn new(count: usize, width: f32, viewport_height: f32, metrics: GridMetrics) -> Self {
+    pub fn new(count: usize, width: f32, viewport_height: f32, mut metrics: GridMetrics) -> Self {
         let usable = (width - 2.0 * metrics.inset_x).max(0.0);
         let columns = (((usable + metrics.gap) / metrics.column_pitch()).floor() as usize).max(1);
+        let occupied = columns as f32 * metrics.column_pitch() - metrics.gap;
+        // Center the column tracks, including when the final row is incomplete.
+        metrics.inset_x = ((width - occupied) / 2.0).floor().max(0.0);
         let rows = count.div_ceil(columns);
         Self { count, columns, rows, width, viewport_height, metrics }
     }
@@ -150,6 +153,11 @@ impl GridGeometry {
 
     pub fn viewport_height(&self) -> f32 {
         self.viewport_height
+    }
+
+    pub fn with_viewport_height(mut self, height: f32) -> Self {
+        self.viewport_height = height;
+        self
     }
 
     pub fn metrics(&self) -> GridMetrics {
@@ -254,12 +262,7 @@ impl GridGeometry {
     }
 
     pub fn content_height(&self) -> f32 {
-        if self.rows == 0 {
-            return 2.0 * self.metrics.inset_y;
-        }
-        self.metrics.inset_y * 2.0
-            + self.rows as f32 * self.metrics.tile_height
-            + (self.rows.saturating_sub(1)) as f32 * self.metrics.gap
+        2.0 * self.metrics.inset_y + self.rows as f32 * self.metrics.row_pitch()
     }
 
     /// Every tile intersecting `rect` (content coordinates), in row-major order.
@@ -301,8 +304,13 @@ mod tests {
 
     #[test]
     fn columns_are_derived_from_width_and_clamped_to_one() {
-        // Standard tiles are 112 wide with an 8 gap and 12 px insets.
-        assert_eq!(geometry(8, 600.0).columns(), 4, "600 - 24 = 576; 5 tiles need 592");
+        // Standard tiles are 100 wide with a 6 pt gap and minimum 8 pt insets.
+        assert_eq!(geometry(8, 751.0).columns(), 6);
+        let grid = geometry(8, 784.0);
+        assert_eq!(grid.columns(), 7);
+        let first = grid.tile_rect(0).unwrap();
+        assert_eq!(first.x, grid.width() - grid.tile_rect(6).unwrap().right());
+        assert_eq!(grid.tile_rect(7).unwrap().x, first.x, "the last row keeps the same tracks");
         assert_eq!(geometry(8, 400.0).columns(), 3);
         assert_eq!(geometry(8, 60.0).columns(), 1, "a narrow pane still shows one tile");
         assert_eq!(geometry(0, 600.0).rows(), 0);
@@ -339,7 +347,7 @@ mod tests {
         assert_eq!(grid.first_visible_row(0.0), 0);
         assert_eq!(grid.first_visible_row(pitch * 2.5), 2);
         assert_eq!(grid.visible_rows(0.0).start, 0);
-        assert!(grid.visible_rows(0.0).end >= 4, "400 high / 124 pitch covers four rows");
+        assert!(grid.visible_rows(0.0).end >= 4, "400 high / 106 pitch covers four rows");
         assert_eq!(grid.offset_for_row(10), grid.row_top(10));
         assert_eq!(grid.offset_for_row(10_000), (grid.content_height() - 400.0).max(0.0), "clamped at the end");
     }

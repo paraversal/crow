@@ -279,8 +279,6 @@ pub struct Truncated {
 /// Shorten `text` in the middle to fit `max` (Finder keeps both the start and the
 /// extension visible: `8b184f2a-90…app_icon.png`). Only long names are measured twice or more.
 pub fn truncate_middle_parts(text: &str, max: Pixels, font_size: Pixels, window: &Window) -> Truncated {
-    let clean = display_text(text);
-    let text = clean.as_ref();
     let font = window.text_style().font();
     let measure = |s: &str| {
         let run = TextRun {
@@ -293,22 +291,32 @@ pub fn truncate_middle_parts(text: &str, max: Pixels, font_size: Pixels, window:
         };
         window.text_system().shape_line(SharedString::from(s.to_owned()), font_size, &[run], None).width
     };
-    if measure(text) <= max {
+    truncate_middle_parts_to_fit(text, |s| measure(s) <= max)
+}
+
+/// Middle-elide text against the caller's layout, keeping grapheme clusters intact.
+pub fn truncate_middle_parts_to_fit(text: &str, fits: impl Fn(&str) -> bool) -> Truncated {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let clean = display_text(text);
+    let text = clean.as_ref();
+    if fits(text) {
         return Truncated { text: SharedString::from(text.to_owned()), cut: None };
     }
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let boundaries = text.grapheme_indices(true).map(|(index, _)| index).chain([text.len()]).collect::<Vec<_>>();
+    let graphemes = boundaries.len() - 1;
     let shortened = |keep: usize| -> (String, (usize, usize)) {
         let head = keep.div_ceil(2);
         let tail = keep - head;
-        let head_end = if head == 0 { 0 } else { chars[head - 1].0 + chars[head - 1].1.len_utf8() };
-        let tail_start = if tail == 0 { text.len() } else { chars[chars.len() - tail].0 };
+        let head_end = boundaries[head];
+        let tail_start = boundaries[graphemes - tail];
         (format!("{}\u{2026}{}", &text[..head_end], &text[tail_start..]), (head_end, tail_start))
     };
     // The longest shortening that still fits.
-    let (mut lo, mut hi) = (0, chars.len().saturating_sub(1));
+    let (mut lo, mut hi) = (0, graphemes.saturating_sub(1));
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
-        if measure(&shortened(mid).0) <= max { lo = mid } else { hi = mid - 1 }
+        if fits(&shortened(mid).0) { lo = mid } else { hi = mid - 1 }
     }
     let (text, cut) = shortened(lo);
     Truncated { text: text.into(), cut: Some(cut) }

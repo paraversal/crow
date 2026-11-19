@@ -53,7 +53,7 @@ use crate::preview::{self, Preview};
 use crate::style::{
     active_selection, cloud_icon, color, color_alpha, content_opacity, cut_outline, display_text, drop_outline,
     effect_tint, focused_column, format_time, highlight_text, inactive_selection, kind, map_range, truncate_middle,
-    truncate_middle_parts,
+    truncate_middle_parts, truncate_middle_parts_to_fit,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
@@ -67,6 +67,13 @@ use view_motion::ViewMotion;
 pub(crate) const ROW_HEIGHT: f32 = 24.0;
 /// The reserved caption line under tile names; blank keeps every tile aligned.
 const CAPTION_LINE_HEIGHT: f32 = 16.0;
+const ICON_TILE_TOP: f32 = 3.0;
+const ICON_TILE_GAP: f32 = 2.0;
+const ICON_BOX_PADDING: f32 = 4.0;
+
+fn icon_name_line_height(font_size: f32) -> f32 {
+    (font_size * 1.25).ceil()
+}
 
 /// The first row a uniform list shows. Its scroll offset is negative once
 /// scrolled down (`drag_row_at` adds it to a pointer position).
@@ -306,6 +313,14 @@ struct Filtering {
     _subscription: Subscription,
 }
 
+/// Paths from the last painted viewport, with their row tops relative to it.
+struct IconViewport {
+    folder: EntityId,
+    generation: u64,
+    anchors: Vec<(PathBuf, f32)>,
+    visible_cursor: Option<PathBuf>,
+}
+
 /// One empty-space drag in the icon grid. The anchor stays in content space, so
 /// scrolling grows the rectangle instead of moving its origin.
 struct Marquee {
@@ -381,6 +396,7 @@ pub struct Pane {
     /// Icon view: its own scroll position and viewport, kept across mode switches.
     icon_scroll: UniformListScrollHandle,
     icon_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    icon_viewport: Rc<RefCell<Option<IconViewport>>>,
     /// The geometry the last icon frame drew, shared by keys, hit tests and anchors.
     grid: Option<GridGeometry>,
     /// The effective icon size for this pane (from views.toml when folders decide).
@@ -513,6 +529,7 @@ impl Pane {
             list_bounds: Rc::new(Cell::new(None)),
             icon_scroll: UniformListScrollHandle::new(),
             icon_bounds: Rc::new(Cell::new(None)),
+            icon_viewport: Rc::new(RefCell::new(None)),
             grid: None,
             icon_size: IconSize::Standard,
             icon_caption: None,
@@ -1362,7 +1379,7 @@ impl Pane {
             && let Some(ix) = self.focused_folder().read(cx).cursor_ix()
         {
             let count = self.focused_folder().read(cx).row_count();
-            self.icon_scroll.scroll_to_item(self.icon_grid(count).row_of(ix), ScrollStrategy::Nearest);
+            self.icon_scroll.scroll_to_item(self.icon_grid(count, cx).row_of(ix), ScrollStrategy::Nearest);
         }
         if cx.global::<Ui>().settings.view_per_folder {
             self.remember(ViewChange::View(mode), cx);
@@ -1453,7 +1470,7 @@ impl Pane {
     /// The grid the pane would draw right now. Until the first icon frame, the
     /// last known viewport height (or the window's) decides the visible rows;
     /// column count and tile bounds only need the width and the listing.
-    fn icon_grid(&self, count: usize) -> GridGeometry {
+    fn icon_grid(&self, count: usize, cx: &App) -> GridGeometry {
         let width = f32::from(self.list_width).max(1.0);
         let height = self
             .icon_bounds
@@ -1463,8 +1480,11 @@ impl Pane {
             .unwrap_or(1.0)
             .max(1.0);
         let mut metrics = self.icon_size.metrics();
+        let name_height = 2.0 * icon_name_line_height(cx.global::<Ui>().settings.font_size);
+        let content_height = ICON_TILE_TOP + metrics.icon_size + ICON_BOX_PADDING + ICON_TILE_GAP + name_height;
+        metrics.tile_height = metrics.tile_height.max(content_height + 1.0);
         if self.icon_caption.is_some() {
-            metrics.tile_height += CAPTION_LINE_HEIGHT;
+            metrics.tile_height += ICON_TILE_GAP + CAPTION_LINE_HEIGHT;
         }
         GridGeometry::new(count, width, height, metrics)
     }
@@ -1677,7 +1697,7 @@ impl Pane {
                 && let Some(ix) = folder.read(cx).cursor_ix()
             {
                 let count = folder.read(cx).row_count();
-                self.icon_scroll.scroll_to_item(self.icon_grid(count).row_of(ix), ScrollStrategy::Nearest);
+                self.icon_scroll.scroll_to_item(self.icon_grid(count, cx).row_of(ix), ScrollStrategy::Nearest);
             }
             if k == self.focused {
                 self.load_preview(cx);
@@ -2013,7 +2033,7 @@ impl Pane {
         if count == 0 {
             return 0;
         }
-        let grid = self.icon_grid(count);
+        let grid = self.icon_grid(count, cx);
         let columns = grid.columns().max(1);
         let last = count - 1;
         let row = grid.row_of(from);
@@ -2635,7 +2655,7 @@ impl Pane {
                 },
             )
         };
-        let grid = self.icon_grid(count);
+        let grid = self.icon_grid(count, cx);
         let mut ordered = Vec::new();
         let mut hits: HashMap<PathBuf, (u64, bool)> = HashMap::new();
         {
@@ -2702,9 +2722,9 @@ impl Pane {
                 }
                 let Some(bounds) = this.icon_bounds.get() else { return };
                 let direction = if pointer.y < bounds.top() + edge {
-                    -1
+                    -1.0
                 } else if pointer.y > bounds.bottom() - edge {
-                    1
+                    1.0
                 } else {
                     return;
                 };
@@ -2716,14 +2736,19 @@ impl Pane {
                     this.cancel_marquee(cx);
                     return;
                 }
-                let grid = this.icon_grid(count);
-                let offset = f32::from(this.icon_scroll.0.borrow().base_handle.offset().y);
-                let first = grid.first_visible_row(offset.max(0.0)) as isize;
-                let target = (first + direction).clamp(0, grid.rows().saturating_sub(1) as isize);
-                if target == first {
-                    return;
+                let grid = this.icon_grid(count, cx);
+                {
+                    let scroll = &this.icon_scroll.0.borrow().base_handle;
+                    let mut offset = scroll.offset();
+                    let top = -f32::from(offset.y);
+                    let max = (grid.content_height() - grid.viewport_height()).max(0.0);
+                    let next = (top + direction * grid.row_pitch()).clamp(0.0, max);
+                    if next == top {
+                        return;
+                    }
+                    offset.y = px(-next);
+                    scroll.set_offset(offset);
                 }
-                this.icon_scroll.scroll_to_item_strict(target as usize, ScrollStrategy::Top);
                 this.update_marquee(pointer, cx);
             })
             .ok();
@@ -3044,7 +3069,7 @@ impl Pane {
         let mode = self.mode;
         let icon_scroll = self.icon_scroll.clone();
         let icon_rows =
-            self.folders.first().map(|folder| self.icon_grid(folder.read(cx).row_count()).rows()).unwrap_or(0);
+            self.folders.first().map(|folder| self.icon_grid(folder.read(cx).row_count(), cx).rows()).unwrap_or(0);
         let Some(bench) = self.bench.as_mut() else { return };
         window.request_animation_frame();
         let folder = self.folders[0].read(cx);
@@ -3648,49 +3673,42 @@ impl Pane {
     /// visible rows and a small overscan are laid out; `GridGeometry` is the one
     /// source for tile bounds, hit tests and scroll rows.
     fn render_icons(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let count = self.folders[0].read(cx).row_count();
-        let geometry = self.icon_grid(count);
-        if let Some(old) = self.grid
-            && (old.columns() != geometry.columns()
-                || old.row_pitch() != geometry.row_pitch()
-                || old.count() != geometry.count()
-                || old.width() != geometry.width())
-        {
-            self.cancel_marquee(cx);
-            let offset = f32::from(self.icon_scroll.0.borrow().base_handle.offset().y);
-            let (cursor_path, cursor_visible, anchors) = {
-                let folder = self.folders[0].read(cx);
-                let visible = old.visible_rows(offset.max(0.0));
-                let cursor = folder.cursor_ix();
-                let cursor_path = cursor.and_then(|ix| folder.row(ix)).map(|(entry, _)| entry.path.clone());
-                let cursor_visible = cursor.is_some_and(|ix| visible.contains(&old.row_of(ix)));
-                let mut anchors = Vec::new();
-                for row in visible.start..visible.end {
-                    let Some(last) = old.last_index_of_row(row) else { break };
-                    for ix in old.first_index_of_row(row)..=last {
-                        if let Some((entry, _)) = folder.row(ix) {
-                            anchors.push(entry.path.clone());
-                        }
-                    }
-                }
-                (cursor_path, cursor_visible, anchors)
-            };
-            let target = if cursor_visible {
-                cursor_path
-            } else {
-                anchors.into_iter().find(|path| self.folders[0].read(cx).row_of_path(path).is_some())
-            };
-            if let Some(path) = target
-                && let Some(ix) = self.folders[0].read(cx).row_of_path(&path)
+        let folder_entity = self.folders[0].clone();
+        let geometry = self.icon_grid(folder_entity.read(cx).row_count(), cx);
+        if let Some(old) = self.grid {
+            if old != geometry {
+                self.cancel_marquee(cx);
+            }
+            let folder = folder_entity.read(cx);
+            let viewport = self.icon_viewport.borrow();
+            if let Some(viewport) = viewport.as_ref().filter(|viewport| viewport.folder == folder_entity.entity_id())
+                && (old.columns() != geometry.columns()
+                    || old.row_pitch() != geometry.row_pitch()
+                    || viewport.generation != folder.layout_generation())
             {
-                let strategy = if cursor_visible { ScrollStrategy::Nearest } else { ScrollStrategy::Top };
-                self.icon_scroll.scroll_to_item(geometry.row_of(ix), strategy);
+                if let Some((index, top)) =
+                    viewport.anchors.iter().find_map(|(path, top)| folder.row_of_path(path).map(|index| (index, top)))
+                {
+                    let scroll = &self.icon_scroll.0.borrow().base_handle;
+                    let mut offset = scroll.offset();
+                    offset.y = px((*top - geometry.row_top(geometry.row_of(index))).min(0.0));
+                    scroll.set_offset(offset);
+                }
+                if old.metrics().icon_size != geometry.metrics().icon_size
+                    && let Some(path) = &viewport.visible_cursor
+                    && folder.selection_cursor() == Some(path)
+                    && let Some(index) = folder.row_of_path(path)
+                {
+                    self.icon_scroll.scroll_to_item(geometry.row_of(index), ScrollStrategy::Nearest);
+                }
             }
         }
         self.grid = Some(geometry);
         let rows = geometry.rows();
         let scroll = self.icon_scroll.clone();
         let bounds = self.icon_bounds.clone();
+        let viewport = self.icon_viewport.clone();
+        let viewport_scroll = scroll.clone();
         let render_rows =
             cx.processor(move |this, range, window, cx| this.render_icon_rows(geometry, range, window, cx));
         let mut body = uniform_list("icon-entries", rows, render_rows)
@@ -3717,8 +3735,35 @@ impl Pane {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .on_children_prepainted(move |children, _, _| {
-                    bounds.set(children.first().copied());
+                .on_children_prepainted(move |children, _, cx| {
+                    let viewport_bounds = children.first().copied();
+                    bounds.set(viewport_bounds);
+                    let Some(viewport_bounds) = viewport_bounds else { return };
+                    let folder = folder_entity.read(cx);
+                    let offset = f32::from(viewport_scroll.0.borrow().base_handle.offset().y);
+                    let visible =
+                        geometry.with_viewport_height(f32::from(viewport_bounds.size.height)).visible_rows(-offset);
+                    let mut anchors = Vec::new();
+                    for row in visible.clone() {
+                        let Some(last) = geometry.last_index_of_row(row) else { break };
+                        let top = geometry.row_top(row) + offset;
+                        for index in geometry.first_index_of_row(row)..=last {
+                            if let Some((entry, _)) = folder.row(index) {
+                                anchors.push((entry.path.clone(), top));
+                            }
+                        }
+                    }
+                    let visible_cursor = folder
+                        .cursor_ix()
+                        .filter(|index| visible.contains(&geometry.row_of(*index)))
+                        .and_then(|_| folder.selection_cursor())
+                        .map(Path::to_path_buf);
+                    viewport.replace(Some(IconViewport {
+                        folder: folder_entity.entity_id(),
+                        generation: folder.layout_generation(),
+                        anchors,
+                        visible_cursor,
+                    }));
                 })
                 .on_mouse_down(
                     MouseButton::Left,
@@ -3812,7 +3857,8 @@ impl Pane {
             let folder = self.folders[0].read(cx);
             (self.folders[0].entity_id(), folder.row_count(), folder.cursor_ix())
         };
-        let text_width = metrics.tile_width - 8.0;
+        let text_width = px(metrics.tile_width - 8.0);
+        let line_height = px(icon_name_line_height(ui.settings.font_size));
         let caption_id = self.icon_caption.as_deref().and_then(|id| crow_core::ExtensionId::parse(id).ok());
         let caption_reserved = self.icon_caption.is_some();
         let rows = range
@@ -3907,8 +3953,8 @@ impl Pane {
                     };
                     let thumb = div()
                         .relative()
-                        .w(px(metrics.icon_size + 8.0))
-                        .h(px(metrics.icon_size + 8.0))
+                        .w(px(metrics.icon_size + ICON_BOX_PADDING))
+                        .h(px(metrics.icon_size + ICON_BOX_PADDING))
                         .flex_none()
                         .flex()
                         .items_center()
@@ -3940,45 +3986,35 @@ impl Pane {
                                 .text_color(color(theme.role("fg-muted")))
                                 .child(badge)
                         }));
-                    let name = tile_name(&entry.name, folder.row_match(ix), px(text_width * 2.0), font_size, window);
-                    let clipped = name.truncated.cut.is_some();
+                    let name = fit_icon_name(&entry.name, text_width, font_size, window);
+                    let clipped = name.cut.is_some();
+                    let label = div().w(text_width).h(line_height * 2).flex_none().overflow_hidden();
                     let label = match self.renaming.as_ref().filter(|r| r.path == entry.path) {
-                        Some(r) => div().w(px(text_width)).child(r.input.clone()).into_any_element(),
+                        Some(r) => label.child(r.input.clone()),
                         None => {
-                            let ranges = name
-                                .ranges
-                                .iter()
-                                .flat_map(|range| map_range(&name.truncated, range.clone()))
+                            let ranges = folder
+                                .row_match(ix)
+                                .into_iter()
+                                .flat_map(|range| map_range(&name, range))
                                 .filter(|range| !range.is_empty())
                                 .collect::<Vec<_>>();
-                            let label_height = (metrics.tile_height
-                                - 4.0
-                                - (metrics.icon_size + 8.0)
-                                - 2.0
-                                - if caption_reserved { CAPTION_LINE_HEIGHT } else { 0.0 }
-                                - 2.0)
-                                .max(16.0);
-                            div()
-                                .w(px(text_width))
-                                .h(px(label_height))
-                                .min_h_0()
-                                .overflow_hidden()
+                            label
+                                .line_height(line_height)
                                 .line_clamp(2)
                                 .text_center()
                                 .text_size(font_size)
                                 .text_color(color(theme.role("fg")))
                                 .opacity(dim)
                                 .child(if ranges.is_empty() {
-                                    name.truncated.text.clone().into_any_element()
+                                    name.text.into_any_element()
                                 } else {
-                                    highlight_text(name.truncated.text.clone(), &ranges, theme, selected && active)
-                                        .into_any_element()
+                                    highlight_text(name.text, &ranges, theme, selected && active).into_any_element()
                                 })
-                                .into_any_element()
                         }
-                    };
+                    }
+                    .into_any_element();
                     let caption_display = if caption_reserved {
-                        let text = truncate_middle(&caption_text, px(text_width), px(11.), window);
+                        let text = truncate_middle(&caption_text, text_width, px(11.), window);
                         let nonempty = !caption_text.is_empty();
                         let name = entry.name.clone();
                         Some(
@@ -3990,8 +4026,9 @@ impl Pane {
                                         format!("caption-slot-{name}")
                                     }
                                 })
-                                .w(px(text_width))
+                                .w(text_width)
                                 .h(px(CAPTION_LINE_HEIGHT))
+                                .line_height(px(CAPTION_LINE_HEIGHT))
                                 .flex_none()
                                 .overflow_hidden()
                                 .whitespace_nowrap()
@@ -4101,8 +4138,8 @@ impl Pane {
                         .flex()
                         .flex_col()
                         .items_center()
-                        .pt(px(4.))
-                        .gap(px(2.))
+                        .pt(px(ICON_TILE_TOP))
+                        .gap(px(ICON_TILE_GAP))
                         .on_drag(DraggedSelection { entries: drag_entries }, {
                             let handoff = handoff.clone();
                             move |_value, offset, window, cx| {
@@ -4187,7 +4224,7 @@ impl Pane {
             return;
         }
         let offset = f32::from(self.icon_scroll.0.borrow().base_handle.offset().y);
-        if self.grid.is_some_and(|grid| grid.first_visible_row(offset.max(0.0)) >= TIP_SCROLL_ROWS) {
+        if self.grid.is_some_and(|grid| grid.first_visible_row(-offset) >= TIP_SCROLL_ROWS) {
             cx.emit(PaneEvent::LongFolderScrolled);
         }
     }
@@ -5032,15 +5069,15 @@ fn with_island_rounding<E: Styled>(element: E, island: Option<IslandEdges>) -> E
     }
 }
 
-/// A tile's name, fitted to two lines' width. Long names keep their start and
-/// extension (middle elision); the caller wraps the rest at word boundaries.
-struct TileName {
-    truncated: crate::style::Truncated,
-    ranges: Vec<Range<usize>>,
-}
-
-fn tile_name(name: &str, range: Option<Range<usize>>, max: Pixels, font_size: Pixels, window: &Window) -> TileName {
-    TileName { truncated: truncate_middle_parts(name, max, font_size, window), ranges: range.into_iter().collect() }
+/// Fit the same wrapped lines that the tile paints, including space lost at a word break.
+fn fit_icon_name(name: &str, width: Pixels, font_size: Pixels, window: &Window) -> crate::style::Truncated {
+    let style = window.text_style();
+    truncate_middle_parts_to_fit(name, |text| {
+        window
+            .text_system()
+            .shape_text(text.to_owned().into(), font_size, &[style.to_run(text.len())], Some(width), None)
+            .is_ok_and(|lines| lines.iter().map(|line| f32::from(line.size(px(1.)).height)).sum::<f32>() <= 2.0)
+    })
 }
 
 /// The file icon with the trash glyph drawn over it while a row is swallowed.
@@ -5728,6 +5765,20 @@ impl Pane {
 #[cfg(test)]
 mod tests {
     use super::{IslandEdges, drag_combo_left, draws_selection_fill, island_edges, selection_islands};
+
+    #[gpui::test]
+    fn icon_names_fit_two_real_lines_and_keep_the_extension(cx: &mut gpui::TestAppContext) {
+        cx.add_empty_window().update(|window, _| {
+            let name = super::fit_icon_name(
+                "Quarterly financial projections (revised).pdf",
+                gpui::px(92.),
+                gpui::px(13.),
+                window,
+            );
+            assert!(name.cut.is_some());
+            assert!(name.text.starts_with("Quarterly") && name.text.ends_with(".pdf"), "{}", name.text);
+        });
+    }
 
     #[test]
     fn selection_islands_are_contiguous_runs() {

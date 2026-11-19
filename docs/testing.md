@@ -454,6 +454,11 @@ finish line carries elapsed ms, first-hit ms, scanned, skipped, rows, hits, `nam
 Run `scripts/bundle.sh --open` so macOS treats Crow as an app. Rows are grouped by window
 region. Committed screenshots come from `scripts/shot.sh` (U11, I2).
 
+For agent-driven app checks, always launch with tips off. Choose **Don’t show tips**
+if Crow asks on first launch. To skip the prompt in a fresh test profile, set
+`tips = "off"` in its `settings.toml` and put `{"tips_choice":false}` in its
+`onboarding.json` under `CROW_STATE_DIR`. Enable tips only for checks that exercise them.
+
 ### Band and menus
 
 | Check | How |
