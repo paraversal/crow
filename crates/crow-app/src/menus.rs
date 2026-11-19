@@ -337,6 +337,7 @@ mod tests {
                 "as Icons",
                 "as List",
                 "as Columns",
+                "as Gallery",
                 "—",
                 "Icon Size: Compact",
                 "Icon Size: Standard",

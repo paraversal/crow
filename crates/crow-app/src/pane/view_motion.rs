@@ -89,10 +89,13 @@ impl ViewMotion {
         if pane.mode == ViewMode::Icons {
             return Self::icon_origins(pane, now, cx);
         }
+        if pane.mode == ViewMode::Gallery {
+            return Self::gallery_origins(pane, now, cx);
+        }
         let (area, row_inset, top_inset) = match pane.mode {
             ViewMode::List => (pane.list_bounds.get(), 8.0, LIST_TOP_INSET),
             ViewMode::Columns => (pane.column_bounds.borrow().get(&pane.focused).copied(), 4.0, 0.0),
-            ViewMode::Icons => unreachable!("handled above"),
+            ViewMode::Icons | ViewMode::Gallery => unreachable!("handled above"),
         };
         let Some(area) = area else { return HashMap::new() };
         let columns = pane.mode == ViewMode::Columns;
@@ -128,6 +131,43 @@ impl ViewMotion {
                     icon: point(icon_x, center_y),
                     label: point(icon_x + px(24.0), center_y),
                     row: Bounds::new(point(base_x, top), size(width, px(ROW_HEIGHT))),
+                    selected: folder.is_selected(&entry.path),
+                };
+                let painted = in_flight
+                    .and_then(|(motion, t)| motion.row(folder_id, &entry.path, t))
+                    .map_or(target, |row| row.origin.interpolate(target, row.t));
+                Some((entry.path.clone(), painted))
+            })
+            .collect()
+    }
+
+    /// Capture the visible rail rows. The fixed rail height is the same in every
+    /// width tier, so the origin math needs no geometry object.
+    fn gallery_origins(pane: &Pane, now: Instant, cx: &App) -> HashMap<PathBuf, RowOrigin> {
+        let folder = pane.focused_folder();
+        let folder_id = folder.entity_id();
+        if pane.presented_layout != Some((ViewMode::Gallery, folder_id)) {
+            return pane.view_motion.as_ref().map_or_else(HashMap::new, |motion| motion.origins.clone());
+        }
+        let Some(area) = pane.gallery.bounds.get() else { return HashMap::new() };
+        let folder = folder.read(cx);
+        let offset = shown_offset(&pane.gallery.scroll);
+        let row_height = super::gallery::ROW_HEIGHT;
+        let first = ((-offset / row_height).floor().max(0.0) as usize).min(folder.row_count());
+        let count = (f32::from(area.size.height) / row_height).ceil() as usize + 1;
+        let last = (first + count).min(folder.row_count());
+        let in_flight =
+            pane.view_motion.as_ref().and_then(|motion| motion.progress(Effective::Full, now).map(|t| (motion, t)));
+        (first..last)
+            .filter_map(|ix| {
+                let (entry, _) = folder.row(ix)?;
+                let top = area.top() + px(offset + ix as f32 * row_height);
+                let center_y = top + px(row_height / 2.0);
+                let icon_x = area.left() + px(16.);
+                let target = RowOrigin {
+                    icon: point(icon_x, center_y),
+                    label: point(icon_x + px(28.0), center_y),
+                    row: Bounds::new(point(area.left() + px(4.), top), size(area.size.width - px(8.), px(row_height))),
                     selected: folder.is_selected(&entry.path),
                 };
                 let painted = in_flight

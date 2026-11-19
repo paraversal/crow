@@ -17,8 +17,8 @@ use crate::actions::{
     NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, OpenSettings, OpenTerminal, PasteFiles, PasteMoveFiles,
     QuickLook, Quit, Redo, RemoveFromSidebar, Rename, ResetFolderView, SearchEverything, SearchHome, SearchReveal,
     SelectAll, ShowCommandPalette, ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus,
-    ToggleActivity, ToggleHiddenFiles, TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsIcons, ViewAsList,
-    WhyThisView,
+    ToggleActivity, ToggleHiddenFiles, TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery,
+    ViewAsIcons, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -89,6 +89,7 @@ pub enum CommandId {
     ViewAsIcons,
     ViewAsList,
     ViewAsColumns,
+    ViewAsGallery,
     IconSizeCompact,
     IconSizeStandard,
     IconSizeLarge,
@@ -177,6 +178,7 @@ impl CommandId {
             CommandId::ViewAsIcons => "view-as-icons",
             CommandId::ViewAsList => "view-as-list",
             CommandId::ViewAsColumns => "view-as-columns",
+            CommandId::ViewAsGallery => "view-as-gallery",
             CommandId::IconSizeCompact => "icon-size-compact",
             CommandId::IconSizeStandard => "icon-size-standard",
             CommandId::IconSizeLarge => "icon-size-large",
@@ -518,6 +520,14 @@ pub const COMMANDS: &[Command] = &[
         action: &ViewAsColumns,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::View, section: 0, title: "as Columns" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::ViewAsGallery,
+        label: "View as Gallery",
+        action: &ViewAsGallery,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::View, section: 0, title: "as Gallery" }),
         palette: true,
     },
     Command {

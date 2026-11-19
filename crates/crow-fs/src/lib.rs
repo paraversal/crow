@@ -17,7 +17,9 @@ pub use cloud::{
     AllowAll, CloudStatus, ReadDecision, ReadGate, ReadHint, dataless_flags, dataless_metadata, is_cloud_candidate,
     status_age_limit,
 };
-pub use listing::{Entry, is_package_name, is_package_path, list_dir, stat_entry};
+pub use listing::{
+    Entry, FolderSample, SampleIncomplete, is_package_name, is_package_path, list_dir, list_sample, stat_entry,
+};
 pub use snapshot::{KindOf, Snapshot, apply_changes, apply_stats, read_dir, stat_changes};
 pub use sort::{Sort, SortKey, compare, natural_cmp, sort_entries};
 pub use watch::{FolderChange, FolderWatcher, watch_folder};

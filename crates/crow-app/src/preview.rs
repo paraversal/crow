@@ -169,6 +169,40 @@ pub async fn plugin_preview(
     None
 }
 
+/// The provider pipeline shared by the Preview pane and Gallery: try the
+/// configured plugin providers in order, then the native previewers. The caller
+/// owns target/generation checks; this only does the bounded work.
+#[allow(clippy::too_many_arguments)]
+pub async fn load_with_plugins(
+    cx: &mut gpui::AsyncApp,
+    surface: crate::plugins::SurfaceId,
+    candidates: Vec<crate::plugins::PreviewCandidate>,
+    entry: Entry,
+    extensions: Arc<Extensions>,
+    gate: Arc<dyn ReadGate>,
+    cloud: Option<CloudStatus>,
+    line: Option<u64>,
+    revision: u64,
+    cancelled: Arc<AtomicBool>,
+) -> Option<Preview> {
+    let readable = gate.check(&entry.path, ReadHint::for_path(&entry.path)) == ReadDecision::Readable;
+    let plugin = if candidates.is_empty() || !readable || cancelled.load(Ordering::Relaxed) {
+        None
+    } else {
+        plugin_preview(cx, surface, candidates, entry.clone(), gate.clone(), cloud, revision, cancelled.clone()).await
+    };
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    match plugin {
+        Some(preview) => Some(preview),
+        None => {
+            let entry = entry.clone();
+            Some(cx.background_spawn(async move { fetch_at(&entry, &extensions, line, gate.as_ref(), cloud) }).await)
+        }
+    }
+}
+
 /// `fetch`, plus the lines around a content hit when the text previewer read it.
 /// `gate` is a fresh read policy; `cloud` is only for the placeholder's text.
 pub fn fetch_at(
@@ -233,8 +267,9 @@ pub fn spoken(
 }
 
 /// A metadata-only block where a picture or text preview would be. There is no
-/// control here: downloading stays an explicit Finder/user action.
-fn cloud_placeholder(cloud: Option<CloudStatus>, theme: &Theme) -> Div {
+/// control here: downloading stays an explicit Finder/user action. `height`
+/// `None` fills the cell for Gallery.
+fn cloud_placeholder(cloud: Option<CloudStatus>, theme: &Theme, height: Option<gpui::Pixels>) -> Div {
     let (glyph_name, role, text) = match cloud {
         Some(CloudStatus::Downloading) => (Glyph::Cloud, "accent", "Downloading from iCloud…"),
         Some(CloudStatus::NotDownloaded) => (Glyph::Cloud, "fg-muted", "Not downloaded from iCloud"),
@@ -242,7 +277,8 @@ fn cloud_placeholder(cloud: Option<CloudStatus>, theme: &Theme) -> Div {
         _ => (Glyph::CloudOff, "fg-muted", "Preview unavailable for this iCloud item"),
     };
     div()
-        .h(px(220.))
+        .when_some(height, |block, height| block.h(height))
+        .when(height.is_none(), |block| block.size_full())
         .flex()
         .flex_col()
         .items_center()
@@ -251,6 +287,11 @@ fn cloud_placeholder(cloud: Option<CloudStatus>, theme: &Theme) -> Div {
         .text_color(color(theme.role(role)))
         .child(glyph(glyph_name, 64.0, role, theme))
         .child(div().text_size(px(12.)).child(text))
+}
+
+/// Gallery's metadata-only cloud block, without the Preview column's fixed height.
+pub(crate) fn cloud_note(cloud: CloudStatus, theme: &Theme) -> Div {
+    cloud_placeholder(Some(cloud), theme, None)
 }
 
 /// How many lines of a text file the preview draws: the box clips the rest, so
@@ -287,10 +328,11 @@ fn code_line(index: usize, number: u64, text: &str, hit: Option<u64>, language: 
         )
 }
 
-fn plugin_contents(plugin: &PluginPreviewView, theme: &Theme) -> gpui::AnyElement {
+fn plugin_contents(plugin: &PluginPreviewView, theme: &Theme, tall: bool) -> gpui::AnyElement {
     let border = color(theme.role("border"));
     let muted = color(theme.role("fg-muted"));
     let provider = div().text_size(px(11.)).text_color(muted).child(format!("{} preview", plugin.provider));
+    let height = (!tall).then(|| px(220.));
     if let Some(text) = &plugin.preview.text {
         let lines = text
             .lines()
@@ -301,8 +343,9 @@ fn plugin_contents(plugin: &PluginPreviewView, theme: &Theme) -> gpui::AnyElemen
             .flex()
             .flex_col()
             .gap_1()
+            .when(tall, |block| block.size_full().min_h_0())
             .child(provider)
-            .child(code_box(theme, border).children(lines))
+            .child(code_box(theme, border, height).children(lines))
             .into_any_element();
     }
     let table = plugin.preview.table.as_ref().expect("preview has text or table");
@@ -315,11 +358,13 @@ fn plugin_contents(plugin: &PluginPreviewView, theme: &Theme) -> gpui::AnyElemen
         .flex()
         .flex_col()
         .gap_1()
+        .when(tall, |block| block.size_full().min_h_0())
         .child(provider)
         .child(
             div()
                 .id("preview-plugin-table-body")
-                .max_h(px(220.))
+                .when_some(height, |body, height| body.max_h(height))
+                .when(tall, |body| body.flex_1().min_h_0())
                 .overflow_y_scroll()
                 .rounded_md()
                 .border_1()
@@ -334,11 +379,12 @@ fn plugin_contents(plugin: &PluginPreviewView, theme: &Theme) -> gpui::AnyElemen
         .into_any_element()
 }
 
-fn code_box(theme: &Theme, border: Rgba) -> gpui::Stateful<Div> {
+fn code_box(theme: &Theme, border: Rgba, height: Option<gpui::Pixels>) -> gpui::Stateful<Div> {
     div()
         .id("preview-code")
         .debug_selector(|| "preview-code".into())
-        .h(px(220.))
+        .when_some(height, |box_, height| box_.h(height))
+        .when(height.is_none(), |box_| box_.flex_1().min_h_0())
         .p_2()
         .rounded_md()
         .border_1()
@@ -466,6 +512,50 @@ pub fn contents(
             Some(tags) => div().child(tags),
             None => div().text_color(muted).child("No tags"),
         })
+}
+
+/// Gallery's large cell content: the same provider output as the Preview tab,
+/// sized to fill the cell instead of the column's fixed 220-point blocks.
+pub(crate) fn gallery_content(
+    entry: &Entry,
+    preview: Option<&Preview>,
+    theme: &Theme,
+    cloud: Option<CloudStatus>,
+    resolver: &crate::icon_packs::Resolver,
+) -> gpui::AnyElement {
+    let border = color(theme.role("border"));
+    if let Some(plugin) = preview.and_then(|preview| preview.plugin.as_ref()) {
+        return plugin_contents(plugin, theme, true);
+    }
+    if preview.is_some_and(|preview| preview.blocked) {
+        return cloud_placeholder(preview.and_then(|preview| preview.cloud).or(cloud), theme, None).into_any_element();
+    }
+    match (preview.and_then(|preview| preview.image.clone()), preview.and_then(|preview| preview.content.clone())) {
+        (Some(image), _) => div()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(img(image).max_w_full().max_h_full())
+            .into_any_element(),
+        (None, Some(PreviewContent::Text(text))) => {
+            let language = Language::from_path(&entry.path);
+            let lines = text
+                .lines()
+                .take(PREVIEW_TEXT_LINES)
+                .enumerate()
+                .map(|(i, line)| code_line(i, i as u64 + 1, line, None, language, theme));
+            code_box(theme, border, None).children(lines).into_any_element()
+        }
+        _ => div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(path_icon(resolver, &entry.path, entry.is_dir, entry.is_package(), cloud, theme, 160.))
+            .into_any_element(),
+    }
 }
 
 /// A folder's summary in the preview column.

@@ -30,7 +30,7 @@ pub const DEFAULT_VIEWS: &str = r#"# Crow view settings. Changes apply when you 
 # View ▸ Why This View? (Cmd-J) shows which layer decided what.
 #
 # Keys, in any layer:
-#   view = "icons" | "list" | "columns"
+#   view = "icons" | "list" | "columns" | "gallery"
 #   icon_size = "compact" | "standard" | "large"
 #   icon_caption = "off" | "<plugin>.<column>"
 #   sort = "name" | "size" | "kind" | "modified" | "added"
@@ -431,6 +431,7 @@ fn mode_name(mode: ViewMode) -> &'static str {
         ViewMode::List => "list",
         ViewMode::Icons => "icons",
         ViewMode::Columns => "columns",
+        ViewMode::Gallery => "gallery",
     }
 }
 

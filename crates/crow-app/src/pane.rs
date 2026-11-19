@@ -397,6 +397,8 @@ pub struct Pane {
     icon_scroll: UniformListScrollHandle,
     icon_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     icon_viewport: Rc<RefCell<Option<IconViewport>>>,
+    /// Gallery: rail scroll, preview pair and folder samples.
+    gallery: gallery::Gallery,
     /// The geometry the last icon frame drew, shared by keys, hit tests and anchors.
     grid: Option<GridGeometry>,
     /// The effective icon size for this pane (from views.toml when folders decide).
@@ -530,6 +532,7 @@ impl Pane {
             icon_scroll: UniformListScrollHandle::new(),
             icon_bounds: Rc::new(Cell::new(None)),
             icon_viewport: Rc::new(RefCell::new(None)),
+            gallery: gallery::Gallery::new(),
             grid: None,
             icon_size: IconSize::Standard,
             icon_caption: None,
@@ -539,6 +542,7 @@ impl Pane {
                         "icons" => Some(ViewMode::Icons),
                         "list" => Some(ViewMode::List),
                         "columns" => Some(ViewMode::Columns),
+                        "gallery" => Some(ViewMode::Gallery),
                         _ => None,
                     })
                 })
@@ -822,6 +826,17 @@ impl Pane {
                     out.extend(
                         (0..folder.row_count().min(200))
                             .filter_map(|ix| folder.row(ix).map(|(entry, _)| format!("tile-{}", entry.name))),
+                    );
+                }
+            }
+            ViewMode::Gallery => {
+                out.push("gallery-rail".to_owned());
+                out.push("gallery-preview".to_owned());
+                if let Some(folder) = self.folders.first() {
+                    let folder = folder.read(cx);
+                    out.extend(
+                        (0..folder.row_count().min(200))
+                            .filter_map(|ix| folder.row(ix).map(|(entry, _)| format!("gallery-row-{}", entry.name))),
                     );
                 }
             }
@@ -1161,6 +1176,11 @@ impl Pane {
         self.plugin_selection.clear();
         self.plugin_scope = None;
         self.preview_cancel.store(true, Ordering::Relaxed);
+        gallery::release(self, cx);
+        if cx.try_global::<crate::plugins::Plugins>().is_some() {
+            let id = self.gallery.replace_surface();
+            cx.global_mut::<crate::plugins::Plugins>().surfaces.drop_surface(id);
+        }
         for folder in &self.folders {
             folder.update(cx, |folder, cx| folder.release_listing(cx));
         }
@@ -1316,6 +1336,7 @@ impl Pane {
             self.preview = None;
             self.load_preview(cx);
         }
+        gallery::cloud_changed(self, cx);
         cx.notify();
     }
 
@@ -1380,6 +1401,13 @@ impl Pane {
         {
             let count = self.focused_folder().read(cx).row_count();
             self.icon_scroll.scroll_to_item(self.icon_grid(count, cx).row_of(ix), ScrollStrategy::Nearest);
+        }
+        if mode == ViewMode::Gallery {
+            self.gallery.reveal = Some(Instant::now());
+            if let Some(ix) = self.focused_folder().read(cx).cursor_ix() {
+                self.gallery.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+            }
+            gallery::refresh(self, cx);
         }
         if cx.global::<Ui>().settings.view_per_folder {
             self.remember(ViewChange::View(mode), cx);
@@ -1459,7 +1487,9 @@ impl Pane {
         match mode {
             // The single-folder views show the folder you were in: the focused
             // column becomes the root. Icons projects its direct entries only.
-            ViewMode::List | ViewMode::Icons => self.collapse_to_focused(mode == ViewMode::List, cx),
+            ViewMode::List | ViewMode::Icons | ViewMode::Gallery => {
+                self.collapse_to_focused(mode == ViewMode::List, cx)
+            }
             ViewMode::Columns => self.update_chain(0, cx),
         }
         self.plugin_scope_changed(cx);
@@ -1571,7 +1601,7 @@ impl Pane {
     fn push_folder(&mut self, dir: PathBuf, auto_select: bool, cx: &mut Context<Self>) {
         let (hidden, sort) = (self.show_hidden, self.sort);
         let icon_source = cx.global::<Ui>().views.resolve(&dir).icon_source.map(|(source, _)| source);
-        let show_tree = self.mode != ViewMode::Icons;
+        let show_tree = self.mode == ViewMode::List || self.mode == ViewMode::Columns;
         let folder = cx.new(|cx| Folder::new(dir, hidden, sort, auto_select, cx));
         folder.update(cx, |folder, cx| {
             folder.set_icon_source(icon_source);
@@ -1702,6 +1732,9 @@ impl Pane {
             if k == self.focused {
                 self.load_preview(cx);
             }
+        }
+        if self.mode == ViewMode::Gallery {
+            gallery::refresh(self, cx);
         }
         cx.notify();
     }
@@ -2069,8 +2102,27 @@ impl Pane {
         self.with_focused(cx, |f, cx| f.select_all(cx));
     }
 
+    fn gallery_row_at(&self, cx: &gpui::App, pointer: Point<Pixels>) -> Option<usize> {
+        let bounds = self.gallery.bounds.get()?;
+        if pointer.x < bounds.left()
+            || pointer.x >= bounds.right()
+            || pointer.y < bounds.top()
+            || pointer.y >= bounds.bottom()
+        {
+            return None;
+        }
+        let folder = self.folders[0].read(cx);
+        let y = pointer.y - bounds.top() + px(shown_offset(&self.gallery.scroll));
+        let row = (f32::from(y) / gallery::ROW_HEIGHT).floor();
+        if row < 0.0 {
+            return None;
+        }
+        let row = row as usize;
+        (row < folder.row_count()).then_some(row)
+    }
+
     /// Column view: move into the column showing the selected folder's contents.
-    fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn move_right(&mut self, _: &MoveRight, window: &mut Window, cx: &mut Context<Self>) {
         match self.mode {
             ViewMode::List => {
                 self.list_right(cx);
@@ -2079,6 +2131,10 @@ impl Pane {
             ViewMode::Icons => {
                 let target = self.icon_neighbor(IconMove::Right, cx);
                 self.with_focused(cx, |f, cx| f.select_only(target, cx));
+                return;
+            }
+            ViewMode::Gallery => {
+                self.move_down(&MoveDown, window, cx);
                 return;
             }
             ViewMode::Columns => {}
@@ -2133,7 +2189,7 @@ impl Pane {
     /// Column view: back to the parent column. The column you leave stays, unselected.
     /// On the leftmost column there is no column to go back to, so the parent folder
     /// is pushed in from the left, with the folder we came from selected in it.
-    fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn move_left(&mut self, _: &MoveLeft, window: &mut Window, cx: &mut Context<Self>) {
         match self.mode {
             ViewMode::List => {
                 self.list_left(cx);
@@ -2142,6 +2198,10 @@ impl Pane {
             ViewMode::Icons => {
                 let target = self.icon_neighbor(IconMove::Left, cx);
                 self.with_focused(cx, |f, cx| f.select_only(target, cx));
+                return;
+            }
+            ViewMode::Gallery => {
+                self.move_up(&MoveUp, window, cx);
                 return;
             }
             ViewMode::Columns => {}
@@ -2539,8 +2599,8 @@ impl Pane {
             }
         };
         let scope = match (self.mode, self.filtering.is_some()) {
-            (ViewMode::List | ViewMode::Icons, false) => KeyScope::List,
-            (ViewMode::List | ViewMode::Icons, true) => KeyScope::ListFiltered,
+            (ViewMode::List | ViewMode::Icons | ViewMode::Gallery, false) => KeyScope::List,
+            (ViewMode::List | ViewMode::Icons | ViewMode::Gallery, true) => KeyScope::ListFiltered,
             (ViewMode::Columns, false) => KeyScope::Columns,
             (ViewMode::Columns, true) => KeyScope::ColumnsFiltered,
         };
@@ -3012,6 +3072,21 @@ impl Pane {
                     None => DropTarget { folder: folder.dir().to_path_buf(), column: 0, rows: None },
                 }
             }
+            ViewMode::Gallery => {
+                let bounds = self.gallery.bounds.get()?;
+                if !bounds.contains(&pointer) {
+                    return None;
+                }
+                let folder = self.folders.first()?.read(cx);
+                match self.gallery_row_at(cx, pointer).and_then(|ix| folder.drop_header(ix)) {
+                    Some(header) => DropTarget {
+                        folder: folder.row(header)?.0.path.clone(),
+                        column: 0,
+                        rows: Some(header..header + 1),
+                    },
+                    None => DropTarget { folder: folder.dir().to_path_buf(), column: 0, rows: None },
+                }
+            }
             ViewMode::Columns => {
                 let column = self
                     .column_bounds
@@ -3086,6 +3161,10 @@ impl Pane {
         if mode == ViewMode::Icons {
             if icon_rows > 0 {
                 icon_scroll.scroll_to_item_strict((bench.frame * 3) % icon_rows, ScrollStrategy::Top);
+            }
+        } else if mode == ViewMode::Gallery {
+            if shown > 0 {
+                self.gallery.scroll.scroll_to_item_strict((bench.frame * 3) % shown, ScrollStrategy::Top);
             }
         } else {
             folder.scroll_strict((bench.frame * 3) % shown);
@@ -5211,6 +5290,7 @@ impl Render for Pane {
             // instead of leaving a withdrawn provider's output on screen.
             self.preview = None;
             self.load_preview(cx);
+            gallery::invalidate(self, cx);
         }
         if self.marquee.is_some() && !self.focus.is_focused(window) {
             self.cancel_marquee(cx);
@@ -5301,7 +5381,7 @@ impl Render for Pane {
             .as_ref()
             .is_some_and(|filtering| filtering.input.read(cx).focus_handle(cx).is_focused(window));
         let mut context = match self.mode {
-            ViewMode::List | ViewMode::Icons => "FileList".to_owned(),
+            ViewMode::List | ViewMode::Icons | ViewMode::Gallery => "FileList".to_owned(),
             ViewMode::Columns => "FileList ColumnView".to_owned(),
         };
         if cx.global::<Ui>().settings.keymap == KeymapLayer::Vim {
@@ -5446,6 +5526,7 @@ impl Render for Pane {
                     .into_any_element()
             }
             ViewMode::Icons => self.render_icons(window, cx).into_any_element(),
+            ViewMode::Gallery => gallery::render(self, window, cx).into_any_element(),
             ViewMode::Columns => self.render_columns(window, cx).into_any_element(),
         };
         let list = div()
@@ -5453,9 +5534,15 @@ impl Render for Pane {
             .debug_selector(|| "file-list".into())
             // In column view the columns are the lists; the focusable wrapper
             // must not repeat the active column's folder name and count.
-            .role(if self.mode == ViewMode::Columns { Role::Group } else { Role::ListBox })
+            .role(if matches!(self.mode, ViewMode::Columns | ViewMode::Gallery) { Role::Group } else { Role::ListBox })
             .aria_label(if self.mode == ViewMode::Columns {
                 "Columns".to_owned()
+            } else if self.mode == ViewMode::Gallery {
+                if filtered {
+                    format!("Gallery, {title}, {shown} of {total} items")
+                } else {
+                    format!("Gallery, {title}, {total} items")
+                }
             } else if filtered {
                 format!("{title}, {shown} of {total} items")
             } else {
@@ -5577,6 +5664,16 @@ impl Pane {
             return Some(gpui::Bounds::new(
                 point(bounds.left() + px(rect.x), bounds.top() + px(rect.y) + px(offset)),
                 gpui::size(px(rect.width), px(rect.height)),
+            ));
+        }
+        if let Some(name) = selector.strip_prefix("gallery-row-") {
+            let bounds = self.gallery.bounds.get()?;
+            let folder = self.focused_folder().read(cx);
+            let ix = (0..folder.row_count()).find(|ix| folder.row(*ix).is_some_and(|(entry, _)| entry.name == name))?;
+            let top = bounds.top() + px(gallery::ROW_HEIGHT * ix as f32) + px(shown_offset(&self.gallery.scroll));
+            return Some(gpui::Bounds::new(
+                point(bounds.left(), top),
+                gpui::size(bounds.size.width, px(gallery::ROW_HEIGHT)),
             ));
         }
         if let Some(name) = selector.strip_prefix("row-") {

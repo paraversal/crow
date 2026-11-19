@@ -458,7 +458,7 @@ impl ControlId {
             ControlId::ShowPreview => "The right column's default in list and column view: Preview and Info tabs.",
             ControlId::ViewPerFolder => "Each folder opens in its saved view; off keeps the window's view.",
             ControlId::PaletteRecent => "List the commands you ran from ⌘K under Recently used.",
-            ControlId::DefaultView => "The view for folders without their own: Icons, List or Columns.",
+            ControlId::DefaultView => "The view for folders without their own: Icons, List, Columns or Gallery.",
             ControlId::DefaultSort => "The [defaults] order; a rule or folder override still wins.",
             ControlId::DefaultDirection => {
                 let ui = cx.global::<Ui>();
@@ -1536,7 +1536,7 @@ impl SettingsWindow {
             }
             ControlId::DefaultView => {
                 let current = view_index(cx.global::<Ui>().views.defaults_layer().view.unwrap_or_default());
-                let next = (current as isize + delta).clamp(0, 2) as usize;
+                let next = (current as isize + delta).clamp(0, 3) as usize;
                 if next != current {
                     self.select_default_view(next, cx);
                 }
@@ -2090,7 +2090,8 @@ impl SettingsWindow {
         let mode = match index {
             0 => ViewMode::Icons,
             1 => ViewMode::List,
-            _ => ViewMode::Columns,
+            2 => ViewMode::Columns,
+            _ => ViewMode::Gallery,
         };
         if cx.global::<Ui>().views.defaults_layer().view != Some(mode) {
             ui::save_defaults_change(DefaultsChange::View(mode), None, cx);
@@ -2571,7 +2572,7 @@ impl Render for SettingsWindow {
         let view_select = select_callback(cx, |this, index, _window, cx| this.select_default_view(index, cx));
         let default_view_row = controls::segmented(
             self.meta(ControlId::DefaultView, cx),
-            &["Icons", "List", "Columns"],
+            &["Icons", "List", "Columns", "Gallery"],
             view_index(cx.global::<Ui>().views.defaults_layer().view.unwrap_or_default()),
             self.style(ControlId::DefaultView, window, &theme),
             view_select,
@@ -3096,6 +3097,7 @@ fn view_index(view: ViewMode) -> usize {
         ViewMode::Icons => 0,
         ViewMode::List => 1,
         ViewMode::Columns => 2,
+        ViewMode::Gallery => 3,
     }
 }
 

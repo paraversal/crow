@@ -438,6 +438,16 @@ impl Folder {
         &self.entries
     }
 
+    /// A complete listing already held in memory for `path`: this folder itself
+    /// or an inline-expanded child. Gallery uses it instead of re-reading the disk.
+    pub fn loaded_listing(&self, path: &Path, cx: &gpui::App) -> Option<Arc<Vec<Entry>>> {
+        if self.dir == path {
+            return (!self.is_loading() && self.error.is_none()).then(|| self.entries.clone());
+        }
+        let child = self.children.get(path)?.folder.read(cx);
+        (!child.is_loading() && child.error.is_none()).then(|| child.entries.clone())
+    }
+
     pub fn is_loading(&self) -> bool {
         self.loading
     }

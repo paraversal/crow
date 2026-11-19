@@ -177,6 +177,7 @@ pub enum ViewMode {
     List,
     Icons,
     Columns,
+    Gallery,
 }
 
 /// Which key hints the bottom bar shows.

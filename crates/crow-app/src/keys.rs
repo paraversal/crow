@@ -361,6 +361,7 @@ mod tests {
                 (CommandId::ViewAsIcons, "⌘1"),
                 (CommandId::ViewAsList, "⌘2"),
                 (CommandId::ViewAsColumns, "⌘3"),
+                (CommandId::ViewAsGallery, "⌘4"),
                 (CommandId::Open, "⌘↓"),
                 (CommandId::QuickLook, "Space"),
                 (CommandId::Rename, "F2"),

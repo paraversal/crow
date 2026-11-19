@@ -2787,6 +2787,94 @@ fn toolbar_view_buttons_switch_views(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn gallery_mode_keeps_selection_filter_and_returns(cx: &mut TestAppContext) {
+    let root = fixture("gallery-mode");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    let mode = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.mode());
+    let names = |cx: &VisualTestContext| rows(&view, cx).into_iter().map(|(name, _)| name).collect::<Vec<_>>();
+
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    assert_eq!(mode(&cx), ViewMode::Gallery);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "the cursor survives the switch");
+    assert!(cx.debug_bounds("gallery-rail").is_some(), "rail is laid out");
+    assert!(cx.debug_bounds("gallery-preview").is_some(), "preview is laid out");
+    let selectors = pane(&view, &cx).read_with(&cx, |p, cx| p.debug_selectors(cx));
+    assert!(
+        cx.debug_bounds("gallery-row-name-beta").is_some(),
+        "the cursor row is mounted: rail={:?} rows={:?}/{:?} selectors={selectors:?}",
+        cx.debug_bounds("gallery-rail"),
+        cx.debug_bounds("gallery-row-beta"),
+        cx.debug_bounds("gallery-row-alpha")
+    );
+    let text = std::fs::read_to_string(config_dir(&cx).join("views.toml")).unwrap();
+    assert!(text.contains("view = \"gallery\""), "Cmd-4 is remembered for the folder: {text}");
+
+    // The filter travels through Gallery and back.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("bet");
+    settle(&view, &mut cx);
+    assert_eq!(names(&cx), vec!["beta"]);
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert_eq!(names(&cx), vec!["alpha", "beta", "notes.txt"]);
+
+    // Icons and List still project their own rows, with the same cursor.
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    assert_eq!(mode(&cx), ViewMode::Icons);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+    cx.simulate_keystrokes("cmd-2");
+    settle(&view, &mut cx);
+    assert_eq!(mode(&cx), ViewMode::List);
+    assert_eq!(names(&cx), vec!["alpha", "beta", "notes.txt"]);
+}
+
+#[gpui::test]
+fn gallery_uses_finder_cmd_4_in_the_vim_layer(cx: &mut TestAppContext) {
+    let root = fixture("gallery-vim");
+    let (view, mut cx) = open(cx, &root);
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.mode()), ViewMode::Gallery);
+    cx.simulate_keystrokes("j");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "j moves the rail");
+}
+
+#[gpui::test]
+fn gallery_compares_two_entries_side_by_side_or_stacked(cx: &mut TestAppContext) {
+    let root = fixture("gallery-compare");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    cx.simulate_keystrokes("cmd-4 cmd-shift-p");
+    settle(&view, &mut cx);
+    let beta = cx.debug_bounds("gallery-row-beta").expect("beta row");
+    cx.simulate_click(beta.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.selected_paths(cx).len()), 2);
+    let alpha = cx.debug_bounds("gallery-cell-alpha").expect("left cell");
+    let beta = cx.debug_bounds("gallery-cell-beta").expect("right cell");
+    assert_eq!(alpha.top(), beta.top(), "a wide window puts the pair side by side");
+    assert!(alpha.right() <= beta.left(), "{alpha:?} {beta:?}");
+}
+
+#[gpui::test]
+fn gallery_stacks_a_pair_in_a_narrow_window(cx: &mut TestAppContext) {
+    let root = fixture("gallery-compare-narrow");
+    let (view, mut cx) = open_sized(cx, &root, 640., 800.);
+    cx.simulate_keystrokes("cmd-4 cmd-shift-p");
+    settle(&view, &mut cx);
+    let beta = cx.debug_bounds("gallery-row-beta").expect("beta row");
+    cx.simulate_click(beta.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    let alpha = cx.debug_bounds("gallery-cell-alpha").expect("first cell");
+    let beta = cx.debug_bounds("gallery-cell-beta").expect("second cell");
+    assert!(alpha.bottom() <= beta.top(), "a narrow window stacks the pair: {alpha:?} {beta:?}");
+}
+
+#[gpui::test]
 fn folder_view_motion_matches_visible_paths_and_keeps_keys_live(cx: &mut TestAppContext) {
     let root = fixture("view-morph");
     for i in 0..100 {
@@ -9081,6 +9169,7 @@ fn a_long_cloud_filename_leaves_room_for_the_badge(cx: &mut TestAppContext) {
         let selector = match mode {
             ViewMode::List => format!("row-name-{name}"),
             ViewMode::Columns => format!("column-0-row-name-{name}"),
+            ViewMode::Gallery => format!("gallery-row-name-{name}"),
             ViewMode::Icons => unreachable!(),
         };
         let name_cell = cx.update(|window, _| window.debug_bounds(&selector)).expect("name cell");
