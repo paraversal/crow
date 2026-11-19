@@ -26,6 +26,7 @@ mod chrome;
 mod cloud_status;
 mod context_menu;
 mod controls;
+mod drag_drop;
 mod effects;
 mod extensions;
 mod feedback;

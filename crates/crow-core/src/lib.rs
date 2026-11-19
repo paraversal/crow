@@ -3,6 +3,7 @@
 
 pub mod batch_rename;
 mod config;
+pub mod drag;
 mod exclude;
 mod extensions;
 mod grid;

@@ -20,18 +20,88 @@ use gpui::{App, Global, SharedString, WindowHandle, WindowId, prelude::*};
 
 use crate::window::CrowWindow;
 
+/// What the drag source allows and what the final pointer asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DropOptions {
+    /// Option is held: explicitly ask for a copy.
+    pub copy: bool,
+    /// The source accepts a move.
+    pub allow_move: bool,
+    /// The source accepts a copy.
+    pub allow_copy: bool,
+}
+
+impl Default for DropOptions {
+    fn default() -> Self {
+        Self { copy: false, allow_move: true, allow_copy: true }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DropKind {
+    Move,
+    Copy,
+}
+
+impl DropOptions {
+    fn requested(self, same_volume: bool) -> Option<DropKind> {
+        if self.copy {
+            return self.allow_copy.then_some(DropKind::Copy);
+        }
+        if same_volume && self.allow_move {
+            return Some(DropKind::Move);
+        }
+        if self.allow_copy {
+            return Some(DropKind::Copy);
+        }
+        self.allow_move.then_some(DropKind::Move)
+    }
+}
+
 /// What dropping `paths` on the folder `into` does, like Finder: a move within a
-/// volume, a copy across volumes; `copy` (Option held) forces a copy. Items already
-/// in `into`, and folders dropped onto themselves or into their own contents, are
-/// left out; `None` when nothing is left.
-pub fn drop_request(paths: &[PathBuf], into: PathBuf, copy: bool) -> Option<ops::Request> {
-    let paths: Vec<PathBuf> = paths.iter().filter(|p| drop_moves(p, &into)).cloned().collect();
-    if paths.is_empty() {
+/// volume, a copy across volumes; Option forces a copy. Items already in `into`,
+/// folders dropped onto themselves or into their own contents (after resolving
+/// symlinks), duplicate paths and deleted sources are left out; `None` when
+/// nothing is left or the source does not offer the requested operation.
+pub fn drop_request(paths: &[PathBuf], into: PathBuf, options: DropOptions) -> Option<ops::Request> {
+    let mut seen = HashSet::new();
+    let mut accepted = Vec::new();
+    for path in paths {
+        if !seen.insert(path.clone()) || !drop_moves(path, &into) || !resolved_drop_moves(path, &into) {
+            continue;
+        }
+        accepted.push(path.clone());
+    }
+    if accepted.is_empty() {
         return None;
     }
-    let same_volume = paths.iter().all(|p| same_volume(p, &into));
-    let paths: Arc<[PathBuf]> = paths.into();
-    Some(if same_volume && !copy { ops::Request::Move { paths, into } } else { ops::Request::Copy { paths, into } })
+    let same_volume = accepted.iter().all(|p| same_volume(p, &into));
+    let kind = options.requested(same_volume)?;
+    let paths: Arc<[PathBuf]> = accepted.into();
+    Some(match kind {
+        DropKind::Move => ops::Request::Move { paths, into },
+        DropKind::Copy => ops::Request::Copy { paths, into },
+    })
+}
+
+/// Reject a target that Gone or nested through a symlink: resolve both sides and
+/// compare their real ancestry, not their displayed spellings. A file that
+/// disappeared during the drag is left out; a target that disappeared rejects the
+/// whole drop.
+fn resolved_drop_moves(path: &Path, into: &Path) -> bool {
+    // io-ok: only called from drop_request, which the drop handlers spawn in the background
+    let Ok(into) = into.canonicalize() else { return false };
+    // Resolve the source's folder, not the item: a dragged symlink moves the link
+    // itself, so a link into the folder it points to is still a valid drop.
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { return false };
+    // io-ok: as above
+    let Ok(parent) = parent.canonicalize() else { return false };
+    // io-ok: as above
+    if std::fs::symlink_metadata(path).is_err() {
+        return false;
+    }
+    let path = parent.join(name);
+    path.parent() != Some(into.as_path()) && !into.starts_with(&path)
 }
 
 /// Whether dropping `paths` into `into` would do anything: not every item is already
@@ -1344,5 +1414,76 @@ mod tests {
         let cut = Clipboard::new(vec![PathBuf::from("/tmp/a")].into(), true, None);
         assert!(cut.flash.is_none(), "a cut does not flash");
         assert!(cut.marked, "a cut is marked");
+    }
+
+    #[test]
+    fn drop_options_follow_the_source_mask_and_option() {
+        let options = DropOptions::default();
+        assert_eq!(options.requested(true), Some(DropKind::Move));
+        assert_eq!(options.requested(false), Some(DropKind::Copy), "cross-volume copy");
+        let copy = DropOptions { copy: true, ..options };
+        assert_eq!(copy.requested(true), Some(DropKind::Copy), "Option asks for copy");
+        assert_eq!(
+            DropOptions { copy: true, allow_copy: false, ..options }.requested(true),
+            None,
+            "an unavailable explicit copy is refused"
+        );
+        assert_eq!(
+            DropOptions { allow_move: false, allow_copy: false, ..options }.requested(true),
+            None,
+            "a source offering neither operation cannot drop"
+        );
+        assert_eq!(
+            DropOptions { allow_move: false, ..options }.requested(true),
+            Some(DropKind::Copy),
+            "copy-only sources copy on the same volume"
+        );
+    }
+
+    #[test]
+    fn drop_request_deduplicates_and_resolves_symlinks() {
+        let root = tempfile::tempdir().expect("temp root");
+        let a = root.path().join("a");
+        let b = root.path().join("b");
+        std::fs::create_dir_all(&a).expect("a");
+        std::fs::create_dir_all(&b).expect("b");
+        std::fs::write(a.join("file.txt"), "x").expect("file");
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&a, &alias).expect("symlink");
+
+        let file = a.join("file.txt");
+        let duplicated = [file.clone(), file.clone()];
+        let request = drop_request(&duplicated, b.clone(), DropOptions::default()).expect("one request");
+        match request {
+            ops::Request::Move { paths, into } => {
+                assert_eq!(into, b);
+                assert_eq!(paths.as_ref(), std::slice::from_ref(&file), "raw duplicate path kept once");
+            }
+            other => panic!("expected a move, got {other:?}"),
+        }
+
+        assert!(
+            drop_request(std::slice::from_ref(&a), alias.clone(), DropOptions::default()).is_none(),
+            "a folder cannot move into a symlink alias of itself"
+        );
+        assert!(
+            matches!(
+                drop_request(std::slice::from_ref(&alias), a.clone(), DropOptions::default()),
+                Some(ops::Request::Move { .. })
+            ),
+            "a symlink moves itself, even into the folder it points to"
+        );
+        assert!(
+            drop_request(&[root.path().join("b/../a/file.txt")], a.clone(), DropOptions::default()).is_none(),
+            "an unnormalized spelling of an item already in the target is a no-op"
+        );
+        assert!(
+            drop_request(std::slice::from_ref(&file), a.clone(), DropOptions::default()).is_none(),
+            "an item already in the target is a no-op"
+        );
+        assert!(
+            drop_request(&[file], b.join("missing"), DropOptions::default()).is_none(),
+            "a target deleted during the drag rejects the drop"
+        );
     }
 }

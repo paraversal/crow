@@ -2,14 +2,17 @@
 //! progress, messages, errors) and the counts. `CrowWindow::bar_state` builds
 //! the state; rendering here reads only that.
 
+use std::cell::RefCell;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Action, Animation, AnimationExt, AnyElement, App, Entity, FontWeight, IntoElement, KeyBinding, Pixels, Role,
-    SharedString, SpringAnimation, SpringConfig, TextRun, Window, div, prelude::*, px, relative, transparent_black,
+    Action, Animation, AnimationExt, AnyElement, App, Bounds, Entity, FontWeight, IntoElement, KeyBinding, Pixels,
+    Role, SharedString, SpringAnimation, SpringConfig, TextRun, Window, div, prelude::*, px, relative,
+    transparent_black,
 };
 
 use crate::actions::{
@@ -33,6 +36,38 @@ use crow_fs::human_size;
 
 /// The bar's height; tips sit above it.
 pub const HEIGHT: f32 = 38.;
+
+/// One path segment's drawn bounds and destination.
+#[derive(Clone, Debug)]
+pub struct PathHit {
+    pub bounds: Bounds<Pixels>,
+    pub path: PathBuf,
+    pub is_dir: bool,
+}
+
+/// The path hits from the last painted bar, shared with the drop router.
+pub type PathHits = Rc<RefCell<Vec<PathHit>>>;
+
+fn register_path_hit(
+    hits: &PathHits,
+    target: PathBuf,
+    is_dir: bool,
+    last: bool,
+    child: impl IntoElement,
+) -> AnyElement {
+    let hits = hits.clone();
+    div()
+        .flex()
+        .items_center()
+        .map(|wrapper| if last { wrapper.min_w_0() } else { wrapper.flex_none() })
+        .on_children_prepainted(move |children, _, _| {
+            if let Some(bounds) = children.first() {
+                hits.borrow_mut().push(PathHit { bounds: *bounds, path: target.clone(), is_dir });
+            }
+        })
+        .child(child)
+        .into_any_element()
+}
 
 /// Everything the bar draws this frame, computed on the main thread.
 pub struct BarState {
@@ -726,7 +761,14 @@ fn hover_path(hovered: &bool, window: &mut Window, cx: &mut App) {
 }
 
 /// One bar: path · transient · counts.
-pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) -> impl IntoElement + use<> {
+pub fn render(
+    state: BarState,
+    pane: Entity<Pane>,
+    hovered: bool,
+    path_hits: &PathHits,
+    cx: &mut App,
+) -> impl IntoElement + use<> {
+    path_hits.borrow_mut().clear();
     let ui = cx.global::<Ui>();
     let theme = ui.theme.clone();
     let border = color(theme.role("border"));
@@ -749,7 +791,15 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
         for (i, (name, target)) in parts.iter().enumerate() {
             if hidden.contains(&i) {
                 if i == hidden.start {
-                    children.push(folded_segment(&parts[hidden.clone()], &pane, hover).into_any_element());
+                    let folded = &parts[hidden.clone()];
+                    let deepest = folded.last().map(|(_, path)| path.clone()).unwrap_or_default();
+                    children.push(register_path_hit(
+                        path_hits,
+                        deepest,
+                        true,
+                        false,
+                        folded_segment(folded, &pane, hover).into_any_element(),
+                    ));
                     children.push(separator().into_any_element());
                 }
                 continue;
@@ -800,6 +850,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
                 .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
                     promote_drag(selection, &handoff, window, cx)
                 });
+            let hit_target = target.clone();
             let target = target.clone();
             let part = part.on_click(move |_, _, cx| {
                 // A segment is not empty space: a double-click must not edit the path.
@@ -816,7 +867,13 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
                     }
                 });
             });
-            children.push(with_tooltip(part, spoke, None).into_any_element());
+            children.push(register_path_hit(
+                path_hits,
+                hit_target,
+                is_dir,
+                i == last,
+                with_tooltip(part, spoke, None).into_any_element(),
+            ));
             if i < last {
                 children.push(separator().into_any_element());
             }

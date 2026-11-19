@@ -18,11 +18,10 @@ use std::time::{Duration, Instant};
 
 use crow_core::motion::{self, Effective, Fx};
 use crow_core::{Favorite, Location, SavedQueryId, Section, SectionDestination, SectionRow, SidebarEdit, Slot, TagId};
-use crow_fs::ops::Request;
 use gpui::{
-    Animation, AnimationExt, Bounds, ClickEvent, Context, EventEmitter, ExternalPaths, FocusHandle, Focusable,
-    FontWeight, IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, Role, SharedString, SpringAnimation,
-    SpringConfig, Task, Window, div, img, prelude::*, px,
+    Animation, AnimationExt, Bounds, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight,
+    IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, Role, SharedString, SpringAnimation, SpringConfig,
+    Task, Window, div, img, prelude::*, px,
 };
 
 use crate::actions::{
@@ -32,7 +31,6 @@ use crate::actions::{
 use crate::chrome::with_tooltip;
 use crate::context_menu::{SidebarMenuKind, SidebarMenuState};
 use crate::palette::CommandId;
-use crate::pane::DraggedSelection;
 use crate::style::{color, current_location, cursor_ring, display_text, drop_outline, effect_tint, icon};
 use crate::ui::{self, Ui};
 
@@ -43,7 +41,6 @@ pub enum SidebarEvent {
     /// The context menu's Open in New Tab.
     OpenInNewTab(Location),
     /// Files dropped on a row.
-    Run(Request),
     Message(SharedString, bool),
     /// The sidebar's saved-query context menu.
     EditSavedQuery(SavedQueryId),
@@ -171,6 +168,49 @@ impl Row {
             _ => None,
         }
     }
+}
+
+/// A cheap identity for the drawn rows: a reorder, added favorite or section
+/// change invalidates a pending spring timer without invalidating a stationary
+/// pointer over an unchanged row.
+fn sidebar_layout_generation(rows: &[Row]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    rows.len().hash(&mut hasher);
+    for row in rows {
+        match row {
+            Row::Header(name, group) => {
+                0u8.hash(&mut hasher);
+                name.hash(&mut hasher);
+                group.hash(&mut hasher);
+            }
+            Row::SectionHeader { id, collapsed, .. } => {
+                1u8.hash(&mut hasher);
+                id.hash(&mut hasher);
+                collapsed.hash(&mut hasher);
+            }
+            Row::Favorite(slot, favorite) => {
+                2u8.hash(&mut hasher);
+                slot.hash(&mut hasher);
+                favorite.path.hash(&mut hasher);
+            }
+            Row::Recent(path) => {
+                3u8.hash(&mut hasher);
+                path.hash(&mut hasher);
+            }
+            Row::Volume(volume) => {
+                4u8.hash(&mut hasher);
+                volume.path.hash(&mut hasher);
+            }
+            Row::PluginItem { section, row } => {
+                5u8.hash(&mut hasher);
+                section.hash(&mut hasher);
+                row.id.hash(&mut hasher);
+                row.folder_path().hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
 }
 
 fn section_order(ui: &Ui, sections: &[Section]) -> Vec<String> {
@@ -1108,6 +1148,29 @@ impl Sidebar {
         nearest.map(|(_, slot)| slot)
     }
 
+    /// The typed drop destination under `position`, from the same row geometry as
+    /// the highlight. Insertion edges win over the row's folder, as they do in Finder.
+    pub(crate) fn drop_hit(&self, position: Point<Pixels>, cx: &gpui::App) -> Option<crate::drag_drop::DropHit> {
+        let rows = rows(cx.global::<Ui>(), &self.plugin_sections);
+        let generation = sidebar_layout_generation(&rows);
+        if let Some(slot) = self.favorite_slot_at(position, true) {
+            return Some(crate::drag_drop::DropHit::insertion(slot, generation));
+        }
+        match self.target_at(position)? {
+            DropTarget::Group(group) => {
+                Some(crate::drag_drop::DropHit::insertion(self.group_end(group, cx), generation))
+            }
+            DropTarget::Row(index) => {
+                let row = rows
+                    .into_iter()
+                    .filter(|row| !matches!(row, Row::Header(..) | Row::SectionHeader { .. }))
+                    .nth(index)?;
+                let path = row.path()?.to_path_buf();
+                Some(crate::drag_drop::DropHit::folder(path, generation, true))
+            }
+        }
+    }
+
     /// The row or group title under `position`; the 1 px gaps between rows snap to
     /// the nearest side so a small pointer wobble cannot lose the highlight.
     fn target_at(&self, position: Point<Pixels>) -> Option<DropTarget> {
@@ -1503,24 +1566,6 @@ impl Sidebar {
         .detach();
     }
 
-    /// Files dropped on a row's folder: moved on the same disk, copied to another, Option copies.
-    fn drop_on(&mut self, into: PathBuf, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
-        // Move vs copy depends on the volumes, which means a stat: ask off the main thread.
-        let paths = paths.paths().to_vec();
-        let copy = window.modifiers().alt;
-        let task = cx.background_spawn(async move { crate::operations::drop_request(&paths, into, copy) });
-        cx.spawn(async move |this, cx| {
-            let request = task.await;
-            this.update(cx, |_, cx| {
-                if let Some(request) = request {
-                    cx.emit(SidebarEvent::Run(request));
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     /// The slot after a group's last favorite.
     fn group_end(&self, group: usize, cx: &gpui::App) -> Slot {
         (group, cx.global::<Ui>().favorites().get(group).map_or(0, |(_, f)| f.len()))
@@ -1537,7 +1582,7 @@ impl Sidebar {
 
     /// The folders among paths dropped from another app: ask the disk off the main
     /// thread, then add them on it.
-    fn add_dropped_folders(&mut self, at: Slot, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+    pub(crate) fn add_dropped_folders(&mut self, at: Slot, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let task = cx.background_spawn(async move { paths.into_iter().filter(|p| p.is_dir()).collect::<Vec<_>>() }); // io-ok: inside background_spawn
         cx.spawn(async move |this, cx| {
             let folders = task.await;
@@ -1545,11 +1590,6 @@ impl Sidebar {
         })
         .detach();
     }
-}
-
-/// The folders in a selection dragged from a pane, which already knows which are folders.
-fn folders_of_selection(selection: &DraggedSelection) -> Vec<PathBuf> {
-    selection.entries.iter().filter(|(_, dir)| *dir).map(|(path, _)| path.clone()).collect()
 }
 
 impl Render for Sidebar {
@@ -1680,14 +1720,6 @@ impl Render for Sidebar {
                             !self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Group(g)),
                             |header| header.child(drop_outline(&theme).inset_0()),
                         )
-                        .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
-                            let at = this.group_end(g, cx);
-                            this.add_dropped_folders(at, paths.paths().to_vec(), cx)
-                        }))
-                        .on_drop(cx.listener(move |this, selection: &DraggedSelection, _, cx| {
-                            let at = this.group_end(g, cx);
-                            this.add_folders(at, folders_of_selection(selection), cx)
-                        }))
                         .on_drop(cx.listener(move |_, dragged: &DraggedFavorite, _, cx| {
                             ui::edit_sidebar(SidebarEdit::Move { from: dragged.slot, to: (g, 0) }, cx);
                         })),
@@ -1752,7 +1784,8 @@ impl Render for Sidebar {
                 _ => None,
             };
             // Plugin rows are navigable but never accept favorite or file drops.
-            let droppable = matches!(&row, Row::Favorite(..) | Row::Recent(_) | Row::Volume(_));
+            let droppable = matches!(&row, Row::Favorite(..) | Row::Recent(_) | Row::Volume(_))
+                || matches!(&row, Row::PluginItem { row, .. } if row.folder_path().is_some());
             kinds.push((droppable.then_some(DropTarget::Row(i)), favorite_slot));
             let path = row.path().map(Path::to_path_buf).unwrap_or_default();
             let navigable = row.location().is_some();
@@ -1837,23 +1870,7 @@ impl Render for Sidebar {
                         this.navigate_row(i, SidebarNav::Open, cx);
                     }
                     cx.notify();
-                }))
-                .when(droppable, |item| {
-                    item.on_drop({
-                        let into = path.clone();
-                        cx.listener(move |this, paths: &ExternalPaths, window, cx| match this.insert_slot {
-                            Some(at) => this.add_dropped_folders(at, paths.paths().to_vec(), cx),
-                            None => this.drop_on(into.clone(), paths, window, cx),
-                        })
-                    })
-                    .on_drop({
-                        let into = path.clone();
-                        cx.listener(move |this, selection: &DraggedSelection, window, cx| match this.insert_slot {
-                            Some(at) => this.add_folders(at, folders_of_selection(selection), cx),
-                            None => this.drop_on(into.clone(), &selection.external(), window, cx),
-                        })
-                    })
-                });
+                }));
             if let Row::Favorite(slot, _) = &row {
                 let slot = *slot;
                 let dragging = self.dragging_favorite.clone();

@@ -163,13 +163,6 @@ pub(crate) struct DraggedSelection {
     pub entries: Arc<Vec<(PathBuf, bool)>>,
 }
 
-impl DraggedSelection {
-    /// What the platform and `ExternalPaths` drop handlers expect.
-    pub fn external(&self) -> ExternalPaths {
-        ExternalPaths(self.entries.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>().into())
-    }
-}
-
 /// Handed from the drag constructor to the native-promotion resolver: the measured
 /// combo and the grab point, so the native image starts in exactly the same place.
 #[derive(Clone)]
@@ -361,6 +354,19 @@ pub struct DropTarget {
     pub rows: Option<std::ops::Range<usize>>,
 }
 
+/// What a spring-loaded presentation moved away from. The origin's listings stay
+/// alive, so cancelling restores the exact rows, selection and scroll.
+struct SpringOrigin {
+    history: History<Location>,
+    folders: Vec<Entity<Folder>>,
+    subscriptions: Vec<Subscription>,
+    focused: usize,
+    mode: ViewMode,
+    sort: Sort,
+    applied_view: Option<(u64, u64, PathBuf)>,
+    virtual_origin: bool,
+}
+
 /// A saved-query result session retained while its location stays in history.
 struct SavedSession {
     view: Entity<SearchView>,
@@ -448,6 +454,10 @@ pub struct Pane {
     child_reveal: Option<(EntityId, Instant)>,
     /// The column and row a drag would drop on in column view.
     drop_column: Option<(usize, usize)>,
+    /// A drag's temporary folder presentation, with the origin kept for cancel.
+    spring: Option<SpringOrigin>,
+    /// The origin and source paths to reselect when Back returns after a sprung drop.
+    return_selection: Option<(Location, Vec<PathBuf>)>,
     mark_pending: Option<MarkPending>,
     /// The `/` filter field, while open.
     filtering: Option<Filtering>,
@@ -589,6 +599,8 @@ impl Pane {
             view_motion: None,
             child_reveal: None,
             drop_column: None,
+            spring: None,
+            return_selection: None,
             mark_pending: None,
             filtering: None,
             marquee: None,
@@ -1399,7 +1411,15 @@ impl Pane {
         self.plugin_walk_dirs = None;
         let from = self.location().as_folder().map(Path::to_path_buf);
         let Some(location) = self.history.back().cloned() else { return };
-        self.apply_location(location, from, Some(window), cx);
+        self.apply_location(location.clone(), from, Some(window), cx);
+        if let Some((origin, paths)) = self.return_selection.take()
+            && origin == location
+            && let Some(folder) = self.folders.first().cloned()
+        {
+            // Surviving source rows come back selected; moved-away paths simply
+            // are not present.
+            folder.update(cx, |folder, cx| folder.select_when_present(paths, Effective::Off, cx));
+        }
     }
 
     pub fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1407,6 +1427,82 @@ impl Pane {
         self.plugin_walk_dirs = None;
         let Some(location) = self.history.forward().cloned() else { return };
         self.apply_location(location, None, Some(window), cx);
+    }
+
+    /// Show a spring-loaded folder. The first spring keeps the origin's history,
+    /// live listings, selection and scroll; later springs only replace the
+    /// temporary presentation. No Recent entry or history step is recorded.
+    pub fn spring_enter(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        if self.spring.is_none() {
+            let virtual_origin = self.location().as_folder().is_none();
+            let origin = SpringOrigin {
+                history: self.history.clone(),
+                folders: std::mem::take(&mut self.folders),
+                subscriptions: std::mem::take(&mut self.subscriptions),
+                focused: self.focused,
+                mode: self.mode,
+                sort: self.sort,
+                applied_view: self.applied_view.clone(),
+                virtual_origin,
+            };
+            self.spring = Some(origin);
+            self.deactivate_saved(cx);
+        }
+        self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
+        self.history.replace_current(Location::Folder(dir.clone()));
+        self.enter_listing(dir, false, cx);
+        cx.emit(PaneEvent::DestinationChanged);
+        cx.notify();
+    }
+
+    /// Accept the drop: the final sprung folder becomes one normal Back step from
+    /// the origin. The folder is already listed, so this does not enter it again.
+    pub fn spring_commit(&mut self, dropped: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(origin) = self.spring.take() else { return };
+        let Some(final_dir) = self.folders.get(self.focused).map(|folder| folder.read(cx).dir().to_path_buf()) else {
+            return;
+        };
+        let origin_location = origin.history.current().clone();
+        for folder in origin.folders {
+            folder.update(cx, |folder, cx| folder.release_listing(cx));
+        }
+        let mut history = origin.history;
+        history.visit(Location::Folder(final_dir.clone()));
+        self.history = history;
+        self.return_selection = Some((origin_location, dropped));
+        self.sidebar_walk = false;
+        self.plugin_walk_dirs = None;
+        cx.emit(PaneEvent::DestinationChanged);
+        cx.emit(PaneEvent::Entered(final_dir));
+        cx.notify();
+    }
+
+    /// Cancel the drag: restore the origin exactly, including its live listings'
+    /// selection and scroll. A virtual origin reopens its saved result session.
+    pub fn spring_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(origin) = self.spring.take() else { return };
+        self.release_listings(cx);
+        self.folders.clear();
+        self.subscriptions.clear();
+        self.focused = 0;
+        self.history = origin.history;
+        if origin.virtual_origin {
+            let location = self.history.current().clone();
+            self.apply_location(location, None, Some(window), cx);
+        } else {
+            self.folders = origin.folders;
+            self.subscriptions = origin.subscriptions;
+            self.focused = origin.focused.min(self.folders.len().saturating_sub(1));
+            self.mode = origin.mode;
+            self.sort = origin.sort;
+            self.applied_view = origin.applied_view;
+            self.sidebar_walk = false;
+            self.plugin_walk_dirs = None;
+            self.plugin_scope_changed(cx);
+            cx.emit(PaneEvent::DestinationChanged);
+            cx.notify();
+        }
     }
 
     pub fn open_parent(&mut self, cx: &mut Context<Self>) {
@@ -1898,6 +1994,14 @@ impl Pane {
     }
 
     fn enter(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        self.enter_listing(dir.clone(), true, cx);
+        cx.emit(PaneEvent::Entered(dir));
+        cx.notify();
+    }
+
+    /// Show `dir`, optionally applying its folder view. Spring uses the current
+    /// presentation and emits no navigation event of its own.
+    fn enter_listing(&mut self, dir: PathBuf, apply_folder_view: bool, cx: &mut Context<Self>) {
         self.cancel_marquee(cx);
         self.view_motion = None;
         self.child_reveal = None;
@@ -1919,10 +2023,11 @@ impl Pane {
         let ui = cx.global::<Ui>();
         let resolved = ui.views.resolve(&dir);
         self.sort = resolved.sort();
-        self.push_folder(dir.clone(), true, cx);
+        self.push_folder(dir, true, cx);
         self.plugin_scope_changed(cx);
-        self.apply_view(cx);
-        cx.emit(PaneEvent::Entered(dir));
+        if apply_folder_view {
+            self.apply_view(cx);
+        }
         cx.notify();
     }
 
@@ -2725,35 +2830,6 @@ impl Pane {
         cx.emit(PaneEvent::Paste { into: self.current_dir(cx), move_items: true });
     }
 
-    /// Files dropped onto folder `k`'s list (as opposed to onto one of its folders).
-    fn drop_files(&mut self, k: usize, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(into) = self.folders.get(k).map(|f| f.read(cx).dir().to_path_buf()) {
-            self.drop_into(into, paths, window, cx);
-        }
-    }
-
-    /// Files dropped from Crow, Finder or another app (see `operations::drop_request`).
-    fn drop_into(&mut self, into: PathBuf, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
-        self.drop_row = None;
-        self.drop_target = None;
-        self.drop_column = None;
-        // Move vs copy depends on the volumes, which means a stat: ask off the main thread.
-        let paths = paths.paths().to_vec();
-        let copy = window.modifiers().alt;
-        let task = cx.background_spawn(async move { crate::operations::drop_request(&paths, into, copy) });
-        cx.spawn(async move |this, cx| {
-            let request = task.await;
-            this.update(cx, |_, cx| {
-                if let Some(request) = request {
-                    cx.emit(PaneEvent::Run(request));
-                }
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
-    }
-
     fn quick_look(&mut self, _: &QuickLook, window: &mut Window, cx: &mut Context<Self>) {
         // Mid-word, Space belongs to type-to-select ("my file"), not Quick Look.
         if self.focused_folder().read(cx).type_select_active() {
@@ -3407,10 +3483,55 @@ impl Pane {
         self.update_drag_row(position, cx);
     }
 
+    /// The typed drop destination under `pointer`, with the layout generation a
+    /// spring timer must capture.
+    pub(crate) fn drop_hit(&self, pointer: Point<Pixels>, cx: &gpui::App) -> Option<crate::drag_drop::DropHit> {
+        let dragged = self.dragged_paths(cx)?;
+        self.drop_hit_for(pointer, &dragged, cx)
+    }
+
+    /// The same target resolution for a drop whose payload was already consumed
+    /// from the app's active drag.
+    pub(crate) fn drop_hit_for(
+        &self,
+        pointer: Point<Pixels>,
+        dragged: &[PathBuf],
+        cx: &gpui::App,
+    ) -> Option<crate::drag_drop::DropHit> {
+        if self.renaming.is_some() {
+            return None;
+        }
+        let target = self.drop_target_at(pointer, dragged, cx)?;
+        let generation = self.drop_generation(target.column, cx);
+        let spring = target.folder != self.current_dir(cx);
+        Some(crate::drag_drop::DropHit::folder(target.folder, generation, spring))
+    }
+
+    /// The layout generation for one column: the folder identity and path as well
+    /// as its row generation, so a spring into a different folder always counts as
+    /// fresh geometry even when both listings have the same row count.
+    fn drop_generation(&self, column: usize, cx: &gpui::App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let Some(folder) = self.folders.get(column).map(|folder| folder.read(cx)) else { return 0 };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        folder.dir().hash(&mut hasher);
+        folder.layout_generation().hash(&mut hasher);
+        (self.mode as u64).hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn dragged_paths(&self, cx: &gpui::App) -> Option<Vec<PathBuf>> {
+        if let Some(selection) = cx.active_drag_value::<DraggedSelection>() {
+            Some(selection.entries.iter().map(|(path, _)| path.clone()).collect())
+        } else {
+            Some(cx.active_drag_value::<ExternalPaths>()?.paths().to_vec())
+        }
+    }
+
     /// Where a drop at `pointer` lands, if dropping the dragged items there would act:
     /// a folder row (with its expanded subtree), the expanded folder that lists a nested
     /// row, or else the folder the list or column shows.
-    fn drop_target_at(&self, pointer: Point<Pixels>, cx: &gpui::App) -> Option<DropTarget> {
+    fn drop_target_at(&self, pointer: Point<Pixels>, dragged: &[PathBuf], cx: &gpui::App) -> Option<DropTarget> {
         let target = match self.mode {
             ViewMode::List => {
                 let bounds = self.list_bounds.get()?;
@@ -3481,17 +3602,12 @@ impl Pane {
                 }
             }
         };
-        let dragged: Vec<PathBuf> = if let Some(selection) = cx.active_drag_value::<DraggedSelection>() {
-            selection.entries.iter().map(|(path, _)| path.clone()).collect()
-        } else {
-            cx.active_drag_value::<ExternalPaths>()?.paths().to_vec()
-        };
-        crate::operations::drop_would_act(&dragged, &target.folder).then_some(target)
+        crate::operations::drop_would_act(dragged, &target.folder).then_some(target)
     }
 
     fn update_drag_row(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let row = if self.mode == ViewMode::List { self.drag_row_at(cx, position) } else { None };
-        let target = self.drop_target_at(position, cx);
+        let target = self.dragged_paths(cx).and_then(|dragged| self.drop_target_at(position, &dragged, cx));
         let column = if self.mode == ViewMode::Columns { self.column_row_at(cx, position) } else { None };
         if row != self.drop_row || target != self.drop_target || column != self.drop_column {
             self.drop_row = row;
@@ -3805,8 +3921,6 @@ impl Pane {
                 let name = truncate_middle_parts(&entry.name, name_room, font_size, window);
                 let ranges = folder.row_match(ix).map(|range| map_range(&name, range));
                 let expanded = folder.is_expanded(&entry.path, cx);
-                let drop_folder =
-                    folder.drop_header(ix).and_then(|header| folder.row(header)).map(|(folder, _)| folder.path.clone());
                 let drag_entries = if selected {
                     selected_entries.clone()
                 } else {
@@ -3931,19 +4045,6 @@ impl Pane {
                     })
                     .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
                         promote_drag(selection, &handoff, window, cx)
-                    })
-                    .when_some(drop_folder, |row, target| {
-                        let target_selection = target.clone();
-                        row.on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
-                            this.drop_into(target.clone(), paths, window, cx);
-                            cx.stop_propagation();
-                        }))
-                        .on_drop(cx.listener(
-                            move |this, selection: &DraggedSelection, window, cx| {
-                                this.drop_into(target_selection.clone(), &selection.external(), window, cx);
-                                cx.stop_propagation();
-                            },
-                        ))
                     })
                     .on_mouse_down(
                         MouseButton::Left,
@@ -4371,7 +4472,6 @@ impl Pane {
                         display_text(&entry.name).into_owned().into()
                     };
                     let handoff = DragHandoff::new();
-                    let drop_folder = entry.is_dir.then(|| entry.path.clone());
                     let points = metrics.icon_size as u32;
                     let revision = folder.plugin_entry_version(&entry);
                     let key = crate::thumbnails::ThumbnailKey::new(entry.path.clone(), revision, points);
@@ -4603,19 +4703,6 @@ impl Pane {
                         })
                         .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
                             promote_drag(selection, &handoff, window, cx)
-                        })
-                        .when_some(drop_folder, |tile, target| {
-                            let target_selection = target.clone();
-                            tile.on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
-                                this.drop_into(target.clone(), paths, window, cx);
-                                cx.stop_propagation();
-                            }))
-                            .on_drop(cx.listener(
-                                move |this, selection: &DraggedSelection, window, cx| {
-                                    this.drop_into(target_selection.clone(), &selection.external(), window, cx);
-                                    cx.stop_propagation();
-                                },
-                            ))
                         })
                         .on_mouse_down(
                             MouseButton::Left,
@@ -5014,20 +5101,6 @@ impl Pane {
                     .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
                         promote_drag(selection, &handoff, window, cx)
                     })
-                    .when(navigable, |row| {
-                        let target = entry.path.clone();
-                        let target_selection = entry.path.clone();
-                        row.on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
-                            this.drop_into(target.clone(), paths, window, cx);
-                            cx.stop_propagation();
-                        }))
-                        .on_drop(cx.listener(
-                            move |this, selection: &DraggedSelection, window, cx| {
-                                this.drop_into(target_selection.clone(), &selection.external(), window, cx);
-                                cx.stop_propagation();
-                            },
-                        ))
-                    })
                     .when(
                         self.drop_target.as_ref().is_some_and(|t| t.column == k && t.rows == Some(ix..ix + 1)),
                         |row| row.child(drop_outline(theme).inset_0()),
@@ -5276,62 +5349,55 @@ impl Pane {
             } else {
                 body
             };
-            strip =
-                strip.child(
-                    div()
-                        .on_children_prepainted({
-                            let bounds = self.column_bounds.clone();
-                            move |children, _, _| {
-                                // The field (when present) is the first child, then the list.
-                                if let Some(child) = children.get(usize::from(has_field)) {
-                                    bounds.borrow_mut().insert(k, *child);
-                                }
+            strip = strip.child(
+                div()
+                    .on_children_prepainted({
+                        let bounds = self.column_bounds.clone();
+                        move |children, _, _| {
+                            // The field (when present) is the first child, then the list.
+                            if let Some(child) = children.get(usize::from(has_field)) {
+                                bounds.borrow_mut().insert(k, *child);
                             }
-                        })
-                        .id(("column-view", k))
-                        .debug_selector(|| format!("column-{k}"))
-                        .role(Role::ListBox)
-                        .aria_label(if filtered {
-                            format!("{title}, {shown} of {count} items")
-                        } else {
-                            format!("{title}, {count} items")
-                        })
-                        .w(width)
-                        .flex_none()
-                        .h_full()
-                        .flex()
-                        .flex_col()
-                        .py_1()
-                        .border_r_1()
-                        .border_color(border)
-                        .when(k == focused, |c| c.bg(focused_column(&theme)))
-                        .relative()
-                        .when(self.drop_target.as_ref().is_some_and(|t| t.column == k && t.rows.is_none()), |c| {
-                            c.child(drop_outline(&theme).left(px(4.)).right(px(4.)).top(px(2.)).bottom(px(2.)))
-                        })
-                        .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
-                            this.drop_files(k, paths, window, cx)
-                        }))
-                        .on_drop(cx.listener(move |this, selection: &DraggedSelection, window, cx| {
-                            this.drop_files(k, &selection.external(), window, cx)
-                        }))
-                        .on_scroll(cx.listener(move |this, _, _, cx| this.on_list_scroll(k, cx)))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                this.press_empty(k, event, window, cx)
-                            }),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                this.context_press_empty(k, event, window, cx)
-                            }),
-                        )
-                        .children(field)
-                        .child(body)
-                        .children(footer),
-                );
+                        }
+                    })
+                    .id(("column-view", k))
+                    .debug_selector(|| format!("column-{k}"))
+                    .role(Role::ListBox)
+                    .aria_label(if filtered {
+                        format!("{title}, {shown} of {count} items")
+                    } else {
+                        format!("{title}, {count} items")
+                    })
+                    .w(width)
+                    .flex_none()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .py_1()
+                    .border_r_1()
+                    .border_color(border)
+                    .when(k == focused, |c| c.bg(focused_column(&theme)))
+                    .relative()
+                    .when(self.drop_target.as_ref().is_some_and(|t| t.column == k && t.rows.is_none()), |c| {
+                        c.child(drop_outline(&theme).left(px(4.)).right(px(4.)).top(px(2.)).bottom(px(2.)))
+                    })
+                    .on_scroll(cx.listener(move |this, _, _, cx| this.on_list_scroll(k, cx)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.press_empty(k, event, window, cx)
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.context_press_empty(k, event, window, cx)
+                        }),
+                    )
+                    .children(field)
+                    .child(body)
+                    .children(footer),
+            );
         }
         // The right column is the last column: a file's preview or a folder's
         // summary on the Preview tab, the item's metadata on the Info tab. It takes
@@ -5722,7 +5788,11 @@ impl Render for Pane {
         } else {
             None
         };
-        self.drop_target = if cx.has_active_drag() { self.drop_target_at(window.mouse_position(), cx) } else { None };
+        self.drop_target = if cx.has_active_drag() {
+            self.dragged_paths(cx).and_then(|dragged| self.drop_target_at(window.mouse_position(), &dragged, cx))
+        } else {
+            None
+        };
         self.drop_column = if cx.has_active_drag() && self.mode == ViewMode::Columns {
             self.column_row_at(cx, window.mouse_position())
         } else {
@@ -5925,13 +5995,6 @@ impl Render for Pane {
                             )
                             .child(body)
                     })
-                    // Dropped on the list but not on a folder row: into the folder shown.
-                    .on_drop(
-                        cx.listener(|this, paths: &ExternalPaths, window, cx| this.drop_files(0, paths, window, cx)),
-                    )
-                    .on_drop(cx.listener(|this, selection: &DraggedSelection, window, cx| {
-                        this.drop_files(0, &selection.external(), window, cx)
-                    }))
                     .children(footer)
                     .into_any_element()
             }
