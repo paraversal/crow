@@ -156,6 +156,7 @@ pub struct CrowWindow {
     info: Entity<InfoPane>,
     side_panes: side_panes::SidePanes,
     git_review: Option<git_review::GitReview>,
+    column_picker: Option<column_picker::ColumnPicker>,
     /// Benchmark runs leave Recent alone, so its saves don't land in the measurement.
     bench: bool,
     show_hidden: bool,
@@ -286,6 +287,7 @@ impl CrowWindow {
             info,
             side_panes: side_panes::SidePanes::new(cx),
             git_review: None,
+            column_picker: None,
             bench,
             show_hidden,
             search_includes_hidden,
@@ -340,6 +342,8 @@ impl CrowWindow {
             allowed.push(("picker", picker.focus.clone()));
         } else if let Some(why) = &self.why {
             allowed.push(("why", why.clone()));
+        } else if let Some(picker) = &self.column_picker {
+            allowed.push(("column picker", picker.focus.clone()));
         } else if let Some(review) = &self.git_review {
             allowed.push(("git review", review.focus.clone()));
         } else if let Some(search) = &self.search {
@@ -502,6 +506,16 @@ impl CrowWindow {
     /// ⌘I: open the column on Info, or close it when Info is already showing.
     /// Unlike ⇧⌘P this does not change the setting, so the column can be opened
     /// in a window whose default is off.
+    fn show_git_diff(&mut self, _: &crate::actions::ShowGitDiff, _: &mut Window, cx: &mut Context<Self>) {
+        if crate::git::provider_enabled(cx) {
+            self.info.update(cx, |info, cx| {
+                info.set_visible(true, cx);
+                info.set_tab(InfoTab::GitDiff, cx);
+            });
+            cx.notify();
+        }
+    }
+
     fn show_info(&mut self, _: &ShowInfo, _: &mut Window, cx: &mut Context<Self>) {
         let info = self.info.clone();
         let (visible, tab) = {
@@ -2049,6 +2063,8 @@ impl CrowWindow {
             CommandId::ToggleHiddenFiles => self.toggle_hidden(&ToggleHiddenFiles, window, cx),
             CommandId::TogglePreview => self.toggle_preview(&TogglePreview, window, cx),
             CommandId::ShowInfo => self.show_info(&ShowInfo, window, cx),
+            CommandId::ShowGitDiff => self.show_git_diff(&crate::actions::ShowGitDiff, window, cx),
+            CommandId::ChooseListColumns => self.choose_list_columns(&crate::actions::ChooseListColumns, window, cx),
             CommandId::CalculateFolderSizes => self.calculate_folder_sizes(&CalculateFolderSizes, window, cx),
             CommandId::OpenParent => self.open_parent(&OpenParent, window, cx),
             CommandId::GoBack => self.go_back(&GoBack, window, cx),
@@ -2329,6 +2345,7 @@ impl Render for CrowWindow {
         let why = self.render_why(cx);
         let picker = self.render_picker(cx);
         let git_review = self.render_git_review(cx);
+        let column_picker = self.render_column_picker(cx);
         let palette = self.render_palette(window, cx);
         let center: gpui::AnyElement = match &self.search {
             Some(search) => div().flex_1().min_w_0().h_full().child(search.clone()).into_any_element(),
@@ -2369,7 +2386,10 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::toggle_hidden))
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::show_info))
-            .when(crate::git::provider_enabled(cx), |root| root.on_action(cx.listener(Self::review_git_command)))
+            .when(crate::git::provider_enabled(cx), |root| {
+                root.on_action(cx.listener(Self::review_git_command)).on_action(cx.listener(Self::show_git_diff))
+            })
+            .when(list_view && self.search.is_none(), |root| root.on_action(cx.listener(Self::choose_list_columns)))
             .on_action(cx.listener(Self::calculate_folder_sizes))
             .on_action(cx.listener(Self::open_parent))
             .on_action(cx.listener(Self::go_back))
@@ -2458,6 +2478,7 @@ impl Render for CrowWindow {
             .children(why)
             .children(picker)
             .children(git_review)
+            .children(column_picker)
             .children(palette)
     }
 }
@@ -2660,6 +2681,7 @@ fn missing_focus_violation(focus_required: bool) -> Option<crate::fuzz::Violatio
     focus_required.then(|| crate::fuzz::Violation::new("focus", "nothing is focused"))
 }
 
+pub(crate) mod column_picker;
 pub(crate) mod git_review;
 pub(crate) mod operation_ui;
 mod palette_view;

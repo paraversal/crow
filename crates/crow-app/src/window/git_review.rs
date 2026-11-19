@@ -21,6 +21,7 @@ pub(super) struct GitReview {
     folder: PathBuf,
     pinned: bool,
     cursor: usize,
+    selection: Option<(PathBuf, &'static str)>,
     scroll: ScrollHandle,
 }
 
@@ -57,6 +58,26 @@ fn rows(folder: &Path, pinned: bool, cx: &mut Context<CrowWindow>) -> (Vec<Chang
         }
         found = true;
         unavailable |= snapshot.unavailable;
+        for (source, destination) in snapshot.renames_by_source.range(relative.clone()..) {
+            if !source.starts_with(&relative) {
+                break;
+            }
+            if destination.starts_with(&relative) {
+                continue;
+            }
+            out.push(Change {
+                path: snapshot.identity.worktree.join(destination),
+                display: format!("{} → {}", source.display(), destination.display()),
+                kind: StatusKind::Renamed,
+                group: "Staged",
+            });
+            if out.len() > LIMIT {
+                break;
+            }
+        }
+        if out.len() > LIMIT {
+            break;
+        }
         for (path, status) in snapshot.entries.range(relative.clone()..) {
             if !path.starts_with(&relative) {
                 break;
@@ -122,7 +143,8 @@ impl CrowWindow {
         }
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.git_review = Some(GitReview { focus, folder, pinned: false, cursor: 0, scroll: ScrollHandle::new() });
+        self.git_review =
+            Some(GitReview { focus, folder, pinned: false, cursor: 0, selection: None, scroll: ScrollHandle::new() });
         cx.notify();
     }
 
@@ -151,7 +173,13 @@ impl CrowWindow {
         let (folder, pinned) = (review.folder.clone(), review.pinned);
         let (changes, message) = rows(&folder, pinned, cx);
         let review = self.git_review.as_mut().expect("review is open");
+        if let Some((path, group)) = &review.selection
+            && let Some(index) = changes.iter().position(|change| &change.path == path && change.group == *group)
+        {
+            review.cursor = index;
+        }
         review.cursor = review.cursor.min(changes.len().saturating_sub(1));
+        review.selection = changes.get(review.cursor).map(|change| (change.path.clone(), change.group));
         let (focus, scroll, cursor) = (review.focus.clone(), review.scroll.clone(), review.cursor);
         let selected = changes.get(cursor).cloned();
         let count = changes.len();
@@ -177,6 +205,7 @@ impl CrowWindow {
                     if let Some(review) = &mut this.git_review {
                         review.pinned = all;
                         review.cursor = 0;
+                        review.selection = None;
                         review.scroll.set_offset(gpui::point(px(0.), px(0.)));
                         cx.notify();
                     }
@@ -213,6 +242,7 @@ impl CrowWindow {
                     .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                         if let Some(review) = &mut this.git_review {
                             review.cursor = index;
+                            review.selection = Some((change.path.clone(), change.group));
                             cx.notify();
                         }
                         if event.click_count() == 2 {
@@ -244,6 +274,7 @@ impl CrowWindow {
                         }
                         _ => return,
                     }
+                    review.selection = None;
                     review.scroll.scroll_to_item(review.cursor);
                     cx.stop_propagation();
                     cx.notify();
@@ -261,7 +292,7 @@ impl CrowWindow {
                             .id("git-review-results")
                             .role(Role::ListBox)
                             .aria_label("Changed paths")
-                            .max_h(gpui::relative(0.65))
+                            .max_h(px(240.))
                             .overflow_y_scroll()
                             .track_scroll(&scroll)
                             .children(rows),

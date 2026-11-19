@@ -3001,6 +3001,12 @@ impl Pane {
         specs.extend(self.columns.iter().map(|c| (c.title().to_owned(), c.sort_key(), c.align())));
         let mut header = div()
             .id("table-header")
+            .role(Role::Group)
+            .aria_label("List columns")
+            .on_mouse_down(MouseButton::Right, |_, window, cx| {
+                cx.stop_propagation();
+                crate::window::column_picker::open(window, cx);
+            })
             .debug_selector(|| "table-header".into())
             .h(px(28.))
             .flex_none()

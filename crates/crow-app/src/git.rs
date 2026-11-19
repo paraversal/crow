@@ -215,14 +215,14 @@ pub fn pin_summary(cx: &mut App, path: &Path, want_lines: bool) -> Option<PinSum
         "—".into()
     } else {
         spoken.push_str(&format!(", {} changed paths", data.changed));
-        if snapshot.entries.values().any(crow_plugin_git::EntryStatus::is_unmerged) {
+        if snapshot.has_conflicts {
             spoken.push_str(", contains conflicts");
             format!("U {}", data.changed)
         } else {
             data.changed.to_string()
         }
     };
-    if want_lines && data.changed > 0 && data.changed as usize <= MAX_SUMMARY_FILES {
+    if want_lines && data.changed > 0 && snapshot.entries.len() <= MAX_SUMMARY_FILES {
         let (mut additions, mut removals, mut files) = (0u64, 0u64, 0);
         let mut pending = false;
         let git = cx.global_mut::<Git>();
@@ -824,6 +824,8 @@ mod tests {
         let host = host.expect("row host data with line counts");
         assert_eq!(host.badge, "M");
         assert_eq!(host.lines_changed, Some(2));
+        let pin = cx.update(|cx| pin_summary(cx, &repo, true).unwrap());
+        assert_eq!(pin.branch, "main · +1/−1");
 
         cx.run_until_parked();
         cx.update(poll);
@@ -862,6 +864,8 @@ mod tests {
             entries: Default::default(),
             affected_folders: Default::default(),
             changed_count: 0,
+            has_conflicts: false,
+            renames_by_source: Default::default(),
             last_commit: None,
             unavailable: false,
         });

@@ -185,6 +185,8 @@ actions!(
         /// View ▸ Calculate Folder Sizes: measure the current folder's folders once.
         CalculateFolderSizes,
         ReviewGitChanges,
+        ShowGitDiff,
+        ChooseListColumns,
         Minimize,
         Zoom,
         KeyboardShortcuts,

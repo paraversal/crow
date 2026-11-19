@@ -239,6 +239,8 @@ pub struct StatusSnapshot {
     /// The strongest change below each affected folder, relative to the worktree root.
     pub affected_folders: BTreeMap<PathBuf, StatusKind>,
     pub changed_count: usize,
+    pub has_conflicts: bool,
+    pub renames_by_source: BTreeMap<PathBuf, PathBuf>,
     /// The first line of `HEAD`'s commit message, bounded for display.
     pub last_commit: Option<String>,
     /// True when the worktree is cloud-backed and status would require content
@@ -274,6 +276,8 @@ pub fn unavailable_snapshot(repo: &gix::Repository) -> gix::Result<StatusSnapsho
         entries: BTreeMap::new(),
         affected_folders: BTreeMap::new(),
         changed_count: 0,
+        has_conflicts: false,
+        renames_by_source: BTreeMap::new(),
         last_commit: None,
         unavailable: true,
     })
@@ -359,14 +363,18 @@ pub fn status_snapshot(repo: &gix::Repository, cancel: &AtomicBool) -> gix::Resu
     }
     check_cancel()?;
     let mut changed_count = 0;
+    let mut has_conflicts = false;
+    let mut renames_by_source = BTreeMap::new();
     let mut affected_folders = BTreeMap::new();
     for (path, status) in &entries {
         let Some(kind) = status.badge().filter(|_| status.is_changed()) else { continue };
         check_cancel()?;
         changed_count += 1;
+        has_conflicts |= kind == StatusKind::Unmerged;
         mark_parent_folders(&mut affected_folders, path, kind);
         if let Some(source) = &status.renamed_from {
             mark_parent_folders(&mut affected_folders, source, StatusKind::Renamed);
+            renames_by_source.insert(source.clone(), path.clone());
         }
     }
     let last_commit = repo.head_commit().ok().and_then(|commit| {
@@ -375,7 +383,17 @@ pub fn status_snapshot(repo: &gix::Repository, cancel: &AtomicBool) -> gix::Resu
         let title = title.trim();
         (!title.is_empty()).then(|| title.chars().take(120).map(|c| if c.is_control() { ' ' } else { c }).collect())
     });
-    Ok(StatusSnapshot { identity, head, entries, affected_folders, changed_count, last_commit, unavailable: false })
+    Ok(StatusSnapshot {
+        identity,
+        head,
+        entries,
+        affected_folders,
+        changed_count,
+        has_conflicts,
+        renames_by_source,
+        last_commit,
+        unavailable: false,
+    })
 }
 
 fn mark_parent_folders(folders: &mut BTreeMap<PathBuf, StatusKind>, path: &Path, kind: StatusKind) {
