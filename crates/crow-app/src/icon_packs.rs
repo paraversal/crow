@@ -37,10 +37,26 @@ pub struct IconSnapshot {
     packs: BTreeMap<String, Arc<LoadedPack>>,
 }
 
+/// One pack the Settings control offers, independent of the saved choice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IconPackChoice {
+    pub id: String,
+    pub name: String,
+}
+
 impl IconSnapshot {
     #[cfg(test)]
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Every loaded pack by human name, then id, so catalog reloads keep a
+    /// stable order. The saved id is added by the caller when it is missing.
+    pub fn choices(&self) -> Vec<IconPackChoice> {
+        let mut choices: Vec<IconPackChoice> =
+            self.packs.iter().map(|(id, pack)| IconPackChoice { id: id.clone(), name: pack.name.clone() }).collect();
+        choices.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.id.cmp(&b.id)));
+        choices
     }
 
     /// The first matching pack entry for this path, with the exact bytes the

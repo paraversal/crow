@@ -35,6 +35,12 @@ pub struct ControlStyle<'a> {
 pub type Activate = Rc<dyn Fn(&mut Window, &mut App)>;
 pub type Select = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
+/// A labelled row around a caller-built control, for composite settings such
+/// as the config-file buttons and the sort key with its direction.
+pub fn labeled(meta: ControlMeta, theme: &Theme, control: impl IntoElement) -> gpui::Stateful<Div> {
+    row(meta, theme, control)
+}
+
 fn row(meta: ControlMeta, theme: &Theme, control: impl IntoElement) -> gpui::Stateful<Div> {
     let id = meta.id;
     div()
@@ -46,7 +52,7 @@ fn row(meta: ControlMeta, theme: &Theme, control: impl IntoElement) -> gpui::Sta
         .w_full()
         .child(
             div()
-                .text_size(px(13.))
+                .text_size(px(14.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(color(if meta.enabled { theme.role("fg") } else { theme.role("fg-muted") }))
                 .child(meta.label),
@@ -360,6 +366,100 @@ pub fn dropdown(
 }
 
 const DROPDOWN_WIDTH: f32 = 260.;
+
+/// A button that opens a list of choices, such as "Add Provider". The list uses
+/// the same anchored popup as a drop-down but the closed button keeps its own
+/// label instead of a selected value.
+#[allow(clippy::too_many_arguments)]
+pub fn menu_button(
+    meta: ControlMeta,
+    label: &'static str,
+    options: &[String],
+    menu: Option<Menu>,
+    style: ControlStyle,
+    toggle: Activate,
+    select: Select,
+) -> gpui::Stateful<Div> {
+    let ControlStyle { focus, focused, theme } = style;
+    let control_id = meta.id;
+    let open = menu.is_some();
+    let mut button = div()
+        .id(control_id)
+        .debug_selector(move || control_id.to_owned())
+        .role(Role::Button)
+        .aria_label(meta.label)
+        .aria_expanded(open)
+        .aria_disabled(!meta.enabled)
+        .track_focus(focus)
+        .px(px(10.))
+        .h(px(26.))
+        .min_w(px(130.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(8.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(color(theme.role("border")))
+        .bg(color(theme.role("surface")))
+        .text_size(px(12.))
+        .text_color(color(theme.role("fg")))
+        .when(focused, |button| button.shadow(cursor_ring(theme)))
+        .when(!meta.enabled, |button| button.opacity(0.45))
+        .child(label)
+        .child(glyph(Glyph::ChevronDown, 12., "fg-muted", theme));
+    if meta.enabled {
+        button = button
+            .cursor_pointer()
+            .hover(|style| style.bg(color(theme.role("surface-raised"))))
+            .on_click(move |_, window, cx| toggle(window, cx));
+    }
+    let popup = menu.map(|Menu { cursor, scroll, dismiss }| {
+        let list = div()
+            .id((control_id, u64::MAX))
+            .debug_selector(move || format!("{control_id}-menu"))
+            .role(Role::ListBox)
+            .aria_label(meta.label)
+            .occlude()
+            .track_scroll(scroll)
+            .overflow_y_scroll()
+            .w(px(DROPDOWN_WIDTH))
+            .max_h(px(280.))
+            .mt(px(4.))
+            .p(px(4.))
+            .flex()
+            .flex_col()
+            .rounded(px(6.))
+            .bg(color(theme.role("surface-raised")))
+            .shadow_lg()
+            .on_mouse_down_out(move |_, window, cx| dismiss(window, cx))
+            .children(options.iter().enumerate().map(|(index, label)| {
+                let select = select.clone();
+                div()
+                    .id((control_id, index))
+                    .debug_selector(move || format!("{control_id}-option-{index}"))
+                    .role(Role::ListBoxOption)
+                    .aria_label(label.clone())
+                    .aria_selected(index == cursor)
+                    .aria_position_in_set(index + 1)
+                    .aria_size_of_set(options.len())
+                    .flex_none()
+                    .px_2()
+                    .py(px(3.))
+                    .rounded(px(4.))
+                    .text_size(px(12.))
+                    .text_color(color(theme.role("fg")))
+                    .truncate()
+                    .cursor_pointer()
+                    .when(index == cursor, |option| option.bg(active_selection(theme)))
+                    .when(index != cursor, |option| option.hover(|style| style.bg(inactive_selection(theme))))
+                    .on_click(move |_, window, cx| select(index, window, cx))
+                    .child(label.clone())
+            }));
+        div().h_0().child(deferred(anchored().snap_to_window_with_margin(px(8.)).child(list)).with_priority(1))
+    });
+    row(meta, theme, div().flex().flex_col().child(button).children(popup))
+}
 
 /// A standard button with a focus ring. Space/Return activate it through the
 /// caller's key handler; a click does the same.

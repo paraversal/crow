@@ -2523,6 +2523,13 @@ impl Render for CrowWindow {
     }
 }
 
+impl CrowWindow {
+    /// The focused folder of the active tab, for Settings' Use Current Folder.
+    pub fn focused_folder(&self, cx: &App) -> PathBuf {
+        self.pane().read(cx).current_dir(cx)
+    }
+}
+
 #[cfg(any(test, feature = "fuzz"))]
 impl CrowWindow {
     /// The selectors a fuzzer can click in this window, in render order. Views
