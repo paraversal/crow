@@ -76,7 +76,7 @@ struct Sample {
 }
 
 #[derive(Default)]
-enum SampleLoad {
+pub(super) enum SampleLoad {
     #[default]
     Idle,
     Loading,
@@ -1047,7 +1047,7 @@ fn folder_cell(
                 .flex()
                 .flex_col()
                 .gap(px(12.))
-                .child(folder_heading(entry, &cloud, &size, theme, &resolver, cell))
+                .child(folder_heading(entry, &cloud, &size, items, theme, &resolver, cell))
                 .child(
                     div()
                         .flex_1()
@@ -1065,7 +1065,7 @@ fn folder_cell(
                 .flex()
                 .flex_col()
                 .gap(px(12.))
-                .child(folder_heading(entry, &cloud, &size, theme, &resolver, cell))
+                .child(folder_heading(entry, &cloud, &size, items, theme, &resolver, cell))
                 .child(
                     div()
                         .flex_1()
@@ -1084,7 +1084,7 @@ fn folder_cell(
         .flex()
         .flex_col()
         .gap(px(8.))
-        .child(folder_heading(entry, &cloud, &size, theme, &resolver, cell))
+        .child(folder_heading(entry, &cloud, &size, items, theme, &resolver, cell))
         .child(
             div()
                 .flex_1()
