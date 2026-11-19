@@ -169,6 +169,51 @@ pub async fn plugin_preview(
     None
 }
 
+/// Test-only holds: a path's next preview request signals that it started and
+/// waits for the test to release it, so stale replies can be released out of order.
+#[cfg(test)]
+pub mod test_hold {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
+
+    struct Hold {
+        started: std::sync::mpsc::Sender<()>,
+        release: futures::channel::oneshot::Receiver<()>,
+    }
+
+    static HOLDS: LazyLock<Mutex<HashMap<PathBuf, Vec<Hold>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Hold the next request for `path`. Returns the "started" receiver and the
+    /// sender that releases it.
+    pub fn install(path: PathBuf) -> (std::sync::mpsc::Receiver<()>, futures::channel::oneshot::Sender<()>) {
+        let (started, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = futures::channel::oneshot::channel();
+        HOLDS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(path)
+            .or_default()
+            .push(Hold { started, release: release_rx });
+        (started_rx, release_tx)
+    }
+
+    pub(super) async fn wait(path: &std::path::Path) {
+        let hold = {
+            let mut holds = HOLDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let hold = holds.get_mut(path).and_then(Vec::pop);
+            if holds.get(path).is_some_and(Vec::is_empty) {
+                holds.remove(path);
+            }
+            hold
+        };
+        if let Some(hold) = hold {
+            let _ = hold.started.send(());
+            let _ = hold.release.await;
+        }
+    }
+}
+
 /// The provider pipeline shared by the Preview pane and Gallery: try the
 /// configured plugin providers in order, then the native previewers. The caller
 /// owns target/generation checks; this only does the bounded work.
@@ -185,6 +230,8 @@ pub async fn load_with_plugins(
     revision: u64,
     cancelled: Arc<AtomicBool>,
 ) -> Option<Preview> {
+    #[cfg(test)]
+    test_hold::wait(&entry.path).await;
     let readable = gate.check(&entry.path, ReadHint::for_path(&entry.path)) == ReadDecision::Readable;
     let plugin = if candidates.is_empty() || !readable || cancelled.load(Ordering::Relaxed) {
         None

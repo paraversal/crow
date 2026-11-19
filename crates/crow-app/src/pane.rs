@@ -5687,6 +5687,11 @@ impl Pane {
         ))
     }
 
+    #[cfg(test)]
+    pub fn gallery_sample_summary(&self) -> Option<(usize, bool)> {
+        self.gallery.sample_summary()
+    }
+
     /// Every shown folder's cursor and selection must name a listed row.
     pub fn invariant_violations(&self, cx: &gpui::App) -> Vec<crate::fuzz::Violation> {
         use crate::fuzz::Violation;

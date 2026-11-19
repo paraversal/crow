@@ -2833,6 +2833,168 @@ fn gallery_mode_keeps_selection_filter_and_returns(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn gallery_shows_the_same_text_preview_pipeline(cx: &mut TestAppContext) {
+    let root = fixture("gallery-preview-text");
+    std::fs::write(root.join("code.rs"), "pub fn main() {\n    let n = 42; // note\n}\n").expect("create fixture");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("down down cmd-4");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("code.rs"));
+    wait_for_selector(&view, &mut cx, "preview-code-line-0");
+    assert!(cx.debug_bounds("preview-code-line-2").is_some(), "all three lines are numbered in the gallery cell");
+    assert!(cx.debug_bounds("gallery-cell-code.rs").is_some(), "the preview belongs to the selected file");
+}
+
+#[gpui::test]
+fn gallery_drops_out_of_order_pair_replies(cx: &mut TestAppContext) {
+    let root = fixture("gallery-stale");
+    let alpha = root.join("alpha");
+    let beta = root.join("beta");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    let timeout = std::time::Duration::from_secs(5);
+
+    // Alpha's initial preview is loaded. Hold its next request and force one by
+    // moving the cursor away and back.
+    let alpha_hold = crate::preview::test_hold::install(alpha.clone());
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down up");
+    settle(&view, &mut cx);
+    alpha_hold.0.recv_timeout(timeout).expect("the alpha load starts");
+
+    // Exactly two selected: the second cell starts its own beta request.
+    let beta_hold = crate::preview::test_hold::install(beta.clone());
+    let beta_row = cx.debug_bounds("gallery-row-beta").expect("beta row");
+    cx.simulate_click(beta_row.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    beta_hold.0.recv_timeout(timeout).expect("the beta load starts");
+    assert!(cx.debug_bounds("gallery-cell-alpha").is_some());
+    assert!(cx.debug_bounds("gallery-cell-beta").is_some());
+
+    // A third selection collapses to one cell and replaces both targets.
+    let notes = cx.debug_bounds("gallery-row-notes.txt").expect("notes row");
+    cx.simulate_click(notes.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    wait_for_selector(&view, &mut cx, "gallery-cell-notes.txt");
+
+    // Release the stale cells out of order, newest target already on screen.
+    beta_hold.1.send(()).ok();
+    alpha_hold.1.send(()).ok();
+    cx.run_until_parked();
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("gallery-cell-notes.txt").is_some(), "the live selection stays");
+    assert!(cx.debug_bounds("gallery-cell-alpha").is_none(), "no stale alpha media");
+    assert!(cx.debug_bounds("gallery-cell-beta").is_none(), "no stale beta media");
+}
+
+#[gpui::test]
+fn gallery_folder_preview_samples_children_and_states(cx: &mut TestAppContext) {
+    let root = fixture("gallery-folders");
+    for i in 0..20 {
+        std::fs::write(root.join(format!("many-{i:02}.txt")), "").expect("create fixture");
+    }
+    std::fs::create_dir_all(root.join("many")).expect("create fixture");
+    for i in 0..20 {
+        std::fs::write(root.join(format!("many/child-{i:02}.txt")), "").expect("create fixture");
+    }
+    std::fs::create_dir_all(root.join("locked")).expect("create fixture");
+    std::fs::write(root.join("locked/inside.txt"), "").expect("create fixture");
+    let locked = root.join("locked");
+    let mut permissions = std::fs::metadata(&locked).expect("stat").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o000);
+    std::fs::set_permissions(&locked, permissions).expect("lock folder");
+
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+
+    // alpha has one child: the sample is complete and shows it.
+    wait_for_selector(&view, &mut cx, "gallery-sample-inner");
+    assert!(cx.debug_bounds("gallery-sample-complete").is_some(), "one child is a complete sample");
+
+    // beta is empty.
+    cx.simulate_keystrokes("down");
+    wait_for_selector(&view, &mut cx, "gallery-sample-empty");
+
+    // many has more children than the sample cap.
+    cx.simulate_keystrokes("down down");
+    wait_for_selector(&view, &mut cx, "gallery-sample-partial");
+    let (shown, partial) =
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.gallery_sample_summary()).expect("the folder sample is ready");
+    assert_eq!(shown, 12, "the sample shows the capped number of children");
+    assert!(partial, "more children exist than the sample read");
+
+    // A folder whose root cannot be listed is a distinct state.
+    cx.simulate_keystrokes("up");
+    wait_for_selector(&view, &mut cx, "gallery-sample-error");
+
+    let mut permissions = std::fs::metadata(&locked).expect("stat").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+    std::fs::set_permissions(&locked, permissions).expect("unlock folder");
+}
+
+#[gpui::test]
+fn gallery_folder_sample_respects_cloud_eligibility(cx: &mut TestAppContext) {
+    let root = fixture("gallery-cloud-folder");
+    let alpha = root.join("alpha");
+    let options = WindowOptions::default();
+    let (view, mut cx) = open_with_before(cx, &root, options, move |cx| {
+        crate::cloud_status::set_test_status(cx, alpha, crow_fs::CloudStatus::NotDownloaded);
+    });
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    wait_for_selector(&view, &mut cx, "gallery-sample-unavailable");
+    assert!(cx.debug_bounds("gallery-sample-inner").is_none(), "a placeholder folder is not enumerated");
+}
+
+#[gpui::test]
+fn gallery_selection_transitions_keep_the_pair_in_rail_order(cx: &mut TestAppContext) {
+    let root = fixture("gallery-transitions");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 800.);
+    cx.simulate_keystrokes("cmd-4 cmd-shift-p");
+    settle(&view, &mut cx);
+
+    // Three selected: one preview for the cursor.
+    cx.simulate_keystrokes("cmd-a");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("gallery-cell-alpha").is_some());
+    assert!(cx.debug_bounds("gallery-cell-beta").is_none(), "three or more follows the cursor");
+
+    // Remove notes from the selection: alpha and beta compare, in rail order.
+    let notes = cx.debug_bounds("gallery-row-notes.txt").expect("notes row");
+    cx.simulate_click(notes.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    let alpha = cx.debug_bounds("gallery-cell-alpha").expect("alpha cell");
+    let beta = cx.debug_bounds("gallery-cell-beta").expect("beta cell");
+    assert!(alpha.left() < beta.left(), "the pair follows rail order");
+
+    // One selected: back to a single preview, then the pair again.
+    let beta_row = cx.debug_bounds("gallery-row-beta").expect("beta row");
+    cx.simulate_click(beta_row.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("gallery-cell-alpha").is_some());
+    assert!(cx.debug_bounds("gallery-cell-beta").is_none());
+    cx.simulate_click(beta_row.center(), gpui::Modifiers { platform: true, ..Default::default() });
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("gallery-cell-beta").is_some());
+}
+
+#[gpui::test]
+fn gallery_home_end_and_horizontal_arrows_move_the_rail(cx: &mut TestAppContext) {
+    let root = fixture("gallery-keys");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("end");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"));
+    cx.simulate_keystrokes("home");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    cx.simulate_keystrokes("right down left up");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "Left and Right are row-motion aliases");
+}
+
+#[gpui::test]
 fn gallery_uses_finder_cmd_4_in_the_vim_layer(cx: &mut TestAppContext) {
     let root = fixture("gallery-vim");
     let (view, mut cx) = open(cx, &root);
@@ -4102,6 +4264,18 @@ fn wait_for_preview(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, path:
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     panic!("preview for {} never loaded", path.display());
+}
+
+/// Wait until `selector` is painted, for a background sample or preview.
+fn wait_for_selector(_view: &Entity<CrowWindow>, cx: &mut VisualTestContext, selector: &'static str) {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        if cx.debug_bounds(selector).is_some() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("{selector} never appeared");
 }
 
 /// Click the element with this debug selector, failing if it is not on screen.

@@ -805,6 +805,20 @@ mod tests {
     }
 
     #[test]
+    fn gallery_is_a_view_value_in_every_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Path::new(HOME);
+        let folder = home.join("Pictures");
+        let text = "[defaults]\nview = \"gallery\"\n";
+        let views = Views::parse(text, home).unwrap();
+        assert_eq!(views.resolve(&folder).view.0, ViewMode::Gallery);
+        save_folder_change(dir.path(), home, &folder, ViewChange::View(ViewMode::Gallery)).unwrap();
+        let saved = std::fs::read_to_string(views_path(dir.path())).unwrap();
+        assert!(saved.contains("view = \"gallery\""), "{saved}");
+        assert_eq!(Views::parse(&saved, home).unwrap().resolve(&folder).view.0, ViewMode::Gallery);
+    }
+
+    #[test]
     fn icon_size_and_caption_resolve_and_write_per_folder() {
         let dir = tempfile::tempdir().unwrap();
         let home = Path::new(HOME);

@@ -107,6 +107,14 @@ impl Gallery {
     pub fn replace_surface(&mut self) -> crate::plugins::SurfaceId {
         std::mem::replace(&mut self.second_surface, crate::plugins::new_surface())
     }
+
+    #[cfg(test)]
+    pub fn sample_summary(&self) -> Option<(usize, bool)> {
+        match &self.samples[0].load {
+            SampleLoad::Ready(sample) => Some((sample.entries.len(), sample.incomplete.is_some())),
+            _ => None,
+        }
+    }
 }
 
 /// The entries the preview shows, in rail order. Exactly two selected entries
@@ -147,7 +155,7 @@ pub(super) fn refresh(pane: &mut Pane, cx: &mut Context<Pane>) {
             Some(cursor) if cursor == right => left,
             _ => return None,
         };
-        entries.iter().find(|entry| &entry.path == other).cloned()
+        entries.iter().find(|entry| &entry.path == other && !sampleable(entry)).cloned()
     });
     load_second(pane, second, cx);
     update_samples(pane, &entries, cx);
@@ -376,8 +384,13 @@ fn start_sample(pane: &mut Pane, slot: usize, entry: Entry, key: u64, cx: &mut C
     cx.spawn(async move |this, cx| {
         let result = cx
             .background_spawn(async move {
-                if gate.check(&checked, ReadHint::for_path(&checked)) != ReadDecision::Readable {
-                    return Err(SampleFailure::Unavailable(cloud.unwrap_or(CloudStatus::NotDownloaded)));
+                let decision = gate.check(&checked, ReadHint::for_path(&checked));
+                if decision != ReadDecision::Readable {
+                    let status = cloud.unwrap_or(match decision {
+                        ReadDecision::SkipAmbiguous => CloudStatus::Unknown,
+                        _ => CloudStatus::NotDownloaded,
+                    });
+                    return Err(SampleFailure::Unavailable(status));
                 }
                 let mut sample =
                     crow_fs::list_sample(&checked, show_hidden, SAMPLE_ROWS, Some(SAMPLE_EXAMINED), &cancel)
@@ -967,6 +980,18 @@ fn folder_cell(
     let border = crate::style::color(theme.role("border"));
     let resolver = pane.icon_resolver(0, cx);
     let size = folder_size.map_or_else(|| "--".to_owned(), |size| crow_fs::human_size(size.bytes));
+    let items = match &sample.load {
+        SampleLoad::Ready(sample) if sample.incomplete.is_none() => Some(sample.entries.len()),
+        _ => None,
+    };
+    let footer_id = match &sample.load {
+        SampleLoad::Idle | SampleLoad::Loading => "gallery-sample-loading",
+        SampleLoad::Ready(sample) if sample.entries.is_empty() && sample.incomplete.is_none() => "gallery-sample-empty",
+        SampleLoad::Ready(sample) if sample.incomplete.is_some() => "gallery-sample-partial",
+        SampleLoad::Ready(_) => "gallery-sample-complete",
+        SampleLoad::Unavailable(_) => "gallery-sample-unavailable",
+        SampleLoad::Error(_) => "gallery-sample-error",
+    };
     let mut list =
         div().id(("gallery-folder-list", cell)).flex().flex_col().flex_1().min_h_0().overflow_y_scroll().gap(px(1.));
     let footer_text: Option<String> = match &sample.load {
@@ -987,6 +1012,10 @@ fn folder_cell(
                 let dim = crate::style::content_opacity(child.hidden, false);
                 list = list.child(
                     div()
+                        .debug_selector({
+                            let name = child.name.clone();
+                            move || format!("gallery-sample-{name}")
+                        })
                         .flex()
                         .items_center()
                         .gap(px(8.))
@@ -1006,12 +1035,14 @@ fn folder_cell(
                 );
             }
             match sample.incomplete {
+                None if sample.entries.len() == 1 => Some("1 item".to_owned()),
                 None => Some(format!("{} items", sample.entries.len())),
                 Some(_) => Some("Partial contents".to_owned()),
             }
         }
         SampleLoad::Unavailable(status) => {
             return div()
+                .debug_selector(|| "gallery-sample-unavailable".into())
                 .size_full()
                 .flex()
                 .flex_col()
@@ -1029,6 +1060,7 @@ fn folder_cell(
         }
         SampleLoad::Error(error) => {
             return div()
+                .debug_selector(|| "gallery-sample-error".into())
                 .size_full()
                 .flex()
                 .flex_col()
@@ -1068,6 +1100,7 @@ fn folder_cell(
                 .when_some(footer_text, |frame, text| {
                     frame.child(
                         div()
+                            .debug_selector(move || footer_id.to_owned())
                             .px(px(8.))
                             .py(px(4.))
                             .border_t_1()
@@ -1084,12 +1117,17 @@ fn folder_heading(
     entry: &Entry,
     cloud: &Option<CloudStatus>,
     size: &str,
+    items: Option<usize>,
     theme: &Theme,
     resolver: &crate::icon_packs::Resolver,
     cell: usize,
 ) -> Div {
     let muted = crate::style::color(theme.role("fg-muted"));
-    let mut detail = format!("Folder · {size}");
+    let mut detail = match items {
+        Some(1) => format!("Folder · 1 item · {size}"),
+        Some(items) => format!("Folder · {items} items · {size}"),
+        None => format!("Folder · {size}"),
+    };
     if entry.modified.is_some() {
         detail.push_str(" · ");
         detail.push_str(&crate::style::format_time(entry.modified));

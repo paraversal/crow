@@ -405,7 +405,7 @@ deterministic tree the `crow-search` corpus cases use; the unreadable folder in 
 remove it with `chmod -R u+rwx` first.
 
 `--bench` scrolls 600 frames and prints first paint, load time and frame times.
-`CROW_BENCH_VIEW=icons` (or `list`/`columns`) forces the view for that run, so the
+`CROW_BENCH_VIEW=icons` (or `list`/`columns`/`gallery`) forces the view for that run, so the
 icon grid is measured on the same fixture and path as the list.
 `--bench-filter <query>` applies the name filter first, so the scroll times are for
 highlighted rows. It needs a GPU, so it runs locally, not in CI. `--make-fixture`
@@ -495,6 +495,7 @@ if Crow asks on first launch. To skip the prompt in a fresh test profile, set
 | Check | How |
 | --- | --- |
 | Column view | Cmd-3: arrows move within a column, Right moves into the selected folder, Left moves back; Left in the leftmost column goes up a folder. Only the focused column's selection is in the accent color. Selecting a file shows its preview as the last column. Cmd-2 returns to the list in the folder you were in. |
+| Gallery view | Cmd-4: the rail shows mixed files and folders with a thumbnail or icon, name, size and modified date; Up/Down, Left/Right, Home/End, Shift and Cmd-click match List, and the filter, cursor and selection survive List ↔ Icons ↔ Gallery. Selecting a folder shows its immediate children without reading their contents; an empty folder, a partial sample, an unreadable folder and an iCloud placeholder each show a distinct state. Select two entries: two labeled preview cells appear in rail order, side by side when they fit and stacked at 640 px; select three: the preview follows the cursor and the full selection still drives file actions and Cmd-I's summary. |
 | Icon view | Cmd-1: tiles show the direct entries only, never inline-expanded children. Open a folder in List, select a child, then Cmd-1: the cursor moves to the direct folder; Cmd-2 restores the open child. Filter, sort, type-to-select, Return, rename, context menu, Preview and drag payloads match List. Arrows follow the tile grid, Shift extends in display order and Cmd-click toggles. |
 | Icon sizes and reflow | View ▸ Icon Size Compact, Standard and Large at 640 px and wide: the tile is fixed per preset, names keep up to two lines, and Compact fits more names. Change size with the cursor near the middle and with it at the bottom: the focused tile stays visible and selected, the filter and cursor survive, and a resize with a drag in flight cancels and restores it. |
 | Icon marquee | Drag from empty space: tiles intersecting the rectangle get the inset preview; reverse and they drop out. Cmd-drag keeps the starting selection, Esc restores it, and dropping the pointer past an edge autoscrolls with the rectangle origin fixed. A watcher reorder or tab/focus change cancels and restores. |

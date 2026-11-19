@@ -221,6 +221,8 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("down", MoveDown, Some(LIST)),
         KeyBinding::new("alt-up", MoveToFirst, Some(LIST)),
         KeyBinding::new("alt-down", MoveToLast, Some(LIST)),
+        KeyBinding::new("home", MoveToFirst, Some("FileList && !Filter && !TextInput")),
+        KeyBinding::new("end", MoveToLast, Some("FileList && !Filter && !TextInput")),
         KeyBinding::new("shift-up", ExtendUp, Some(LIST)),
         KeyBinding::new("shift-down", ExtendDown, Some(LIST)),
         KeyBinding::new("cmd-a", SelectAll, Some(LIST)),
