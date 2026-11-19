@@ -6528,10 +6528,6 @@ fn list_name_column_follows_the_window_width(cx: &mut TestAppContext) {
     let (_view, mut cx) = open(cx, &root);
     let widths = |cx: &mut VisualTestContext| {
         cx.run_until_parked();
-        // The pane asks for one more frame once it sees the new width; the test
-        // platform does not run scheduled frames, so draw it here.
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
         let name = cx.debug_bounds("column-header-0").expect("Name header").size.width;
         let next = cx.debug_bounds("column-header-1").expect("second header").size.width;
         let table = cx.debug_bounds("table-header").expect("header").size.width;
@@ -6539,7 +6535,7 @@ fn list_name_column_follows_the_window_width(cx: &mut TestAppContext) {
     };
     cx.simulate_resize(gpui::size(px(1400.), px(700.)));
     let (wide_name, wide_next, wide_table) = widths(&mut cx);
-    cx.simulate_resize(gpui::size(px(1100.), px(700.)));
+    cx.simulate_resize(gpui::size(px(1200.), px(700.)));
     let (narrow_name, narrow_next, narrow_table) = widths(&mut cx);
     assert!(wide_table > narrow_table, "the list got narrower");
     assert_eq!(wide_next, narrow_next, "the other columns keep their widths");
@@ -6550,8 +6546,6 @@ fn list_name_column_follows_the_window_width(cx: &mut TestAppContext) {
     for width in [900., 760., 640.] {
         cx.simulate_resize(gpui::size(px(width), px(700.)));
         cx.run_until_parked();
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
         let table = cx.debug_bounds("table-header").expect("header");
         let shown: Vec<_> = (0..6).filter_map(|i| cx.debug_bounds(format!("column-header-{i}").leak())).collect();
         assert!(!shown.is_empty(), "Name always shows");
@@ -6559,6 +6553,41 @@ fn list_name_column_follows_the_window_width(cx: &mut TestAppContext) {
             assert!(cell.right() <= table.right() + px(0.5), "at {width}: {cell:?} past {table:?}");
         }
     }
+}
+
+#[gpui::test]
+fn list_columns_fit_with_preview_open_at_launch(cx: &mut TestAppContext) {
+    let root = fixture("preview-list-width");
+    let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1200.), px(760.)));
+    let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+    let (_view, mut cx) = open_with_before(cx, &root, options, |cx| {
+        let config = &cx.global::<Ui>().config_dir;
+        std::fs::write(config.join("settings.toml"), "show_preview = true\n[window]\nsidebar_width = 294\n")
+            .expect("write settings");
+        std::fs::write(
+            config.join("views.toml"),
+            "[defaults]\ncolumns = [\"modified\", \"size\", \"kind\", \"added\"]\n",
+        )
+        .expect("write views");
+        ui::reload_config(cx);
+    });
+    let header = |cx: &mut VisualTestContext, id| cx.debug_bounds(id).expect("column header");
+    let name = header(&mut cx, "column-header-0");
+    let kind = header(&mut cx, "column-header-3");
+    assert!(name.size.width >= px(220.));
+    assert!(kind.size.width < px(100.), "Kind gives up room for file names");
+    assert_eq!(header(&mut cx, "column-header-4").right(), header(&mut cx, "table-header").right());
+    let row_name = cx.debug_bounds("row-name-notes.txt").expect("name cell");
+    assert_eq!(row_name.right() + px(8.), name.right(), "the name cell ends at the same divider");
+
+    cx.simulate_keystrokes("cmd-shift-p");
+    assert!(cx.debug_bounds("preview").is_none());
+    assert!(header(&mut cx, "column-header-0").size.width > name.size.width);
+    assert!(header(&mut cx, "column-header-3").size.width > kind.size.width);
+
+    cx.simulate_keystrokes("cmd-shift-p");
+    assert_eq!(header(&mut cx, "column-header-0"), name);
+    assert_eq!(header(&mut cx, "column-header-3"), kind);
 }
 
 #[gpui::test]
