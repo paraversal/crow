@@ -259,6 +259,8 @@ pub struct SearchView {
     scroll: UniformListScrollHandle,
     /// The results list's drawn bounds, captured at prepaint for drop hit testing.
     list_bounds: std::rc::Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The folder result under a drag, outlined like a folder row in a listing.
+    drop_hover: Option<PathBuf>,
     show_skipped: bool,
     /// The row whose context menu is open, while it is.
     menu: Option<usize>,
@@ -660,6 +662,7 @@ impl SearchView {
             preview_cancel: Arc::new(AtomicBool::new(false)),
             scroll: UniformListScrollHandle::new(),
             list_bounds: std::rc::Rc::new(Cell::new(None)),
+            drop_hover: None,
             show_skipped: false,
             menu: None,
             menu_plugins: Vec::new(),
@@ -3421,6 +3424,13 @@ impl SearchView {
 
     /// The real folder under `pointer`, from the same fixed-row geometry the list
     /// drew. A file, package or skipped row is unavailable.
+    pub(crate) fn set_drop_hover(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+        if self.drop_hover != path {
+            self.drop_hover = path;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn drop_hit(&self, pointer: Point<Pixels>, _cx: &App) -> Option<crate::drag_drop::DropHit> {
         let bounds = self.list_bounds.get()?;
         if !bounds.contains(&pointer) {
@@ -3552,6 +3562,8 @@ impl SearchView {
                     display_text(&row.name).into_owned().into()
                 };
                 let drag_icon = cloud_icon(cloud, &row.path, row.is_dir, 22);
+                let drop_opacity = (self.drop_hover.as_deref() == Some(row.path.as_path()))
+                    .then(|| crate::drag_drop::cue_opacity(cx, &row.path));
                 div()
                     .id(("search-row", i))
                     .role(Role::ListBoxOption)
@@ -3584,6 +3596,9 @@ impl SearchView {
                             cut_outline(theme, edge.top, edge.bottom)
                                 .debug_selector(|| format!("search-cut-outline-{i}")),
                         )
+                    })
+                    .when_some(drop_opacity, |row, opacity| {
+                        row.child(crate::style::drop_outline(theme).inset_0().opacity(opacity))
                     })
                     .debug_selector(|| format!("search-row-{i}"))
                     .on_mouse_down(

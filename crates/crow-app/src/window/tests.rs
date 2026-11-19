@@ -15960,3 +15960,196 @@ fn batch_rename_rejects_a_changed_source_after_the_preview(cx: &mut TestAppConte
     assert_eq!(steps, 0, "a stale preview has no undoable batch");
     assert!(error.as_ref().is_some_and(|error| error.contains("changed since the preview")), "{error:?}");
 }
+
+fn navigate_to(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, dir: PathBuf) {
+    let pane = pane(view, cx);
+    pane.update(cx, |pane, cx| pane.navigate(dir, cx));
+    settle(view, cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn holding_over_back_undoes_springs_then_walks_history(cx: &mut TestAppContext) {
+    let root = fixture("drop-spring-back");
+    let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "off");
+    navigate_to(&view, &mut cx, root.join("alpha"));
+    let pane = pane(&view, &cx);
+    let dir = |cx: &VisualTestContext| pane.read_with(cx, |pane, cx| pane.current_dir(cx));
+    let inner = cx.debug_bounds("row-inner").expect("inner row").center();
+    let back = cx.debug_bounds("back").expect("Back button").center();
+
+    cx.simulate_event(external_entered(inner, root.join("notes.txt"), Default::default()));
+    cx.simulate_event(external_pending(inner, Default::default()));
+    spring_delay(&mut cx, 601);
+    assert_eq!(dir(&cx), root.join("alpha/inner"), "the folder sprang open");
+
+    cx.simulate_event(external_pending(back, Default::default()));
+    spring_delay(&mut cx, 599);
+    assert_eq!(dir(&cx), root.join("alpha/inner"), "Back waits the same delay");
+    spring_delay(&mut cx, 2);
+    assert_eq!(dir(&cx), root.join("alpha"), "Back first undoes the spring");
+
+    spring_delay(&mut cx, 601);
+    assert_eq!(dir(&cx), root.to_path_buf(), "holding still steps back through real history");
+
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let beta = cx.debug_bounds("row-beta").expect("beta row in the history step").center();
+    cx.simulate_event(external_pending(beta, Default::default()));
+    cx.simulate_event(external_submit(beta, Default::default()));
+    settle(&view, &mut cx);
+    assert!(root.join("beta/notes.txt").exists(), "the drop landed where Back led");
+    assert_eq!(dir(&cx), root.to_path_buf(), "the history step stays shown");
+    cx.simulate_keystrokes("cmd-[");
+    settle(&view, &mut cx);
+    assert_eq!(dir(&cx), root.join("alpha"), "one Back step returns to the drag's origin");
+}
+
+#[gpui::test]
+fn releasing_over_back_cancels_and_restores_the_origin(cx: &mut TestAppContext) {
+    let root = fixture("drop-spring-back-release");
+    std::fs::remove_dir_all(root.join("alpha/inner")).expect("empty alpha");
+    let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "off");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let pane = pane(&view, &cx);
+    let alpha = cx.debug_bounds("row-alpha").expect("alpha row").center();
+    let back = cx.debug_bounds("back").expect("Back button").center();
+    cx.simulate_event(external_entered(alpha, root.join("notes.txt"), Default::default()));
+    cx.simulate_event(external_pending(alpha, Default::default()));
+    spring_delay(&mut cx, 601);
+    assert_eq!(pane.read_with(&cx, |pane, cx| pane.current_dir(cx)), root.join("alpha"));
+
+    cx.simulate_event(external_pending(back, Default::default()));
+    cx.simulate_event(external_submit(back, Default::default()));
+    settle(&view, &mut cx);
+    assert_eq!(pane.read_with(&cx, |pane, cx| pane.current_dir(cx)), root.to_path_buf(), "origin restored");
+    assert!(root.join("notes.txt").exists(), "Back never takes a drop");
+    assert!(!pane.read_with(&cx, |pane, _| pane.can_go_back()), "no Back step");
+}
+
+#[gpui::test]
+fn an_armed_folder_blinks_twice_before_it_springs(cx: &mut TestAppContext) {
+    let root = fixture("drop-spring-cue");
+    std::fs::remove_dir_all(root.join("alpha/inner")).expect("empty alpha");
+    let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "full");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let pane = pane(&view, &cx);
+    let alpha = cx.debug_bounds("row-alpha").expect("alpha row").center();
+    let cue = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.try_global::<crate::drag_drop::SpringCue>().cloned());
+    let armed = Some(crate::drag_drop::DropLocation::Folder(root.join("alpha")));
+
+    cx.simulate_event(external_entered(alpha, root.join("notes.txt"), Default::default()));
+    cx.simulate_event(external_pending(alpha, Default::default()));
+    spring_delay(&mut cx, 319);
+    assert!(cue(&mut cx).is_none_or(|cue| cue.target.is_none()), "steady until the last moment");
+    assert!(cx.debug_bounds("drop-outline").is_some(), "the hover outline is up");
+    spring_delay(&mut cx, 2);
+    assert_eq!(cue(&mut cx).map(|cue| (cue.target, cue.opacity)), Some((armed.clone(), 0.0)), "first blink off");
+    spring_delay(&mut cx, 70);
+    assert_eq!(cue(&mut cx).map(|cue| cue.opacity), Some(1.0), "back on");
+    spring_delay(&mut cx, 70);
+    assert_eq!(cue(&mut cx).map(|cue| cue.opacity), Some(0.0), "second blink off");
+    spring_delay(&mut cx, 70);
+    assert_eq!(cue(&mut cx).map(|cue| cue.opacity), Some(1.0), "visible when it opens");
+    spring_delay(&mut cx, 70);
+    assert_eq!(pane.read_with(&cx, |pane, cx| pane.current_dir(cx)), root.join("alpha"), "then it springs");
+    assert!(cue(&mut cx).is_none_or(|cue| cue.target.is_none()), "the cue ends with the spring");
+}
+
+#[gpui::test]
+fn moving_off_an_armed_folder_stops_its_blink(cx: &mut TestAppContext) {
+    let root = fixture("drop-spring-cue-move");
+    let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "full");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let pane = pane(&view, &cx);
+    let alpha = cx.debug_bounds("row-alpha").expect("alpha row").center();
+    let beta = cx.debug_bounds("row-beta").expect("beta row").center();
+    let cue = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.try_global::<crate::drag_drop::SpringCue>().cloned());
+    cx.simulate_event(external_entered(alpha, root.join("notes.txt"), Default::default()));
+    cx.simulate_event(external_pending(alpha, Default::default()));
+    spring_delay(&mut cx, 330);
+    assert_eq!(cue(&mut cx).map(|cue| cue.opacity), Some(0.0), "mid-blink");
+    cx.simulate_event(external_pending(beta, Default::default()));
+    cx.run_until_parked();
+    assert!(cue(&mut cx).is_none_or(|cue| cue.target.is_none()), "a new target never inherits a dimmed outline");
+    spring_delay(&mut cx, 300);
+    assert_eq!(pane.read_with(&cx, |pane, cx| pane.current_dir(cx)), root.to_path_buf(), "alpha's timer is stale");
+    cx.simulate_event(gpui::FileDropEvent::Exited);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_path_segment_is_outlined_under_a_drag(cx: &mut TestAppContext) {
+    let root = fixture("drop-hover-outline");
+    let (view, mut cx) = open(cx, &root.join("alpha"));
+    set_motion(&mut cx, "off");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let target = root.canonicalize().expect("real root");
+    let hit = view
+        .read_with(&cx, |window, _| window.path_hits.borrow().clone())
+        .into_iter()
+        .find(|hit| hit.path.canonicalize().ok().as_deref() == Some(target.as_path()))
+        .expect("root path segment");
+    cx.simulate_event(external_entered(hit.bounds.center(), root.join("notes.txt"), Default::default()));
+    cx.simulate_event(external_pending(hit.bounds.center(), Default::default()));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let outline = cx.debug_bounds("drop-outline").expect("the segment is outlined");
+    assert!(outline.contains(&hit.bounds.center()), "around the segment under the pointer");
+    cx.simulate_event(gpui::FileDropEvent::Exited);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_folder_search_result_is_outlined_under_a_drag(cx: &mut TestAppContext) {
+    let root = fixture("drop-hover-search-outline");
+    let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "off");
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    cx.simulate_input("alpha");
+    wait_for_search(&view, &mut cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let row = cx.debug_bounds("search-row-0").expect("alpha search row").center();
+    cx.simulate_event(external_entered(row, root.join("notes.txt"), Default::default()));
+    cx.simulate_event(external_pending(row, Default::default()));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let outline = cx.debug_bounds("drop-outline").expect("the folder result is outlined");
+    assert!(outline.contains(&row), "around the result under the pointer");
+    cx.simulate_event(gpui::FileDropEvent::Exited);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_finder_drop_right_after_typing_still_lands(cx: &mut TestAppContext) {
+    let root = fixture("drop-after-typing");
+    let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "off");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let alpha = cx.debug_bounds("row-alpha").expect("alpha row").center();
+    // Type-to-select puts the window in keyboard modality; no plain mouse move
+    // follows, as when the pointer was resting over Finder while typing.
+    cx.simulate_keystrokes("b");
+    cx.run_until_parked();
+    cx.simulate_event(external_entered(alpha, root.join("notes.txt"), Default::default()));
+    cx.simulate_event(external_pending(alpha, Default::default()));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("drop-outline").is_some(), "the folder under the drag is outlined");
+    cx.simulate_event(external_submit(alpha, Default::default()));
+    settle(&view, &mut cx);
+    assert!(root.join("alpha/notes.txt").exists(), "the drop landed");
+    assert!(!root.join("notes.txt").exists(), "…as a move");
+}

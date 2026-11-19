@@ -120,7 +120,7 @@ index cfb1410..27d62af 100644
      /// The user has stopped dragging the files over the window.
      Exited,
 diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
-index 68afa43..83c7f9a 100644
+index 68afa43..b59d861 100644
 --- a/crates/gpui/src/window.rs
 +++ b/crates/gpui/src/window.rs
 @@ -11,7 +11,7 @@ use crate::{
@@ -162,7 +162,18 @@ index 68afa43..83c7f9a 100644
      /// Returns true if the last input event was keyboard-based (key press, tab navigation, etc.)
      /// This is used for focus-visible styling to show focus indicators only for keyboard navigation.
      pub fn last_input_was_keyboard(&self) -> bool {
-@@ -6134,8 +6143,10 @@ impl Window {
+@@ -6079,6 +6088,10 @@ impl Window {
+         self.last_input_modality = match &event {
+             PlatformInput::KeyDown(_) => InputModality::Keyboard,
+             PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
++            // A native file drag becomes mouse moves and a mouse up below; after
++            // typing it must not stay in keyboard modality, or no hitbox counts
++            // as hovered and the drag can neither highlight nor drop.
++            PlatformInput::FileDrop(_) => InputModality::Mouse,
+             PlatformInput::Touch(_) => InputModality::Touch,
+             _ => self.last_input_modality,
+         };
+@@ -6134,8 +6147,10 @@ impl Window {
              // Translate dragging and dropping of external files from the operating system
              // to internal drag and drop events.
              PlatformInput::FileDrop(file_drop) => match file_drop {
@@ -174,7 +185,7 @@ index 68afa43..83c7f9a 100644
                      let source_window = self.handle.window_id();
                      if !cx.restore_platform_drag(source_window) && cx.active_drag.is_none() {
                          cx.active_drag = Some(AnyDrag {
-@@ -6145,29 +6156,40 @@ impl Window {
+@@ -6145,29 +6160,40 @@ impl Window {
                              cursor_style: None,
                              external_payload_source: None,
                              origin: None,

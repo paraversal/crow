@@ -54,9 +54,11 @@ fn register_path_hit(
     is_dir: bool,
     last: bool,
     child: impl IntoElement,
+    drop: Option<(&crow_theme::Theme, f32)>,
 ) -> AnyElement {
     let hits = hits.clone();
     div()
+        .relative()
         .flex()
         .items_center()
         .map(|wrapper| if last { wrapper.min_w_0() } else { wrapper.flex_none() })
@@ -66,6 +68,9 @@ fn register_path_hit(
             }
         })
         .child(child)
+        .when_some(drop, |wrapper, (theme, opacity)| {
+            wrapper.child(crate::style::drop_outline(theme).inset_0().opacity(opacity))
+        })
         .into_any_element()
 }
 
@@ -766,9 +771,13 @@ pub fn render(
     pane: Entity<Pane>,
     hovered: bool,
     path_hits: &PathHits,
+    drop_hover: Option<&std::path::Path>,
     cx: &mut App,
 ) -> impl IntoElement + use<> {
     path_hits.borrow_mut().clear();
+    // The segment under a drag gets the same outline as a folder row.
+    let drop = drop_hover.map(|path| (path.to_path_buf(), crate::drag_drop::cue_opacity(cx, path)));
+    let drop_on = |target: &PathBuf| drop.as_ref().filter(|(path, _)| path == target).map(|(_, opacity)| *opacity);
     let ui = cx.global::<Ui>();
     let theme = ui.theme.clone();
     let border = color(theme.role("border"));
@@ -793,12 +802,14 @@ pub fn render(
                 if i == hidden.start {
                     let folded = &parts[hidden.clone()];
                     let deepest = folded.last().map(|(_, path)| path.clone()).unwrap_or_default();
+                    let outline = drop_on(&deepest).map(|opacity| (&theme, opacity));
                     children.push(register_path_hit(
                         path_hits,
                         deepest,
                         true,
                         false,
                         folded_segment(folded, &pane, hover).into_any_element(),
+                        outline,
                     ));
                     children.push(separator().into_any_element());
                 }
@@ -867,12 +878,14 @@ pub fn render(
                     }
                 });
             });
+            let outline = drop_on(&hit_target).map(|opacity| (&theme, opacity));
             children.push(register_path_hit(
                 path_hits,
                 hit_target,
                 is_dir,
                 i == last,
                 with_tooltip(part, spoke, None).into_any_element(),
+                outline,
             ));
             if i < last {
                 children.push(separator().into_any_element());

@@ -244,6 +244,10 @@ pub mod ms {
     pub const CHILD_COLUMN: u64 = 145;
     pub const NAVIGATION_LOW: u64 = 120;
     pub const REVEAL: u64 = 300;
+    /// One half of the double blink before a folder springs open.
+    pub const SPRING_BLINK: u64 = 70;
+    /// Low's single soft dip before a spring.
+    pub const SPRING_DIP: u64 = 110;
 }
 
 pub fn ease_in(t: f32) -> f32 {
@@ -383,6 +387,24 @@ pub fn copy_flash(mode: Effective, started: Instant, now: Instant) -> f32 {
         return 0.0;
     }
     1.0 - ease_in(elapsed.as_secs_f32() / duration.as_secs_f32())
+}
+
+/// The drop outline's opacity steps while a spring is armed, as
+/// `(ms after arming, opacity)`, ending before `delay_ms`. Full blinks the
+/// outline twice right before the folder opens, like Finder; Low dims it once
+/// (a change of color, not a flash); Off keeps it steady.
+pub fn spring_cue(mode: Effective, delay_ms: u64) -> Vec<(u64, f32)> {
+    match mode {
+        Effective::Off => Vec::new(),
+        Effective::Low => {
+            let start = delay_ms.saturating_sub(2 * ms::SPRING_DIP);
+            vec![(start, 0.4), (start + ms::SPRING_DIP, 1.0)]
+        }
+        Effective::Full => {
+            let start = delay_ms.saturating_sub(4 * ms::SPRING_BLINK);
+            (0..4).map(|k| (start + k * ms::SPRING_BLINK, if k % 2 == 0 { 0.0 } else { 1.0 })).collect()
+        }
+    }
 }
 
 // ----- disclosure: a folder opening or closing inline (list view) -----
@@ -568,5 +590,19 @@ mod tests {
         }
         assert!(sounds(SoundSet::Off).is_empty());
         assert_eq!(all_sounds().len(), 6, "trash, empty trash, Purr, Pop, Bottle, Glass");
+    }
+
+    #[test]
+    fn spring_cue_blinks_before_the_spring_and_ends_visible() {
+        let full = spring_cue(Effective::Full, 600);
+        assert_eq!(full, vec![(320, 0.0), (390, 1.0), (460, 0.0), (530, 1.0)], "two blinks in the last 280 ms");
+        let low = spring_cue(Effective::Low, 600);
+        assert_eq!(low.len(), 2, "one dip, no flashing");
+        assert!(low.iter().all(|(_, opacity)| *opacity > 0.0), "Low never hides the outline");
+        assert!(spring_cue(Effective::Off, 600).is_empty());
+        for cue in [full, low] {
+            assert!(cue.windows(2).all(|w| w[0].0 < w[1].0), "steps in order");
+            assert!(cue.last().is_some_and(|(at, opacity)| *at < 600 && *opacity == 1.0), "visible when it opens");
+        }
     }
 }

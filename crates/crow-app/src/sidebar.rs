@@ -1852,7 +1852,9 @@ impl Render for Sidebar {
                 .flex()
                 .flex_col()
                 .relative()
-                .when(look.drop, |row| row.child(drop_outline(&theme).inset_0()))
+                .when(look.drop, |row| {
+                    row.child(drop_outline(&theme).inset_0().opacity(crate::drag_drop::cue_opacity(cx, &path)))
+                })
                 .when(look.ring, |row| row.shadow(cursor_ring(&theme)))
                 .when(self.menu.is_some_and(|(m, _)| m == i), |row| row.child(drop_outline(&theme).inset_0()))
                 .when_some(receive_tint, |row, tint| row.child(div().absolute().inset_0().rounded_md().bg(tint)))

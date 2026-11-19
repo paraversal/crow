@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crow_core::drag::{DragMachine, Finish, SpringTarget};
+use crow_core::drag::{DragMachine, Finish, Spring};
 use crow_core::{Location, SidebarEdit, Tabs, TipId, TipsMode, ViewMode, ZeroMatchStreak};
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement,
@@ -29,7 +29,7 @@ use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
 };
 use crate::chrome::{self, Keycap, KeycapWeight, SheetWidth, with_action_tooltip, with_tooltip};
-use crate::drag_drop::{DropHit, DropLocation};
+use crate::drag_drop::{DropHit, DropLocation, DropSurface, SpringCue};
 use crate::icons::{self, Glyph};
 use crate::info_pane::{self, InfoKey, InfoPane, InfoPaneEvent, InfoTab, InfoTarget};
 use crate::keys::{self, KeyScope};
@@ -210,6 +210,11 @@ pub struct CrowWindow {
     drop_pending: bool,
     /// The path bar's segment bounds from the last frame.
     path_hits: bottom_bar::PathHits,
+    /// The Back button's bounds from the last frame, for springing back.
+    back_bounds: Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
+    /// The destination under the pointer during a drag, for surfaces whose
+    /// hover outline the window draws (Back, path bar, search results).
+    drop_hover: Option<DropHit>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -343,6 +348,8 @@ impl CrowWindow {
             drag_timer_token: None,
             drop_pending: false,
             path_hits: Default::default(),
+            back_bounds: Default::default(),
+            drop_hover: None,
             _subscriptions: subscriptions,
         }
     }
@@ -804,6 +811,10 @@ impl CrowWindow {
             );
             (pane.can_go_back(), pane.can_go_forward(), pane.mode(), back_label, forward_label)
         };
+        // During a drag, Back is live whenever holding over it would spring back.
+        let back = back || self.drag.can_spring_back();
+        let back_drop = self.drop_hover.as_ref().is_some_and(|hit| hit.location == DropLocation::Back && hit.spring);
+        let back_bounds = self.back_bounds.clone();
         let fg = color(theme.role("fg"));
         let muted = color(theme.role("fg-muted"));
         let surface = color(theme.role("surface"));
@@ -848,8 +859,19 @@ impl CrowWindow {
             .flex()
             .gap(px(2.))
             .child(
-                nav_button("back", "Back".to_owned(), back_label, Glyph::Back, back, &GoBack, cx)
-                    .on_click(cx.listener(|this, _, window, cx| this.pane().update(cx, |p, cx| p.go_back(window, cx)))),
+                div()
+                    .relative()
+                    .on_children_prepainted(move |children, _, _| back_bounds.set(children.first().copied()))
+                    .child(nav_button("back", "Back".to_owned(), back_label, Glyph::Back, back, &GoBack, cx).on_click(
+                        cx.listener(|this, _, window, cx| this.pane().update(cx, |p, cx| p.go_back(window, cx))),
+                    ))
+                    .when(back_drop, |wrap| {
+                        wrap.child(
+                            crate::style::drop_outline(&theme)
+                                .inset_0()
+                                .opacity(crate::drag_drop::back_cue_opacity(cx)),
+                        )
+                    }),
             )
             .child(
                 nav_button("forward", "Forward".to_owned(), forward_label, Glyph::Forward, forward, &GoForward, cx)
@@ -1346,7 +1368,12 @@ impl CrowWindow {
 
     fn render_bottom_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let state = self.bar_state(window, cx);
-        bottom_bar::render(state, self.pane().clone(), self.path_hovered, &self.path_hits, cx)
+        let drop_hover = self
+            .drop_hover
+            .as_ref()
+            .filter(|hit| hit.surface == DropSurface::PathBar)
+            .and_then(|hit| hit.path().cloned());
+        bottom_bar::render(state, self.pane().clone(), self.path_hovered, &self.path_hits, drop_hover.as_deref(), cx)
     }
 
     // ----- external drag routing and spring-loaded folders -----
@@ -1360,7 +1387,7 @@ impl CrowWindow {
             .iter()
             .find(|hit| hit.bounds.contains(&pointer))
             .filter(|hit| hit.is_dir)
-            .map(|hit| DropHit::folder(hit.path.clone(), 0, true))
+            .map(|hit| DropHit::folder(hit.path.clone(), 0, true).on(DropSurface::PathBar))
     }
 
     /// The deepest eligible destination under `pointer`. A modal blocks every
@@ -1382,14 +1409,17 @@ impl CrowWindow {
         {
             return None;
         }
+        if self.back_bounds.get().is_some_and(|bounds| bounds.contains(&pointer)) {
+            return Some(DropHit::back(self.drag.can_spring_back()));
+        }
         if let Some(hit) = self.sidebar.read(cx).drop_hit(pointer, cx) {
-            return Some(hit);
+            return Some(hit.on(DropSurface::Sidebar));
         }
         if let Some(hit) = self.path_hit_at(pointer) {
             return Some(hit);
         }
         if let Some(search) = self.active_search(cx) {
-            return search.read(cx).drop_hit(pointer, cx);
+            return search.read(cx).drop_hit(pointer, cx).map(|hit| hit.on(DropSurface::Search));
         }
         let pane = self.pane().read(cx);
         match dragged {
@@ -1443,25 +1473,66 @@ impl CrowWindow {
                 self.drag_epoch = Some(now);
                 self.drag_tab = self.active_tab_id();
                 self.drag_pane = Some(self.pane().clone());
-                let origin = self.pane().read(cx).current_dir(cx);
-                self.drag.begin(origin)
+                let pane = self.pane().read(cx);
+                let origin = pane.current_dir(cx);
+                let back = pane.back_folders();
+                self.drag.begin(origin, back)
             }
         };
         let elapsed = self.drag_now(cx);
         let hit = self.drop_hit_at(position, None, cx);
-        let target = match &hit {
-            Some(hit) if hit.spring => hit.path().cloned().map(|path| SpringTarget::new(path, hit.generation)),
-            _ => None,
-        };
+        let target = hit.as_ref().and_then(DropHit::spring_target);
+        self.set_drop_hover(hit, cx);
         let pointer = (f32::from(position.x), f32::from(position.y));
         match self.drag.observe(id, pointer, target, elapsed) {
             Some(token) if self.drag_timer_token != Some(token) => {
                 self.spawn_spring_timer(id, token, window, cx);
             }
-            None => self.drag_timer_token = None,
+            None => {
+                self.drag_timer_token = None;
+                self.clear_spring_cue(cx);
+            }
             Some(_) => {}
         }
         cx.notify();
+    }
+
+    /// Remember the hovered destination; the search list draws its own outline
+    /// from it, the window draws Back's and the path bar's.
+    fn set_drop_hover(&mut self, hit: Option<DropHit>, cx: &mut Context<Self>) {
+        if self.drop_hover == hit {
+            return;
+        }
+        let search_path =
+            hit.as_ref().filter(|hit| hit.surface == DropSurface::Search).and_then(|hit| hit.path().cloned());
+        if let Some(search) = self.active_search(cx) {
+            search.update(cx, |search, cx| search.set_drop_hover(search_path, cx));
+        }
+        self.drop_hover = hit;
+    }
+
+    fn clear_spring_cue(&mut self, cx: &mut Context<Self>) {
+        if cx.try_global::<SpringCue>().is_some_and(|cue| cue.target.is_some()) {
+            cx.set_global(SpringCue::default());
+        }
+    }
+
+    /// One step of the armed target's blink. False once the timer is stale.
+    fn step_spring_cue(
+        &mut self,
+        session: crow_core::drag::DragId,
+        token: u64,
+        opacity: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.drop_pending || self.drag.active() != Some(session) || self.drag_timer_token != Some(token) {
+            return false;
+        }
+        let Some(target) = self.drop_hover.as_ref().map(|hit| hit.location.clone()) else { return false };
+        cx.set_global(SpringCue { target: Some(target), opacity });
+        window.refresh();
+        true
     }
 
     fn spawn_spring_timer(
@@ -1472,8 +1543,22 @@ impl CrowWindow {
         cx: &mut Context<Self>,
     ) {
         self.drag_timer_token = Some(token);
+        self.clear_spring_cue(cx);
+        let delay = crow_core::drag::SPRING_DELAY_MS;
+        let cue = crow_core::motion::spring_cue(cx.global::<Ui>().feedback.mode, delay);
         cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(crow_core::drag::SPRING_DELAY_MS)).await;
+            let mut waited = 0;
+            for (at, opacity) in cue {
+                cx.background_executor().timer(Duration::from_millis(at - waited)).await;
+                waited = at;
+                let live = this
+                    .update_in(cx, |this, window, cx| this.step_spring_cue(session, token, opacity, window, cx))
+                    .unwrap_or(false);
+                if !live {
+                    return;
+                }
+            }
+            cx.background_executor().timer(Duration::from_millis(delay - waited)).await;
             this.update_in(cx, |this, window, cx| this.spring_timer_fired(session, token, window, cx)).ok();
         })
         .detach();
@@ -1497,20 +1582,27 @@ impl CrowWindow {
             return;
         }
         self.drag_timer_token = None;
+        self.clear_spring_cue(cx);
         let position = window.mouse_position();
         let hit = self.drop_hit_at(position, None, cx);
-        let target = match &hit {
-            Some(hit) if hit.spring => hit.path().cloned().map(|path| SpringTarget::new(path, hit.generation)),
-            _ => None,
-        };
+        let back = hit.as_ref().is_some_and(|hit| hit.location == DropLocation::Back);
+        let target = hit.as_ref().and_then(DropHit::spring_target);
         let pointer = (f32::from(position.x), f32::from(position.y));
         let elapsed = self.drag_now(cx);
-        let Some(path) = self.drag.expire(session, token, pointer, target, elapsed) else { return };
+        let Some(spring) = self.drag.expire(session, token, pointer, target, elapsed) else { return };
         let Some(pane) = self.drag_pane.clone() else { return };
         if self.search.is_some() {
             self.close_search(window, cx);
         }
-        pane.update(cx, |pane, cx| pane.spring_enter(path, cx));
+        match spring {
+            Spring::Enter(path) => pane.update(cx, |pane, cx| pane.spring_enter(path, cx)),
+            Spring::Origin => pane.update(cx, |pane, cx| pane.spring_cancel(window, cx)),
+        }
+        // Back does not reflow under a still pointer: keep stepping while held.
+        if back {
+            self.drop_hover = None;
+            self.drag_pointer_moved(position, window, cx);
+        }
         cx.notify();
     }
 
@@ -1523,6 +1615,8 @@ impl CrowWindow {
         let pane = self.drag_pane.take();
         self.drag_epoch = None;
         self.drag_timer_token = None;
+        self.clear_spring_cue(cx);
+        self.set_drop_hover(None, cx);
         if let (Finish::Cancelled { restore: Some(_) }, Some(pane)) = (finish, pane) {
             pane.update(cx, |pane, cx| pane.spring_cancel(window, cx));
         }
@@ -1582,7 +1676,11 @@ impl CrowWindow {
         let owner = self.drag_pane.take();
         self.drag_epoch = None;
         self.drag_timer_token = None;
+        self.clear_spring_cue(cx);
+        self.set_drop_hover(None, cx);
         let sprung = matches!(finish, Finish::Accepted { sprung: true, .. });
+        // Back springs but never takes a drop: releasing there is a cancel.
+        let hit = hit.filter(|hit| hit.location != DropLocation::Back);
         let Some(hit) = hit else {
             if let (true, Some(pane)) = (sprung, owner) {
                 pane.update(cx, |pane, cx| pane.spring_cancel(window, cx));
@@ -1590,6 +1688,7 @@ impl CrowWindow {
             return;
         };
         match hit.location {
+            DropLocation::Back => {}
             DropLocation::SidebarInsertion(slot) => {
                 if let (true, Some(pane)) = (sprung, owner) {
                     pane.update(cx, |pane, cx| pane.spring_cancel(window, cx));

@@ -1009,6 +1009,12 @@ impl Pane {
     }
 
     /// The destination Back/Forward would show, for tooltip labels.
+    /// The real folders Back would walk through, nearest first; a virtual
+    /// location ends the walk, since a spring can only show folders.
+    pub fn back_folders(&self) -> Vec<PathBuf> {
+        self.history.back_stack().map_while(|location| location.as_folder().map(Path::to_path_buf)).collect()
+    }
+
     pub fn back_target(&self) -> Option<&Location> {
         self.history.back_target()
     }
@@ -4331,8 +4337,11 @@ impl Pane {
                         this.context_press_empty(0, event, window, cx)
                     }),
                 )
-                .when(self.drop_target.as_ref().is_some_and(|target| target.rows.is_none()), |body| {
-                    body.child(drop_outline(&theme).left(px(4.)).right(px(4.)).top(px(2.)).bottom(px(2.)))
+                .when_some(self.drop_target.as_ref().filter(|target| target.rows.is_none()), |body, target| {
+                    let opacity = crate::drag_drop::cue_opacity(cx, &target.folder);
+                    body.child(
+                        drop_outline(&theme).left(px(4.)).right(px(4.)).top(px(2.)).bottom(px(2.)).opacity(opacity),
+                    )
                 })
                 .child(body)
                 .children(overlay)
@@ -4670,7 +4679,10 @@ impl Pane {
                                     .bg(color_alpha(theme.role("accent"), 0x18)),
                             )
                         })
-                        .when(drop_here, |tile| tile.child(drop_outline(theme).absolute().inset(px(1.)).rounded_md()))
+                        .when(drop_here, |tile| {
+                            let opacity = crate::drag_drop::cue_opacity(cx, &entry.path);
+                            tile.child(drop_outline(theme).absolute().inset(px(1.)).rounded_md().opacity(opacity))
+                        })
                         .children(moving_fill.map(|row| {
                             row.selection(
                                 selection_bg,
@@ -5103,7 +5115,11 @@ impl Pane {
                     })
                     .when(
                         self.drop_target.as_ref().is_some_and(|t| t.column == k && t.rows == Some(ix..ix + 1)),
-                        |row| row.child(drop_outline(theme).inset_0()),
+                        |row| {
+                            row.child(
+                                drop_outline(theme).inset_0().opacity(crate::drag_drop::cue_opacity(cx, &entry.path)),
+                            )
+                        },
                     )
                     .on_mouse_down(
                         MouseButton::Left,
@@ -5378,8 +5394,11 @@ impl Pane {
                     .border_color(border)
                     .when(k == focused, |c| c.bg(focused_column(&theme)))
                     .relative()
-                    .when(self.drop_target.as_ref().is_some_and(|t| t.column == k && t.rows.is_none()), |c| {
-                        c.child(drop_outline(&theme).left(px(4.)).right(px(4.)).top(px(2.)).bottom(px(2.)))
+                    .when_some(self.drop_target.as_ref().filter(|t| t.column == k && t.rows.is_none()), |c, t| {
+                        let opacity = crate::drag_drop::cue_opacity(cx, &t.folder);
+                        c.child(
+                            drop_outline(&theme).left(px(4.)).right(px(4.)).top(px(2.)).bottom(px(2.)).opacity(opacity),
+                        )
                     })
                     .on_scroll(cx.listener(move |this, _, _, cx| this.on_list_scroll(k, cx)))
                     .on_mouse_down(
@@ -5935,7 +5954,10 @@ impl Render for Pane {
                                     None
                                 };
                                 let drop_outline = self.drop_target.as_ref().map(|t| {
-                                    let outline = drop_outline(&theme).left(px(8.)).right(px(8.));
+                                    let outline = drop_outline(&theme)
+                                        .left(px(8.))
+                                        .right(px(8.))
+                                        .opacity(crate::drag_drop::cue_opacity(cx, &t.folder));
                                     match &t.rows {
                                         Some(rows) => {
                                             let offset = shown_offset(&scroll);

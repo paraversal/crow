@@ -707,7 +707,10 @@ fn render_rows(
                 .when(fade < 1.0, |row| row.opacity(fade))
                 .when(multi && cursor_here, |row| row.shadow(crate::style::cursor_ring(&theme)))
                 .when(drop_target, |row| {
-                    row.child(drop_outline(&theme).left(px(2.)).right(px(2.)).top(px(1.)).bottom(px(1.)))
+                    let opacity = crate::drag_drop::cue_opacity(cx, &entry.path);
+                    row.child(
+                        drop_outline(&theme).left(px(2.)).right(px(2.)).top(px(1.)).bottom(px(1.)).opacity(opacity),
+                    )
                 })
                 .debug_selector(|| format!("gallery-row-{}", entry.name))
                 .on_drag(DraggedSelection { entries: drag_entries }, {

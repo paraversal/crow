@@ -236,8 +236,10 @@ copy them there, drop folders between two favorites (a line shows where) or on a
 them. Ctrl-Cmd-T adds the selected folder.
 Dropping from Finder or another app works on folder rows and results, sidebar folders, path segments
 and real folders found by search. Holding still over a folder for a moment springs it open; release
-to drop there, or leave to restore the folder, selection and scroll you started from. Option copies,
-and Back returns to the starting folder after the drop.
+to drop there, or leave to restore the folder, selection and scroll you started from. The highlight
+blinks twice just before a folder opens. Holding over the Back button steps back out of opened
+folders, then through Back history. Option copies, and Back returns to the starting folder after the
+drop.
 Same-named folders show their parent after the name (and "alias" for a symlink); Recent leaves out
 folders that are favorites or already listed, also when reached through a symlink. With
 `keymap = "vim"`, favorites with a `key` show the letter on the right. Locations shows free space
