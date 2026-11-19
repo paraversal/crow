@@ -1,6 +1,6 @@
 # M9 P3C — Gallery view progress
 
-Branch: m9-p3c-gallery · PR: none · Last updated: 2026-11-19 · State: in progress
+Branch: m9-p3c-gallery · PR: none · Last updated: 2026-11-19 · State: Ready for critique
 
 ## Status
 | Item | State | Notes |
@@ -9,7 +9,7 @@ Branch: m9-p3c-gallery · PR: none · Last updated: 2026-11-19 · State: in prog
 | 2 Filename rail | done | Virtualized 48 pt rail with thumbnails, aligned/narrow metadata tiers, cursor ring, cloud badge, tooltips, drag/drop, context menu, filter/rename and arrow/Home/End navigation. Tests cover mode round trips, keys, pair layout and mounted rows. |
 | 3 Preview and folder contents | done | File previews share `preview::load_with_plugins` with the Preview pane. Bounded `crow_fs::list_sample` (12 shown/256 examined) with loaded-listing reuse, P8 gate, sort/hidden policy and distinct loading/empty/partial/error/cloud states; tests cover text previews and all folder states. |
 | 4 Comparison | done | Two selected entries render in rail order with independent second preview/surface and per-cell samples; 1→2→3→2→1 and out-of-order stale replies are tested, including side-by-side and stacked layouts. |
-| Verification and hand-off | in progress | fmt, clippy and the full workspace suite pass. Bench, screenshots and bundle checks are recorded below; VoiceOver and a real iCloud folder remain for the critic. |
+| Verification and hand-off | done | fmt, clippy, the full workspace suite and the bundle pass. Bench, screenshots and bundle checks are recorded below; VoiceOver, a real iCloud folder, light theme and native drag to a rail folder remain for the critic. |
 
 ## Questions
 - none
@@ -41,6 +41,7 @@ Branch: m9-p3c-gallery · PR: none · Last updated: 2026-11-19 · State: in prog
 - 2026-11-19 Branch `m9-p3c-gallery`; plan and P3B progress read; initial progress file.
 - 2026-11-19 Mode wiring, toolbar/palette/menu/Settings, Cmd-4, Gallery rail/preview scaffolding, shared preview loader and bounded folder sample in place.
 - 2026-11-19 Gallery rail, folder states, comparison cells and stale-reply handling complete. Tests: 729 app + 137 core + 74 fs + 81 search and remaining crates pass, 1 ignored; fmt and clippy clean; bundle built and inspected; bench recorded.
+- 2026-11-19 Final bundle at HEAD rebuilt from a clean release (`cargo clean --release` first: a shared target directory from a `main` worktree had left release rlibs without Gallery). Relaunched and checked the folder cell: `Folder · 1 item · 0 bytes`, footer `1 item`, four toolbar buttons, gallery selected (`/tmp/crow-gallery-final.png`). Full workspace suite passes.
 
 ## Next
-Update the progress state to Ready for critique after a final bundle pass and commit; list the VoiceOver/iCloud/light-theme/drag hand checks for the critic.
+Hand off to the critic with this plan and progress file. The critic opens the PR after review.
