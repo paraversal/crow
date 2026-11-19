@@ -29,6 +29,8 @@ pub struct Limits {
     pub max_map_size: usize,
     /// A granted excerpt read through a request-local handle.
     pub max_read_bytes: usize,
+    /// The bounded host-data map attached to one call (repository + entries).
+    pub max_host_bytes: usize,
     /// Explicit commands; full means busy.
     pub command_mailbox: usize,
     /// Refresh notifications; coalesced, a full lane reports busy.
@@ -57,6 +59,7 @@ impl Default for Limits {
             max_array_size: 1024,
             max_map_size: 1024,
             max_read_bytes: 64 * 1024,
+            max_host_bytes: 64 * 1024,
             command_mailbox: 16,
             refresh_mailbox: 16,
             service_mailbox: 32,

@@ -4542,7 +4542,7 @@ fn shipped_fixture_command_runs_through_the_real_service(cx: &mut TestAppContext
         let package = crow_plugin::load_package(&plugin, &crow_plugin::Limits::default()).expect("fixture package");
         crow_plugin::grants::approve(&config.join("plugins.toml"), &package.manifest.id, &package)
             .expect("approve fixture");
-        crate::plugins::start(cx, config);
+        crate::plugins::start_for_tests(cx, config);
     });
     let id = PluginId::parse("example.p1b-fixture").expect("fixture id");
     for _ in 0..400 {

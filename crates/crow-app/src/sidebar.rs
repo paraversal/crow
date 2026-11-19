@@ -436,6 +436,16 @@ impl Sidebar {
             }
             sections.push(Section { id: key, title, collapsed, rows: crate::plugins::sidebar_rows(cx, surface) });
         }
+        let home = cx.global::<Ui>().home.clone();
+        let roots = config.project_roots(&home);
+        if !roots.is_empty() && config.section_shown(crate::git::PROJECTS_SECTION) && crate::git::provider_enabled(cx) {
+            sections.push(Section {
+                id: crate::git::PROJECTS_SECTION.into(),
+                title: "Projects".into(),
+                collapsed: config.section_collapsed(crate::git::PROJECTS_SECTION),
+                rows: crate::git::projects_rows(cx, roots, &home),
+            });
+        }
         self.plugin_sections = sections;
     }
 

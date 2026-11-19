@@ -27,7 +27,7 @@ pub enum EnqueueError {
 /// event for a displaced or rejected call.
 pub(crate) enum RefreshEnqueue {
     Queued,
-    Replaced(Call),
+    Replaced(Box<Call>),
     Full,
     Closed,
 }
@@ -81,7 +81,7 @@ impl Mailbox {
         {
             let displaced = std::mem::replace(&mut state.refreshes[index], call);
             self.ready.notify_one();
-            return RefreshEnqueue::Replaced(displaced);
+            return RefreshEnqueue::Replaced(Box::new(displaced));
         }
         if state.refreshes.len() >= self.refresh_capacity {
             return RefreshEnqueue::Full;
@@ -453,7 +453,11 @@ fn notify(
 }
 
 fn empty_input() -> RequestInput {
-    RequestInput { snapshot: Snapshot { scope: String::new(), selection: None, entries: Vec::new() }, excerpt: None }
+    RequestInput {
+        snapshot: Snapshot { scope: String::new(), selection: None, entries: Vec::new() },
+        excerpt: None,
+        host: None,
+    }
 }
 
 fn build_engine(limits: &Limits, runtime: Arc<Runtime>, assets: Arc<BTreeMap<String, Arc<[u8]>>>) -> Engine {
@@ -504,6 +508,34 @@ fn input_map(input: &RequestInput) -> Map {
     if let Some(selection) = input.snapshot.selection {
         map.insert("selection".into(), Dynamic::from(selection.0 as i64));
     }
+    let host_entries: std::collections::HashMap<u32, &crate::dto::EntryHostData> = input
+        .host
+        .as_ref()
+        .map(|host| host.entries.iter().map(|entry| (entry.handle.0, entry)).collect())
+        .unwrap_or_default();
+    if let Some(repository) = input.host.as_ref().and_then(|host| host.repository.as_ref()) {
+        let mut repo = Map::new();
+        if let Some(branch) = &repository.branch {
+            repo.insert("branch".into(), Dynamic::from(branch.clone()));
+        }
+        if let Some(head) = &repository.head {
+            repo.insert("head".into(), Dynamic::from(head.clone()));
+        }
+        repo.insert("detached".into(), Dynamic::from(repository.detached));
+        repo.insert("unborn".into(), Dynamic::from(repository.unborn));
+        if let Some(ahead) = repository.ahead {
+            repo.insert("ahead".into(), Dynamic::from(ahead as i64));
+        }
+        if let Some(behind) = repository.behind {
+            repo.insert("behind".into(), Dynamic::from(behind as i64));
+        }
+        if let Some(last_commit) = &repository.last_commit {
+            repo.insert("last_commit".into(), Dynamic::from(last_commit.clone()));
+        }
+        repo.insert("unavailable".into(), Dynamic::from(repository.unavailable));
+        repo.insert("changed".into(), Dynamic::from(repository.changed as i64));
+        map.insert("repository".into(), Dynamic::from(repo));
+    }
     let entries: Array = input
         .snapshot
         .entries
@@ -519,6 +551,22 @@ fn input_map(input: &RequestInput) -> Map {
                 && excerpt.handle == entry.handle
             {
                 item.insert("excerpt".into(), Dynamic::from(excerpt.text.clone()));
+            }
+            if let Some(git) = host_entries.get(&entry.handle.0).copied() {
+                let mut details = Map::new();
+                details.insert("badge".into(), Dynamic::from(git.badge.clone()));
+                details.insert("label".into(), Dynamic::from(git.label.clone()));
+                if let Some(index) = &git.index {
+                    details.insert("index".into(), Dynamic::from(index.clone()));
+                }
+                if let Some(worktree) = &git.worktree {
+                    details.insert("worktree".into(), Dynamic::from(worktree.clone()));
+                }
+                details.insert("ignored".into(), Dynamic::from(git.ignored));
+                if let Some(lines) = git.lines_changed {
+                    details.insert("lines".into(), Dynamic::from(lines as i64));
+                }
+                item.insert("git".into(), Dynamic::from(details));
             }
             Dynamic::from(item)
         })
@@ -566,7 +614,7 @@ fn send(inbox: &Sender<Inbox>, message: WorkerMessage) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::{ExcerptInput, RequestInput};
+    use crate::dto::{EntryHostData, ExcerptInput, HostData, RepositoryData, RequestInput};
     use crate::manifest::Manifest;
     use crow_core::{ContributionValues, EntryData, EntryHandle, ExtensionId};
     use std::sync::mpsc::{Receiver, channel};
@@ -624,11 +672,40 @@ provides = [{provides}]
                 }],
             },
             excerpt: None,
+            host: None,
         }
     }
 
     fn input_with_excerpt(text: &str) -> RequestInput {
         RequestInput { excerpt: Some(ExcerptInput { handle: EntryHandle(1), text: text.into() }), ..input() }
+    }
+
+    fn input_with_host() -> RequestInput {
+        RequestInput {
+            host: Some(HostData {
+                repository: Some(RepositoryData {
+                    branch: Some("main".into()),
+                    head: None,
+                    detached: false,
+                    unborn: false,
+                    ahead: Some(1),
+                    behind: None,
+                    changed: 2,
+                    last_commit: None,
+                    unavailable: false,
+                }),
+                entries: vec![EntryHostData {
+                    handle: EntryHandle(1),
+                    badge: "M".into(),
+                    label: "modified".into(),
+                    index: Some("modified".into()),
+                    worktree: Some("modified".into()),
+                    ignored: false,
+                    lines_changed: Some(3),
+                }],
+            }),
+            ..input()
+        }
     }
 
     fn next(rx: &Receiver<Inbox>, timeout: Duration) -> WorkerMessage {
@@ -704,6 +781,39 @@ fn run(ctx) {{ {body} }}
                 cancel,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn host_git_facts_arrive_as_plain_data_and_are_optional() {
+        let (worker, rx) = spawn(
+            &command_source(
+                r#"#{ kind: "copy_text", text: ctx.repository.branch + ":" + ctx.entries[0].git.badge + ":" + ctx.entries[0].git.lines }"#,
+            ),
+            &[],
+            limits(),
+        );
+        evaluate(&worker, input_with_host());
+        match next(&rx, Duration::from_secs(2)) {
+            WorkerMessage::Replied { reply: Reply::Intent(crow_core::CommandIntent::CopyText(text)), .. } => {
+                assert_eq!(text, "main:M:3");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let (worker, rx) = spawn(
+            &command_source(
+                r#"#{ kind: "copy_text", text: if ctx.contains("repository") { "present" } else { "absent" } }"#,
+            ),
+            &[],
+            limits(),
+        );
+        evaluate(&worker, input());
+        match next(&rx, Duration::from_secs(2)) {
+            WorkerMessage::Replied { reply: Reply::Intent(crow_core::CommandIntent::CopyText(text)), .. } => {
+                assert_eq!(text, "absent");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -843,7 +953,8 @@ fn preview(ctx) { #{ table: [["a", "b"], ["c", "d"]] } }
         };
         assert!(matches!(mailbox.enqueue_refresh(notify(1)), RefreshEnqueue::Queued));
         match mailbox.enqueue_refresh(notify(2)) {
-            RefreshEnqueue::Replaced(Call::Notify { stamp, .. }) => {
+            RefreshEnqueue::Replaced(call) => {
+                let Call::Notify { stamp, .. } = *call else { panic!("expected a displaced hook") };
                 assert_eq!(stamp.request_id, 1, "the host receives the displaced call");
             }
             _ => panic!("a coalesced hook must return the displaced call"),

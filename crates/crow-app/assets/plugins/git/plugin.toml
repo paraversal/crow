@@ -1,0 +1,7 @@
+id = "git"
+name = "Git"
+version = "0.1.0"
+api = 1
+entry = "main.rhai"
+provides = ["column", "decoration", "status", "info"]
+permissions = { fs = "none", spawn = [], net = false }

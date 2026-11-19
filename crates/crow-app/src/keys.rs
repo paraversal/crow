@@ -408,11 +408,14 @@ mod tests {
                 CommandId::OpenTerminal,
                 CommandId::EditSettings,
                 CommandId::CalculateFolderSizes,
+                CommandId::AddProjectRoot,
+                CommandId::RemoveProjectRoot,
+                CommandId::RefreshProjects,
             ] {
                 let command = COMMANDS.iter().find(|c| c.id == id).unwrap();
                 assert_eq!(text(command.action, command.scope, cx), None, "{id:?} has no binding");
             }
-            assert_eq!(COMMANDS.len(), expected.len() + 6, "every command is in the table");
+            assert_eq!(COMMANDS.len(), expected.len() + 9, "every command is in the table");
         });
     }
 }

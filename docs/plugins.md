@@ -230,6 +230,61 @@ show = true
 collapsed = false
 ```
 
+## Bundled Git package
+
+Crow embeds one package with the reserved ID `git`. It is not installed from `plugins/` and
+an installed bundle cannot claim that ID. It appears in Settings ▸ Plugins as
+**git (bundled)** and contributes nothing until you approve its exact digest; **Disable**
+removes every Git row decoration, status value, Info field, Projects section and line count
+without restarting Crow.
+
+```toml
+# sidebar.toml
+[projects]
+roots = ["~/code", "~/work"]
+
+[sections]
+order = ["recent", "crow.projects", "locations"]
+
+[section."crow.projects"]
+show = true
+collapsed = false
+```
+
+```toml
+# views.toml
+[defaults]
+columns = ["modified", "size", "git.lines-changed", "kind"]
+```
+
+The palette has **Add Current Folder as Project Root**, **Remove Current Folder from Project
+Roots** and **Refresh Projects**. Project rows open like ordinary folders. Discovery scans
+only the configured roots, stops at a bound (then the section shows a Refresh Projects row),
+skips packages and symlinked folders, and lists nested repositories separately. Each row
+shows its abbreviated path, branch and the number of tracked/untracked changed paths, with
+ignored paths excluded.
+
+The package registers a decoration, a column (`git.lines-changed`), a status value and Info
+fields. Its scripts only map numbers and labels; all repository access is in Crow's Rust
+provider. For this package only, the request context also carries:
+
+```rhai
+ctx.repository == #{ branch?, head?, detached, unborn, ahead?, behind?, changed, last_commit? }
+ctx.entries[0].git == #{ badge, label, index?, worktree?, ignored, lines? }
+```
+
+`badge` uses conflict > deleted/renamed > added > modified > untracked > ignored. `lines` is
+the staged-plus-unstaged text line edits for that row and is absent when the file is binary,
+untracked, unmerged, unreadable, oversized or still being measured; the column shows `—`
+rather than zero. A repository with no local upstream omits `ahead`/`behind`, a detached
+head carries `head`, and an unborn branch carries its name.
+
+The provider opens repositories read-only: it never writes the index, never fetches, never
+opens a network transport, and clears every external filter/diff driver before asking gix to
+compare bytes, so a repository-local clean/process filter, fsmonitor helper or diff command is
+never run. Status and line-count work happens off the main thread and is cancelled or dropped
+when the tab, repository or plugin generation changes.
+
 ## Test fixture
 
 The copyable fixture lives at

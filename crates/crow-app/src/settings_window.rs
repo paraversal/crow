@@ -3027,7 +3027,7 @@ fn run(ctx) { #{ kind: "copy_text", text: "x" } }
         let (view, mut vcx) = open_settings_after(cx, |cx| {
             let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
             write_plugin_bundle(&config);
-            cx.update(|cx| crate::plugins::start(cx, config));
+            cx.update(|cx| crate::plugins::start_for_tests(cx, config));
         });
         wait_plugin_state(&mut vcx, "example.demo", PluginState::PendingApproval);
         assert!(view.read_with(&vcx, |view, _| view.debug_selectors()).iter().any(|id| id == "settings-plugins"));
@@ -3062,7 +3062,7 @@ fn run(ctx) { #{ kind: "copy_text", text: "x" } }
         let (view, mut vcx) = open_settings_after(cx, |cx| {
             let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
             write_long_name_plugin_bundle(&config);
-            cx.update(|cx| crate::plugins::start(cx, config));
+            cx.update(|cx| crate::plugins::start_for_tests(cx, config));
         });
         wait_plugin_state(&mut vcx, "example.long-name", PluginState::PendingApproval);
         focus_control(&view, &mut vcx, ControlId::Plugins);
@@ -3096,7 +3096,7 @@ permissions = { fs = "none" }
             )
             .unwrap();
             std::fs::write(dir.join("main.rhai"), "fn register() { [] }").unwrap();
-            cx.update(|cx| crate::plugins::start(cx, config));
+            cx.update(|cx| crate::plugins::start_for_tests(cx, config));
         });
         wait_plugin_state(&mut vcx, "example.broken", PluginState::IncompatibleApi);
         let message = vcx.read_global::<crate::operations::Operations, _>(|operations, _| operations.message.clone());
@@ -3112,7 +3112,7 @@ permissions = { fs = "none" }
             let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
             write_named_plugin_bundle(&config, "a", "example.a", "A");
             write_named_plugin_bundle(&config, "b", "example.b", "B");
-            cx.update(|cx| crate::plugins::start(cx, config));
+            cx.update(|cx| crate::plugins::start_for_tests(cx, config));
         });
         wait_plugin_count(&mut vcx, 2);
         focus_control(&view, &mut vcx, ControlId::Plugins);
@@ -3146,7 +3146,7 @@ permissions = { fs = "none" }
             write_named_plugin_bundle(&config, "a", "example.a", "A");
             write_named_plugin_bundle(&config, "b", "example.b", "B");
             write_named_plugin_bundle(&config, "c", "example.c", "C");
-            cx.update(|cx| crate::plugins::start(cx, config));
+            cx.update(|cx| crate::plugins::start_for_tests(cx, config));
         });
         wait_plugin_count(&mut vcx, 3);
         focus_control(&view, &mut vcx, ControlId::Plugins);
@@ -3187,7 +3187,7 @@ permissions = { fs = "none" }
                     &format!("P{index:02}"),
                 );
             }
-            cx.update(|cx| crate::plugins::start(cx, config));
+            cx.update(|cx| crate::plugins::start_for_tests(cx, config));
         });
         wait_plugin_count(&mut vcx, 20);
         focus_control(&view, &mut vcx, ControlId::Plugins);
@@ -3213,7 +3213,7 @@ permissions = { fs = "none" }
             let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
             write_named_plugin_bundle(&config, "dup-one", "example.dup", "Dup One");
             write_named_plugin_bundle(&config, "dup-two", "example.dup", "Dup Two");
-            cx.update(|cx| crate::plugins::start(cx, config));
+            cx.update(|cx| crate::plugins::start_for_tests(cx, config));
         });
         wait_plugin_count(&mut vcx, 2);
         focus_control(&view, &mut vcx, ControlId::Plugins);
@@ -3240,7 +3240,7 @@ permissions = { fs = "none" }
         let (view, mut vcx) = open_settings_after(cx, |cx| {
             let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
             write_named_plugin_bundle(&config, "a", "example.a", "A");
-            cx.update(|cx| crate::plugins::start(cx, config));
+            cx.update(|cx| crate::plugins::start_for_tests(cx, config));
         });
         wait_plugin_count(&mut vcx, 1);
         let config = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());

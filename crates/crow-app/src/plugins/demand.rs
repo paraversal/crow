@@ -53,17 +53,27 @@ impl UniformListDecoration for PluginRows {
                         size: entry.size,
                         kind: crate::style::kind(entry).to_string(),
                         selected: folder.is_selected(&entry.path),
+                        git: None,
                     })
                 })
                 .collect::<Vec<_>>();
-            (folder.plugin_scope_version(), folder.dir().display().to_string(), rows)
+            (folder.plugin_scope_version(), folder.dir().to_path_buf(), rows)
         };
+        let dir = scope_display;
+        let want_lines = self.descriptors.iter().any(crate::git::is_lines_column);
+        let rows = rows
+            .into_iter()
+            .map(|mut row| {
+                row.git = crate::git::entry_host(cx, &dir, &row.path, row.is_dir, want_lines);
+                row
+            })
+            .collect();
         if cx.try_global::<Plugins>().is_some() {
             cx.global_mut::<Plugins>().surfaces.queue_rows(
                 self.surface,
                 self.scope.clone(),
                 scope_version,
-                scope_display,
+                dir.display().to_string(),
                 0,
                 self.descriptors.clone(),
                 rows,

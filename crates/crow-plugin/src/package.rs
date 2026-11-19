@@ -56,6 +56,8 @@ pub struct PackageCandidate {
     pub name: Option<String>,
     pub version: Option<String>,
     pub snapshot: Result<Arc<PackageSnapshot>, PackageError>,
+    /// True for a snapshot embedded in the running app, not a config directory.
+    pub bundled: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -161,6 +163,7 @@ fn load_candidate(
         name: None,
         version: None,
         snapshot: Err(placeholder()),
+        bundled: false,
     };
     let snapshot = match load_snapshot(root, dir_name, limits) {
         Ok(snapshot) => snapshot,
@@ -359,7 +362,46 @@ fn loadable_name(bundle: &OsString) -> Result<&str, PackageError> {
 }
 
 fn invalid(bundle: OsString, dir_name: String, error: PackageError) -> PackageCandidate {
-    PackageCandidate { bundle, dir_name, id: None, name: None, version: None, snapshot: Err(error) }
+    PackageCandidate { bundle, dir_name, id: None, name: None, version: None, snapshot: Err(error), bundled: false }
+}
+
+/// Build a snapshot from bytes embedded in the app. This is the only source
+/// allowed to use an embedded provider's reserved ID; the host gates the
+/// matching native data by this exact digest.
+pub fn embedded(files: &[(&str, &str)], limits: &Limits) -> Result<Arc<PackageSnapshot>, PackageError> {
+    let Some((_, manifest_text)) = files.iter().find(|(name, _)| *name == "plugin.toml") else {
+        return Err(PackageError::new(PackageErrorKind::Manifest, "embedded package has no plugin.toml"));
+    };
+    let manifest = parse_manifest(manifest_text, limits)?;
+    let mut table: BTreeMap<String, Arc<[u8]>> = BTreeMap::new();
+    let mut total = 0usize;
+    for (name, text) in files {
+        if !matches!(*name, "plugin.toml")
+            && *name != manifest.entry
+            && !manifest.assets.iter().any(|asset| asset == name)
+        {
+            return Err(PackageError::new(
+                PackageErrorKind::Read,
+                format!("embedded file \"{name}\" is not the manifest, entry or a declared asset"),
+            ));
+        }
+        total += text.len();
+        if total > limits.max_package_bytes {
+            return Err(PackageError::new(
+                PackageErrorKind::Read,
+                format!("package is larger than {} bytes", limits.max_package_bytes),
+            ));
+        }
+        table.insert((*name).to_owned(), Arc::from(text.as_bytes()));
+    }
+    if !table.contains_key(&manifest.entry) {
+        return Err(PackageError::new(
+            PackageErrorKind::Read,
+            format!("embedded package has no entry \"{}\"", manifest.entry),
+        ));
+    }
+    let digest = digest_files(&table);
+    Ok(Arc::new(PackageSnapshot { manifest, files: table, digest }))
 }
 
 fn placeholder() -> PackageError {

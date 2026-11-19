@@ -280,6 +280,10 @@ impl UniformListDecoration for PluginSearchRows {
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
+        let descriptors = crate::plugins::decoration_ids(cx);
+        if descriptors.is_empty() {
+            return div().into_any_element();
+        }
         let (surface, scope, scope_version, display, rows) = {
             let view = self.view.read(cx);
             (
@@ -290,8 +294,19 @@ impl UniformListDecoration for PluginSearchRows {
                 view.plugin_rows(visible_range),
             )
         };
-        let descriptors = crate::plugins::decoration_ids(cx);
-        if !descriptors.is_empty() && !rows.is_empty() && cx.try_global::<crate::plugins::Plugins>().is_some() {
+        // Search may span repositories (Home, This Mac); each result belongs to
+        // its own parent folder's worktree, and decorations need no single
+        // repository value.
+        let rows: Vec<crate::plugins::RowInput> = rows
+            .into_iter()
+            .map(|mut row| {
+                if let Some(parent) = row.path.parent() {
+                    row.git = crate::git::entry_host(cx, parent, &row.path, row.is_dir, false);
+                }
+                row
+            })
+            .collect();
+        if !rows.is_empty() {
             cx.global_mut::<crate::plugins::Plugins>().surfaces.queue_rows(
                 surface,
                 scope,
@@ -512,6 +527,7 @@ impl SearchView {
                 size: 0,
                 kind: if row.is_dir { "Folder".into() } else { "File".into() },
                 selected: self.selection.contains(&row.path),
+                git: None,
             })
             .collect()
     }

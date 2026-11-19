@@ -47,11 +47,51 @@ pub struct ExcerptInput {
     pub text: String,
 }
 
+/// Repository facts a host may attach to one call. Only the bundled provider
+/// that owns the extension may fill this; the script sees it as plain data.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostData {
+    pub repository: Option<RepositoryData>,
+    pub entries: Vec<EntryHostData>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepositoryData {
+    pub branch: Option<String>,
+    /// A short commit id for a detached HEAD.
+    pub head: Option<String>,
+    pub detached: bool,
+    pub unborn: bool,
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    pub changed: u32,
+    /// The first line of HEAD's commit message, when the caller knows it.
+    pub last_commit: Option<String>,
+    /// Status could not be read safely (for example a cloud-backed worktree).
+    pub unavailable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryHostData {
+    pub handle: EntryHandle,
+    /// The one badge the host chose, following its display precedence.
+    pub badge: String,
+    /// The spoken description for that badge, e.g. "conflicted".
+    pub label: String,
+    pub index: Option<String>,
+    pub worktree: Option<String>,
+    pub ignored: bool,
+    /// Staged plus unstaged text line edits; absent means unknown.
+    pub lines_changed: Option<u32>,
+}
+
 #[derive(Clone, Debug)]
 pub struct RequestInput {
     pub snapshot: Snapshot,
     /// At most one host-read excerpt for an entry in this snapshot.
     pub excerpt: Option<ExcerptInput>,
+    /// Provider facts for the extension that owns this call, if any.
+    pub host: Option<HostData>,
 }
 
 impl RequestInput {
@@ -85,6 +125,45 @@ impl RequestInput {
             }
             if excerpt.text.len() > limits.max_read_bytes || excerpt.text.contains('\0') {
                 return Err(format!("excerpt for handle {} is not bounded text", excerpt.handle.0));
+            }
+        }
+        if let Some(host) = &self.host {
+            let bounded = |text: Option<&str>, what: &str| {
+                let text = text.unwrap_or_default();
+                if text.len() > limits.max_display_bytes || text.chars().any(char::is_control) {
+                    return Err(format!("{what} is not bounded plain text"));
+                }
+                Ok(text.len())
+            };
+            let mut host_bytes = 0usize;
+            if let Some(repository) = &host.repository {
+                host_bytes = bounded(repository.branch.as_deref(), "repository branch")?
+                    + bounded(repository.head.as_deref(), "repository head")?
+                    + bounded(repository.last_commit.as_deref(), "last commit")?;
+            }
+            if host.entries.len() > limits.max_entries_per_call {
+                return Err(format!("host data has more than {} entries", limits.max_entries_per_call));
+            }
+            let mut host_handles = std::collections::HashSet::new();
+            for entry in &host.entries {
+                if !handles.contains(&entry.handle) {
+                    return Err(format!("host data handle {} is not in the snapshot", entry.handle.0));
+                }
+                if !host_handles.insert(entry.handle) {
+                    return Err(format!("duplicate host data handle {}", entry.handle.0));
+                }
+                if entry.badge.len() > limits.max_badge_bytes || entry.badge.chars().any(char::is_control) {
+                    return Err(format!("badge for handle {} is not bounded plain text", entry.handle.0));
+                }
+                host_bytes = host_bytes
+                    .saturating_add(entry.badge.len())
+                    .saturating_add(bounded(Some(&entry.label), "entry label")?)
+                    .saturating_add(bounded(entry.index.as_deref(), "index status")?)
+                    .saturating_add(bounded(entry.worktree.as_deref(), "worktree status")?)
+                    .saturating_add(32);
+            }
+            if host_bytes > limits.max_host_bytes {
+                return Err(format!("host data is larger than {} bytes", limits.max_host_bytes));
             }
         }
         Ok(())
@@ -396,6 +475,8 @@ pub struct PluginEntry {
     /// Derived from the Running record; empty outside Running.
     pub icon_packs: Vec<RegisteredIconPack>,
     pub generation: u64,
+    /// True when the package is embedded in the app rather than installed.
+    pub bundled: bool,
 }
 
 impl PluginEntry {
@@ -504,4 +585,74 @@ pub fn permissions_summary(permissions: &Permissions) -> String {
 /// A synthetic snapshot entry, for tests and P1B's host-side input builder.
 pub fn entry_data(handle: u32, name: impl Into<String>, is_dir: bool, size: u64, kind: impl Into<String>) -> EntryData {
     EntryData { handle: EntryHandle(handle), name: name.into(), is_dir, size, kind: kind.into() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::Limits;
+
+    fn input(host: Option<HostData>) -> RequestInput {
+        RequestInput {
+            snapshot: Snapshot {
+                scope: "/tmp".into(),
+                selection: None,
+                entries: vec![EntryData {
+                    handle: EntryHandle(1),
+                    name: "a.txt".into(),
+                    is_dir: false,
+                    size: 1,
+                    kind: "Text".into(),
+                }],
+            },
+            excerpt: None,
+            host,
+        }
+    }
+
+    fn entry(handle: u32) -> EntryHostData {
+        EntryHostData {
+            handle: EntryHandle(handle),
+            badge: "M".into(),
+            label: "modified".into(),
+            index: None,
+            worktree: Some("modified".into()),
+            ignored: false,
+            lines_changed: Some(2),
+        }
+    }
+
+    #[test]
+    fn host_data_accepts_a_matching_entry_and_rejects_bad_handles() {
+        let limits = Limits::default();
+        let valid = HostData {
+            repository: Some(RepositoryData {
+                branch: Some("main".into()),
+                head: None,
+                detached: false,
+                unborn: false,
+                ahead: Some(1),
+                behind: None,
+                changed: 2,
+                last_commit: None,
+                unavailable: false,
+            }),
+            entries: vec![entry(1)],
+        };
+        assert!(input(Some(valid)).validate(&limits).is_ok());
+
+        let unknown = HostData { repository: None, entries: vec![entry(2)] };
+        assert!(input(Some(unknown)).validate(&limits).is_err());
+
+        let duplicate = HostData { repository: None, entries: vec![entry(1), entry(1)] };
+        assert!(input(Some(duplicate)).validate(&limits).is_err());
+
+        let mut long_badge = entry(1);
+        long_badge.badge = "M".repeat(limits.max_badge_bytes + 1);
+        assert!(input(Some(HostData { repository: None, entries: vec![long_badge] })).validate(&limits).is_err());
+
+        let mut control = entry(1);
+        control.label = "bad\nlabel".into();
+        assert!(input(Some(HostData { repository: None, entries: vec![control] })).validate(&limits).is_err());
+    }
 }

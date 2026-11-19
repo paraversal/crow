@@ -67,8 +67,61 @@ pub fn init_empty(cx: &mut App) {
     cx.set_global(Plugins::default());
 }
 
+pub fn git_package() -> Result<std::sync::Arc<crow_plugin::package::PackageSnapshot>, String> {
+    crow_plugin::package::embedded(
+        &[
+            ("plugin.toml", include_str!("../assets/plugins/git/plugin.toml")),
+            ("main.rhai", include_str!("../assets/plugins/git/main.rhai")),
+        ],
+        &Limits::default(),
+    )
+    .map_err(|error| format!("{:?}: {}", error.kind, error.message))
+}
+
+/// The bundled Git package is Running in its approved generation.
+pub fn bundled_git_running(cx: &App) -> bool {
+    let Some(plugins) = cx.try_global::<Plugins>() else { return false };
+    plugins.inventory.plugins.iter().any(|entry| {
+        entry.bundled
+            && entry.state == crow_plugin::PluginState::Running
+            && entry.id.as_ref().is_some_and(|id| id.as_str() == crate::git::PLUGIN_ID)
+    })
+}
+
+pub fn invalidate_git_lines(cx: &mut App, paths: &[PathBuf]) {
+    if cx.try_global::<Plugins>().is_some() {
+        cx.global_mut::<Plugins>().surfaces.invalidate_git_lines(paths);
+    }
+}
+
+pub fn invalidate_git(cx: &mut App) {
+    if cx.try_global::<Plugins>().is_some()
+        && let Ok(id) = crow_core::PluginId::parse(crate::git::PLUGIN_ID)
+    {
+        cx.global_mut::<Plugins>().surfaces.invalidate_plugin(&id);
+    }
+}
+
 pub fn start(cx: &mut App, config_dir: PathBuf) {
-    match PluginService::start(config_dir, Limits::default()) {
+    start_inner(cx, config_dir, true);
+}
+
+/// Tests that pin an exact inventory use only the fixtures they installed.
+#[cfg(test)]
+pub fn start_for_tests(cx: &mut App, config_dir: PathBuf) {
+    start_inner(cx, config_dir, false);
+}
+
+fn start_inner(cx: &mut App, config_dir: PathBuf, with_bundled: bool) {
+    let bundled = match (with_bundled, git_package()) {
+        (true, Ok(package)) => vec![package],
+        (true, Err(error)) => {
+            tracing::warn!("bundled git package: {error}");
+            Vec::new()
+        }
+        (false, _) => Vec::new(),
+    };
+    match PluginService::start_with_bundled(config_dir, Limits::default(), bundled) {
         Ok((service, events)) => {
             let handle = service.handle();
             cx.set_global(Plugins {
@@ -145,7 +198,7 @@ pub fn poll(cx: &mut App) {
             HostEvent::Inventory(_) => {}
             HostEvent::Status { message, error, .. } => messages.push((message, error)),
             HostEvent::RequestFinished { extension, stamp, result } => {
-                let command = cx.global_mut::<Plugins>().surfaces.finish_command(&extension, stamp, result.clone());
+                let command = cx.global_mut::<Plugins>().surfaces.finish_command(&extension, stamp, &result);
                 if let Some((window, extension, effect, capture)) = command {
                     results.push(crate::actions::PluginCommandResult { window, extension, effect, capture });
                 } else {
@@ -174,6 +227,7 @@ pub fn poll(cx: &mut App) {
     if menu_projection_changed {
         crate::menus::refresh(cx);
     }
+    crate::git::sync_enabled(cx);
     cx.global_mut::<Plugins>().surfaces.drain_rows(handle.as_ref(), now);
     let hooks = cx.global_mut::<Plugins>().surfaces.flush_hooks(handle.as_ref(), now);
     refresh |= hooks;
@@ -335,7 +389,8 @@ pub fn request_status(cx: &mut App, surface: SurfaceId, scope: ScopeKey, revisio
     if ids.is_empty() {
         return;
     }
-    cx.global_mut::<Plugins>().surfaces.request_status(handle.as_ref(), surface, scope, revision, &display, &ids);
+    let host = crate::git::host_data(cx, scope.path(), Vec::new());
+    cx.global_mut::<Plugins>().surfaces.request_status(handle.as_ref(), surface, scope, revision, &display, &ids, host);
 }
 
 pub fn status_item(cx: &App, surface: SurfaceId) -> Option<(String, String)> {
@@ -373,7 +428,20 @@ pub fn request_info(
         size: entry.size,
         kind: crate::style::kind(entry).to_string(),
     };
-    cx.global_mut::<Plugins>().surfaces.request_info(handle.as_ref(), surface, scope, revision, &display, &ids, data);
+    let host = crate::git::repository_data(cx, scope.path()).map(|repository| crow_plugin::HostData {
+        repository: Some(repository),
+        entries: crate::git::entry_host(cx, scope.path(), &entry.path, entry.is_dir, false).into_iter().collect(),
+    });
+    cx.global_mut::<Plugins>().surfaces.request_info(
+        handle.as_ref(),
+        surface,
+        scope,
+        revision,
+        &display,
+        &ids,
+        data,
+        host,
+    );
 }
 
 pub fn info_rows(cx: &App, surface: SurfaceId) -> Vec<crow_core::InfoRow> {
@@ -493,6 +561,7 @@ pub fn try_preview(
             }],
         },
         excerpt,
+        host: None,
     };
     cx.global_mut::<Plugins>().surfaces.request_preview(
         &handle,
@@ -707,5 +776,215 @@ mod tests {
         assert!(suffix_matches(path, &["png".into()]));
         assert!(!suffix_matches(path, &["jpg".into()]));
         assert!(!suffix_matches(Path::new("/tmp/README"), &["md".into()]));
+    }
+}
+
+#[cfg(test)]
+mod bundled_tests {
+    use super::*;
+    use crow_core::{ContributionValues, ExtensionId, PluginId};
+    use crow_plugin::{HostData, HostEvent, RepositoryData, RequestInput, RequestResult};
+    use std::time::Duration;
+
+    fn wait_inventory(events: &Receiver<HostEvent>) -> crow_plugin::Inventory {
+        for _ in 0..200 {
+            while let Ok(event) = events.try_recv() {
+                if let HostEvent::Inventory(inventory) = event {
+                    return inventory;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("no inventory");
+    }
+
+    fn start_git() -> (PluginService, Receiver<HostEvent>, crow_plugin::PluginEntry) {
+        let package = git_package().expect("embedded package");
+        let temp = tempfile::tempdir().unwrap();
+        let (service, events) =
+            PluginService::start_with_bundled(temp.path().to_path_buf(), Limits::default(), vec![package.clone()])
+                .unwrap();
+        let handle = service.handle();
+        let inventory = wait_inventory(&events);
+        assert_eq!(inventory.plugins[0].state, crow_plugin::PluginState::PendingApproval);
+        handle.approve(PluginId::parse("git").unwrap(), package.digest.clone()).unwrap();
+        for _ in 0..200 {
+            let inventory = wait_inventory(&events);
+            if let Some(entry) = inventory.plugins.iter().find(|entry| entry.state == crow_plugin::PluginState::Running)
+            {
+                return (service, events, entry.clone());
+            }
+        }
+        panic!("git package never reached Running");
+    }
+
+    fn wait_result(events: &Receiver<HostEvent>, id: &ExtensionId) -> RequestResult {
+        for _ in 0..200 {
+            while let Ok(event) = events.try_recv() {
+                if let HostEvent::RequestFinished { extension, result, .. } = event
+                    && &extension == id
+                {
+                    return result;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("request for {id} did not finish");
+    }
+
+    fn entry(handle: u32, badge: &str, label: &str) -> crow_plugin::EntryHostData {
+        crow_plugin::EntryHostData {
+            handle: crow_core::EntryHandle(handle),
+            badge: badge.into(),
+            label: label.into(),
+            index: None,
+            worktree: Some(label.into()),
+            ignored: false,
+            lines_changed: Some(3),
+        }
+    }
+
+    #[test]
+    fn bundled_git_package_maps_decorations_column_and_info() {
+        let (_service, events, entry_info) = start_git();
+        let handle = _service.handle();
+        let host = HostData {
+            repository: Some(RepositoryData {
+                branch: Some("main".into()),
+                head: None,
+                detached: false,
+                unborn: false,
+                ahead: None,
+                behind: None,
+                changed: 2,
+                last_commit: None,
+                unavailable: false,
+            }),
+            entries: vec![entry(7, "M", "modified")],
+        };
+        let input = RequestInput {
+            snapshot: crow_core::Snapshot {
+                scope: "/tmp/repo".into(),
+                selection: None,
+                entries: vec![crow_core::EntryData {
+                    handle: crow_core::EntryHandle(7),
+                    name: "a.txt".into(),
+                    is_dir: false,
+                    size: 1,
+                    kind: "Text".into(),
+                }],
+            },
+            excerpt: None,
+            host: Some(host.clone()),
+        };
+        handle
+            .try_evaluate(ExtensionId::parse("git.status").unwrap(), entry_info.generation, 1, input.clone())
+            .unwrap();
+        let decoration = wait_result(&events, &ExtensionId::parse("git.status").unwrap());
+        let RequestResult::Values(ContributionValues::Decoration(values)) = decoration else {
+            panic!("expected decoration, got {decoration:?}");
+        };
+        assert_eq!(values[0].text, "M");
+        assert_eq!(values[0].spoken.as_deref(), Some("modified"));
+        assert_eq!(values[0].tint, Some(crow_core::Tint::Success));
+        assert!(!values[0].dim);
+
+        handle
+            .try_evaluate(ExtensionId::parse("git.lines-changed").unwrap(), entry_info.generation, 2, input.clone())
+            .unwrap();
+        let column = wait_result(&events, &ExtensionId::parse("git.lines-changed").unwrap());
+        let RequestResult::Values(ContributionValues::Column(values)) = column else {
+            panic!("expected column, got {column:?}");
+        };
+        assert_eq!(values[0].text, "3");
+
+        let mut missing = input.clone();
+        missing.host.as_mut().unwrap().entries[0].lines_changed = None;
+        handle
+            .try_evaluate(ExtensionId::parse("git.lines-changed").unwrap(), entry_info.generation, 4, missing)
+            .unwrap();
+        let column = wait_result(&events, &ExtensionId::parse("git.lines-changed").unwrap());
+        let RequestResult::Values(ContributionValues::Column(values)) = column else {
+            panic!("expected column");
+        };
+        assert_eq!(values[0].text, "—", "an unknown count is not zero");
+
+        handle.try_evaluate(ExtensionId::parse("git.details").unwrap(), entry_info.generation, 3, input).unwrap();
+        let info = wait_result(&events, &ExtensionId::parse("git.details").unwrap());
+        let RequestResult::Values(ContributionValues::Info(rows)) = info else {
+            panic!("expected info, got {info:?}");
+        };
+        assert!(rows.iter().any(|row| row.label == "Status" && row.value == "modified"));
+        assert!(rows.iter().any(|row| row.label == "Lines changed" && row.value == "3"));
+        assert!(rows.iter().any(|row| row.label == "Branch" && row.value == "main"));
+    }
+
+    #[test]
+    fn bundled_git_package_registers_and_maps_host_data() {
+        let package = git_package().expect("embedded package");
+        assert_eq!(package.manifest.id.as_str(), "git");
+        let temp = tempfile::tempdir().unwrap();
+        let (service, events) =
+            PluginService::start_with_bundled(temp.path().to_path_buf(), Limits::default(), vec![package.clone()])
+                .unwrap();
+        let handle = service.handle();
+        let inventory = wait_inventory(&events);
+        let entry =
+            inventory.plugins.iter().find(|entry| entry.id.as_ref().is_some_and(|id| id.as_str() == "git")).unwrap();
+        assert!(entry.bundled);
+        assert_eq!(entry.state, crow_plugin::PluginState::PendingApproval);
+
+        handle.approve(PluginId::parse("git").unwrap(), package.digest.clone()).unwrap();
+        let mut running = None;
+        for _ in 0..200 {
+            let inventory = wait_inventory(&events);
+            if let Some(entry) =
+                inventory.plugins.iter().find(|entry| entry.id.as_ref().is_some_and(|id| id.as_str() == "git"))
+                && entry.state == crow_plugin::PluginState::Running
+            {
+                running = Some(entry.clone());
+                break;
+            }
+        }
+        let entry = running.expect("git package reaches Running");
+        assert!(entry.descriptors.iter().any(|descriptor| descriptor.kind == crow_core::ExtensionKind::Column));
+        let status_id = ExtensionId::parse("git.repository").unwrap();
+        let generation = entry.generation;
+        let input = RequestInput {
+            snapshot: crow_core::Snapshot { scope: "/tmp".into(), selection: None, entries: Vec::new() },
+            excerpt: None,
+            host: Some(HostData {
+                repository: Some(RepositoryData {
+                    branch: Some("main".into()),
+                    head: None,
+                    detached: false,
+                    unborn: false,
+                    ahead: Some(2),
+                    behind: None,
+                    changed: 1,
+                    last_commit: None,
+                    unavailable: false,
+                }),
+                entries: Vec::new(),
+            }),
+        };
+        handle.try_evaluate(status_id.clone(), generation, 1, input).unwrap();
+        for _ in 0..200 {
+            while let Ok(event) = events.try_recv() {
+                if let HostEvent::RequestFinished { extension, result, .. } = event
+                    && extension == status_id
+                {
+                    match result {
+                        RequestResult::Values(ContributionValues::Status(values)) => {
+                            assert_eq!(values, vec![crow_core::StatusItem { text: "main ↑2 · 1 changed".into() }]);
+                            return;
+                        }
+                        other => panic!("unexpected result: {other:?}"),
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("status request did not finish");
     }
 }
