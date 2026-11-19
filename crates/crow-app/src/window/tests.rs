@@ -12184,38 +12184,50 @@ fn collapsing_an_inline_folder_releases_its_listing(cx: &mut TestAppContext) {
 /// paths. The per-path scan of the listing was O(n²) and held the main thread
 /// for 30 s on one apply (the seed-505 live run's HANG at step 9112).
 #[gpui::test]
-fn a_large_select_when_present_applies_quickly(cx: &mut TestAppContext) {
+fn a_large_select_when_present_avoids_quadratic_apply(cx: &mut TestAppContext) {
     let root = fixture("select-when-present");
-    let folder = cx.update(|cx| {
-        cx.new(|cx| crate::folder::Folder::new(root.to_path_buf(), false, crow_fs::Sort::default(), false, cx))
-    });
-    let entries: Vec<Entry> = (0..100_000)
-        .map(|i| Entry {
-            name: format!("file-{i:06}.txt"),
-            path: root.join(format!("file-{i:06}.txt")),
-            is_dir: false,
-            is_symlink: false,
-            hidden: false,
-            dataless: false,
-            size: 0,
-            modified: None,
-            created: None,
-            added: None,
-        })
-        .collect();
-    let paths: Vec<PathBuf> = entries.iter().map(|entry| entry.path.clone()).collect();
-    cx.update(|cx| {
-        folder.update(cx, |folder, cx| {
-            folder.replace_entries_for_test(entries.clone(), Some(&[]), cx);
-            folder.select_when_present_for_test(paths, crow_core::motion::Effective::Off);
+    let apply = |count| {
+        let folder = cx.update(|cx| {
+            cx.new(|cx| crate::folder::Folder::new(root.to_path_buf(), false, crow_fs::Sort::default(), false, cx))
         });
-    });
-    let started = Instant::now();
-    cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries, Some(&[]), cx)));
-    let elapsed = started.elapsed();
-    let selection = cx.update(|cx| folder.read(cx).selection_paths());
-    assert_eq!(selection.len(), 100_000, "every result is selected");
-    assert!(elapsed < Duration::from_secs(2), "the apply took {elapsed:?}");
+        let entries: Vec<Entry> = (0..count)
+            .map(|i| {
+                let name = format!("file-{i:06}.txt");
+                Entry {
+                    path: root.join(&name),
+                    name,
+                    is_dir: false,
+                    is_symlink: false,
+                    hidden: false,
+                    dataless: false,
+                    size: 0,
+                    modified: None,
+                    created: None,
+                    added: None,
+                }
+            })
+            .collect();
+        let paths = entries.iter().map(|entry| entry.path.clone()).collect();
+        let previous = cx.update(|cx| {
+            folder.update(cx, |folder, cx| {
+                folder.replace_entries_for_test(entries.clone(), Some(&[]), cx);
+                folder.select_when_present_for_test(paths, crow_core::motion::Effective::Off);
+                folder.entries().clone()
+            })
+        });
+        let started = Instant::now();
+        cx.update(|cx| folder.update(cx, |folder, cx| folder.replace_entries_for_test(entries, Some(&[]), cx)));
+        let elapsed = started.elapsed();
+        drop(previous);
+        assert_eq!(cx.update(|cx| folder.read(cx).selected_count()), count, "every result is selected");
+        elapsed
+    };
+
+    // Use the fastest of three samples on the shared debug runner. An eightfold
+    // increase in paths would take about 64 times as long with a quadratic scan.
+    let small = (0..3).map(|_| apply(12_500)).min().unwrap();
+    let large = (0..3).map(|_| apply(100_000)).min().unwrap();
+    assert!(large < small * 32, "12,500 paths took {small:?}, 100,000 took {large:?}");
 }
 
 /// H4 #20: the 100 ms watcher poll used to spawn a second batch while the first
