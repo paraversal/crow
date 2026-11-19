@@ -438,9 +438,9 @@ pub fn contents(
     let excerpt = preview.and_then(|p| p.excerpt.as_ref());
     let language = Language::from_path(&entry.path);
     let picture: gpui::AnyElement = if preview.is_some_and(|p| p.plugin.is_some()) {
-        plugin_contents(preview.and_then(|p| p.plugin.as_ref()).expect("checked"), theme)
+        plugin_contents(preview.and_then(|p| p.plugin.as_ref()).expect("checked"), theme, false)
     } else if preview.is_some_and(|p| p.blocked) {
-        cloud_placeholder(preview.and_then(|p| p.cloud).or(cloud), theme).into_any_element()
+        cloud_placeholder(preview.and_then(|p| p.cloud).or(cloud), theme, Some(px(220.))).into_any_element()
     } else {
         match (preview.and_then(|p| p.image.clone()), preview.and_then(|p| p.content.clone())) {
             (Some(image), _) => div()
@@ -455,7 +455,7 @@ pub fn contents(
                 let lines = excerpt.text.lines().take(PREVIEW_TEXT_LINES).enumerate().map(|(i, line)| {
                     code_line(i, excerpt.first_line + i as u64, line, Some(excerpt.hit), language, theme)
                 });
-                code_box(theme, border).children(lines).into_any_element()
+                code_box(theme, border, Some(px(220.))).children(lines).into_any_element()
             }
             (None, Some(PreviewContent::Text(text))) => {
                 let lines = text
@@ -463,7 +463,7 @@ pub fn contents(
                     .take(PREVIEW_TEXT_LINES)
                     .enumerate()
                     .map(|(i, line)| code_line(i, i as u64 + 1, line, None, language, theme));
-                code_box(theme, border).children(lines).into_any_element()
+                code_box(theme, border, Some(px(220.))).children(lines).into_any_element()
             }
             _ => div()
                 .h(px(220.))

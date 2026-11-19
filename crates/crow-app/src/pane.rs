@@ -59,6 +59,7 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::ui::Ui;
 use crow_fs::ops::Request;
 
+mod gallery;
 mod pane_filter;
 mod view_motion;
 use pane_filter::FilterPlace;
@@ -1799,35 +1800,23 @@ impl Pane {
         let revision = generation;
         cx.spawn(async move |this, cx| {
             let path = entry.path.clone();
-            let readable =
-                gate.check(&entry.path, crow_fs::ReadHint::for_path(&entry.path)) == crow_fs::ReadDecision::Readable;
-            let plugin = if candidates.is_empty() || !readable || cancel.load(Ordering::Relaxed) {
-                None
-            } else {
-                preview::plugin_preview(
-                    cx,
-                    surface,
-                    candidates,
-                    entry.clone(),
-                    gate.clone(),
-                    cloud,
-                    revision,
-                    cancel.clone(),
-                )
-                .await
-            };
+            let fetched = preview::load_with_plugins(
+                cx,
+                surface,
+                candidates,
+                entry,
+                extensions,
+                gate,
+                cloud,
+                None,
+                revision,
+                cancel.clone(),
+            )
+            .await;
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
-            let fetched = match plugin {
-                Some(preview) => preview,
-                None => {
-                    cx.background_spawn(
-                        async move { preview::fetch_at(&entry, &extensions, None, gate.as_ref(), cloud) },
-                    )
-                    .await
-                }
-            };
+            let Some(fetched) = fetched else { return };
             this.update(cx, |this, cx| {
                 if cancel.load(Ordering::Relaxed) {
                     return;
