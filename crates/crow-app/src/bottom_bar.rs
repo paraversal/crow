@@ -9,8 +9,7 @@ use std::time::Duration;
 
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, Entity, FontWeight, IntoElement, KeyBinding, Pixels, Role,
-    SharedString, SpringAnimation, SpringConfig, TextRun, Window, div, img, prelude::*, px, relative,
-    transparent_black,
+    SharedString, SpringAnimation, SpringConfig, TextRun, Window, div, prelude::*, px, relative, transparent_black,
 };
 
 use crate::actions::{
@@ -687,6 +686,16 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
             }
             let pane = pane.clone();
             let is_dir = i < last || last_is_dir;
+            let is_package = is_dir && crow_fs::is_package_path(target);
+            let source = {
+                let ui = cx.global::<Ui>();
+                ui.views
+                    .resolve(target)
+                    .icon_source
+                    .map(|(source, _)| source)
+                    .unwrap_or_else(|| ui.settings.icon_pack.clone())
+            };
+            let icons = crate::icon_packs::Resolver::for_source(cx, &source);
             let spoke = if is_dir { format!("Go to {name}") } else { format!("Open {name}") };
             let part = div()
                 .id(("path-segment", i))
@@ -702,7 +711,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
                 // Only the last segment gives way (with an ellipsis) once nothing else can fold.
                 .map(|part| if i == last { part.min_w_0().text_color(fg_path) } else { part.flex_none() })
                 .hover(move |s| s.bg(hover))
-                .children(icon(target, is_dir, 14).map(|i| img(i).flex_none().size(px(14.))))
+                .child(crate::preview::path_icon(&icons, target, is_dir, is_package, None, &theme, 14.))
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name.clone()));
             // A segment drags the entry it stands for: the folder, or the file the
             // last segment shows. The click below still navigates; GPUI clears the

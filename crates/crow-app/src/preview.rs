@@ -353,7 +353,7 @@ fn code_box(theme: &Theme, border: Rgba) -> gpui::Stateful<Div> {
 
 /// A packed glyph, or Finder's icon when the source is native, the pack has no
 /// match, or the item is a cloud placeholder.
-fn path_icon(
+pub(crate) fn path_icon(
     resolver: &crate::icon_packs::Resolver,
     path: &std::path::Path,
     is_dir: bool,
@@ -367,7 +367,7 @@ fn path_icon(
     match packed {
         Some(icon) => crate::icons::pack_glyph(&icon.asset, size, color(icon.color.rgb(theme))).into_any_element(),
         None => div()
-            .children(cloud_icon(cloud, path, is_dir, size as u32).map(|image| img(image).size(px(size))))
+            .children(cloud_icon(cloud, path, is_dir, size as u32).map(|image| img(image).flex_none().size(px(size))))
             .into_any_element(),
     }
 }
