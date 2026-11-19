@@ -8,7 +8,7 @@
 //! - typing and filtering always act on the focused column.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use crow_core::motion::{self, Effective, Fx, Look};
 use crow_core::{
-    Align, Column, ColumnCell, ColumnContext, ColumnWidth, EnterAction, History, KeymapLayer, KnownSize, ResizeDrag,
-    TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS, TableLayout, TipId, ViewChange, ViewMode,
+    Align, Column, ColumnCell, ColumnContext, ColumnWidth, EnterAction, GridGeometry, GridRect, History, IconSize,
+    KeymapLayer, KnownSize, ResizeDrag, TIP_SCROLL_ENTRIES, TIP_SCROLL_ROWS, TableLayout, TipId, ViewChange, ViewMode,
 };
 use crow_fs::{AllowAll, CloudStatus, Entry, ReadGate, Sort, SortKey};
 use crow_theme::Theme;
@@ -29,7 +29,7 @@ use gpui::{
     ExternalDragPayload, ExternalPaths, FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle,
     ScrollStrategy, SharedString, SpringAnimation, SpringConfig, Subscription, UniformListScrollHandle, Window, canvas,
-    div, img, point, prelude::*, px, uniform_list,
+    div, img, point, prelude::*, px, size, uniform_list,
 };
 
 use crate::actions::{
@@ -38,6 +38,7 @@ use crate::actions::{
     MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection, OpenTerminal, PasteFiles, PasteMoveFiles, QuickLook,
     Rename, SelectAll, ShowInFinder, StartFilter,
 };
+use crate::chrome::with_tooltip;
 use crate::cloud_status::{self, CloudSource, CloudStatusService};
 use crate::context_menu::{MenuKind, MenuState};
 use crate::extensions::Ext;
@@ -64,6 +65,8 @@ use pane_filter::FilterPlace;
 use view_motion::ViewMotion;
 
 pub(crate) const ROW_HEIGHT: f32 = 24.0;
+/// The reserved caption line under tile names; blank keeps every tile aligned.
+const CAPTION_LINE_HEIGHT: f32 = 16.0;
 
 /// The first row a uniform list shows. Its scroll offset is negative once
 /// scrolled down (`drag_row_at` adds it to a pointer position).
@@ -119,6 +122,15 @@ pub enum PaneEvent {
 enum MarkPending {
     Set,
     Jump,
+}
+
+/// Icon grid arrow directions, before geometry turns them into indices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IconMove {
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
@@ -294,6 +306,21 @@ struct Filtering {
     _subscription: Subscription,
 }
 
+/// One empty-space drag in the icon grid. The anchor stays in content space, so
+/// scrolling grows the rectangle instead of moving its origin.
+struct Marquee {
+    anchor: Point<Pixels>,
+    pointer: Point<Pixels>,
+    base_selection: Vec<PathBuf>,
+    base_cursor: Option<PathBuf>,
+    base: Arc<HashSet<PathBuf>>,
+    additive: bool,
+    /// Past the motion threshold: the rectangle is live.
+    started: bool,
+    layout_generation: u64,
+    hits: HashMap<PathBuf, (u64, bool)>,
+}
+
 /// Where a drop would land, drawn as an outline. Only set when the drop would act.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DropTarget {
@@ -351,6 +378,17 @@ pub struct Pane {
     applied_view: Option<(u64, u64, PathBuf)>,
     /// List view: the uniform list's viewport, captured at prepaint.
     list_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Icon view: its own scroll position and viewport, kept across mode switches.
+    icon_scroll: UniformListScrollHandle,
+    icon_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The geometry the last icon frame drew, shared by keys, hit tests and anchors.
+    grid: Option<GridGeometry>,
+    /// The effective icon size for this pane (from views.toml when folders decide).
+    icon_size: IconSize,
+    /// A view forced by `CROW_BENCH_VIEW`, so the bench measures the named layout.
+    bench_view: Option<ViewMode>,
+    /// The plugin column under tile names, when configured.
+    icon_caption: Option<String>,
     /// The list row under a drag, drawn from state rather than drag-over styles.
     drop_row: Option<usize>,
     /// Where a drop would land in either view, and the rows it covers.
@@ -365,6 +403,9 @@ pub struct Pane {
     mark_pending: Option<MarkPending>,
     /// The `/` filter field, while open.
     filtering: Option<Filtering>,
+    /// An empty-space drag selecting tiles in icon view.
+    marquee: Option<Marquee>,
+    marquee_scroll_gen: u64,
     /// Reserve the list's bottom inset while a tip card covers it.
     tip_inset: bool,
     /// The filter count VoiceOver hears: the live count, but only once typing
@@ -421,6 +462,7 @@ impl Pane {
         let cloud_service = cx.try_global::<CloudStatusService>().map(|service| service.0.clone());
         let cloud_source =
             cloud_service.as_ref().map(|service| crate::cloud_status::register_source(service, cx)).unwrap_or(0);
+        let thumbnail_service = crate::thumbnails::service(cx);
         let subscriptions = Vec::new();
         let mut service_subscriptions = Vec::new();
         if let Some(service) = size_service {
@@ -428,6 +470,9 @@ impl Pane {
         }
         if let Some(service) = cloud_service {
             service_subscriptions.push(cx.observe(&service, |pane, _, cx| pane.cloud_changed(cx)));
+        }
+        if let Some(service) = thumbnail_service {
+            service_subscriptions.push(cx.observe(&service, |_, _, cx| cx.notify()));
         }
         let mut pane = Self {
             history: History::new(dir.clone()),
@@ -466,6 +511,21 @@ impl Pane {
             }),
             applied_view: None,
             list_bounds: Rc::new(Cell::new(None)),
+            icon_scroll: UniformListScrollHandle::new(),
+            icon_bounds: Rc::new(Cell::new(None)),
+            grid: None,
+            icon_size: IconSize::Standard,
+            icon_caption: None,
+            bench_view: bench
+                .then(|| {
+                    std::env::var("CROW_BENCH_VIEW").ok().and_then(|view| match view.as_str() {
+                        "icons" => Some(ViewMode::Icons),
+                        "list" => Some(ViewMode::List),
+                        "columns" => Some(ViewMode::Columns),
+                        _ => None,
+                    })
+                })
+                .flatten(),
             drop_row: None,
             drop_target: None,
             column_bounds: Rc::new(RefCell::new(HashMap::new())),
@@ -475,6 +535,8 @@ impl Pane {
             drop_column: None,
             mark_pending: None,
             filtering: None,
+            marquee: None,
+            marquee_scroll_gen: 0,
             tip_inset: false,
             filter_announce: SharedString::default(),
             filter_announce_gen: 0,
@@ -492,6 +554,9 @@ impl Pane {
         if let Some(mode) = start_mode.filter(|_| !cx.global::<Ui>().settings.view_per_folder) {
             pane.apply_mode(mode, cx);
         }
+        if let Some(mode) = pane.bench_view {
+            pane.apply_mode(mode, cx);
+        }
         if let Some(filter) = pane.bench.as_ref().and_then(|bench| bench.filter.clone()) {
             let folder = pane.folders[0].clone();
             folder.update(cx, |folder, cx| folder.set_filter(Some(filter), cx));
@@ -507,6 +572,10 @@ impl Pane {
 
     pub fn mode(&self) -> ViewMode {
         self.mode
+    }
+
+    pub fn icon_size(&self) -> IconSize {
+        self.icon_size
     }
 
     /// The tab's folder: the list view's folder, or the column view's root.
@@ -726,6 +795,16 @@ impl Pane {
                     out.extend(
                         (0..folder.row_count().min(200))
                             .filter_map(|ix| folder.row(ix).map(|(entry, _)| format!("row-{}", entry.name))),
+                    );
+                }
+            }
+            ViewMode::Icons => {
+                out.push("file-list".to_owned());
+                if let Some(folder) = self.folders.first() {
+                    let folder = folder.read(cx);
+                    out.extend(
+                        (0..folder.row_count().min(200))
+                            .filter_map(|ix| folder.row(ix).map(|(entry, _)| format!("tile-{}", entry.name))),
                     );
                 }
             }
@@ -1082,11 +1161,26 @@ impl Pane {
 
     /// Cancel a Vim mark waiting for its letter. Returns whether one was pending.
     pub fn cancel_pending(&mut self, cx: &mut Context<Self>) -> bool {
+        let marquee = self.cancel_marquee(cx);
         let pending = self.mark_pending.take().is_some();
         if pending {
             cx.notify();
         }
-        pending
+        pending || marquee
+    }
+
+    #[cfg(test)]
+    pub fn marquee_active(&self) -> bool {
+        self.marquee.as_ref().is_some_and(|marquee| marquee.started)
+    }
+
+    #[cfg(test)]
+    pub fn marquee_hit_names(&self) -> Vec<String> {
+        let Some(marquee) = &self.marquee else { return Vec::new() };
+        let mut names: Vec<String> =
+            marquee.hits.keys().filter_map(|path| path.file_name()).map(|name| name.to_string_lossy().into()).collect();
+        names.sort();
+        names
     }
 
     /// The focused folder's type-to-select prefix, while its run is active.
@@ -1252,6 +1346,7 @@ impl Pane {
         if self.mode == mode {
             return;
         }
+        self.cancel_marquee(cx);
         let motion = ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, Instant::now(), cx);
         self.apply_mode(mode, cx);
         self.view_motion = motion;
@@ -1262,6 +1357,12 @@ impl Pane {
         }
         if mode == ViewMode::Columns {
             self.strip_scroll.scroll_to_item(self.focused);
+        }
+        if mode == ViewMode::Icons
+            && let Some(ix) = self.focused_folder().read(cx).cursor_ix()
+        {
+            let count = self.focused_folder().read(cx).row_count();
+            self.icon_scroll.scroll_to_item(self.icon_grid(count).row_of(ix), ScrollStrategy::Nearest);
         }
         if cx.global::<Ui>().settings.view_per_folder {
             self.remember(ViewChange::View(mode), cx);
@@ -1297,6 +1398,10 @@ impl Pane {
             folder.update(cx, |folder, _| folder.set_icon_source(source));
         }
         self.applied_view = Some(key);
+        if cx.global::<Ui>().settings.view_per_folder {
+            self.icon_size = resolved.icon_size.0;
+            self.icon_caption = resolved.icon_caption.0.clone();
+        }
         self.apply_sort(resolved.sort(), cx);
         let ids: Vec<&str> = self.columns.iter().map(|c| c.id()).collect();
         if ids != resolved.columns.0 {
@@ -1319,7 +1424,7 @@ impl Pane {
         // With `view_per_folder = false` the window keeps its view.
         let per_folder = cx.global::<Ui>().settings.view_per_folder;
         if per_folder && (self.mode != ViewMode::Columns || self.folders.len() == 1) {
-            self.apply_mode(resolved.view.0, cx);
+            self.apply_mode(self.bench_view.unwrap_or(resolved.view.0), cx);
         }
         cx.notify();
     }
@@ -1329,26 +1434,15 @@ impl Pane {
         if self.mode == mode {
             return false;
         }
+        self.cancel_marquee(cx);
         self.view_motion = None;
         self.child_reveal = None;
         self.drop_filter(cx);
         self.mode = mode;
         match mode {
-            // The list shows the folder you were in: the focused column becomes the root.
-            ViewMode::List => {
-                for (index, folder) in self.folders.iter().enumerate() {
-                    if index != self.focused {
-                        folder.update(cx, |folder, cx| folder.release_listing(cx));
-                    }
-                }
-                let keep = self.folders.remove(self.focused);
-                let subscription = self.subscriptions.remove(self.focused);
-                let dir = keep.read(cx).dir().to_path_buf();
-                self.folders = vec![keep];
-                self.subscriptions = vec![subscription];
-                self.focused = 0;
-                self.history.visit(dir);
-            }
+            // The single-folder views show the folder you were in: the focused
+            // column becomes the root. Icons projects its direct entries only.
+            ViewMode::List | ViewMode::Icons => self.collapse_to_focused(mode == ViewMode::List, cx),
             ViewMode::Columns => self.update_chain(0, cx),
         }
         self.plugin_scope_changed(cx);
@@ -1356,7 +1450,76 @@ impl Pane {
         true
     }
 
+    /// The grid the pane would draw right now. Until the first icon frame, the
+    /// last known viewport height (or the window's) decides the visible rows;
+    /// column count and tile bounds only need the width and the listing.
+    fn icon_grid(&self, count: usize) -> GridGeometry {
+        let width = f32::from(self.list_width).max(1.0);
+        let height = self
+            .icon_bounds
+            .get()
+            .map(|bounds| f32::from(bounds.size.height))
+            .or_else(|| self.grid.map(|grid| grid.viewport_height()))
+            .unwrap_or(1.0)
+            .max(1.0);
+        let mut metrics = self.icon_size.metrics();
+        if self.icon_caption.is_some() {
+            metrics.tile_height += CAPTION_LINE_HEIGHT;
+        }
+        GridGeometry::new(count, width, height, metrics)
+    }
+
+    /// Configure the plugin column under tile names; `None` is Off. The tile
+    /// height changes when the slot appears, so the renderer restores the anchor.
+    pub fn set_icon_caption(&mut self, caption: Option<String>, cx: &mut Context<Self>) {
+        if self.icon_caption == caption {
+            return;
+        }
+        self.cancel_marquee(cx);
+        self.icon_caption = caption;
+        if cx.global::<Ui>().settings.view_per_folder {
+            self.remember(ViewChange::IconCaption(self.icon_caption.clone()), cx);
+        }
+        cx.notify();
+    }
+
+    pub fn icon_caption(&self) -> Option<&str> {
+        self.icon_caption.as_deref()
+    }
+
+    /// Switch the grid preset. Selected paths and the filter stay; the renderer
+    /// restores the visible anchor against the new geometry.
+    pub fn set_icon_size(&mut self, size: IconSize, cx: &mut Context<Self>) {
+        if self.icon_size == size {
+            return;
+        }
+        self.cancel_marquee(cx);
+        self.icon_size = size;
+        if cx.global::<Ui>().settings.view_per_folder {
+            self.remember(ViewChange::IconSize(size), cx);
+        }
+        cx.notify();
+    }
+
+    /// Collapse a column chain to the focused folder, for List and Icons.
+    fn collapse_to_focused(&mut self, show_tree: bool, cx: &mut Context<Self>) {
+        for (index, folder) in self.folders.iter().enumerate() {
+            if index != self.focused {
+                folder.update(cx, |folder, cx| folder.release_listing(cx));
+            }
+        }
+        let keep = self.folders.remove(self.focused);
+        let subscription = self.subscriptions.remove(self.focused);
+        let dir = keep.read(cx).dir().to_path_buf();
+        keep.update(cx, |folder, cx| folder.set_show_tree(show_tree, cx));
+        self.folders = vec![keep];
+        self.subscriptions = vec![subscription];
+        self.focused = 0;
+        self.history.visit(dir);
+    }
+
     fn enter(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        self.cancel_marquee(cx);
         self.view_motion = None;
         self.child_reveal = None;
         if self.filtering.take().is_some() {
@@ -1388,8 +1551,12 @@ impl Pane {
     fn push_folder(&mut self, dir: PathBuf, auto_select: bool, cx: &mut Context<Self>) {
         let (hidden, sort) = (self.show_hidden, self.sort);
         let icon_source = cx.global::<Ui>().views.resolve(&dir).icon_source.map(|(source, _)| source);
+        let show_tree = self.mode != ViewMode::Icons;
         let folder = cx.new(|cx| Folder::new(dir, hidden, sort, auto_select, cx));
-        folder.update(cx, |folder, _| folder.set_icon_source(icon_source));
+        folder.update(cx, |folder, cx| {
+            folder.set_icon_source(icon_source);
+            folder.set_show_tree(show_tree, cx);
+        });
         self.subscriptions
             .push(cx.subscribe(&folder, |this, folder, event, cx| this.on_folder_event(folder, event, cx)));
         self.folders.push(folder);
@@ -1444,6 +1611,13 @@ impl Pane {
 
     fn on_folder_event(&mut self, folder: Entity<Folder>, event: &FolderEvent, cx: &mut Context<Self>) {
         let Some(k) = self.index_of(folder.entity_id()) else { return };
+        if self.marquee.is_some()
+            && matches!(event, FolderEvent::Loaded | FolderEvent::Changed | FolderEvent::WatcherApplied { .. })
+        {
+            // The rows under the rectangle changed: indices from the old layout
+            // must not select whatever moved into them.
+            self.cancel_marquee(cx);
+        }
         if matches!(event, FolderEvent::Loaded | FolderEvent::Changed)
             && let Some(service) = cx.try_global::<CloudStatusService>()
         {
@@ -1497,6 +1671,13 @@ impl Pane {
         if let FolderEvent::CursorMoved = event {
             if self.mode == ViewMode::Columns {
                 self.update_chain(k, cx);
+            }
+            if self.mode == ViewMode::Icons
+                && k == self.focused
+                && let Some(ix) = folder.read(cx).cursor_ix()
+            {
+                let count = folder.read(cx).row_count();
+                self.icon_scroll.scroll_to_item(self.icon_grid(count).row_of(ix), ScrollStrategy::Nearest);
             }
             if k == self.focused {
                 self.load_preview(cx);
@@ -1786,19 +1967,74 @@ impl Pane {
     // ----- actions -----
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == ViewMode::Icons {
+            let target = self.icon_neighbor(IconMove::Up, cx);
+            self.with_focused(cx, |f, cx| f.select_only(target, cx));
+            return;
+        }
         self.with_focused(cx, |f, cx| f.select_only(f.step(-1), cx));
     }
 
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == ViewMode::Icons {
+            let target = self.icon_neighbor(IconMove::Down, cx);
+            self.with_focused(cx, |f, cx| f.select_only(target, cx));
+            return;
+        }
         self.with_focused(cx, |f, cx| f.select_only(f.step(1), cx));
     }
 
     fn extend_up(&mut self, _: &ExtendUp, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == ViewMode::Icons {
+            let target = self.icon_neighbor(IconMove::Up, cx);
+            self.with_focused(cx, |f, cx| f.extend_to(target, cx));
+            return;
+        }
         self.with_focused(cx, |f, cx| f.extend_to(f.step(-1), cx));
     }
 
     fn extend_down(&mut self, _: &ExtendDown, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == ViewMode::Icons {
+            let target = self.icon_neighbor(IconMove::Down, cx);
+            self.with_focused(cx, |f, cx| f.extend_to(target, cx));
+            return;
+        }
         self.with_focused(cx, |f, cx| f.extend_to(f.step(1), cx));
+    }
+
+    /// The tile arrow keys land on: vertical moves keep the column, horizontal
+    /// moves stop at the row's edge, and a short final row clamps.
+    fn icon_neighbor(&self, movement: IconMove, cx: &gpui::App) -> usize {
+        let folder = self.focused_folder().read(cx);
+        let count = folder.row_count();
+        let Some(from) = folder.cursor_ix() else {
+            return if movement == IconMove::Up { count.saturating_sub(1) } else { 0 };
+        };
+        if count == 0 {
+            return 0;
+        }
+        let grid = self.icon_grid(count);
+        let columns = grid.columns().max(1);
+        let last = count - 1;
+        let row = grid.row_of(from);
+        match movement {
+            IconMove::Up => {
+                if row == 0 {
+                    from
+                } else {
+                    from - columns
+                }
+            }
+            IconMove::Down => {
+                if row + 1 >= grid.rows() {
+                    from
+                } else {
+                    (from + columns).min(last)
+                }
+            }
+            IconMove::Left => from.saturating_sub(usize::from(from % columns != 0)),
+            IconMove::Right => (from + 1).min(last).min(from + usize::from((from + 1) % columns != 0)),
+        }
     }
 
     fn move_to_first(&mut self, _: &MoveToFirst, _: &mut Window, cx: &mut Context<Self>) {
@@ -1815,9 +2051,17 @@ impl Pane {
 
     /// Column view: move into the column showing the selected folder's contents.
     fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
-        if self.mode == ViewMode::List {
-            self.list_right(cx);
-            return;
+        match self.mode {
+            ViewMode::List => {
+                self.list_right(cx);
+                return;
+            }
+            ViewMode::Icons => {
+                let target = self.icon_neighbor(IconMove::Right, cx);
+                self.with_focused(cx, |f, cx| f.select_only(target, cx));
+                return;
+            }
+            ViewMode::Columns => {}
         }
         if self.focused + 1 >= self.folders.len() {
             return;
@@ -1870,9 +2114,17 @@ impl Pane {
     /// On the leftmost column there is no column to go back to, so the parent folder
     /// is pushed in from the left, with the folder we came from selected in it.
     fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
-        if self.mode == ViewMode::List {
-            self.list_left(cx);
-            return;
+        match self.mode {
+            ViewMode::List => {
+                self.list_left(cx);
+                return;
+            }
+            ViewMode::Icons => {
+                let target = self.icon_neighbor(IconMove::Left, cx);
+                self.with_focused(cx, |f, cx| f.select_only(target, cx));
+                return;
+            }
+            ViewMode::Columns => {}
         }
         if self.focused > 0 {
             self.drop_filter(cx);
@@ -2178,6 +2430,10 @@ impl Pane {
             self.context_press(k, None, window, cx);
             return;
         }
+        if self.mode == ViewMode::Icons {
+            self.begin_marquee(event, window, cx);
+            return;
+        }
         if self.renaming.is_some() {
             self.commit_rename(window, cx);
         }
@@ -2263,8 +2519,8 @@ impl Pane {
             }
         };
         let scope = match (self.mode, self.filtering.is_some()) {
-            (ViewMode::List, false) => KeyScope::List,
-            (ViewMode::List, true) => KeyScope::ListFiltered,
+            (ViewMode::List | ViewMode::Icons, false) => KeyScope::List,
+            (ViewMode::List | ViewMode::Icons, true) => KeyScope::ListFiltered,
             (ViewMode::Columns, false) => KeyScope::Columns,
             (ViewMode::Columns, true) => KeyScope::ColumnsFiltered,
         };
@@ -2298,6 +2554,248 @@ impl Pane {
             this.update_in(cx, |this, window, cx| this.context_menu_closed(chosen, window, cx)).ok();
         })
         .detach();
+    }
+
+    // ----- icon marquee -----
+
+    fn begin_marquee(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_marquee(cx);
+        if self.renaming.is_some() {
+            self.commit_rename(window, cx);
+        }
+        window.focus(&self.focus, cx);
+        self.cancel_type_select(cx);
+        let Some(content) = self.icon_content_point(event.position) else { return };
+        let folder = self.focused_folder().clone();
+        let (base_selection, base_cursor, layout_generation) = {
+            let folder = folder.read(cx);
+            (folder.selected_paths(), folder.selection_cursor().map(Path::to_path_buf), folder.layout_generation())
+        };
+        let additive = event.modifiers.platform || event.modifiers.shift;
+        let base = Arc::new(if additive { base_selection.iter().cloned().collect() } else { HashSet::new() });
+        if !additive {
+            folder.update(cx, |folder, cx| folder.clear_selection(cx));
+            self.load_preview(cx);
+        }
+        self.marquee = Some(Marquee {
+            anchor: content,
+            pointer: event.position,
+            base_selection,
+            base_cursor,
+            base,
+            additive,
+            started: false,
+            layout_generation,
+            hits: HashMap::new(),
+        });
+        cx.notify();
+    }
+
+    /// The pointer in the grid's content coordinates (x from the content's left,
+    /// y from the first row, both before the scroll offset is applied).
+    fn icon_content_point(&self, pointer: Point<Pixels>) -> Option<Point<Pixels>> {
+        let bounds = self.icon_bounds.get()?;
+        let offset = self.icon_scroll.0.borrow().base_handle.offset().y;
+        Some(point(pointer.x - bounds.left(), pointer.y - bounds.top() - offset))
+    }
+
+    fn update_marquee(&mut self, pointer: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(marquee) = &self.marquee else { return };
+        let was_started = marquee.started;
+        let previous_pointer = marquee.pointer;
+        let anchor = marquee.anchor;
+        let additive = marquee.additive;
+        let base = marquee.base.clone();
+        let old: HashMap<PathBuf, (u64, bool)> = marquee.hits.clone();
+        let layout_generation = marquee.layout_generation;
+        let base_cursor = marquee.base_cursor.clone();
+        let base_first = marquee.base_selection.first().cloned();
+        if !was_started {
+            let dx = f32::from(pointer.x - previous_pointer.x);
+            let dy = f32::from(pointer.y - previous_pointer.y);
+            if dx * dx + dy * dy < 9.0 {
+                return;
+            }
+        }
+        let Some(current) = self.icon_content_point(pointer) else { return };
+        let folder_entity = self.focused_folder().clone();
+        if folder_entity.read(cx).layout_generation() != layout_generation {
+            self.cancel_marquee(cx);
+            return;
+        }
+        let (count, rect) = {
+            let folder = folder_entity.read(cx);
+            (
+                folder.row_count(),
+                GridRect {
+                    x: f32::from(anchor.x.min(current.x)),
+                    y: f32::from(anchor.y.min(current.y)),
+                    width: f32::from((anchor.x - current.x).abs()).max(1.0),
+                    height: f32::from((anchor.y - current.y).abs()).max(1.0),
+                },
+            )
+        };
+        let grid = self.icon_grid(count);
+        let mut ordered = Vec::new();
+        let mut hits: HashMap<PathBuf, (u64, bool)> = HashMap::new();
+        {
+            let folder = folder_entity.read(cx);
+            grid.tiles_intersecting(&rect, |ix, _| {
+                if let Some((entry, _)) = folder.row(ix) {
+                    hits.insert(entry.path.clone(), (entry.size, entry.is_dir));
+                    ordered.push(entry.path.clone());
+                }
+            });
+        }
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        for (path, entry) in &hits {
+            if !old.contains_key(path) && !base.contains(path) {
+                added.push((path.clone(), entry.0, entry.1));
+            }
+        }
+        for (path, entry) in &old {
+            if !hits.contains_key(path) && !(additive && base.contains(path)) {
+                removed.push((path.clone(), entry.0, entry.1));
+            }
+        }
+        let preferred = base_cursor
+            .clone()
+            .filter(|path| (additive && base.contains(path)) || hits.contains_key(path))
+            .or_else(|| ordered.first().cloned())
+            .or_else(|| additive.then_some(base_cursor).flatten())
+            .or_else(|| additive.then_some(base_first).flatten());
+        folder_entity.update(cx, |folder, cx| folder.apply_marquee_delta(&added, &removed, preferred, cx));
+        if let Some(marquee) = &mut self.marquee {
+            marquee.started = true;
+            marquee.pointer = pointer;
+            marquee.hits = hits;
+        }
+        self.schedule_marquee_scroll(pointer, cx);
+        cx.notify();
+    }
+
+    /// Edge autoscroll as one-shot timers: a stationary pointer at an edge steps
+    /// one grid row and schedules the next step; leaving the edge stops it. An
+    /// endless timer would keep the test executor from ever parking.
+    fn schedule_marquee_scroll(&mut self, pointer: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(bounds) = self.icon_bounds.get() else { return };
+        let edge = px(24.);
+        if pointer.y >= bounds.top() + edge && pointer.y <= bounds.bottom() - edge {
+            return;
+        }
+        let Some(marquee) = &self.marquee else { return };
+        if !marquee.started {
+            return;
+        }
+        self.marquee_scroll_gen += 1;
+        let generation = self.marquee_scroll_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(40)).await;
+            this.update(cx, |this, cx| {
+                if this.marquee_scroll_gen != generation {
+                    return;
+                }
+                let Some(marquee) = &this.marquee else { return };
+                if marquee.pointer != pointer {
+                    return;
+                }
+                let Some(bounds) = this.icon_bounds.get() else { return };
+                let direction = if pointer.y < bounds.top() + edge {
+                    -1
+                } else if pointer.y > bounds.bottom() - edge {
+                    1
+                } else {
+                    return;
+                };
+                let (layout_changed, count) = {
+                    let folder = this.focused_folder().read(cx);
+                    (folder.layout_generation() != marquee.layout_generation, folder.row_count())
+                };
+                if layout_changed {
+                    this.cancel_marquee(cx);
+                    return;
+                }
+                let grid = this.icon_grid(count);
+                let offset = f32::from(this.icon_scroll.0.borrow().base_handle.offset().y);
+                let first = grid.first_visible_row(offset.max(0.0)) as isize;
+                let target = (first + direction).clamp(0, grid.rows().saturating_sub(1) as isize);
+                if target == first {
+                    return;
+                }
+                this.icon_scroll.scroll_to_item_strict(target as usize, ScrollStrategy::Top);
+                this.update_marquee(pointer, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Cancel the drag and restore the surviving starting selection and cursor.
+    pub(crate) fn cancel_marquee(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(marquee) = self.marquee.take() else { return false };
+        self.marquee_scroll_gen += 1;
+        let folder = self.focused_folder().clone();
+        let mut survivors = Vec::new();
+        let mut totals = (0u64, 0usize);
+        {
+            let read = folder.read(cx);
+            for path in &marquee.base_selection {
+                let Some(ix) = read.row_of_path(path) else { continue };
+                let Some((entry, _)) = read.row(ix) else { continue };
+                survivors.push(path.clone());
+                if entry.is_dir {
+                    totals.1 += 1;
+                } else {
+                    totals.0 += entry.size;
+                }
+            }
+        }
+        let cursor = marquee.base_cursor.filter(|path| survivors.contains(path)).or_else(|| survivors.first().cloned());
+        folder.update(cx, |folder, cx| folder.set_selection_paths(survivors, cursor, totals, cx));
+        self.load_preview(cx);
+        cx.notify();
+        true
+    }
+
+    /// Release after a drag: the preview selection is already the committed one.
+    fn commit_marquee(&mut self, cx: &mut Context<Self>) {
+        if self.marquee.take().is_some() {
+            self.marquee_scroll_gen += 1;
+            cx.notify();
+        }
+    }
+
+    fn marquee_rect(&self) -> Option<Bounds<Pixels>> {
+        let marquee = self.marquee.as_ref().filter(|marquee| marquee.started)?;
+        let bounds = self.icon_bounds.get()?;
+        let offset = self.icon_scroll.0.borrow().base_handle.offset().y;
+        let current = point(marquee.pointer.x - bounds.left(), marquee.pointer.y - bounds.top());
+        let start = point(marquee.anchor.x, marquee.anchor.y + offset);
+        let left = start.x.min(current.x).max(px(0.));
+        let top = start.y.min(current.y).max(px(0.));
+        if left >= bounds.size.width || top >= bounds.size.height {
+            return None;
+        }
+        let width = (start.x - current.x).abs().max(px(1.)).min(bounds.size.width - left);
+        let height = (start.y - current.y).abs().max(px(1.)).min(bounds.size.height - top);
+        Some(Bounds::new(point(left, top), size(width, height)))
+    }
+
+    fn marquee_overlay(&self, theme: &Theme) -> Option<Div> {
+        let rect = self.marquee_rect()?;
+        Some(
+            div()
+                .absolute()
+                .debug_selector(|| "marquee".into())
+                .left(rect.left())
+                .top(rect.top())
+                .w(rect.size.width)
+                .h(rect.size.height)
+                .bg(color_alpha(theme.role("accent"), 0x24))
+                .border_1()
+                .border_color(color_alpha(theme.role("accent"), 0xcc)),
+        )
     }
 
     /// The menu closed, with the item at `chosen` picked (an index into its slots), or none.
@@ -2468,6 +2966,27 @@ impl Pane {
                     None => DropTarget { folder: folder.dir().to_path_buf(), column: 0, rows: None },
                 }
             }
+            ViewMode::Icons => {
+                let bounds = self.icon_bounds.get()?;
+                if !bounds.contains(&pointer) {
+                    return None;
+                }
+                let offset = self.icon_scroll.0.borrow().base_handle.offset().y;
+                let grid = self.grid?;
+                let index = grid.tile_at(
+                    f32::from(pointer.x - bounds.left()),
+                    f32::from(pointer.y - bounds.top()) - f32::from(offset),
+                );
+                let folder = self.folders.first()?.read(cx);
+                match index.and_then(|ix| folder.drop_header(ix)) {
+                    Some(header) => DropTarget {
+                        folder: folder.row(header)?.0.path.clone(),
+                        column: 0,
+                        rows: Some(header..folder.subtree_end(header)),
+                    },
+                    None => DropTarget { folder: folder.dir().to_path_buf(), column: 0, rows: None },
+                }
+            }
             ViewMode::Columns => {
                 let column = self
                     .column_bounds
@@ -2522,6 +3041,10 @@ impl Pane {
     }
 
     fn bench_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = self.mode;
+        let icon_scroll = self.icon_scroll.clone();
+        let icon_rows =
+            self.folders.first().map(|folder| self.icon_grid(folder.read(cx).row_count()).rows()).unwrap_or(0);
         let Some(bench) = self.bench.as_mut() else { return };
         window.request_animation_frame();
         let folder = self.folders[0].read(cx);
@@ -2535,14 +3058,20 @@ impl Pane {
         }
         bench.frame += 1;
         // About 3 rows per frame: a fast, continuous trackpad scroll.
-        folder.scroll_strict((bench.frame * 3) % shown);
+        if mode == ViewMode::Icons {
+            if icon_rows > 0 {
+                icon_scroll.scroll_to_item_strict((bench.frame * 3) % icon_rows, ScrollStrategy::Top);
+            }
+        } else {
+            folder.scroll_strict((bench.frame * 3) % shown);
+        }
         if bench.frame == 600 {
             let mut v = std::mem::take(&mut bench.intervals);
             v.sort_by(f64::total_cmp);
             let at = |q: f64| v[((v.len() - 1) as f64 * q) as usize];
             let avg = v.iter().sum::<f64>() / v.len() as f64;
             bench.scrolled = Some(format!(
-                "items={count} cold_first_paint={:.0}ms cold_load={:.0}ms frames={} avg={avg:.2}ms ({:.0} fps) p50={:.2}ms p95={:.2}ms p99={:.2}ms max={:.2}ms",
+                "view={mode:?} items={count} cold_first_paint={:.0}ms cold_load={:.0}ms frames={} avg={avg:.2}ms ({:.0} fps) p50={:.2}ms p95={:.2}ms p99={:.2}ms max={:.2}ms",
                 folder.first_paint_ms().unwrap_or_default(),
                 folder.load_ms(),
                 v.len(),
@@ -2584,6 +3113,30 @@ impl Pane {
     }
 
     // ----- list view -----
+
+    fn icon_row_decoration(
+        &self,
+        caption: Option<&str>,
+        columns: usize,
+        cx: &App,
+    ) -> Option<crate::plugins::PluginRows> {
+        let descriptors = crate::plugins::icon_row_descriptors(cx, caption);
+        if descriptors.is_empty() {
+            return None;
+        }
+        let folder = self.folders.first()?.clone();
+        let (surface, dir) = {
+            let folder = folder.read(cx);
+            (folder.plugin_surface(), folder.dir().to_path_buf())
+        };
+        Some(crate::plugins::PluginRows::new_grid(
+            folder,
+            surface,
+            crate::plugins::ScopeKey::Folder(dir),
+            descriptors,
+            columns,
+        ))
+    }
 
     fn plugin_row_decoration(&self, k: usize, cx: &App) -> Option<crate::plugins::PluginRows> {
         let descriptors = crate::plugins::row_descriptors(cx);
@@ -3087,6 +3640,556 @@ impl Pane {
                 ))
             })
             .collect()
+    }
+
+    // ----- icon view -----
+
+    /// Standard grid rows. One uniform-list item is one row of tiles, so only the
+    /// visible rows and a small overscan are laid out; `GridGeometry` is the one
+    /// source for tile bounds, hit tests and scroll rows.
+    fn render_icons(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let count = self.folders[0].read(cx).row_count();
+        let geometry = self.icon_grid(count);
+        if let Some(old) = self.grid
+            && (old.columns() != geometry.columns()
+                || old.row_pitch() != geometry.row_pitch()
+                || old.count() != geometry.count()
+                || old.width() != geometry.width())
+        {
+            self.cancel_marquee(cx);
+            let offset = f32::from(self.icon_scroll.0.borrow().base_handle.offset().y);
+            let (cursor_path, cursor_visible, anchors) = {
+                let folder = self.folders[0].read(cx);
+                let visible = old.visible_rows(offset.max(0.0));
+                let cursor = folder.cursor_ix();
+                let cursor_path = cursor.and_then(|ix| folder.row(ix)).map(|(entry, _)| entry.path.clone());
+                let cursor_visible = cursor.is_some_and(|ix| visible.contains(&old.row_of(ix)));
+                let mut anchors = Vec::new();
+                for row in visible.start..visible.end {
+                    let Some(last) = old.last_index_of_row(row) else { break };
+                    for ix in old.first_index_of_row(row)..=last {
+                        if let Some((entry, _)) = folder.row(ix) {
+                            anchors.push(entry.path.clone());
+                        }
+                    }
+                }
+                (cursor_path, cursor_visible, anchors)
+            };
+            let target = if cursor_visible {
+                cursor_path
+            } else {
+                anchors.into_iter().find(|path| self.folders[0].read(cx).row_of_path(path).is_some())
+            };
+            if let Some(path) = target
+                && let Some(ix) = self.folders[0].read(cx).row_of_path(&path)
+            {
+                let strategy = if cursor_visible { ScrollStrategy::Nearest } else { ScrollStrategy::Top };
+                self.icon_scroll.scroll_to_item(geometry.row_of(ix), strategy);
+            }
+        }
+        self.grid = Some(geometry);
+        let rows = geometry.rows();
+        let scroll = self.icon_scroll.clone();
+        let bounds = self.icon_bounds.clone();
+        let render_rows =
+            cx.processor(move |this, range, window, cx| this.render_icon_rows(geometry, range, window, cx));
+        let mut body = uniform_list("icon-entries", rows, render_rows)
+            .track_scroll(&scroll)
+            .on_scroll(cx.listener(|this, _, _, cx| this.on_icon_scroll(cx)))
+            .flex_1()
+            .min_h_0();
+        let caption = self.icon_caption.clone();
+        if let Some(decoration) = self.icon_row_decoration(caption.as_deref(), geometry.columns(), cx) {
+            body = body.with_decoration(decoration);
+        }
+        let field = self.render_filter_field(FilterPlace::List, window, cx);
+        let no_matches = self.render_no_matches(cx);
+        let footer = self.render_filter_footer(FilterPlace::List, cx);
+        let theme = cx.global::<Ui>().theme.clone();
+        let overlay = self.marquee_overlay(&theme);
+        let body = match no_matches {
+            Some(block) => block,
+            None => div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .on_children_prepainted(move |children, _, _| {
+                    bounds.set(children.first().copied());
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| this.press_empty(0, event, window, cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        this.context_press_empty(0, event, window, cx)
+                    }),
+                )
+                .when(self.drop_target.as_ref().is_some_and(|target| target.rows.is_none()), |body| {
+                    body.child(drop_outline(&theme).left(px(4.)).right(px(4.)).top(px(2.)).bottom(px(2.)))
+                })
+                .child(body)
+                .children(overlay)
+                .into_any_element(),
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .children(field)
+            .child(body)
+            .children(footer)
+    }
+
+    fn render_icon_rows(
+        &mut self,
+        geometry: GridGeometry,
+        range: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<impl IntoElement + use<>> {
+        let metrics = geometry.metrics();
+        let indices: Vec<usize> = range
+            .clone()
+            .flat_map(|row| {
+                let first = geometry.first_index_of_row(row);
+                let last = geometry.last_index_of_row(row).unwrap_or(first);
+                first..=last
+            })
+            .collect();
+        let cloud_visible: Vec<PathBuf> = {
+            let folder = self.folders[0].read(cx);
+            indices.iter().filter_map(|ix| folder.row(*ix)).map(|(entry, _)| entry.path.clone()).collect()
+        };
+        self.observe_cloud((self.cloud_source, 0), &cloud_visible, cx);
+        let visible: Vec<PathBuf> = {
+            let folder = self.folders[0].read(cx);
+            indices
+                .iter()
+                .filter_map(|ix| folder.row(*ix))
+                .filter(|(entry, _)| entry.is_dir && !entry.is_symlink)
+                .map(|(entry, _)| entry.path.clone())
+                .collect()
+        };
+        self.observe_sizes((self.size_source, 0), &visible, cx);
+        let (scope, versions) = {
+            let folder = self.folders[0].read(cx);
+            let versions = indices
+                .iter()
+                .filter_map(|ix| folder.row(*ix))
+                .map(|(entry, _)| (entry.path.clone(), folder.plugin_entry_version(entry)))
+                .collect::<HashMap<_, _>>();
+            (crate::plugins::ScopeKey::Folder(folder.dir().to_path_buf()), versions)
+        };
+        let decoration_ids = crate::plugins::decoration_ids(cx);
+        let presentations: HashMap<PathBuf, crate::plugins::RowPresentation> = versions
+            .iter()
+            .map(|(path, version)| {
+                (path.clone(), crate::plugins::row_presentation(cx, &scope, path, *version, &decoration_ids))
+            })
+            .collect();
+        let thumbnail_service = crate::thumbnails::service(cx);
+        let thumbnail_gate = crate::thumbnails::readable_gate(cx);
+        let mut thumbnail_requests = Vec::new();
+        let ui = cx.global::<Ui>();
+        let theme = &ui.theme;
+        let font_size = px(ui.settings.font_size);
+        let mode = ui.feedback.mode;
+        let now = Instant::now();
+        let icons = self.icon_resolver(0, cx);
+        let active = self.focus.is_focused(window);
+        let selection_bg = if active { active_selection(theme) } else { inactive_selection(theme) };
+        let selected_entries = self.folders[0].read(cx).selected_entries();
+        let (folder_id, total, cursor) = {
+            let folder = self.folders[0].read(cx);
+            (self.folders[0].entity_id(), folder.row_count(), folder.cursor_ix())
+        };
+        let text_width = metrics.tile_width - 8.0;
+        let caption_id = self.icon_caption.as_deref().and_then(|id| crow_core::ExtensionId::parse(id).ok());
+        let caption_reserved = self.icon_caption.is_some();
+        let rows = range
+            .map(|row| {
+                let first = geometry.first_index_of_row(row);
+                let last = geometry.last_index_of_row(row).unwrap_or(first);
+                let tiles = (first..=last).filter_map(|ix| {
+                    let folder = self.folders[0].read(cx);
+                    let (entry, _) = folder.row(ix)?;
+                    let entry = entry.clone();
+                    let selected = folder.is_selected(&entry.path);
+                    let cloud =
+                        self.cloud_status(&entry.path, cx).or(entry.dataless.then_some(CloudStatus::NotDownloaded));
+                    let presentation = presentations.get(&entry.path).cloned().unwrap_or_default();
+                    let version = versions.get(&entry.path).copied().unwrap_or(0);
+                    let caption = caption_id
+                        .as_ref()
+                        .and_then(|id| crate::plugins::column_value(cx, id, &scope, &entry.path, version));
+                    let caption_text = caption
+                        .as_ref()
+                        .map(|value| format!("{} · {}", display_text(&value.title), display_text(&value.text)))
+                        .unwrap_or_default();
+                    let caption_spoken = caption.as_ref().and_then(|value| {
+                        value.spoken.clone().or_else(|| Some(format!("{} {}", value.title, value.text)))
+                    });
+                    let dim = if presentation.dim {
+                        content_opacity(true, false)
+                    } else {
+                        content_opacity(
+                            entry.hidden,
+                            self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
+                        )
+                    };
+                    let plugin_spoken = if presentation.spoken.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", {}", presentation.spoken.join(", "))
+                    };
+                    let cloud_spoken = cloud
+                        .and_then(CloudStatus::spoken_suffix)
+                        .map(|suffix| format!(", {suffix}"))
+                        .unwrap_or_default();
+                    let look = folder.effect_look(&entry.path, mode, now).unwrap_or_default();
+                    let tint = effect_tint(look, theme);
+                    let drag_entries = if selected {
+                        selected_entries.clone()
+                    } else {
+                        Arc::new(vec![(entry.path.clone(), entry.is_dir)])
+                    };
+                    let drag_icon = cloud_icon(cloud, &entry.path, entry.is_dir, 22);
+                    let drag_count = drag_entries.len();
+                    let drag_label: SharedString = if drag_count > 1 {
+                        format!("{drag_count} items").into()
+                    } else {
+                        display_text(&entry.name).into_owned().into()
+                    };
+                    let handoff = DragHandoff::new();
+                    let drop_folder = entry.is_dir.then(|| entry.path.clone());
+                    let points = metrics.icon_size as u32;
+                    let revision = folder.plugin_entry_version(&entry);
+                    let key = crate::thumbnails::ThumbnailKey::new(entry.path.clone(), revision, points);
+                    let thumbnail = thumbnail_service.as_ref().and_then(|service| service.read(cx).image(&key));
+                    let thumbnail_known =
+                        thumbnail_service.as_ref().is_some_and(|service| service.read(cx).is_cached(&key));
+                    let thumbnailable = thumbnail_service.is_some()
+                        && (!entry.is_dir || entry.is_package())
+                        && !entry.is_symlink
+                        && !entry.dataless
+                        && cloud.is_none_or(CloudStatus::is_local)
+                        && !crate::style::native_cloud_icon(cloud, &entry.path);
+                    if thumbnail.is_none() && !thumbnail_known && thumbnailable {
+                        thumbnail_requests.push(crate::thumbnails::ThumbnailRequest {
+                            key: key.clone(),
+                            gate: thumbnail_gate.clone(),
+                        });
+                    }
+                    let packed = (!crate::style::native_cloud_icon(cloud, &entry.path))
+                        .then(|| icons.resolve(&entry.path, entry.is_dir, entry.is_package()))
+                        .flatten();
+                    let thumb = match thumbnail {
+                        Some(image) => img(image).size(px(metrics.icon_size)).into_any_element(),
+                        None => match packed {
+                            Some(icon) => {
+                                crate::icons::pack_glyph(&icon.asset, metrics.icon_size, color(icon.color.rgb(theme)))
+                                    .into_any_element()
+                            }
+                            None => match cloud_icon(cloud, &entry.path, entry.is_dir, points) {
+                                Some(image) => img(image).size(px(metrics.icon_size)).into_any_element(),
+                                None => div().size(px(metrics.icon_size)).into_any_element(),
+                            },
+                        },
+                    };
+                    let thumb = div()
+                        .relative()
+                        .w(px(metrics.icon_size + 8.0))
+                        .h(px(metrics.icon_size + 8.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity((1.0 - look.trash) * dim)
+                        .child(thumb)
+                        .when(look.trash > 0.0, |slot| {
+                            slot.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .opacity(look.trash)
+                                    .child(glyph(Glyph::Trash, look.trash_size, "fg-muted", theme)),
+                            )
+                        })
+                        .children(
+                            crate::cloud_status::badge(cloud, theme)
+                                .map(|badge| div().absolute().top(px(0.)).right(px(0.)).child(badge)),
+                        )
+                        .children(presentation.badge.clone().map(|badge| {
+                            div()
+                                .absolute()
+                                .top(px(0.))
+                                .left(px(0.))
+                                .text_size(px(11.))
+                                .text_color(color(theme.role("fg-muted")))
+                                .child(badge)
+                        }));
+                    let name = tile_name(&entry.name, folder.row_match(ix), px(text_width * 2.0), font_size, window);
+                    let clipped = name.truncated.cut.is_some();
+                    let label = match self.renaming.as_ref().filter(|r| r.path == entry.path) {
+                        Some(r) => div().w(px(text_width)).child(r.input.clone()).into_any_element(),
+                        None => {
+                            let ranges = name
+                                .ranges
+                                .iter()
+                                .flat_map(|range| map_range(&name.truncated, range.clone()))
+                                .filter(|range| !range.is_empty())
+                                .collect::<Vec<_>>();
+                            let label_height = (metrics.tile_height
+                                - 4.0
+                                - (metrics.icon_size + 8.0)
+                                - 2.0
+                                - if caption_reserved { CAPTION_LINE_HEIGHT } else { 0.0 }
+                                - 2.0)
+                                .max(16.0);
+                            div()
+                                .w(px(text_width))
+                                .h(px(label_height))
+                                .min_h_0()
+                                .overflow_hidden()
+                                .line_clamp(2)
+                                .text_center()
+                                .text_size(font_size)
+                                .text_color(color(theme.role("fg")))
+                                .opacity(dim)
+                                .child(if ranges.is_empty() {
+                                    name.truncated.text.clone().into_any_element()
+                                } else {
+                                    highlight_text(name.truncated.text.clone(), &ranges, theme, selected && active)
+                                        .into_any_element()
+                                })
+                                .into_any_element()
+                        }
+                    };
+                    let caption_display = if caption_reserved {
+                        let text = truncate_middle(&caption_text, px(text_width), px(11.), window);
+                        let nonempty = !caption_text.is_empty();
+                        let name = entry.name.clone();
+                        Some(
+                            div()
+                                .debug_selector(move || {
+                                    if nonempty {
+                                        format!("caption-text-{name}")
+                                    } else {
+                                        format!("caption-slot-{name}")
+                                    }
+                                })
+                                .w(px(text_width))
+                                .h(px(CAPTION_LINE_HEIGHT))
+                                .flex_none()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_center()
+                                .text_size(px(11.))
+                                .text_color(color(theme.role("fg-muted")))
+                                .opacity(dim)
+                                .child(text),
+                        )
+                    } else {
+                        None
+                    };
+                    let clipboard = cx.global::<Operations>().clipboard.as_ref();
+                    let cut = clipboard
+                        .is_some_and(|clipboard| clipboard.cut && clipboard.marked && clipboard.contains(&entry.path));
+                    let flash = clipboard
+                        .and_then(|clipboard| {
+                            clipboard.contains(&entry.path).then(|| {
+                                clipboard
+                                    .flash
+                                    .map(|started| crow_core::motion::copy_flash(mode, started, now))
+                                    .unwrap_or(0.0)
+                            })
+                        })
+                        .filter(|flash| *flash > 0.0)
+                        .map(|flash| color_alpha(theme.role("accent"), (flash * 0x40 as f32) as u8));
+                    let moving = self.view_motion.as_ref().and_then(|motion| {
+                        motion.progress(mode, now).and_then(|t| motion.row(folder_id, &entry.path, t))
+                    });
+                    let moving_fill = moving.filter(|row| selected && row.tracks_selection());
+                    let (marquee_hit, marquee_base) =
+                        self.marquee.as_ref().filter(|marquee| marquee.started).map_or((false, false), |marquee| {
+                            (
+                                marquee.hits.contains_key(&entry.path),
+                                marquee.additive && marquee.base.contains(&entry.path),
+                            )
+                        });
+                    let preview_only = marquee_hit && !marquee_base;
+                    let drop_here = self.drop_target.as_ref().is_some_and(|target| target.folder == entry.path);
+                    let icon_visual = match moving {
+                        Some(row) => row.icon(thumb),
+                        None => thumb.into_any_element(),
+                    };
+                    let label_visual = match moving {
+                        Some(row) => row.label(label),
+                        None => label,
+                    };
+                    let tile = div()
+                        .id(("tile", ix))
+                        .debug_selector({
+                            let name = entry.name.clone();
+                            move || format!("tile-{name}")
+                        })
+                        .role(Role::ListBoxOption)
+                        .aria_label(format!(
+                            "{}, {kind}{plugin_spoken}{caption_spoken}{cloud_spoken}",
+                            display_text(&entry.name),
+                            kind = kind(&entry),
+                            caption_spoken = caption_spoken.map(|spoken| format!(", {spoken}")).unwrap_or_default()
+                        ))
+                        .aria_position_in_set(ix + 1)
+                        .aria_size_of_set(total)
+                        .aria_selected(selected)
+                        .when(active && cursor == Some(ix), |tile| tile.aria_active_descendant())
+                        .relative()
+                        .w(px(metrics.tile_width))
+                        .h(px(metrics.tile_height))
+                        .flex_none()
+                        .rounded_md()
+                        .when(selected && moving_fill.is_none() && !preview_only, |tile| tile.bg(selection_bg))
+                        .when(preview_only, |tile| {
+                            tile.child(
+                                div()
+                                    .debug_selector({
+                                        let name = entry.name.clone();
+                                        move || format!("marquee-hit-{name}")
+                                    })
+                                    .absolute()
+                                    .inset(px(2.))
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(color(theme.role("accent")))
+                                    .bg(color_alpha(theme.role("accent"), 0x18)),
+                            )
+                        })
+                        .when(drop_here, |tile| tile.child(drop_outline(theme).absolute().inset(px(1.)).rounded_md()))
+                        .children(moving_fill.map(|row| {
+                            row.selection(
+                                selection_bg,
+                                Some(IslandEdges { top: true, bottom: true, rule_above: false }),
+                            )
+                        }))
+                        .when_some(tint, |tile, tint| tile.child(div().absolute().inset_0().rounded_md().bg(tint)))
+                        .when_some(flash, |tile, tint| tile.child(div().absolute().inset_0().rounded_md().bg(tint)))
+                        .when(cut, |tile| {
+                            tile.child(
+                                div()
+                                    .absolute()
+                                    .inset(px(1.))
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(color(theme.role("accent"))),
+                            )
+                        })
+                        .when(look.opacity < 1.0, |tile| tile.opacity(look.opacity))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .pt(px(4.))
+                        .gap(px(2.))
+                        .on_drag(DraggedSelection { entries: drag_entries }, {
+                            let handoff = handoff.clone();
+                            move |_value, offset, window, cx| {
+                                drag_combo(drag_icon.clone(), &drag_label, offset, &handoff, window, cx)
+                            }
+                        })
+                        .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
+                            promote_drag(selection, &handoff, window, cx)
+                        })
+                        .when_some(drop_folder, |tile, target| {
+                            let target_selection = target.clone();
+                            tile.on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                                this.drop_into(target.clone(), paths, window, cx);
+                                cx.stop_propagation();
+                            }))
+                            .on_drop(cx.listener(
+                                move |this, selection: &DraggedSelection, window, cx| {
+                                    this.drop_into(target_selection.clone(), &selection.external(), window, cx);
+                                    cx.stop_propagation();
+                                },
+                            ))
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                this.press(0, ix, event, window, cx)
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                                this.context_press(0, Some(ix), window, cx)
+                            }),
+                        )
+                        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                            if event.click_count() == 2 {
+                                this.open_selected(cx);
+                            }
+                        }))
+                        .child(icon_visual)
+                        .child(label_visual)
+                        .children(caption_display);
+                    let tile = if (clipped || !caption_text.is_empty()) && self.renaming.is_none() {
+                        let tooltip = if caption_text.is_empty() {
+                            display_text(&entry.name).into_owned()
+                        } else {
+                            format!("{} — {}", display_text(&entry.name), caption_text)
+                        };
+                        with_tooltip(tile, tooltip, None)
+                    } else {
+                        tile
+                    };
+                    Some(tile.into_any_element())
+                });
+                div()
+                    .h(px(geometry.row_pitch()))
+                    .w_full()
+                    .flex()
+                    .items_start()
+                    .gap(px(metrics.gap))
+                    .px(px(metrics.inset_x))
+                    .children(tiles)
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        if let Some(service) = thumbnail_service {
+            service.update(cx, |service, cx| service.request(thumbnail_requests, cx));
+        }
+        rows
+    }
+
+    fn on_icon_scroll(&mut self, cx: &mut Context<Self>) {
+        if self.view_motion.take().is_some() {
+            cx.notify();
+        }
+        if self.filtering.is_some() || !crate::tips::wants(TipId::Filter, cx) {
+            return;
+        }
+        let Some(folder) = self.folders.first() else { return };
+        let folder = folder.read(cx);
+        if folder.entries().len() < TIP_SCROLL_ENTRIES {
+            return;
+        }
+        let offset = f32::from(self.icon_scroll.0.borrow().base_handle.offset().y);
+        if self.grid.is_some_and(|grid| grid.first_visible_row(offset.max(0.0)) >= TIP_SCROLL_ROWS) {
+            cx.emit(PaneEvent::LongFolderScrolled);
+        }
     }
 
     fn render_table_header(&self, widths: &[f32], cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -3929,6 +5032,17 @@ fn with_island_rounding<E: Styled>(element: E, island: Option<IslandEdges>) -> E
     }
 }
 
+/// A tile's name, fitted to two lines' width. Long names keep their start and
+/// extension (middle elision); the caller wraps the rest at word boundaries.
+struct TileName {
+    truncated: crate::style::Truncated,
+    ranges: Vec<Range<usize>>,
+}
+
+fn tile_name(name: &str, range: Option<Range<usize>>, max: Pixels, font_size: Pixels, window: &Window) -> TileName {
+    TileName { truncated: truncate_middle_parts(name, max, font_size, window), ranges: range.into_iter().collect() }
+}
+
 /// The file icon with the trash glyph drawn over it while a row is swallowed.
 fn row_icon(
     entry: &Entry,
@@ -4061,6 +5175,9 @@ impl Render for Pane {
             self.preview = None;
             self.load_preview(cx);
         }
+        if self.marquee.is_some() && !self.focus.is_focused(window) {
+            self.cancel_marquee(cx);
+        }
         self.request_plugin_status(cx);
         self.update_plugin_command_context(window, cx);
         self.bench_step(window, cx);
@@ -4147,7 +5264,7 @@ impl Render for Pane {
             .as_ref()
             .is_some_and(|filtering| filtering.input.read(cx).focus_handle(cx).is_focused(window));
         let mut context = match self.mode {
-            ViewMode::List => "FileList".to_owned(),
+            ViewMode::List | ViewMode::Icons => "FileList".to_owned(),
             ViewMode::Columns => "FileList ColumnView".to_owned(),
         };
         if cx.global::<Ui>().settings.keymap == KeymapLayer::Vim {
@@ -4291,6 +5408,7 @@ impl Render for Pane {
                     .children(footer)
                     .into_any_element()
             }
+            ViewMode::Icons => self.render_icons(window, cx).into_any_element(),
             ViewMode::Columns => self.render_columns(window, cx).into_any_element(),
         };
         let list = div()
@@ -4348,6 +5466,9 @@ impl Render for Pane {
                 if cx.has_active_drag() {
                     this.update_drag_row(event.position, cx);
                 }
+                if this.marquee.is_some() {
+                    this.update_marquee(event.position, cx);
+                }
                 if let Some(drag) = this.resize {
                     if event.pressed_button == Some(MouseButton::Left) {
                         this.table.drag_to(&drag, f32::from(event.position.x));
@@ -4357,8 +5478,22 @@ impl Render for Pane {
                     }
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.resize = None))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.resize = None))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.resize = None;
+                    this.commit_marquee(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.resize = None;
+                    this.cancel_marquee(cx);
+                }),
+            )
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .w_full()
@@ -4395,6 +5530,18 @@ impl Pane {
     /// Bounds for a generated row selector, from the pane's own layout state.
     /// `debug_bounds` needs a `&'static str`; row names are dynamic.
     pub fn debug_selector_bounds(&self, selector: &str, cx: &gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {
+        if let Some(name) = selector.strip_prefix("tile-") {
+            let bounds = self.icon_bounds.get()?;
+            let grid = self.grid?;
+            let folder = self.focused_folder().read(cx);
+            let ix = (0..folder.row_count()).find(|ix| folder.row(*ix).is_some_and(|(entry, _)| entry.name == name))?;
+            let rect = grid.tile_rect(ix)?;
+            let offset = f32::from(self.icon_scroll.0.borrow().base_handle.offset().y);
+            return Some(gpui::Bounds::new(
+                point(bounds.left() + px(rect.x), bounds.top() + px(rect.y) + px(offset)),
+                gpui::size(px(rect.width), px(rect.height)),
+            ));
+        }
         if let Some(name) = selector.strip_prefix("row-") {
             let bounds = self.list_bounds.get()?;
             let folder = self.focused_folder().read(cx);

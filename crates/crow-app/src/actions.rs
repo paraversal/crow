@@ -147,8 +147,14 @@ actions!(
         /// The path bar's hover state, so the pill can fade.
         PathHover,
         PathUnhover,
+        ViewAsIcons,
         ViewAsList,
         ViewAsColumns,
+        IconSizeCompact,
+        IconSizeStandard,
+        IconSizeLarge,
+        IconCaptionOff,
+        IconCaptionLines,
         // List filter
         StartFilter,
         ClearFilter,
@@ -262,6 +268,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("right", MoveRight, Some(COLUMNS)),
         KeyBinding::new("left", MoveLeft, Some(LIST_NOT_COLUMNS)),
         KeyBinding::new("right", MoveRight, Some(LIST_NOT_COLUMNS)),
+        KeyBinding::new("cmd-1", ViewAsIcons, Some("Crow")),
         KeyBinding::new("cmd-2", ViewAsList, Some("Crow")),
         KeyBinding::new("cmd-3", ViewAsColumns, Some("Crow")),
         KeyBinding::new("up", MoveUp, Some("Sidebar")),
@@ -343,6 +350,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-z", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-shift-z", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-alt-l", NoAction {}, Some("Sheet")),
+        KeyBinding::new("cmd-1", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-2", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-3", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-up", NoAction {}, Some("Sheet")),
@@ -478,5 +486,18 @@ mod tests {
         assert!(wins(&keymap, "/", &unfiltered, &StartFilter));
         assert!(wins(&keymap, "j", &unfiltered, &MoveDown));
         assert!(wins(&keymap, "up", &unfiltered, &MoveUp));
+    }
+
+    #[test]
+    fn sheets_mask_every_view_shortcut() {
+        let keymap = keymap();
+        let sheet = ["Crow", "Sheet"];
+        for input in ["cmd-1", "cmd-2", "cmd-3"] {
+            // A NoAction binding is consumed by the keymap: nothing is left to dispatch.
+            assert!(resolved(&keymap, input, &sheet).is_empty(), "{input} must not change a view behind a sheet");
+        }
+        let finder = ["Crow", "FileList"];
+        assert!(wins(&keymap, "cmd-1", &finder, &ViewAsIcons));
+        assert!(wins(&keymap, "cmd-2", &finder, &ViewAsList));
     }
 }

@@ -16,10 +16,11 @@ use gpui::{
 
 use crate::actions::{
     AddToSidebar, ApplyThemeEverywhere, CalculateFolderSizes, CloseTab, EditPath, EmptyTrash, GoBack, GoForward,
-    GoToFolder, KeyboardShortcuts, Minimize, MoveDown, MoveUp, NewTab, NewWindow, NextTab, OpenParent,
-    PaletteOpenInTab, PathHover, PathUnhover, PluginCommand, PluginCommandResult, PreviousTab, ResetFolderView,
-    SearchEverything, SearchHome, ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus,
-    ToggleHiddenFiles, TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsList, WhyThisView, Zoom,
+    GoToFolder, IconCaptionLines, IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard, KeyboardShortcuts,
+    Minimize, MoveDown, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover, PathUnhover,
+    PluginCommand, PluginCommandResult, PreviousTab, ResetFolderView, SearchEverything, SearchHome, ShowCommandPalette,
+    ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, TogglePreview, UseViewAsDefaults,
+    ViewAsColumns, ViewAsIcons, ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -383,6 +384,9 @@ impl CrowWindow {
     }
 
     fn open_tab_at(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| {
+            pane.cancel_marquee(cx);
+        });
         if self.search.is_some() {
             self.close_search(window, cx);
         }
@@ -408,6 +412,9 @@ impl CrowWindow {
     }
 
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| {
+            pane.cancel_marquee(cx);
+        });
         if self.search.is_some() {
             self.close_search(window, cx);
         }
@@ -428,6 +435,9 @@ impl CrowWindow {
     }
 
     fn cycle_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| {
+            pane.cancel_marquee(cx);
+        });
         if self.search.is_some() {
             self.close_search(window, cx);
         }
@@ -449,6 +459,9 @@ impl CrowWindow {
     }
 
     fn switch_focus(&mut self, _: &SwitchFocus, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| {
+            pane.cancel_marquee(cx);
+        });
         let sidebar = self.sidebar.read(cx).focus_handle(cx);
         if sidebar.is_focused(window) {
             self.record_walk_visit(cx);
@@ -642,12 +655,36 @@ impl CrowWindow {
         cx.background_spawn(async move { crow_core::complete_typed(&typed, &cwd, &home) })
     }
 
+    fn view_as_icons(&mut self, _: &ViewAsIcons, _: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| pane.set_mode(ViewMode::Icons, cx));
+    }
+
     fn view_as_list(&mut self, _: &ViewAsList, _: &mut Window, cx: &mut Context<Self>) {
         self.pane().update(cx, |pane, cx| pane.set_mode(ViewMode::List, cx));
     }
 
     fn view_as_columns(&mut self, _: &ViewAsColumns, _: &mut Window, cx: &mut Context<Self>) {
         self.pane().update(cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+    }
+
+    fn icon_size_compact(&mut self, _: &IconSizeCompact, _: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| pane.set_icon_size(crow_core::IconSize::Compact, cx));
+    }
+
+    fn icon_size_standard(&mut self, _: &IconSizeStandard, _: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| pane.set_icon_size(crow_core::IconSize::Standard, cx));
+    }
+
+    fn icon_size_large(&mut self, _: &IconSizeLarge, _: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| pane.set_icon_size(crow_core::IconSize::Large, cx));
+    }
+
+    fn icon_caption_off(&mut self, _: &IconCaptionOff, _: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| pane.set_icon_caption(None, cx));
+    }
+
+    fn icon_caption_lines(&mut self, _: &IconCaptionLines, _: &mut Window, cx: &mut Context<Self>) {
+        self.pane().update(cx, |pane, cx| pane.set_icon_caption(Some("git.lines-changed".to_owned()), cx));
     }
 
     fn open_parent(&mut self, _: &OpenParent, _: &mut Window, cx: &mut Context<Self>) {
@@ -769,6 +806,18 @@ impl CrowWindow {
             .p(px(2.))
             .rounded(px(8.))
             .bg(surface)
+            .child(
+                with_action_tooltip(
+                    view_button("view-icons", "as Icons", Glyph::Grid, mode == ViewMode::Icons, &theme),
+                    "View as Icons",
+                    &ViewAsIcons,
+                    KeyScope::Window,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.pane().update(cx, |p, cx| p.set_mode(ViewMode::Icons, cx));
+                })),
+            )
             .child(
                 with_action_tooltip(
                     view_button("view-list", "as List", Glyph::List, mode == ViewMode::List, &theme),
@@ -1540,6 +1589,7 @@ impl CrowWindow {
             (self.pane().read(cx).mode(), "this window (view_per_folder = false in settings.toml)".to_owned())
         };
         let mode = match view {
+            ViewMode::Icons => "Icons",
             ViewMode::List => "List",
             ViewMode::Columns => "Columns",
         };
@@ -1570,8 +1620,30 @@ impl CrowWindow {
             ),
         };
         let pack_error = packs.and_then(|packs| packs.error().cloned());
+        let (icon_size, icon_size_source) = if ui.settings.view_per_folder {
+            (resolved.icon_size.0, resolved.icon_size.1.to_string())
+        } else {
+            (self.pane().read(cx).icon_size(), "this window (view_per_folder = false in settings.toml)".to_owned())
+        };
+        let (caption, caption_source) = if ui.settings.view_per_folder {
+            (resolved.icon_caption.0.clone(), resolved.icon_caption.1.to_string())
+        } else {
+            (
+                self.pane().read(cx).icon_caption().map(str::to_owned),
+                "this window (view_per_folder = false in settings.toml)".to_owned(),
+            )
+        };
+        let caption_value = match caption.as_deref() {
+            None => "Off".to_owned(),
+            Some(id) => crow_core::ExtensionId::parse(id)
+                .ok()
+                .and_then(|id| crate::plugins::column_title(cx, &id))
+                .unwrap_or_else(|| id.to_owned()),
+        };
         let lines: Vec<(&str, String, String)> = vec![
             ("View", mode.into(), view_source),
+            ("Icon Size", icon_size.label().into(), icon_size_source),
+            ("Caption", caption_value, caption_source),
             ("Sort", sort_title(resolved.sort.0).into(), resolved.sort.1.to_string()),
             ("Order", direction.into(), resolved.ascending.1.to_string()),
             (
@@ -2099,8 +2171,14 @@ impl CrowWindow {
             CommandId::GoForward => self.go_forward(&GoForward, window, cx),
             CommandId::GoToFolder => self.go_to_folder(&GoToFolder, window, cx),
             CommandId::EditPath => self.edit_path(&EditPath, window, cx),
+            CommandId::ViewAsIcons => self.view_as_icons(&ViewAsIcons, window, cx),
             CommandId::ViewAsList => self.view_as_list(&ViewAsList, window, cx),
             CommandId::ViewAsColumns => self.view_as_columns(&ViewAsColumns, window, cx),
+            CommandId::IconSizeCompact => self.icon_size_compact(&IconSizeCompact, window, cx),
+            CommandId::IconSizeStandard => self.icon_size_standard(&IconSizeStandard, window, cx),
+            CommandId::IconSizeLarge => self.icon_size_large(&IconSizeLarge, window, cx),
+            CommandId::IconCaptionOff => self.icon_caption_off(&IconCaptionOff, window, cx),
+            CommandId::IconCaptionLines => self.icon_caption_lines(&IconCaptionLines, window, cx),
             CommandId::Undo => self.undo(None, cx),
             CommandId::Redo => self.redo(cx),
             CommandId::AddToSidebar => self.add_to_sidebar(&AddToSidebar, window, cx),
@@ -2297,7 +2375,8 @@ impl Render for CrowWindow {
         let show_preview = self.info.read(cx).visible();
         let (font, font_size) = (ui_font(&ui.settings.font_family), ui.settings.font_size);
         let title = crate::style::display_name(&self.pane().read(cx).current_dir(cx));
-        let list_view = self.pane().read(cx).mode() == ViewMode::List;
+        // The single-folder views share the preview column; column view has its own.
+        let list_view = self.pane().read(cx).mode() != ViewMode::Columns;
         window.set_window_title(&title);
         let title_bar = self.render_title_bar(&title, window, cx);
         let tab_bar = (self.tabs.len() > 1).then(|| self.render_tab_bar(cx));
@@ -2444,8 +2523,14 @@ impl Render for CrowWindow {
                 this.path_hovered = false;
                 cx.notify();
             }))
+            .on_action(cx.listener(Self::view_as_icons))
             .on_action(cx.listener(Self::view_as_list))
             .on_action(cx.listener(Self::view_as_columns))
+            .on_action(cx.listener(Self::icon_size_compact))
+            .on_action(cx.listener(Self::icon_size_standard))
+            .on_action(cx.listener(Self::icon_size_large))
+            .on_action(cx.listener(Self::icon_caption_off))
+            .on_action(cx.listener(Self::icon_caption_lines))
             .on_action(cx.listener(|this, _: &crate::actions::Undo, _, cx| this.undo(None, cx)))
             .on_action(cx.listener(|this, _: &crate::actions::Redo, _, cx| this.redo(cx)))
             .on_action(cx.listener(|this, _: &crate::actions::CancelOperation, window, cx| {

@@ -24,8 +24,11 @@ pub(super) struct ViewMotion {
 
 #[derive(Clone, Copy)]
 struct RowOrigin {
-    icon_x: Pixels,
-    label_x: Pixels,
+    /// Where the icon's left edge and vertical center sit.
+    icon: Point<Pixels>,
+    /// Where the name's left edge and vertical center sit.
+    label: Point<Pixels>,
+    /// The row in list/column view, or the whole tile in the icon grid.
     row: Bounds<Pixels>,
     selected: bool,
 }
@@ -33,8 +36,8 @@ struct RowOrigin {
 impl RowOrigin {
     fn interpolate(self, to: Self, t: f32) -> Self {
         Self {
-            icon_x: lerp(self.icon_x, to.icon_x, t),
-            label_x: lerp(self.label_x, to.label_x, t),
+            icon: point(lerp(self.icon.x, to.icon.x, t), lerp(self.icon.y, to.icon.y, t)),
+            label: point(lerp(self.label.x, to.label.x, t), lerp(self.label.y, to.label.y, t)),
             row: interpolate_bounds(self.row, to.row, t),
             selected: to.selected,
         }
@@ -82,9 +85,13 @@ impl ViewMotion {
         if pane.presented_layout != Some((pane.mode, folder.entity_id())) {
             return pane.view_motion.as_ref().map_or_else(HashMap::new, |motion| motion.origins.clone());
         }
+        if pane.mode == ViewMode::Icons {
+            return Self::icon_origins(pane, now, cx);
+        }
         let (area, row_inset, top_inset) = match pane.mode {
             ViewMode::List => (pane.list_bounds.get(), 8.0, LIST_TOP_INSET),
             ViewMode::Columns => (pane.column_bounds.borrow().get(&pane.focused).copied(), 4.0, 0.0),
+            ViewMode::Icons => unreachable!("handled above"),
         };
         let Some(area) = area else { return HashMap::new() };
         let columns = pane.mode == ViewMode::Columns;
@@ -115,10 +122,51 @@ impl ViewMotion {
                         + offset
                         + ix as f32 * ROW_HEIGHT
                         + folder.row_shift(ix, Effective::Full, now, ROW_HEIGHT));
+                let center_y = top + px(ROW_HEIGHT / 2.0);
                 let target = RowOrigin {
-                    icon_x,
-                    label_x: icon_x + px(24.0),
+                    icon: point(icon_x, center_y),
+                    label: point(icon_x + px(24.0), center_y),
                     row: Bounds::new(point(base_x, top), size(width, px(ROW_HEIGHT))),
+                    selected: folder.is_selected(&entry.path),
+                };
+                let painted = in_flight
+                    .and_then(|(motion, t)| motion.row(folder_id, &entry.path, t))
+                    .map_or(target, |row| row.origin.interpolate(target, row.t));
+                Some((entry.path.clone(), painted))
+            })
+            .collect()
+    }
+
+    /// Capture the visible tiles against the grid the last frame drew.
+    fn icon_origins(pane: &Pane, now: Instant, cx: &App) -> HashMap<PathBuf, RowOrigin> {
+        let folder = pane.focused_folder();
+        let folder_id = folder.entity_id();
+        if pane.presented_layout != Some((ViewMode::Icons, folder_id)) {
+            return pane.view_motion.as_ref().map_or_else(HashMap::new, |motion| motion.origins.clone());
+        }
+        let Some(area) = pane.icon_bounds.get() else { return HashMap::new() };
+        let folder = folder.read(cx);
+        let grid = pane.grid.unwrap_or_else(|| pane.icon_grid(folder.row_count()));
+        let metrics = grid.metrics();
+        let offset = f32::from(pane.icon_scroll.0.borrow().base_handle.offset().y);
+        let visible = grid.visible_rows(offset.max(0.0));
+        let in_flight =
+            pane.view_motion.as_ref().and_then(|motion| motion.progress(Effective::Full, now).map(|t| (motion, t)));
+        (0..folder.row_count())
+            .filter(|ix| visible.contains(&grid.row_of(*ix)))
+            .filter_map(|ix| {
+                let (entry, _) = folder.row(ix)?;
+                let rect = grid.tile_rect(ix)?;
+                let left = area.left() + px(rect.x);
+                let top = area.top() + px(rect.y) - px(offset);
+                let icon_size = metrics.icon_size + 8.0;
+                let icon_left = left + px((metrics.tile_width - icon_size) / 2.0);
+                let icon_y = top + px(4.0 + icon_size / 2.0);
+                let label_y = top + px(4.0 + icon_size + 2.0 + (metrics.tile_height - 4.0 - icon_size - 2.0) / 2.0);
+                let target = RowOrigin {
+                    icon: point(icon_left, icon_y),
+                    label: point(left + px(4.0), label_y),
+                    row: Bounds::new(point(left, top), size(px(metrics.tile_width), px(metrics.tile_height))),
                     selected: folder.is_selected(&entry.path),
                 };
                 let painted = in_flight
@@ -132,16 +180,15 @@ impl ViewMotion {
 
 impl MovingRow {
     pub fn icon(self, visual: impl IntoElement) -> AnyElement {
-        self.track(visual, self.origin.icon_x)
+        self.track(visual, self.origin.icon)
     }
 
     pub fn label(self, visual: AnyElement) -> AnyElement {
-        self.track(visual, self.origin.label_x)
+        self.track(visual, self.origin.label)
     }
 
-    fn track(self, visual: impl IntoElement, x: Pixels) -> AnyElement {
-        ShiftedVisual { child: visual.into_any_element(), center: point(x, self.origin.row.center().y), t: self.t }
-            .into_any_element()
+    fn track(self, visual: impl IntoElement, anchor: Point<Pixels>) -> AnyElement {
+        ShiftedVisual { child: visual.into_any_element(), center: anchor, t: self.t }.into_any_element()
     }
 
     pub fn tracks_selection(self) -> bool {

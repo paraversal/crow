@@ -2152,6 +2152,541 @@ fn view_changes_are_remembered_per_folder(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn icon_view_projects_direct_entries_and_keeps_list_expansion(cx: &mut TestAppContext) {
+    let root = fixture("icons");
+    let (view, mut cx) = open(cx, &root);
+    let mode = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.mode());
+    let names = |cx: &VisualTestContext| rows(&view, cx).into_iter().map(|(name, _)| name).collect::<Vec<_>>();
+
+    // Open alpha inline in List, then move the cursor onto its child.
+    cx.simulate_keystrokes("right");
+    settle(&view, &mut cx);
+    assert_eq!(names(&cx), vec!["alpha", "inner", "beta", "notes.txt"], "alpha's child is a list row");
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("inner"));
+
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    assert_eq!(mode(&cx), ViewMode::Icons);
+    assert_eq!(names(&cx), vec!["alpha", "beta", "notes.txt"], "the grid shows direct entries only");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"), "the cursor falls back to its direct ancestor");
+    let tile = cx.debug_bounds("tile-alpha").expect("the first tile is laid out");
+    assert_eq!(tile.size.width, px(112.), "Standard tiles have a fixed width");
+    let text = std::fs::read_to_string(config_dir(&cx).join("views.toml")).unwrap();
+    assert!(text.contains("view = \"icons\""), "Cmd-1 is remembered for the folder: {text}");
+
+    // The filter travels into the grid and back.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("alp");
+    settle(&view, &mut cx);
+    assert_eq!(names(&cx), vec!["alpha"]);
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert_eq!(names(&cx), vec!["alpha", "beta", "notes.txt"]);
+
+    // Returning to List restores the inline folder and its row.
+    cx.simulate_keystrokes("cmd-2");
+    settle(&view, &mut cx);
+    assert_eq!(mode(&cx), ViewMode::List);
+    assert_eq!(names(&cx), vec!["alpha", "inner", "beta", "notes.txt"], "the expansion survived the round trip");
+}
+
+#[gpui::test]
+fn icon_grid_arrows_follow_the_tile_geometry(cx: &mut TestAppContext) {
+    let root = TestRoot::new("icon-arrows");
+    for i in 0..8 {
+        std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open_sized(cx, &root, 700., 800.);
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    // Hide Preview so the 700 pt window leaves a three-column pane.
+    cx.simulate_keystrokes("cmd-shift-p");
+    settle(&view, &mut cx);
+    let bounds = |cx: &VisualTestContext, name: &str| {
+        view.read_with(cx, |window, cx| window.debug_selector_bounds(&format!("tile-{name}"), cx)).expect("tile")
+    };
+    let f0 = bounds(&cx, "f0.txt");
+    let f1 = bounds(&cx, "f1.txt");
+    let f2 = bounds(&cx, "f2.txt");
+    let f3 = bounds(&cx, "f3.txt");
+    assert_eq!(f0.origin.y, f1.origin.y, "the first three tiles share a row");
+    assert_eq!(f0.origin.y, f2.origin.y);
+    assert!(f3.origin.y > f0.origin.y, "the fourth tile starts the next row");
+
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("f3.txt"), "Down keeps the column");
+    cx.simulate_keystrokes("down down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("f6.txt"), "the short final row clamps");
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("f6.txt"), "Down at the bottom stays");
+    cx.simulate_keystrokes("right");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("f7.txt"));
+    cx.simulate_keystrokes("right");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("f7.txt"), "Right stops at the row's edge");
+    cx.simulate_keystrokes("left");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("f6.txt"));
+    cx.simulate_keystrokes("up up");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("f0.txt"), "Up keeps the column");
+    cx.simulate_keystrokes("up");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("f0.txt"), "Up at the top stays");
+
+    cx.simulate_keystrokes("shift-down");
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_names(cx)),
+        vec!["f0.txt", "f1.txt", "f2.txt", "f3.txt"],
+        "Shift extends in row-major display order"
+    );
+
+    // Cmd-click adds an unselected tile without losing the clicked selection.
+    let f5 = bounds(&cx, "f5.txt").center();
+    cx.simulate_mouse_down(f5, MouseButton::Left, gpui::Modifiers::default());
+    cx.simulate_mouse_up(f5, MouseButton::Left, gpui::Modifiers::default());
+    let f2 = bounds(&cx, "f2.txt").center();
+    cx.simulate_mouse_down(f2, MouseButton::Left, gpui::Modifiers { platform: true, ..Default::default() });
+    cx.simulate_mouse_up(f2, MouseButton::Left, gpui::Modifiers { platform: true, ..Default::default() });
+    assert_eq!(selected(&view, &cx).as_deref(), Some("f2.txt"), "Cmd-click makes the added tile the cursor");
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_names(cx)),
+        vec!["f2.txt", "f5.txt"],
+        "Cmd-click toggles without clearing the previous selection"
+    );
+}
+
+#[gpui::test]
+fn marquee_selects_columns_and_restores_the_start_on_escape(cx: &mut TestAppContext) {
+    let root = TestRoot::new("icon-marquee");
+    for i in 0..8 {
+        std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open_sized(cx, &root, 700., 800.);
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-shift-p");
+    settle(&view, &mut cx);
+    let bounds = |cx: &VisualTestContext, name: &str| {
+        view.read_with(cx, |window, cx| window.debug_selector_bounds(&format!("tile-{name}"), cx)).expect("tile")
+    };
+    let list = cx.debug_bounds("file-list").expect("icon viewport");
+    let f0 = bounds(&cx, "f0.txt").center();
+    let f2 = bounds(&cx, "f2.txt").center();
+    let f7 = bounds(&cx, "f7.txt");
+    let start = gpui::point(list.right() - px(20.), f7.bottom() - px(4.));
+    let modifiers = gpui::Modifiers::default();
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(f0, Some(gpui::MouseButton::Left), modifiers);
+    assert!(pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_active()), "the drag rectangle is live");
+    assert!(cx.debug_bounds("marquee").is_some(), "the rectangle is drawn");
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_hit_names()).len(), 8);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_names(cx)),
+        vec!["f0.txt", "f1.txt", "f2.txt", "f3.txt", "f4.txt", "f5.txt", "f6.txt", "f7.txt"]
+    );
+
+    // Reversing to the rightmost column drops the others immediately.
+    cx.simulate_mouse_move(f2, Some(gpui::MouseButton::Left), modifiers);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_hit_names()), vec!["f2.txt", "f5.txt"]);
+
+    cx.simulate_mouse_up(f2, gpui::MouseButton::Left, modifiers);
+    assert!(!pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_active()), "release commits");
+    assert!(cx.debug_bounds("marquee").is_none());
+
+    // Escape restores the selection that was present when the drag began.
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(f0, Some(gpui::MouseButton::Left), modifiers);
+    cx.simulate_keystrokes("escape");
+    assert!(!pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_active()));
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_names(cx)),
+        vec!["f2.txt", "f5.txt"],
+        "Esc restores the selection that was committed before the drag"
+    );
+}
+
+#[gpui::test]
+fn cmd_marquee_keeps_the_starting_selection(cx: &mut TestAppContext) {
+    let root = TestRoot::new("icon-marquee-add");
+    for i in 0..8 {
+        std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open_sized(cx, &root, 700., 800.);
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-shift-p");
+    settle(&view, &mut cx);
+    let list = cx.debug_bounds("file-list").expect("icon viewport");
+    let tile = |cx: &VisualTestContext, name: &str| {
+        view.read_with(cx, |window, cx| window.debug_selector_bounds(&format!("tile-{name}"), cx)).expect("tile")
+    };
+    let f7 = tile(&cx, "f7.txt");
+    let f2 = tile(&cx, "f2.txt").center();
+    let start = gpui::point(list.right() - px(20.), f7.bottom() - px(4.));
+    let modifiers = gpui::Modifiers { platform: true, ..Default::default() };
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(f2, Some(gpui::MouseButton::Left), modifiers);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_names(cx)),
+        vec!["f0.txt", "f2.txt", "f5.txt"],
+        "the frozen starting selection is not cleared and new hits join it"
+    );
+    cx.simulate_mouse_up(f2, gpui::MouseButton::Left, modifiers);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_names(cx)),
+        vec!["f0.txt", "f2.txt", "f5.txt"],
+        "the additive selection commits as-is"
+    );
+}
+
+#[gpui::test]
+fn a_watch_update_mid_marquee_cancels_and_restores_the_start(cx: &mut TestAppContext) {
+    let root = TestRoot::new("icon-marquee-watch");
+    for i in 0..8 {
+        std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open_sized(cx, &root, 700., 800.);
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-shift-p");
+    settle(&view, &mut cx);
+    let list = cx.debug_bounds("file-list").expect("icon viewport");
+    let tile = |cx: &VisualTestContext, name: &str| {
+        view.read_with(cx, |window, cx| window.debug_selector_bounds(&format!("tile-{name}"), cx)).expect("tile")
+    };
+    let f0 = tile(&cx, "f0.txt").center();
+    let f7 = tile(&cx, "f7.txt");
+    let start = gpui::point(list.right() - px(20.), f7.bottom() - px(4.));
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, Default::default());
+    cx.simulate_mouse_move(f0, Some(gpui::MouseButton::Left), Default::default());
+    assert!(pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_active()));
+
+    let deleted = root.join("f4.txt");
+    std::fs::remove_file(&deleted).expect("delete mid-drag");
+    pane(&view, &cx).update(&mut cx, |pane, cx| {
+        pane.test_folder().update(cx, |folder, _| folder.queue_changes(vec![deleted.clone()]));
+    });
+    for _ in 0..20 {
+        cx.executor().advance_clock(std::time::Duration::from_millis(120));
+        cx.run_until_parked();
+        if !pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_active()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(!pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_active()), "the reorder ends the drag");
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_names(cx)),
+        vec!["f0.txt"],
+        "the starting selection survives; no old index selects a new row"
+    );
+    cx.simulate_mouse_up(f0, gpui::MouseButton::Left, Default::default());
+}
+
+#[gpui::test]
+fn marquee_edge_autoscroll_reaches_rows_below_the_viewport(cx: &mut TestAppContext) {
+    let root = TestRoot::new("icon-marquee-scroll");
+    for i in 0..40 {
+        std::fs::write(root.join(format!("f{i:02}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open_sized(cx, &root, 700., 500.);
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-shift-p");
+    settle(&view, &mut cx);
+    let list = cx.debug_bounds("file-list").expect("icon viewport");
+    let start = gpui::point(list.right() - px(20.), list.bottom() - px(80.));
+    let bottom = gpui::point(list.left() + px(4.), list.bottom() - px(8.));
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, Default::default());
+    cx.simulate_mouse_move(bottom, Some(gpui::MouseButton::Left), Default::default());
+    let before = pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_hit_names().len());
+    for _ in 0..20 {
+        cx.executor().advance_clock(std::time::Duration::from_millis(40));
+        cx.run_until_parked();
+    }
+    let after = pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_hit_names().len());
+    assert!(after > before, "edge autoscroll grows the selection ({before} -> {after})");
+    cx.simulate_mouse_move(start, Some(gpui::MouseButton::Left), Default::default());
+    cx.simulate_mouse_up(start, gpui::MouseButton::Left, Default::default());
+}
+
+#[gpui::test]
+fn icon_size_presets_keep_the_filter_and_cursor_visible(cx: &mut TestAppContext) {
+    let root = TestRoot::new("icon-sizes");
+    for i in 0..200 {
+        std::fs::write(root.join(format!("f{i:03}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open_sized(cx, &root, 700., 800.);
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-shift-p");
+    settle(&view, &mut cx);
+    let list = cx.debug_bounds("file-list").expect("icon viewport");
+    let tile = |cx: &VisualTestContext, name: &str| {
+        view.read_with(cx, |window, cx| window.debug_selector_bounds(&format!("tile-{name}"), cx)).expect("tile")
+    };
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("f100");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("down down");
+    settle(&view, &mut cx);
+    assert_eq!(selected(&view, &cx).as_deref(), Some("f100.txt"));
+
+    cx.dispatch_action(crate::actions::IconSizeCompact);
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.icon_size()), crow_core::IconSize::Compact);
+    assert_eq!(tile(&cx, "f100.txt").size.width, px(88.));
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.filter_query(cx)).as_deref(), Some("f100"));
+    assert_eq!(selected(&view, &cx).as_deref(), Some("f100.txt"), "the cursor survives the preset change");
+    let here = tile(&cx, "f100.txt");
+    assert!(here.top() >= list.top() && here.bottom() <= list.bottom(), "the focused tile stays in view");
+
+    cx.dispatch_action(crate::actions::IconSizeLarge);
+    settle(&view, &mut cx);
+    assert_eq!(tile(&cx, "f100.txt").size.width, px(160.));
+    let here = tile(&cx, "f100.txt");
+    assert!(here.top() >= list.top() && here.bottom() <= list.bottom(), "Large keeps the focused tile visible");
+    let text = std::fs::read_to_string(config_dir(&cx).join("views.toml")).unwrap();
+    assert!(text.contains("icon_size = \"large\""), "{text}");
+}
+
+#[gpui::test]
+fn icon_caption_reserves_a_line_and_off_removes_it(cx: &mut TestAppContext) {
+    let root = TestRoot::new("icon-caption-config");
+    for i in 0..4 {
+        std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open(cx, &root);
+    let views = format!("[folder.\"{}\"]\nicon_caption = \"git.lines-changed\"\n", root.display());
+    write_config(&view, &mut cx, "views.toml", &views);
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.icon_caption().map(str::to_owned)).as_deref(),
+        Some("git.lines-changed")
+    );
+    let plain = px(116.);
+    let with_caption =
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.debug_selector_bounds("tile-f0.txt", cx)).expect("tile");
+    assert_eq!(with_caption.size.height, plain + px(16.), "the caption reserves one line on every tile");
+    assert!(
+        cx.update(|window, _| window.debug_bounds("caption-slot-f0.txt")).is_some(),
+        "the reserved slot is blank while no provider answers"
+    );
+
+    cx.dispatch_action(crate::actions::IconCaptionOff);
+    settle(&view, &mut cx);
+    assert!(pane(&view, &cx).read_with(&cx, |pane, _| pane.icon_caption().is_none()));
+    let without =
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.debug_selector_bounds("tile-f0.txt", cx)).expect("tile");
+    assert_eq!(without.size.height, plain, "Off removes the reserved line");
+    assert!(cx.update(|window, _| window.debug_bounds("caption-slot-f0.txt")).is_none());
+    let text = std::fs::read_to_string(config_dir(&cx).join("views.toml")).unwrap();
+    assert!(text.contains("icon_caption = \"off\""), "Off is an explicit override: {text}");
+}
+
+#[gpui::test]
+fn icon_view_transitions_track_the_same_paths(cx: &mut TestAppContext) {
+    let root = fixture("icon-motion");
+    let (view, mut cx) = open_sized(cx, &root, 840., 500.);
+    set_motion(&mut cx, "full");
+    let old = cx.debug_bounds("row-alpha").expect("alpha in list");
+    cx.simulate_keystrokes("cmd-1");
+    let pane = pane(&view, &cx);
+    let tracked = pane
+        .read_with(&cx, |pane, _| pane.view_motion_origin(&root.join("alpha")))
+        .expect("the visible list row becomes a tile");
+    assert_eq!(tracked.size.width, old.size.width, "the row's selection fill starts at the row bounds");
+    assert!(
+        pane.read_with(&cx, |pane, _| pane.view_motion_origin(&root.join("notes.txt"))).is_some(),
+        "every visible path is matched"
+    );
+    let tile = cx.debug_bounds("tile-alpha").expect("the destination tile is interactive immediately");
+    assert!(tile.size.width < old.size.width, "the destination hitbox is already its final tile");
+    let selection = cx.update(|window, cx| {
+        let shade = crate::style::active_selection(&cx.global::<Ui>().theme).into();
+        let left = tile.left().scale(window.scale_factor());
+        window.painted_quads().iter().any(|quad| quad.background == shade && quad.bounds.left() < left)
+    });
+    assert!(selection, "the fill is painted between the two layouts");
+}
+
+#[gpui::test]
+fn an_icon_caption_comes_from_the_plugin_row_cache(cx: &mut TestAppContext) {
+    use crow_core::{Descriptor, DescriptorSource, ExtensionId, ExtensionKind, LocalId, PluginId};
+    let root = TestRoot::new("icon-caption-plugin");
+    for i in 0..8 {
+        std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open(cx, &root);
+    let id = ExtensionId::new(PluginId::parse("example.p3b").unwrap(), LocalId::parse("lines").unwrap());
+    let descriptor =
+        Descriptor::new(ExtensionKind::Column, id.clone(), "Lines".into(), DescriptorSource::Function("lines".into()));
+    let mut snapshot = crate::plugins::PublishedSurfaces::default();
+    snapshot.extensions.insert(
+        id.clone(),
+        crate::plugins::PublishedExtension {
+            generation: 3,
+            package: "P3B Fixture".into(),
+            read_allowed: false,
+            descriptor,
+        },
+    );
+    cx.update(|_, cx| cx.global_mut::<crate::plugins::Plugins>().surfaces.publish_rows_for_test(snapshot));
+    let views = format!("[folder.\"{}\"]\nicon_caption = \"{id}\"\n", root.display());
+    write_config(&view, &mut cx, "views.toml", &views);
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.test_folder());
+    let (scope, version, path) = folder.read_with(&cx, |folder, _| {
+        let entry = folder.entries().iter().find(|entry| entry.name == "f0.txt").expect("f0");
+        (
+            crate::plugins::ScopeKey::Folder(folder.dir().to_path_buf()),
+            folder.plugin_entry_version(entry),
+            entry.path.clone(),
+        )
+    });
+    cx.update(|_, cx| {
+        assert!(cx.global_mut::<crate::plugins::Plugins>().surfaces.insert_row_for_test(
+            &id,
+            &scope,
+            &path,
+            version,
+            "22",
+            Some("22 lines"),
+        ));
+    });
+    pane(&view, &cx).update(&mut cx, |_, cx| cx.notify());
+    settle(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.icon_caption().map(str::to_owned)).as_deref(),
+        Some(&*id.to_string())
+    );
+    let value = cx.update(|_, cx| crate::plugins::column_value(cx, &id, &scope, &path, version));
+    assert_eq!(value.map(|value| (value.title, value.text)), Some(("Lines".into(), "22".into())));
+    assert!(
+        cx.update(|window, _| window.debug_bounds("caption-text-f0.txt")).is_some(),
+        "the returned cell fills the reserved line"
+    );
+    let labels = cx.update(|window, _| {
+        window
+            .debug_interactive_elements()
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|element| element.label.clone())
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        labels.iter().any(|label| label.contains("22 lines") && label.contains("f0.txt")),
+        "VoiceOver hears the cell's spoken value: {labels:?}"
+    );
+
+    // The configured id stays while the provider goes away; only the value clears.
+    cx.update(|_, cx| {
+        cx.global_mut::<crate::plugins::Plugins>()
+            .surfaces
+            .publish_rows_for_test(crate::plugins::PublishedSurfaces::default())
+    });
+    pane(&view, &cx).update(&mut cx, |_, cx| cx.notify());
+    settle(&view, &mut cx);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.icon_caption().map(str::to_owned)).as_deref(),
+        Some(&*id.to_string())
+    );
+    assert!(cx.update(|window, _| window.debug_bounds("caption-slot-f0.txt")).is_some(), "the slot stays reserved");
+    assert!(cx.update(|window, _| window.debug_bounds("caption-text-f0.txt")).is_none(), "the value clears");
+}
+
+#[gpui::test]
+fn icon_view_shares_typing_rename_menus_and_the_vim_switch(cx: &mut TestAppContext) {
+    let root = fixture("icon-interactions");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("b");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"), "typing selects by name");
+
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.mode()), ViewMode::Icons);
+    cx.simulate_keystrokes("right");
+    assert_eq!(selected(&view, &cx).as_deref(), Some("notes.txt"), "arrows select tiles");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.renaming_path()),
+        Some(root.join("notes.txt")),
+        "Return renames the focused tile"
+    );
+    cx.simulate_keystrokes("escape");
+    assert!(pane(&view, &cx).read_with(&cx, |pane, _| pane.renaming_path()).is_none());
+
+    let tile = view.read_with(&cx, |window, cx| window.debug_selector_bounds("tile-alpha", cx)).expect("alpha tile");
+    let modifiers = gpui::Modifiers::default();
+    cx.simulate_mouse_down(tile.center(), gpui::MouseButton::Right, modifiers);
+    cx.simulate_mouse_up(tile.center(), gpui::MouseButton::Right, modifiers);
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.context_menu()),
+        Some(crate::context_menu::MenuKind::Items)
+    );
+    pane(&view, &cx).update_in(&mut cx, |pane, window, cx| pane.choose_context_item(None, window, cx));
+    cx.run_until_parked();
+    assert!(pane(&view, &cx).read_with(&cx, |pane, _| pane.context_menu().is_none()));
+
+    // The Finder shortcut works from the Vim layer too.
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-2");
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.mode()), ViewMode::List);
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.mode()), ViewMode::Icons);
+}
+
+#[gpui::test]
+fn focus_and_tab_changes_cancel_a_marquee(cx: &mut TestAppContext) {
+    let root = TestRoot::new("icon-marquee-focus");
+    for i in 0..12 {
+        std::fs::write(root.join(format!("f{i}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open_sized(cx, &root, 700., 800.);
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-shift-p");
+    settle(&view, &mut cx);
+    let list = cx.debug_bounds("file-list").expect("icon viewport");
+    let tile = |cx: &VisualTestContext, name: &str| {
+        view.read_with(cx, |window, cx| window.debug_selector_bounds(&format!("tile-{name}"), cx)).expect("tile")
+    };
+    let f0 = tile(&cx, "f0.txt").center();
+    let f11 = tile(&cx, "f11.txt");
+    let start = gpui::point(list.right() - px(20.), f11.bottom() - px(4.));
+    let modifiers = gpui::Modifiers::default();
+
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(f0, Some(gpui::MouseButton::Left), modifiers);
+    assert!(pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_active()));
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    assert!(
+        !pane(&view, &cx).read_with(&cx, |pane, _| pane.marquee_active()),
+        "moving focus to the sidebar restores and releases the drag"
+    );
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, cx| pane.selected_names(cx)),
+        vec!["f0.txt"],
+        "the starting selection returns"
+    );
+
+    let old = pane(&view, &cx);
+    old.update_in(&mut cx, |pane, window, cx| {
+        window.focus(pane.focus_handle(), cx);
+    });
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(f0, Some(gpui::MouseButton::Left), modifiers);
+    assert!(old.read_with(&cx, |pane, _| pane.marquee_active()));
+    cx.simulate_keystrokes("cmd-t");
+    settle(&view, &mut cx);
+    assert!(!old.read_with(&cx, |pane, _| pane.marquee_active()), "switching tabs releases the old pane's drag");
+}
+
+#[gpui::test]
 fn view_per_folder_off_keeps_the_window_view(cx: &mut TestAppContext) {
     let root = fixture("views-locked");
     let (view, mut cx) = open(cx, &root);
@@ -8523,11 +9058,20 @@ fn a_long_cloud_filename_leaves_room_for_the_badge(cx: &mut TestAppContext) {
         let selector = match mode {
             ViewMode::List => format!("row-name-{name}"),
             ViewMode::Columns => format!("column-0-row-name-{name}"),
+            ViewMode::Icons => unreachable!(),
         };
-        let name_cell = cx.debug_bounds(Box::leak(selector.into_boxed_str())).expect("name cell");
+        let name_cell = cx.update(|window, _| window.debug_bounds(&selector)).expect("name cell");
         let badge = cx.debug_bounds("cloud-badge-not-downloaded").expect("cloud badge");
         assert!(badge.right() <= name_cell.right(), "{mode:?} badge {badge:?} fits inside {name_cell:?}");
     }
+
+    // The tile keeps the same affordance inside its fixed thumbnail box.
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Icons, cx));
+    settle(&view, &mut cx);
+    let tile =
+        view.read_with(&cx, |window, cx| window.debug_selector_bounds(&format!("tile-{name}"), cx)).expect("tile");
+    let badge = cx.debug_bounds("cloud-badge-not-downloaded").expect("cloud badge");
+    assert!(badge.right() <= tile.right(), "the tile badge {badge:?} stays inside {tile:?}");
 }
 
 #[gpui::test]

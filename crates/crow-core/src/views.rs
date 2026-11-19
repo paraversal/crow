@@ -17,6 +17,7 @@ use serde::Deserialize;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value, value};
 
 use crate::config::{abbreviate_home, edit_toml, expand_home};
+use crate::grid::IconSize;
 use crate::settings::ViewMode;
 
 pub const DEFAULT_VIEWS: &str = r#"# Crow view settings. Changes apply when you next open a folder.
@@ -29,7 +30,9 @@ pub const DEFAULT_VIEWS: &str = r#"# Crow view settings. Changes apply when you 
 # View ▸ Why This View? (Cmd-J) shows which layer decided what.
 #
 # Keys, in any layer:
-#   view = "list" | "columns"
+#   view = "icons" | "list" | "columns"
+#   icon_size = "compact" | "standard" | "large"
+#   icon_caption = "off" | "<plugin>.<column>"
 #   sort = "name" | "size" | "kind" | "modified" | "added"
 #   ascending = true | false     (default: A to Z for names and kinds,
 #                                 newest and largest first otherwise)
@@ -63,6 +66,8 @@ columns = ["modified", "size", "kind"]
 #[serde(deny_unknown_fields)]
 pub struct ViewLayer {
     pub view: Option<ViewMode>,
+    pub icon_size: Option<IconSize>,
+    pub icon_caption: Option<String>,
     #[serde(default, deserialize_with = "sort_key")]
     pub sort: Option<SortKey>,
     pub ascending: Option<bool>,
@@ -78,6 +83,8 @@ pub struct ViewLayer {
 struct RuleFile {
     path: String,
     view: Option<ViewMode>,
+    icon_size: Option<IconSize>,
+    icon_caption: Option<String>,
     #[serde(default, deserialize_with = "sort_key")]
     sort: Option<SortKey>,
     ascending: Option<bool>,
@@ -158,6 +165,9 @@ impl fmt::Display for Source {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedView {
     pub view: (ViewMode, Source),
+    pub icon_size: (IconSize, Source),
+    /// The plugin column shown under tile names; `None` is Off.
+    pub icon_caption: (Option<String>, Source),
     pub sort: (SortKey, Source),
     pub ascending: (bool, Source),
     pub folders_first: (bool, Source),
@@ -202,6 +212,16 @@ fn validate_icon_source(layer: &ViewLayer, where_: &str) -> Result<(), String> {
     crate::icon_pack::validate_source(source).map_err(|error| format!("{where_}: icon_source: {error}"))
 }
 
+fn validate_icon_caption(layer: &ViewLayer, where_: &str) -> Result<(), String> {
+    let Some(caption) = &layer.icon_caption else { return Ok(()) };
+    if caption == "off" {
+        return Ok(());
+    }
+    crate::extensions::ExtensionId::parse(caption)
+        .map(|_| ())
+        .map_err(|error| format!("{where_}: icon_caption \"{caption}\": {error}"))
+}
+
 fn validate_preview_providers(layer: &ViewLayer, where_: &str) -> Result<(), String> {
     let Some(ids) = &layer.preview_providers else { return Ok(()) };
     for id in ids {
@@ -216,6 +236,7 @@ impl Views {
         let file: ViewsFile = toml::from_str(text).map_err(|e| crate::config::parse_error(&e, text))?;
         validate_preview_providers(&file.defaults, "defaults")?;
         validate_icon_source(&file.defaults, "defaults")?;
+        validate_icon_caption(&file.defaults, "defaults")?;
         let rules = file
             .rule
             .into_iter()
@@ -234,6 +255,8 @@ impl Views {
                     .map_err(|e| format!("rule \"{}\": {e}", r.path))?;
                 let layer = ViewLayer {
                     view: r.view,
+                    icon_size: r.icon_size,
+                    icon_caption: r.icon_caption,
                     sort: r.sort,
                     ascending: r.ascending,
                     folders_first: r.folders_first,
@@ -243,12 +266,14 @@ impl Views {
                 };
                 validate_preview_providers(&layer, &format!("rule \"{}\"", r.path))?;
                 validate_icon_source(&layer, &format!("rule \"{}\"", r.path))?;
+                validate_icon_caption(&layer, &format!("rule \"{}\"", r.path))?;
                 Ok(Rule { pattern: r.path, matchers, layer })
             })
             .collect::<Result<_, String>>()?;
         for (path, layer) in &file.folder {
             validate_preview_providers(layer, &format!("folder \"{path}\""))?;
             validate_icon_source(layer, &format!("folder \"{path}\""))?;
+            validate_icon_caption(layer, &format!("folder \"{path}\""))?;
         }
         let folders = file.folder.into_iter().map(|(path, layer)| (expand_home(&path, home), layer)).collect();
         Ok(Views { defaults: file.defaults, rules, folders })
@@ -258,6 +283,8 @@ impl Views {
     pub fn resolve(&self, dir: &Path) -> ResolvedView {
         let mut out = ResolvedView {
             view: (ViewMode::List, Source::Builtin),
+            icon_size: (IconSize::Standard, Source::Builtin),
+            icon_caption: (None, Source::Builtin),
             sort: (SortKey::Name, Source::Builtin),
             ascending: (true, Source::Builtin),
             folders_first: (true, Source::Builtin),
@@ -269,6 +296,12 @@ impl Views {
         let mut apply = |layer: &ViewLayer, source: Source| {
             if let Some(v) = layer.view {
                 out.view = (v, source.clone());
+            }
+            if let Some(size) = layer.icon_size {
+                out.icon_size = (size, source.clone());
+            }
+            if let Some(caption) = &layer.icon_caption {
+                out.icon_caption = ((caption != "off").then(|| caption.clone()), source.clone());
             }
             if let Some(key) = layer.sort {
                 out.sort = (key, source.clone());
@@ -372,6 +405,9 @@ pub struct RuleLocator {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewChange {
     View(ViewMode),
+    IconSize(IconSize),
+    /// `None` writes `"off"`, overriding an inherited source.
+    IconCaption(Option<String>),
     Sort(Sort),
     Columns(Vec<String>),
 }
@@ -393,6 +429,7 @@ pub enum DefaultsChange {
 fn mode_name(mode: ViewMode) -> &'static str {
     match mode {
         ViewMode::List => "list",
+        ViewMode::Icons => "icons",
         ViewMode::Columns => "columns",
     }
 }
@@ -400,6 +437,8 @@ fn mode_name(mode: ViewMode) -> &'static str {
 fn write_change(table: &mut Table, change: ViewChange) {
     match change {
         ViewChange::View(mode) => table["view"] = value(mode_name(mode)),
+        ViewChange::IconSize(size) => table["icon_size"] = value(size.key()),
+        ViewChange::IconCaption(caption) => table["icon_caption"] = value(caption.as_deref().unwrap_or("off")),
         ViewChange::Columns(columns) => {
             let old = table.get("columns").and_then(Item::as_array);
             let mut array = old.cloned().unwrap_or_default();
@@ -762,6 +801,32 @@ mod tests {
         let text = std::fs::read_to_string(path).unwrap();
         assert!(text.contains("sort = \"size\" # sort comment"));
         assert!(text.contains("preview_providers = [] # list comment"));
+    }
+
+    #[test]
+    fn icon_size_and_caption_resolve_and_write_per_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Path::new(HOME);
+        let folder = home.join("Pictures");
+        let text = format!(
+            "[folder.\"{}\"]\nview = \"icons\"\nicon_size = \"compact\"\nicon_caption = \"git.lines-changed\"\n",
+            folder.display()
+        );
+        std::fs::write(views_path(dir.path()), &text).unwrap();
+        let views = Views::parse(&text, home).unwrap();
+        let resolved = views.resolve(&folder);
+        assert_eq!(resolved.view.0, ViewMode::Icons);
+        assert_eq!(resolved.icon_size, (IconSize::Compact, Source::Folder));
+        assert_eq!(resolved.icon_caption, (Some("git.lines-changed".into()), Source::Folder));
+
+        save_folder_change(dir.path(), home, &folder, ViewChange::IconSize(IconSize::Large)).unwrap();
+        save_folder_change(dir.path(), home, &folder, ViewChange::IconCaption(None)).unwrap();
+        let saved = std::fs::read_to_string(views_path(dir.path())).unwrap();
+        assert!(saved.contains("icon_size = \"large\""), "{saved}");
+        assert!(saved.contains("icon_caption = \"off\""), "Off is written explicitly: {saved}");
+        let resolved = Views::parse(&saved, home).unwrap().resolve(&folder);
+        assert_eq!(resolved.icon_caption, (None, Source::Folder), "an explicit Off beats an inherited source");
+        assert!(Views::parse("[defaults]\nicon_caption = \"not an id\"\n", home).is_err());
     }
 
     #[test]

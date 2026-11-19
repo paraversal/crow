@@ -336,6 +336,7 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     .detach();
     crate::folder_sizes::init_at(cx, cache_dir, true);
     crate::cloud_status::init_at(cx);
+    crate::thumbnails::init(cx);
     crate::git::init_at(cx);
     crate::icon_packs::install(cx);
     let feedback = cx.global::<Ui>().feedback;
@@ -447,6 +448,7 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     crate::extensions::init(cx);
     crate::icon_packs::install(cx);
     crate::cloud_status::init_for_tests(cx);
+    crate::thumbnails::init_for_tests(cx);
     crate::git::init_for_tests(cx);
     crate::plugins::init_empty(cx);
     crate::usage::init(cx);

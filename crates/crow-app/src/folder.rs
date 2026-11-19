@@ -239,6 +239,10 @@ pub struct Folder {
     show_hidden: bool,
     /// Name filter (list/column view): shown rows are this folder's matches, flat.
     filter: Option<String>,
+    /// List and column views flatten expanded folders into the rows. The icon
+    /// grid shows only this folder's direct entries, so it turns the tree off
+    /// without closing the expanded folders (turning it back on restores them).
+    show_tree: bool,
     /// First match in each shown row's name, as byte offsets. Aligned with `rows`
     /// while a filter is set; `(u32::MAX, u32::MAX)` where the row has no range.
     match_ranges: Arc<Vec<(u32, u32)>>,
@@ -351,6 +355,7 @@ impl Folder {
             type_select_gen: 0,
             show_hidden,
             filter: None,
+            show_tree: true,
             match_ranges: Arc::new(Vec::new()),
             children: HashMap::new(),
             expanded: HashSet::new(),
@@ -736,6 +741,88 @@ impl Folder {
         cx.emit(FolderEvent::SelectionChanged);
     }
 
+    /// The selection's cursor path, whether or not it is still visible.
+    pub fn selection_cursor(&self) -> Option<&Path> {
+        self.selection.cursor().map(PathBuf::as_path)
+    }
+
+    /// The row layout's generation. A watcher apply or reorder changes it; an
+    /// in-progress marquee must not keep selecting indices from the old layout.
+    pub fn layout_generation(&self) -> u64 {
+        self.rows_generation
+    }
+
+    /// Apply a marquee preview in one step. `paths` is the new selected set,
+    /// `cursor` the preferred cursor (clamped to the set), and `totals` the
+    /// caller's sum over those paths. No listing scan: a rectangle update on a
+    /// 100k folder must not walk the folder.
+    pub fn set_selection_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cursor: Option<PathBuf>,
+        totals: (u64, usize),
+        cx: &mut Context<Self>,
+    ) {
+        let previous_cursor = self.selection.cursor().cloned();
+        self.selection.select_all(paths.iter().cloned());
+        let cursor = cursor.filter(|path| paths.contains(path)).or_else(|| paths.first().cloned());
+        if let Some(cursor) = &cursor {
+            self.selection.set_cursor(cursor.clone());
+        }
+        self.selection_totals = totals;
+        self.cursor_ix = cursor.as_deref().and_then(|cursor| self.index_of_path(cursor));
+        self.selection_changed(cx);
+        if previous_cursor != cursor {
+            cx.emit(FolderEvent::CursorMoved);
+        }
+        cx.notify();
+    }
+
+    /// Add and remove marquee hits without rebuilding the whole selection, so a
+    /// Cmd-drag that started from a large selection stays cheap per frame.
+    pub fn apply_marquee_delta(
+        &mut self,
+        added: &[(PathBuf, u64, bool)],
+        removed: &[(PathBuf, u64, bool)],
+        cursor: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let previous_cursor = self.selection.cursor().cloned();
+        for (path, size, is_dir) in removed {
+            if self.selection.contains(path) {
+                self.selection.remove(path);
+                let totals = Self::entry_totals_of(*size, *is_dir);
+                self.selection_totals.0 = self.selection_totals.0.saturating_sub(totals.0);
+                self.selection_totals.1 = self.selection_totals.1.saturating_sub(totals.1);
+            }
+        }
+        for (path, size, is_dir) in added {
+            if !self.selection.contains(path) {
+                self.selection.toggle(path.clone());
+                let totals = Self::entry_totals_of(*size, *is_dir);
+                self.selection_totals.0 += totals.0;
+                self.selection_totals.1 += totals.1;
+            }
+        }
+        let cursor = cursor
+            .filter(|path| self.selection.contains(path))
+            .or_else(|| self.selection.cursor().cloned())
+            .or_else(|| self.selection.iter().next().cloned());
+        if let Some(cursor) = &cursor {
+            self.selection.set_cursor(cursor.clone());
+        }
+        self.cursor_ix = cursor.as_deref().and_then(|cursor| self.index_of_path(cursor));
+        self.selection_changed(cx);
+        if previous_cursor != cursor {
+            cx.emit(FolderEvent::CursorMoved);
+        }
+        cx.notify();
+    }
+
+    fn entry_totals_of(size: u64, is_dir: bool) -> (u64, usize) {
+        if is_dir { (0, 1) } else { (size, 0) }
+    }
+
     pub fn selected_paths(&self) -> Vec<PathBuf> {
         self.rows
             .iter()
@@ -778,6 +865,46 @@ impl Folder {
     pub fn row_match(&self, ix: usize) -> Option<Range<usize>> {
         let (start, end) = *self.match_ranges.get(ix)?;
         (start != u32::MAX).then_some(start as usize..end as usize)
+    }
+
+    /// List and column views show expanded folders inline; the icon grid shows
+    /// only this folder's direct entries. The expansion set is kept, so turning
+    /// the tree back on restores the open folders. A cursor on a list-only
+    /// descendant moves to its nearest direct folder ancestor, because a path
+    /// that is not projected cannot be selected.
+    pub fn set_show_tree(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.show_tree == show {
+            return;
+        }
+        let cursor = self.selection.cursor().cloned();
+        self.show_tree = show;
+        self.rebuild_rows(cx);
+        self.prune_selection(cx);
+        if !show
+            && let Some(cursor) = cursor
+            && self.index_of_path(&cursor).is_none()
+        {
+            let ancestor = self
+                .entries
+                .iter()
+                .filter(|entry| entry.is_dir && entry.path != cursor && cursor.starts_with(&entry.path))
+                .max_by_key(|entry| entry.path.components().count())
+                .map(|entry| entry.path.clone());
+            if let Some(path) = ancestor {
+                if self.selection.contains(&path) {
+                    self.selection.set_cursor(path);
+                } else {
+                    self.selection.toggle(path.clone());
+                    if let Some(entry) = self.entries.iter().find(|entry| entry.path == path) {
+                        Self::add_totals(&mut self.selection_totals, entry);
+                    }
+                    self.selection_changed(cx);
+                }
+            }
+        }
+        self.settle_cursor(cx);
+        cx.emit(FolderEvent::Changed);
+        cx.notify();
     }
 
     /// Filter this folder's own rows (case-insensitive substring). Open inline
@@ -1537,7 +1664,7 @@ impl Folder {
             }
             None => None,
         };
-        let built = build_rows(&self.entries, &children, filter);
+        let built = build_rows(&self.entries, &children, filter, self.show_tree);
         self.assign_rows(built);
     }
 
@@ -1569,6 +1696,7 @@ impl Folder {
         let entries = self.entries.clone();
         let children = self.child_rows(cx);
         let filter = self.filter.clone();
+        let show_tree = self.show_tree;
         let generation = self.generation;
         let rows_generation = self.rows_generation;
         cx.spawn(async move |this, cx| {
@@ -1577,7 +1705,7 @@ impl Folder {
                     let lower = filter.as_ref().map(|query| query.to_lowercase());
                     let filter =
                         filter.as_ref().zip(lower.as_ref()).map(|(query, lower)| (query.as_str(), lower.as_str()));
-                    build_rows(&snapshot, &children, filter)
+                    build_rows(&snapshot, &children, filter, show_tree)
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -2399,7 +2527,7 @@ fn apply_folder_sizes(entries: &mut [Entry], sizes: &HashMap<PathBuf, u64>) {
 
 /// Flatten `entries` and the open children into the rows the list view draws.
 /// Free of entities so an apply can run it on the background executor.
-fn build_rows(entries: &[Entry], children: &ChildRows, filter: Option<(&str, &str)>) -> Rows {
+fn build_rows(entries: &[Entry], children: &ChildRows, filter: Option<(&str, &str)>, show_tree: bool) -> Rows {
     if let Some((filter, lower)) = filter {
         let mut rows = Vec::new();
         let mut ranges = Vec::new();
@@ -2426,6 +2554,15 @@ fn build_rows(entries: &[Entry], children: &ChildRows, filter: Option<(&str, &st
         };
     }
     let mut rows = Vec::with_capacity(entries.len());
+    if !show_tree {
+        rows.extend((0..entries.len()).map(FlatRow::Own));
+        return Rows {
+            row_ends: Arc::new((1..=rows.len()).collect()),
+            row_parents: Arc::new(vec![None; rows.len()]),
+            rows: Arc::new(rows),
+            match_ranges: Arc::new(Vec::new()),
+        };
+    }
     for (i, entry) in entries.iter().enumerate() {
         rows.push(FlatRow::Own(i));
         if !entry.is_dir || entry.is_package() {

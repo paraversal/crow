@@ -175,6 +175,7 @@ impl SearchMatch {
 pub enum ViewMode {
     #[default]
     List,
+    Icons,
     Columns,
 }
 

@@ -1548,6 +1548,31 @@ impl PluginSurfaces {
         self.snapshot = std::sync::Arc::new(published);
     }
 
+    /// Put a ready cell into the row cache without a plugin round trip.
+    #[cfg(test)]
+    pub fn insert_row_for_test(
+        &mut self,
+        extension: &ExtensionId,
+        scope: &ScopeKey,
+        path: &Path,
+        version: u64,
+        text: &str,
+        spoken: Option<&str>,
+    ) -> bool {
+        let Some(published) = self.snapshot.extension(extension) else { return false };
+        self.rows.insert(
+            RowKey {
+                extension: extension.clone(),
+                generation: published.generation,
+                scope: scope.clone(),
+                path: path.to_path_buf(),
+                version,
+            },
+            RowValue { text: text.to_owned(), spoken: spoken.map(str::to_owned), tint: None, dim: false },
+        );
+        true
+    }
+
     #[cfg(test)]
     pub fn set_sidebar_rows_for_test(&mut self, surface: SurfaceId, descriptor: ExtensionId, rows: Vec<SectionRow>) {
         let binding = self.sidebar.entry(surface).or_insert_with(|| SidebarBinding {
