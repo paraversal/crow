@@ -2584,7 +2584,7 @@ fn an_icon_caption_comes_from_the_plugin_row_cache(cx: &mut TestAppContext) {
         let entry = folder.entries().iter().find(|entry| entry.name == "f0.txt").expect("f0");
         (
             crate::plugins::ScopeKey::Folder(folder.dir().to_path_buf()),
-            folder.plugin_entry_version(entry),
+            folder.plugin_row_version(entry),
             entry.path.clone(),
         )
     });
@@ -2621,6 +2621,21 @@ fn an_icon_caption_comes_from_the_plugin_row_cache(cx: &mut TestAppContext) {
     assert!(
         labels.iter().any(|label| label.contains("22 lines") && label.contains("f0.txt")),
         "VoiceOver hears the cell's spoken value: {labels:?}"
+    );
+
+    folder.update(&mut cx, |folder, cx| {
+        let mut entries = folder.entries().as_ref().clone();
+        let changed = entries.iter_mut().find(|entry| entry.name == "f1.txt").expect("f1");
+        changed.size += 1;
+        let path = changed.path.clone();
+        let stats = [(path.clone(), Some(changed.clone()))];
+        folder.replace_entries_for_test(entries, Some(&stats), cx);
+        cx.emit(crate::folder::FolderEvent::WatcherApplied { paths: vec![path] });
+    });
+    settle(&view, &mut cx);
+    assert!(
+        cx.debug_bounds("caption-text-f0.txt").is_some(),
+        "a watcher update to another path keeps the ready caption visible"
     );
 
     // The configured id stays while the provider goes away; only the value clears.
@@ -3450,6 +3465,15 @@ fn the_bar_names_the_queue_and_opens_activity(cx: &mut TestAppContext) {
     let state = bar_state(&view, &mut cx);
     let Primary::Running(running) = &state.primary else { panic!("progress is primary") };
     assert!(running.detail.contains("1 waiting"), "{}", running.detail);
+    cx.cx.update(|cx| {
+        cx.global_mut::<Operations>().active.as_mut().unwrap().phase = crate::operations::JobPhase::AwaitingConflict;
+        cx.refresh_windows();
+    });
+    cx.simulate_resize(size(px(640.), px(640.)));
+    cx.run_until_parked();
+    let cancel = cx.debug_bounds("bar-cancel").expect("Cancel remains available");
+    let transient = cx.debug_bounds("bar-transient").expect("the operation status region");
+    assert!(cancel.right() <= transient.right(), "the cancel button fits at 640 points");
     let bounds = cx.debug_bounds("bar-activity").expect("the bar offers Activity");
     cx.simulate_click(bounds.center(), gpui::Modifiers::default());
     assert!(view.read_with(&cx, |this, _| this.show_activity), "the affordance opens Activity");
@@ -10446,12 +10470,23 @@ fn closing_the_origin_window_rehosts_a_conflict(cx: &mut TestAppContext) {
     });
     let resolve: &'static str = format!("activity-resolve-{}", job.0).leak();
     assert!(cx_b.debug_bounds(resolve).is_some(), "Activity offers Resolve");
-    let handle = cx_b.update(|window, _| window.window_handle().downcast::<CrowWindow>().expect("B handle"));
-    cx_b.cx.update(|cx| crate::operations::present_prompt_in(handle, cx));
+    click_selector(&mut cx_b, resolve);
     cx_b.run_until_parked();
     assert!(
         view_b.read_with(&cx_b, |this, _| matches!(this.sheet, Some(Sheet::Conflict { .. }))),
         "Resolve reopens the sheet"
+    );
+    cx_b.simulate_keystrokes("escape cmd-alt-l cmd-alt-l tab");
+    let resolve_focus = view_b.read_with(&cx_b, |this, _| this.activity_controls[&("activity-resolve", job.0)].clone());
+    assert!(cx_b.update(|window, _| resolve_focus.is_focused(window)), "Tab reaches Resolve");
+    cx_b.simulate_keystrokes("space");
+    // Div buttons synthesize a click on release. simulate_keystrokes sends only down.
+    let keystroke = cx_b.read(|cx| gpui::Keystroke::parse_with_os("space", cx.platform_info().os).unwrap());
+    cx_b.simulate_event(gpui::KeyUpEvent { keystroke });
+    cx_b.run_until_parked();
+    assert!(
+        view_b.read_with(&cx_b, |this, _| matches!(this.sheet, Some(Sheet::Conflict { .. }))),
+        "the keyboard can reach and activate Resolve"
     );
 
     let stale = ConflictKey { attempt: key.attempt + 1, ..key };
@@ -10460,10 +10495,16 @@ fn closing_the_origin_window_rehosts_a_conflict(cx: &mut TestAppContext) {
         "an obsolete attempt is ignored"
     );
     assert!(cx_b.read(|cx| cx.global::<Operations>().prompt.is_some()), "the current prompt stays");
+    cx_b.simulate_keystrokes("tab tab enter");
     assert!(
-        cx_b.cx.update(|cx| crate::operations::resolve_prompt(job, key, Resolution::KeepBoth, false, cx)),
-        "the current attempt is accepted"
+        view_b.read_with(&cx_b, |this, _| matches!(
+            this.sheet,
+            Some(Sheet::Conflict { choice: Resolution::Replace, .. })
+        )),
+        "Enter selects the focused option and leaves the sheet open"
     );
+    cx_b.simulate_keystrokes("shift-tab enter shift-tab enter");
+    assert!(cx_b.read(|cx| cx.global::<Operations>().prompt.is_none()), "the current attempt is accepted");
     settle(&view_b, &mut cx_b);
     assert_eq!(
         std::fs::read_to_string(root.join("alpha/notes.txt")).ok().as_deref(),
@@ -10497,6 +10538,45 @@ fn a_result_after_navigation_does_not_move_the_new_selection(cx: &mut TestAppCon
         "a result from the old surface does not move the new tab's selection"
     );
     assert_eq!(cx.read(|cx| cx.global::<Operations>().undo_stack.len()), 1, "the finished job is undoable");
+}
+
+#[gpui::test]
+fn returning_to_a_folder_does_not_restore_a_queued_jobs_origin(cx: &mut TestAppContext) {
+    let root = fixture("revisited-origin");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<Operations>().test_hold_planning = true);
+    view.update_in(&mut cx, |this, window, cx| {
+        this.run_request(Request::Duplicate { paths: Arc::from([root.join("notes.txt")]) }, window, cx);
+        this.pane().update(cx, |pane, cx| {
+            pane.navigate(root.join("beta"), cx);
+            pane.navigate(root.path.clone(), cx);
+        });
+    });
+    cx.update(|_, cx| crate::operations::release_planning(cx));
+    settle(&view, &mut cx);
+    assert!(root.join("notes copy.txt").exists(), "the duplicate still commits");
+    assert_ne!(selected(&view, &cx).as_deref(), Some("notes copy.txt"));
+}
+
+#[gpui::test]
+fn emptying_a_fixture_trash_releases_the_queue_after_the_origin_closes(app: &mut TestAppContext) {
+    let root = fixture("empty-trash-origin");
+    let trash = root.join("test-trash");
+    std::fs::create_dir(&trash).unwrap();
+    std::fs::write(trash.join("item"), "disposable fixture").unwrap();
+    let (view_a, mut cx_a) = open(app, &root);
+    let (view_b, mut cx_b) = second_window(&mut cx_a, &root);
+    view_a.update_in(&mut cx_a, |this, window, cx| {
+        this.sheet = Some(Sheet::ConfirmEmptyTrash { folders: vec![trash.clone()], focus: cx.focus_handle() });
+        this.confirm_sheet(window, cx);
+        assert_eq!(cx.global::<Operations>().maintenance, Some(crate::operations::Maintenance::EmptyTrash));
+        crate::operations::enqueue(copy_request(&[root.join("notes.txt")], root.join("beta")), None, cx);
+        window.remove_window();
+    });
+    settle(&view_b, &mut cx_b);
+    assert!(!trash.join("item").exists());
+    assert!(root.join("beta/notes.txt").exists(), "the waiting transfer starts after Empty Trash finishes");
+    assert!(cx_b.read(|cx| cx.global::<Operations>().is_idle()));
 }
 
 #[gpui::test]
@@ -10638,6 +10718,35 @@ fn cancelling_a_planning_head_logs_and_does_not_copy(cx: &mut TestAppContext) {
     assert!(cx.read(|cx| cx.global::<Operations>().active.is_none()));
     assert!(!root.join("beta/notes.txt").exists(), "nothing was copied");
     assert!(cx.read(|cx| cx.global::<Operations>().log.iter().any(|entry| entry.cancelled)));
+}
+
+#[gpui::test]
+fn a_confirmed_close_rejects_new_work_until_planning_stops(app: &mut TestAppContext) {
+    let root = fixture("stop-planning");
+    let (_view, mut cx) = open(app, &root);
+    cx.cx.update(|cx| {
+        cx.global_mut::<Operations>().test_hold_planning = true;
+        crate::operations::enqueue(copy_request(&[root.join("notes.txt")], root.join("beta")), None, cx);
+    });
+    cx.simulate_keystrokes("cmd-w enter");
+    cx.cx.update(|cx| {
+        crate::operations::enqueue(copy_request(&[root.join("notes.txt")], root.join("alpha")), None, cx);
+        crate::operations::cancel_active(cx);
+        let ops = cx.global::<Operations>();
+        assert!(ops.stopping && ops.queue.is_empty(), "late transfers are refused during stop");
+        assert!(ops.has_active(), "repeated Cancel still waits for the planning worker");
+    });
+    cx.cx.update(crate::operations::release_planning);
+    for _ in 0..20 {
+        if app.update(|cx| cx.windows().is_empty()) {
+            break;
+        }
+        cx.executor().advance_clock(Duration::from_millis(30));
+        app.run_until_parked();
+    }
+    assert!(app.update(|cx| cx.windows().is_empty()));
+    assert!(app.read(|cx| !cx.global::<Operations>().stopping), "a later window can start new work");
+    assert!(!root.join("beta/notes.txt").exists() && !root.join("alpha/notes.txt").exists());
 }
 
 #[gpui::test]

@@ -168,6 +168,8 @@ pub struct CrowWindow {
     /// A sheet asking before an operation runs (conflicts, permanent delete).
     sheet: Option<Sheet>,
     show_activity: bool,
+    activity_focus: FocusHandle,
+    activity_controls: HashMap<(&'static str, u64), FocusHandle>,
     /// "Why this view?", while open.
     why: Option<FocusHandle>,
     picker: Option<ThemePicker>,
@@ -306,6 +308,8 @@ impl CrowWindow {
             search_includes_hidden,
             sheet,
             show_activity: false,
+            activity_focus: cx.focus_handle(),
+            activity_controls: HashMap::new(),
             why: None,
             picker: None,
             palette: None,
@@ -375,6 +379,9 @@ impl CrowWindow {
             if let Sheet::Onboarding { show, no, .. } = sheet {
                 allowed.push(("sheet choice", show.clone()));
                 allowed.push(("sheet choice", no.clone()));
+            }
+            if let Sheet::Conflict { controls, .. } = sheet {
+                allowed.extend(controls.iter().cloned().map(|focus| ("conflict control", focus)));
             }
         } else if let Some(palette) = &self.palette {
             allowed.push(("palette", palette.input.read(cx).focus_handle(cx)));
@@ -1421,6 +1428,7 @@ enum Sheet {
     /// One app-wide conflict question, shown by whichever window owns it.
     Conflict {
         focus: FocusHandle,
+        controls: [FocusHandle; 6],
         job: crate::operations::RequestId,
         key: crow_fs::ops::ConflictKey,
         choice: Resolution,
@@ -2405,8 +2413,7 @@ impl CrowWindow {
                 }
             }
             CommandId::ToggleActivity => {
-                self.show_activity = !self.show_activity;
-                cx.notify();
+                self.toggle_activity(window, cx);
             }
             CommandId::RemoveFromSidebar
             | CommandId::MoveFavoriteUp
@@ -2581,12 +2588,16 @@ impl Render for CrowWindow {
         // rule the fuzzer's focus invariant checks.
         if !self.refocus_overlay {
             let surfaces = self.overlay_focus_surfaces(cx);
-            if !surfaces.is_empty() && !surfaces.iter().any(|(_, handle)| Some(handle) == window.focused(cx).as_ref()) {
+            if !surfaces.is_empty()
+                && !self.activity_owns_focus(window, cx)
+                && !surfaces.iter().any(|(_, handle)| Some(handle) == window.focused(cx).as_ref())
+            {
                 self.refocus_overlay = true;
                 cx.defer_in(window, |this, window, cx| {
                     this.refocus_overlay = false;
                     let surfaces = this.overlay_focus_surfaces(cx);
                     if !surfaces.is_empty()
+                        && !this.activity_owns_focus(window, cx)
                         && !surfaces.iter().any(|(_, handle)| Some(handle) == window.focused(cx).as_ref())
                     {
                         window.focus(&surfaces[0].1, cx);
@@ -2695,7 +2706,7 @@ impl Render for CrowWindow {
             None => None,
         };
         let sheet = self.render_sheet(window, cx);
-        let activity = self.show_activity.then(|| self.render_activity(cx));
+        let activity = self.show_activity.then(|| self.render_activity(window, cx));
         let why = self.render_why(cx);
         let picker = self.render_picker(cx);
         let git_review = self.render_git_review(cx);
@@ -2831,9 +2842,8 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::save_search))
             .on_action(cx.listener(Self::edit_saved_search))
             .on_action(cx.listener(Self::remove_saved_search))
-            .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, _, cx| {
-                this.show_activity = !this.show_activity;
-                cx.notify();
+            .on_action(cx.listener(|this, _: &crate::actions::ToggleActivity, window, cx| {
+                this.toggle_activity(window, cx);
             }))
             .size_full()
             .flex()
@@ -3028,7 +3038,7 @@ impl CrowWindow {
                         allowed.push(("path field", edit.input.read(cx).focus_handle(cx)));
                     }
                 }
-                if !allowed.iter().any(|(_, handle)| handle == &focused) {
+                if !self.activity_owns_focus(window, cx) && !allowed.iter().any(|(_, handle)| handle == &focused) {
                     let surface = allowed.first().map_or("expected", |(name, _)| name);
                     out.push(Violation::new(
                         "focus",

@@ -71,7 +71,7 @@ impl UniformListDecoration for PluginRows {
                     let (entry, _) = folder.row(ix)?;
                     Some(RowInput {
                         path: entry.path.clone(),
-                        version: folder.plugin_entry_version(entry),
+                        version: folder.plugin_row_version(entry),
                         name: entry.name.clone(),
                         is_dir: entry.is_dir,
                         size: entry.size,

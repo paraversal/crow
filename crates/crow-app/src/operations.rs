@@ -64,6 +64,7 @@ pub struct Origin {
     pub window: WindowHandle<CrowWindow>,
     pub tab: TabId,
     pub dir: PathBuf,
+    pub surface: crate::plugins::SurfaceId,
 }
 
 impl Origin {
@@ -76,7 +77,7 @@ impl Origin {
     ) {
         self.window
             .update(cx, |this, window, cx| {
-                if this.origin_is_current(self.tab, &self.dir, cx) {
+                if this.origin_is_current(self, cx) {
                     f(this, window, cx);
                 }
             })
@@ -325,7 +326,6 @@ impl Operations {
         self.active.as_ref().map(|active| active.view(self.queue.len()))
     }
 
-    #[cfg(test)]
     pub fn active_id(&self) -> Option<RequestId> {
         self.active.as_ref().map(|active| active.id)
     }
@@ -491,6 +491,9 @@ fn is_transfer(request: &ops::Request) -> bool {
 /// existing one-at-a-time undo ordering is preserved.
 pub fn enqueue(request: ops::Request, origin: Option<Origin>, cx: &mut App) {
     let ops = cx.global::<Operations>();
+    if ops.stopping {
+        return;
+    }
     if !is_transfer(&request) && !ops.is_idle() {
         message("Another operation is still running", true, cx);
         cx.refresh_windows();
@@ -498,7 +501,6 @@ pub fn enqueue(request: ops::Request, origin: Option<Origin>, cx: &mut App) {
     }
     let id = {
         let ops = cx.global_mut::<Operations>();
-        ops.stopping = false;
         ops.next_request += 1;
         let id = RequestId(ops.next_request);
         ops.queue.push_back(QueuedJob { id, label: request_label(&request), request, origin });
@@ -723,7 +725,9 @@ fn handle_event(id: RequestId, event: JobEvent, cx: &mut App) {
                     active.phase = JobPhase::Paused;
                 }
             }
-            JobEvent::Conflict(conflict) if engine_matches == Some(conflict.key.job_id) => {
+            JobEvent::Conflict(conflict)
+                if engine_matches == Some(conflict.key.job_id) && active.phase != JobPhase::Cancelling =>
+            {
                 if let Some(choice) = conflict.auto {
                     // An apply-to-all policy answered this one; the engine moves on.
                     tracing::debug!(job = %conflict.key.job_id, ?choice, "conflict answered by policy");
@@ -902,7 +906,7 @@ pub fn cancel_active(cx: &mut App) {
     let (id, label, force) = {
         let ops = cx.global_mut::<Operations>();
         let Some(active) = ops.active.as_mut() else { return };
-        let force = active.engine.is_none() && active.phase != JobPhase::Planning;
+        let force = active.engine.is_none() && !matches!(active.phase, JobPhase::Planning | JobPhase::Cancelling);
         active.phase = JobPhase::Cancelling;
         active.conflict = None;
         if ops.prompt.as_ref().is_some_and(|prompt| prompt.job == active.id) {
@@ -1111,7 +1115,7 @@ pub fn stop_label(cx: &App) -> String {
 pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static) {
     let (index, record, trash) = {
         let ops = cx.global::<Operations>();
-        if !ops.is_idle() {
+        if ops.stopping || !ops.is_idle() {
             message("Another operation is still running", true, cx);
             cx.refresh_windows();
             return;
@@ -1157,7 +1161,7 @@ pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf
 pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static) {
     let (reversed, trash) = {
         let ops = cx.global::<Operations>();
-        if !ops.is_idle() {
+        if ops.stopping || !ops.is_idle() {
             message("Another operation is still running", true, cx);
             cx.refresh_windows();
             return;
@@ -1206,7 +1210,7 @@ pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static
 /// usual message when something else owns it.
 pub fn begin_maintenance(kind: Maintenance, cx: &mut App) -> bool {
     let ops = cx.global_mut::<Operations>();
-    if !ops.is_idle() {
+    if ops.stopping || !ops.is_idle() {
         message("Another operation is still running", true, cx);
         cx.refresh_windows();
         return false;

@@ -998,7 +998,7 @@ pub fn render(state: BarState, pane: Entity<Pane>, hovered: bool, cx: &mut App) 
                 .aria_min_numeric_value(0.)
                 .aria_max_numeric_value(100.)
                 .child(shrinking_text(label.clone()).text_color(fg))
-                .children((!detail.is_empty()).then(|| div().flex_none().text_color(muted).child(detail)));
+                .children((!detail.is_empty()).then(|| shrinking_text(detail).text_color(muted)));
             group = group.child(activity_button(running.queued, cx).flex_none());
             group = group.child(cancel_button(cx).flex_none());
             (Some(label), Some(group.into_any_element()))

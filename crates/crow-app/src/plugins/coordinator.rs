@@ -20,6 +20,8 @@ use crow_plugin::{
 };
 use gpui::WindowId;
 
+use crate::git::PluginRefresh;
+
 /// One view-owned demand source. Ids are never reused; a closed owner stops
 /// observing and the coordinator drops its pending work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -156,6 +158,7 @@ struct RowKey {
 struct CachedRow {
     value: RowValue,
     touch: u64,
+    stale: bool,
 }
 
 #[derive(Default)]
@@ -194,7 +197,7 @@ impl RowCache {
         }
         self.tick = self.tick.wrapping_add(1);
         self.bytes = self.bytes.saturating_add(value.bytes());
-        self.values.insert(key, CachedRow { value, touch: self.tick });
+        self.values.insert(key, CachedRow { value, touch: self.tick, stale: false });
         self.evict();
     }
 
@@ -211,15 +214,19 @@ impl RowCache {
         }
     }
 
-    fn remove_matching(&mut self, mut remove: impl FnMut(&RowKey) -> bool) {
+    fn retain(&mut self, mut keep: impl FnMut(&RowKey, &mut CachedRow) -> bool) {
         self.values.retain(|key, row| {
-            if remove(key) {
+            if keep(key, row) {
+                true
+            } else {
                 self.bytes -= row.value.bytes();
                 false
-            } else {
-                true
             }
         });
+    }
+
+    fn remove_matching(&mut self, mut remove: impl FnMut(&RowKey) -> bool) {
+        self.retain(|key, _| !remove(key));
     }
 
     fn remove_extension(&mut self, extension: &ExtensionId) {
@@ -601,18 +608,17 @@ impl PluginSurfaces {
                 }
                 keep
             });
-            self.status.insert(
-                surface,
-                StatusBinding { scope: scope.clone(), revision, values: BTreeMap::new(), seen: HashSet::new() },
+            let values = self.status.remove(&surface).filter(|old| old.scope == scope && host.is_some()).map_or_else(
+                BTreeMap::new,
+                |mut old| {
+                    old.values.retain(|id, _| crate::git::is_git_plugin(&id.plugin));
+                    old.values
+                },
             );
+            self.status.insert(surface, StatusBinding { scope: scope.clone(), revision, values, seen: HashSet::new() });
         }
         let Some(binding) = self.status.get(&surface) else { return };
-        let needed: Vec<ExtensionId> = descriptors
-            .iter()
-            .filter(|id| !binding.seen.contains(*id))
-            .filter(|id| !(binding.values.contains_key(*id)))
-            .cloned()
-            .collect();
+        let needed: Vec<ExtensionId> = descriptors.iter().filter(|id| !binding.seen.contains(*id)).cloned().collect();
         for descriptor in needed {
             let Some(published) = self.snapshot.extension(&descriptor).cloned() else { continue };
             if published.descriptor.kind != ExtensionKind::Status
@@ -965,7 +971,8 @@ impl PluginSurfaces {
             }
             let already = self.tickets.values().any(|ticket| {
                 &ticket.extension == descriptor
-                    && matches!(&ticket.kind, TicketKind::Rows { surface: s, scope: q, .. } if *s == surface && q == &scope)
+                    && matches!(&ticket.kind, TicketKind::Rows { surface: s, scope: q, scope_version: v, .. }
+                        if *s == surface && q == &scope && *v == scope_version)
             });
             if already {
                 self.counters.coalesced_rows += 1;
@@ -980,13 +987,6 @@ impl PluginSurfaces {
                 if refs.len() >= MAX_BATCH {
                     break;
                 }
-                // A clean Git row has no contribution; asking the worker for it
-                // would turn a folder scroll into hundreds of empty round trips.
-                if bundled_git && row.git.is_none() {
-                    continue;
-                }
-                // Demand is the misses only. A cached value, hit or empty,
-                // already serves this generation, scope, path and version.
                 let key = RowKey {
                     extension: descriptor.clone(),
                     generation,
@@ -994,7 +994,10 @@ impl PluginSurfaces {
                     path: row.path.clone(),
                     version: row.version,
                 };
-                if self.rows.peek(&key).is_some() {
+                let cached = self.rows.values.get(&key);
+                // A clean Git row needs a reply only when it has a previous
+                // decoration to replace. The worker then returns no decoration.
+                if cached.is_some_and(|row| !row.stale) || (bundled_git && row.git.is_none() && cached.is_none()) {
                     continue;
                 }
                 let handle = EntryHandle(refs.len() as u32 + 1);
@@ -1262,7 +1265,11 @@ impl PluginSurfaces {
                         tint: value.tint,
                         dim: value.dim,
                     });
-                    if self.rows.peek(&key) != Some(&value) {
+                    if let Some(row) = self.rows.values.get_mut(&key)
+                        && row.value == value
+                    {
+                        row.stale = false;
+                    } else {
                         self.rows.insert(key, value);
                         changed = true;
                     }
@@ -1323,17 +1330,32 @@ impl PluginSurfaces {
             .is_some()
     }
 
-    pub fn invalidate_path(&mut self, scope: &ScopeKey, path: &Path) {
-        self.rows.remove_matching(|key| &key.scope == scope && key.path == path);
-        for state in self.surfaces.values_mut() {
-            if &state.scope == scope {
-                state.versions.remove(path);
-            }
-        }
+    pub fn invalidate_paths(&mut self, scope: &ScopeKey, paths: &[PathBuf]) {
+        let paths: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        self.invalidate_rows(scope, |path| paths.contains(path));
     }
 
-    /// A provider snapshot or line count changed. Drop this plugin's ready
-    /// values and let the next visible pass ask again.
+    fn invalidate_rows(&mut self, scope: &ScopeKey, matches: impl Fn(&Path) -> bool) {
+        self.rows.remove_matching(|key| &key.scope == scope && matches(&key.path));
+        for state in self.surfaces.values_mut() {
+            if &state.scope == scope {
+                state.versions.retain(|path, _| !matches(path));
+            }
+        }
+        for demand in self.pending_rows.values_mut().filter(|demand| &demand.scope == scope) {
+            demand.rows.retain(|row| !matches(&row.path));
+        }
+        self.tickets.retain(|_, ticket| {
+            let affected = matches!(&ticket.kind, TicketKind::Rows { scope: captured, entries, .. }
+                if captured == scope && entries.iter().any(|(_, path, _)| matches(path)));
+            if affected {
+                ticket.ticket.cancel();
+            }
+            !affected
+        });
+    }
+
+    /// Drop all output and pending work when a provider is enabled or disabled.
     pub fn invalidate_plugin(&mut self, plugin: &PluginId) {
         self.rows.remove_plugin(plugin);
         self.tickets.retain(|_, ticket| {
@@ -1360,6 +1382,63 @@ impl PluginSurfaces {
         }
     }
 
+    /// Refresh only the folders that used this worktree. Keep established
+    /// decorations visible for the same entry version while their replies are
+    /// pending. The previous repository's output cannot survive a reset.
+    pub fn refresh_git(&mut self, refresh: PluginRefresh, folder_matches: impl Fn(&Path) -> bool) {
+        let extension_matches = |id: &ExtensionId| {
+            crate::git::is_git_plugin(&id.plugin)
+                && (refresh != PluginRefresh::Lines || crate::git::is_lines_column(id))
+        };
+        let row_matches = |scope: &ScopeKey, path: &Path| match scope {
+            ScopeKey::Folder(folder) => folder_matches(folder),
+            ScopeKey::Search { .. } => path.parent().is_some_and(&folder_matches),
+        };
+        self.rows.retain(|key, row| {
+            if !extension_matches(&key.extension) || !row_matches(&key.scope, &key.path) {
+                return true;
+            }
+            if refresh == PluginRefresh::Status && !crate::git::is_lines_column(&key.extension) {
+                row.stale = true;
+                return true;
+            }
+            false
+        });
+        self.tickets.retain(|_, ticket| {
+            let affected = extension_matches(&ticket.extension)
+                && match &ticket.kind {
+                    TicketKind::Rows { scope, entries, .. } => {
+                        entries.iter().any(|(_, path, _)| row_matches(scope, path))
+                    }
+                    TicketKind::Status { scope, .. } | TicketKind::Info { scope, .. } => folder_matches(scope.path()),
+                    _ => false,
+                };
+            if affected {
+                ticket.ticket.cancel();
+            }
+            !affected
+        });
+        for demand in self.pending_rows.values_mut() {
+            if demand.rows.iter().any(|row| row_matches(&demand.scope, &row.path)) {
+                demand.descriptors.retain(|id| !extension_matches(id));
+            }
+        }
+        if refresh != PluginRefresh::Lines {
+            for binding in self.status.values_mut().filter(|binding| folder_matches(binding.scope.path())) {
+                binding.seen.retain(|id| !extension_matches(id));
+                if refresh == PluginRefresh::Reset {
+                    binding.values.retain(|id, _| !extension_matches(id));
+                }
+            }
+            for binding in self.info.values_mut().filter(|binding| folder_matches(binding.scope.path())) {
+                binding.seen.retain(|id| !extension_matches(id));
+                if refresh == PluginRefresh::Reset {
+                    binding.values.retain(|id, _| !extension_matches(id));
+                }
+            }
+        }
+    }
+
     pub fn invalidate_git_lines(&mut self, paths: &[PathBuf]) {
         let paths: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
         self.rows
@@ -1383,12 +1462,11 @@ impl PluginSurfaces {
     }
 
     pub fn bump_scope(&mut self, surface: SurfaceId, scope: ScopeKey, scope_version: u64, _now: Instant) {
-        self.rows.remove_scope(&scope);
+        self.invalidate_rows(&scope, |_| true);
         if let Some(state) = self.surfaces.get_mut(&surface)
             && state.scope == scope
         {
             state.scope_version = scope_version;
-            state.versions.clear();
         }
     }
 
@@ -1425,7 +1503,6 @@ impl PluginSurfaces {
     }
 
     pub fn notify_files_changed(&mut self, scope: ScopeKey, display: String, now: Instant) {
-        self.invalidate_scope(&scope);
         self.queue_hook(
             HookSlot::Files(scope.path().clone()),
             HookEvent::FilesChanged { scope: display },
@@ -1440,15 +1517,6 @@ impl PluginSurfaces {
 
     fn queue_hook(&mut self, slot: HookSlot, event: HookEvent, scope: Option<ScopeKey>, now: Instant) {
         self.hooks.insert(slot, PendingHook { due: now + HOOK_DEBOUNCE, event, scope });
-    }
-
-    fn invalidate_scope(&mut self, scope: &ScopeKey) {
-        self.rows.remove_scope(scope);
-        for state in self.surfaces.values_mut() {
-            if &state.scope == scope {
-                state.versions.clear();
-            }
-        }
     }
 
     /// Send due hooks. Runs from the 100 ms app poll, so one poll interval is
@@ -1906,9 +1974,12 @@ mod tests {
             surface,
             scope.clone(),
             9,
-            vec![(EntryHandle(1), path.clone(), 2)],
+            vec![(EntryHandle(1), path.clone(), 1)],
         );
-        surfaces.invalidate_path(&scope, &path);
+        surfaces.invalidate_paths(&scope, std::slice::from_ref(&path));
+        // The replacement can have identical listing metadata. Observing it
+        // again must never make the earlier same-version reply current.
+        start_row(&mut surfaces, running(5, vec![column.clone()]), &column, surface, &scope, &path, 1, stamp(5, 3));
         assert!(!surfaces.finish(
             &column.id,
             stamp(5, 2),

@@ -61,8 +61,27 @@ struct RepoWatch {
     watcher: Option<RecommendedWatcher>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PluginRefresh {
+    Lines,
+    Status,
+    Reset,
+}
+
+fn plugin_refresh(previous: Option<&StatusSnapshot>, next: Option<&StatusSnapshot>) -> Option<PluginRefresh> {
+    match (previous, next) {
+        (None, None) => None,
+        // File contents can change while the Git status stays the same.
+        (Some(old), Some(new)) if old == new => Some(PluginRefresh::Lines),
+        (Some(old), Some(new)) if old.identity == new.identity && old.unavailable == new.unavailable => {
+            Some(PluginRefresh::Status)
+        }
+        _ => Some(PluginRefresh::Reset),
+    }
+}
+
 enum GitEvent {
-    Repo { worktree: PathBuf, snapshot: Option<Arc<StatusSnapshot>> },
+    Repo { worktree: PathBuf, snapshot: Option<Arc<StatusSnapshot>>, refresh: Option<PluginRefresh> },
     Watch { changed: Arc<AtomicBool>, watcher: Option<RecommendedWatcher> },
     Lines { worktree: PathBuf, snapshot: Arc<StatusSnapshot>, results: Vec<(PathBuf, Option<LineCounts>)> },
     Project { scan: Arc<AtomicBool>, project: ProjectRow },
@@ -353,13 +372,13 @@ fn request_folder(cx: &mut App, folder: &Path) {
             let old_repo = git.folders.get(&folder).and_then(|cache| cache.repo.as_ref());
             let changed = old_repo != repo.as_ref();
             let invalidated = changed && old_repo.is_some();
-            git.folders.insert(folder, FolderCache { repo, checked: now });
+            git.folders.insert(folder.clone(), FolderCache { repo, checked: now });
             if let Some(identity) = watch {
                 ensure_watch(cx, identity);
             }
             request_repos(cx, now);
             if invalidated {
-                crate::plugins::invalidate_git(cx);
+                crate::plugins::refresh_git(cx, PluginRefresh::Reset, |path| path == folder);
             }
             if changed {
                 cx.refresh_windows();
@@ -413,11 +432,13 @@ fn request_repos(cx: &mut App, now: Instant) {
         git.pending_repos.insert(worktree.clone());
     }
     for worktree in jobs {
+        let previous = cx.global::<Git>().snapshot(&worktree).cloned();
         let sender = sender.clone();
         let cancel = cancel.clone();
         cx.background_spawn(async move {
             let snapshot = scan_repository(&worktree, &cancel).map(Arc::new);
-            sender.send(GitEvent::Repo { worktree, snapshot }).ok();
+            let refresh = plugin_refresh(previous.as_deref(), snapshot.as_deref());
+            sender.send(GitEvent::Repo { worktree, snapshot, refresh }).ok();
         })
         .detach();
     }
@@ -488,24 +509,23 @@ pub fn poll(cx: &mut App) {
         }
     }
 
-    let mut status_changed = false;
+    let mut repo_refreshes = Vec::new();
     let mut projects_changed = false;
     let mut line_paths = Vec::new();
     let mut watches = Vec::new();
     for event in events {
         match event {
-            GitEvent::Repo { worktree, snapshot } => {
+            GitEvent::Repo { worktree, snapshot, refresh } => {
                 git.pending_repos.remove(&worktree);
-                let changed = snapshot.is_some() || git.snapshot(&worktree).is_some();
                 if let Some(snapshot) = &snapshot {
                     watches.push(snapshot.identity.clone());
                 }
-                if changed {
+                if let Some(refresh) = refresh {
                     git.lines.retain(|(repo, _), _| repo != &worktree);
                     git.wanted_lines.retain(|(repo, _), _| repo != &worktree);
+                    repo_refreshes.push((worktree.clone(), refresh));
                 }
                 git.repos.insert(worktree, RepoCache { snapshot, checked: now });
-                status_changed |= changed;
             }
             GitEvent::Watch { changed, watcher } => {
                 if let Some(watch) = git.watches.iter_mut().find(|watch| Arc::ptr_eq(&watch.changed, &changed)) {
@@ -540,12 +560,20 @@ pub fn poll(cx: &mut App) {
     }
     request_repos(cx, now);
     schedule_lines(cx);
-    if status_changed {
-        crate::plugins::invalidate_git(cx);
-    } else if !line_paths.is_empty() {
+    for (worktree, refresh) in &repo_refreshes {
+        let folders: HashSet<PathBuf> = cx
+            .global::<Git>()
+            .folders
+            .iter()
+            .filter(|(_, cache)| cache.repo.as_ref().is_some_and(|repo| &repo.worktree == worktree))
+            .map(|(folder, _)| folder.clone())
+            .collect();
+        crate::plugins::refresh_git(cx, *refresh, |path| folders.contains(path));
+    }
+    if !line_paths.is_empty() {
         crate::plugins::invalidate_git_lines(cx, &line_paths);
     }
-    if status_changed || projects_changed || !line_paths.is_empty() {
+    if !repo_refreshes.is_empty() || projects_changed || !line_paths.is_empty() {
         cx.refresh_windows();
     }
 }

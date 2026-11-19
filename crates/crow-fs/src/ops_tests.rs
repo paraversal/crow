@@ -733,6 +733,7 @@ fn an_approved_target_replaced_while_paused_reopens_the_conflict() {
     let outcome = harness.terminal();
     assert!(outcome.error.is_none(), "{:?}", outcome.error);
     assert!(outcome.record.steps.is_empty(), "the old approval was discarded, not applied");
+    assert_eq!(conflict.source, f.path("src/a.txt"), "the conflict names the original source, not its stage");
     assert_eq!(f.snapshot()["dest/a.txt"], "new occupant");
     assert!(!f.snapshot().contains_key("dest/a 2.txt"));
 }

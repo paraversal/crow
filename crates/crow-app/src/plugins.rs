@@ -102,6 +102,12 @@ pub fn invalidate_git(cx: &mut App) {
     }
 }
 
+pub fn refresh_git(cx: &mut App, refresh: crate::git::PluginRefresh, folder_matches: impl Fn(&Path) -> bool) {
+    if cx.try_global::<Plugins>().is_some() {
+        cx.global_mut::<Plugins>().surfaces.refresh_git(refresh, folder_matches);
+    }
+}
+
 pub fn start(cx: &mut App, config_dir: PathBuf) {
     start_inner(cx, config_dir, true);
 }
@@ -887,6 +893,83 @@ mod bundled_tests {
             ignored: false,
             lines_changed: Some(3),
         }
+    }
+
+    #[test]
+    fn git_refresh_keeps_ignored_decoration_until_the_current_reply() {
+        use crate::git::PluginRefresh;
+
+        let (service, events, plugin) = start_git();
+        let handle = service.handle();
+        let plugin_id = plugin.id.clone().unwrap();
+        let decoration = ExtensionId::parse("git.status").unwrap();
+        let mut surfaces = PluginSurfaces::default();
+        surfaces.publish_inventory(&Inventory { plugins: vec![plugin], grants_error: None, scan_error: None });
+
+        let surface = new_surface();
+        let scope = ScopeKey::Search { session: 1, origin: PathBuf::from("/tmp") };
+        let path = PathBuf::from("/tmp/one/ignored.txt");
+        let other = PathBuf::from("/tmp/two/ignored.txt");
+        let matches_folder = |folder: &Path| folder == Path::new("/tmp/one");
+        let row = |path: &Path, ignored: bool| RowInput {
+            path: path.to_path_buf(),
+            version: 1,
+            name: "ignored.txt".into(),
+            is_dir: false,
+            size: 1,
+            kind: "Text".into(),
+            selected: false,
+            git: ignored.then(|| crow_plugin::EntryHostData { ignored: true, ..entry(1, "", "ignored") }),
+        };
+        let observe = |surfaces: &mut PluginSurfaces, ignored| {
+            surfaces.observe_rows(
+                Some(&handle),
+                surface,
+                scope.clone(),
+                1,
+                "/tmp",
+                1,
+                std::slice::from_ref(&decoration),
+                vec![row(&path, ignored), row(&other, true)],
+                Instant::now(),
+            );
+        };
+        let reply = || loop {
+            if let HostEvent::RequestFinished { extension, stamp, result } =
+                events.recv_timeout(Duration::from_secs(2)).expect("Git decoration reply")
+            {
+                assert_eq!(extension, decoration);
+                break (stamp, result);
+            }
+        };
+        let dim = |surfaces: &PluginSurfaces, path: &Path| {
+            surfaces.row_value_peek(&decoration, &scope, path, 1).is_some_and(|value| value.dim)
+        };
+
+        observe(&mut surfaces, true);
+        let (stamp, result) = reply();
+        assert!(surfaces.finish(&decoration, stamp, result, Instant::now()));
+        assert!(dim(&surfaces, &path) && dim(&surfaces, &other));
+
+        surfaces.refresh_git(PluginRefresh::Lines, matches_folder);
+        observe(&mut surfaces, true);
+        assert_eq!(surfaces.pending_tickets(), 0, "an identical status leaves decoration ready");
+
+        surfaces.refresh_git(PluginRefresh::Status, matches_folder);
+        observe(&mut surfaces, false);
+        let (stamp, result) = reply();
+        assert!(dim(&surfaces, &path) && dim(&surfaces, &other), "the old decoration stays until the reply is applied");
+        surfaces.refresh_git(PluginRefresh::Status, matches_folder);
+        assert!(!surfaces.finish(&decoration, stamp, result, Instant::now()), "an obsolete reply cannot clear the row");
+        assert!(dim(&surfaces, &path));
+
+        observe(&mut surfaces, false);
+        let (stamp, result) = reply();
+        assert!(surfaces.finish(&decoration, stamp, result, Instant::now()));
+        assert!(!dim(&surfaces, &path), "a clean result clears the previously ignored styling");
+        assert!(dim(&surfaces, &other), "a different worktree keeps its styling");
+        surfaces.suppress_disable(&plugin_id);
+        assert!(!dim(&surfaces, &other));
     }
 
     #[test]
