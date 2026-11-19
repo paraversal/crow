@@ -16153,3 +16153,80 @@ fn a_finder_drop_right_after_typing_still_lands(cx: &mut TestAppContext) {
     assert!(root.join("alpha/notes.txt").exists(), "the drop landed");
     assert!(!root.join("notes.txt").exists(), "…as a move");
 }
+
+/// A long folder of subfolders, for drops into a scrolled listing.
+fn folders_fixture(name: &str) -> TestRoot {
+    let root = TestRoot::new(&format!("crow-app-{name}-"));
+    for i in 0..200 {
+        std::fs::create_dir_all(root.join(format!("d{i:03}"))).expect("create fixture");
+    }
+    root
+}
+
+/// Drop `source` at `at` as Finder would, and wait for the request to finish.
+fn finder_drop(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>, source: PathBuf) {
+    cx.simulate_event(external_entered(at, source, Default::default()));
+    cx.simulate_event(external_pending(at, Default::default()));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let outline = cx.debug_bounds("drop-outline").expect("the row under the pointer is outlined");
+    assert!(outline.contains(&at), "the outline is drawn around the row under the pointer, got {outline:?} for {at:?}");
+    cx.simulate_event(external_submit(at, Default::default()));
+    settle(view, cx);
+}
+
+#[gpui::test]
+fn a_drop_on_a_row_of_a_scrolled_list_lands_in_that_row(cx: &mut TestAppContext) {
+    let root = folders_fixture("drop-scrolled-list");
+    let outside = fixture("drop-scrolled-list-source");
+    let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "off");
+    settle(&view, &mut cx);
+    let folder = view.read_with(&cx, |w, cx| w.pane().read(cx).focused_folder_for_test());
+    // GPUI's scroll offset is negative once scrolled down.
+    folder.read_with(&cx, |f, _| f.scroll().0.borrow().base_handle.set_offset(point(px(0.), px(-24. * 50.))));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let at = cx.debug_bounds("row-d055").expect("d055 is on screen").center();
+    finder_drop(&view, &mut cx, at, outside.join("notes.txt"));
+    assert!(root.join("d055/notes.txt").exists(), "the file landed in the row under the pointer");
+}
+
+#[gpui::test]
+fn a_drop_on_a_row_of_a_scrolled_column_lands_in_that_row(cx: &mut TestAppContext) {
+    let root = folders_fixture("drop-scrolled-column");
+    let outside = fixture("drop-scrolled-column-source");
+    let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "off");
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Columns, cx));
+    settle(&view, &mut cx);
+    let folder = view.read_with(&cx, |w, cx| w.pane().read(cx).focused_folder_for_test());
+    folder.read_with(&cx, |f, _| f.scroll().0.borrow().base_handle.set_offset(point(px(0.), px(-24. * 50.))));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let at = cx.debug_bounds("column-0-row-d055").expect("d055 is on screen").center();
+    finder_drop(&view, &mut cx, at, outside.join("notes.txt"));
+    assert!(root.join("d055/notes.txt").exists(), "the file landed in the column row under the pointer");
+}
+
+#[gpui::test]
+fn a_drop_on_a_scrolled_folder_search_result_lands_in_that_result(cx: &mut TestAppContext) {
+    let root = folders_fixture("drop-scrolled-search");
+    let outside = fixture("drop-scrolled-search-source");
+    let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "off");
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    cx.simulate_input("d");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |window, _| window.search.clone()).expect("search");
+    assert!(search.read_with(&cx, |search, _| search.result_paths().len()) > 100, "a long result list");
+    // Search rows are 40 px tall.
+    search.read_with(&cx, |s, _| s.scroll_for_test().0.borrow().base_handle.set_offset(point(px(0.), px(-40. * 50.))));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let at = cx.debug_bounds("search-row-55").expect("result 55 is on screen").center();
+    let expected = search.read_with(&cx, |search, _| search.result_paths()[55].clone());
+    finder_drop(&view, &mut cx, at, outside.join("notes.txt"));
+    assert!(expected.join("notes.txt").exists(), "the file landed in the result under the pointer");
+}

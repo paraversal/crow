@@ -2010,6 +2010,11 @@ impl SearchView {
     }
 
     #[cfg(test)]
+    pub fn scroll_for_test(&self) -> &UniformListScrollHandle {
+        &self.scroll
+    }
+
+    #[cfg(test)]
     pub fn result_paths(&self) -> Vec<PathBuf> {
         self.results.iter().map(|row| row.path.clone()).collect()
     }
@@ -3437,7 +3442,8 @@ impl SearchView {
             return None;
         }
         let offset = f32::from(self.scroll.0.borrow().base_handle.offset().y);
-        let row = (f32::from(pointer.y - bounds.top()) + offset) / ROW_HEIGHT;
+        // The offset is negative once scrolled down.
+        let row = (f32::from(pointer.y - bounds.top()) - offset) / ROW_HEIGHT;
         if row < 0.0 {
             return None;
         }

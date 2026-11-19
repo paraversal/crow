@@ -79,7 +79,7 @@ fn icon_name_line_height(font_size: f32) -> f32 {
 }
 
 /// The first row a uniform list shows. Its scroll offset is negative once
-/// scrolled down (`drag_row_at` adds it to a pointer position).
+/// scrolled down (`drag_row_at` subtracts it from a pointer position).
 fn first_visible_row(handle: &UniformListScrollHandle) -> usize {
     let offset = f32::from(handle.0.borrow().base_handle.offset().y);
     (-offset / ROW_HEIGHT).max(0.).floor() as usize
@@ -3457,7 +3457,8 @@ impl Pane {
         }
         let folder = self.folders[0].read(cx);
         let row_height = px(ROW_HEIGHT);
-        let y = pointer.y - bounds.top() - px(LIST_TOP_INSET) + folder.scroll().0.borrow().base_handle.offset().y;
+        // The offset is negative once scrolled down: subtracting it moves into the content.
+        let y = pointer.y - bounds.top() - px(LIST_TOP_INSET) - folder.scroll().0.borrow().base_handle.offset().y;
         let row = (f32::from(y) / f32::from(row_height)).floor();
         if row < 0.0 {
             return None;
@@ -3476,7 +3477,7 @@ impl Pane {
             .map(|(k, bounds)| (*k, *bounds))?;
         let folder = self.folders.get(k)?.read(cx);
         let row_height = px(ROW_HEIGHT);
-        let y = pointer.y - bounds.top() + folder.scroll().0.borrow().base_handle.offset().y;
+        let y = pointer.y - bounds.top() - folder.scroll().0.borrow().base_handle.offset().y;
         let row = (f32::from(y) / f32::from(row_height)).floor();
         if row < 0.0 {
             return None;
@@ -6179,7 +6180,7 @@ impl Pane {
             let folder = self.focused_folder().read(cx);
             let ix = (0..folder.row_count()).find(|ix| folder.row(*ix).is_some_and(|(entry, _)| entry.name == name))?;
             let offset = folder.scroll().0.borrow().base_handle.offset().y;
-            let top = bounds.top() + px(LIST_TOP_INSET) - offset + px(ROW_HEIGHT * ix as f32);
+            let top = bounds.top() + px(LIST_TOP_INSET) + offset + px(ROW_HEIGHT * ix as f32);
             return Some(gpui::Bounds::new(point(bounds.left(), top), gpui::size(bounds.size.width, px(ROW_HEIGHT))));
         }
         let rest = selector.strip_prefix("column-")?;
@@ -6189,7 +6190,7 @@ impl Pane {
         let folder = self.folders.get(k)?.read(cx);
         let ix = (0..folder.row_count()).find(|ix| folder.row(*ix).is_some_and(|(entry, _)| entry.name == name))?;
         let offset = folder.scroll().0.borrow().base_handle.offset().y;
-        let top = column.top() + px(ROW_HEIGHT * ix as f32) - offset;
+        let top = column.top() + px(ROW_HEIGHT * ix as f32) + offset;
         Some(gpui::Bounds::new(
             point(column.left() + px(4.), top),
             gpui::size(column.size.width - px(8.), px(ROW_HEIGHT)),
