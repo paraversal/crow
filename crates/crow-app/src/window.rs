@@ -2394,7 +2394,8 @@ impl Render for CrowWindow {
         let (font, font_size) = (ui_font(&ui.settings.font_family), ui.settings.font_size);
         let title = crate::style::display_name(&self.pane().read(cx).current_dir(cx));
         // The single-folder views share the preview column; column view has its own.
-        let list_view = self.pane().read(cx).mode() != ViewMode::Columns;
+        let mode = self.pane().read(cx).mode();
+        let list_view = mode != ViewMode::Columns;
         window.set_window_title(&title);
         let title_bar = self.render_title_bar(&title, window, cx);
         let tab_bar = (self.tabs.len() > 1).then(|| self.render_tab_bar(cx));
@@ -2413,6 +2414,7 @@ impl Render for CrowWindow {
             window.viewport_size().width,
             cx.global::<Ui>().settings.window.sidebar_width,
             self.info.read(cx).preferred_width,
+            show_preview && self.search.is_none() && mode == ViewMode::Gallery,
         );
         let sidebar = div()
             .relative()

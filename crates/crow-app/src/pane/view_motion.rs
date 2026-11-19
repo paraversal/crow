@@ -12,8 +12,8 @@ use gpui::{
 };
 
 use super::{
-    CELL_PADDING, ICON_BOX_PADDING, ICON_TILE_GAP, ICON_TILE_TOP, INDENT, IslandEdges, LIST_TOP_INSET, NAME_INSET,
-    Pane, ROW_HEIGHT, TRIANGLE_WIDTH, icon_name_line_height, shown_offset,
+    CELL_PADDING, ICON_BOX_PADDING, ICON_TILE_GAP, ICON_TILE_TOP, INDENT, IslandEdges, LIST_SIDE_INSET, LIST_TOP_INSET,
+    NAME_INSET, Pane, ROW_HEIGHT, TRIANGLE_WIDTH, gallery, icon_name_line_height, shown_offset,
 };
 
 pub(super) struct ViewMotion {
@@ -152,7 +152,7 @@ impl ViewMotion {
         let Some(area) = pane.gallery.bounds.get() else { return HashMap::new() };
         let folder = folder.read(cx);
         let offset = shown_offset(&pane.gallery.scroll);
-        let row_height = super::gallery::ROW_HEIGHT;
+        let row_height = gallery::ROW_HEIGHT;
         let first = ((-offset / row_height).floor().max(0.0) as usize).min(folder.row_count());
         let count = (f32::from(area.size.height) / row_height).ceil() as usize + 1;
         let last = (first + count).min(folder.row_count());
@@ -163,11 +163,14 @@ impl ViewMotion {
                 let (entry, _) = folder.row(ix)?;
                 let top = area.top() + px(offset + ix as f32 * row_height);
                 let center_y = top + px(row_height / 2.0);
-                let icon_x = area.left() + px(16.);
+                let row_left = area.left() + px(LIST_SIDE_INSET);
+                let row_width = (area.size.width - px(2. * LIST_SIDE_INSET)).max(px(0.));
+                let icon_x = row_left + px(gallery::ROW_PADDING);
+                let label_y = center_y - px((gallery::METADATA_LINE_HEIGHT + gallery::TEXT_GAP) / 2.);
                 let target = RowOrigin {
                     icon: point(icon_x, center_y),
-                    label: point(icon_x + px(28.0), center_y),
-                    row: Bounds::new(point(area.left() + px(4.), top), size(area.size.width - px(8.), px(row_height))),
+                    label: point(icon_x + px(gallery::THUMBNAIL_POINTS as f32 + gallery::ICON_GAP), label_y),
+                    row: Bounds::new(point(row_left, top), size(row_width, px(row_height))),
                     selected: folder.is_selected(&entry.path),
                 };
                 let painted = in_flight

@@ -1,6 +1,5 @@
 //! The app's extension registry: crow-core's built-ins plus the ones that need macOS.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use crow_core::{Extensions, PreviewContent, Previewer};
@@ -27,13 +26,13 @@ impl Previewer for QuickLookThumbnail {
         "quicklook-thumbnail"
     }
 
-    fn preview(&self, entry: &Entry, gate: &dyn ReadGate) -> Option<PreviewContent> {
+    fn preview(&self, entry: &Entry, gate: &dyn ReadGate, image_points: u32) -> Option<PreviewContent> {
         if entry.is_dir && !entry.is_package() {
             return None;
         }
         if gate.check(&entry.path, ReadHint::for_path(&entry.path)) != ReadDecision::Readable {
             return None;
         }
-        crow_macos::thumbnail_png(Path::new(&entry.path), 256.0).map(|png| PreviewContent::Image(Arc::new(png)))
+        crow_macos::thumbnail_png(&entry.path, f64::from(image_points)).map(|png| PreviewContent::Image(Arc::new(png)))
     }
 }

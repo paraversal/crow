@@ -230,7 +230,7 @@ pub fn thumbnail_png(path: &Path, points: f64) -> Option<Vec<u8>> {
         return None;
     }
     let (tx, rx) = mpsc::channel::<Option<Vec<u8>>>();
-    autoreleasepool(|_| {
+    let request = autoreleasepool(|_| {
         let url = ns_url(path);
         // SAFETY: valid URL and size; the request is retained for the call.
         let request = unsafe {
@@ -259,8 +259,16 @@ pub fn thumbnail_png(path: &Path, points: f64) -> Option<Vec<u8>> {
             QLThumbnailGenerator::sharedGenerator()
                 .generateBestRepresentationForRequest_completionHandler(&request, &handler)
         };
+        request
     });
-    rx.recv_timeout(Duration::from_secs(2)).ok().flatten()
+    match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(png) => png,
+        Err(_) => {
+            // SAFETY: the request is retained and the shared generator is thread-safe.
+            autoreleasepool(|_| unsafe { QLThumbnailGenerator::sharedGenerator().cancelRequest(&request) });
+            None
+        }
+    }
 }
 
 #[cfg(test)]

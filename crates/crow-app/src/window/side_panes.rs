@@ -63,10 +63,18 @@ impl SidePanes {
         Self { left_focus: cx.focus_handle(), left: px(210.), right: px(300.), drag: None }
     }
 
-    pub(super) fn layout(&mut self, viewport: Pixels, preferred_left: u32, preferred_right: Option<Pixels>) {
+    pub(super) fn layout(
+        &mut self,
+        viewport: Pixels,
+        preferred_left: u32,
+        preferred_right: Option<Pixels>,
+        gallery_with_info: bool,
+    ) {
+        let center_min = if gallery_with_info { px(320.) } else { px(130.) };
+        let right_min = px(160.);
         let left = self.drag.as_ref().and_then(Drag::resized_left).unwrap_or(preferred_left).clamp(LEFT_MIN, LEFT_MAX);
-        self.left = px(left as f32).min((viewport - px(290.)).max(px(LEFT_MIN as f32)));
-        self.right = preferred_right.unwrap_or(px(300.)).min((viewport - self.left - px(130.)).max(px(160.)));
+        self.left = px(left as f32).min((viewport - center_min - right_min).max(px(LEFT_MIN as f32)));
+        self.right = preferred_right.unwrap_or(px(300.)).min((viewport - self.left - center_min).max(right_min));
     }
 
     pub(super) fn left_width(&self) -> Pixels {

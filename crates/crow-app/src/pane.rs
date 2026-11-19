@@ -368,6 +368,7 @@ pub struct Pane {
     list_width: Pixels,
     resize: Option<ResizeDrag>,
     preview: Option<Preview>,
+    preview_key: Option<(PathBuf, u64, u32)>,
     preview_generation: u64,
     /// Plugin/views generations at the last preview load, so registration and
     /// `preview_providers` edits refresh an already visible preview.
@@ -508,6 +509,7 @@ impl Pane {
             list_width: Pixels::ZERO,
             resize: None,
             preview: None,
+            preview_key: None,
             preview_generation: 0,
             preview_plugin_generation: 0,
             preview_views_generation: 0,
@@ -1177,6 +1179,8 @@ impl Pane {
         self.plugin_selection.clear();
         self.plugin_scope = None;
         self.preview_cancel.store(true, Ordering::Relaxed);
+        self.clear_preview(cx);
+        self.preview_key = None;
         gallery::release(self, cx);
         if cx.try_global::<crate::plugins::Plugins>().is_some() {
             let id = self.gallery.replace_surface();
@@ -1334,7 +1338,8 @@ impl Pane {
             && let Some(preview) = self.preview.as_mut().filter(|preview| preview.path == entry.path)
             && preview.update_cloud(status)
         {
-            self.preview = None;
+            self.clear_preview(cx);
+            self.preview_key = None;
             self.load_preview(cx);
         }
         gallery::cloud_changed(self, cx);
@@ -1408,7 +1413,6 @@ impl Pane {
             if let Some(ix) = self.focused_folder().read(cx).cursor_ix() {
                 self.gallery.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
             }
-            gallery::refresh(self, cx);
         }
         if cx.global::<Ui>().settings.view_per_folder {
             self.remember(ViewChange::View(mode), cx);
@@ -1484,6 +1488,9 @@ impl Pane {
         self.view_motion = None;
         self.child_reveal = None;
         self.drop_filter(cx);
+        if self.mode == ViewMode::Gallery {
+            gallery::release(self, cx);
+        }
         self.mode = mode;
         match mode {
             // The single-folder views show the folder you were in: the focused
@@ -1494,6 +1501,10 @@ impl Pane {
             ViewMode::Columns => self.update_chain(0, cx),
         }
         self.plugin_scope_changed(cx);
+        if mode == ViewMode::Gallery {
+            self.load_preview(cx);
+            gallery::refresh(self, cx);
+        }
         cx.notify();
         true
     }
@@ -1585,7 +1596,6 @@ impl Pane {
         self.folders.clear();
         self.subscriptions.clear();
         self.focused = 0;
-        self.preview = None;
         self.preview_generation += 1;
         self.status = None;
         // The folder's view decides the sort before the listing starts.
@@ -1730,11 +1740,18 @@ impl Pane {
                 let count = folder.read(cx).row_count();
                 self.icon_scroll.scroll_to_item(self.icon_grid(count, cx).row_of(ix), ScrollStrategy::Nearest);
             }
-            if k == self.focused {
+            if self.mode == ViewMode::Gallery
+                && k == self.focused
+                && let Some(ix) = folder.read(cx).cursor_ix()
+            {
+                self.gallery.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+            }
+            if k == self.focused && self.mode != ViewMode::Gallery {
                 self.load_preview(cx);
             }
         }
         if self.mode == ViewMode::Gallery {
+            self.load_preview(cx);
             gallery::refresh(self, cx);
         }
         cx.notify();
@@ -1768,18 +1785,39 @@ impl Pane {
         }
     }
 
+    fn clear_preview(&mut self, cx: &mut gpui::App) {
+        if let Some(mut preview) = self.preview.take() {
+            preview.release_image(cx);
+        }
+    }
+
     fn load_preview(&mut self, cx: &mut Context<Self>) {
         let surface = self.current_plugin_surface(cx);
         let Some(entry) = self.cursor_entry(cx) else {
-            self.preview = None;
+            self.clear_preview(cx);
+            self.preview_key = None;
             self.preview_generation += 1;
             self.preview_cancel.store(true, Ordering::Relaxed);
             crate::plugins::cancel_previews(surface, cx);
             return;
         };
-        if self.preview.as_ref().is_some_and(|p| p.path == entry.path) {
-            return;
+        let revision = self.focused_folder().read(cx).plugin_entry_version(&entry);
+        let image_size = if self.mode == ViewMode::Gallery {
+            preview::ImageSize::Gallery(self.gallery.primary_worker.clone())
+        } else {
+            preview::ImageSize::Pane
+        };
+        let image_points = image_size.points();
+        if let Some((path, old_revision, old_points)) = &self.preview_key {
+            if *path == entry.path && *old_revision == revision {
+                if *old_points >= image_points {
+                    return;
+                }
+            } else {
+                self.clear_preview(cx);
+            }
         }
+        self.preview_key = Some((entry.path.clone(), revision, image_points));
         self.preview_generation += 1;
         let generation = self.preview_generation;
         self.preview_cancel.store(true, Ordering::Relaxed);
@@ -1797,7 +1835,6 @@ impl Pane {
             }
             None => (Arc::new(AllowAll) as Arc<dyn ReadGate>, None),
         };
-        let revision = generation;
         cx.spawn(async move |this, cx| {
             let path = entry.path.clone();
             let fetched = preview::load_with_plugins(
@@ -1809,7 +1846,8 @@ impl Pane {
                 gate,
                 cloud,
                 None,
-                revision,
+                generation,
+                image_size,
                 cancel.clone(),
             )
             .await;
@@ -1824,9 +1862,11 @@ impl Pane {
                 if this.preview_generation == generation && this.cursor_entry(cx).is_some_and(|e| e.path == path) {
                     let mut fetched = fetched;
                     if this.cloud_status(&path, cx).is_some_and(|status| fetched.update_cloud(status)) {
-                        this.preview = None;
+                        this.clear_preview(cx);
+                        this.preview_key = None;
                         this.load_preview(cx);
                     } else {
+                        this.clear_preview(cx);
                         this.preview = Some(fetched);
                     }
                     cx.notify();
@@ -5277,7 +5317,8 @@ impl Render for Pane {
             self.preview_views_generation = views_generation;
             // A registration or provider-list change refreshes the visible preview
             // instead of leaving a withdrawn provider's output on screen.
-            self.preview = None;
+            self.clear_preview(cx);
+            self.preview_key = None;
             self.load_preview(cx);
             gallery::invalidate(self, cx);
         }
@@ -5661,8 +5702,8 @@ impl Pane {
             let ix = (0..folder.row_count()).find(|ix| folder.row(*ix).is_some_and(|(entry, _)| entry.name == name))?;
             let top = bounds.top() + px(gallery::ROW_HEIGHT * ix as f32) + px(shown_offset(&self.gallery.scroll));
             return Some(gpui::Bounds::new(
-                point(bounds.left(), top),
-                gpui::size(bounds.size.width, px(gallery::ROW_HEIGHT)),
+                point(bounds.left() + px(LIST_SIDE_INSET), top),
+                gpui::size((bounds.size.width - px(2. * LIST_SIDE_INSET)).max(px(0.)), px(gallery::ROW_HEIGHT)),
             ));
         }
         if let Some(name) = selector.strip_prefix("row-") {

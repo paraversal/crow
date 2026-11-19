@@ -25,7 +25,8 @@ use gpui::{
 };
 
 use super::{
-    DragHandoff, DraggedSelection, FilterPlace, Pane, drag_combo, drop_outline, promote_drag, row_icon, shown_offset,
+    DragHandoff, DraggedSelection, FilterPlace, LIST_SIDE_INSET, Pane, drag_combo, drop_outline, promote_drag,
+    row_icon, shown_offset,
 };
 use crate::preview::{self, Preview};
 
@@ -33,19 +34,25 @@ use crate::preview::{self, Preview};
 /// so resizing never moves a row under the pointer.
 pub(super) const ROW_HEIGHT: f32 = 48.0;
 /// Points requested from Quick Look for a rail thumbnail.
-const THUMBNAIL_POINTS: u32 = 20;
+pub(super) const THUMBNAIL_POINTS: u32 = 20;
 const SAMPLE_ROWS: usize = 12;
 const SAMPLE_EXAMINED: usize = 256;
 const RAIL_MIN: f32 = 170.0;
 const RAIL_MAX: f32 = 300.0;
+pub(super) const ROW_PADDING: f32 = 10.0;
+pub(super) const ICON_GAP: f32 = 8.0;
+pub(super) const METADATA_LINE_HEIGHT: f32 = 14.0;
+pub(super) const TEXT_GAP: f32 = 2.0;
 /// Below this preview width two cells stack instead of squeezing side by side.
 const SIDE_BY_SIDE_MIN: f32 = 520.0;
 
 pub(super) struct Gallery {
     pub scroll: UniformListScrollHandle,
     pub bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// The two compared paths in rail order, while exactly two are selected.
-    pair: Option<(PathBuf, PathBuf)>,
+    /// Visible preview targets in rail order, refreshed on folder events.
+    entries: Vec<Entry>,
+    pub primary_worker: Arc<futures::lock::Mutex<()>>,
+    second_worker: Arc<futures::lock::Mutex<()>>,
     second: Second,
     second_surface: crate::plugins::SurfaceId,
     samples: [Sample; 2],
@@ -96,7 +103,9 @@ impl Gallery {
         Self {
             scroll: UniformListScrollHandle::new(),
             bounds: Rc::new(Cell::new(None)),
-            pair: None,
+            entries: Vec::new(),
+            primary_worker: Arc::default(),
+            second_worker: Arc::default(),
             second: Second::default(),
             second_surface: crate::plugins::new_surface(),
             samples: Default::default(),
@@ -120,7 +129,7 @@ impl Gallery {
 /// The entries the preview shows, in rail order. Exactly two selected entries
 /// compare; every other selection follows the cursor, which is always one of
 /// the selected rows while one exists.
-pub(super) fn targets(pane: &Pane, cx: &gpui::App) -> Vec<Entry> {
+fn targets(pane: &Pane, cx: &gpui::App) -> Vec<Entry> {
     let folder = pane.focused_folder().read(cx);
     if folder.selected_count() == 2 {
         let mut pair = Vec::with_capacity(2);
@@ -147,25 +156,23 @@ pub(super) fn refresh(pane: &mut Pane, cx: &mut Context<Pane>) {
     }
     let entries = targets(pane, cx);
     let cursor = pane.cursor_entry(cx).map(|entry| entry.path.clone());
-    let pair = (entries.len() == 2).then(|| (entries[0].path.clone(), entries[1].path.clone()));
-    pane.gallery.pair = pair.clone();
-    let second = pair.as_ref().and_then(|(left, right)| {
-        let other = match &cursor {
-            Some(cursor) if cursor == left => right,
-            Some(cursor) if cursor == right => left,
-            _ => return None,
-        };
-        entries.iter().find(|entry| &entry.path == other && !sampleable(entry)).cloned()
-    });
+    let second = match (entries.as_slice(), cursor.as_deref()) {
+        ([left, right], Some(cursor)) if left.path == cursor => Some(right),
+        ([left, right], Some(cursor)) if right.path == cursor => Some(left),
+        _ => None,
+    }
+    .filter(|entry| !sampleable(entry))
+    .cloned();
     load_second(pane, second, cx);
     update_samples(pane, &entries, cx);
+    pane.gallery.entries = entries;
 }
 
 /// A provider registration or `preview_providers` edit invalidated every
 /// preview: keep the targets but fetch them again.
 pub(super) fn invalidate(pane: &mut Pane, cx: &mut Context<Pane>) {
     pane.gallery.second.path = None;
-    pane.gallery.second.preview = None;
+    pane.gallery.second.clear_preview(cx);
     pane.gallery.second.loading = false;
     refresh(pane, cx);
 }
@@ -176,14 +183,28 @@ pub(super) fn cloud_changed(pane: &mut Pane, cx: &mut Context<Pane>) {
     if pane.mode != ViewMode::Gallery {
         return;
     }
-    let Some(path) = pane.gallery.second.path.clone() else { return };
-    let Some(status) = pane.cloud_status(&path, cx) else { return };
-    if let Some(preview) = pane.gallery.second.preview.as_mut()
-        && preview.update_cloud(status)
-    {
-        pane.gallery.second.path = None;
-        pane.gallery.second.preview = None;
-        pane.gallery.second.loading = false;
+    let mut refresh_needed = false;
+    let second = &mut pane.gallery.second;
+    let cloud = cx.try_global::<crate::cloud_status::CloudStatusService>().map(|service| service.0.read(cx));
+    let retry_second = second.preview.as_mut().is_some_and(|preview| {
+        cloud.and_then(|service| service.status(&preview.path)).is_some_and(|status| preview.update_cloud(status))
+    });
+    for sample in &mut pane.gallery.samples {
+        if matches!(sample.load, SampleLoad::Unavailable(_))
+            && let Some(path) = &sample.path
+            && cloud.and_then(|service| service.status(path)).is_some_and(CloudStatus::is_local)
+        {
+            sample.path = None;
+            refresh_needed = true;
+        }
+    }
+    if retry_second {
+        second.path = None;
+        second.clear_preview(cx);
+        second.loading = false;
+        refresh_needed = true;
+    }
+    if refresh_needed {
         refresh(pane, cx);
     }
 }
@@ -191,9 +212,10 @@ pub(super) fn cloud_changed(pane: &mut Pane, cx: &mut Context<Pane>) {
 /// Stop work whose result can no longer be shown.
 pub(super) fn release(pane: &mut Pane, cx: &mut Context<Pane>) {
     pane.gallery.second.path = None;
-    pane.gallery.second.preview = None;
+    pane.gallery.second.clear_preview(cx);
     pane.gallery.second.loading = false;
     pane.gallery.second.revision = pane.gallery.second.revision.wrapping_add(1);
+    pane.gallery.second.cancel();
     crate::plugins::cancel_previews(pane.gallery.second_surface, cx);
     for sample in &mut pane.gallery.samples {
         sample.cancel.cancel();
@@ -202,7 +224,7 @@ pub(super) fn release(pane: &mut Pane, cx: &mut Context<Pane>) {
         sample.key = 0;
         sample.load = SampleLoad::Idle;
     }
-    pane.gallery.pair = None;
+    pane.gallery.entries.clear();
 }
 
 fn key_for(pane: &Pane, entry: &Entry, cx: &gpui::App) -> u64 {
@@ -220,7 +242,7 @@ fn load_second(pane: &mut Pane, entry: Option<Entry>, cx: &mut Context<Pane>) {
     let surface = pane.gallery.second_surface;
     let Some(entry) = entry else {
         pane.gallery.second.path = None;
-        pane.gallery.second.preview = None;
+        pane.gallery.second.clear_preview(cx);
         pane.gallery.second.loading = false;
         pane.gallery.second.revision = pane.gallery.second.revision.wrapping_add(1);
         pane.gallery.second.cancel();
@@ -239,7 +261,7 @@ fn load_second(pane: &mut Pane, entry: Option<Entry>, cx: &mut Context<Pane>) {
     pane.gallery.second.path = Some(entry.path.clone());
     pane.gallery.second.revision = revision;
     pane.gallery.second.loading = true;
-    pane.gallery.second.preview = None;
+    pane.gallery.second.clear_preview(cx);
     let generation = revision;
     let configured = cx.global::<crate::ui::Ui>().views.resolve(pane.dir()).preview_providers.0.clone();
     let candidates = crate::plugins::preview_candidates(cx, &configured, &entry.path, entry.is_dir, entry.is_symlink);
@@ -247,6 +269,7 @@ fn load_second(pane: &mut Pane, entry: Option<Entry>, cx: &mut Context<Pane>) {
     let (gate, cloud) = gate_and_cloud(cx, &entry.path);
     let cancel = Arc::new(AtomicBool::new(false));
     pane.gallery.second.cancel_flag = cancel.clone();
+    let image_size = preview::ImageSize::Gallery(pane.gallery.second_worker.clone());
     let shown = entry.clone();
     cx.spawn(async move |this, cx| {
         let fetched = preview::load_with_plugins(
@@ -259,6 +282,7 @@ fn load_second(pane: &mut Pane, entry: Option<Entry>, cx: &mut Context<Pane>) {
             cloud,
             None,
             generation,
+            image_size,
             cancel.clone(),
         )
         .await;
@@ -274,7 +298,6 @@ fn load_second(pane: &mut Pane, entry: Option<Entry>, cx: &mut Context<Pane>) {
                 return;
             };
             if this.cloud_status(&shown.path, cx).is_some_and(|status| fetched.update_cloud(status)) {
-                this.gallery.second.preview = None;
                 this.gallery.second.path = None;
                 load_second(this, Some(shown), cx);
             } else {
@@ -303,54 +326,35 @@ fn sampleable(entry: &Entry) -> bool {
 }
 
 fn update_samples(pane: &mut Pane, entries: &[Entry], cx: &mut Context<Pane>) {
-    let wanted: [Option<(PathBuf, u64)>; 2] = std::array::from_fn(|i| {
-        entries.get(i).filter(|entry| sampleable(entry)).map(|entry| (entry.path.clone(), key_for(pane, entry, cx)))
-    });
-    for i in 0..2 {
-        let keep = match (&wanted[i], &pane.gallery.samples[i]) {
-            (Some((path, key)), sample) => sample.path.as_ref() == Some(path) && sample.key == *key,
-            (None, _) => false,
-        };
-        if !keep {
-            pane.gallery.samples[i].cancel.cancel();
-            pane.gallery.samples[i].generation = pane.gallery.samples[i].generation.wrapping_add(1);
-            pane.gallery.samples[i].path = None;
-            pane.gallery.samples[i].key = 0;
-            pane.gallery.samples[i].load = SampleLoad::Idle;
+    let wanted = entries
+        .iter()
+        .filter(|entry| sampleable(entry))
+        .map(|entry| (entry, key_for(pane, entry, cx)))
+        .collect::<Vec<_>>();
+    // Slots belong to entries. Moving a surviving entry to another visible
+    // cell keeps its worker and result even while the first reply is pending.
+    for sample in &mut pane.gallery.samples {
+        if !wanted.iter().any(|(entry, key)| sample.path.as_ref() == Some(&entry.path) && sample.key == *key) {
+            sample.cancel.cancel();
+            sample.generation = sample.generation.wrapping_add(1);
+            sample.path = None;
+            sample.load = SampleLoad::Idle;
         }
     }
-    // A surviving entry keeps its result when the layout moves it to the other
-    // cell (the cursor moved inside an existing pair).
-    for i in 0..2 {
-        let Some((path, key)) = wanted[i].clone() else { continue };
-        if pane.gallery.samples[i].path.as_ref() == Some(&path) && pane.gallery.samples[i].key == key {
+    for (entry, key) in wanted {
+        if pane.gallery.samples.iter().any(|sample| sample.path.as_ref() == Some(&entry.path)) {
             continue;
         }
-        let j = (0..2).find(|j| {
-            *j != i && pane.gallery.samples[*j].path.as_ref() == Some(&path) && pane.gallery.samples[*j].key == key
-        });
-        if let Some(j) = j {
-            let moved = std::mem::take(&mut pane.gallery.samples[j]);
-            pane.gallery.samples[i] = moved;
+        if let Some(slot) = pane.gallery.samples.iter().position(|sample| sample.path.is_none()) {
+            if let Some(loaded) = pane.focused_folder().read(cx).loaded_listing(&entry.path, cx) {
+                let sample = &mut pane.gallery.samples[slot];
+                sample.path = Some(entry.path.clone());
+                sample.key = key;
+                sample.load = SampleLoad::Ready(Arc::new(from_listing(&loaded)));
+            } else {
+                start_sample(pane, slot, entry.clone(), key, cx);
+            }
         }
-    }
-    for i in 0..2 {
-        let Some((path, key)) = wanted[i].clone() else { continue };
-        if pane.gallery.samples[i].path.as_ref() == Some(&path) && pane.gallery.samples[i].key == key {
-            continue;
-        }
-        let Some(entry) = entries.iter().find(|entry| entry.path == path).cloned() else { continue };
-        if let Some(loaded) = pane.focused_folder().read(cx).loaded_listing(&path, cx) {
-            pane.gallery.samples[i] = Sample {
-                path: Some(path),
-                key,
-                generation: pane.gallery.samples[i].generation.wrapping_add(1),
-                cancel: Default::default(),
-                load: SampleLoad::Ready(Arc::new(from_listing(&loaded))),
-            };
-            continue;
-        }
-        start_sample(pane, i, entry, key, cx);
     }
 }
 
@@ -421,12 +425,23 @@ fn start_sample(pane: &mut Pane, slot: usize, entry: Entry, key: u64, cx: &mut C
 }
 
 impl Second {
+    fn clear_preview(&mut self, cx: &mut gpui::App) {
+        if let Some(mut preview) = self.preview.take() {
+            preview.release_image(cx);
+        }
+    }
+
     fn cancel(&mut self) {
         self.cancel_flag.store(true, Ordering::Relaxed);
     }
 }
 
 /// One frame of the Gallery body.
+fn rail_width(width: Pixels) -> f32 {
+    let width = f32::from(width).max(1.0);
+    (width * 0.36).clamp(RAIL_MIN, RAIL_MAX).min(width)
+}
+
 pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane>) -> impl IntoElement + use<> {
     let folder_entity = pane.folders[0].clone();
     let (rows, folder_name) = {
@@ -435,9 +450,9 @@ pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane
     };
     let width = f32::from(pane.list_width).max(1.0);
     let theme = cx.global::<crate::ui::Ui>().theme.clone();
-    let rail_width = (width * 0.36).clamp(RAIL_MIN, RAIL_MAX).min(width);
+    let rail_width = rail_width(pane.list_width);
     let preview_width = (width - rail_width - 1.0).max(0.0);
-    let entries = targets(pane, cx);
+    let entries = &pane.gallery.entries;
     let cursor = pane.cursor_entry(cx).map(|entry| entry.path.clone());
 
     // Report the visible rail rows and the preview's folders in one source, so
@@ -456,12 +471,14 @@ pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane
             }
         }
     }
-    for (i, entry) in entries.iter().enumerate() {
+    for entry in entries {
         cloud_paths.push(entry.path.clone());
         if entry.is_dir && !entry.is_symlink {
             size_paths.push(entry.path.clone());
         }
-        if let SampleLoad::Ready(sample) = &pane.gallery.samples[i].load {
+    }
+    for slot in &pane.gallery.samples {
+        if let SampleLoad::Ready(sample) = &slot.load {
             for child in &sample.entries {
                 cloud_paths.push(child.path.clone());
                 if child.is_dir && !child.is_symlink {
@@ -498,6 +515,7 @@ pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane
                 Some(block) => block,
                 None => div()
                     .relative()
+                    .pt(px(4.))
                     .flex_1()
                     .min_h_0()
                     .w_full()
@@ -508,7 +526,12 @@ pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane
                         bounds.set(children.first().copied());
                     })
                     .child(
-                        uniform_list("gallery-entries", rows, render_rows).track_scroll(&scrolling).flex_1().min_h_0(),
+                        uniform_list("gallery-entries", rows, render_rows)
+                            .track_scroll(&scrolling)
+                            .w_full()
+                            .px(px(LIST_SIDE_INSET))
+                            .flex_1()
+                            .min_h_0(),
                     )
                     .into_any_element(),
             };
@@ -550,7 +573,7 @@ pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane
         pane.gallery.reveal = None;
     }
     let opacity = reveal.map_or(1.0, |t| 0.4 + 0.6 * t);
-    let preview = render_preview(pane, &entries, &cursor, preview_width, &theme, window, cx).opacity(opacity);
+    let preview = render_preview(pane, &cursor, preview_width, &theme, window, cx).opacity(opacity);
     div()
         .debug_selector(|| "gallery".into())
         .size_full()
@@ -602,9 +625,10 @@ fn render_rows(
     let icons = pane.icon_resolver(0, cx);
     let thumbnails = crate::thumbnails::service(cx);
     let gate = crate::thumbnails::readable_gate(cx);
-    let width = (f32::from(pane.list_width) * 0.36).clamp(RAIL_MIN, RAIL_MAX);
+    let width = rail_width(pane.list_width);
     let wide = width >= 240.0;
-    let name_room = px((width - 34.0).max(40.0));
+    let name_room =
+        px((width - 1.0 - 2.0 * LIST_SIDE_INSET - 2.0 * ROW_PADDING - THUMBNAIL_POINTS as f32 - ICON_GAP).max(0.0));
     let mut requests = Vec::new();
     let rows = rows
         .into_iter()
@@ -636,14 +660,14 @@ fn render_rows(
                 Some(row) => row.icon(icon),
                 None => icon,
             };
+            let known_size = folder_size(pane, &entry, cx);
             let size = if entry.is_dir {
-                cx.try_global::<crate::folder_sizes::SizeService>()
-                    .and_then(|service| service.0.read(cx).size(&entry.path))
-                    .map_or_else(|| "--".to_owned(), |size| crow_fs::human_size(size.bytes))
+                known_size.map_or_else(|| "--".to_owned(), |size| crow_fs::human_size(size.bytes))
             } else {
                 crow_fs::human_size(entry.size)
             };
             let date = crate::style::format_time_short(entry.modified);
+            let name_room = crate::cloud_status::name_room(cloud, name_room);
             let name = crate::style::truncate_middle_parts(&entry.name, name_room, font_size, window);
             let name_ranges = ranges.get(&ix).map(|range| crate::style::map_range(&name, range.clone()));
             let dim = crate::style::content_opacity(entry.hidden, false);
@@ -680,11 +704,13 @@ fn render_rows(
                 .aria_selected(selected)
                 .when(cursor_here, |row| row.aria_active_descendant())
                 .h(px(ROW_HEIGHT))
-                .mx(px(4.))
+                .w_full()
+                .px(px(ROW_PADDING))
                 .rounded(px(6.))
                 .relative()
                 .flex()
                 .items_center()
+                .gap(px(ICON_GAP))
                 .when(selected, |row| row.bg(selection_bg))
                 .when(fade < 1.0, |row| row.opacity(fade))
                 .when(multi && cursor_here, |row| row.shadow(crate::style::cursor_ring(&theme)))
@@ -731,21 +757,28 @@ fn render_rows(
                 }))
                 .child(
                     div()
+                        .flex_none()
+                        .size(px(THUMBNAIL_POINTS as f32))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(dim)
+                        .child(icon),
+                )
+                .child(
+                    div()
                         .flex_1()
                         .min_w_0()
                         .flex()
                         .flex_col()
                         .justify_center()
-                        .gap(px(2.))
-                        .pl(px(6.))
-                        .pr(px(6.))
+                        .gap(px(TEXT_GAP))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
-                                .gap(px(8.))
+                                .gap(px(4.))
                                 .min_w_0()
-                                .child(icon)
                                 .child({
                                     let renaming = pane.renaming.as_ref().is_some_and(|r| r.path == entry.path);
                                     let label = if renaming {
@@ -782,7 +815,7 @@ fn render_rows(
                                                 .text_ellipsis()
                                                 .opacity(dim)
                                                 .child(text),
-                                            entry.name.clone(),
+                                            crate::style::display_text(&entry.name).into_owned(),
                                             None,
                                         )
                                         .into_any_element()
@@ -800,13 +833,17 @@ fn render_rows(
                                 .items_center()
                                 .gap(px(6.))
                                 .text_size(px(11.))
+                                .line_height(px(METADATA_LINE_HEIGHT))
                                 .text_color(muted)
                                 .opacity(dim)
                                 .when(wide, |meta| {
-                                    meta.child(div().w(px(58.)).text_right().child(size.clone()))
-                                        .child(div().flex_1().text_right().child(date.clone()))
+                                    meta.child(div().w(px(56.)).flex_none().child(size.clone()))
+                                        .child(div().flex_1().min_w_0().text_right().truncate().child(date.clone()))
                                 })
-                                .when(!wide, |meta| meta.child(format!("{size} · {date}"))),
+                                .when(!wide, |meta| {
+                                    let date = crate::style::format_date_short(entry.modified);
+                                    meta.child(div().min_w_0().truncate().child(format!("{size} · {date}")))
+                                }),
                         ),
                 )
         })
@@ -818,14 +855,14 @@ fn render_rows(
 }
 
 fn render_preview(
-    pane: &mut Pane,
-    entries: &[Entry],
+    pane: &Pane,
     cursor: &Option<PathBuf>,
     width: f32,
     theme: &Theme,
     window: &mut Window,
     cx: &mut Context<Pane>,
 ) -> Div {
+    let entries = &pane.gallery.entries;
     if entries.is_empty() {
         return div()
             .size_full()
@@ -836,6 +873,7 @@ fn render_preview(
             .child("No selection");
     }
     let side_by_side = entries.len() == 2 && width >= SIDE_BY_SIDE_MIN;
+    let cell_width = if side_by_side { (width - 36.0) / 2.0 } else { width - 24.0 };
     let mut wrapper = div()
         .debug_selector(|| "gallery-preview".into())
         .size_full()
@@ -845,7 +883,12 @@ fn render_preview(
         .when(side_by_side, |wrapper| wrapper.flex().flex_row())
         .when(!side_by_side, |wrapper| wrapper.flex().flex_col());
     for (i, entry) in entries.iter().enumerate() {
-        let sample = &pane.gallery.samples[i.min(1)];
+        let sample = pane
+            .gallery
+            .samples
+            .iter()
+            .find(|sample| sample.path.as_ref() == Some(&entry.path))
+            .map_or(&SampleLoad::Idle, |sample| &sample.load);
         let preview = if cursor.as_deref() == Some(entry.path.as_path()) {
             pane.preview(cx)
         } else if pane.gallery.second.path.as_deref() == Some(entry.path.as_path()) {
@@ -856,7 +899,7 @@ fn render_preview(
         let size = folder_size(pane, entry, cx);
         let cloud = pane.cloud_status(&entry.path, cx).or(entry.dataless.then_some(CloudStatus::NotDownloaded));
         let label = if sampleable(entry) {
-            let items = match &sample.load {
+            let items = match sample {
                 SampleLoad::Ready(sample) if sample.incomplete.is_none() => Some(sample.entries.len()),
                 _ => None,
             };
@@ -881,9 +924,9 @@ fn render_preview(
             .when(side_by_side, |cell| cell.h_full())
             .when(!side_by_side, |cell| cell.w_full())
             .child(if sampleable(entry) {
-                folder_cell(pane, entry, sample, size, cloud, theme, width, i, window, cx).into_any_element()
+                folder_cell(pane, entry, sample, size, cloud, theme, cell_width, i, window, cx).into_any_element()
             } else {
-                file_cell(pane, entry, preview, size, cloud, theme, i, window, cx).into_any_element()
+                file_cell(pane, entry, preview, size, cloud, theme, i, cell_width < 240.0, cx).into_any_element()
             });
         wrapper = wrapper.child(cell);
     }
@@ -908,7 +951,7 @@ fn file_cell(
     cloud: Option<CloudStatus>,
     theme: &Theme,
     cell: usize,
-    _window: &mut Window,
+    compact: bool,
     cx: &gpui::Context<Pane>,
 ) -> Div {
     let muted = crate::style::color(theme.role("fg-muted"));
@@ -944,22 +987,20 @@ fn file_cell(
                     name,
                     None,
                 ))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(11.))
-                        .text_color(muted)
-                        .child(format!("{} · {size}", crate::style::kind(entry))),
-                ),
+                .when(!compact, |header| {
+                    header.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(format!("{} · {size}", crate::style::kind(entry))),
+                    )
+                }),
         )
         .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .overflow_hidden()
-                .flex()
-                .child(preview::gallery_content(entry, preview, theme, cloud, &resolver)),
+            div().flex_1().min_h_0().w_full().relative().overflow_hidden().child(
+                div().absolute().inset_0().child(preview::gallery_content(entry, preview, theme, cloud, &resolver)),
+            ),
         )
 }
 
@@ -967,7 +1008,7 @@ fn file_cell(
 fn folder_cell(
     pane: &Pane,
     entry: &Entry,
-    sample: &Sample,
+    sample: &SampleLoad,
     folder_size: Option<KnownSize>,
     cloud: Option<CloudStatus>,
     theme: &Theme,
@@ -980,11 +1021,11 @@ fn folder_cell(
     let border = crate::style::color(theme.role("border"));
     let resolver = pane.icon_resolver(0, cx);
     let size = folder_size.map_or_else(|| "--".to_owned(), |size| crow_fs::human_size(size.bytes));
-    let items = match &sample.load {
+    let items = match sample {
         SampleLoad::Ready(sample) if sample.incomplete.is_none() => Some(sample.entries.len()),
         _ => None,
     };
-    let footer_id = match &sample.load {
+    let footer_id = match sample {
         SampleLoad::Idle | SampleLoad::Loading => "gallery-sample-loading",
         SampleLoad::Ready(sample) if sample.entries.is_empty() && sample.incomplete.is_none() => "gallery-sample-empty",
         SampleLoad::Ready(sample) if sample.incomplete.is_some() => "gallery-sample-partial",
@@ -994,7 +1035,7 @@ fn folder_cell(
     };
     let mut list =
         div().id(("gallery-folder-list", cell)).flex().flex_col().flex_1().min_h_0().overflow_y_scroll().gap(px(1.));
-    let footer_text: Option<String> = match &sample.load {
+    let footer_text: Option<String> = match sample {
         SampleLoad::Idle | SampleLoad::Loading => Some("Loading…".to_owned()),
         SampleLoad::Ready(sample) if sample.entries.is_empty() && sample.incomplete.is_none() => {
             Some("Empty folder".to_owned())

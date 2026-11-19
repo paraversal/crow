@@ -11,18 +11,38 @@ use crow_core::{EntryHandle, Excerpt, Extensions, KnownSize, PluginPreview, Prev
 use crow_fs::{CloudStatus, Entry, ReadDecision, ReadGate, ReadHint};
 use crow_plugin::ExcerptInput;
 use crow_theme::Theme;
-use gpui::{Div, FontWeight, HighlightStyle, Image, ImageFormat, Rgba, Role, StyledText, div, img, prelude::*, px};
+use futures::lock::Mutex;
+use gpui::{
+    Div, FontWeight, HighlightStyle, Image, ImageFormat, ObjectFit, RenderImage, Rgba, Role, StyledText, SvgRenderer,
+    div, img, prelude::*, px,
+};
 
 use crate::icons::{Glyph, glyph};
 use crate::style::{cloud_icon, color, color_alpha, display_text, format_time, kind};
 use crate::syntax::{self, Language};
+
+pub enum ImageSize {
+    Pane,
+    /// One bounded Retina rendition works for both comparison layouts and Info.
+    /// Each cell's worker prevents superseded requests from overlapping.
+    Gallery(Arc<Mutex<()>>),
+}
+
+impl ImageSize {
+    pub fn points(&self) -> u32 {
+        match self {
+            Self::Pane => 256,
+            Self::Gallery(_) => 1024,
+        }
+    }
+}
 
 /// What the preview shows for one item, loaded off the main thread.
 #[derive(Clone)]
 pub struct Preview {
     pub path: PathBuf,
     pub content: Option<PreviewContent>,
-    pub image: Option<Arc<Image>>,
+    pub image: Option<Arc<RenderImage>>,
     pub tags: Vec<String>,
     /// The lines around a content hit, when the search asked for one.
     pub excerpt: Option<Excerpt>,
@@ -43,6 +63,13 @@ pub struct PluginPreviewView {
 }
 
 impl Preview {
+    pub fn release_image(&mut self, cx: &mut gpui::App) {
+        if let Some(image) = self.image.take() {
+            // Let the window finish updating before clearing its sprite atlas.
+            cx.defer(move |cx| cx.drop_image(image, None));
+        }
+    }
+
     /// Request one fresh read when a blocked preview learns that the item is local.
     pub fn update_cloud(&mut self, status: CloudStatus) -> bool {
         let retry = self.blocked && status.is_local() && self.cloud != Some(status);
@@ -228,43 +255,63 @@ pub async fn load_with_plugins(
     cloud: Option<CloudStatus>,
     line: Option<u64>,
     revision: u64,
+    image_size: ImageSize,
     cancelled: Arc<AtomicBool>,
 ) -> Option<Preview> {
     #[cfg(test)]
     test_hold::wait(&entry.path).await;
-    let readable = gate.check(&entry.path, ReadHint::for_path(&entry.path)) == ReadDecision::Readable;
-    let plugin = if candidates.is_empty() || !readable || cancelled.load(Ordering::Relaxed) {
-        None
-    } else {
-        plugin_preview(cx, surface, candidates, entry.clone(), gate.clone(), cloud, revision, cancelled.clone()).await
-    };
     if cancelled.load(Ordering::Relaxed) {
         return None;
     }
-    match plugin {
-        Some(preview) => Some(preview),
-        None => {
-            let entry = entry.clone();
-            Some(cx.background_spawn(async move { fetch_at(&entry, &extensions, line, gate.as_ref(), cloud) }).await)
-        }
+    if !candidates.is_empty()
+        && cx
+            .background_spawn({
+                let path = entry.path.clone();
+                let gate = gate.clone();
+                async move { gate.check(&path, ReadHint::for_path(&path)) == ReadDecision::Readable }
+            })
+            .await
+        && !cancelled.load(Ordering::Relaxed)
+        && let Some(preview) =
+            plugin_preview(cx, surface, candidates, entry.clone(), gate.clone(), cloud, revision, cancelled.clone())
+                .await
+    {
+        return Some(preview);
     }
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let image_points = image_size.points();
+    let worker = match image_size {
+        ImageSize::Pane => None,
+        ImageSize::Gallery(worker) => Some(worker.lock_owned().await),
+    };
+    let svg = cx.update(|cx| cx.svg_renderer());
+    cx.background_spawn(async move {
+        let _worker = worker;
+        (!cancelled.load(Ordering::Relaxed))
+            .then(|| fetch_at(&entry, &extensions, line, gate.as_ref(), cloud, image_points, svg))
+    })
+    .await
 }
 
 /// `fetch`, plus the lines around a content hit when the text previewer read it.
 /// `gate` is a fresh read policy; `cloud` is only for the placeholder's text.
-pub fn fetch_at(
+fn fetch_at(
     entry: &Entry,
     extensions: &Extensions,
     line: Option<u64>,
     gate: &dyn ReadGate,
     cloud: Option<CloudStatus>,
+    image_points: u32,
+    svg: SvgRenderer,
 ) -> Preview {
     let _span = tracing::debug_span!("preview load").entered();
     let decision = gate.check(&entry.path, ReadHint::for_path(&entry.path));
     let blocked = decision != ReadDecision::Readable;
-    let content = if blocked { None } else { extensions.preview(entry, gate) };
+    let content = if blocked { None } else { extensions.preview(entry, gate, image_points) };
     let image = match &content {
-        Some(PreviewContent::Image(png)) => Some(Arc::new(Image::from_bytes(ImageFormat::Png, png.to_vec()))),
+        Some(PreviewContent::Image(png)) => Image::from_bytes(ImageFormat::Png, png.to_vec()).to_image_data(svg).ok(),
         _ => None,
     };
     let excerpt = match (&content, line) {
@@ -580,11 +627,9 @@ pub(crate) fn gallery_content(
     match (preview.and_then(|preview| preview.image.clone()), preview.and_then(|preview| preview.content.clone())) {
         (Some(image), _) => div()
             .size_full()
-            .min_h_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(img(image).max_w_full().max_h_full())
+            .relative()
+            .debug_selector(|| "gallery-image-frame".into())
+            .child(img(image).absolute().inset_0().size_full().aspect_square().object_fit(ObjectFit::Contain))
             .into_any_element(),
         (None, Some(PreviewContent::Text(text))) => {
             let language = Language::from_path(&entry.path);
@@ -720,7 +765,15 @@ mod tests {
         let mut entry = entry;
         entry.path = path;
         let ext = Extensions::with_builtins();
-        let blocked = fetch_at(&entry, &ext, None, &Refuse, Some(CloudStatus::NotDownloaded));
+        let blocked = fetch_at(
+            &entry,
+            &ext,
+            None,
+            &Refuse,
+            Some(CloudStatus::NotDownloaded),
+            256,
+            SvgRenderer::new(Arc::new(())),
+        );
         assert!(blocked.blocked);
         assert!(blocked.content.is_none());
         assert!(blocked.image.is_none());
@@ -728,7 +781,8 @@ mod tests {
         assert_eq!(blocked.cloud, Some(CloudStatus::NotDownloaded));
 
         let gate = CountReads(Default::default());
-        let mut ready = fetch_at(&entry, &ext, None, &gate, Some(CloudStatus::Downloaded));
+        let mut ready =
+            fetch_at(&entry, &ext, None, &gate, Some(CloudStatus::Downloaded), 256, SvgRenderer::new(Arc::new(())));
         assert!(!ready.blocked);
         assert!(matches!(ready.content, Some(PreviewContent::Text(_))), "a downloaded file previews");
         assert!(gate.0.load(std::sync::atomic::Ordering::Relaxed) >= 1, "the gate is consulted");

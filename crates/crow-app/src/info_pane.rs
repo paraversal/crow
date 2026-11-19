@@ -17,7 +17,7 @@ use crow_fs::{CloudStatus, Entry};
 use crow_theme::Theme;
 use gpui::{
     AnyElement, App, Bounds, Context, Div, Entity, EventEmitter, FontWeight, IntoElement, Render, Role, Subscription,
-    Window, canvas, div, fill, point, prelude::*, px, size,
+    Window, canvas, div, fill, point, prelude::*, px, relative, size,
 };
 
 use crate::cloud_status::{self, CloudStatusService};
@@ -861,7 +861,14 @@ fn field(label: &str, value: impl IntoElement, theme: &Theme) -> Div {
         .py_1()
         .border_b_1()
         .border_color(color(theme.role("border")))
-        .child(div().w(px(84.)).flex_none().text_color(color(theme.role("fg-muted"))).child(label.to_owned()))
+        .child(
+            div()
+                .w(px(84.))
+                .max_w(relative(0.4))
+                .flex_none()
+                .text_color(color(theme.role("fg-muted")))
+                .child(label.to_owned()),
+        )
         .child(div().flex_1().min_w_0().child(value))
 }
 

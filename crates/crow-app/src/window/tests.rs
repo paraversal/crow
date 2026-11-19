@@ -3034,6 +3034,36 @@ fn gallery_stacks_a_pair_in_a_narrow_window(cx: &mut TestAppContext) {
     let alpha = cx.debug_bounds("gallery-cell-alpha").expect("first cell");
     let beta = cx.debug_bounds("gallery-cell-beta").expect("second cell");
     assert!(alpha.bottom() <= beta.top(), "a narrow window stacks the pair: {alpha:?} {beta:?}");
+    cx.simulate_keystrokes("cmd-i");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("info-body").is_some());
+    let alpha = cx.debug_bounds("gallery-cell-alpha").expect("first cell with Info open");
+    assert!(alpha.size.width >= px(120.), "Info leaves room for the preview: {alpha:?}");
+}
+
+#[gpui::test]
+fn gallery_rows_use_the_rail_width_and_scroll_to_home_and_end(cx: &mut TestAppContext) {
+    let root = fixture("gallery-rail-width");
+    for i in 0..100 {
+        std::fs::write(root.join(format!("file-{i:03}.txt")), "").unwrap();
+    }
+    let (view, mut cx) = open_sized(cx, &root, 1280., 520.);
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    let rail = cx.debug_bounds("gallery-rail").expect("rail");
+    let beta = cx.debug_bounds("gallery-row-beta").expect("beta row");
+    let name = cx.debug_bounds("gallery-row-name-beta").expect("beta name");
+    assert!(beta.left() >= rail.left() + px(8.));
+    assert!(beta.right() >= rail.right() - px(10.), "row fills the rail between the gutters");
+    assert!(name.left() >= beta.left() + px(38.), "filename leaves room for the inset thumbnail");
+    cx.simulate_click(gpui::point(rail.right() - px(12.), beta.center().y), gpui::Modifiers::default());
+    assert_eq!(selected(&view, &cx).as_deref(), Some("beta"));
+    cx.simulate_keystrokes("end");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("gallery-row-notes.txt").is_some());
+    cx.simulate_keystrokes("home");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("gallery-row-alpha").is_some());
 }
 
 #[gpui::test]
