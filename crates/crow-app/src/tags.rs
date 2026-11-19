@@ -23,10 +23,8 @@ pub const INVENTORY_TAG_CAP: usize = 256;
 pub struct TagIndex {
     pub pinned: Vec<String>,
     pub used: Vec<String>,
-    pub scanning: bool,
     pub partial: bool,
     pub error: Option<SharedString>,
-    pub generation: u64,
 }
 
 impl TagIndex {
@@ -53,19 +51,15 @@ impl TagIndex {
             return;
         }
         self.pinned = tags;
-        self.generation = self.generation.wrapping_add(1);
     }
 
     fn apply(&mut self, discovery: TagDiscovery) {
         if self.used == discovery.tags && self.partial == discovery.partial && self.error.is_none() {
-            self.scanning = false;
             return;
         }
         self.used = discovery.tags;
         self.partial = discovery.partial;
         self.error = discovery.error.map(SharedString::from);
-        self.scanning = false;
-        self.generation = self.generation.wrapping_add(1);
     }
 
     /// The section title labels the limitation the APIs impose: Spotlight only
@@ -153,7 +147,6 @@ pub fn init(cx: &mut App) {
 }
 
 fn refresh_with(cx: &mut App, inventory: Arc<dyn TagInventory>, cancel: Arc<AtomicBool>) {
-    cx.global_mut::<Ui>().tags.scanning = true;
     cx.spawn(async move |cx| {
         let discovery = cx.background_executor().spawn(async move { inventory.discover(&cancel) }).await;
         cx.update(|cx| {

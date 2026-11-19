@@ -5,6 +5,7 @@ use gpui::{Context, FocusHandle, FontWeight, IntoElement, Role, Toggled, Window,
 
 use crate::actions::{SheetCancel, SheetConfirm};
 use crate::chrome::{self, SheetWidth};
+use crate::icons::{Glyph, glyph};
 use crate::style::{active_selection, color};
 use crate::ui::Ui;
 
@@ -78,10 +79,19 @@ impl CrowWindow {
                     .py_1()
                     .rounded_sm()
                     .flex()
+                    .items_center()
                     .gap_2()
                     .when(picker.cursor == index, |row| row.bg(active_selection(&theme)))
-                    .child(div().w(px(17.)).child(if checked { "✓" } else { "" }))
-                    .child(tag.clone())
+                    .child(glyph(Glyph::Tag, 14., if checked { "accent" } else { "fg-muted" }, &theme))
+                    .child(div().flex_1().min_w_0().child(tag.clone()))
+                    .child(
+                        div()
+                            .w(px(14.))
+                            .flex_none()
+                            .text_size(px(12.))
+                            .text_color(color(theme.role("accent")))
+                            .child(if checked { "✓" } else { "" }),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(picker) = &mut this.tag_picker {
                             picker.cursor = index;

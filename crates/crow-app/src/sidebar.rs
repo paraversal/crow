@@ -201,7 +201,7 @@ fn rows(ui: &Ui, sections: &[Section]) -> Vec<Row> {
     }
     for id in section_order(ui, sections) {
         match id.as_str() {
-            "tags" if ui.sidebar.section_shown("tags") && !ui.tags.is_empty() => {
+            "tags" if ui.sidebar.section_shown("tags") && (!ui.tags.is_empty() || ui.tags.error.is_some()) => {
                 let collapsed = ui.sidebar.section_collapsed("tags");
                 rows.push(Row::SectionHeader {
                     id: "tags".into(),
@@ -1756,7 +1756,14 @@ impl Render for Sidebar {
             kinds.push((droppable.then_some(DropTarget::Row(i)), favorite_slot));
             let path = row.path().map(Path::to_path_buf).unwrap_or_default();
             let navigable = row.location().is_some();
-            let current_description = if row.path().is_some() { "current folder" } else { "current saved query" };
+            let current_description = if row.path().is_some() {
+                "current folder"
+            } else if matches!(&row, Row::PluginItem { row, .. } if matches!(row.destination, SectionDestination::Tag { .. }))
+            {
+                "current tag"
+            } else {
+                "current saved query"
+            };
             let cursor = i == self.cursor;
             let mut look = looks.next().expect("one look per selectable row");
             let pin = row.path().and_then(|path| pin_summaries.get(path)).filter(|_| matches!(row, Row::Favorite(..)));
@@ -1777,7 +1784,15 @@ impl Render for Sidebar {
                     f.color.as_deref().and_then(|c| favorite_color(c, &theme)),
                 ),
                 Row::Recent(_) => (None, Some(crate::icons::Glyph::Clock), None),
-                Row::PluginItem { .. } => (None, Some(crate::icons::Glyph::Folder), None),
+                Row::PluginItem { row, .. } => (
+                    None,
+                    Some(if matches!(row.destination, SectionDestination::Tag { .. }) {
+                        crate::icons::Glyph::Tag
+                    } else {
+                        crate::icons::Glyph::Folder
+                    }),
+                    None,
+                ),
                 _ => (None, None, None),
             };
             let volume_label = match &row {

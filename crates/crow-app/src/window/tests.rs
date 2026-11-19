@@ -7740,6 +7740,13 @@ fn tag_filter_requires_every_tag_and_reuses_metadata_for_name_changes(cx: &mut T
     assert_eq!(folder.read_with(&cx, |folder, _| folder.tag_errors()), 1, "the unreadable entry is reported");
     assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 3);
 
+    // A new constraint never shows the previous constraint's rows while the new
+    // scan runs; the field says it is scanning instead.
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["review".into()], cx));
+    assert!(rows(&view, &cx).is_empty(), "the old constraint's rows are not a snapshot of the new one");
+    settle(&view, &mut cx);
+    assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)]);
+
     // Changing the tag set rereads only when a path's fact is missing; all three
     // are cached, so adding `review` is classification, not another tag read.
     pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["Work".into(), "review".into()], cx));
@@ -7842,6 +7849,19 @@ fn a_tag_only_filter_with_no_matches_shows_the_reason(cx: &mut TestAppContext) {
     pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["Missing".into()], cx));
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("filter-no-matches").is_some(), "the empty state names the tag constraint");
+}
+
+#[gpui::test]
+fn a_tag_inventory_error_is_visible_without_pinned_tags(cx: &mut TestAppContext) {
+    let root = fixture("tag-inventory-error");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<Ui>().tags.error = Some("Spotlight failed".into()));
+    settle(&view, &mut cx);
+    let looks = sidebar_looks(&view, &mut cx);
+    assert!(
+        looks.iter().any(|look| look.label == "Tags (index unavailable)"),
+        "the Tags section names the unavailable index even with no pinned tags: {looks:?}"
+    );
 }
 
 #[gpui::test]

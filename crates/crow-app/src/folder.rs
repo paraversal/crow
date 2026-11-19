@@ -954,7 +954,7 @@ impl Folder {
         } else {
             // Show a coherent (possibly empty) snapshot for the new constraint
             // while the scan runs; never the old constraint's rows.
-            self.tag_matches.get_or_insert_with(|| Arc::new(HashSet::new()));
+            self.tag_matches = Some(Arc::new(HashSet::new()));
             self.tag_scanning = true;
             self.tag_errors = 0;
             self.tag_scanned = 0;
