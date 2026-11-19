@@ -1362,12 +1362,26 @@ impl Render for Sidebar {
             window.request_animation_frame();
         }
         self.update_plugin_sections(cx);
+        let rows = rows(cx.global::<Ui>(), &self.plugin_sections);
+        let wants_pin_lines = self.layout.borrow().first().is_some_and(|(_, _, bounds)| bounds.size.width >= px(300.));
+        let pin_summaries: HashMap<_, _> = if crate::git::provider_enabled(cx) {
+            rows.iter()
+                .filter_map(|row| match row {
+                    Row::Favorite(_, favorite) => Some(favorite.path.as_path()),
+                    _ => None,
+                })
+                .filter_map(|path| {
+                    crate::git::pin_summary(cx, path, wants_pin_lines).map(|summary| (path.to_owned(), summary))
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let mode = ui.feedback.mode;
         let now = Instant::now();
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
-        let rows = rows(ui, &self.plugin_sections);
         self.stabilize_plugin_cursor(&rows);
         let focused = self.focus.is_focused(window);
         let selectable_count = rows.iter().filter(|r| !matches!(r, Row::Header(..))).count();
@@ -1543,7 +1557,15 @@ impl Render for Sidebar {
             let path = row.path().map(Path::to_path_buf).unwrap_or_default();
             let has_path = row.path().is_some();
             let cursor = i == self.cursor;
-            let look = looks.next().expect("one look per selectable row");
+            let mut look = looks.next().expect("one look per selectable row");
+            let pin = row.path().and_then(|path| pin_summaries.get(path)).filter(|_| matches!(row, Row::Favorite(..)));
+            if let Some(pin) = pin {
+                if look.hint.is_none() {
+                    look.hint = Some(pin.branch.clone());
+                }
+                look.spoken.push_str(", ");
+                look.spoken.push_str(&pin.spoken);
+            }
             // Favorites and Recent use the board's line icons; a favorite's
             // custom text icon and its palette color still win. Volumes and the
             // file list keep Finder's icons.
@@ -1716,6 +1738,19 @@ impl Render for Sidebar {
                     );
                 }
                 None => line = line.child(div().flex_1()),
+            }
+            if let Some(pin) = pin {
+                line = line.child(with_tooltip(
+                    div()
+                        .id(("git-pin", i))
+                        .flex_none()
+                        .ml(px(6.))
+                        .text_size(px(11.))
+                        .text_color(color(muted))
+                        .child(pin.badge.clone()),
+                    pin.spoken.clone(),
+                    None,
+                ));
             }
             if let Some(badge) = &look.badge {
                 line = line.child(
