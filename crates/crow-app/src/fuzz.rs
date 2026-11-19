@@ -423,17 +423,17 @@ pub fn settings_state_for(
 ) -> GenState {
     let height = window.viewport_size().height;
     let selectors = view
-        .debug_selectors()
+        .debug_selectors(cx)
         .into_iter()
         .filter(|selector| {
             window.debug_bounds(selector).is_some_and(|bounds| bounds.top() < height && bounds.bottom() > gpui::px(0.))
         })
         .collect();
     let home_is_real = cx.global::<crate::ui::Ui>().home == crow_core::home();
-    let mut state = base_state(window, cx, selectors, view.text_focused(window), 2, home_is_real);
+    let mut state = base_state(window, cx, selectors, view.text_focused(window, cx), 2, home_is_real);
     state.active_keys.retain(|key| key != "cmd-w");
     state.all_keys.retain(|key| key != "cmd-w");
-    if !view.menu_open() {
+    if !view.menu_open() && !view.search_active() {
         state.active_keys.retain(|key| key != "escape");
         state.all_keys.retain(|key| key != "escape");
     }

@@ -71,9 +71,28 @@ pub struct Ui {
     config_write_revision: [u64; VIEWS + 1],
     pub state_dir: PathBuf,
     pub home: PathBuf,
+    /// The Settings category last chosen, read once at startup. The window maps
+    /// an unknown id to Appearance.
+    pub settings_category: Option<String>,
+    /// The focused folder of the browser that last invoked Settings, for the
+    /// preview editor's Use Current Folder action.
+    pub settings_folder: Option<PathBuf>,
+    settings_category_write: Option<Shared<Task<Result<(), String>>>>,
     /// One message per config file that doesn't load; shown in the status line until fixed.
     errors: [Option<SharedString>; 4],
 }
+
+/// A config file problem as the Settings window lists it, with the config
+/// directory stripped so rows read "views.toml line 12: …".
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfigIssue {
+    pub file: &'static str,
+    pub path: PathBuf,
+    pub message: SharedString,
+    pub line: Option<u32>,
+}
+
+const CONFIG_FILES: [&str; 4] = ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml"];
 
 impl Global for Ui {}
 
@@ -86,6 +105,11 @@ impl Ui {
     fn new(config_dir: PathBuf, state_dir: PathBuf, home: PathBuf, theme: Theme, fade_enabled: bool) -> Ui {
         let recent = Recent::load(&state_dir.join("recent.json"));
         let recent_commands = RecentCommands::load(&state_dir.join("palette-commands.json"));
+        // io-ok: startup: the last Settings category is one small read before the first window
+        let settings_category = std::fs::read_to_string(state_dir.join("settings-category"))
+            .ok()
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty());
         let mut ui = Ui {
             settings: Settings::default(),
             applied_icon: None,
@@ -114,6 +138,9 @@ impl Ui {
             config_write_revision: Default::default(),
             state_dir,
             home,
+            settings_category,
+            settings_folder: None,
+            settings_category_write: None,
             errors: Default::default(),
         };
         ui.load_settings();
@@ -136,23 +163,43 @@ impl Ui {
         self.fade.as_ref().map(|(_, _, duration)| *duration)
     }
 
-    /// A broken `settings.toml`, with the config dir stripped so the settings
-    /// window can say "settings.toml line 3: …".
-    pub fn settings_error(&self) -> Option<SharedString> {
-        let message = self.errors[SETTINGS].as_ref()?;
+    /// One config file's problem, with the config dir stripped so the window
+    /// can say "settings.toml line 3: …".
+    pub fn file_error(&self, file: &str) -> Option<SharedString> {
+        let index = CONFIG_FILES.iter().position(|name| *name == file)?;
+        let message = self.errors[index].as_ref()?;
         let dir = self.config_dir.display().to_string();
         let text = message.strip_prefix(&dir).map_or(message.as_str(), |rest| rest.trim_start_matches('/'));
         Some(text.to_owned().into())
     }
 
+    /// A broken `settings.toml`, with the config dir stripped so the settings
+    /// window can say "settings.toml line 3: …".
+    pub fn settings_error(&self) -> Option<SharedString> {
+        self.file_error("settings.toml")
+    }
+
+    /// A broken `views.toml`; the view controls that write it are disabled.
+    pub fn views_error(&self) -> Option<SharedString> {
+        self.file_error("views.toml")
+    }
+
+    /// Every file-keyed problem, in file order, for the Settings error region.
+    pub fn config_issues(&self) -> Vec<ConfigIssue> {
+        CONFIG_FILES
+            .iter()
+            .filter_map(|file| {
+                let message = self.file_error(file)?;
+                Some(ConfigIssue { file, path: self.config_dir.join(file), line: error_line(&message), message })
+            })
+            .collect()
+    }
+
     /// The first config file problem and the file it names, with the config dir
     /// stripped so the bar can say "views.toml: …".
     pub fn config_error_file(&self) -> Option<(SharedString, PathBuf)> {
-        const FILES: [&str; 4] = ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml"];
-        let (index, message) = self.errors.iter().enumerate().find_map(|(i, e)| e.as_ref().map(|m| (i, m)))?;
-        let dir = self.config_dir.display().to_string();
-        let text = message.strip_prefix(&dir).map_or(message.as_str(), |rest| rest.trim_start_matches('/'));
-        Some((text.to_owned().into(), self.config_dir.join(FILES[index])))
+        let issue = self.config_issues().into_iter().next()?;
+        Some((issue.message, issue.path))
     }
 
     fn set_error(&mut self, which: usize, result: Result<(), String>) -> bool {
@@ -233,6 +280,13 @@ impl Ui {
     pub fn favorites(&self) -> Vec<(String, Vec<crow_core::Favorite>)> {
         self.sidebar.favorites(&self.home)
     }
+}
+
+/// The line from a message like "views.toml line 12: unknown field".
+fn error_line(message: &str) -> Option<u32> {
+    let (_, rest) = message.split_once(" line ")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }
 
 struct Watchers {
@@ -533,6 +587,7 @@ pub enum SettingChange {
     Motion(MotionMode),
     Sound(SoundSet),
     AppIcon(AppIcon),
+    IconPack(String),
     FontFamily(String),
     FontSize(f32),
     Terminal(String),
@@ -562,6 +617,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             SettingChange::Motion(value) => replace(&mut settings.motion, *value),
             SettingChange::Sound(value) => replace(&mut settings.sound, *value),
             SettingChange::AppIcon(value) => replace(&mut settings.app_icon, *value),
+            SettingChange::IconPack(value) => replace(&mut settings.icon_pack, value.clone()),
             SettingChange::FontFamily(value) => replace(&mut settings.font_family, value.clone()),
             SettingChange::FontSize(value) => replace(&mut settings.font_size, *value),
             SettingChange::Terminal(value) => replace(&mut settings.terminal, value.clone()),
@@ -631,6 +687,9 @@ fn write_setting(change: SettingChange, cx: &mut App) {
         }
         SettingChange::AppIcon(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "app_icon", value.key()), cx);
+        }
+        SettingChange::IconPack(value) => {
+            write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "icon_pack", &value), cx);
         }
         SettingChange::FontFamily(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_setting(config, "font_family", &value), cx);
@@ -702,6 +761,42 @@ fn write_setting(change: SettingChange, cx: &mut App) {
 /// View ▸ Show/Hide Preview: remember the choice for every window and the next launch.
 pub fn set_show_preview(show: bool, cx: &mut App) {
     set_setting(SettingChange::ShowPreview(show), cx);
+}
+
+/// Remember the chosen Settings category in the state folder. Writes are
+/// serialized so rapid category switches leave the last choice on disk.
+pub fn save_settings_category(id: &str, cx: &mut App) {
+    let (state_dir, previous) = {
+        let ui = cx.global_mut::<Ui>();
+        if ui.settings_category.as_deref() == Some(id) {
+            return;
+        }
+        ui.settings_category = Some(id.to_owned());
+        (ui.state_dir.clone(), ui.settings_category_write.take())
+    };
+    let id = id.to_owned();
+    let task = cx
+        .background_spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            crow_core::write_atomic(&state_dir.join("settings-category"), &id).map_err(|error| error.to_string())
+        })
+        .shared();
+    cx.global_mut::<Ui>().settings_category_write = Some(task.clone());
+    cx.spawn(async move |cx| {
+        if let Err(error) = task.await {
+            tracing::warn!("settings category: {error}");
+            cx.update(|cx| {
+                if cx.try_global::<crate::operations::Operations>().is_some() {
+                    let message = format!("Couldn't remember the Settings category: {error}");
+                    crate::operations::message(message, true, cx);
+                    cx.refresh_windows();
+                }
+            });
+        }
+    })
+    .detach();
 }
 
 /// Re-resolve the theme (after an index change, a settings change, an appearance
@@ -889,7 +984,19 @@ pub fn record_command(id: crate::palette::CommandId, cx: &mut App) {
 #[cfg(test)]
 pub fn reload_state_for_tests(cx: &mut App) {
     let file = cx.global::<Ui>().state_dir.join("palette-commands.json");
-    cx.global_mut::<Ui>().recent_commands = RecentCommands::load(&file);
+    let category_file = cx.global::<Ui>().state_dir.join("settings-category");
+    let category = read_settings_category(category_file);
+    let ui = cx.global_mut::<Ui>();
+    ui.recent_commands = RecentCommands::load(&file);
+    ui.settings_category = category;
+}
+
+#[cfg(test)]
+fn read_settings_category(path: PathBuf) -> Option<String> {
+    // io-ok: test-only simulated relaunch
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.trim().to_owned();
+    (!text.is_empty()).then_some(text)
 }
 
 /// Recompute Recent's list off the main thread (it checks each folder still exists)
@@ -979,6 +1086,17 @@ pub fn refresh_volumes(cx: &mut App) {
 /// Write a config file off the main thread, then reload it here. A failure shows
 /// in the status line like any other config problem.
 fn write_config(which: usize, write: impl FnOnce(&Path, &Path) -> Result<(), String> + Send + 'static, cx: &mut App) {
+    write_config_with_completion(which, write, None, cx);
+}
+
+pub type ViewsWriteCompletion = Box<dyn FnOnce(Result<(), String>, &mut App)>;
+
+fn write_config_with_completion(
+    which: usize,
+    write: impl FnOnce(&Path, &Path) -> Result<(), String> + Send + 'static,
+    completion: Option<ViewsWriteCompletion>,
+    cx: &mut App,
+) {
     let ui = cx.global::<Ui>();
     let (config_dir, home) = (ui.config_dir.clone(), ui.home.clone());
     if matches!(which, SETTINGS | VIEWS) {
@@ -1005,15 +1123,20 @@ fn write_config(which: usize, write: impl FnOnce(&Path, &Path) -> Result<(), Str
         cx.spawn(async move |cx| {
             let result = task.await;
             cx.update(|cx| {
+                let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
                 if cx.global::<Ui>().config_write_revision[which] == revision {
                     let ui = cx.global_mut::<Ui>();
                     ui.config_writes[which] = None;
                     match result {
                         Ok(ConfigSnapshot::Settings(settings)) => ui.apply_loaded_settings(Ok(settings)),
                         Ok(ConfigSnapshot::Views(views)) => ui.apply_loaded_views(Ok(views)),
-                        Err(error) => ui.set_error(which, Err(error)),
+                        Err(error) if completion.is_none() => ui.set_error(which, Err(error)),
+                        Err(_) => false,
                     };
                     cx.refresh_windows();
+                }
+                if let Some(completion) = completion {
+                    completion(outcome, cx);
                 }
             });
         })
@@ -1044,6 +1167,63 @@ fn write_config(which: usize, write: impl FnOnce(&Path, &Path) -> Result<(), Str
         });
     })
     .detach();
+}
+
+/// Change `[defaults]` in views.toml. The queued reload publishes a new views
+/// generation, so browser panes and Why This View apply it like any edit.
+pub fn save_defaults_change(change: crow_core::DefaultsChange, completion: Option<ViewsWriteCompletion>, cx: &mut App) {
+    write_config_with_completion(
+        VIEWS,
+        move |config, home| crow_core::save_defaults_change(config, home, change),
+        completion,
+        cx,
+    );
+}
+
+/// Set or clear one folder's preview-provider list.
+pub fn save_folder_preview_providers(
+    dir: PathBuf,
+    providers: Option<Vec<String>>,
+    completion: ViewsWriteCompletion,
+    cx: &mut App,
+) {
+    write_config_with_completion(
+        VIEWS,
+        move |config, home| crow_core::save_folder_preview_providers(config, home, &dir, providers),
+        Some(completion),
+        cx,
+    );
+}
+
+/// Set or clear one path rule's preview-provider list, proving the rule identity.
+pub fn save_rule_preview_providers(
+    locator: crow_core::RuleLocator,
+    providers: Option<Vec<String>>,
+    completion: ViewsWriteCompletion,
+    cx: &mut App,
+) {
+    write_config_with_completion(
+        VIEWS,
+        move |config, home| crow_core::save_rule_preview_providers(config, home, &locator, providers),
+        Some(completion),
+        cx,
+    );
+}
+
+/// Append a preview-only path rule after the existing rules.
+pub fn add_preview_rule(
+    index: usize,
+    pattern: String,
+    providers: Vec<String>,
+    completion: ViewsWriteCompletion,
+    cx: &mut App,
+) {
+    write_config_with_completion(
+        VIEWS,
+        move |config, home| crow_core::add_preview_rule(config, home, index, &pattern, providers),
+        Some(completion),
+        cx,
+    );
 }
 
 /// Remember a view change as `dir`'s own setting.
@@ -1087,7 +1267,7 @@ mod tests {
     fn each_setting_writes_only_its_key(cx: &mut gpui::TestAppContext) {
         let config = cx.update(crate::ui::init_for_tests);
         cx.update(crate::menus::init_for_tests);
-        let before = "# mine\n\ntheme = \"system\" # theme\nkeymap = \"finder\"\nhints = \"auto\"\ntips = \"auto\"\nmotion = \"auto\"\nsound = \"crow\"\napp_icon = \"refined\"\nfont_family = \"\"\nfont_size = 13.0\nterminal = \"Terminal\"\nshow_hidden_files = true\nsearch_includes_hidden = true\nsearch_match = \"all\"\nshow_preview = true\npalette_recent_commands = true\nview_per_folder = true\n\n[window]\nwidth = 1200\nheight = 760\n";
+        let before = "# mine\n\ntheme = \"system\" # theme\nkeymap = \"finder\"\nhints = \"auto\"\ntips = \"auto\"\nmotion = \"auto\"\nsound = \"crow\"\napp_icon = \"refined\"\nicon_pack = \"native\"\nfont_family = \"\"\nfont_size = 13.0\nterminal = \"Terminal\"\nshow_hidden_files = true\nsearch_includes_hidden = true\nsearch_match = \"all\"\nshow_preview = true\npalette_recent_commands = true\nview_per_folder = true\n\n[window]\nwidth = 1200\nheight = 760\n";
         let changes = [
             SettingChange::Theme("gruvbox-dark-hard".into()),
             SettingChange::Keymap(KeymapLayer::Vim),
@@ -1096,6 +1276,7 @@ mod tests {
             SettingChange::Motion(MotionMode::Off),
             SettingChange::Sound(SoundSet::Finder),
             SettingChange::AppIcon(AppIcon::Sun),
+            SettingChange::IconPack("example.pack".into()),
             SettingChange::FontFamily("Menlo".into()),
             SettingChange::FontSize(14.0),
             SettingChange::Terminal("iTerm".into()),

@@ -2108,7 +2108,7 @@ impl CrowWindow {
             CommandId::UseViewAsDefaults => self.use_view_as_defaults(&UseViewAsDefaults, window, cx),
             CommandId::ResetFolderView => self.reset_folder_view(&ResetFolderView, window, cx),
             CommandId::ShowThemePicker => self.show_theme_picker(&ShowThemePicker, window, cx),
-            CommandId::OpenSettings => crate::settings_window::open(cx),
+            CommandId::OpenSettings => crate::settings_window::open_for_folder(self.focused_folder(cx), cx),
             CommandId::EditSettings => crate::ui::edit_settings_file(cx),
             CommandId::ShowSearch => self.show_search(&ShowSearch, window, cx),
             CommandId::SearchEverything => self.search_everything(&SearchEverything, window, cx),
@@ -2493,6 +2493,9 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::use_view_as_defaults))
             .on_action(cx.listener(Self::reset_folder_view))
             .on_action(cx.listener(Self::show_theme_picker))
+            .on_action(cx.listener(|this, _: &crate::actions::OpenSettings, _, cx| {
+                crate::settings_window::open_for_folder(this.focused_folder(cx), cx);
+            }))
             .on_action(cx.listener(Self::show_palette))
             .on_action(cx.listener(Self::show_search))
             .on_action(cx.listener(Self::search_everything))
@@ -2520,6 +2523,13 @@ impl Render for CrowWindow {
             .children(git_review)
             .children(column_picker)
             .children(palette)
+    }
+}
+
+impl CrowWindow {
+    /// The focused folder of the active tab, for Settings' Use Current Folder.
+    pub fn focused_folder(&self, cx: &App) -> PathBuf {
+        self.pane().read(cx).current_dir(cx)
     }
 }
 

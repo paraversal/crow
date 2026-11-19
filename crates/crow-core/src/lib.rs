@@ -54,8 +54,10 @@ pub use tips::{
 };
 pub use usage::{RETIRE_AFTER, USAGE_CAP, USAGE_FILE, Usage, idle_hint_visible};
 pub use views::{
-    DEFAULT_VIEWS, ResolvedView, Source, ViewChange, ViewLayer, Views, load_views, natural_ascending, reset_folder,
-    save_as_defaults, save_default_columns, save_folder_change, sort_key_name,
+    DEFAULT_VIEWS, DefaultsChange, ResolvedView, RuleInfo, RuleLocator, Source, ViewChange, ViewLayer, Views,
+    add_preview_rule, load_views, natural_ascending, reset_folder, save_as_defaults, save_default_columns,
+    save_defaults_change, save_folder_change, save_folder_preview_providers, save_rule_preview_providers,
+    sort_key_name,
 };
 
 /// Natural order for names, shared with `crow-fs` so type-to-select and sorting agree.

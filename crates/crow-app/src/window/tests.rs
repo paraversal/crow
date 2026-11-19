@@ -11110,7 +11110,7 @@ fn check_windows(cx: &mut VisualTestContext, deep: bool, root: Option<&Path>) ->
         {
             out.extend(found);
         } else if let Some(view) = handle.downcast::<crate::settings_window::SettingsWindow>()
-            && let Ok(found) = view.update(&mut cx.cx, |settings, window, _| settings.check_invariants(window))
+            && let Ok(found) = view.update(&mut cx.cx, |settings, window, cx| settings.check_invariants(window, cx))
         {
             out.extend(found);
         }
@@ -11376,7 +11376,7 @@ fn apply_settings_and_check(
     crate::fuzz::logs::reset();
     apply_settings_step(step, cx)?;
     cx.run_until_parked();
-    if let Some(violation) = cx.update(|window, cx| view.read(cx).check_invariants(window)).into_iter().next() {
+    if let Some(violation) = cx.update(|window, cx| view.read(cx).check_invariants(window, cx)).into_iter().next() {
         return Err(violation);
     }
     if matches!(step, crate::fuzz::Step::Settle)
@@ -11388,6 +11388,118 @@ fn apply_settings_and_check(
         return Err(crate::fuzz::Violation::new("log", "an error was logged"));
     }
     Ok(())
+}
+
+#[gpui::test]
+fn settings_shortcut_captures_the_invoking_browser_folder(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("settings-invoking-folder", 1);
+    let (_, mut bcx) = open(cx, &tree.path);
+    bcx.simulate_keystrokes("cmd-,");
+    assert_eq!(bcx.read_global::<crate::ui::Ui, _>(|ui, _| ui.settings_folder.clone()), Some(tree.path.clone()));
+}
+
+#[gpui::test]
+fn settings_default_view_reaches_two_browser_windows(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("settings-two-windows", 4);
+    let (first, fcx) = open(cx, &tree.path);
+    let second_dir = tree.path.join("second");
+    std::fs::create_dir_all(&second_dir).unwrap();
+    let second: WindowHandle<CrowWindow> = fcx
+        .cx
+        .update(|cx| {
+            cx.open_window(WindowOptions::default(), |window, cx| {
+                cx.new(|cx| CrowWindow::new(second_dir.clone(), false, None, window, cx))
+            })
+        })
+        .expect("second window");
+    let mut scx = VisualTestContext::from_window(second.into(), &fcx.cx);
+    let second_view = second.root(&mut scx).expect("second root");
+    settle(&second_view, &mut scx);
+    assert_eq!(pane(&first, &fcx).read_with(&fcx, |pane, _| pane.mode()), ViewMode::List);
+    assert_eq!(pane(&second_view, &scx).read_with(&scx, |pane, _| pane.mode()), ViewMode::List);
+
+    fcx.cx.update(|cx| crate::ui::save_defaults_change(crow_core::DefaultsChange::View(ViewMode::Columns), None, cx));
+    for _ in 0..400 {
+        fcx.cx.run_until_parked();
+        if pane(&first, &fcx).read_with(&fcx, |pane, _| pane.mode()) == ViewMode::Columns
+            && pane(&second_view, &scx).read_with(&scx, |pane, _| pane.mode()) == ViewMode::Columns
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(pane(&first, &fcx).read_with(&fcx, |pane, _| pane.mode()), ViewMode::Columns);
+    assert_eq!(
+        pane(&second_view, &scx).read_with(&scx, |pane, _| pane.mode()),
+        ViewMode::Columns,
+        "the published views generation reaches every browser window"
+    );
+}
+
+#[gpui::test]
+fn settings_keyboard_search_categories_and_edits(cx: &mut TestAppContext) {
+    close_all_windows(cx);
+    let tree = fuzz_tree("settings-keyboard", 4);
+    let (_browser, mut bcx) = open(cx, &tree.path);
+    bcx.update(|_, cx| crate::settings_window::open(cx));
+    bcx.run_until_parked();
+    let handle = settings_handle(&mut bcx.cx).expect("settings window");
+    let mut scx = VisualTestContext::from_window(handle.into(), &bcx.cx);
+    let view = handle.root(&mut scx).expect("settings root");
+    let draw = |scx: &mut VisualTestContext| {
+        scx.update(|window, cx| {
+            let clear = window.draw(cx);
+            clear.clear(cx);
+        });
+        scx.run_until_parked();
+    };
+    draw(&mut scx);
+    assert!(scx.update(|window, cx| view.read(cx).search_focused_for_tests(window, cx)), "⌘, focuses search");
+
+    scx.simulate_input("vim");
+    draw(&mut scx);
+    assert_eq!(view.read_with(&scx, |view, _| view.query_for_tests().to_owned()), "vim");
+    assert!(scx.update(|window, _| window.debug_bounds("settings-keymap-control").is_some()), "the result paints");
+    assert!(
+        scx.update(|window, _| window.debug_bounds("settings-theme-control").is_none()),
+        "nonmatching controls are not mounted"
+    );
+
+    scx.simulate_keystrokes("tab");
+    scx.simulate_keystrokes("right");
+    let config = scx.read_global::<crate::ui::Ui, _>(|ui, _| ui.config_dir.clone());
+    for _ in 0..100 {
+        scx.run_until_parked();
+        if std::fs::read_to_string(config.join("settings.toml")).is_ok_and(|text| text.contains("keymap = \"vim\"")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        std::fs::read_to_string(config.join("settings.toml")).unwrap().contains("keymap = \"vim\""),
+        "a result edits the same file the category page would"
+    );
+
+    scx.simulate_keystrokes("escape");
+    draw(&mut scx);
+    assert_eq!(view.read_with(&scx, |view, _| view.query_for_tests().to_owned()), "", "the first Esc clears search");
+    assert!(
+        scx.update(|window, cx| view.read(cx).search_focused_for_tests(window, cx)),
+        "clearing returns focus to search"
+    );
+
+    scx.simulate_keystrokes("tab");
+    scx.simulate_keystrokes("down");
+    scx.simulate_keystrokes("enter");
+    assert_eq!(view.read_with(&scx, |view, _| view.category_id_for_tests()), "behaviour", "arrows choose sidebar rows");
+
+    scx.simulate_keystrokes("tab");
+    scx.simulate_keystrokes("cmd-f");
+    draw(&mut scx);
+    assert!(
+        scx.update(|window, cx| view.read(cx).search_focused_for_tests(window, cx)),
+        "⌘F returns to Settings search from a control"
+    );
 }
 
 /// I2b: drive the Settings window as a second fuzz surface. Same generator,
