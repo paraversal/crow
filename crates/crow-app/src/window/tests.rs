@@ -16504,6 +16504,72 @@ fn audit_batch_one_sidebar_projects_drop_uses_its_navigable_row(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn project_root_commands_are_reachable_from_menu_palette_and_project_rows(cx: &mut TestAppContext) {
+    let root = fixture("project-commands");
+    let repo = root.join("beta").canonicalize().unwrap();
+    let output = std::process::Command::new("git").arg("-C").arg(&repo).args(["init", "-q"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| crate::git::set_enabled_for_test(cx, true));
+
+    // Menu bar and palette: all three are real commands with a File menu slot.
+    for id in [CommandId::AddProjectRoot, CommandId::RemoveProjectRoot, CommandId::RefreshProjects] {
+        let command = crate::context_menu::command(id);
+        assert!(command.palette, "{id:?} is in the palette");
+        let slot = command.menu.expect("in a menu");
+        assert_eq!(slot.menu, crate::palette::MenuName::File, "{id:?} is in the File menu");
+    }
+
+    // Adding the current folder through the action makes a Projects root.
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">add folder as project root");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    let roots = cx.read(|cx| {
+        let ui = cx.global::<Ui>();
+        ui.sidebar.project_roots(&ui.home)
+    });
+    assert!(roots.contains(&root.path.canonicalize().unwrap()) || roots.contains(&root.path), "{roots:?}");
+
+    // The row menu matches rows to roots by path, so spell the root the way the rows are.
+    let config = format!(
+        "{}\n[projects]\nroots = [\"{}\"]\n",
+        favorites_toml(&[&root.join("alpha")]).replace("show = false", "show = true"),
+        repo.parent().unwrap().display()
+    );
+    write_config(&view, &mut cx, "sidebar.toml", &config);
+    let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+    let mut project = None;
+    for _ in 0..300 {
+        cx.update(|_, cx| crate::git::poll(cx));
+        settle(&view, &mut cx);
+        project = sidebar.read_with(&cx, |sidebar, cx| sidebar.index_of_path(&repo, cx));
+        if project.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let row = project.expect("Projects row");
+    let at = cx.update(|window, _| window.debug_bounds(&format!("sidebar-{row}"))).expect("row").center();
+    cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::default());
+    let (_, kind) = sidebar.read_with(&cx, |s, _| s.menu()).expect("a project row has a menu");
+    assert_eq!(kind, crate::context_menu::SidebarMenuKind::Project);
+    let slots: Vec<_> = crate::context_menu::sidebar_slots(kind).iter().flatten().map(|(id, _)| *id).collect();
+    assert!(slots.contains(&CommandId::RefreshProjects) && slots.contains(&CommandId::RemoveProjectRoot));
+    let ix = crate::context_menu::sidebar_slots(kind)
+        .iter()
+        .position(|slot| slot.is_some_and(|(id, _)| id == CommandId::RemoveProjectRoot))
+        .unwrap();
+    sidebar.update_in(&mut cx, |s, window, cx| s.choose_menu_item(Some(ix), window, cx));
+    settle(&view, &mut cx);
+    let roots = cx.read(|cx| {
+        let ui = cx.global::<Ui>();
+        ui.sidebar.project_roots(&ui.home)
+    });
+    assert!(roots.is_empty(), "Remove Project Root on a project row removes the root that holds it: {roots:?}");
+}
+
+#[gpui::test]
 fn audit_batch_one_stationary_drag_samples_do_not_invalidate_the_window(cx: &mut TestAppContext) {
     let root = fixture("audit-stationary-drag");
     let (view, mut cx) = open(cx, &root);
@@ -16778,4 +16844,35 @@ fn an_eperm_folder_offers_full_disk_access(cx: &mut TestAppContext) {
         assert!(cx.debug_bounds("folder-full-disk-access").is_some(), "{mode:?} offers Full Disk Access on EPERM");
         assert!(cx.debug_bounds("folder-retry").is_some(), "{mode:?} offers Retry");
     }
+}
+
+#[gpui::test]
+fn a_config_error_and_the_right_pane_fit_a_640_px_window(cx: &mut TestAppContext) {
+    let root = fixture("narrow-error-and-tabs");
+    let bounds = Bounds::new(point(px(0.), px(0.)), size(px(640.), px(500.)));
+    let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+    let (view, mut cx) = open_with_before(cx, &root, options, |cx| {
+        crate::git::set_enabled_for_test(cx, true);
+        let config = &cx.global::<Ui>().config_dir;
+        std::fs::write(config.join("settings.toml"), "show_preview = true\n").expect("write settings");
+        std::fs::write(
+            config.join("views.toml"),
+            "[defaults]\nsort = \"a-very-long-invalid-sort-name-that-fills-the-bar\"\n",
+        )
+        .expect("write a broken views.toml");
+        ui::reload_config(cx);
+    });
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(ViewMode::Gallery, cx));
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    let window = cx.update(|window, _| window.bounds());
+    for id in ["bar-error", "bar-error-open", "info-tab-preview", "info-tab-info", "info-tab-git-diff"] {
+        let item = cx.debug_bounds(id).unwrap_or_else(|| panic!("{id} is on screen"));
+        assert!(item.right() <= window.size.width + px(0.5), "{id} {item:?} stays inside the {window:?} window");
+        assert!(item.left() >= px(0.), "{id} {item:?} starts inside the window");
+    }
+    // Open stays the pill's last item, still wide enough to click.
+    let pill = cx.debug_bounds("bar-error").expect("pill");
+    let open = cx.debug_bounds("bar-error-open").expect("Open");
+    assert!(open.right() <= pill.right() + px(0.5) && open.size.width >= px(30.), "{open:?} inside {pill:?}");
 }

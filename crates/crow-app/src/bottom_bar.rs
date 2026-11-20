@@ -597,6 +597,8 @@ fn error_token(error: &BarError, theme: &crow_theme::Theme) -> AnyElement {
         .role(Role::Group)
         .aria_label(format!("Error: {text}"))
         .h(px(20.))
+        // The message gives way; the icon and Open never do.
+        .min_w_0()
         .rounded(px(10.))
         .pl(px(8.))
         .pr(px(4.))
@@ -605,8 +607,10 @@ fn error_token(error: &BarError, theme: &crow_theme::Theme) -> AnyElement {
         .gap(px(8.))
         .bg(error_soft(theme))
         .text_color(color(theme.role("error")))
-        .child(icons::glyph(Glyph::AlertCircle, 13., "error", theme))
-        .child(div().max_w(px(420.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(text.clone()));
+        .child(icons::glyph(Glyph::AlertCircle, 13., "error", theme).flex_none())
+        .child(
+            div().min_w_0().max_w(px(420.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(text.clone()),
+        );
     if let Some(path) = &error.file {
         let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
         let path = path.clone();
@@ -617,6 +621,7 @@ fn error_token(error: &BarError, theme: &crow_theme::Theme) -> AnyElement {
                 .role(Role::Button)
                 .aria_label(format!("Open {name}"))
                 .h(px(16.))
+                .flex_none()
                 .rounded(px(8.))
                 .px(px(6.))
                 .flex()

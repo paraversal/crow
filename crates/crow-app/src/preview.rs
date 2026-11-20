@@ -577,7 +577,7 @@ pub fn contents(
             .border_b_1()
             .border_color(border)
             .child(div().flex_none().text_color(muted).child(label.to_owned()))
-            .child(div().text_right().child(value))
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_right().child(value))
     };
     let detail = div()
         .flex()

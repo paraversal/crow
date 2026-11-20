@@ -620,6 +620,23 @@ impl CrowWindow {
         cx.notify();
     }
 
+    /// File ▸ Add Folder as Project Root: the folder shown becomes a Projects root.
+    fn add_project_root(&mut self, _: &crate::actions::AddProjectRoot, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.pane().read(cx).focused_path(cx) else { return };
+        crate::ui::edit_sidebar(crow_core::SidebarEdit::AddProjectRoot(dir), cx);
+        crate::git::refresh_projects(cx);
+    }
+
+    fn remove_project_root(&mut self, _: &crate::actions::RemoveProjectRoot, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.pane().read(cx).focused_path(cx) else { return };
+        crate::ui::edit_sidebar(crow_core::SidebarEdit::RemoveProjectRoot(dir), cx);
+        crate::git::refresh_projects(cx);
+    }
+
+    fn refresh_projects(&mut self, _: &crate::actions::RefreshProjects, _: &mut Window, cx: &mut Context<Self>) {
+        crate::git::refresh_projects(cx);
+    }
+
     /// ⌘I: open the column on Info, or close it when Info is already showing.
     /// Unlike ⇧⌘P this does not change the setting, so the column can be opened
     /// in a window whose default is off.
@@ -1269,7 +1286,7 @@ impl CrowWindow {
         let ops = cx.global::<Operations>();
 
         // Errors never lose to hints: the token shows beside whatever else is primary.
-        let error = if let Some((text, file)) = ui.config_error_file() {
+        let error = if let Some((text, file)) = crate::ui::config_error_file(cx) {
             Some(BarError { text, file: Some(file) })
         } else if let Some(text) = pane.error(cx) {
             Some(BarError { text, file: None })
@@ -2982,17 +2999,9 @@ impl CrowWindow {
             | CommandId::Eject => {
                 self.sidebar.update(cx, |sidebar, cx| sidebar.run_command(command, window, cx));
             }
-            CommandId::AddProjectRoot | CommandId::RemoveProjectRoot => {
-                let Some(dir) = self.pane().read(cx).focused_path(cx) else { return };
-                let edit = if command == CommandId::AddProjectRoot {
-                    crow_core::SidebarEdit::AddProjectRoot(dir)
-                } else {
-                    crow_core::SidebarEdit::RemoveProjectRoot(dir)
-                };
-                crate::ui::edit_sidebar(edit, cx);
-                crate::git::refresh_projects(cx);
-            }
-            CommandId::RefreshProjects => crate::git::refresh_projects(cx),
+            CommandId::AddProjectRoot => self.add_project_root(&crate::actions::AddProjectRoot, window, cx),
+            CommandId::RemoveProjectRoot => self.remove_project_root(&crate::actions::RemoveProjectRoot, window, cx),
+            CommandId::RefreshProjects => self.refresh_projects(&crate::actions::RefreshProjects, window, cx),
             CommandId::ReviewGitChanges => self.review_git_command(&crate::actions::ReviewGitChanges, window, cx),
             CommandId::Quit => operation_ui::quit(cx),
             CommandId::Paste | CommandId::PasteMove | CommandId::NewFolder | CommandId::NewFile
@@ -3337,7 +3346,11 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::toggle_preview))
             .on_action(cx.listener(Self::show_info))
             .when(crate::git::provider_enabled(cx), |root| {
-                root.on_action(cx.listener(Self::review_git_command)).on_action(cx.listener(Self::show_git_diff))
+                root.on_action(cx.listener(Self::review_git_command))
+                    .on_action(cx.listener(Self::show_git_diff))
+                    .on_action(cx.listener(Self::add_project_root))
+                    .on_action(cx.listener(Self::remove_project_root))
+                    .on_action(cx.listener(Self::refresh_projects))
             })
             .when(list_view && self.search.is_none(), |root| root.on_action(cx.listener(Self::choose_list_columns)))
             .on_action(cx.listener(Self::calculate_folder_sizes))

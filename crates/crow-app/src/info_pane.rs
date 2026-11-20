@@ -595,6 +595,10 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
             .aria_label(label)
             .h_full()
             .px_2()
+            // Tabs give way together in a narrow column; the label ellipsizes
+            // instead of running off the window edge.
+            .min_w_0()
+            .overflow_hidden()
             .flex()
             .items_center()
             .text_size(px(12.))
@@ -608,7 +612,7 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
             .on_click(move |_, _, cx| {
                 info.update(cx, |info, cx| info.set_tab(value, cx));
             })
-            .child(label)
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
     };
     let git = crate::git::provider_enabled(cx);
     let count = if git { 3 } else { 2 };
@@ -627,6 +631,8 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
         .h(px(TAB_STRIP_HEIGHT))
         .relative()
         .flex_none()
+        .min_w_0()
+        .overflow_hidden()
         .flex()
         .items_stretch()
         .gap_2()

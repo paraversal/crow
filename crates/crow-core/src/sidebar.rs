@@ -499,7 +499,7 @@ fn apply(doc: &mut DocumentMut, edit: &SidebarEdit, home: &Path) -> Result<(), S
                 .ok_or_else(|| "`section` must be a table".to_owned())?;
             let entry = section.entry(id).or_insert_with(|| Item::Table(toml_edit::Table::new()));
             let table = entry.as_table_mut().ok_or_else(|| format!("section \"{id}\" must be a table"))?;
-            table["collapsed"] = toml_edit::value(*collapsed);
+            crate::config::set_value(table, "collapsed", (*collapsed).into());
         }
         SidebarEdit::Move { from, to } => {
             let value = {
@@ -662,6 +662,11 @@ show = true
         assert!(out.contains("order = [\"recent\", \"example.p1b-fixture.folders\", \"locations\"]"));
         let reparsed = SidebarConfig::parse(&out).unwrap();
         assert!(reparsed.section_collapsed("example.p1b-fixture.folders"));
+
+        let mut doc = "[section.\"x.y\"]\ncollapsed = false # my note\n".parse::<DocumentMut>().unwrap();
+        apply(&mut doc, &SidebarEdit::SetSectionCollapsed { id: "x.y".into(), collapsed: true }, Path::new(HOME))
+            .unwrap();
+        assert!(doc.to_string().contains("collapsed = true # my note"), "{doc}");
     }
 
     #[test]

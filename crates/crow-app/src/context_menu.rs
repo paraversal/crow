@@ -120,6 +120,8 @@ pub enum SidebarMenuKind {
     Volume,
     Plugin,
     SavedQuery,
+    /// A repository row in the Projects section.
+    Project,
 }
 
 /// A menu line with its own title when the row needs other words than the menu
@@ -171,6 +173,14 @@ const SIDEBAR_SAVED_QUERY: &[TitledSlot] = &[
     Some((CommandId::RemoveSavedSearch, Some("Remove Saved Search"))),
 ];
 
+const SIDEBAR_PROJECT: &[TitledSlot] = &[
+    Some((CommandId::Open, None)),
+    Some((CommandId::NewTab, Some("Open in New Tab"))),
+    None,
+    Some((CommandId::RefreshProjects, None)),
+    Some((CommandId::RemoveProjectRoot, Some("Remove Project Root"))),
+];
+
 pub fn sidebar_slots(kind: SidebarMenuKind) -> &'static [TitledSlot] {
     match kind {
         SidebarMenuKind::Favorite => SIDEBAR_FAVORITE,
@@ -178,6 +188,7 @@ pub fn sidebar_slots(kind: SidebarMenuKind) -> &'static [TitledSlot] {
         SidebarMenuKind::Volume => SIDEBAR_VOLUME,
         SidebarMenuKind::Plugin => SIDEBAR_PLUGIN,
         SidebarMenuKind::SavedQuery => SIDEBAR_SAVED_QUERY,
+        SidebarMenuKind::Project => SIDEBAR_PROJECT,
     }
 }
 
@@ -187,6 +198,8 @@ pub struct SidebarMenuState {
     pub can_move_up: bool,
     pub can_move_down: bool,
     pub ejectable: bool,
+    /// The row sits under a configured Projects root that can be removed.
+    pub removable_root: bool,
 }
 
 pub fn sidebar_enabled(id: CommandId, state: SidebarMenuState) -> bool {
@@ -194,6 +207,7 @@ pub fn sidebar_enabled(id: CommandId, state: SidebarMenuState) -> bool {
         CommandId::MoveFavoriteUp => state.can_move_up,
         CommandId::MoveFavoriteDown => state.can_move_down,
         CommandId::Eject => state.ejectable,
+        CommandId::RemoveProjectRoot => state.removable_root,
         _ => true,
     }
 }
@@ -307,7 +321,7 @@ mod tests {
                 command(*id);
             }
         }
-        let first = SidebarMenuState { can_move_up: false, can_move_down: true, ejectable: false };
+        let first = SidebarMenuState { can_move_up: false, can_move_down: true, ..SidebarMenuState::default() };
         assert!(!sidebar_enabled(CommandId::MoveFavoriteUp, first));
         assert!(sidebar_enabled(CommandId::MoveFavoriteDown, first));
         assert!(!sidebar_enabled(CommandId::Eject, first), "an internal disk can't be ejected");
