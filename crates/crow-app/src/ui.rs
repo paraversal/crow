@@ -485,6 +485,10 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
 fn install_drag_cancel(cx: &mut App) {
     cx.intercept_keystrokes(|event, window, cx| {
         if event.keystroke.key == "escape" && window.cancel_active_drag(cx) {
+            // A sprung folder goes back now, not on the next mouse move.
+            if let Some(Some(root)) = window.root::<crate::window::CrowWindow>() {
+                root.update(cx, |this, cx| this.drag_cancelled(window, cx));
+            }
             cx.stop_propagation();
         }
     })

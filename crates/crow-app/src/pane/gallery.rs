@@ -551,12 +551,6 @@ pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane
                         this.context_press_empty(0, event, window, cx)
                     }),
                 )
-                .on_drop(
-                    cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| this.drop_files(0, paths, window, cx)),
-                )
-                .on_drop(cx.listener(|this, selection: &DraggedSelection, window, cx| {
-                    this.drop_files(0, &selection.external(), window, cx)
-                }))
                 .child(body)
         })
         .children(footer);
@@ -681,8 +675,6 @@ fn render_rows(
             };
             let handoff = DragHandoff::new();
             let drag_icon = crate::style::cloud_icon(cloud, &entry.path, entry.is_dir, 22);
-            let drop_folder =
-                folder.drop_header(ix).and_then(|header| folder.row(header)).map(|(folder, _)| folder.path.clone());
             let drop_target = pane
                 .drop_target
                 .as_ref()
@@ -715,7 +707,10 @@ fn render_rows(
                 .when(fade < 1.0, |row| row.opacity(fade))
                 .when(multi && cursor_here, |row| row.shadow(crate::style::cursor_ring(&theme)))
                 .when(drop_target, |row| {
-                    row.child(drop_outline(&theme).left(px(2.)).right(px(2.)).top(px(1.)).bottom(px(1.)))
+                    let opacity = crate::drag_drop::cue_opacity(cx, &entry.path);
+                    row.child(
+                        drop_outline(&theme).left(px(2.)).right(px(2.)).top(px(1.)).bottom(px(1.)).opacity(opacity),
+                    )
                 })
                 .debug_selector(|| format!("gallery-row-{}", entry.name))
                 .on_drag(DraggedSelection { entries: drag_entries }, {
@@ -726,19 +721,6 @@ fn render_rows(
                 })
                 .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
                     promote_drag(selection, &handoff, window, cx)
-                })
-                .when_some(drop_folder, |row, target| {
-                    let target_selection = target.clone();
-                    row.on_drop(cx.listener(move |this, paths: &gpui::ExternalPaths, window, cx| {
-                        this.drop_into(target.clone(), paths, window, cx);
-                        cx.stop_propagation();
-                    }))
-                    .on_drop(cx.listener(
-                        move |this, selection: &DraggedSelection, window, cx| {
-                            this.drop_into(target_selection.clone(), &selection.external(), window, cx);
-                            cx.stop_propagation();
-                        },
-                    ))
                 })
                 .on_mouse_down(
                     MouseButton::Left,

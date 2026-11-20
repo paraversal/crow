@@ -66,6 +66,11 @@ impl<L: Clone + PartialEq> History<L> {
         Some(&self.current)
     }
 
+    /// The Back stack, nearest first.
+    pub fn back_stack(&self) -> impl Iterator<Item = &L> {
+        self.back.iter().rev()
+    }
+
     /// Every retained location, used by teardown to release virtual sessions.
     pub fn locations(&self) -> impl Iterator<Item = &L> {
         self.back.iter().chain(std::iter::once(&self.current)).chain(self.forward.iter())

@@ -1,17 +1,19 @@
 //! One Crow window: title bar, tabs, sidebar, the active pane, preview and path bar.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
+use crow_core::drag::{DragMachine, Finish, Spring};
 use crow_core::{Location, SidebarEdit, Tabs, TipId, TipsMode, ViewMode, ZeroMatchStreak};
 use gpui::{
-    App, Bounds, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight, IntoElement, MouseButton, Render,
-    Role, ScrollHandle, SharedString, Subscription, Task, TitlebarOptions, Toggled, Window, WindowBounds,
-    WindowOptions, div, img, point, prelude::*, px, size, transparent_black,
+    App, Bounds, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement,
+    MouseButton, Render, Role, ScrollHandle, SharedString, Subscription, Task, TitlebarOptions, Toggled, Window,
+    WindowBounds, WindowOptions, div, img, point, prelude::*, px, size, transparent_black,
 };
 
 use crate::actions::{
@@ -27,13 +29,14 @@ use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
 };
 use crate::chrome::{self, Keycap, KeycapWeight, SheetWidth, with_action_tooltip, with_tooltip};
+use crate::drag_drop::{DropHit, DropLocation, DropSurface, SpringCue};
 use crate::icons::{self, Glyph};
 use crate::info_pane::{self, InfoKey, InfoPane, InfoPaneEvent, InfoTab, InfoTarget};
 use crate::keys::{self, KeyScope};
 use crate::operations::{self, Clipboard, Operations};
 use crate::palette;
-use crate::pane::Pane;
 use crate::pane::PaneEvent;
+use crate::pane::{DraggedSelection, Pane};
 use crate::preview;
 use crate::search::{SearchEvent, SearchView};
 use crate::sidebar::{Sidebar, SidebarEvent};
@@ -196,7 +199,36 @@ pub struct CrowWindow {
     /// Every pane this window has owned, so closing the window releases tab
     /// listings and surfaces that were not the active tab.
     panes: Rc<RefCell<Vec<gpui::WeakEntity<Pane>>>>,
+    /// Spring-loaded folder navigation for the current drag.
+    drag: DragMachine,
+    /// The tab and pane that owned the drag when it began.
+    drag_tab: Option<crow_core::TabId>,
+    drag_pane: Option<Entity<Pane>>,
+    drag_epoch: Option<std::time::Instant>,
+    drag_timer_token: Option<u64>,
+    /// A successful drop is planning or running; Exited must not undo the spring.
+    drop_pending: bool,
+    /// The path bar's segment bounds from the last frame.
+    path_hits: bottom_bar::PathHits,
+    /// The Back button's bounds from the last frame, for springing back.
+    back_bounds: Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
+    /// The destination under the pointer during a drag, for surfaces whose
+    /// hover outline the window draws (Back, path bar, search results).
+    drop_hover: Option<DropHit>,
+    /// Volumes of the current native drag's sources and targets, read off the
+    /// main thread, so the drag cursor can show a copy across volumes.
+    drag_devices: DragDevices,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Device numbers for one drag, filled in by background reads.
+#[derive(Default)]
+struct DragDevices {
+    /// The readable sources' devices, once read.
+    sources: Option<Vec<u64>>,
+    targets: HashMap<PathBuf, Option<u64>>,
+    reading: HashSet<PathBuf>,
+    reading_sources: bool,
 }
 
 /// View ▸ Theme…: "System" first, then every theme in the index. Moving the
@@ -322,6 +354,16 @@ impl CrowWindow {
             zero_streak: ZeroMatchStreak::new(),
             walk_visit: None,
             panes,
+            drag: DragMachine::default(),
+            drag_tab: None,
+            drag_pane: None,
+            drag_epoch: None,
+            drag_timer_token: None,
+            drop_pending: false,
+            path_hits: Default::default(),
+            back_bounds: Default::default(),
+            drop_hover: None,
+            drag_devices: DragDevices::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -783,6 +825,10 @@ impl CrowWindow {
             );
             (pane.can_go_back(), pane.can_go_forward(), pane.mode(), back_label, forward_label)
         };
+        // During a drag, Back is live whenever holding over it would spring back.
+        let back = back || self.drag.can_spring_back();
+        let back_drop = self.drop_hover.as_ref().is_some_and(|hit| hit.location == DropLocation::Back && hit.spring);
+        let back_bounds = self.back_bounds.clone();
         let fg = color(theme.role("fg"));
         let muted = color(theme.role("fg-muted"));
         let surface = color(theme.role("surface"));
@@ -827,8 +873,19 @@ impl CrowWindow {
             .flex()
             .gap(px(2.))
             .child(
-                nav_button("back", "Back".to_owned(), back_label, Glyph::Back, back, &GoBack, cx)
-                    .on_click(cx.listener(|this, _, window, cx| this.pane().update(cx, |p, cx| p.go_back(window, cx)))),
+                div()
+                    .relative()
+                    .on_children_prepainted(move |children, _, _| back_bounds.set(children.first().copied()))
+                    .child(nav_button("back", "Back".to_owned(), back_label, Glyph::Back, back, &GoBack, cx).on_click(
+                        cx.listener(|this, _, window, cx| this.pane().update(cx, |p, cx| p.go_back(window, cx))),
+                    ))
+                    .when(back_drop, |wrap| {
+                        wrap.child(
+                            crate::style::drop_outline(&theme)
+                                .inset_0()
+                                .opacity(crate::drag_drop::back_cue_opacity(cx)),
+                        )
+                    }),
             )
             .child(
                 nav_button("forward", "Forward".to_owned(), forward_label, Glyph::Forward, forward, &GoForward, cx)
@@ -1325,7 +1382,435 @@ impl CrowWindow {
 
     fn render_bottom_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let state = self.bar_state(window, cx);
-        bottom_bar::render(state, self.pane().clone(), self.path_hovered, cx)
+        let drop_hover = self
+            .drop_hover
+            .as_ref()
+            .filter(|hit| hit.surface == DropSurface::PathBar)
+            .and_then(|hit| hit.path().cloned());
+        bottom_bar::render(state, self.pane().clone(), self.path_hovered, &self.path_hits, drop_hover.as_deref(), cx)
+    }
+
+    // ----- external drag routing and spring-loaded folders -----
+
+    fn path_hit_at(&self, pointer: gpui::Point<gpui::Pixels>) -> Option<DropHit> {
+        if self.path_edit.is_some() {
+            return None;
+        }
+        self.path_hits
+            .borrow()
+            .iter()
+            .find(|hit| hit.bounds.contains(&pointer))
+            .filter(|hit| hit.is_dir)
+            .map(|hit| DropHit::folder(hit.path.clone(), 0, true).on(DropSurface::PathBar))
+    }
+
+    /// The deepest eligible destination under `pointer`. A modal blocks every
+    /// target; the path bar and sidebar own their own surfaces.
+    fn drop_hit_at(
+        &self,
+        pointer: gpui::Point<gpui::Pixels>,
+        dragged: Option<&[PathBuf]>,
+        cx: &App,
+    ) -> Option<DropHit> {
+        if self.sheet.is_some()
+            || self.palette.is_some()
+            || self.why.is_some()
+            || self.picker.is_some()
+            || self.git_review.is_some()
+            || self.column_picker.is_some()
+            || self.tag_picker.is_some()
+            || self.show_activity
+        {
+            return None;
+        }
+        if self.back_bounds.get().is_some_and(|bounds| bounds.contains(&pointer)) {
+            return Some(DropHit::back(self.drag.can_spring_back()));
+        }
+        if let Some(hit) = self.sidebar.read(cx).drop_hit(pointer, cx) {
+            return Some(hit.on(DropSurface::Sidebar));
+        }
+        if let Some(hit) = self.path_hit_at(pointer) {
+            return Some(hit);
+        }
+        if let Some(search) = self.active_search(cx) {
+            return search.read(cx).drop_hit(pointer, cx).map(|hit| hit.on(DropSurface::Search));
+        }
+        let pane = self.pane().read(cx);
+        match dragged {
+            Some(paths) => pane.drop_hit_for(pointer, paths, cx),
+            None => pane.drop_hit(pointer, cx),
+        }
+    }
+
+    fn active_tab_id(&self) -> Option<crow_core::TabId> {
+        self.tabs.iter().nth(self.tabs.active_index()).map(|(id, _)| id)
+    }
+
+    fn drag_owner_is_current(&self) -> bool {
+        self.drag.active().is_none() || self.drag_tab == self.active_tab_id()
+    }
+
+    fn drag_now(&self, cx: &App) -> u64 {
+        let now = cx.background_executor().now();
+        let started = self.drag_epoch.unwrap_or(now);
+        now.saturating_duration_since(started).as_millis() as u64
+    }
+
+    /// One sample of the pointer during a drag: resolve a target, arm its timer,
+    /// and finish a session whose drag ended without a drop callback.
+    fn drag_pointer_moved(&mut self, position: gpui::Point<gpui::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drop_pending {
+            return;
+        }
+        if !cx.has_active_drag() {
+            self.end_drag_session(window, cx);
+            return;
+        }
+        if !self.drag_owner_is_current() {
+            self.end_drag_session(window, cx);
+            return;
+        }
+        // Sidebar favorite reordering has its own model; only file drags spring.
+        let file_drag =
+            cx.active_drag_value::<ExternalPaths>().is_some() || cx.active_drag_value::<DraggedSelection>().is_some();
+        if !file_drag {
+            self.end_drag_session(window, cx);
+            return;
+        }
+        if self.sheet.is_some() || self.palette.is_some() {
+            return;
+        }
+        let now = cx.background_executor().now();
+        let id = match self.drag.active() {
+            Some(id) => id,
+            None => {
+                self.drag_epoch = Some(now);
+                self.drag_devices = DragDevices::default();
+                self.drag_tab = self.active_tab_id();
+                self.drag_pane = Some(self.pane().clone());
+                let pane = self.pane().read(cx);
+                let origin = pane.current_dir(cx);
+                let back = pane.back_folders();
+                self.drag.begin(origin, back)
+            }
+        };
+        let elapsed = self.drag_now(cx);
+        let hit = self.drop_hit_at(position, None, cx);
+        let target = hit.as_ref().and_then(DropHit::spring_target);
+        self.show_drop_operation(id, hit.as_ref(), window, cx);
+        self.set_drop_hover(hit, cx);
+        let pointer = (f32::from(position.x), f32::from(position.y));
+        match self.drag.observe(id, pointer, target, elapsed) {
+            Some(token) if self.drag_timer_token != Some(token) => {
+                self.spawn_spring_timer(id, token, window, cx);
+            }
+            None => {
+                self.drag_timer_token = None;
+                self.clear_spring_cue(cx);
+            }
+            Some(_) => {}
+        }
+        cx.notify();
+    }
+
+    /// Tell the native drag cursor what a drop on `hit` would do, like Finder: a
+    /// copy across volumes, a move within one, a copy with Option. Devices are
+    /// read in the background once per path and drag; until they are known the
+    /// platform keeps its own choice for this update.
+    fn show_drop_operation(
+        &mut self,
+        session: crow_core::drag::DragId,
+        hit: Option<&DropHit>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sources) = cx.active_drag_value::<ExternalPaths>().map(|paths| paths.paths().to_vec()) else {
+            return;
+        };
+        let Some(target) = hit.and_then(DropHit::path).cloned() else { return };
+        let devices = &mut self.drag_devices;
+        if devices.sources.is_none() && !devices.reading_sources {
+            devices.reading_sources = true;
+            let task = cx.background_spawn(async move {
+                sources.iter().filter_map(|path| operations::volume_of(path, false)).collect::<Vec<_>>()
+            });
+            cx.spawn(async move |this, cx| {
+                let read = task.await;
+                this.update(cx, |this, _| {
+                    if this.drag.active() == Some(session) {
+                        this.drag_devices.sources = Some(read);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        if !devices.targets.contains_key(&target) && devices.reading.insert(target.clone()) {
+            let path = target.clone();
+            let task = cx.background_spawn(async move { operations::volume_of(&path, true) });
+            let path = target.clone();
+            cx.spawn(async move |this, cx| {
+                let read = task.await;
+                this.update(cx, |this, _| {
+                    if this.drag.active() == Some(session) {
+                        this.drag_devices.reading.remove(&path);
+                        this.drag_devices.targets.insert(path, read);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        let (Some(sources), Some(Some(target))) = (devices.sources.as_ref(), devices.targets.get(&target)) else {
+            return;
+        };
+        if sources.is_empty() {
+            return;
+        }
+        let allowed = window.file_drop_operations();
+        let options = operations::DropOptions {
+            copy: window.modifiers().alt,
+            allow_move: allowed.move_,
+            allow_copy: allowed.copy,
+        };
+        let same_volume = sources.iter().all(|source| source == target);
+        window.set_file_drop_operation(operations::drop_operation(options, same_volume));
+    }
+
+    /// Remember the hovered destination; the search list draws its own outline
+    /// from it, the window draws Back's and the path bar's.
+    fn set_drop_hover(&mut self, hit: Option<DropHit>, cx: &mut Context<Self>) {
+        if self.drop_hover == hit {
+            return;
+        }
+        let search_path =
+            hit.as_ref().filter(|hit| hit.surface == DropSurface::Search).and_then(|hit| hit.path().cloned());
+        if let Some(search) = self.active_search(cx) {
+            search.update(cx, |search, cx| search.set_drop_hover(search_path, cx));
+        }
+        self.drop_hover = hit;
+    }
+
+    fn clear_spring_cue(&mut self, cx: &mut Context<Self>) {
+        if cx.try_global::<SpringCue>().is_some_and(|cue| cue.target.is_some()) {
+            cx.set_global(SpringCue::default());
+        }
+    }
+
+    /// One step of the armed target's blink. False once the timer is stale.
+    fn step_spring_cue(
+        &mut self,
+        session: crow_core::drag::DragId,
+        token: u64,
+        opacity: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.drop_pending || self.drag.active() != Some(session) || self.drag_timer_token != Some(token) {
+            return false;
+        }
+        let Some(target) = self.drop_hover.as_ref().map(|hit| hit.location.clone()) else { return false };
+        cx.set_global(SpringCue { target: Some(target), opacity });
+        window.refresh();
+        true
+    }
+
+    fn spawn_spring_timer(
+        &mut self,
+        session: crow_core::drag::DragId,
+        token: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.drag_timer_token = Some(token);
+        self.clear_spring_cue(cx);
+        let delay = crow_core::drag::SPRING_DELAY_MS;
+        let cue = crow_core::motion::spring_cue(cx.global::<Ui>().feedback.mode, delay);
+        cx.spawn_in(window, async move |this, cx| {
+            let mut waited = 0;
+            for (at, opacity) in cue {
+                cx.background_executor().timer(Duration::from_millis(at - waited)).await;
+                waited = at;
+                let live = this
+                    .update_in(cx, |this, window, cx| this.step_spring_cue(session, token, opacity, window, cx))
+                    .unwrap_or(false);
+                if !live {
+                    return;
+                }
+            }
+            cx.background_executor().timer(Duration::from_millis(delay - waited)).await;
+            this.update_in(cx, |this, window, cx| this.spring_timer_fired(session, token, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn spring_timer_fired(
+        &mut self,
+        session: crow_core::drag::DragId,
+        token: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.drop_pending || !cx.has_active_drag() || self.drag.active() != Some(session) {
+            return;
+        }
+        if !self.drag_owner_is_current() {
+            self.end_drag_session(window, cx);
+            return;
+        }
+        if self.drag_timer_token != Some(token) {
+            return;
+        }
+        self.drag_timer_token = None;
+        self.clear_spring_cue(cx);
+        let position = window.mouse_position();
+        let hit = self.drop_hit_at(position, None, cx);
+        let back = hit.as_ref().is_some_and(|hit| hit.location == DropLocation::Back);
+        let target = hit.as_ref().and_then(DropHit::spring_target);
+        let pointer = (f32::from(position.x), f32::from(position.y));
+        let elapsed = self.drag_now(cx);
+        let Some(spring) = self.drag.expire(session, token, pointer, target, elapsed) else { return };
+        let Some(pane) = self.drag_pane.clone() else { return };
+        if self.search.is_some() {
+            self.close_search(window, cx);
+        }
+        match spring {
+            Spring::Enter(path) => pane.update(cx, |pane, cx| pane.spring_enter(path, cx)),
+            Spring::Origin => pane.update(cx, |pane, cx| pane.spring_cancel(window, cx)),
+        }
+        // Back does not reflow under a still pointer: keep stepping while held.
+        if back {
+            self.drop_hover = None;
+            self.drag_pointer_moved(position, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// A drag ended without an accepted drop: undo a temporary folder and forget
+    /// the timer. A pending accepted drop owns the spring until planning finishes.
+    fn end_drag_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.drag.active() else { return };
+        let finish = self.drag.finish(id, false);
+        self.drag_tab = None;
+        let pane = self.drag_pane.take();
+        self.drag_epoch = None;
+        self.drag_devices = DragDevices::default();
+        self.drag_timer_token = None;
+        self.clear_spring_cue(cx);
+        self.set_drop_hover(None, cx);
+        if let (Finish::Cancelled { restore: Some(_) }, Some(pane)) = (finish, pane) {
+            pane.update(cx, |pane, cx| pane.spring_cancel(window, cx));
+        }
+        self.drop_pending = false;
+        cx.notify();
+    }
+
+    /// The drag left the window or Escape cancelled it: restore a sprung folder
+    /// at once. A pending accepted drop owns the spring until planning finishes.
+    pub(crate) fn drag_cancelled(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.drop_pending {
+            self.end_drag_session(window, cx);
+        }
+    }
+
+    fn drag_modifiers_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if cx.has_active_drag() && !self.drop_pending {
+            self.drag_pointer_moved(window.mouse_position(), window, cx);
+        }
+    }
+
+    fn drop_external(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        let operations = window.file_drop_operations();
+        self.accept_drop(paths.paths().to_vec(), operations, window, cx);
+    }
+
+    fn drop_selection(&mut self, selection: &DraggedSelection, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = selection.entries.iter().map(|(path, _)| path.clone()).collect();
+        // Crow is the source and allows both; the window's native mask belongs to
+        // the last external drag and may be stale.
+        self.accept_drop(paths, gpui::ExternalDragOperations::default(), window, cx);
+    }
+
+    /// Resolve the final target once, enqueue one request, and commit a sprung
+    /// folder as one Back step only after the request exists.
+    fn accept_drop(
+        &mut self,
+        paths: Vec<PathBuf>,
+        operations: gpui::ExternalDragOperations,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.drop_pending {
+            return;
+        }
+        if !self.drag_owner_is_current() {
+            self.end_drag_session(window, cx);
+            return;
+        }
+        let pointer = window.mouse_position();
+        let hit = self.drop_hit_at(pointer, Some(&paths), cx);
+        let finish = match self.drag.active() {
+            Some(id) => self.drag.finish(id, true),
+            None => Finish::None,
+        };
+        self.drag_tab = None;
+        let owner = self.drag_pane.take();
+        self.drag_epoch = None;
+        self.drag_devices = DragDevices::default();
+        self.drag_timer_token = None;
+        self.clear_spring_cue(cx);
+        self.set_drop_hover(None, cx);
+        let sprung = matches!(finish, Finish::Accepted { sprung: true, .. });
+        // Back springs but never takes a drop: releasing there is a cancel.
+        let hit = hit.filter(|hit| hit.location != DropLocation::Back);
+        let Some(hit) = hit else {
+            if let (true, Some(pane)) = (sprung, owner) {
+                pane.update(cx, |pane, cx| pane.spring_cancel(window, cx));
+            }
+            return;
+        };
+        match hit.location {
+            DropLocation::Back => {}
+            DropLocation::SidebarInsertion(slot) => {
+                if let (true, Some(pane)) = (sprung, owner) {
+                    pane.update(cx, |pane, cx| pane.spring_cancel(window, cx));
+                }
+                let sidebar = self.sidebar.clone();
+                sidebar.update(cx, |sidebar, cx| sidebar.add_dropped_folders(slot, paths, cx));
+            }
+            DropLocation::Folder(into) => {
+                let options = operations::DropOptions {
+                    copy: window.modifiers().alt,
+                    allow_move: operations.move_,
+                    allow_copy: operations.copy,
+                };
+                self.drop_pending = true;
+                let dropped = paths.clone();
+                let task = cx.background_spawn(async move { operations::drop_request(&paths, into, options) });
+                cx.spawn_in(window, async move |this, cx| {
+                    let request = task.await;
+                    this.update_in(cx, |this, window, cx| {
+                        this.drop_pending = false;
+                        match request {
+                            Some(request) => {
+                                if let (true, Some(pane)) = (sprung, owner.clone()) {
+                                    pane.update(cx, |pane, cx| pane.spring_commit(dropped.clone(), cx));
+                                }
+                                this.run_request(request, window, cx);
+                            }
+                            None => {
+                                if let (true, Some(pane)) = (sprung, owner) {
+                                    pane.update(cx, |pane, cx| pane.spring_cancel(window, cx));
+                                }
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
     }
 
     // ----- contextual tips -----
@@ -1679,7 +2164,6 @@ impl CrowWindow {
                     }
                 }
             }
-            SidebarEvent::Run(request) => self.run_request(request.clone(), window, cx),
             SidebarEvent::EditSavedQuery(id) => self.edit_saved_search_by_id(id.clone(), window, cx),
             SidebarEvent::RemoveSavedQuery(id) => {
                 ui::remove_saved_query(id.clone(), None, cx);
@@ -2743,7 +3227,7 @@ impl Render for CrowWindow {
             .id("crow")
             .role(Role::Application)
             .aria_label("Crow")
-            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
                 if event.pressed_button == Some(MouseButton::Left) {
                     this.drag_side_pane(event.position.x, cx);
                 } else {
@@ -2752,7 +3236,16 @@ impl Render for CrowWindow {
                 if cx.has_active_drag() {
                     this.pane().update(cx, |pane, cx| pane.update_drag_target(event.position, cx));
                 }
+                this.drag_pointer_moved(event.position, window, cx);
             }))
+            .on_modifiers_changed(cx.listener(|this, _, window, cx| this.drag_modifiers_changed(window, cx)))
+            .on_file_drop_exit(cx.listener(|this, _, window, cx| this.drag_cancelled(window, cx)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.drop_external(paths, window, cx)))
+            .on_drop(
+                cx.listener(|this, selection: &DraggedSelection, window, cx| {
+                    this.drop_selection(selection, window, cx)
+                }),
+            )
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.finish_side_pane_resize(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.finish_side_pane_resize(cx)))
             // keys::context_stack (KeyScope::Window) mirrors this; every overlay nests under it.
