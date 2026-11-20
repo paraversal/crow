@@ -2525,7 +2525,12 @@ impl Folder {
     /// Click inside an existing selection: keep it (so it can be dragged), move the cursor.
     pub fn click(&mut self, ix: usize, cx: &mut Context<Self>) {
         match self.row(ix) {
-            Some((entry, _)) if self.selection.contains(&entry.path) => self.set_cursor(ix, cx),
+            Some((entry, _)) if self.selection.contains(&entry.path) => {
+                // The model's cursor follows the row, or Shift-arrows and the
+                // preview would act on the row the click left.
+                self.selection.set_cursor(entry.path.clone());
+                self.set_cursor(ix, cx);
+            }
             Some(_) => self.select_only(ix, cx),
             None => {}
         }

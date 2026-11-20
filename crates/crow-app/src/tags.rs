@@ -6,9 +6,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use crow_core::normalize_tag;
-use gpui::{App, SharedString};
+use gpui::{App, Global, SharedString};
 
 use crate::ui::Ui;
 
@@ -139,17 +140,53 @@ pub fn reader() -> Arc<dyn crow_search::TagReader> {
     READER.clone()
 }
 
-/// Start the one inventory scan. Pinned tags are already in `Ui`; discovered
-/// tags may take a moment and update the sidebar when they arrive.
-pub fn init(cx: &mut App) {
-    let cancel = Arc::new(AtomicBool::new(false));
-    refresh_with(cx, Arc::new(SystemInventory), cancel);
+/// The shortest time between two inventory scans. A scan walks Spotlight and
+/// reads tags per hit, so a window gaining focus must not start one each time.
+pub const REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// The scan's own state: one scan at a time, never sooner than `cooldown`
+/// after the last one started.
+struct Refresh {
+    inventory: Arc<dyn TagInventory>,
+    cooldown: Duration,
+    started: Option<Instant>,
+    in_flight: bool,
 }
 
-fn refresh_with(cx: &mut App, inventory: Arc<dyn TagInventory>, cancel: Arc<AtomicBool>) {
+impl Global for Refresh {}
+
+/// Start the first inventory scan. Pinned tags are already in `Ui`; discovered
+/// tags may take a moment and update the sidebar when they arrive.
+pub fn init(cx: &mut App) {
+    install(cx, Arc::new(SystemInventory), REFRESH_COOLDOWN);
+    refresh_if_stale(cx);
+}
+
+fn install(cx: &mut App, inventory: Arc<dyn TagInventory>, cooldown: Duration) {
+    cx.set_global(Refresh { inventory, cooldown, started: None, in_flight: false });
+}
+
+/// Rescan for tags created in Finder since the last scan, when the cooldown has
+/// passed and none is running. Called when a window comes to the front and when
+/// the tag picker opens; a no-op where the app has no inventory (tests).
+pub fn refresh_if_stale(cx: &mut App) {
+    let now = Instant::now();
+    if !cx.has_global::<Refresh>() {
+        return;
+    }
+    let refresh = cx.global_mut::<Refresh>();
+    if refresh.in_flight || refresh.started.is_some_and(|started| now.duration_since(started) < refresh.cooldown) {
+        return;
+    }
+    refresh.in_flight = true;
+    refresh.started = Some(now);
+    let inventory = refresh.inventory.clone();
     cx.spawn(async move |cx| {
+        let cancel = AtomicBool::new(false);
         let discovery = cx.background_executor().spawn(async move { inventory.discover(&cancel) }).await;
         cx.update(|cx| {
+            cx.global_mut::<Refresh>().in_flight = false;
+            // `apply` replaces the discovered names; pinned tags live apart from them.
             cx.global_mut::<Ui>().tags.apply(discovery);
             cx.refresh_windows();
         });
@@ -191,5 +228,55 @@ mod tests {
     fn discovery_goes_through_the_injected_provider() {
         let index = Fake(vec!["Work".into()]).discover(&AtomicBool::new(false));
         assert_eq!(index.tags, ["Work"]);
+    }
+
+    /// Answers each scan with the next scripted list and counts the scans.
+    struct Scripted {
+        answers: std::sync::Mutex<Vec<Vec<String>>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl TagInventory for Scripted {
+        fn discover(&self, _: &AtomicBool) -> TagDiscovery {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let mut answers = self.answers.lock().unwrap();
+            let tags = if answers.len() > 1 { answers.remove(0) } else { answers[0].clone() };
+            TagDiscovery { tags, partial: false, error: None }
+        }
+    }
+
+    #[gpui::test]
+    fn a_new_finder_tag_appears_after_the_cooldown_and_pinned_tags_stay(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::ui::init_for_tests);
+        let inventory = Arc::new(Scripted {
+            answers: std::sync::Mutex::new(vec![vec!["review".into()], vec!["review".into(), "Fresh".into()]]),
+            calls: Default::default(),
+        });
+        cx.update(|cx| {
+            cx.global_mut::<Ui>().tags.set_pinned(vec!["Work".into()]);
+            install(cx, inventory.clone(), Duration::from_millis(60));
+            refresh_if_stale(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| cx.global::<Ui>().tags.all()), ["Work", "review"]);
+
+        // Inside the cooldown: no second scan, however often a window activates.
+        cx.update(|cx| {
+            for _ in 0..5 {
+                refresh_if_stale(cx);
+            }
+        });
+        cx.run_until_parked();
+        assert_eq!(inventory.calls.load(Ordering::Relaxed), 1, "the cooldown holds");
+
+        std::thread::sleep(Duration::from_millis(80));
+        cx.update(|cx| {
+            // Two activations at once still start one scan.
+            refresh_if_stale(cx);
+            refresh_if_stale(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(inventory.calls.load(Ordering::Relaxed), 2, "one scan after the cooldown");
+        assert_eq!(cx.read(|cx| cx.global::<Ui>().tags.all()), ["Work", "review", "Fresh"], "the new tag merged");
     }
 }

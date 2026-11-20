@@ -1607,6 +1607,11 @@ impl Pane {
         for folder in self.folders.clone() {
             folder.update(cx, |folder, cx| folder.remap_selection(map, cursor, cx));
         }
+        // A saved search or tag shows its results from its own session, which keeps
+        // selection and cursor by path; bring them to the new names first.
+        if let Some(session) = self.saved_session() {
+            session.update(cx, |session, cx| session.apply_rename_map(map, cx));
+        }
         self.load_preview(cx);
         self.refresh_saved(cx);
         cx.notify();

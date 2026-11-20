@@ -42,13 +42,26 @@ pub(crate) struct SavedQueryForm {
 }
 
 /// A tag field that stays comma-separated for ordinary names; a name containing
-/// a comma is shown as a JSON string array so editing it cannot split the value.
+/// a comma, or starting with `[` (which would read as the JSON form), is shown
+/// as a JSON string array so editing it cannot split or reinterpret the value.
 fn tag_field_text(tags: &[String]) -> String {
-    if tags.iter().any(|tag| tag.contains(',')) {
+    if tags.iter().any(|tag| tag.contains(',') || tag.starts_with('[')) {
         serde_json::to_string(tags).unwrap_or_default()
     } else {
         tags.join(", ")
     }
+}
+
+/// The inverse of [`tag_field_text`]: a JSON string array when the text is one,
+/// otherwise a comma-separated list, so `[Urgent], Work` is two tags and not a
+/// failed array.
+fn parse_tags_field(text: &str) -> Result<Vec<String>, String> {
+    if text.starts_with('[')
+        && let Ok(values) = serde_json::from_str::<Vec<String>>(text)
+    {
+        return crow_core::normalize_tags(values);
+    }
+    crow_core::normalize_tags(text.split(',').map(str::trim).filter(|tag| !tag.is_empty()))
 }
 
 fn field<T: 'static>(
@@ -189,13 +202,7 @@ impl SavedQueryForm {
             )
         };
         let tags_text = self.tags.read(cx).text().trim().to_owned();
-        let tags = if tags_text.starts_with('[') {
-            let values: Vec<String> = serde_json::from_str(&tags_text)
-                .map_err(|_| "Tags must be a comma-separated list or a JSON array of strings".to_owned())?;
-            crow_core::normalize_tags(values)?
-        } else {
-            crow_core::normalize_tags(tags_text.split(',').map(str::trim).filter(|tag| !tag.is_empty()))?
-        };
+        let tags = parse_tags_field(&tags_text)?;
         let id = match &self.id {
             Some(id) => id.clone(),
             None => SavedQuery::allocate_id(&name, &cx.global::<Ui>().saved_queries),
@@ -427,7 +434,7 @@ impl SavedQueryForm {
                 .debug_selector(move || id.into())
                 .role(Role::CheckBox)
                 .aria_label(text)
-                .aria_selected(on)
+                .aria_toggled(if on { gpui::Toggled::True } else { gpui::Toggled::False })
                 .flex()
                 .items_center()
                 .gap_2()
@@ -458,6 +465,8 @@ impl SavedQueryForm {
         div()
             .id("saved-query-form")
             .debug_selector(|| "saved-query-form".into())
+            .role(Role::Dialog)
+            .aria_label(if form.id.is_some() { "Edit Saved Search" } else { "Save Search" })
             .key_context("SavedQueryForm")
             .track_focus(&self.focus)
             .on_action(
@@ -609,5 +618,20 @@ mod tests {
     fn a_comma_inside_a_tag_uses_a_json_array() {
         assert_eq!(tag_field_text(&["Work".into(), "review".into()]), "Work, review");
         assert_eq!(tag_field_text(&["Work".into(), "a,b".into()]), r#"["Work","a,b"]"#);
+    }
+
+    #[test]
+    fn tags_round_trip_through_the_field() {
+        for tags in [
+            vec!["[Urgent]".to_owned(), "Work".to_owned()],
+            vec!["a,b".to_owned()],
+            vec!["Work".to_owned(), "review".to_owned()],
+            vec!["[".to_owned()],
+        ] {
+            let text = tag_field_text(&tags);
+            assert_eq!(parse_tags_field(&text).unwrap(), tags, "{text}");
+        }
+        assert_eq!(parse_tags_field("[Urgent], Work").unwrap(), ["[Urgent]", "Work"], "hand-typed brackets are tags");
+        assert_eq!(parse_tags_field("").unwrap(), Vec::<String>::new());
     }
 }

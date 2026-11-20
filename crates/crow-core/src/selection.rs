@@ -119,9 +119,19 @@ impl<K: Clone + Eq + Hash> Selection<K> {
         self.anchor = self.anchor.as_ref().map(|key| map.get(key).cloned().unwrap_or_else(|| key.clone()));
     }
 
-    /// Cmd-A.
+    /// Cmd-A, a marquee, or any wholesale replacement. The cursor and anchor
+    /// stay only while they are still selected: one that left the set is
+    /// dropped, so a later Shift-click cannot extend from a row that is no
+    /// longer selected. No member is invented as the new cursor: the caller
+    /// sets one, and a 100k select-all must not trigger a lookup for it.
     pub fn select_all(&mut self, keys: impl IntoIterator<Item = K>) {
         self.selected = keys.into_iter().collect();
+        if self.cursor.as_ref().is_some_and(|key| !self.selected.contains(key)) {
+            self.cursor = None;
+        }
+        if self.anchor.as_ref().is_some_and(|key| !self.selected.contains(key)) {
+            self.anchor = None;
+        }
     }
 
     /// Drop items that no longer exist (after a folder change). The cursor and anchor
@@ -196,6 +206,26 @@ impl TypeSelect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacing_the_selection_drops_a_cursor_and_anchor_that_left_it() {
+        let mut selection = Selection::default();
+        selection.select_only("a");
+        selection.select_all(["b", "c"]);
+        assert_eq!(selection.cursor(), None, "`a` is no longer selected");
+
+        // Still a member: stay put.
+        selection.set_cursor("c");
+        selection.select_all(["b", "c", "d"]);
+        assert_eq!(selection.cursor(), Some(&"c"));
+
+        // Emptied (a marquee cancelled to nothing): nothing to extend from.
+        selection.select_all(Vec::<&str>::new());
+        assert_eq!(selection.cursor(), None);
+        let (from, to) = selection.extend_to(2, |_| None, |i| ["a", "b", "c"][i]);
+        assert_eq!((from, to), (2, 2), "Shift-click after an emptied selection starts at the target");
+        assert_eq!(selection.len(), 1);
+    }
 
     fn keys() -> Vec<&'static str> {
         vec!["a", "b", "c", "d", "e"]
