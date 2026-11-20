@@ -21,12 +21,33 @@ if [ ! -d "$dest/.git" ]; then
 fi
 git -C "$dest" sparse-checkout set "${CRATES[@]/#/crates/}"
 git -C "$dest" fetch -q --depth 1 --filter=blob:none origin "$ZED_REV"
-git -C "$dest" checkout -q --detach FETCH_HEAD
+
+# Check whether $dest is already at FETCH_HEAD with every patch applied in order,
+# without touching file mtimes (preserving Cargo and CI rust-cache fingerprints).
+already_patched() {
+  [ "$(git -C "$dest" rev-parse HEAD 2>/dev/null || true)" = "$(git -C "$dest" rev-parse FETCH_HEAD)" ] || return 1
+  local tmp_index
+  tmp_index=$(mktemp "${TMPDIR:-/tmp}/crow-gpui-index.XXXXXX") || return 1
+  cp "$dest/.git/index" "$tmp_index"
+  for patch in patches/gpui-*.patch; do
+    [ -e "$patch" ] || continue
+    if ! GIT_INDEX_FILE="$tmp_index" git -C "$dest" apply --cached "$PWD/$patch" 2>/dev/null; then
+      rm -f "$tmp_index"
+      return 1
+    fi
+  done
+  local status=0
+  GIT_INDEX_FILE="$tmp_index" git -C "$dest" diff --quiet || status=$?
+  rm -f "$tmp_index"
+  return "$status"
+}
+
 # Crow's small fixes to GPUI, kept as patches so a fresh fetch (and CI) has them.
-for patch in patches/gpui-*.patch; do
-  [ -e "$patch" ] || continue
-  if ! git -C "$dest" apply --reverse --check "$PWD/$patch" 2>/dev/null; then
+if ! already_patched; then
+  git -C "$dest" checkout -q -f --detach FETCH_HEAD
+  for patch in patches/gpui-*.patch; do
+    [ -e "$patch" ] || continue
     git -C "$dest" apply "$PWD/$patch"
-  fi
-done
+  done
+fi
 echo "GPUI at $(git -C "$dest" rev-parse --short HEAD) in $dest"
