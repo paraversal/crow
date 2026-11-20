@@ -10758,7 +10758,8 @@ fn emptying_a_fixture_trash_releases_the_queue_after_the_origin_closes(app: &mut
     let (view_a, mut cx_a) = open(app, &root);
     let (view_b, mut cx_b) = second_window(&mut cx_a, &root);
     view_a.update_in(&mut cx_a, |this, window, cx| {
-        this.sheet = Some(Sheet::ConfirmEmptyTrash { folders: vec![trash.clone()], focus: cx.focus_handle() });
+        this.sheet =
+            Some(Sheet::ConfirmEmptyTrash { folders: vec![trash.clone()], finder: false, focus: cx.focus_handle() });
         this.confirm_sheet(window, cx);
         assert_eq!(cx.global::<Operations>().maintenance, Some(crate::operations::Maintenance::EmptyTrash));
         crate::operations::enqueue(copy_request(&[root.join("notes.txt")], root.join("beta")), None, cx);
@@ -16644,4 +16645,137 @@ fn audit_batch_one_palette_adds_the_search_result_folder_to_the_sidebar(cx: &mut
     let paths = sidebar_paths(&cx);
     assert!(paths.contains(&result), "the search result is a favorite");
     assert!(!paths.contains(&root.join("alpha")), "the hidden selection was left alone");
+}
+
+#[gpui::test]
+fn an_unreadable_trash_is_not_called_empty_and_finder_empties_it(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = fixture("empty-trash-denied");
+    let trash = root.join(".Trash");
+    std::fs::create_dir_all(&trash).expect("create trash");
+    std::fs::write(trash.join("secret.txt"), "a").expect("write trash");
+    std::fs::set_permissions(&trash, std::fs::Permissions::from_mode(0o000)).expect("deny the trash");
+    let home = root.to_path_buf();
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        cx.global_mut::<Ui>().home = home;
+    });
+    effect_calls(&mut cx);
+    cx.simulate_keystrokes("cmd-shift-backspace");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(sheet_open(&view, &cx), "an unreadable Trash asks instead of claiming it is empty");
+    assert!(cx.debug_bounds("sheet-full-disk-access").is_some(), "the sheet offers Full Disk Access");
+    let message = cx.read(|cx| cx.global::<Operations>().message.clone());
+    assert!(!message.is_some_and(|(text, _)| text.contains("already empty")), "never claims empty");
+
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(!sheet_open(&view, &cx));
+    assert!(
+        effect_calls(&mut cx).iter().any(|call| matches!(call, crate::effects::Call::FinderEmptyTrash)),
+        "Finder does the emptying"
+    );
+    let message = cx.read(|cx| cx.global::<Operations>().message.clone());
+    assert!(
+        message.as_ref().is_some_and(|(text, error)| !error && text == "Emptied the Trash with Finder."),
+        "{message:?}"
+    );
+    let logged = cx.read(|cx| cx.global::<Operations>().log.last().map(|entry| entry.record.label.clone()));
+    assert_eq!(logged.as_deref(), Some("Emptied the Trash with Finder."), "Activity keeps the outcome");
+
+    // A refused Automation prompt is an error, not silence.
+    cx.update(|_, cx| crate::effects::recording(cx).unwrap().set_finder_trash_error(Some("not allowed".into())));
+    cx.simulate_keystrokes("cmd-shift-backspace");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    let message = cx.read(|cx| cx.global::<Operations>().message.clone());
+    assert!(
+        message.as_ref().is_some_and(|(text, error)| *error && text.contains("Finder could not empty the Trash")),
+        "{message:?}"
+    );
+    let _ = std::fs::set_permissions(&trash, std::fs::Permissions::from_mode(0o755));
+}
+
+#[gpui::test]
+fn empty_trash_shows_in_activity_while_running_and_after(cx: &mut TestAppContext) {
+    let root = fixture("empty-trash-activity");
+    let trash = root.join("test-trash");
+    std::fs::create_dir(&trash).unwrap();
+    std::fs::write(trash.join("item"), "disposable fixture").unwrap();
+    let (view, mut cx) = open(cx, &root);
+    // The engine slot is claimed while Empty Trash runs; hold it to look.
+    cx.update(|_, cx| cx.global_mut::<Operations>().maintenance = Some(crate::operations::Maintenance::EmptyTrash));
+    view.update(&mut cx, |this, cx| {
+        this.show_activity = true;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("activity-empty-trash").is_some(), "the running Empty Trash has an Activity row");
+    cx.update(|_, cx| cx.global_mut::<Operations>().maintenance = None);
+    view.update_in(&mut cx, |this, window, cx| {
+        this.sheet =
+            Some(Sheet::ConfirmEmptyTrash { folders: vec![trash.clone()], finder: false, focus: cx.focus_handle() });
+        this.confirm_sheet(window, cx);
+    });
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("activity-empty-trash").is_none(), "the running row goes when it finishes");
+    let logged = cx.read(|cx| cx.global::<Operations>().log.last().map(|entry| entry.record.label.clone()));
+    assert_eq!(logged.as_deref(), Some("Emptied the Trash: 1 item."), "the outcome is in the history");
+}
+
+#[gpui::test]
+fn an_unreadable_folder_shows_a_lock_state_in_every_view(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = fixture("unreadable-folder");
+    let locked = root.join("locked");
+    std::fs::create_dir(&locked).expect("create folder");
+    std::fs::write(locked.join("inside.txt"), "x").expect("write file");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("deny the folder");
+    let (view, mut cx) = open(cx, &root);
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(locked.clone(), cx));
+    for mode in [ViewMode::List, ViewMode::Columns, ViewMode::Icons, ViewMode::Gallery] {
+        pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_mode(mode, cx));
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("folder-unreadable").is_some(), "{mode:?} shows the lock state");
+        assert!(cx.debug_bounds("folder-retry").is_some(), "{mode:?} offers Retry");
+        assert!(
+            cx.debug_bounds("folder-full-disk-access").is_none(),
+            "{mode:?}: plain EACCES is not a Full Disk Access problem"
+        );
+    }
+
+    // Retry lists the folder once it is readable again.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("allow the folder");
+    pane(&view, &cx).update(&mut cx, |pane, cx| {
+        let folder = pane.focused_folder_for_test();
+        folder.update(cx, |folder, cx| folder.reload(cx));
+    });
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("folder-unreadable").is_none(), "a successful reload clears the state");
+}
+
+#[gpui::test]
+fn an_eperm_folder_offers_full_disk_access(cx: &mut TestAppContext) {
+    let root = fixture("unreadable-eperm");
+    let (view, mut cx) = open(cx, &root);
+    for mode in [ViewMode::List, ViewMode::Columns, ViewMode::Icons, ViewMode::Gallery] {
+        pane(&view, &cx).update(&mut cx, |pane, cx| {
+            pane.set_mode(mode, cx);
+            let folder = pane.focused_folder_for_test();
+            folder.update(cx, |folder, cx| {
+                folder.set_error_for_test(crate::folder::FolderErrorKind::PermissionDenied { tcc_likely: true }, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("folder-full-disk-access").is_some(), "{mode:?} offers Full Disk Access on EPERM");
+        assert!(cx.debug_bounds("folder-retry").is_some(), "{mode:?} offers Retry");
+    }
 }

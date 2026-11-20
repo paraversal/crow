@@ -286,7 +286,7 @@ pub(crate) fn promote_drag(
     let label = handoff.label.borrow().clone();
     let entries = selection.entries.as_slice();
     if let Some((path, is_dir)) = entries.first()
-        && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
+        && let Some(png) = crate::style::drag_icon_png(cx, path, *is_dir, 22)
         && crate::effects::effects(cx).begin_drag(
             window,
             &crow_macos::ComboDrag {
@@ -396,6 +396,8 @@ pub struct Pane {
     /// Which folder has keyboard focus (always 0 in list view).
     focused: usize,
     focus: FocusHandle,
+    /// Retry and Open Full Disk Access in the unreadable-folder state.
+    unreadable: [FocusHandle; 2],
     /// The list view's columns after Name, and the widths shared by header and rows.
     columns: Vec<Arc<dyn Column>>,
     table: TableLayout,
@@ -546,6 +548,7 @@ impl Pane {
             _service_subscriptions: service_subscriptions,
             focused: 0,
             focus: cx.focus_handle(),
+            unreadable: [cx.focus_handle(), cx.focus_handle()],
             table: default_table(&columns),
             columns,
             content_width: Pixels::ZERO,
@@ -5757,6 +5760,83 @@ fn default_table(shown: &[Arc<dyn Column>]) -> TableLayout {
     TableLayout::new(columns)
 }
 
+impl Pane {
+    /// The in-pane state for a folder macOS will not list, shared by every view
+    /// mode. Offers Retry, and Full Disk Access when privacy protection is the cause.
+    fn render_unreadable(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::folder::FolderErrorKind;
+        if self.active_saved.is_some() || self.active_tag.is_some() {
+            return None;
+        }
+        let root = self.folders.first()?.clone();
+        let tcc_likely = match root.read(cx).error_kind()? {
+            FolderErrorKind::PermissionDenied { tcc_likely } => tcc_likely,
+            FolderErrorKind::Other => return None,
+        };
+        let theme = cx.global::<Ui>().theme.clone();
+        let [retry_focus, access_focus] = self.unreadable.clone();
+        let button = |id: &'static str, label: &'static str, focus: &FocusHandle, primary: bool| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .role(Role::Button)
+                .aria_label(label)
+                .track_focus(focus)
+                .tab_stop(true)
+                .focus_visible(|style| style.shadow(crate::style::cursor_ring(&theme)))
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .bg(color(if primary { theme.role("accent") } else { theme.role("surface-raised") }))
+                .text_color(color(if primary { theme.role("on-accent") } else { theme.role("fg") }))
+                .child(label)
+        };
+        let retry = {
+            let root = root.clone();
+            let again = move |cx: &mut gpui::App| root.update(cx, |folder, cx| folder.reload(cx));
+            let on_key = again.clone();
+            button("folder-retry", "Retry", &retry_focus, !tcc_likely).on_click(move |_, _, cx| again(cx)).on_key_down(
+                move |event, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        on_key(cx);
+                        cx.stop_propagation();
+                    }
+                },
+            )
+        };
+        let access = tcc_likely.then(|| {
+            button("folder-full-disk-access", "Open Full Disk Access…", &access_focus, true)
+                .on_click(|_, _, cx| cx.open_url(crate::trash::PRIVACY_SETTINGS_URL))
+                .on_key_down(|event, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.open_url(crate::trash::PRIVACY_SETTINGS_URL);
+                        cx.stop_propagation();
+                    }
+                })
+        });
+        Some(
+            div()
+                .id("folder-unreadable")
+                .debug_selector(|| "folder-unreadable".into())
+                .role(Role::Group)
+                .aria_label("You don't have permission to view this folder.")
+                .track_focus(&self.focus)
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .bg(color(theme.role("bg")))
+                .text_color(color(theme.role("fg-muted")))
+                .child(glyph(Glyph::Lock, 28., "fg-muted", &theme))
+                .child("You don't have permission to view this folder.")
+                .child(div().flex().gap_2().child(retry).children(access))
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(message) = self.saved_unavailable(cx) {
@@ -5774,6 +5854,9 @@ impl Render for Pane {
                 .text_color(color(theme.role("fg-muted")))
                 .child(message)
                 .into_any_element();
+        }
+        if let Some(state) = self.render_unreadable(cx) {
+            return state;
         }
         if let Some(view) = self.saved_session() {
             return div().size_full().child(view).into_any_element();

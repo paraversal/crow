@@ -32,6 +32,21 @@ pub fn in_jail(folders: Vec<PathBuf>, jail: Option<&Path>) -> Vec<PathBuf> {
     }
 }
 
+/// Full Disk Access, where the user lets Crow read the Trash.
+pub const PRIVACY_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+
+/// Said instead of "already empty" when a Trash folder cannot be listed and
+/// there is no Finder fallback (a jailed run).
+pub fn denied_message(denied: &[PathBuf]) -> String {
+    let name = denied.first().map_or_else(String::new, |path| quoted_name(path));
+    format!("Crow can't read the Trash {name}. Allow Full Disk Access in System Settings.")
+}
+
+/// Finder's own refusal (often a declined Automation prompt), kept readable.
+pub fn finder_failure(error: &str) -> String {
+    format!("Finder could not empty the Trash: {}", error.lines().next().unwrap_or("unknown error"))
+}
+
 /// What the status line says after `empty`. The second item is "this is an
 /// error (red, stays)"; a partial failure is still an error.
 pub fn message(report: &Report) -> (String, bool) {

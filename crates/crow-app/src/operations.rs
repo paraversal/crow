@@ -1319,6 +1319,17 @@ pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static
     .detach();
 }
 
+/// Record a finished non-undoable maintenance action (Empty Trash) in Activity.
+pub fn log_maintenance(label: &str, is_error: bool, cx: &mut App) {
+    cx.global_mut::<Operations>().log.push(LogEntry {
+        record: Arc::new(Record { label: label.to_owned(), steps: Vec::new() }),
+        at: SystemTime::now(),
+        error: is_error.then(|| label.to_owned()),
+        cancelled: false,
+        undone: false,
+    });
+}
+
 /// Claim the engine slot for a non-transfer mutation. Returns false with the
 /// usual message when something else owns it.
 pub fn begin_maintenance(kind: Maintenance, cx: &mut App) -> bool {

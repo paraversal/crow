@@ -27,6 +27,7 @@ pub fn count_saved_query(
     home: &std::path::Path,
     exclude: &Exclude,
     cancel: &Arc<AtomicBool>,
+    read_gate: Arc<dyn crow_fs::ReadGate>,
 ) -> CountResult {
     if cancel.load(Ordering::Relaxed) {
         return CountResult::default();
@@ -43,7 +44,7 @@ pub fn count_saved_query(
                 },
                 _ => home.to_path_buf(),
             };
-            count_engine(&root, query, text, &predicates, home, exclude, cancel)
+            count_engine(&root, query, text, home, exclude, cancel, read_gate)
         }
     }
 }
@@ -52,11 +53,12 @@ fn count_engine(
     root: &std::path::Path,
     query: &SavedQuery,
     text: &str,
-    predicates: &Predicates,
     home: &std::path::Path,
     exclude: &Exclude,
     cancel: &Arc<AtomicBool>,
+    read_gate: Arc<dyn crow_fs::ReadGate>,
 ) -> CountResult {
+    let predicates = predicates_for_saved(query);
     let rules = match RuleSet::from_config(exclude, home) {
         Ok(rules) => Arc::new(rules),
         Err(_) => return CountResult { count: 0, partial: true },
@@ -73,8 +75,8 @@ fn count_engine(
         include_hidden: query.include_hidden,
         rules,
         everything: query.exclusions == SavedExclusions::Everything,
-        read_gate: None,
-        predicates: predicates.clone(),
+        read_gate: Some(read_gate),
+        predicates,
         tag_reader: Some(crate::tags::reader()),
     };
     let control = Control::with_parent_cancel(cancel.clone());
@@ -170,7 +172,50 @@ mod tests {
             modified_within_days: None,
             tags: Vec::new(),
         };
-        let count = count_saved_query(&query, &root, &Exclude::default(), &Arc::new(AtomicBool::new(false)));
+        let count = count_saved_query(
+            &query,
+            &root,
+            &Exclude::default(),
+            &Arc::new(AtomicBool::new(false)),
+            Arc::new(crow_fs::AllowAll),
+        );
         assert_eq!(count, CountResult { count: 2, partial: false });
+    }
+
+    struct RefuseAll(std::sync::atomic::AtomicUsize);
+
+    impl crow_fs::ReadGate for RefuseAll {
+        fn check(&self, _: &std::path::Path, _: crow_fs::ReadHint) -> crow_fs::ReadDecision {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            crow_fs::ReadDecision::SkipCloud
+        }
+    }
+
+    #[test]
+    fn background_counts_consult_the_read_gate_before_content_reads() {
+        let guard = tempfile::Builder::new().prefix("crow-count-gate-").tempdir().unwrap();
+        let root = guard.path().to_path_buf();
+        std::fs::write(root.join("note.txt"), "needle").unwrap();
+        let query = SavedQuery {
+            id: SavedQueryId::new("needle").unwrap(),
+            name: "Needle".into(),
+            scope: SavedScope::Folder,
+            root: Some(root.display().to_string()),
+            text: "needle".into(),
+            matching: crow_core::SavedMatch::Contents,
+            include_hidden: true,
+            enter_hidden_folders: false,
+            exclusions: crow_core::SavedExclusions::Configured,
+            kind: None,
+            modified_within_days: None,
+            tags: Vec::new(),
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let allowed = count_saved_query(&query, &root, &Exclude::default(), &cancel, Arc::new(crow_fs::AllowAll));
+        assert_eq!(allowed.count, 1, "an ordinary local file is searched");
+        let gate = Arc::new(RefuseAll(Default::default()));
+        let refused = count_saved_query(&query, &root, &Exclude::default(), &cancel, gate.clone());
+        assert!(gate.0.load(Ordering::Relaxed) > 0, "the gate is asked before a content read");
+        assert_eq!(refused.count, 0, "a refused file is not opened, so it cannot match its contents");
     }
 }

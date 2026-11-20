@@ -102,6 +102,16 @@ pub fn register_source<T: 'static>(service: &Entity<CloudStatuses>, cx: &mut Con
     owner
 }
 
+/// The fresh read gate for a background reader, taken on the main thread
+/// before the work is spawned. Without the service nothing is cloud-aware, so
+/// ordinary local reads are allowed.
+pub fn read_gate(cx: &App) -> Arc<dyn ReadGate> {
+    match cx.try_global::<CloudStatusService>() {
+        Some(service) => service.0.read(cx).gate(),
+        None => Arc::new(crow_fs::AllowAll),
+    }
+}
+
 pub fn init_at(cx: &mut App) {
     install(cx, Arc::new(SystemProvider), Arc::new(crow_macos::SystemReadGate));
 }

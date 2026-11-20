@@ -289,9 +289,12 @@ impl InfoPane {
         let repo = snapshot.identity.worktree.clone();
         let worker_snapshot = snapshot.clone();
         let worker_path = path.clone();
+        let gate = cloud_status::read_gate(cx);
         let task = cx.background_spawn(async move {
             let repo = open_worktree(&repo).map_err(|_| ())?;
-            LineDiff::new(&repo).and_then(|mut diff| diff.diff(&worker_snapshot, &worker_path)).map_err(|_| ())
+            LineDiff::with_gate(&repo, gate)
+                .and_then(|mut diff| diff.diff(&worker_snapshot, &worker_path))
+                .map_err(|_| ())
         });
         self.git_diff_task = Some(cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -995,6 +998,51 @@ mod tests {
         let loaded = real_load(&InfoTarget::Single { entry, items: None });
         assert!(loaded.entry.is_some(), "the link itself still stats");
         assert!(loaded.permissions.is_some(), "the dangling link keeps its own mode");
+    }
+
+    #[gpui::test]
+    fn git_diff_skips_a_placeholder_worktree_file(cx: &mut gpui::TestAppContext) {
+        use std::process::Command;
+        cx.update(crate::ui::init_for_tests);
+        let guard = tempfile::Builder::new().prefix("crow-info-diff-").tempdir().expect("temp dir");
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(guard.path())
+                .args(["-c", "user.name=Crow", "-c", "user.email=crow@example.invalid"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(guard.path().join("f.txt"), "one\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["commit", "-q", "-m", "base"]);
+        std::fs::write(guard.path().join("f.txt"), "two\n").unwrap();
+        let repo = crow_plugin_git::open_worktree(guard.path()).unwrap();
+        let snapshot = Arc::new(crow_plugin_git::status_snapshot(&repo, &Default::default()).unwrap());
+        let live = snapshot.identity.worktree.join("f.txt");
+        let pane = cx.new(|cx| InfoPane::with_loader(cx, Arc::new(|_| LoadedInfo::default())));
+        let diff_for = |cx: &mut gpui::TestAppContext, status| {
+            crate::cloud_status::set_test_status(&mut cx.app.borrow_mut(), live.clone(), status);
+            let source = Some((snapshot.clone(), PathBuf::from("f.txt")));
+            pane.update(cx, |pane, cx| {
+                pane.git_diff = None;
+                pane.sync_git_diff(source, cx)
+            });
+            cx.run_until_parked();
+            while pane.read_with(cx, |pane, _| pane.git_diff.as_ref().is_some_and(|view| view.result.is_none())) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                cx.run_until_parked();
+            }
+            pane.read_with(cx, |pane, _| match pane.git_diff.as_ref().and_then(|view| view.result.as_ref()) {
+                Some(Ok(diff)) => Some(matches!(diff.unstaged, crow_plugin_git::DiffLayer::Text(_))),
+                _ => None,
+            })
+        };
+        assert_eq!(diff_for(cx, CloudStatus::Local), Some(true), "a local file is diffed");
+        assert_eq!(diff_for(cx, CloudStatus::NotDownloaded), Some(false), "a placeholder is never read");
     }
 
     #[gpui::test]

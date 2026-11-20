@@ -537,3 +537,77 @@ fn cloud_backed_worktrees_are_identified_and_skip_status_reads() {
     assert_eq!(snapshot.changed_count, 0);
     assert_eq!(snapshot.head.state, HeadState::Branch { name: "main".into() });
 }
+
+/// A gate that records every path it is asked about and refuses the ones named.
+struct RecordingGate {
+    refuse: Vec<&'static str>,
+    asked: std::sync::Mutex<Vec<PathBuf>>,
+}
+
+impl RecordingGate {
+    fn new(refuse: &[&'static str]) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self { refuse: refuse.to_vec(), asked: Default::default() })
+    }
+}
+
+impl crow_fs::ReadGate for RecordingGate {
+    fn check(&self, path: &Path, _: crow_fs::ReadHint) -> crow_fs::ReadDecision {
+        self.asked.lock().unwrap().push(path.to_path_buf());
+        if self.refuse.iter().any(|name| path.ends_with(name)) {
+            crow_fs::ReadDecision::SkipCloud
+        } else {
+            crow_fs::ReadDecision::Readable
+        }
+    }
+}
+
+/// Rewrite `path` with same-length `bytes` and a different mtime, so the index
+/// stat no longer matches and only a content hash can tell whether it changed.
+fn rewrite_same_size(repo: &Repo, path: &str, bytes: &[u8]) {
+    repo.write(path, bytes);
+    let file = std::fs::File::options().write(true).open(repo.dir.join(path)).unwrap();
+    file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600)).unwrap();
+}
+
+#[test]
+fn gated_status_never_hashes_refused_files() {
+    let repo = Repo::new("gated-status");
+    repo.write("local.txt", b"aaa\n");
+    repo.write("placeholder.txt", b"aaa\n");
+    repo.commit("base");
+    rewrite_same_size(&repo, "local.txt", b"bbb\n");
+    rewrite_same_size(&repo, "placeholder.txt", b"bbb\n");
+
+    let open = repo.open();
+    let open_snapshot = status_snapshot(&open, &AtomicBool::new(false)).unwrap();
+    assert!(open_snapshot.entries[Path::new("placeholder.txt")].worktree.is_some(), "an ungated read sees the edit");
+
+    let gate = RecordingGate::new(&["placeholder.txt"]);
+    let snapshot = crow_plugin_git::status_snapshot_gated(&open, &AtomicBool::new(false), gate.clone()).unwrap();
+    assert_eq!(snapshot.entries[Path::new("local.txt")].worktree, Some(StatusKind::Modified));
+    assert!(!snapshot.entries.contains_key(Path::new("placeholder.txt")), "a refused file stays unread and unchanged");
+    let asked = gate.asked.lock().unwrap();
+    assert!(asked.iter().any(|path| path.ends_with("placeholder.txt")), "the gate is consulted before the read");
+}
+
+#[test]
+fn gated_line_diff_skips_refused_worktree_files() {
+    use crow_plugin_git::DiffLayer;
+    let repo = Repo::new("gated-diff");
+    repo.write("local.txt", b"aaa\n");
+    repo.write("placeholder.txt", b"aaa\n");
+    repo.commit("base");
+    repo.write("local.txt", b"bbb\n");
+    repo.write("placeholder.txt", b"bbb\n");
+    let snapshot = repo.snapshot();
+    let open = repo.open();
+    let gate = RecordingGate::new(&["placeholder.txt"]);
+    let mut diff = LineDiff::with_gate(&open, gate.clone()).unwrap();
+    assert_eq!(diff.counts(&snapshot, Path::new("placeholder.txt")).unwrap(), None);
+    let layers = diff.diff(&snapshot, Path::new("placeholder.txt")).unwrap();
+    assert!(matches!(layers.unstaged, DiffLayer::Unavailable));
+    assert_eq!(
+        diff.counts(&snapshot, Path::new("local.txt")).unwrap(),
+        Some(crow_plugin_git::LineCounts { insertions: 1, removals: 1 })
+    );
+}

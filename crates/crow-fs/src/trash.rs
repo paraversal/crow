@@ -27,14 +27,29 @@ impl Report {
     }
 }
 
-/// The number of items the Trash folders hold. Missing or unreadable folders
-/// count zero; this is the cheap check before asking to empty.
-pub fn count(folders: &[PathBuf]) -> usize {
-    folders
-        .iter()
-        .filter_map(|folder| fs::read_dir(folder).ok())
-        .map(|entries| entries.filter_map(Result::ok).count())
-        .sum()
+/// What the cheap pre-check found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CountReport {
+    /// Items in the folders that could be read.
+    pub items: usize,
+    /// Folders macOS refused to list (`EPERM` from TCC without Full Disk
+    /// Access, or `EACCES`). Their contents are unknown, never "empty".
+    pub denied: Vec<PathBuf>,
+}
+
+/// The number of items the Trash folders hold. A missing folder counts zero; a
+/// folder that cannot be listed because of permissions is reported in `denied`
+/// instead of being treated as empty. This is the cheap check before asking.
+pub fn count(folders: &[PathBuf]) -> CountReport {
+    let mut report = CountReport::default();
+    for folder in folders {
+        match fs::read_dir(folder) {
+            Ok(entries) => report.items += entries.filter_map(Result::ok).count(),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => report.denied.push(folder.clone()),
+            Err(_) => {}
+        }
+    }
+    report
 }
 
 /// Remove every item in `folders`. A missing folder is skipped; an item that
@@ -95,7 +110,7 @@ mod tests {
         fs::create_dir_all(dir.join("nested/deep")).expect("create folder");
         fs::write(dir.join("nested/deep/b.txt"), "b").expect("write nested");
 
-        assert_eq!(count(std::slice::from_ref(&dir.to_path_buf())), 3);
+        assert_eq!(count(std::slice::from_ref(&dir.to_path_buf())), CountReport { items: 3, denied: Vec::new() });
         let report = empty(std::slice::from_ref(&dir.to_path_buf()));
         assert_eq!(report, Report { removed: 3, failed: Vec::new() });
         assert!(read_dir_empty(&dir));
@@ -108,7 +123,7 @@ mod tests {
         let missing = root.join("missing");
         let report = empty(std::slice::from_ref(&missing));
         assert!(report.is_empty(), "{report:?}");
-        assert_eq!(count(std::slice::from_ref(&missing)), 0);
+        assert_eq!(count(std::slice::from_ref(&missing)), CountReport::default());
     }
 
     #[test]
@@ -128,6 +143,17 @@ mod tests {
         assert!(locked.exists(), "the locked folder stayed");
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("unlock");
+    }
+
+    #[test]
+    fn an_unreadable_trash_is_denied_not_empty() {
+        let dir = trash("denied");
+        fs::write(dir.join("secret.txt"), "a").expect("write file");
+        fs::set_permissions(&*dir, fs::Permissions::from_mode(0o000)).expect("lock trash");
+        let report = count(std::slice::from_ref(&dir.to_path_buf()));
+        fs::set_permissions(&*dir, fs::Permissions::from_mode(0o755)).expect("unlock trash");
+        assert_eq!(report.items, 0);
+        assert_eq!(report.denied, vec![dir.to_path_buf()], "an unreadable Trash must not look empty");
     }
 
     fn read_dir_empty(dir: &Path) -> bool {

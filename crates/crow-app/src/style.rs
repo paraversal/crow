@@ -162,6 +162,18 @@ pub fn cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path, is_dir: boo
     image_from_png(crow_macos::icon_png(path, is_dir, points)?)
 }
 
+/// PNG bytes of the Finder icon for a drag, never inspecting a cloud
+/// placeholder's own icon resource.
+pub fn drag_icon_png(cx: &gpui::App, path: &Path, is_dir: bool, points: u32) -> Option<Arc<Vec<u8>>> {
+    let status =
+        cx.try_global::<crate::cloud_status::CloudStatusService>().and_then(|service| service.0.read(cx).status(path));
+    if native_cloud_icon(status, path) {
+        let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        return crow_macos::type_icon_png(ext, is_dir, points);
+    }
+    crow_macos::icon_png(path, is_dir, points)
+}
+
 /// A cloud placeholder (or an unprobed cloud candidate) keeps its native
 /// type/cloud icon: an icon pack must not hide the download affordance.
 pub fn native_cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path) -> bool {
