@@ -620,9 +620,6 @@ impl CrowWindow {
         cx.notify();
     }
 
-    /// ⌘I: open the column on Info, or close it when Info is already showing.
-    /// Unlike ⇧⌘P this does not change the setting, so the column can be opened
-    /// in a window whose default is off.
     /// File ▸ Add Folder as Project Root: the folder shown becomes a Projects root.
     fn add_project_root(&mut self, _: &crate::actions::AddProjectRoot, _: &mut Window, cx: &mut Context<Self>) {
         let Some(dir) = self.pane().read(cx).focused_path(cx) else { return };
@@ -640,6 +637,9 @@ impl CrowWindow {
         crate::git::refresh_projects(cx);
     }
 
+    /// ⌘I: open the column on Info, or close it when Info is already showing.
+    /// Unlike ⇧⌘P this does not change the setting, so the column can be opened
+    /// in a window whose default is off.
     fn show_git_diff(&mut self, _: &crate::actions::ShowGitDiff, _: &mut Window, cx: &mut Context<Self>) {
         if crate::git::provider_enabled(cx) {
             self.info.update(cx, |info, cx| {
