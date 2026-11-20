@@ -26,7 +26,10 @@ mod tips;
 mod usage;
 mod views;
 
-pub use config::{abbreviate_home, cache_dir, edit_toml, expand_home, home, state_dir, write_atomic};
+pub use config::{
+    abbreviate_home, cache_dir, edit_toml, expand_home, file_message, home, parse_error, set_value, state_dir,
+    write_atomic,
+};
 pub use exclude::{DEFAULT_EXCLUDE, Exclude, ExcludeSet, SetName, SetRules, exclude_path, load_exclude};
 pub use extensions::{
     Align, Column, ColumnCell, ColumnContext, CommandIntent, CommandTarget, ContributionValues, Descriptor,

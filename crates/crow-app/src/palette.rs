@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Datelike as _, Local, TimeZone as _};
 use crow_search::FuzzyMatcher;
-use gpui::{Action, NoAction, SharedString};
+use gpui::{Action, SharedString};
 
 use crate::actions::{
     AddToSidebar, CalculateFolderSizes, ChooseTags, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently,
@@ -374,35 +374,35 @@ pub const COMMANDS: &[Command] = &[
         palette: true,
     },
     Command {
-        id: CommandId::AddProjectRoot,
-        label: "Add Current Folder as Project Root",
-        action: &NoAction,
-        scope: KeyScope::Window,
-        menu: None,
-        palette: true,
-    },
-    Command {
-        id: CommandId::RemoveProjectRoot,
-        label: "Remove Current Folder from Project Roots",
-        action: &NoAction,
-        scope: KeyScope::Window,
-        menu: None,
-        palette: true,
-    },
-    Command {
-        id: CommandId::RefreshProjects,
-        label: "Refresh Projects",
-        action: &NoAction,
-        scope: KeyScope::Window,
-        menu: None,
-        palette: true,
-    },
-    Command {
         id: CommandId::ReviewGitChanges,
         label: "Review Git Changes",
         action: &crate::actions::ReviewGitChanges,
         scope: KeyScope::Window,
         menu: Some(MenuSlot { menu: MenuName::File, section: 2, title: "Review Git Changes…" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::AddProjectRoot,
+        label: "Add Current Folder as Project Root",
+        action: &crate::actions::AddProjectRoot,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::File, section: 2, title: "Add Folder as Project Root" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::RemoveProjectRoot,
+        label: "Remove Current Folder from Project Roots",
+        action: &crate::actions::RemoveProjectRoot,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::File, section: 2, title: "Remove Folder from Project Roots" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::RefreshProjects,
+        label: "Refresh Projects",
+        action: &crate::actions::RefreshProjects,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::File, section: 2, title: "Refresh Projects" }),
         palette: true,
     },
     // Edit

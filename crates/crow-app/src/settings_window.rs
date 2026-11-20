@@ -712,9 +712,9 @@ enum FocusTarget {
 }
 
 /// The files the error region covers. `plugins.toml` comes from the plugin
-/// inventory; the other four from the config loader.
-const ERROR_FILES: [&str; 6] =
-    ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml", "plugins.toml", "saved-queries.toml"];
+/// inventory and `pack.toml` from the icon pack loader; the rest from the config loader.
+const ERROR_FILES: [&str; 7] =
+    ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml", "plugins.toml", "saved-queries.toml", "pack.toml"];
 
 /// The preview editor's layer. The target within the layer is kept while the
 /// editor is on screen.
@@ -1086,19 +1086,7 @@ impl SettingsWindow {
 
     /// Every error the window can recover from, in file order.
     fn issues(&self, cx: &App) -> Vec<ui::ConfigIssue> {
-        let mut issues = cx.global::<Ui>().config_issues();
-        if let Some(error) =
-            cx.try_global::<crate::plugins::Plugins>().and_then(|plugins| plugins.inventory.grants_error.clone())
-        {
-            let ui = cx.global::<Ui>();
-            issues.push(ui::ConfigIssue {
-                file: "plugins.toml",
-                path: ui.config_dir.join("plugins.toml"),
-                message: error.into(),
-                line: None,
-            });
-        }
-        issues
+        ui::config_issues(cx)
     }
 
     fn focus_targets(&self, cx: &App) -> Vec<FocusTarget> {
@@ -2724,12 +2712,13 @@ impl Render for SettingsWindow {
                 let focus = self.error_handles[issue.file].clone();
                 let style = controls::ControlStyle { focus: &focus, focused: focus.is_focused(window), theme: &theme };
                 let file = issue.file;
+                let path = issue.path.clone();
                 let open = controls::link_button(
                     file,
                     file,
                     true,
                     style,
-                    callback(cx, move |_, _, cx| ui::open_config_file(file, cx)),
+                    callback(cx, move |_, _, cx| ui::open_config_path(&path, cx)),
                 );
                 let rest = issue
                     .message
@@ -3760,6 +3749,25 @@ mod tests {
     }
 
     #[gpui::test]
+    fn config_files_reach_saved_queries_by_tab_and_by_search(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::ConfigFiles);
+        let visible = view.read_with(&vcx, |view, cx| view.visible_controls(cx));
+        assert!(visible.contains(&ControlId::OpenSavedQueriesToml), "saved-queries.toml is in the tab walk");
+        focus_control(&view, &mut vcx, ControlId::OpenSavedQueriesToml);
+        assert_eq!(
+            vcx.update(|window, cx| view.read(cx).focused_control(window)),
+            Some(ControlId::OpenSavedQueriesToml),
+            "its link takes focus"
+        );
+
+        vcx.simulate_input("saved-queries.toml");
+        draw(&mut vcx);
+        let results = view.read_with(&vcx, |view, cx| view.visible_controls(cx));
+        assert!(results.contains(&ControlId::OpenSavedQueriesToml), "search finds the Config Files link: {results:?}");
+    }
+
+    #[gpui::test]
     fn sidebar_arrows_move_the_cursor_and_return_chooses(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
         draw(&mut vcx);
@@ -4168,6 +4176,63 @@ mod tests {
         vcx.run_until_parked();
         draw(&mut vcx);
         assert!(state(&view, &vcx, ControlId::PreviewScope).enabled);
+    }
+
+    #[gpui::test]
+    fn plugins_and_pack_errors_reach_settings_and_the_bar_and_clear_on_recovery(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings_after(cx, |cx| {
+            let config = cx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+            std::fs::write(config.join("plugins.toml"), "# note\n[plugin.\"example.x\"]\nenabled = \"yes\"\n").unwrap();
+            let pack = config.join("icon-packs/broken");
+            std::fs::create_dir_all(&pack).unwrap();
+            std::fs::write(pack.join("pack.toml"), "api = 1\nnonsense = [\n").unwrap();
+            cx.update(|cx| {
+                crate::plugins::start_for_tests(cx, config);
+                crate::icon_packs::reload(cx);
+            });
+        });
+        let mut ready = false;
+        for _ in 0..400 {
+            vcx.update(|_, cx| crate::plugins::poll(cx));
+            vcx.run_until_parked();
+            ready = grants_error(&vcx)
+                && vcx.read_global::<crate::icon_packs::IconPacks, _>(|packs, _| packs.error().is_some());
+            if ready {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ready, "both files are reported broken");
+        draw(&mut vcx);
+        let issues = view.read_with(&vcx, |view, cx| view.issues(cx));
+        let plugins = issues.iter().find(|issue| issue.file == "plugins.toml").expect("plugins.toml issue");
+        assert_eq!(plugins.line, Some(3), "the grants error carries its line: {plugins:?}");
+        assert!(plugins.message.starts_with("plugins.toml line 3:"), "the config folder is stripped: {plugins:?}");
+        let pack = issues.iter().find(|issue| issue.file == "pack.toml").expect("pack.toml issue");
+        assert!(pack.path.ends_with("icon-packs/broken/pack.toml"), "{pack:?}");
+
+        // The status bar's pill reads the same list and points at a file.
+        let (_, file) = vcx.update(|_, cx| ui::config_error_file(cx)).expect("a bar error");
+        assert!(file.ends_with("plugins.toml"), "{file:?}");
+
+        // Fixing both clears both.
+        let config = vcx.read_global::<Ui, _>(|ui, _| ui.config_dir.clone());
+        std::fs::write(config.join("plugins.toml"), "").unwrap();
+        std::fs::remove_dir_all(config.join("icon-packs/broken")).unwrap();
+        vcx.update(|_, cx| {
+            ui::reload_config(cx);
+            crate::icon_packs::reload(cx);
+        });
+        for _ in 0..400 {
+            vcx.update(|_, cx| crate::plugins::poll(cx));
+            vcx.run_until_parked();
+            if vcx.update(|_, cx| ui::config_issues(cx)).is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(vcx.update(|_, cx| ui::config_issues(cx)).is_empty(), "recovery clears the bar and Settings");
+        assert!(vcx.update(|_, cx| ui::config_error_file(cx)).is_none());
     }
 
     #[gpui::test]

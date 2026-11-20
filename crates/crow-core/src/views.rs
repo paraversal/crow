@@ -437,9 +437,11 @@ fn mode_name(mode: ViewMode) -> &'static str {
 
 fn write_change(table: &mut Table, change: ViewChange) {
     match change {
-        ViewChange::View(mode) => table["view"] = value(mode_name(mode)),
-        ViewChange::IconSize(size) => table["icon_size"] = value(size.key()),
-        ViewChange::IconCaption(caption) => table["icon_caption"] = value(caption.as_deref().unwrap_or("off")),
+        ViewChange::View(mode) => crate::config::set_value(table, "view", mode_name(mode).into()),
+        ViewChange::IconSize(size) => crate::config::set_value(table, "icon_size", size.key().into()),
+        ViewChange::IconCaption(caption) => {
+            crate::config::set_value(table, "icon_caption", caption.as_deref().unwrap_or("off").into());
+        }
         ViewChange::Columns(columns) => {
             let old = table.get("columns").and_then(Item::as_array);
             let mut array = old.cloned().unwrap_or_default();
@@ -451,11 +453,11 @@ fn write_change(table: &mut Table, change: ViewChange) {
                     array.push(column);
                 }
             }
-            table["columns"] = value(array);
+            crate::config::set_value(table, "columns", array.into());
         }
         ViewChange::Sort(sort) => {
-            table["sort"] = value(sort_key_name(sort.key));
-            table["ascending"] = value(sort.ascending);
+            crate::config::set_value(table, "sort", sort_key_name(sort.key).into());
+            crate::config::set_value(table, "ascending", sort.ascending.into());
         }
     }
 }
@@ -494,14 +496,16 @@ pub fn save_defaults_change(config_dir: &Path, home: &Path, change: DefaultsChan
         let defaults = doc.entry("defaults").or_insert_with(|| Item::Table(Table::new()));
         let table = defaults.as_table_mut().ok_or_else(|| "views.toml: `defaults` must be a table".to_owned())?;
         match change {
-            DefaultsChange::View(mode) => write_view_value(table, "view", Value::from(mode_name(mode))),
-            DefaultsChange::SortKey(key) => write_view_value(table, "sort", Value::from(sort_key_name(key))),
-            DefaultsChange::Ascending(Some(ascending)) => write_view_value(table, "ascending", Value::from(ascending)),
+            DefaultsChange::View(mode) => crate::config::set_value(table, "view", Value::from(mode_name(mode))),
+            DefaultsChange::SortKey(key) => crate::config::set_value(table, "sort", Value::from(sort_key_name(key))),
+            DefaultsChange::Ascending(Some(ascending)) => {
+                crate::config::set_value(table, "ascending", Value::from(ascending))
+            }
             DefaultsChange::Ascending(None) => {
                 table.remove("ascending");
             }
             DefaultsChange::FoldersFirst(folders_first) => {
-                write_view_value(table, "folders_first", Value::from(folders_first))
+                crate::config::set_value(table, "folders_first", Value::from(folders_first))
             }
             DefaultsChange::PreviewProviders(providers) => write_preview_list(table, &providers),
             DefaultsChange::InheritPreviewProviders => {
@@ -525,14 +529,7 @@ fn write_preview_list(table: &mut Table, providers: &[String]) {
             array.push(provider);
         }
     }
-    write_view_value(table, "preview_providers", Value::from(array));
-}
-
-fn write_view_value(table: &mut Table, key: &str, mut value: Value) {
-    if let Some(old) = table.get(key).and_then(Item::as_value) {
-        *value.decor_mut() = old.decor().clone();
-    }
-    table[key] = Item::Value(value);
+    crate::config::set_value(table, "preview_providers", Value::from(array));
 }
 
 /// The `[folder]` keys whose expanded path is exactly `dir`. More than one is
@@ -729,9 +726,19 @@ pub fn save_as_defaults(config_dir: &Path, home: &Path, dir: &Path, view: &Resol
         let defaults = defaults.as_table_mut().ok_or_else(|| "views.toml: `defaults` must be a table".to_owned())?;
         write_change(defaults, ViewChange::View(view.view.0));
         write_change(defaults, ViewChange::Sort(view.sort()));
-        defaults["folders_first"] = value(view.folders_first.0);
+        crate::config::set_value(defaults, "folders_first", view.folders_first.0.into());
         if let Some(folders) = doc.get_mut("folder").and_then(Item::as_table_mut) {
-            folders.remove(&abbreviate_home(dir, home));
+            // Both spellings: `~/x` as Crow writes it and the absolute one a user may have written.
+            for key in [abbreviate_home(dir, home), dir.display().to_string()] {
+                let Some(table) = folders.get_mut(&key).and_then(Item::as_table_mut) else { continue };
+                // Only what was just promoted; icon, column and preview overrides still apply here.
+                for promoted in ["view", "sort", "ascending", "folders_first"] {
+                    table.remove(promoted);
+                }
+                if table.is_empty() {
+                    folders.remove(&key);
+                }
+            }
         }
         Ok(())
     })
@@ -1188,5 +1195,69 @@ sort = "size"
         save_folder_change(dir.path(), home, pictures, ViewChange::View(ViewMode::List)).unwrap();
         reset_folder(dir.path(), home, pictures).unwrap();
         assert!(!load_views(dir.path(), home).unwrap().has_folder_override(pictures));
+    }
+
+    #[test]
+    fn view_edits_keep_inline_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Path::new(HOME);
+        std::fs::write(
+            dir.path().join("views.toml"),
+            "[folder.\"~/Pictures\"]\nview = \"list\" # a\nsort = \"name\" # b\nascending = true # c\n",
+        )
+        .unwrap();
+        let pictures = Path::new("/Users/me/Pictures");
+        save_folder_change(dir.path(), home, pictures, ViewChange::View(ViewMode::Icons)).unwrap();
+        save_folder_change(
+            dir.path(),
+            home,
+            pictures,
+            ViewChange::Sort(Sort { key: SortKey::Size, ascending: false, folders_first: true }),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+        for expected in ["view = \"icons\" # a", "sort = \"size\" # b", "ascending = false # c"] {
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+    }
+
+    #[test]
+    fn save_as_defaults_keeps_a_folders_other_overrides_and_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Path::new(HOME);
+        let keys = "view = \"icons\"\nsort = \"size\"\nascending = false\nfolders_first = false\n\
+preview_providers = [\"example.pack.preview\"]\nicon_source = \"example.pack\"\nicon_size = \"large\"\n\
+icon_caption = \"example.pack.caption\"\ncolumns = [\"name\", \"size\"]\n";
+        std::fs::write(
+            dir.path().join("views.toml"),
+            format!(
+                "[defaults]\nview = \"list\" # mine\n\n[folder.\"~/Pictures\"]\n{keys}\n[folder.\"/Users/me/Pictures\"]\n{keys}\n[folder.\"~/Music\"]\nview = \"icons\"\n"
+            ),
+        )
+        .unwrap();
+        let pictures = Path::new("/Users/me/Pictures");
+        let resolved = load_views(dir.path(), home).unwrap().resolve(pictures);
+        save_as_defaults(dir.path(), home, pictures, &resolved).unwrap();
+
+        let text = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+        let doc: DocumentMut = text.parse().unwrap();
+        assert_eq!(doc["defaults"]["view"].as_str(), Some("icons"), "{text}");
+        assert!(text.contains("view = \"icons\" # mine"), "the inline comment survives: {text}");
+        for spelling in ["~/Pictures", "/Users/me/Pictures"] {
+            let folder = doc["folder"][spelling].as_table().unwrap_or_else(|| panic!("{spelling} stays: {text}"));
+            for kept in ["preview_providers", "icon_source", "icon_size", "icon_caption", "columns"] {
+                assert!(folder.contains_key(kept), "{spelling} keeps {kept}: {text}");
+            }
+            for promoted in ["view", "sort", "ascending", "folders_first"] {
+                assert!(!folder.contains_key(promoted), "{spelling} drops {promoted}: {text}");
+            }
+        }
+        assert!(doc["folder"]["~/Music"].is_table(), "another folder is untouched: {text}");
+
+        // A folder with nothing else left is removed, as before.
+        std::fs::write(dir.path().join("views.toml"), "[folder.\"~/Pictures\"]\nview = \"icons\"\n").unwrap();
+        save_as_defaults(dir.path(), home, pictures, &resolved).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+        assert!(!text.contains("[folder"), "{text}");
     }
 }

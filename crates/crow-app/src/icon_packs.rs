@@ -121,6 +121,34 @@ impl Resolver {
     }
 }
 
+/// Why a catalog load failed, and the `pack.toml` it points at when one file is
+/// to blame, so the status bar and Settings can offer to open it.
+#[derive(Debug)]
+pub(crate) struct LoadError {
+    message: String,
+    file: Option<PathBuf>,
+}
+
+impl From<String> for LoadError {
+    fn from(message: String) -> Self {
+        Self { message, file: None }
+    }
+}
+
+impl std::ops::Deref for LoadError {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// The app-owned pack state. `request` is bumped on every reload; only a reply
 /// carrying the newest request may publish.
 pub struct IconPacks {
@@ -129,6 +157,8 @@ pub struct IconPacks {
     loading: bool,
     queued: bool,
     error: Option<SharedString>,
+    /// The `pack.toml` behind `error`, when one file is to blame.
+    error_file: Option<PathBuf>,
     reported_error: Option<String>,
 }
 
@@ -142,6 +172,7 @@ impl Default for IconPacks {
             loading: false,
             queued: false,
             error: None,
+            error_file: None,
             reported_error: None,
         }
     }
@@ -154,6 +185,11 @@ impl IconPacks {
 
     pub fn error(&self) -> Option<&SharedString> {
         self.error.as_ref()
+    }
+
+    /// The failing pack's `pack.toml`, when one file is to blame.
+    pub fn error_file(&self) -> Option<&Path> {
+        self.error_file.as_deref()
     }
 
     pub fn display_name(&self, source: &str) -> String {
@@ -207,7 +243,7 @@ fn spawn_load(
     .detach();
 }
 
-fn finish_load(cx: &mut App, generation: u64, result: Result<IconSnapshot, String>) {
+fn finish_load(cx: &mut App, generation: u64, result: Result<IconSnapshot, LoadError>) {
     let (start, changed) = {
         let icons = cx.global_mut::<IconPacks>();
         let current = generation == icons.request;
@@ -231,6 +267,10 @@ fn finish_load(cx: &mut App, generation: u64, result: Result<IconSnapshot, Strin
         spawn_load(cx, generation, config_dir, home, plugin_packs);
     }
     let error = cx.global::<IconPacks>().error.clone();
+    if error.is_some() || changed {
+        // Keep the Settings error region and the bar's pill in step with the load.
+        cx.refresh_windows();
+    }
     if changed {
         cx.refresh_windows();
         // Status errors stay until something replaces them. A successful load
@@ -261,7 +301,7 @@ fn finish_load(cx: &mut App, generation: u64, result: Result<IconSnapshot, Strin
 impl IconPacks {
     /// Apply one load reply. Returns whether the published snapshot changed.
     /// A stale generation is ignored; an error keeps the entire last good set.
-    fn apply(&mut self, generation: u64, result: Result<IconSnapshot, String>) -> bool {
+    fn apply(&mut self, generation: u64, result: Result<IconSnapshot, LoadError>) -> bool {
         if generation != self.request {
             return false;
         }
@@ -270,10 +310,12 @@ impl IconPacks {
                 snapshot.generation = generation;
                 self.snapshot = Arc::new(snapshot);
                 self.error = None;
+                self.error_file = None;
                 true
             }
             Err(error) => {
-                self.error = Some(error.into());
+                self.error_file = error.file.clone();
+                self.error = Some(error.message.into());
                 false
             }
         }
@@ -294,7 +336,7 @@ impl IconPacks {
 
     #[cfg(test)]
     pub(crate) fn publish_for_tests(&mut self, generation: u64, result: Result<IconSnapshot, String>) -> bool {
-        self.apply(generation, result)
+        self.apply(generation, result.map_err(LoadError::from))
     }
 }
 
@@ -341,7 +383,7 @@ impl PluginPackSource for TestPluginPack {
 }
 
 #[cfg(test)]
-pub(crate) fn load_catalog(config_dir: &Path, home: &Path) -> Result<IconSnapshot, String> {
+pub(crate) fn load_catalog(config_dir: &Path, home: &Path) -> Result<IconSnapshot, LoadError> {
     load_catalog_with::<RegisteredIconPack>(config_dir, home, &[])
 }
 
@@ -349,7 +391,7 @@ pub(crate) fn load_catalog_with<P: PluginPackSource>(
     config_dir: &Path,
     home: &Path,
     plugins: &[P],
-) -> Result<IconSnapshot, String> {
+) -> Result<IconSnapshot, LoadError> {
     let mut packs = BTreeMap::new();
     for pack in load_local(config_dir, home)? {
         packs.insert(pack.0, pack.1);
@@ -357,25 +399,25 @@ pub(crate) fn load_catalog_with<P: PluginPackSource>(
     for source in plugins {
         let key = source.key();
         if packs.contains_key(&key) {
-            return Err(format!("icon pack \"{key}\": two packs use this id"));
+            return Err(format!("icon pack \"{key}\": two packs use this id").into());
         }
         let bytes = source.bytes().ok_or_else(|| format!("icon pack \"{key}\": its pack.toml is missing"))?;
         let loaded = load_plugin_pack(&key, &bytes, home, source)?;
         packs.insert(key, loaded);
     }
     if packs.len() > MAX_PACKS {
-        return Err(format!("more than {MAX_PACKS} icon packs are installed"));
+        return Err(format!("more than {MAX_PACKS} icon packs are installed").into());
     }
     Ok(IconSnapshot { generation: 0, packs: packs.into_iter().map(|(key, pack)| (key, Arc::new(pack))).collect() })
 }
 
-fn load_local(config_dir: &Path, home: &Path) -> Result<Vec<(String, LoadedPack)>, String> {
+fn load_local(config_dir: &Path, home: &Path) -> Result<Vec<(String, LoadedPack)>, LoadError> {
     let root = config_dir.join("icon-packs");
     // io-ok: the whole catalog loads in background_spawn
     let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("{}: {error}", root.display())),
+        Err(error) => return Err(format!("{}: {error}", root.display()).into()),
     };
     let mut packs = Vec::new();
     for entry in entries {
@@ -387,7 +429,7 @@ fn load_local(config_dir: &Path, home: &Path) -> Result<Vec<(String, LoadedPack)
             .ok_or_else(|| format!("icon-packs: {} is not valid UTF-8", name.to_string_lossy()))?
             .to_owned();
         if file_type.is_symlink() {
-            return Err(format!("icon-packs/{key}: a pack folder may not be a symlink"));
+            return Err(format!("icon-packs/{key}: a pack folder may not be a symlink").into());
         }
         // io-ok: the whole catalog loads in background_spawn
         if !file_type.is_dir() {
@@ -399,9 +441,10 @@ fn load_local(config_dir: &Path, home: &Path) -> Result<Vec<(String, LoadedPack)
         }
         LocalId::parse(&key).map_err(|error| format!("icon-packs/{key}: {error}"))?;
         if key == NATIVE_ICON_SOURCE {
-            return Err("icon-packs/native: \"native\" is reserved".into());
+            return Err("icon-packs/native: \"native\" is reserved".to_owned().into());
         }
-        let pack = load_local_pack(&entry.path(), &key, home)?;
+        let pack = load_local_pack(&entry.path(), &key, home)
+            .map_err(|message| LoadError { message, file: Some(entry.path().join("pack.toml")) })?;
         packs.push((key, pack));
     }
     Ok(packs)

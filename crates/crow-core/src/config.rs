@@ -94,6 +94,15 @@ pub fn file_message(path: &Path, message: String) -> String {
     }
 }
 
+/// Set `key` in `table`, keeping the comment and spacing written beside the old
+/// value, so an edit from Crow does not eat `# my note`.
+pub fn set_value(table: &mut toml_edit::Table, key: &str, mut new: toml_edit::Value) {
+    if let Some(old) = table.get(key).and_then(toml_edit::Item::as_value) {
+        *new.decor_mut() = old.decor().clone();
+    }
+    table[key] = toml_edit::Item::Value(new);
+}
+
 /// Read `path` as an editable document (`default` if it doesn't exist), let `edit`
 /// change it, and write it back with every comment the user wrote still in place.
 pub fn edit_toml(

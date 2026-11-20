@@ -8,6 +8,19 @@ pub fn log_dir() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("Library/Logs/Crow")
 }
 
+/// The non-blocking writer for `dir/crow.log`. An unwritable folder or file is
+/// an `Err`, never a panic: Crow still runs with stderr logging alone.
+fn open_log(dir: &std::path::Path) -> Result<(tracing_appender::non_blocking::NonBlocking, WorkerGuard), String> {
+    // io-ok: startup: the log folder must exist before the subscriber starts
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::NEVER)
+        .filename_prefix("crow.log")
+        .build(dir)
+        .map_err(|e| e.to_string())?;
+    Ok(tracing_appender::non_blocking(appender))
+}
+
 /// Log to `~/Library/Logs/Crow/crow.log` and to stderr. `RUST_LOG` overrides the
 /// default level (`info`). Keep the guard alive for the whole run so lines flush.
 pub fn init() -> Option<WorkerGuard> {
@@ -22,10 +35,8 @@ pub fn init_fuzz(trace: crate::fuzz_live::TraceLayer, dir: &std::path::Path) -> 
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,crow=debug,crow_macos=debug"));
     let stderr = fmt::layer().with_writer(std::io::stderr).with_target(false);
-    // io-ok: startup: the log folder must exist before the subscriber starts
-    match std::fs::create_dir_all(dir) {
-        Ok(()) => {
-            let (file, guard) = tracing_appender::non_blocking(tracing_appender::rolling::never(dir, "crow.log"));
+    match open_log(dir) {
+        Ok((file, guard)) => {
             let file = fmt::layer().with_writer(file).with_ansi(false);
             tracing_subscriber::registry().with(filter).with(stderr).with(file).with(trace).init();
             Some(guard)
@@ -41,10 +52,8 @@ pub fn init_fuzz(trace: crate::fuzz_live::TraceLayer, dir: &std::path::Path) -> 
 fn init_with(default: &str) -> Option<WorkerGuard> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
     let stderr = fmt::layer().with_writer(std::io::stderr).with_target(false);
-    // io-ok: startup: the log folder must exist before the subscriber starts
-    match std::fs::create_dir_all(log_dir()) {
-        Ok(()) => {
-            let (file, guard) = tracing_appender::non_blocking(tracing_appender::rolling::never(log_dir(), "crow.log"));
+    match open_log(&log_dir()) {
+        Ok((file, guard)) => {
             let file = fmt::layer().with_writer(file).with_ansi(false);
             tracing_subscriber::registry().with(filter).with(stderr).with(file).init();
             Some(guard)
@@ -54,5 +63,27 @@ fn init_with(default: &str) -> Option<WorkerGuard> {
             tracing::warn!("no log file: {e}");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    #[test]
+    fn an_unwritable_log_folder_or_file_is_an_error_not_a_panic() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("logs");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(open_log(&dir).is_err(), "a read-only folder cannot hold crow.log");
+        // A file where the folder should be.
+        let file = temp.path().join("not-a-folder");
+        std::fs::write(&file, "x").unwrap();
+        assert!(open_log(&file).is_err());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(open_log(&dir).is_ok(), "a writable folder works");
     }
 }

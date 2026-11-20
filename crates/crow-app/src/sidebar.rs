@@ -1419,7 +1419,8 @@ impl Sidebar {
         let (kind, state) = match &row {
             Row::Favorite((g, n), _) => {
                 let len = cx.global::<Ui>().favorites().get(*g).map_or(0, |(_, f)| f.len());
-                let state = SidebarMenuState { can_move_up: *n > 0, can_move_down: n + 1 < len, ejectable: false };
+                let state =
+                    SidebarMenuState { can_move_up: *n > 0, can_move_down: n + 1 < len, ..SidebarMenuState::default() };
                 (SidebarMenuKind::Favorite, state)
             }
             Row::Recent(_) => (SidebarMenuKind::Recent, SidebarMenuState::default()),
@@ -1428,6 +1429,10 @@ impl Sidebar {
             }
             Row::PluginItem { row, .. } if row.saved_query_id().is_some() => {
                 (SidebarMenuKind::SavedQuery, SidebarMenuState::default())
+            }
+            Row::PluginItem { section, row } if section == crate::git::PROJECTS_SECTION => {
+                let removable_root = row.folder_path().is_some_and(|path| self.project_root_of(path, cx).is_some());
+                (SidebarMenuKind::Project, SidebarMenuState { removable_root, ..SidebarMenuState::default() })
             }
             Row::PluginItem { row, .. } if row.folder_path().is_some() => {
                 (SidebarMenuKind::Plugin, SidebarMenuState::default())
@@ -1508,6 +1513,13 @@ impl Sidebar {
         }
         let Some(path) = row.path().map(Path::to_path_buf) else { return };
         match id {
+            CommandId::RefreshProjects => crate::git::refresh_projects(cx),
+            CommandId::RemoveProjectRoot => {
+                if let Some(root) = self.project_root_of(&path, cx) {
+                    ui::edit_sidebar(crow_core::SidebarEdit::RemoveProjectRoot(root), cx);
+                    crate::git::refresh_projects(cx);
+                }
+            }
             CommandId::Open => {
                 self.cursor = i;
                 self.navigate_row(i, SidebarNav::Open, cx);
@@ -1532,6 +1544,16 @@ impl Sidebar {
             }
             _ => {}
         }
+    }
+
+    /// The configured Projects root that holds `path`: the deepest one when roots nest.
+    fn project_root_of(&self, path: &Path, cx: &gpui::App) -> Option<PathBuf> {
+        let ui = cx.global::<Ui>();
+        ui.sidebar
+            .project_roots(&ui.home)
+            .into_iter()
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.as_os_str().len())
     }
 
     #[cfg(test)]

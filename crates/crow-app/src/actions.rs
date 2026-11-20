@@ -202,6 +202,10 @@ actions!(
         /// View ▸ Calculate Folder Sizes: measure the current folder's folders once.
         CalculateFolderSizes,
         ReviewGitChanges,
+        /// File ▸ Add Folder as Project Root.
+        AddProjectRoot,
+        RemoveProjectRoot,
+        RefreshProjects,
         ShowGitDiff,
         ChooseListColumns,
         Minimize,

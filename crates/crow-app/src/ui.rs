@@ -142,6 +142,40 @@ pub struct ConfigIssue {
     pub line: Option<u32>,
 }
 
+/// Every config problem the app knows, in the order Settings lists them: the
+/// five files Crow loads itself, then `plugins.toml` from the plugin host and the
+/// icon pack `pack.toml` that failed to load. The status bar and Settings both
+/// read this one list, so a problem shows in both and clears from both.
+pub fn config_issues(cx: &App) -> Vec<ConfigIssue> {
+    let ui = cx.global::<Ui>();
+    let mut issues = ui.config_issues();
+    if let Some(error) =
+        cx.try_global::<crate::plugins::Plugins>().and_then(|plugins| plugins.inventory.grants_error.clone())
+    {
+        let message = ui.without_config_dir(&error);
+        issues.push(ConfigIssue {
+            file: "plugins.toml",
+            path: ui.config_dir.join("plugins.toml"),
+            line: error_line(&message),
+            message,
+        });
+    }
+    if let Some(packs) = cx.try_global::<crate::icon_packs::IconPacks>()
+        && let Some(error) = packs.error()
+    {
+        let path = packs.error_file().map_or_else(|| ui.config_dir.join("icon-packs"), Path::to_path_buf);
+        let message = ui.without_config_dir(error);
+        issues.push(ConfigIssue { file: "pack.toml", path, line: error_line(&message), message });
+    }
+    issues
+}
+
+/// The first problem and the file it names, for the status bar's pill.
+pub fn config_error_file(cx: &App) -> Option<(SharedString, PathBuf)> {
+    let issue = config_issues(cx).into_iter().next()?;
+    Some((issue.message, issue.path))
+}
+
 const CONFIG_FILES: [&str; 5] = ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml", "saved-queries.toml"];
 
 impl Global for Ui {}
@@ -223,10 +257,12 @@ impl Ui {
     /// can say "settings.toml line 3: …".
     pub fn file_error(&self, file: &str) -> Option<SharedString> {
         let index = CONFIG_FILES.iter().position(|name| *name == file)?;
-        let message = self.errors[index].as_ref()?;
+        Some(self.without_config_dir(self.errors[index].as_ref()?))
+    }
+
+    fn without_config_dir(&self, message: &str) -> SharedString {
         let dir = self.config_dir.display().to_string();
-        let text = message.strip_prefix(&dir).map_or(message.as_str(), |rest| rest.trim_start_matches('/'));
-        Some(text.to_owned().into())
+        message.strip_prefix(&dir).map_or(message, |rest| rest.trim_start_matches('/')).to_owned().into()
     }
 
     /// A broken `settings.toml`, with the config dir stripped so the settings
@@ -249,13 +285,6 @@ impl Ui {
                 Some(ConfigIssue { file, path: self.config_dir.join(file), line: error_line(&message), message })
             })
             .collect()
-    }
-
-    /// The first config file problem and the file it names, with the config dir
-    /// stripped so the bar can say "views.toml: …".
-    pub fn config_error_file(&self) -> Option<(SharedString, PathBuf)> {
-        let issue = self.config_issues().into_iter().next()?;
-        Some((issue.message, issue.path))
     }
 
     fn set_error(&mut self, which: usize, result: Result<(), String>) -> bool {
@@ -986,7 +1015,12 @@ pub fn edit_settings_file(cx: &mut App) {
 /// Open `name` from the config folder in its default app.
 pub fn open_config_file(name: &str, cx: &mut App) {
     let path = cx.global::<Ui>().config_dir.join(name);
-    if !crate::effects::effects(cx).open_in_default_app(&path) {
+    open_config_path(&path, cx);
+}
+
+/// Open one config file, or the folder holding a problem that no one file explains.
+pub fn open_config_path(path: &Path, cx: &mut App) {
+    if !crate::effects::effects(cx).open_in_default_app(path) {
         let message = format!("Couldn't open {}: no app is set to open .toml files", path.display());
         crate::operations::message(message, true, cx);
         cx.refresh_windows();

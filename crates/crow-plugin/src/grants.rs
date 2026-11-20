@@ -5,9 +5,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crow_core::{PluginId, edit_toml, write_atomic};
+use crow_core::{PluginId, edit_toml, set_value, write_atomic};
 use serde::Deserialize;
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{DocumentMut, Item, Table};
 
 use crate::manifest::FsAccess;
 use crate::package::PackageSnapshot;
@@ -91,7 +91,7 @@ pub fn grants_path(config_dir: &Path) -> PathBuf {
 /// Parse the whole file. A single invalid record makes the entire store
 /// invalid: the caller withdraws every grant and shows the error.
 pub fn parse_grants(text: &str) -> Result<Grants, String> {
-    let raw: RawGrants = toml::from_str(text).map_err(|error| first_line(&error.to_string()))?;
+    let raw: RawGrants = toml::from_str(text).map_err(|error| crow_core::parse_error(&error, text))?;
     let mut records = BTreeMap::new();
     for (key, record) in raw.plugin {
         let id = PluginId::parse(&key).map_err(|error| format!("plugin.\"{key}\": {error}"))?;
@@ -114,7 +114,7 @@ pub fn parse_grants(text: &str) -> Result<Grants, String> {
 
 pub fn load_grants(path: &Path) -> Result<Grants, String> {
     let text = std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    parse_grants(&text).map_err(|error| format!("{}: {error}", path.display()))
+    parse_grants(&text).map_err(|error| crow_core::file_message(path, error))
 }
 
 /// Write the documented default when the file is missing. Called from the
@@ -136,9 +136,9 @@ pub fn approve(path: &Path, id: &PluginId, snapshot: &PackageSnapshot) -> Result
         let table = plugin_table(doc)?;
         let entry = table.entry(id.as_str()).or_insert_with(|| Item::Table(Table::new()));
         let entry = entry.as_table_mut().ok_or_else(|| format!("plugins.toml: plugin.\"{id}\" must be a table"))?;
-        entry["enabled"] = value(true);
-        entry["digest"] = value(snapshot.digest.clone());
-        entry["fs"] = value(snapshot.manifest.permissions.fs().key());
+        set_value(entry, "enabled", true.into());
+        set_value(entry, "digest", snapshot.digest.clone().into());
+        set_value(entry, "fs", snapshot.manifest.permissions.fs().key().into());
         Ok(())
     })
 }
@@ -152,7 +152,7 @@ pub fn set_enabled(path: &Path, id: &PluginId, enabled: bool) -> Result<(), Stri
             return Ok(());
         };
         let entry = entry.as_table_mut().ok_or_else(|| format!("plugins.toml: plugin.\"{id}\" must be a table"))?;
-        entry["enabled"] = value(enabled);
+        set_value(entry, "enabled", enabled.into());
         Ok(())
     })
 }
@@ -173,10 +173,6 @@ fn plugin_table(doc: &mut DocumentMut) -> Result<&mut Table, String> {
         Item::Table(table)
     });
     plugins.as_table_mut().ok_or_else(|| "plugins.toml: `plugin` must be a table".to_owned())
-}
-
-fn first_line(text: &str) -> String {
-    text.lines().next().unwrap_or(text).trim_end().to_owned()
 }
 
 #[cfg(test)]
@@ -244,6 +240,28 @@ mod tests {
     }
 
     #[test]
+    fn edited_keys_keep_their_inline_comments() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("plugins.toml");
+        let id = plugin_id("example.relative-path");
+        std::fs::write(
+            &path,
+            format!(
+                "[plugin.\"{id}\"]\nenabled = false # parked\ndigest = \"{}\" # old build\nfs = \"none\" # least\n",
+                "a".repeat(64)
+            ),
+        )
+        .unwrap();
+        approve(&path, &id, &snapshot("example.relative-path", &"b".repeat(64), FsAccess::Read)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for note in ["# parked", "# old build", "# least"] {
+            assert!(text.contains(note), "{note} survives approve: {text}");
+        }
+        set_enabled(&path, &id, false).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("# parked"));
+    }
+
+    #[test]
     fn a_changed_snapshot_or_capability_invalidates_the_grant() {
         let package = snapshot("example.relative-path", &"c".repeat(64), FsAccess::Read);
         let id = plugin_id("example.relative-path");
@@ -255,6 +273,23 @@ mod tests {
         assert!(grants.authorizing(&id, &edited).is_none());
         let narrower = snapshot("example.relative-path", &"c".repeat(64), FsAccess::None);
         assert!(grants.authorizing(&id, &narrower).is_none(), "requested capabilities must match exactly");
+    }
+
+    #[test]
+    fn a_broken_file_names_its_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("plugins.toml");
+        std::fs::write(&path, "# note\n[plugin.\"example.relative-path\"]\nenabled = maybe\n").unwrap();
+        let error = load_grants(&path).unwrap_err();
+        assert!(error.starts_with(&format!("{} line 3:", path.display())), "{error}");
+        assert!(!error.contains('\n'), "one line for the status bar: {error}");
+        // A well-formed file with a bad record keeps the plain form.
+        std::fs::write(
+            &path,
+            "[plugin.\"example.relative-path\"]\nenabled = true\ndigest = \"short\"\nfs = \"none\"\n",
+        )
+        .unwrap();
+        assert!(load_grants(&path).unwrap_err().contains("digest must be 64"));
     }
 
     #[test]
