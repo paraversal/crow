@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 /// The stationary hover that opens a folder, matching the hand-checked Finder feel.
 pub const SPRING_DELAY_MS: u64 = 600;
+const MAX_SPRING_DEPTH: usize = 32;
 
 /// One drag, from entry to leave, cancel or accepted drop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,14 +20,14 @@ pub struct DragId(u64);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SpringTarget {
     /// A folder, and the layout it was drawn in.
-    Folder { path: PathBuf, generation: u64 },
+    Folder { path: PathBuf, generation: u64, allow_ancestor: bool },
     /// The Back button: undo the last spring, then step back through history.
     Back,
 }
 
 impl SpringTarget {
     pub fn new(path: PathBuf, generation: u64) -> Self {
-        Self::Folder { path, generation }
+        Self::Folder { path, generation, allow_ancestor: false }
     }
 }
 
@@ -55,15 +56,15 @@ pub enum Finish {
     /// The drop was accepted. `path` is the final destination; `sprung` says
     /// whether the pane is showing a temporary folder that must become one
     /// history step.
-    Accepted { path: PathBuf, sprung: bool },
-    /// The drag was cancelled. `restore` is the origin when the pane sprang away.
-    Cancelled { restore: Option<PathBuf> },
+    Accepted { path: Option<PathBuf>, sprung: bool },
+    /// The drag was cancelled. Restore the presentation if the pane sprang away.
+    Cancelled { restore: bool },
 }
 
 struct Session {
     id: DragId,
-    origin: PathBuf,
-    current: PathBuf,
+    origin: Option<PathBuf>,
+    current: Option<PathBuf>,
     /// Folders opened by holding over them, oldest first.
     sprung: Vec<PathBuf>,
     /// The origin's real Back history, nearest first.
@@ -91,6 +92,15 @@ impl Session {
 
     fn away(&self) -> bool {
         !self.sprung.is_empty() || self.back_steps > 0
+    }
+
+    fn can_enter(&self, path: &Path, allow_ancestor: bool) -> bool {
+        self.sprung.len() < MAX_SPRING_DEPTH
+            && !self.sprung.iter().any(|visited| visited == path)
+            && self
+                .current
+                .as_deref()
+                .is_none_or(|current| current != path && (allow_ancestor || !current.starts_with(path)))
     }
 
     /// Where holding over Back would go, if anywhere.
@@ -123,7 +133,7 @@ impl DragMachine {
 
     /// Start a drag showing `origin`, with the origin's real-folder Back history
     /// (nearest first). A previous session is replaced.
-    pub fn begin(&mut self, origin: PathBuf, back_history: Vec<PathBuf>) -> DragId {
+    pub fn begin(&mut self, origin: Option<PathBuf>, back_history: Vec<PathBuf>) -> DragId {
         let id = DragId(self.next_id);
         self.next_id = self.next_id.wrapping_add(1).max(1);
         self.session = Some(Session {
@@ -152,7 +162,7 @@ impl DragMachine {
 
     /// The folder the pane should show: the origin, or the deepest sprung folder.
     pub fn current(&self) -> Option<&Path> {
-        self.session.as_ref().map(|session| session.current.as_path())
+        self.session.as_ref()?.current.as_deref()
     }
 
     pub fn sprung(&self) -> &[PathBuf] {
@@ -189,9 +199,8 @@ impl DragMachine {
                     return None;
                 }
             }
-            SpringTarget::Folder { path, generation } => {
-                if session.current == *path || session.current.starts_with(path) {
-                    // The shown folder, or one of its ancestors: a spring would loop.
+            SpringTarget::Folder { path, generation, allow_ancestor } => {
+                if !session.can_enter(path, *allow_ancestor) {
                     session.armed = None;
                     return None;
                 }
@@ -240,8 +249,8 @@ impl DragMachine {
                 }
                 destination
             }
-            SpringTarget::Folder { path, .. } => {
-                if session.current == *path || session.current.starts_with(path) {
+            SpringTarget::Folder { path, allow_ancestor, .. } => {
+                if !session.can_enter(path, *allow_ancestor) {
                     return None;
                 }
                 session.sprung.push(path.clone());
@@ -254,7 +263,7 @@ impl DragMachine {
         };
         session.armed = None;
         session.current = match &spring {
-            Spring::Enter(path) => path.clone(),
+            Spring::Enter(path) => Some(path.clone()),
             Spring::Origin => session.origin.clone(),
         };
         session.awaiting_hover = true;
@@ -281,7 +290,7 @@ impl DragMachine {
         if accepted {
             Finish::Accepted { path: session.current, sprung: away }
         } else {
-            Finish::Cancelled { restore: away.then_some(session.origin) }
+            Finish::Cancelled { restore: away }
         }
     }
 }
@@ -300,8 +309,44 @@ mod tests {
 
     fn machine_at_root() -> (DragMachine, DragId) {
         let mut machine = DragMachine::new(SPRING_DELAY_MS);
-        let id = machine.begin(path("/root"), Vec::new());
+        let id = machine.begin(Some(path("/root")), Vec::new());
         (machine, id)
+    }
+
+    #[test]
+    fn explicit_ancestor_targets_can_spring_without_revisiting_the_stack() {
+        let mut machine = DragMachine::default();
+        let id = machine.begin(Some(path("/root/a/b")), Vec::new());
+        let ancestor = SpringTarget::Folder { path: path("/root"), generation: 1, allow_ancestor: true };
+        assert_eq!(spring(&mut machine, id, ancestor.clone(), 0), Some(Spring::Enter(path("/root"))));
+        assert_eq!(spring(&mut machine, id, target("/root/a", 2), 700), Some(Spring::Enter(path("/root/a"))));
+        assert_eq!(machine.observe(id, (10., 10.), Some(ancestor), 1400), None);
+    }
+
+    #[test]
+    fn virtual_origin_can_spring_and_restore_without_a_folder() {
+        let mut machine = DragMachine::default();
+        let id = machine.begin(None, vec![path("/root")]);
+        assert_eq!(machine.current(), None);
+        assert_eq!(spring(&mut machine, id, target("/root", 1), 0), Some(Spring::Enter(path("/root"))));
+        assert_eq!(spring(&mut machine, id, SpringTarget::Back, 700), Some(Spring::Origin));
+        assert_eq!(machine.current(), None);
+        assert_eq!(spring(&mut machine, id, target("/root", 2), 1400), Some(Spring::Enter(path("/root"))));
+        assert_eq!(machine.finish(id, false), Finish::Cancelled { restore: true });
+    }
+
+    #[test]
+    fn limits_forward_spring_depth() {
+        let (mut machine, id) = machine_at_root();
+        for depth in 0..MAX_SPRING_DEPTH {
+            let path = format!("/root/{depth}");
+            let time = depth as u64 * SPRING_DELAY_MS;
+            assert_eq!(
+                spring(&mut machine, id, target(&path, depth as u64 + 1), time),
+                Some(Spring::Enter(PathBuf::from(path))),
+            );
+        }
+        assert_eq!(machine.observe(id, (10., 10.), Some(target("/root/next", 100)), 30_000), None);
     }
 
     #[test]
@@ -387,11 +432,11 @@ mod tests {
         let (mut machine, id) = machine_at_root();
         machine.observe(id, (10., 10.), Some(target("/root/a", 1)), 0);
         machine.expire(id, 1, (10., 10.), Some(target("/root/a", 1)), 600);
-        assert_eq!(machine.finish(id, true), Finish::Accepted { path: path("/root/a"), sprung: true });
+        assert_eq!(machine.finish(id, true), Finish::Accepted { path: Some(path("/root/a")), sprung: true });
         let (mut machine, id) = machine_at_root();
         machine.observe(id, (10., 10.), Some(target("/root/a", 1)), 0);
         machine.expire(id, 1, (10., 10.), Some(target("/root/a", 1)), 600);
-        assert_eq!(machine.finish(id, false), Finish::Cancelled { restore: Some(path("/root")) });
+        assert_eq!(machine.finish(id, false), Finish::Cancelled { restore: true });
         assert_eq!(machine.finish(id, false), Finish::None, "one finish per session");
     }
 
@@ -404,14 +449,14 @@ mod tests {
         machine.leave(id);
         assert!(machine.armed().is_none());
         assert_eq!(machine.current(), Some(Path::new("/root/a")));
-        assert_eq!(machine.finish(id, false), Finish::Cancelled { restore: Some(path("/root")) });
+        assert_eq!(machine.finish(id, false), Finish::Cancelled { restore: true });
     }
 
     #[test]
     fn a_new_drag_invalidates_the_old_session() {
         let (mut machine, id) = machine_at_root();
         machine.observe(id, (10., 10.), Some(target("/root/a", 1)), 0);
-        let new = machine.begin(path("/other"), Vec::new());
+        let new = machine.begin(Some(path("/other")), Vec::new());
         assert_ne!(id, new);
         assert_eq!(machine.observe(id, (10., 10.), Some(target("/root/a", 1)), 10), None);
         assert_eq!(machine.finish(id, true), Finish::None);
@@ -426,7 +471,7 @@ mod tests {
     #[test]
     fn back_undoes_springs_then_walks_real_history() {
         let mut machine = DragMachine::new(SPRING_DELAY_MS);
-        let id = machine.begin(path("/root"), vec![path("/prev"), path("/older")]);
+        let id = machine.begin(Some(path("/root")), vec![path("/prev"), path("/older")]);
         assert_eq!(spring(&mut machine, id, target("/root/a", 1), 0), Some(Spring::Enter(path("/root/a"))));
         assert_eq!(spring(&mut machine, id, target("/root/a/b", 2), 1000), Some(Spring::Enter(path("/root/a/b"))));
 
@@ -443,7 +488,7 @@ mod tests {
         assert_eq!(spring(&mut machine, id, SpringTarget::Back, 8000), Some(Spring::Enter(path("/older"))));
         assert_eq!(
             machine.finish(id, true),
-            Finish::Accepted { path: path("/older"), sprung: true },
+            Finish::Accepted { path: Some(path("/older")), sprung: true },
             "a history step is still away from the origin"
         );
     }
@@ -451,7 +496,7 @@ mod tests {
     #[test]
     fn holding_still_over_back_keeps_stepping() {
         let mut machine = DragMachine::new(SPRING_DELAY_MS);
-        let id = machine.begin(path("/root"), vec![path("/prev"), path("/older")]);
+        let id = machine.begin(Some(path("/root")), vec![path("/prev"), path("/older")]);
         let token = machine.observe(id, (5., 5.), Some(SpringTarget::Back), 0).expect("armed");
         assert_eq!(
             machine.expire(id, token, (5., 5.), Some(SpringTarget::Back), 600),
@@ -468,18 +513,18 @@ mod tests {
     #[test]
     fn back_to_the_origin_finishes_as_not_sprung() {
         let mut machine = DragMachine::new(SPRING_DELAY_MS);
-        let id = machine.begin(path("/root"), Vec::new());
+        let id = machine.begin(Some(path("/root")), Vec::new());
         assert!(!machine.can_spring_back(), "no springs and no history");
         spring(&mut machine, id, target("/root/a", 1), 0);
         assert!(machine.can_spring_back());
         assert_eq!(spring(&mut machine, id, SpringTarget::Back, 1000), Some(Spring::Origin));
-        assert_eq!(machine.finish(id, true), Finish::Accepted { path: path("/root"), sprung: false });
+        assert_eq!(machine.finish(id, true), Finish::Accepted { path: Some(path("/root")), sprung: false });
     }
 
     #[test]
     fn a_stale_back_timer_does_not_spring() {
         let mut machine = DragMachine::new(SPRING_DELAY_MS);
-        let id = machine.begin(path("/root"), vec![path("/prev")]);
+        let id = machine.begin(Some(path("/root")), vec![path("/prev")]);
         let token = machine.observe(id, (5., 5.), Some(SpringTarget::Back), 0).expect("armed");
         machine.observe(id, (50., 50.), Some(target("/root/a", 1)), 100);
         assert_eq!(machine.expire(id, token, (5., 5.), Some(SpringTarget::Back), 600), None, "moved away and back");

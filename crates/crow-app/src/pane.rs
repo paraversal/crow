@@ -27,8 +27,8 @@ use crow_fs::{AllowAll, CloudStatus, Entry, ReadGate, Sort, SortKey};
 use crow_theme::Theme;
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter,
-    ExternalDragPayload, ExternalPaths, FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle,
+    ExternalDragPayload, FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle,
     ScrollStrategy, SharedString, SpringAnimation, SpringConfig, Subscription, UniformListScrollHandle, Window, canvas,
     div, img, point, prelude::*, px, size, uniform_list,
 };
@@ -1346,6 +1346,7 @@ impl Pane {
                 }
             }
             SearchEvent::Reveal(path) => self.reveal(path.clone(), cx),
+            SearchEvent::Rename(path) => self.rename_search_result(path.clone(), cx),
             SearchEvent::Run(request) => cx.emit(PaneEvent::Run(request.clone())),
             SearchEvent::Copy { paths, cut } => cx.emit(PaneEvent::Copy { paths: paths.clone(), cut: *cut }),
             SearchEvent::Save => cx.emit(PaneEvent::SaveSearch),
@@ -1412,6 +1413,12 @@ impl Pane {
         }
     }
 
+    pub fn rename_search_result(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.reveal_search_result(path.clone(), cx);
+        self.rename_when_present = Some(path);
+        cx.notify();
+    }
+
     pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_walk = false;
         self.plugin_walk_dirs = None;
@@ -1420,11 +1427,12 @@ impl Pane {
         self.apply_location(location.clone(), from, Some(window), cx);
         if let Some((origin, paths)) = self.return_selection.take()
             && origin == location
+            && origin.as_folder().is_some()
             && let Some(folder) = self.folders.first().cloned()
         {
             // Surviving source rows come back selected; moved-away paths simply
             // are not present.
-            folder.update(cx, |folder, cx| folder.select_when_present(paths, Effective::Off, cx));
+            folder.update(cx, |folder, cx| folder.select_survivors_after_load(paths, cx));
         }
     }
 
@@ -1746,6 +1754,9 @@ impl Pane {
     /// once the cursor item is positively local/downloaded. It does not open the
     /// explicit Quick Look panel.
     fn cloud_changed(&mut self, cx: &mut Context<Self>) {
+        if self.folder().is_none() {
+            return;
+        }
         let Some(entry) = self.cursor_entry(cx) else {
             cx.notify();
             return;
@@ -1803,7 +1814,7 @@ impl Pane {
     /// Switch view as the user asked (Cmd-2, Cmd-3), and remember it for the folder
     /// shown, unless views don't follow folders: then it is this window's alone.
     pub fn set_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
-        if self.mode == mode {
+        if self.folder().is_none() || self.mode == mode {
             return;
         }
         self.cancel_marquee(cx);
@@ -2160,6 +2171,9 @@ impl Pane {
             }
             _ => {}
         }
+        if self.folder().is_none() {
+            return;
+        }
         if let FolderEvent::CursorMoved = event {
             if self.mode == ViewMode::Columns {
                 self.update_chain(k, cx);
@@ -2224,7 +2238,7 @@ impl Pane {
 
     fn load_preview(&mut self, cx: &mut Context<Self>) {
         let surface = self.current_plugin_surface(cx);
-        let Some(entry) = self.cursor_entry(cx) else {
+        let Some(entry) = self.cursor_entry(cx).filter(|_| self.folder().is_some()) else {
             self.clear_preview(cx);
             self.preview_key = None;
             self.preview_generation += 1;
@@ -2256,7 +2270,8 @@ impl Pane {
         self.preview_cancel = cancel.clone();
         crate::plugins::cancel_previews(surface, cx);
         let extensions = cx.global::<Ext>().0.clone();
-        let configured = cx.global::<Ui>().views.resolve(self.dir()).preview_providers.0.clone();
+        let Some(dir) = self.folder() else { return };
+        let configured = cx.global::<Ui>().views.resolve(dir).preview_providers.0.clone();
         let candidates =
             crate::plugins::preview_candidates(cx, &configured, &entry.path, entry.is_dir, entry.is_symlink);
         let (gate, cloud) = match cx.try_global::<CloudStatusService>() {
@@ -2578,7 +2593,7 @@ impl Pane {
             return None;
         }
         let folder = self.folders[0].read(cx);
-        let y = pointer.y - bounds.top() + px(shown_offset(&self.gallery.scroll));
+        let y = pointer.y - bounds.top() - px(shown_offset(&self.gallery.scroll));
         let row = (f32::from(y) / gallery::ROW_HEIGHT).floor();
         if row < 0.0 {
             return None;
@@ -3492,20 +3507,13 @@ impl Pane {
 
     /// The typed drop destination under `pointer`, with the layout generation a
     /// spring timer must capture.
-    pub(crate) fn drop_hit(&self, pointer: Point<Pixels>, cx: &gpui::App) -> Option<crate::drag_drop::DropHit> {
-        let dragged = self.dragged_paths(cx)?;
-        self.drop_hit_for(pointer, &dragged, cx)
-    }
-
-    /// The same target resolution for a drop whose payload was already consumed
-    /// from the app's active drag.
-    pub(crate) fn drop_hit_for(
+    pub(crate) fn drop_hit_for<'a>(
         &self,
         pointer: Point<Pixels>,
-        dragged: &[PathBuf],
+        dragged: impl Iterator<Item = &'a Path>,
         cx: &gpui::App,
     ) -> Option<crate::drag_drop::DropHit> {
-        if self.renaming.is_some() {
+        if self.renaming.is_some() || self.folder().is_none() {
             return None;
         }
         let target = self.drop_target_at(pointer, dragged, cx)?;
@@ -3527,18 +3535,15 @@ impl Pane {
         hasher.finish()
     }
 
-    fn dragged_paths(&self, cx: &gpui::App) -> Option<Vec<PathBuf>> {
-        if let Some(selection) = cx.active_drag_value::<DraggedSelection>() {
-            Some(selection.entries.iter().map(|(path, _)| path.clone()).collect())
-        } else {
-            Some(cx.active_drag_value::<ExternalPaths>()?.paths().to_vec())
-        }
-    }
-
     /// Where a drop at `pointer` lands, if dropping the dragged items there would act:
     /// a folder row (with its expanded subtree), the expanded folder that lists a nested
     /// row, or else the folder the list or column shows.
-    fn drop_target_at(&self, pointer: Point<Pixels>, dragged: &[PathBuf], cx: &gpui::App) -> Option<DropTarget> {
+    fn drop_target_at<'a>(
+        &self,
+        pointer: Point<Pixels>,
+        dragged: impl Iterator<Item = &'a Path>,
+        cx: &gpui::App,
+    ) -> Option<DropTarget> {
         let target = match self.mode {
             ViewMode::List => {
                 let bounds = self.list_bounds.get()?;
@@ -3577,8 +3582,9 @@ impl Pane {
                 }
             }
             ViewMode::Gallery => {
-                let bounds = self.gallery.bounds.get()?;
-                if !bounds.contains(&pointer) {
+                if !self.gallery.bounds.get().is_some_and(|bounds| bounds.contains(&pointer))
+                    && !self.gallery.preview_bounds.get().is_some_and(|bounds| bounds.contains(&pointer))
+                {
                     return None;
                 }
                 let folder = self.folders.first()?.read(cx);
@@ -3614,7 +3620,7 @@ impl Pane {
 
     fn update_drag_row(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let row = if self.mode == ViewMode::List { self.drag_row_at(cx, position) } else { None };
-        let target = self.dragged_paths(cx).and_then(|dragged| self.drop_target_at(position, &dragged, cx));
+        let target = self.drop_target_at(position, crate::drag_drop::active_paths(cx), cx);
         let column = if self.mode == ViewMode::Columns { self.column_row_at(cx, position) } else { None };
         if row != self.drop_row || target != self.drop_target || column != self.drop_column {
             self.drop_row = row;
@@ -5809,7 +5815,7 @@ impl Render for Pane {
             None
         };
         self.drop_target = if cx.has_active_drag() {
-            self.dragged_paths(cx).and_then(|dragged| self.drop_target_at(window.mouse_position(), &dragged, cx))
+            self.drop_target_at(window.mouse_position(), crate::drag_drop::active_paths(cx), cx)
         } else {
             None
         };

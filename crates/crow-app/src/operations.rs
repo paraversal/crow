@@ -125,8 +125,8 @@ fn resolved_drop_moves(path: &Path, into: &Path) -> bool {
 
 /// Whether dropping `paths` into `into` would do anything: not every item is already
 /// there, and none is `into` itself or a folder above it.
-pub fn drop_would_act(paths: &[PathBuf], into: &Path) -> bool {
-    paths.iter().any(|path| drop_moves(path, into))
+pub fn drop_would_act<'a>(mut paths: impl Iterator<Item = &'a Path>, into: &Path) -> bool {
+    paths.any(|path| drop_moves(path, into))
 }
 
 fn drop_moves(path: &Path, into: &Path) -> bool {

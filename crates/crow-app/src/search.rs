@@ -137,6 +137,7 @@ pub enum SearchEvent {
         is_dir: bool,
     },
     Reveal(PathBuf),
+    Rename(PathBuf),
     Run(Request),
     Copy {
         paths: Arc<[PathBuf]>,
@@ -2423,9 +2424,13 @@ impl SearchView {
 
     fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
         let entries = self.selected_rename_inputs();
-        if entries.len() < 2 {
+        if let [entry] = entries.as_slice() {
+            cx.emit(SearchEvent::Rename(entry.source.clone()));
+            return;
+        }
+        if entries.is_empty() {
             crate::feedback::refuse(crate::feedback::RefuseTarget::None, window, cx);
-            crate::operations::message("Select two or more results to rename", false, cx);
+            crate::operations::message("Select a result to rename", false, cx);
             cx.notify();
             return;
         }
@@ -2637,6 +2642,7 @@ impl SearchView {
         use crate::palette::CommandId;
         match command {
             CommandId::Open => self.open_selected(cx),
+            CommandId::Rename => self.rename(&Rename, window, cx),
             CommandId::SearchReveal => self.reveal_selected(cx),
             CommandId::QuickLook => self.quick_look_selected(cx),
             CommandId::Copy => self.copy_selected(false, cx),

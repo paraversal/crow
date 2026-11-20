@@ -7,6 +7,17 @@ use std::path::{Path, PathBuf};
 
 use crow_core::Slot;
 
+pub(crate) fn active_paths(cx: &gpui::App) -> impl Iterator<Item = &Path> {
+    let external =
+        cx.active_drag_value::<gpui::ExternalPaths>().into_iter().flat_map(|paths| paths.paths()).map(PathBuf::as_path);
+    let selection = cx
+        .active_drag_value::<crate::pane::DraggedSelection>()
+        .into_iter()
+        .flat_map(|selection| selection.entries.iter())
+        .map(|(path, _)| path.as_path());
+    external.chain(selection)
+}
+
 /// Where a drop would land.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DropLocation {
@@ -70,7 +81,11 @@ impl DropHit {
             return None;
         }
         match &self.location {
-            DropLocation::Folder(path) => Some(crow_core::drag::SpringTarget::new(path.clone(), self.generation)),
+            DropLocation::Folder(path) => Some(crow_core::drag::SpringTarget::Folder {
+                path: path.clone(),
+                generation: self.generation,
+                allow_ancestor: matches!(self.surface, DropSurface::Sidebar | DropSurface::PathBar),
+            }),
             DropLocation::Back => Some(crow_core::drag::SpringTarget::Back),
             DropLocation::SidebarInsertion(_) => None,
         }

@@ -15320,6 +15320,13 @@ fn saved_query_is_a_destination_with_history_and_results(cx: &mut TestAppContext
         .read_with(&cx, |search, _| search.title().to_owned());
     assert_eq!(title, "PDFs", "the destination title names the session");
 
+    cx.simulate_keystrokes("cmd-1 cmd-2 cmd-3 cmd-4");
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::SavedQuery(id.clone()),
+        "view shortcuts leave the saved destination intact"
+    );
+
     // Back returns to the folder; Forward restores the same saved destination and
     // its retained result session.
     cx.simulate_keystrokes("cmd-[");
@@ -15379,6 +15386,12 @@ fn tag_destination_searches_spotlight_and_survives_history(cx: &mut TestAppConte
     assert_eq!(
         pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
         crow_core::Location::Tag(tag.clone())
+    );
+    cx.simulate_keystrokes("cmd-1 cmd-2 cmd-3 cmd-4");
+    assert_eq!(
+        pane(&view, &cx).read_with(&cx, |pane, _| pane.location().to_owned()),
+        crow_core::Location::Tag(tag.clone()),
+        "view shortcuts leave the tag destination intact"
     );
     let session = pane(&view, &cx).read_with(&cx, |pane, _| pane.saved_session()).expect("tag session");
     assert_eq!(session.read_with(&cx, |search, _| search.result_paths()), [root.join("notes.txt")]);
@@ -16089,6 +16102,7 @@ fn moving_off_an_armed_folder_stops_its_blink(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_path_segment_is_outlined_under_a_drag(cx: &mut TestAppContext) {
     let root = fixture("drop-hover-outline");
+    let outside = fixture("drop-hover-outline-source");
     let (view, mut cx) = open(cx, &root.join("alpha"));
     set_motion(&mut cx, "off");
     cx.update(|window, _| window.refresh());
@@ -16099,7 +16113,7 @@ fn a_path_segment_is_outlined_under_a_drag(cx: &mut TestAppContext) {
         .into_iter()
         .find(|hit| hit.path.canonicalize().ok().as_deref() == Some(target.as_path()))
         .expect("root path segment");
-    cx.simulate_event(external_entered(hit.bounds.center(), root.join("notes.txt"), Default::default()));
+    cx.simulate_event(external_entered(hit.bounds.center(), outside.join("notes.txt"), Default::default()));
     cx.simulate_event(external_pending(hit.bounds.center(), Default::default()));
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
@@ -16283,4 +16297,341 @@ fn the_drag_cursor_shows_a_copy_across_volumes(cx: &mut TestAppContext) {
         Some(gpui::DragOperation::Copy),
         "Finder shows a copy when the drop would copy"
     );
+}
+
+#[gpui::test]
+fn audit_batch_one_palette_operates_on_transient_search_results(cx: &mut TestAppContext) {
+    let root = fixture("audit-search-palette");
+    std::fs::write(root.join("beta/search-result.txt"), "result").unwrap();
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("search-result");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("down cmd-k");
+    cx.simulate_input(">copy path");
+    cx.simulate_keystrokes("enter");
+    let text = cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text()));
+    assert_eq!(text, Some(root.join("beta/search-result.txt").display().to_string()));
+
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">copy");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        cx.read(|cx| cx.global::<Operations>().clipboard.as_ref().map(|clipboard| clipboard.paths.to_vec())),
+        Some(vec![root.join("beta/search-result.txt")])
+    );
+
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">rename");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, cx| pane.rename_text(cx)).as_deref(), Some("search-result.txt"));
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("new-name.txt");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("beta/new-name.txt").is_file());
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("new-name");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("down cmd-k");
+    cx.simulate_input(">move to trash");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(!root.join("beta/new-name.txt").exists());
+    assert!(root.join("alpha").is_dir());
+}
+
+#[gpui::test]
+fn audit_batch_one_gallery_routes_scrolled_rows_and_preview_background(cx: &mut TestAppContext) {
+    let root = folders_fixture("audit-gallery-drop");
+    let source = fixture("audit-gallery-source");
+    let (view, mut cx) = open_sized(cx, &root, 1280., 520.);
+    set_motion(&mut cx, "off");
+    cx.simulate_keystrokes("cmd-4 end");
+    settle(&view, &mut cx);
+    let last_row = cx.debug_bounds("gallery-row-d199").expect("scrolled to the end").center();
+    finder_drop(&view, &mut cx, last_row, source.join("notes.txt"));
+    assert!(root.join("d199/notes.txt").exists());
+    assert!(!root.join("d000/notes.txt").exists());
+
+    let gallery = cx.debug_bounds("gallery").expect("Gallery").center();
+    finder_drop(&view, &mut cx, gallery, source.join("alpha"));
+    assert!(root.join("alpha/inner").is_dir(), "the preview dropped into the displayed folder");
+}
+
+#[gpui::test]
+fn audit_batch_one_cancelled_spring_restores_transient_search(cx: &mut TestAppContext) {
+    let root = fixture("audit-spring-search");
+    let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "off");
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("alpha");
+    wait_for_search(&view, &mut cx);
+    let before = view.read_with(&cx, |w, _| w.search.clone()).expect("search session");
+    let at = cx.debug_bounds("search-row-0").expect("alpha result").center();
+    cx.simulate_event(external_entered(at, root.join("notes.txt"), Default::default()));
+    cx.simulate_event(external_pending(at, Default::default()));
+    spring_delay(&mut cx, 601);
+    assert!(view.read_with(&cx, |w, _| w.search.is_none()), "the sprung folder is visible");
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)), root.join("alpha"));
+    cx.simulate_event(gpui::FileDropEvent::Exited);
+    settle(&view, &mut cx);
+    assert_eq!(view.read_with(&cx, |w, _| w.search.clone()), Some(before));
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)), root.to_path_buf());
+}
+
+#[gpui::test]
+fn audit_batch_one_recent_drop_resolves_past_section_headers(cx: &mut TestAppContext) {
+    let root = fixture("audit-recent-drop");
+    let source = fixture("audit-recent-source");
+    let (view, mut cx) = open(cx, &root);
+    write_config(
+        &view,
+        &mut cx,
+        "sidebar.toml",
+        &favorites_toml(&[&root.join("alpha")]).replace("show = false", "show = true"),
+    );
+    pane(&view, &cx).update(&mut cx, |p, cx| p.navigate(root.join("beta"), cx));
+    settle(&view, &mut cx);
+    let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+    let recent = sidebar.read_with(&cx, |sidebar, cx| sidebar.index_of_path(&root.join("beta"), cx)).expect("beta");
+    let selector = format!("sidebar-{recent}");
+    let at = cx.update(|window, _| window.debug_bounds(&selector)).expect("Recent row").center();
+    cx.simulate_event(external_entered(at, root.join("beta"), Default::default()));
+    cx.simulate_event(external_pending(at, Default::default()));
+    cx.run_until_parked();
+    assert_eq!(sidebar.read_with(&cx, |sidebar, _| sidebar.drop_target()), None);
+    cx.simulate_event(gpui::FileDropEvent::Exited);
+    finder_drop(&view, &mut cx, at, source.join("notes.txt"));
+    assert!(root.join("beta/notes.txt").is_file());
+    assert!(!root.join("alpha/notes.txt").exists());
+}
+
+#[gpui::test]
+fn audit_batch_one_ancestor_path_segment_springs(cx: &mut TestAppContext) {
+    let root = fixture("audit-ancestor-path");
+    let source = fixture("audit-ancestor-source");
+    let (view, mut cx) = open_sized(cx, &root.join("alpha"), 1280., 600.);
+    set_motion(&mut cx, "off");
+    let path = root.canonicalize().expect("real path");
+    let hit = view.read_with(&cx, |w, _| {
+        w.path_hits
+            .borrow()
+            .iter()
+            .find(|hit| hit.path.canonicalize().ok().as_deref() == Some(path.as_path()))
+            .cloned()
+            .expect("ancestor segment")
+    });
+    let at = hit.bounds.center();
+    cx.simulate_event(external_entered(at, source.join("notes.txt"), Default::default()));
+    cx.simulate_event(external_pending(at, Default::default()));
+    spring_delay(&mut cx, 601);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)), hit.path);
+    cx.simulate_event(gpui::FileDropEvent::Exited);
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, cx| p.current_dir(cx)), root.join("alpha"));
+}
+
+#[gpui::test]
+fn audit_batch_one_virtual_tab_closes_why_and_refuses_folder_commands(cx: &mut TestAppContext) {
+    let root = fixture("audit-virtual-commands");
+    let (view, mut cx) = open(cx, &root);
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &saved_queries_toml(&[("notes", "Notes", &root.display().to_string(), None)])
+            .replace("text = \"\"", "text = \"notes\""),
+    );
+    cx.simulate_keystrokes("cmd-t");
+    view.update_in(&mut cx, |w, window, cx| {
+        w.pane().update(cx, |p, cx| p.open_saved_query(crow_core::SavedQueryId::new("notes").unwrap(), window, cx));
+    });
+    wait_for_pane_search(&view, &mut cx);
+    view.update_in(&mut cx, |w, window, cx| w.previous_tab(&PreviousTab, window, cx));
+    cx.simulate_keystrokes("cmd-j");
+    assert!(view.read_with(&cx, |w, _| w.why.is_some()));
+    view.update_in(&mut cx, |w, window, cx| w.next_tab(&NextTab, window, cx));
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.why.is_none()));
+
+    for (command, expected) in [
+        (palette::CommandId::Paste, "Open a folder to use this command"),
+        (palette::CommandId::ReviewGitChanges, "Open a folder to review Git changes"),
+    ] {
+        view.update_in(&mut cx, |w, window, cx| w.run_command(command, window, cx));
+        assert!(view.read_with(&cx, |w, _| w.git_review.is_none()));
+        assert_eq!(
+            cx.read(|cx| cx.global::<Operations>().message.as_ref().map(|(text, _)| text.to_string())).as_deref(),
+            Some(expected)
+        );
+    }
+}
+
+#[gpui::test]
+fn audit_batch_one_sidebar_projects_drop_uses_its_navigable_row(cx: &mut TestAppContext) {
+    let root = fixture("audit-projects-drop");
+    let source = fixture("audit-projects-source");
+    let repo = root.join("beta").canonicalize().unwrap();
+    let output = std::process::Command::new("git").arg("-C").arg(&repo).args(["init", "-q"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| crate::git::set_enabled_for_test(cx, true));
+    let config = format!(
+        "{}\n[projects]\nroots = [\"{}\"]\n",
+        favorites_toml(&[&root.join("alpha")]).replace("show = false", "show = true"),
+        root.display()
+    );
+    write_config(&view, &mut cx, "sidebar.toml", &config);
+    let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+    let mut project = None;
+    for _ in 0..300 {
+        cx.update(|_, cx| crate::git::poll(cx));
+        settle(&view, &mut cx);
+        project = sidebar.read_with(&cx, |sidebar, cx| sidebar.index_of_path(&repo, cx));
+        if project.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let selector = format!("sidebar-{}", project.expect("Projects row"));
+    let at = cx.update(|window, _| window.debug_bounds(&selector)).expect("Projects row bounds").center();
+    finder_drop(&view, &mut cx, at, source.join("notes.txt"));
+    assert!(repo.join("notes.txt").is_file());
+    assert!(!root.join("alpha/notes.txt").exists());
+}
+
+#[gpui::test]
+fn audit_batch_one_stationary_drag_samples_do_not_invalidate_the_window(cx: &mut TestAppContext) {
+    let root = fixture("audit-stationary-drag");
+    let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "off");
+    let at = cx.debug_bounds("row-alpha").expect("alpha").center();
+    cx.simulate_event(external_entered(at, root.join("notes.txt"), Default::default()));
+    cx.simulate_event(external_pending(at, Default::default()));
+    cx.run_until_parked();
+
+    // Once the volume lookup supplies the operation, the cursor is stable too.
+    cx.simulate_event(external_pending(at, Default::default()));
+    cx.run_until_parked();
+
+    let invalidations = std::rc::Rc::new(std::cell::Cell::new(0));
+    let _observation = cx.update(|_, cx| {
+        let invalidations = invalidations.clone();
+        cx.observe(&view, move |_, _| invalidations.set(invalidations.get() + 1))
+    });
+    for _ in 0..8 {
+        cx.simulate_event(external_pending(at, Default::default()));
+    }
+    cx.run_until_parked();
+    assert_eq!(invalidations.get(), 0, "stable pointer samples do not request another render");
+    cx.simulate_event(gpui::FileDropEvent::Exited);
+}
+
+#[gpui::test]
+fn audit_batch_one_saved_query_batch_rename_updates_a_hidden_gallery_listing(cx: &mut TestAppContext) {
+    let root = fixture("audit-virtual-rename");
+    std::fs::write(root.join("other-notes.txt"), "other").unwrap();
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-4 end");
+    settle(&view, &mut cx);
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &saved_queries_toml(&[("notes", "Notes", &root.display().to_string(), None)])
+            .replace("text = \"\"", "text = \"notes\""),
+    );
+    view.update_in(&mut cx, |w, window, cx| {
+        w.pane().update(cx, |p, cx| p.open_saved_query(crow_core::SavedQueryId::new("notes").unwrap(), window, cx));
+    });
+    wait_for_pane_search(&view, &mut cx);
+    cx.simulate_keystrokes("down cmd-a cmd-k");
+    cx.simulate_input(">rename");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| matches!(w.sheet, Some(Sheet::BatchRename(_)))));
+    let add = cx.debug_bounds("batch-rule-add").expect("Add Text rule").center();
+    cx.simulate_click(add, Default::default());
+    cx.simulate_input(" renamed");
+    pump_batch(&mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    pump_batch(&mut cx);
+    assert!(root.join("notes renamed.txt").is_file());
+    assert!(root.join("other-notes renamed.txt").is_file());
+    assert!(pane(&view, &cx).read_with(&cx, |p, _| matches!(p.location(), crow_core::Location::SavedQuery(_))));
+}
+
+#[gpui::test]
+fn audit_batch_one_saved_query_can_spring_to_the_previously_shown_folder(cx: &mut TestAppContext) {
+    let root = fixture("audit-virtual-spring");
+    let source = fixture("audit-virtual-spring-source");
+    let (view, mut cx) = open(cx, &root.join("alpha"));
+    set_motion(&mut cx, "off");
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &saved_queries_toml(&[("folders", "Alpha", &root.display().to_string(), None)])
+            .replace("text = \"\"", "text = \"alpha\""),
+    );
+    let id = crow_core::SavedQueryId::new("folders").unwrap();
+    view.update_in(&mut cx, |w, window, cx| {
+        w.pane().update(cx, |p, cx| p.open_saved_query(id.clone(), window, cx));
+    });
+    wait_for_pane_search(&view, &mut cx);
+    let at = cx.debug_bounds("search-row-0").expect("alpha result").center();
+    cx.simulate_event(external_entered(at, source.join("notes.txt"), Default::default()));
+    cx.simulate_event(external_pending(at, Default::default()));
+    spring_delay(&mut cx, 601);
+    let active = pane(&view, &cx);
+    assert_eq!(active.read_with(&cx, |p, _| p.location().clone()), crow_core::Location::Folder(root.join("alpha")));
+    cx.simulate_event(gpui::FileDropEvent::Exited);
+    settle(&view, &mut cx);
+    assert_eq!(active.read_with(&cx, |p, _| p.location().clone()), crow_core::Location::SavedQuery(id));
+}
+
+#[gpui::test]
+fn audit_batch_one_back_after_a_spring_selects_the_surviving_sources(cx: &mut TestAppContext) {
+    let root = fixture("audit-spring-survivors");
+    let (view, mut cx) = open(cx, &root);
+    let pane = pane(&view, &cx);
+    let target = root.join("alpha");
+    let moved = root.join("notes.txt");
+    let survivor = root.join("beta");
+    pane.update(&mut cx, |p, cx| p.spring_enter(target.clone(), cx));
+    settle(&view, &mut cx);
+    std::fs::rename(&moved, target.join("notes.txt")).unwrap();
+    pane.update(&mut cx, |p, cx| p.spring_commit(vec![moved.clone(), survivor.clone()], cx));
+    cx.simulate_keystrokes("cmd-[");
+    settle(&view, &mut cx);
+    assert_eq!(pane.read_with(&cx, |p, cx| p.selected_paths(cx)), [survivor]);
+
+    pane.update(&mut cx, |p, cx| p.spring_enter(target, cx));
+    settle(&view, &mut cx);
+    pane.update(&mut cx, |p, cx| p.spring_commit(vec![moved.clone()], cx));
+    cx.simulate_keystrokes("cmd-[");
+    settle(&view, &mut cx);
+    assert!(!pane.read_with(&cx, |p, cx| p.selected_paths(cx)).contains(&moved));
+}
+
+#[gpui::test]
+fn audit_batch_one_palette_adds_the_search_result_folder_to_the_sidebar(cx: &mut TestAppContext) {
+    let root = fixture("audit-search-favorite");
+    let result = root.join("beta/search-folder");
+    std::fs::create_dir(&result).unwrap();
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]));
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("search-folder");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("down cmd-k");
+    cx.simulate_input(">add to sidebar");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    let paths = sidebar_paths(&cx);
+    assert!(paths.contains(&result), "the search result is a favorite");
+    assert!(!paths.contains(&root.join("alpha")), "the hidden selection was left alone");
 }
