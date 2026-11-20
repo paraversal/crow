@@ -180,6 +180,8 @@ pub struct CrowWindow {
     palette: Option<palette_view::Palette>,
     /// Cmd-F, while its results replace the pane.
     search: Option<Entity<SearchView>>,
+    /// The Cmd-F session hidden by a temporary spring-loaded folder.
+    sprung_search: Option<Entity<SearchView>>,
     /// ⌘L or a double-click on empty path space: the bar's path slot is a field.
     path_edit: Option<path_edit::PathEdit>,
     /// The path bar's hover state, so the pill can fade.
@@ -229,6 +231,7 @@ struct DragDevices {
     targets: HashMap<PathBuf, Option<u64>>,
     reading: HashSet<PathBuf>,
     reading_sources: bool,
+    shown_operation: Option<gpui::DragOperation>,
 }
 
 /// View ▸ Theme…: "System" first, then every theme in the index. Moving the
@@ -346,6 +349,7 @@ impl CrowWindow {
             picker: None,
             palette: None,
             search: None,
+            sprung_search: None,
             path_edit: None,
             path_hovered: false,
             refocus_overlay: false,
@@ -646,13 +650,29 @@ impl CrowWindow {
         cx.notify();
     }
 
-    /// View ▸ Calculate Folder Sizes: measure the current folder's folders once,
-    /// even when `folder_sizes = "off"`.
+    fn refuse_folder_command(&self, cx: &mut Context<Self>) {
+        operations::message("Open a folder to use this command", false, cx);
+        cx.notify();
+    }
+
+    /// Measure folders once, even when automatic folder sizes are off.
     fn calculate_folder_sizes(&mut self, _: &CalculateFolderSizes, _: &mut Window, cx: &mut Context<Self>) {
-        if self.pane().read(cx).folder().is_none() {
+        let search = self.active_search(cx);
+        let pane = self.pane().read(cx);
+        if pane.folder().is_none() {
+            self.refuse_folder_command(cx);
             return;
         }
-        let paths = self.pane().read(cx).folder_paths(cx);
+        let paths = match search {
+            Some(search) => search
+                .read(cx)
+                .selected_entry()
+                .filter(|(_, is_dir)| *is_dir)
+                .map(|(path, _)| path)
+                .into_iter()
+                .collect(),
+            None => pane.folder_paths(cx),
+        };
         let service = cx.global::<crate::folder_sizes::SizeService>().0.clone();
         service.update(cx, |service, cx| service.measure_once(&paths, cx));
         cx.notify();
@@ -796,8 +816,12 @@ impl CrowWindow {
         self.pane().update(cx, |pane, cx| pane.set_icon_caption(Some("git.lines-changed".to_owned()), cx));
     }
 
-    fn open_parent(&mut self, _: &OpenParent, _: &mut Window, cx: &mut Context<Self>) {
-        self.pane().update(cx, |pane, cx| pane.open_parent(cx));
+    fn open_parent(&mut self, _: &OpenParent, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(search) = self.active_search(cx) {
+            search.update(cx, |search, cx| search.run_command(palette::CommandId::SearchReveal, window, cx));
+        } else {
+            self.pane().update(cx, |pane, cx| pane.open_parent(cx));
+        }
     }
 
     fn go_back(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
@@ -1406,10 +1430,10 @@ impl CrowWindow {
 
     /// The deepest eligible destination under `pointer`. A modal blocks every
     /// target; the path bar and sidebar own their own surfaces.
-    fn drop_hit_at(
+    fn drop_hit_at<'a>(
         &self,
         pointer: gpui::Point<gpui::Pixels>,
-        dragged: Option<&[PathBuf]>,
+        paths: impl Iterator<Item = &'a Path>,
         cx: &App,
     ) -> Option<DropHit> {
         if self.sheet.is_some()
@@ -1426,20 +1450,23 @@ impl CrowWindow {
         if self.back_bounds.get().is_some_and(|bounds| bounds.contains(&pointer)) {
             return Some(DropHit::back(self.drag.can_spring_back()));
         }
-        if let Some(hit) = self.sidebar.read(cx).drop_hit(pointer, cx) {
-            return Some(hit.on(DropSurface::Sidebar));
-        }
-        if let Some(hit) = self.path_hit_at(pointer) {
-            return Some(hit);
+        let hit = self
+            .sidebar
+            .read(cx)
+            .drop_hit(pointer, cx)
+            .map(|hit| hit.on(DropSurface::Sidebar))
+            .or_else(|| self.path_hit_at(pointer));
+        if let Some(hit) = hit {
+            return hit.path().is_none_or(|path| operations::drop_would_act(paths, path)).then_some(hit);
         }
         if let Some(search) = self.active_search(cx) {
-            return search.read(cx).drop_hit(pointer, cx).map(|hit| hit.on(DropSurface::Search));
+            let hit = search.read(cx).drop_hit(pointer, cx)?;
+            return hit
+                .path()
+                .is_some_and(|path| operations::drop_would_act(paths, path))
+                .then(|| hit.on(DropSurface::Search));
         }
-        let pane = self.pane().read(cx);
-        match dragged {
-            Some(paths) => pane.drop_hit_for(pointer, paths, cx),
-            None => pane.drop_hit(pointer, cx),
-        }
+        self.pane().read(cx).drop_hit_for(pointer, paths, cx)
     }
 
     fn active_tab_id(&self) -> Option<crow_core::TabId> {
@@ -1489,15 +1516,17 @@ impl CrowWindow {
                 self.drag_tab = self.active_tab_id();
                 self.drag_pane = Some(self.pane().clone());
                 let pane = self.pane().read(cx);
-                let origin = pane.current_dir(cx);
+                let origin = pane.focused_path(cx);
                 let back = pane.back_folders();
                 self.drag.begin(origin, back)
             }
         };
         let elapsed = self.drag_now(cx);
-        let hit = self.drop_hit_at(position, None, cx);
+        let hit = self.drop_hit_at(position, crate::drag_drop::active_paths(cx), cx);
         let target = hit.as_ref().and_then(DropHit::spring_target);
-        self.show_drop_operation(id, hit.as_ref(), window, cx);
+        let cursor_changed = self.show_drop_operation(id, hit.as_ref(), window, cx);
+        let hover_changed = self.drop_hover != hit;
+        let timer_before = self.drag_timer_token;
         self.set_drop_hover(hit, cx);
         let pointer = (f32::from(position.x), f32::from(position.y));
         match self.drag.observe(id, pointer, target, elapsed) {
@@ -1510,7 +1539,9 @@ impl CrowWindow {
             }
             Some(_) => {}
         }
-        cx.notify();
+        if hover_changed || timer_before != self.drag_timer_token || cursor_changed {
+            cx.notify();
+        }
     }
 
     /// Tell the native drag cursor what a drop on `hit` would do, like Finder: a
@@ -1523,14 +1554,16 @@ impl CrowWindow {
         hit: Option<&DropHit>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let Some(sources) = cx.active_drag_value::<ExternalPaths>().map(|paths| paths.paths().to_vec()) else {
-            return;
-        };
-        let Some(target) = hit.and_then(DropHit::path).cloned() else { return };
+    ) -> bool {
+        let Some(sources) = cx.active_drag_value::<ExternalPaths>() else { return false };
         let devices = &mut self.drag_devices;
+        let Some(target) = hit.and_then(DropHit::path).cloned() else {
+            window.set_file_drop_operation(None);
+            return devices.shown_operation.take().is_some();
+        };
         if devices.sources.is_none() && !devices.reading_sources {
             devices.reading_sources = true;
+            let sources = sources.paths().to_vec();
             let task = cx.background_spawn(async move {
                 sources.iter().filter_map(|path| operations::volume_of(path, false)).collect::<Vec<_>>()
             });
@@ -1561,20 +1594,19 @@ impl CrowWindow {
             })
             .detach();
         }
-        let (Some(sources), Some(Some(target))) = (devices.sources.as_ref(), devices.targets.get(&target)) else {
-            return;
-        };
-        if sources.is_empty() {
-            return;
-        }
+        let volume = devices.targets.get(&target).and_then(|device| *device);
         let allowed = window.file_drop_operations();
         let options = operations::DropOptions {
             copy: window.modifiers().alt,
             allow_move: allowed.move_,
             allow_copy: allowed.copy,
         };
-        let same_volume = sources.iter().all(|source| source == target);
-        window.set_file_drop_operation(operations::drop_operation(options, same_volume));
+        let operation =
+            devices.sources.as_ref().filter(|sources| !sources.is_empty()).zip(volume).and_then(|(sources, target)| {
+                operations::drop_operation(options, sources.iter().all(|source| *source == target))
+            });
+        window.set_file_drop_operation(operation);
+        std::mem::replace(&mut devices.shown_operation, operation) != operation
     }
 
     /// Remember the hovered destination; the search list draws its own outline
@@ -1664,19 +1696,22 @@ impl CrowWindow {
         self.drag_timer_token = None;
         self.clear_spring_cue(cx);
         let position = window.mouse_position();
-        let hit = self.drop_hit_at(position, None, cx);
+        let hit = self.drop_hit_at(position, crate::drag_drop::active_paths(cx), cx);
         let back = hit.as_ref().is_some_and(|hit| hit.location == DropLocation::Back);
         let target = hit.as_ref().and_then(DropHit::spring_target);
         let pointer = (f32::from(position.x), f32::from(position.y));
         let elapsed = self.drag_now(cx);
         let Some(spring) = self.drag.expire(session, token, pointer, target, elapsed) else { return };
         let Some(pane) = self.drag_pane.clone() else { return };
-        if self.search.is_some() {
-            self.close_search(window, cx);
-        }
         match spring {
-            Spring::Enter(path) => pane.update(cx, |pane, cx| pane.spring_enter(path, cx)),
-            Spring::Origin => pane.update(cx, |pane, cx| pane.spring_cancel(window, cx)),
+            Spring::Enter(path) => {
+                self.set_drop_hover(None, cx);
+                if self.sprung_search.is_none() {
+                    self.sprung_search = self.search.take();
+                }
+                pane.update(cx, |pane, cx| pane.spring_enter(path, cx));
+            }
+            Spring::Origin => self.restore_spring(&pane, window, cx),
         }
         // Back does not reflow under a still pointer: keep stepping while held.
         if back {
@@ -1684,6 +1719,19 @@ impl CrowWindow {
             self.drag_pointer_moved(position, window, cx);
         }
         cx.notify();
+    }
+
+    fn restore_spring(&mut self, pane: &Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
+        pane.update(cx, |pane, cx| pane.spring_cancel(window, cx));
+        if let Some(search) = self.sprung_search.take() {
+            let visible = pane == self.pane() && self.search.is_none();
+            if visible {
+                self.search = Some(search);
+                self.focus_center(window, cx);
+            } else {
+                Self::release_search(search, cx);
+            }
+        }
     }
 
     /// A drag ended without an accepted drop: undo a temporary folder and forget
@@ -1698,8 +1746,8 @@ impl CrowWindow {
         self.drag_timer_token = None;
         self.clear_spring_cue(cx);
         self.set_drop_hover(None, cx);
-        if let (Finish::Cancelled { restore: Some(_) }, Some(pane)) = (finish, pane) {
-            pane.update(cx, |pane, cx| pane.spring_cancel(window, cx));
+        if let (Finish::Cancelled { restore: true }, Some(pane)) = (finish, pane) {
+            self.restore_spring(&pane, window, cx);
         }
         self.drop_pending = false;
         cx.notify();
@@ -1748,7 +1796,7 @@ impl CrowWindow {
             return;
         }
         let pointer = window.mouse_position();
-        let hit = self.drop_hit_at(pointer, Some(&paths), cx);
+        let hit = self.drop_hit_at(pointer, paths.iter().map(PathBuf::as_path), cx);
         let finish = match self.drag.active() {
             Some(id) => self.drag.finish(id, true),
             None => Finish::None,
@@ -1765,7 +1813,7 @@ impl CrowWindow {
         let hit = hit.filter(|hit| hit.location != DropLocation::Back);
         let Some(hit) = hit else {
             if let (true, Some(pane)) = (sprung, owner) {
-                pane.update(cx, |pane, cx| pane.spring_cancel(window, cx));
+                self.restore_spring(&pane, window, cx);
             }
             return;
         };
@@ -1773,7 +1821,7 @@ impl CrowWindow {
             DropLocation::Back => {}
             DropLocation::SidebarInsertion(slot) => {
                 if let (true, Some(pane)) = (sprung, owner) {
-                    pane.update(cx, |pane, cx| pane.spring_cancel(window, cx));
+                    self.restore_spring(&pane, window, cx);
                 }
                 let sidebar = self.sidebar.clone();
                 sidebar.update(cx, |sidebar, cx| sidebar.add_dropped_folders(slot, paths, cx));
@@ -1795,12 +1843,15 @@ impl CrowWindow {
                             Some(request) => {
                                 if let (true, Some(pane)) = (sprung, owner.clone()) {
                                     pane.update(cx, |pane, cx| pane.spring_commit(dropped.clone(), cx));
+                                    if let Some(search) = this.sprung_search.take() {
+                                        Self::release_search(search, cx);
+                                    }
                                 }
                                 this.run_request(request, window, cx);
                             }
                             None => {
                                 if let (true, Some(pane)) = (sprung, owner) {
-                                    pane.update(cx, |pane, cx| pane.spring_cancel(window, cx));
+                                    this.restore_spring(&pane, window, cx);
                                 }
                             }
                         }
@@ -2200,16 +2251,15 @@ impl CrowWindow {
     /// Finder's File ▸ Add to Sidebar: the selected folders, or the folder shown.
     fn add_to_sidebar(&mut self, _: &AddToSidebar, _: &mut Window, cx: &mut Context<Self>) {
         let pane = self.pane().read(cx);
-        let selected: Vec<PathBuf> = if pane.folder().is_some() {
-            pane.selected_entries(cx).iter().filter(|(_, is_dir)| *is_dir).map(|(path, _)| path.clone()).collect()
+        let paths: Vec<PathBuf> = if let Some(search) = self.active_search(cx) {
+            search.read(cx).selected_entry().filter(|(_, is_dir)| *is_dir).map(|(path, _)| path).into_iter().collect()
+        } else if pane.folder().is_some() {
+            let selected: Vec<_> =
+                pane.selected_entries(cx).iter().filter(|(_, is_dir)| *is_dir).map(|(path, _)| path.clone()).collect();
+            if selected.is_empty() { pane.focused_path(cx).into_iter().collect() } else { selected }
         } else {
-            self.active_search(cx)
-                .and_then(|search| search.read(cx).selected_entry())
-                .and_then(|(path, is_dir)| is_dir.then_some(path))
-                .into_iter()
-                .collect()
+            Vec::new()
         };
-        let paths = if selected.is_empty() { pane.focused_path(cx).into_iter().collect() } else { selected };
         if paths.is_empty() {
             return;
         }
@@ -2263,7 +2313,7 @@ impl CrowWindow {
         let focus = self.why.as_ref()?;
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
-        let dir = self.pane().read(cx).dir().to_path_buf();
+        let dir = self.pane().read(cx).folder()?.to_path_buf();
         let resolved = ui.views.resolve(&dir);
         let has_override = ui.views.has_folder_override(&dir);
         let views_file = ui.config_dir.join("views.toml");
@@ -2596,15 +2646,19 @@ impl CrowWindow {
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(search) = self.search.take() {
-            let surface = search.read(cx).plugin_surface();
-            if cx.try_global::<crate::plugins::Plugins>().is_some() {
-                cx.global_mut::<crate::plugins::Plugins>().surfaces.drop_surface(surface);
-            }
-            search.update(cx, |search, cx| search.cancel(cx));
+            Self::release_search(search, cx);
             self.announce_active_scope(cx);
             self.focus_center(window, cx);
             cx.notify();
         }
+    }
+
+    fn release_search(search: Entity<SearchView>, cx: &mut Context<Self>) {
+        let surface = search.read(cx).plugin_surface();
+        if cx.try_global::<crate::plugins::Plugins>().is_some() {
+            cx.global_mut::<crate::plugins::Plugins>().surfaces.drop_surface(surface);
+        }
+        search.update(cx, |search, cx| search.cancel(cx));
     }
 
     fn on_search_event(
@@ -2627,6 +2681,12 @@ impl CrowWindow {
             SearchEvent::Reveal(path) => {
                 self.pane().update(cx, |pane, cx| pane.reveal_search_result(path.clone(), cx));
                 self.close_search(window, cx);
+                self.focus_center(window, cx);
+            }
+            SearchEvent::Rename(path) => {
+                let path = path.clone();
+                self.close_search(window, cx);
+                self.pane().update(cx, |pane, cx| pane.rename_search_result(path, cx));
                 self.focus_center(window, cx);
             }
             SearchEvent::Open { path, is_dir } => {
@@ -2932,11 +2992,16 @@ impl CrowWindow {
             CommandId::RefreshProjects => crate::git::refresh_projects(cx),
             CommandId::ReviewGitChanges => self.review_git_command(&crate::actions::ReviewGitChanges, window, cx),
             CommandId::Quit => operation_ui::quit(cx),
+            CommandId::Paste | CommandId::PasteMove | CommandId::NewFolder | CommandId::NewFile
+                if self.pane().read(cx).folder().is_none() =>
+            {
+                self.refuse_folder_command(cx);
+            }
             other => {
-                if self.pane().read(cx).folder().is_some() {
-                    self.pane().update(cx, |pane, cx| pane.run_command(other, window, cx));
-                } else if let Some(search) = self.active_search(cx) {
+                if let Some(search) = self.active_search(cx) {
                     search.update(cx, |search, cx| search.run_command(other, window, cx));
+                } else if self.pane().read(cx).folder().is_some() {
+                    self.pane().update(cx, |pane, cx| pane.run_command(other, window, cx));
                 }
             }
         }
@@ -3071,6 +3136,9 @@ impl CrowWindow {
 
 impl Render for CrowWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.why.is_some() && self.pane().read(cx).folder().is_none() {
+            self.why = None;
+        }
         let active = window.is_window_active();
         if active
             && !self.window_was_active
@@ -3275,6 +3343,16 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::go_to_folder))
             .on_action(cx.listener(Self::edit_path))
+            .when(self.pane().read(cx).folder().is_none(), |root| {
+                root.on_action(
+                    cx.listener(|this, _: &crate::actions::PasteFiles, _, cx| this.refuse_folder_command(cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &crate::actions::PasteMoveFiles, _, cx| this.refuse_folder_command(cx)),
+                )
+                .on_action(cx.listener(|this, _: &crate::actions::NewFolder, _, cx| this.refuse_folder_command(cx)))
+                .on_action(cx.listener(|this, _: &crate::actions::NewFile, _, cx| this.refuse_folder_command(cx)))
+            })
             .on_action(cx.listener(Self::path_edit_go))
             .on_action(cx.listener(|this, _: &PathHover, _, cx| {
                 this.path_hovered = true;
@@ -3284,10 +3362,12 @@ impl Render for CrowWindow {
                 this.path_hovered = false;
                 cx.notify();
             }))
-            .on_action(cx.listener(Self::view_as_icons))
-            .on_action(cx.listener(Self::view_as_list))
-            .on_action(cx.listener(Self::view_as_columns))
-            .on_action(cx.listener(Self::view_as_gallery))
+            .when(self.pane().read(cx).folder().is_some(), |root| {
+                root.on_action(cx.listener(Self::view_as_icons))
+                    .on_action(cx.listener(Self::view_as_list))
+                    .on_action(cx.listener(Self::view_as_columns))
+                    .on_action(cx.listener(Self::view_as_gallery))
+            })
             .on_action(cx.listener(Self::icon_size_compact))
             .on_action(cx.listener(Self::icon_size_standard))
             .on_action(cx.listener(Self::icon_size_large))

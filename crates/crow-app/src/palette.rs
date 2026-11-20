@@ -156,6 +156,21 @@ pub struct Command {
     pub palette: bool,
 }
 
+impl Command {
+    pub fn listed(&self, folder_sizes_visible: bool, virtual_destination: bool) -> bool {
+        self.palette
+            && !(folder_sizes_visible && self.id == CommandId::CalculateFolderSizes)
+            && !(virtual_destination
+                && matches!(
+                    self.id,
+                    CommandId::ViewAsIcons
+                        | CommandId::ViewAsList
+                        | CommandId::ViewAsColumns
+                        | CommandId::ViewAsGallery
+                ))
+    }
+}
+
 impl CommandId {
     /// The stable id remembered in `palette-commands.json`: renaming a variant
     /// must not change this string.
@@ -1251,12 +1266,10 @@ pub fn command_listing(
     recent_ids: &[CommandId],
     show_recent: bool,
     folder_sizes_visible: bool,
+    virtual_destination: bool,
 ) -> Listing {
-    let listed: Vec<&Command> = COMMANDS
-        .iter()
-        .filter(|command| command.palette)
-        .filter(|command| !(folder_sizes_visible && command.id == CommandId::CalculateFolderSizes))
-        .collect();
+    let listed: Vec<&Command> =
+        COMMANDS.iter().filter(|command| command.listed(folder_sizes_visible, virtual_destination)).collect();
     let total = listed.len();
     let mut items: Vec<Item> = Vec::new();
     let mut rows: Vec<Row> = Vec::new();
@@ -1846,7 +1859,7 @@ mod tests {
     }
 
     fn command_ids(query: &str) -> Vec<CommandId> {
-        command_listing(query, &[], false, false)
+        command_listing(query, &[], false, false, false)
             .items
             .into_iter()
             .filter_map(|item| match item {
@@ -1978,7 +1991,7 @@ mod tests {
     #[test]
     fn an_empty_command_query_leaves_out_quit() {
         assert!(!command_ids("").contains(&CommandId::Quit), "> then Return must not quit");
-        let recent = command_listing("", &[CommandId::Quit, CommandId::NewTab], true, false);
+        let recent = command_listing("", &[CommandId::Quit, CommandId::NewTab], true, false, false);
         let ids: Vec<CommandId> = recent
             .items
             .iter()
@@ -2066,7 +2079,7 @@ mod tests {
     #[test]
     fn settings_commands_are_in_the_palette() {
         let commands = |query: &str| -> Vec<CommandId> {
-            command_listing(query, &[], true, false)
+            command_listing(query, &[], true, false, false)
                 .items
                 .iter()
                 .filter_map(|item| match item {
@@ -2083,7 +2096,7 @@ mod tests {
     #[test]
     fn calculate_folder_sizes_is_hidden_when_sizes_are_automatic() {
         let commands = |folder_sizes_visible: bool| -> Vec<CommandId> {
-            command_listing("", &[], false, folder_sizes_visible)
+            command_listing("", &[], false, folder_sizes_visible, false)
                 .items
                 .iter()
                 .filter_map(|item| match item {

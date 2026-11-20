@@ -188,10 +188,6 @@ fn palette_row_y(listing: &palette::Listing, cursor: usize) -> (f32, f32) {
 impl CrowWindow {
     pub(super) fn show_palette(&mut self, _: &ShowCommandPalette, window: &mut Window, cx: &mut Context<Self>) {
         crate::usage::record(&ShowCommandPalette, cx);
-        // Another overlay owns the keys; open_palette would refuse below.
-        if self.search_blocked() {
-            return;
-        }
         crate::tips::key_used(TipId::GoTo, cx);
         self.open_palette("", window, cx);
     }
@@ -202,7 +198,7 @@ impl CrowWindow {
     }
 
     pub(super) fn open_palette(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.is_some() || self.picker.is_some() || self.sheet.is_some() || self.search.is_some() {
+        if self.palette.is_some() || self.picker.is_some() || self.sheet.is_some() {
             return;
         }
         let home = cx.global::<Ui>().home.clone();
@@ -350,11 +346,14 @@ impl CrowWindow {
         let ui = cx.global::<Ui>();
         let recent: Vec<palette::CommandId> =
             ui.recent_commands.ids().iter().filter_map(|key| palette::CommandId::from_key(key)).collect();
+        let folder_sizes_visible = ui.settings.folder_sizes == crow_core::FolderSizesMode::Visible;
+        let virtual_destination = self.pane().read(cx).folder().is_none();
         let mut listing = palette::command_listing(
             query,
             &recent,
             ui.settings.palette_recent_commands,
-            ui.settings.folder_sizes == crow_core::FolderSizesMode::Visible,
+            folder_sizes_visible,
+            virtual_destination,
         );
         let selection = self.palette.as_ref().and_then(|palette| palette.plugin_context.as_ref());
         let commands: Vec<_> = crate::plugins::command_items(cx)
@@ -368,11 +367,7 @@ impl CrowWindow {
         if !matched.is_empty() {
             let builtin_total = palette::COMMANDS
                 .iter()
-                .filter(|command| command.palette)
-                .filter(|command| {
-                    !(ui.settings.folder_sizes == crow_core::FolderSizesMode::Visible
-                        && command.id == palette::CommandId::CalculateFolderSizes)
-                })
+                .filter(|command| command.listed(folder_sizes_visible, virtual_destination))
                 .count();
             listing.rows.push(Row::Header("Plugins".into()));
             for (item, _) in matched {

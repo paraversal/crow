@@ -1161,10 +1161,7 @@ impl Sidebar {
                 Some(crate::drag_drop::DropHit::insertion(self.group_end(group, cx), generation))
             }
             DropTarget::Row(index) => {
-                let row = rows
-                    .into_iter()
-                    .filter(|row| !matches!(row, Row::Header(..) | Row::SectionHeader { .. }))
-                    .nth(index)?;
+                let row = rows.into_iter().filter(|row| !matches!(row, Row::Header(..))).nth(index)?;
                 let path = row.path()?.to_path_buf();
                 Some(crate::drag_drop::DropHit::folder(path, generation, true))
             }
@@ -1644,7 +1641,17 @@ impl Render for Sidebar {
             // Between two favorites the line shows where the drop goes; no row fills.
             self.drop_target = match self.insert_slot {
                 Some(_) if !self.dragging_favorite.get() => None,
-                _ => self.target_at(position),
+                _ => self.target_at(position).filter(|target| match target {
+                    DropTarget::Group(_) => true,
+                    DropTarget::Row(index) => rows
+                        .iter()
+                        .filter(|row| !matches!(row, Row::Header(..)))
+                        .nth(*index)
+                        .and_then(Row::path)
+                        .is_some_and(|path| {
+                            crate::operations::drop_would_act(crate::drag_drop::active_paths(cx), path)
+                        }),
+                }),
             };
         } else {
             self.drop_target = None;

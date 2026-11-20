@@ -49,6 +49,7 @@ const SIDE_BY_SIDE_MIN: f32 = 520.0;
 pub(super) struct Gallery {
     pub scroll: UniformListScrollHandle,
     pub bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    pub preview_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Visible preview targets in rail order, refreshed on folder events.
     entries: Vec<Entry>,
     pub primary_worker: Arc<futures::lock::Mutex<()>>,
@@ -103,6 +104,7 @@ impl Gallery {
         Self {
             scroll: UniformListScrollHandle::new(),
             bounds: Rc::new(Cell::new(None)),
+            preview_bounds: Rc::new(Cell::new(None)),
             entries: Vec::new(),
             primary_worker: Arc::default(),
             second_worker: Arc::default(),
@@ -240,7 +242,7 @@ fn key_for(pane: &Pane, entry: &Entry, cx: &gpui::App) -> u64 {
 
 fn load_second(pane: &mut Pane, entry: Option<Entry>, cx: &mut Context<Pane>) {
     let surface = pane.gallery.second_surface;
-    let Some(entry) = entry else {
+    let Some(entry) = entry.filter(|_| pane.folder().is_some()) else {
         pane.gallery.second.path = None;
         pane.gallery.second.clear_preview(cx);
         pane.gallery.second.loading = false;
@@ -263,7 +265,8 @@ fn load_second(pane: &mut Pane, entry: Option<Entry>, cx: &mut Context<Pane>) {
     pane.gallery.second.loading = true;
     pane.gallery.second.clear_preview(cx);
     let generation = revision;
-    let configured = cx.global::<crate::ui::Ui>().views.resolve(pane.dir()).preview_providers.0.clone();
+    let Some(dir) = pane.folder() else { return };
+    let configured = cx.global::<crate::ui::Ui>().views.resolve(dir).preview_providers.0.clone();
     let candidates = crate::plugins::preview_candidates(cx, &configured, &entry.path, entry.is_dir, entry.is_symlink);
     let extensions = cx.global::<crate::extensions::Ext>().0.clone();
     let (gate, cloud) = gate_and_cloud(cx, &entry.path);
@@ -568,14 +571,20 @@ pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane
     }
     let opacity = reveal.map_or(1.0, |t| 0.4 + 0.6 * t);
     let preview = render_preview(pane, &cursor, preview_width, &theme, window, cx).opacity(opacity);
+    let preview_bounds = pane.gallery.preview_bounds.clone();
     div()
         .debug_selector(|| "gallery".into())
         .size_full()
         .flex()
         .flex_row()
+        .relative()
         .overflow_hidden()
+        .on_children_prepainted(move |children, _, _| preview_bounds.set(children.get(1).copied()))
         .child(rail)
         .child(div().flex_1().min_w_0().h_full().flex().flex_col().overflow_hidden().child(preview))
+        .when(pane.drop_target.as_ref().is_some_and(|target| target.rows.is_none()), |gallery| {
+            gallery.child(drop_outline(&theme).left(px(4.)).right(px(4.)).top(px(2.)).bottom(px(2.)))
+        })
 }
 
 fn visible_rows(pane: &Pane, rows: usize) -> std::ops::Range<usize> {

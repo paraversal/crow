@@ -134,7 +134,12 @@ fn rows(folder: &Path, pinned: bool, cx: &mut Context<CrowWindow>) -> (Vec<Chang
 
 impl CrowWindow {
     pub(super) fn review_git_command(&mut self, _: &ReviewGitChanges, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_git_review(self.pane().read(cx).current_dir(cx), window, cx);
+        let Some(folder) = self.pane().read(cx).folder().map(Path::to_path_buf) else {
+            crate::operations::message("Open a folder to review Git changes", false, cx);
+            cx.notify();
+            return;
+        };
+        self.open_git_review(folder, window, cx);
     }
 
     pub(super) fn open_git_review(&mut self, folder: PathBuf, window: &mut Window, cx: &mut Context<Self>) {

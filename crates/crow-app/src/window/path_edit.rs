@@ -20,6 +20,10 @@ impl CrowWindow {
     /// ⌘L: edit the path the bar shows in the bottom bar. A second ⌘L selects
     /// the field's text again; overlays and a rename own the screen, so they keep it.
     pub(super) fn edit_path(&mut self, _: &EditPath, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pane().read(cx).folder().is_none() {
+            self.refuse_folder_command(cx);
+            return;
+        }
         if let Some(edit) = &self.path_edit {
             let input = edit.input.clone();
             let len = input.read(cx).text().len();
@@ -33,8 +37,6 @@ impl CrowWindow {
             || self.picker.is_some()
             || self.palette.is_some()
             || self.pane().read(cx).is_renaming()
-            // A virtual destination has no path to edit; the slot shows its title.
-            || self.pane().read(cx).folder().is_none()
         {
             return;
         }

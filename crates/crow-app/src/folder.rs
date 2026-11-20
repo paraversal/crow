@@ -238,6 +238,7 @@ pub struct Folder {
     select_after_load: Option<(PathBuf, bool)>,
     /// Items an operation produced: selected as soon as they appear in the listing.
     select_when_present: Vec<PathBuf>,
+    select_survivors: bool,
     /// The mode their Arrive effect plays in.
     arrival_mode: Effective,
     /// Select the first item once loaded. Off for column-view children, which show
@@ -375,6 +376,7 @@ impl Folder {
             cursor_before_apply: None,
             select_after_load: None,
             select_when_present: Vec::new(),
+            select_survivors: false,
             arrival_mode: Effective::Off,
             auto_select,
             type_select: TypeSelect::default(),
@@ -1242,7 +1244,15 @@ impl Folder {
     /// They play Arrive in `mode` when they appear.
     pub fn select_when_present(&mut self, paths: Vec<PathBuf>, mode: Effective, cx: &mut Context<Self>) {
         self.select_when_present = paths;
+        self.select_survivors = false;
         self.arrival_mode = mode;
+        self.reload(cx);
+    }
+
+    pub fn select_survivors_after_load(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.select_when_present = paths;
+        self.select_survivors = true;
+        self.arrival_mode = Effective::Off;
         self.reload(cx);
     }
 
@@ -1722,7 +1732,13 @@ impl Folder {
             self.selection_changed(cx);
             selected = true;
         }
-        if !self.select_when_present.is_empty() && self.all_present(&self.select_when_present) {
+        if self.select_survivors && !self.loading {
+            let present: HashSet<&Path> = self.entries.iter().map(|entry| entry.path.as_path()).collect();
+            self.select_when_present.retain(|path| present.contains(path.as_path()));
+            self.select_survivors = false;
+        }
+        if !self.select_survivors && !self.select_when_present.is_empty() && self.all_present(&self.select_when_present)
+        {
             let wanted = std::mem::take(&mut self.select_when_present);
             self.selection.clear();
             let mut totals = (0u64, 0usize);
