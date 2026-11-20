@@ -6029,23 +6029,24 @@ fn right_click_on_a_selected_search_result_makes_it_the_active_row(cx: &mut Test
     let paths = search.read_with(&cx, |s, _| s.result_paths());
     assert!(paths.len() >= 2, "{paths:?}");
 
-    // Click the second row, then Cmd-click the first: both selected, cursor on the second.
+    // Click the second row, then Cmd-click the first: both selected, and the cursor
+    // follows the selection model onto the row just added, as in the list.
     click_selector(&mut cx, "search-row-1");
     wait_for_preview(&view, &mut cx, &paths[1]);
     let at = row_center(&mut cx, "search-row-0");
     cx.simulate_click(at, gpui::Modifiers { platform: true, ..Default::default() });
     cx.run_until_parked();
-    assert_eq!(search.read_with(&cx, |s, _| s.cursor()), 1, "Cmd-click keeps the cursor on the second row");
+    assert_eq!(search.read_with(&cx, |s, _| s.cursor()), 0, "Cmd-click moves the cursor to the added row");
 
-    // Right-click the selected first row: it becomes the active row everywhere.
-    let at = row_center(&mut cx, "search-row-0");
+    // Right-click the selected second row: it becomes the active row everywhere.
+    let at = row_center(&mut cx, "search-row-1");
     right_click(&mut cx, at);
     cx.run_until_parked();
-    assert_eq!(search.read_with(&cx, |s, _| s.cursor()), 0, "the menu's row is the cursor");
-    wait_for_preview(&view, &mut cx, &paths[0]);
+    assert_eq!(search.read_with(&cx, |s, _| s.cursor()), 1, "the menu's row is the cursor");
+    wait_for_preview(&view, &mut cx, &paths[1]);
     assert_eq!(
         search.read_with(&cx, |s, _| s.selected_entry()).map(|(path, _)| path),
-        Some(paths[0].clone()),
+        Some(paths[1].clone()),
         "the bar names the row the menu will act on"
     );
 }
@@ -10758,8 +10759,12 @@ fn emptying_a_fixture_trash_releases_the_queue_after_the_origin_closes(app: &mut
     let (view_a, mut cx_a) = open(app, &root);
     let (view_b, mut cx_b) = second_window(&mut cx_a, &root);
     view_a.update_in(&mut cx_a, |this, window, cx| {
-        this.sheet =
-            Some(Sheet::ConfirmEmptyTrash { folders: vec![trash.clone()], finder: false, focus: cx.focus_handle() });
+        this.sheet = Some(Sheet::ConfirmEmptyTrash {
+            folders: vec![trash.clone()],
+            finder: false,
+            focus: cx.focus_handle(),
+            buttons: vec![cx.focus_handle(), cx.focus_handle()],
+        });
         this.confirm_sheet(window, cx);
         assert_eq!(cx.global::<Operations>().maintenance, Some(crate::operations::Maintenance::EmptyTrash));
         crate::operations::enqueue(copy_request(&[root.join("notes.txt")], root.join("beta")), None, cx);
@@ -16629,6 +16634,10 @@ fn audit_batch_one_saved_query_batch_rename_updates_a_hidden_gallery_listing(cx:
     assert!(root.join("notes renamed.txt").is_file());
     assert!(root.join("other-notes renamed.txt").is_file());
     assert!(pane(&view, &cx).read_with(&cx, |p, _| matches!(p.location(), crow_core::Location::SavedQuery(_))));
+    // The session keeps its selection on the renamed paths.
+    let session = pane(&view, &cx).read_with(&cx, |p, _| p.saved_session()).expect("the saved session");
+    let selected = session.read_with(&cx, |s, _| s.selected_count());
+    assert_eq!(selected, 2, "both renamed results stay selected");
 
     // A watcher batch on the hidden listing reaches the pane while its Gallery
     // is virtual; it must not reload a preview through the missing folder path.
@@ -16783,8 +16792,12 @@ fn empty_trash_shows_in_activity_while_running_and_after(cx: &mut TestAppContext
     assert!(cx.debug_bounds("activity-empty-trash").is_some(), "the running Empty Trash has an Activity row");
     cx.update(|_, cx| cx.global_mut::<Operations>().maintenance = None);
     view.update_in(&mut cx, |this, window, cx| {
-        this.sheet =
-            Some(Sheet::ConfirmEmptyTrash { folders: vec![trash.clone()], finder: false, focus: cx.focus_handle() });
+        this.sheet = Some(Sheet::ConfirmEmptyTrash {
+            folders: vec![trash.clone()],
+            finder: false,
+            focus: cx.focus_handle(),
+            buttons: vec![cx.focus_handle(), cx.focus_handle()],
+        });
         this.confirm_sheet(window, cx);
     });
     settle(&view, &mut cx);
@@ -16875,4 +16888,256 @@ fn a_config_error_and_the_right_pane_fit_a_640_px_window(cx: &mut TestAppContext
     let pill = cx.debug_bounds("bar-error").expect("pill");
     let open = cx.debug_bounds("bar-error-open").expect("Open");
     assert!(open.right() <= pill.right() + px(0.5) && open.size.width >= px(30.), "{open:?} inside {pill:?}");
+}
+
+#[gpui::test]
+fn the_save_search_form_is_labelled_for_assistive_tech(cx: &mut TestAppContext) {
+    let root = fixture("save-search-a11y");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    cx.simulate_input("notes");
+    view.update_in(&mut cx, |w, window, cx| w.save_search(&SaveSearch, window, cx));
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| matches!(w.sheet, Some(Sheet::SavedQuery(_)))), "the form is open");
+    let elements = cx.update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec());
+    let form = elements
+        .iter()
+        .find(|element| element.selector.as_deref() == Some("saved-query-form"))
+        .expect("the form is an interactive element");
+    assert_eq!(form.role, Some(Role::Dialog));
+    assert_eq!(form.label.as_deref(), Some("Save Search"));
+    for element in &elements {
+        let selector = element.selector.as_deref().unwrap_or_default();
+        if selector.starts_with("saved-") || selector.starts_with("sheet-") {
+            assert!(element.role.is_some(), "{selector} has a role");
+            assert!(element.label.as_deref().is_some_and(|label| !label.is_empty()), "{selector} has a label");
+        }
+    }
+    assert!(elements.iter().any(|element| element.role == Some(Role::CheckBox)), "the form has check boxes");
+}
+
+#[gpui::test]
+fn clicking_inside_a_selection_and_emptying_it_keep_the_cursor_model_in_step(cx: &mut TestAppContext) {
+    let root = fixture("selection-cursor-sync");
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(root.join(name), name).unwrap();
+    }
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.focused_folder_for_test());
+    let index = |cx: &mut VisualTestContext, name: &str| {
+        folder
+            .read_with(cx, |folder, _| folder.entries().iter().position(|entry| entry.path == root.join(name)))
+            .expect("row")
+    };
+    let (a, b, c) = (index(&mut cx, "a.txt"), index(&mut cx, "b.txt"), index(&mut cx, "c.txt"));
+
+    // A plain click on a selected row moves the model's cursor with the row.
+    cx.update(|_, cx| {
+        folder.update(cx, |folder, cx| {
+            folder.select_only(a, cx);
+            folder.toggle(b, cx);
+            folder.click(a, cx);
+        })
+    });
+    assert_eq!(folder.read_with(&cx, |f, _| f.selection_cursor().map(Path::to_path_buf)), Some(root.join("a.txt")));
+    assert_eq!(folder.read_with(&cx, |f, _| f.selected_paths().len()), 2, "the selection is kept for dragging");
+
+    // A marquee that ends on nothing leaves no stale anchor for Shift-click.
+    cx.update(|_, cx| {
+        folder.update(cx, |folder, cx| folder.set_selection_paths(Vec::new(), None, (0, 0), cx));
+    });
+    assert_eq!(folder.read_with(&cx, |f, _| f.selection_cursor().map(Path::to_path_buf)), None);
+    cx.update(|_, cx| folder.update(cx, |folder, cx| folder.extend_to(c, cx)));
+    assert_eq!(
+        folder.read_with(&cx, |f, _| f.selected_paths()),
+        vec![root.join("c.txt")],
+        "Shift-click after an emptied selection selects just that row"
+    );
+}
+
+/// The sheet's button the keyboard has reached, by selector, among the ones named.
+fn focused_sheet_button(
+    view: &Entity<CrowWindow>,
+    cx: &mut VisualTestContext,
+    ids: &[&'static str],
+) -> Option<&'static str> {
+    let buttons = view.read_with(cx, |w, _| {
+        w.sheet.as_ref().and_then(|sheet| sheet.buttons().map(<[gpui::FocusHandle]>::to_vec)).unwrap_or_default()
+    });
+    cx.update(|window, _| buttons.iter().position(|button| button.is_focused(window)).map(|index| ids[index]))
+}
+
+#[gpui::test]
+fn confirmation_sheets_are_reachable_and_answered_from_the_keyboard(cx: &mut TestAppContext) {
+    let root = fixture("sheet-keyboard");
+    let (view, mut cx) = open(cx, &root);
+
+    // Delete: Tab reaches Cancel, then Delete; Return answers the focused one.
+    let doomed = root.join("notes.txt");
+    view.update_in(&mut cx, |w, window, cx| {
+        w.run_request(Request::DeletePermanently { paths: Arc::from([doomed.clone()]) }, window, cx)
+    });
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    assert_eq!(focused_sheet_button(&view, &mut cx, &["sheet-cancel", "sheet-confirm"]), Some("sheet-cancel"));
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(!sheet_open(&view, &cx), "Return on Cancel cancels");
+    assert!(doomed.exists(), "nothing was deleted");
+
+    view.update_in(&mut cx, |w, window, cx| {
+        w.run_request(Request::DeletePermanently { paths: Arc::from([doomed.clone()]) }, window, cx)
+    });
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("tab tab");
+    settle(&view, &mut cx);
+    assert_eq!(focused_sheet_button(&view, &mut cx, &["sheet-cancel", "sheet-confirm"]), Some("sheet-confirm"));
+    cx.simulate_keystrokes("shift-tab");
+    settle(&view, &mut cx);
+    assert_eq!(focused_sheet_button(&view, &mut cx, &["sheet-cancel", "sheet-confirm"]), Some("sheet-cancel"));
+    cx.simulate_keystrokes("space");
+    settle(&view, &mut cx);
+    assert!(!sheet_open(&view, &cx), "Space presses the focused button");
+    assert!(doomed.exists());
+
+    // Empty Trash and Stop have the same two-stop ring.
+    view.update_in(&mut cx, |w, window, cx| {
+        let buttons = vec![cx.focus_handle(), cx.focus_handle()];
+        w.sheet = Some(Sheet::ConfirmEmptyTrash {
+            folders: vec![root.join("nowhere")],
+            finder: false,
+            focus: cx.focus_handle(),
+            buttons,
+        });
+        window.focus(w.sheet.as_ref().unwrap().focus(), cx);
+        cx.notify();
+    });
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("tab tab");
+    settle(&view, &mut cx);
+    assert_eq!(focused_sheet_button(&view, &mut cx, &["sheet-cancel", "sheet-confirm"]), Some("sheet-confirm"));
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    assert_eq!(
+        focused_sheet_button(&view, &mut cx, &["sheet-cancel", "sheet-confirm"]),
+        Some("sheet-cancel"),
+        "the ring wraps"
+    );
+    cx.simulate_keystrokes("escape");
+    settle(&view, &mut cx);
+    assert!(!sheet_open(&view, &cx));
+
+    view.update_in(&mut cx, |w, window, cx| w.ask_to_stop(crate::operations::StopIntent::Close, window, cx));
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    assert_eq!(focused_sheet_button(&view, &mut cx, &["sheet-cancel", "sheet-confirm"]), Some("sheet-cancel"));
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(!sheet_open(&view, &cx), "Keep Running closes the question");
+}
+
+#[gpui::test]
+fn the_tag_picker_buttons_are_reachable_by_keyboard(cx: &mut TestAppContext) {
+    let root = fixture("tag-picker-keyboard");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<Ui>().tags.set_pinned(vec!["Work".into()]));
+    view.update_in(&mut cx, |w, window, cx| w.open_tag_picker(window, cx));
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("tags-clear").is_some(), "the picker is open");
+    let buttons = view.read_with(&cx, |w, _| w.tag_picker.as_ref().map(|picker| picker.buttons.clone())).unwrap();
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| buttons[0].is_focused(window)), "Tab reaches Clear first");
+    cx.simulate_keystrokes("tab");
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| buttons[1].is_focused(window)), "then Cancel");
+    cx.simulate_keystrokes("shift-tab shift-tab");
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| buttons[2].is_focused(window)), "Shift-Tab wraps to Done");
+    cx.simulate_keystrokes("shift-tab");
+    cx.simulate_keystrokes("shift-tab");
+    settle(&view, &mut cx);
+    assert!(cx.update(|window, _| buttons[0].is_focused(window)));
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.tag_picker.is_none()), "Return on Clear clears and closes");
+
+    // A picker never opens over another sheet.
+    view.update_in(&mut cx, |w, window, cx| {
+        w.run_request(Request::DeletePermanently { paths: Arc::from([root.join("notes.txt")]) }, window, cx);
+        w.open_tag_picker(window, cx);
+    });
+    assert!(view.read_with(&cx, |w, _| w.tag_picker.is_none()), "the open sheet keeps the keys");
+    cx.simulate_keystrokes("escape");
+}
+
+#[gpui::test]
+fn the_save_search_sheet_fits_a_640_by_500_window(cx: &mut TestAppContext) {
+    let root = fixture("save-search-narrow");
+    let (view, mut cx) = open_sized(cx, &root, 640., 500.);
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    cx.simulate_input("notes");
+    view.update_in(&mut cx, |w, window, cx| w.save_search(&SaveSearch, window, cx));
+    settle(&view, &mut cx);
+    let window = cx.update(|window, _| window.bounds());
+    let panel = cx.debug_bounds("sheet-panel").expect("the sheet");
+    assert!(
+        panel.left() >= px(0.) && panel.right() <= window.size.width && panel.bottom() <= window.size.height,
+        "{panel:?} stays inside {window:?}"
+    );
+}
+
+#[gpui::test]
+fn search_results_keep_the_selection_cursor_and_shift_arrows_in_step(cx: &mut TestAppContext) {
+    let root = fixture("search-selection-parity");
+    for name in ["needle-a.txt", "needle-b.txt", "needle-c.txt"] {
+        std::fs::write(root.join(name), "needle\n").unwrap();
+    }
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("needle");
+    wait_for_search(&view, &mut cx);
+    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search");
+    cx.simulate_keystrokes("tab down");
+    assert_eq!(search.read_with(&cx, |s, _| s.selected_count()), 1);
+
+    // Shift-Down and Shift-Up extend and shrink the range from the anchor (row 1).
+    cx.simulate_keystrokes("shift-down");
+    assert_eq!(search.read_with(&cx, |s, _| s.selected_count()), 2, "Shift-Down extends");
+    cx.simulate_keystrokes("shift-up");
+    assert_eq!(search.read_with(&cx, |s, _| s.selected_count()), 1, "Shift-Up takes one back");
+    cx.simulate_keystrokes("shift-up");
+    assert_eq!(search.read_with(&cx, |s, _| s.selected_count()), 2, "and extends upward past the anchor");
+
+    // A plain press inside the selection keeps all of it for a drag, and the
+    // cursor lands on the pressed row.
+    let paths = search.read_with(&cx, |s, _| s.result_paths());
+    let first = cx.debug_bounds("search-row-0").expect("row 0").center();
+    cx.simulate_mouse_down(first, gpui::MouseButton::Left, gpui::Modifiers::default());
+    cx.simulate_mouse_up(first, gpui::MouseButton::Left, gpui::Modifiers::default());
+    assert_eq!(search.read_with(&cx, |s, _| s.selected_count()), 2, "the selection survives a press inside it");
+    assert_eq!(search.read_with(&cx, |s, _| s.selected_entry().map(|(path, _)| path)), Some(paths[0].clone()));
+
+    // Cmd-click adds a row; the active row is the one the model names.
+    let third = cx.debug_bounds("search-row-2").expect("row 2").center();
+    let cmd = gpui::Modifiers { platform: true, ..Default::default() };
+    cx.simulate_mouse_down(third, gpui::MouseButton::Left, cmd);
+    cx.simulate_mouse_up(third, gpui::MouseButton::Left, cmd);
+    assert_eq!(search.read_with(&cx, |s, _| s.selected_count()), 3);
+    assert_eq!(
+        search.read_with(&cx, |s, _| s.selected_entry().map(|(path, _)| path)),
+        Some(paths[2].clone()),
+        "Return and Quick Look now act on the row just added"
+    );
+    // And removing a row moves the active row to the model's cursor, not a stale index.
+    cx.simulate_mouse_down(third, gpui::MouseButton::Left, cmd);
+    cx.simulate_mouse_up(third, gpui::MouseButton::Left, cmd);
+    assert_eq!(search.read_with(&cx, |s, _| s.selected_count()), 2);
+    let active = search.read_with(&cx, |s, _| s.selected_entry().map(|(path, _)| path)).expect("an active row");
+    assert!(search.read_with(&cx, |s, _| s.result_paths()).contains(&active));
 }

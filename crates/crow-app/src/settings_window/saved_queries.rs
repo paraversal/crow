@@ -230,6 +230,8 @@ impl SettingsWindow {
             chrome::sheet(
                 chrome::sheet_panel("settings-saved-query-editor", SheetWidth::Wide, theme)
                     .aria_label(title)
+                    // The sheet context blocks ⌘W and the other window-level keys behind it.
+                    .key_context("Sheet")
                     .max_w(window.viewport_size().width - px(24.))
                     .max_h(window.viewport_size().height - px(50.))
                     .overflow_y_scroll()

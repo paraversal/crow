@@ -1364,7 +1364,8 @@ impl SettingsWindow {
     fn on_stepper_event(&mut self, id: ControlId, event: &TextInputEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             TextInputEvent::Confirmed => self.commit_stepper(id, window, cx),
-            TextInputEvent::Cancelled => self.close(window, cx),
+            // Escape peels one layer, as everywhere else in this window.
+            TextInputEvent::Cancelled => self.cancel(window, cx),
             TextInputEvent::CompletionRequested => {
                 self.advance_focus(1, window, cx);
             }
@@ -1411,7 +1412,7 @@ impl SettingsWindow {
     fn on_terminal_event(&mut self, event: &TextInputEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             TextInputEvent::Confirmed => self.commit_terminal(window, cx),
-            TextInputEvent::Cancelled => self.close(window, cx),
+            TextInputEvent::Cancelled => self.cancel(window, cx),
             TextInputEvent::CompletionRequested => {
                 self.commit_terminal(window, cx);
                 self.advance_focus(1, window, cx);
@@ -3679,6 +3680,52 @@ mod tests {
             cx.windows().into_iter().filter(|handle| handle.downcast::<SettingsWindow>().is_some()).count()
         });
         assert_eq!(count, 0);
+    }
+
+    fn settings_window_count(cx: &mut TestAppContext) -> usize {
+        cx.update(|cx| cx.windows().into_iter().filter(|handle| handle.downcast::<SettingsWindow>().is_some()).count())
+    }
+
+    #[gpui::test]
+    fn cmd_w_leaves_settings_open_behind_the_saved_query_sheet(cx: &mut TestAppContext) {
+        let (_dir, path) = fixture("saved-query-cmd-w");
+        let (view, mut vcx) = open_settings(cx);
+        vcx.update(|_, cx| cx.global_mut::<Ui>().settings_folder = Some(path.clone()));
+        show_category(&view, &mut vcx, Category::Search);
+        focus_control(&view, &mut vcx, ControlId::NewSavedQuery);
+        vcx.simulate_keystrokes("enter");
+        assert!(view.read_with(&vcx, |view, _| view.saved_query_form.is_some()), "the sheet is open");
+        vcx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        assert_eq!(settings_window_count(cx), 1, "the window stays behind its sheet");
+        vcx.simulate_keystrokes("escape");
+        assert!(view.read_with(&vcx, |view, _| view.saved_query_form.is_none()), "Escape closes the sheet first");
+        assert_eq!(settings_window_count(cx), 1);
+    }
+
+    #[gpui::test]
+    fn escape_in_a_stepper_clears_the_search_before_closing(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        draw(&mut vcx);
+        vcx.simulate_input("font size");
+        draw(&mut vcx);
+        // Tab through the results without leaving the search.
+        for _ in 0..8 {
+            if vcx.update(|window, cx| view.read(cx).focused_control(window)) == Some(ControlId::FontSize) {
+                break;
+            }
+            vcx.simulate_keystrokes("tab");
+        }
+        assert_eq!(vcx.update(|window, cx| view.read(cx).focused_control(window)), Some(ControlId::FontSize));
+        assert_eq!(view.read_with(&vcx, |view, _| view.query.clone()), "font size");
+        vcx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(settings_window_count(cx), 1, "the first Escape peels the search, not the window");
+        assert_eq!(view.read_with(&vcx, |view, _| view.query.clone()), "");
+        focus_control(&view, &mut vcx, ControlId::FontSize);
+        vcx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(settings_window_count(cx), 0, "with nothing left to peel, Escape closes");
     }
 
     #[gpui::test]

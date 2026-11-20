@@ -343,6 +343,8 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("escape", CloseSearch, Some("SearchResults")),
         KeyBinding::new("up", MoveUp, Some("SearchResults")),
         KeyBinding::new("down", MoveDown, Some("SearchResults")),
+        KeyBinding::new("shift-up", ExtendUp, Some("SearchResults")),
+        KeyBinding::new("shift-down", ExtendDown, Some("SearchResults")),
         // ↓ in the field enters the results (no sidebar fallback); ↑ on the first row
         // comes back. "Search" is the band's own context level, so it reaches the field
         // without stealing the results list's plain ↓ (that binding matches deeper).

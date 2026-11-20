@@ -297,6 +297,10 @@ impl CrowWindow {
             // Another window coming to the front mid-drag must be able to receive it,
             // even while the pointer stays inside Crow's bounds.
             cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    // Tags made in Finder while Crow was in the background.
+                    crate::tags::refresh_if_stale(cx);
+                }
                 if !window.is_window_active() {
                     window.promote_active_drag_to_platform(cx);
                     // The pointer can stay over the path while another app is active;
@@ -426,6 +430,9 @@ impl CrowWindow {
                 allowed.push(("sheet choice", show.clone()));
                 allowed.push(("sheet choice", no.clone()));
             }
+            if let Some(buttons) = sheet.buttons() {
+                allowed.extend(buttons.iter().cloned().map(|focus| ("sheet button", focus)));
+            }
             if let Sheet::Conflict { controls, .. } = sheet {
                 allowed.extend(controls.iter().cloned().map(|focus| ("conflict control", focus)));
             }
@@ -442,6 +449,7 @@ impl CrowWindow {
             allowed.push(("column picker", picker.focus.clone()));
         } else if let Some(picker) = &self.tag_picker {
             allowed.push(("tag picker", picker.focus.clone()));
+            allowed.extend(picker.buttons().iter().cloned().map(|focus| ("tag picker button", focus)));
         } else if let Some(review) = &self.git_review {
             allowed.push(("git review", review.focus.clone()));
         } else if let Some(search) = &self.search {
@@ -1994,6 +2002,8 @@ enum Sheet {
     ConfirmDelete {
         paths: Arc<[PathBuf]>,
         focus: FocusHandle,
+        /// Cancel, then the confirming button, in Tab order.
+        buttons: Vec<FocusHandle>,
     },
     /// Emptying is permanent and covers the home Trash and every volume.
     ConfirmEmptyTrash {
@@ -2002,18 +2012,18 @@ enum Sheet {
         /// so Finder does the emptying and the sheet says why.
         finder: bool,
         focus: FocusHandle,
+        /// Cancel, [Open Full Disk Access], then the confirming button, in Tab order.
+        buttons: Vec<FocusHandle>,
     },
     /// Quitting or closing the last window would stop the queue partway.
     StopOperation {
         focus: FocusHandle,
         intent: crate::operations::StopIntent,
+        /// Keep Running, then the stopping button, in Tab order.
+        buttons: Vec<FocusHandle>,
     },
     /// The first launch asks whether tips should show.
-    Onboarding {
-        focus: FocusHandle,
-        show: FocusHandle,
-        no: FocusHandle,
-    },
+    Onboarding { focus: FocusHandle, show: FocusHandle, no: FocusHandle },
     /// File ▸ Save Search… and the sidebar's Edit Saved Search… form.
     SavedQuery(Box<saved_query_form::SavedQueryForm>),
     /// Rename two or more selected entries with one rule and one preview.
@@ -2021,6 +2031,16 @@ enum Sheet {
 }
 
 impl Sheet {
+    /// A confirmation's buttons in Tab order, for the sheets that have them.
+    fn buttons(&self) -> Option<&[FocusHandle]> {
+        match self {
+            Sheet::ConfirmDelete { buttons, .. }
+            | Sheet::ConfirmEmptyTrash { buttons, .. }
+            | Sheet::StopOperation { buttons, .. } => Some(buttons),
+            _ => None,
+        }
+    }
+
     fn focus(&self) -> &FocusHandle {
         match self {
             Sheet::Conflict { focus, .. }

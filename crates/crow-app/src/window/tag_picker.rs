@@ -11,21 +11,41 @@ use crate::ui::Ui;
 
 use super::CrowWindow;
 
+impl TagPicker {
+    pub(super) fn buttons(&self) -> &[FocusHandle] {
+        &self.buttons
+    }
+}
+
 pub(super) struct TagPicker {
     pub(super) focus: FocusHandle,
     selected: Vec<String>,
     cursor: usize,
+    /// Clear, Cancel and Done, in Tab order.
+    pub(super) buttons: [FocusHandle; 3],
 }
 
 impl CrowWindow {
     pub(super) fn open_tag_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search.is_some() || self.tag_picker.is_some() {
+        if self.search.is_some()
+            || self.tag_picker.is_some()
+            || self.sheet.is_some()
+            || self.palette.is_some()
+            || self.picker.is_some()
+            || self.why.is_some()
+        {
             return;
         }
+        crate::tags::refresh_if_stale(cx);
         let selected = self.pane().read(cx).folder_tag_filter(cx);
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.tag_picker = Some(TagPicker { focus, selected, cursor: 0 });
+        self.tag_picker = Some(TagPicker {
+            focus,
+            selected,
+            cursor: 0,
+            buttons: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
+        });
         cx.notify();
     }
 
@@ -37,6 +57,19 @@ impl CrowWindow {
             self.focus_center(window, cx);
         }
         cx.notify();
+    }
+
+    /// Return or Space: the focused button, else Done.
+    fn press_tag_button(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = &mut self.tag_picker else { return };
+        match picker.buttons.iter().position(|button| button.is_focused(window)) {
+            Some(0) => {
+                picker.selected.clear();
+                self.apply_tag_picker(window, cx);
+            }
+            Some(1) => self.close_tag_picker(window, cx),
+            _ => self.apply_tag_picker(window, cx),
+        }
     }
 
     fn apply_tag_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -101,12 +134,15 @@ impl CrowWindow {
                     }))
             })
             .collect::<Vec<_>>();
-        let button = |id: &'static str, label: &'static str| {
+        let button = |id: &'static str, label: &'static str, focus: &FocusHandle| {
             div()
                 .id(id)
                 .debug_selector(move || id.into())
                 .role(Role::Button)
                 .aria_label(label)
+                .track_focus(focus)
+                .tab_stop(true)
+                .focus_visible(|style| style.shadow(crate::style::cursor_ring(&theme)))
                 .rounded_md()
                 .px_2()
                 .py_1()
@@ -126,12 +162,28 @@ impl CrowWindow {
                 .key_context("Sheet")
                 .track_focus(&picker.focus)
                 .on_action(cx.listener(|this, _: &SheetCancel, window, cx| this.close_tag_picker(window, cx)))
-                .on_action(cx.listener(|this, _: &SheetConfirm, window, cx| this.apply_tag_picker(window, cx)))
-                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                .on_action(cx.listener(|this, _: &SheetConfirm, window, cx| this.press_tag_button(window, cx)))
+                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                     let Some(picker) = &mut this.tag_picker else { return };
+                    let focused = picker.buttons.iter().position(|button| button.is_focused(window));
                     match event.keystroke.key.as_str() {
+                        "tab" => {
+                            let forward = !event.keystroke.modifiers.shift;
+                            let count = picker.buttons.len();
+                            let next = match (focused, forward) {
+                                (Some(index), true) => (index + 1) % count,
+                                (Some(index), false) => (index + count - 1) % count,
+                                (None, true) => 0,
+                                (None, false) => count - 1,
+                            };
+                            window.focus(&picker.buttons[next], cx);
+                        }
                         "up" => picker.cursor = picker.cursor.saturating_sub(1),
                         "down" => picker.cursor = (picker.cursor + 1).min(limit),
+                        // Space presses a focused button; otherwise it toggles the row under the cursor.
+                        "space" if focused.is_some() => {
+                            this.press_tag_button(window, cx);
+                        }
                         "space" => {
                             if let Some(tag) = &selected {
                                 toggle(&mut picker.selected, tag);
@@ -161,19 +213,21 @@ impl CrowWindow {
                     div()
                         .flex()
                         .gap_2()
-                        .child(button("tags-clear", "Clear").on_click(cx.listener(|this, _, window, cx| {
-                            if let Some(picker) = &mut this.tag_picker {
-                                picker.selected.clear();
-                                this.apply_tag_picker(window, cx);
-                            }
-                        })))
+                        .child(button("tags-clear", "Clear", &picker.buttons[0]).on_click(cx.listener(
+                            |this, _, window, cx| {
+                                if let Some(picker) = &mut this.tag_picker {
+                                    picker.selected.clear();
+                                    this.apply_tag_picker(window, cx);
+                                }
+                            },
+                        )))
                         .child(div().flex_1())
                         .child(
-                            button("tags-cancel", "Cancel")
+                            button("tags-cancel", "Cancel", &picker.buttons[1])
                                 .on_click(cx.listener(|this, _, window, cx| this.close_tag_picker(window, cx))),
                         )
                         .child(
-                            button("tags-done", "Done")
+                            button("tags-done", "Done", &picker.buttons[2])
                                 .on_click(cx.listener(|this, _, window, cx| this.apply_tag_picker(window, cx))),
                         ),
                 ),

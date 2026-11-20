@@ -116,7 +116,7 @@ impl CrowWindow {
         false
     }
 
-    fn ask_to_stop(&mut self, intent: StopIntent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn ask_to_stop(&mut self, intent: StopIntent, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.sheet, Some(Sheet::StopOperation { .. })) {
             return;
         }
@@ -129,7 +129,8 @@ impl CrowWindow {
         }
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.sheet = Some(Sheet::StopOperation { focus, intent });
+        let buttons = (0..2).map(|_| cx.focus_handle()).collect();
+        self.sheet = Some(Sheet::StopOperation { focus, intent, buttons });
         // A conflict sheet in another window must not stack with this question.
         cx.defer(|cx| operations::dismiss_prompt_sheets(None, cx));
         window.activate_window();
@@ -161,7 +162,8 @@ impl CrowWindow {
         if let Request::DeletePermanently { paths } = request {
             let focus = cx.focus_handle();
             window.focus(&focus, cx);
-            self.sheet = Some(Sheet::ConfirmDelete { paths, focus });
+            let buttons = (0..2).map(|_| cx.focus_handle()).collect();
+            self.sheet = Some(Sheet::ConfirmDelete { paths, focus, buttons });
             cx.notify();
             return;
         }
@@ -376,7 +378,8 @@ impl CrowWindow {
                 }
                 let focus = cx.focus_handle();
                 window.focus(&focus, cx);
-                this.sheet = Some(Sheet::ConfirmEmptyTrash { folders, finder: denied, focus });
+                let buttons = (0..if denied { 3 } else { 2 }).map(|_| cx.focus_handle()).collect();
+                this.sheet = Some(Sheet::ConfirmEmptyTrash { folders, finder: denied, focus, buttons });
                 cx.notify();
             })
             .ok();
@@ -463,6 +466,18 @@ impl CrowWindow {
     }
 
     fn activate_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A confirmation answers with the button that has focus: Cancel cancels,
+        // Open Full Disk Access opens its page, and the last one (or none) confirms.
+        if let Some(buttons) = self.sheet.as_ref().and_then(Sheet::buttons)
+            && let Some(index) = buttons.iter().position(|button| button.is_focused(window))
+            && index + 1 < buttons.len()
+        {
+            if index > 0 {
+                cx.open_url(crate::trash::PRIVACY_SETTINGS_URL);
+            }
+            self.close_sheet(window, cx);
+            return;
+        }
         if let Some(Sheet::Conflict { controls, choice, all, .. }) = &self.sheet {
             match controls.iter().position(|control| control.is_focused(window)) {
                 Some(index @ 0..=2) => {
@@ -512,7 +527,7 @@ impl CrowWindow {
                 .child(label)
         };
         let (title, body): (String, gpui::AnyElement) = match sheet {
-            Sheet::ConfirmDelete { paths, .. } => {
+            Sheet::ConfirmDelete { paths, buttons, .. } => {
                 let what = match &paths[..] {
                     [one] => {
                         let name = one.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -533,19 +548,20 @@ impl CrowWindow {
                                 .justify_end()
                                 .gap_2()
                                 .child(
-                                    button("sheet-cancel", "Cancel".into(), false, None)
+                                    button("sheet-cancel", "Cancel".into(), false, Some(&buttons[0]))
                                         .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
                                 )
                                 .child(
-                                    button("sheet-confirm", "Delete".into(), true, None)
+                                    button("sheet-confirm", "Delete".into(), true, Some(&buttons[1]))
                                         .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
                                 ),
                         )
                         .into_any_element(),
                 )
             }
-            Sheet::ConfirmEmptyTrash { finder, .. } => {
+            Sheet::ConfirmEmptyTrash { finder, buttons, .. } => {
                 let finder = *finder;
+                let confirm = buttons.last().expect("a confirming button");
                 (
                     if finder { "Empty the Trash with Finder?" } else { "Empty the Trash?" }.to_owned(),
                     div()
@@ -563,12 +579,17 @@ impl CrowWindow {
                                 .justify_end()
                                 .gap_2()
                                 .child(
-                                    button("sheet-cancel", "Cancel".into(), false, None)
+                                    button("sheet-cancel", "Cancel".into(), false, Some(&buttons[0]))
                                         .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
                                 )
                                 .when(finder, |row| {
                                     row.child(
-                                        button("sheet-full-disk-access", "Open Full Disk Access…".into(), false, None)
+                                        button(
+                                            "sheet-full-disk-access",
+                                            "Open Full Disk Access…".into(),
+                                            false,
+                                            Some(&buttons[1]),
+                                        )
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 cx.open_url(crate::trash::PRIVACY_SETTINGS_URL);
                                                 this.close_sheet(window, cx);
@@ -580,7 +601,7 @@ impl CrowWindow {
                                         "sheet-confirm",
                                         if finder { "Empty with Finder" } else { "Empty Trash" }.into(),
                                         true,
-                                        None,
+                                        Some(confirm),
                                     )
                                     .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
                                 ),
@@ -588,7 +609,7 @@ impl CrowWindow {
                         .into_any_element(),
                 )
             }
-            Sheet::StopOperation { intent, .. } => {
+            Sheet::StopOperation { intent, buttons, .. } => {
                 let label = operations::stop_label(cx);
                 let queued = cx.global::<Operations>().queued_count();
                 let (verb, confirm) = match intent {
@@ -617,11 +638,11 @@ impl CrowWindow {
                                 .justify_end()
                                 .gap_2()
                                 .child(
-                                    button("sheet-cancel", "Keep Running".into(), false, None)
+                                    button("sheet-cancel", "Keep Running".into(), false, Some(&buttons[0]))
                                         .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
                                 )
                                 .child(
-                                    button("sheet-confirm", confirm.into(), true, None)
+                                    button("sheet-confirm", confirm.into(), true, Some(&buttons[1]))
                                         .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
                                 ),
                         )
@@ -774,11 +795,26 @@ impl CrowWindow {
             }
         };
         let sheet_tab = cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+            // Space presses the focused button, as Return does.
+            if event.keystroke.key == "space" && event.keystroke.modifiers == gpui::Modifiers::default() {
+                let on_button = this.sheet.as_ref().is_some_and(|sheet| match sheet {
+                    Sheet::Conflict { controls, .. } => controls.iter().any(|control| control.is_focused(window)),
+                    sheet => sheet.buttons().is_some_and(|buttons| buttons.iter().any(|b| b.is_focused(window))),
+                });
+                if on_button {
+                    this.activate_sheet(window, cx);
+                    cx.stop_propagation();
+                }
+                return;
+            }
             if event.keystroke.key != "tab" {
                 return;
             }
             let forward = !event.keystroke.modifiers.shift;
-            if let Some(Sheet::Conflict { controls, .. }) = &this.sheet {
+            if let Some(buttons) = this.sheet.as_ref().and_then(Sheet::buttons) {
+                cycle_focus(buttons, forward, window, cx);
+                cx.notify();
+            } else if let Some(Sheet::Conflict { controls, .. }) = &this.sheet {
                 cycle_focus(controls, forward, window, cx);
                 cx.notify();
             } else if matches!(this.sheet, Some(Sheet::BatchRename(_))) {
@@ -799,13 +835,20 @@ impl CrowWindow {
                 // keys::context_stack (KeyScope::Sheet) mirrors this.
                 .key_context("Sheet")
                 .when(!matches!(sheet, Sheet::SavedQuery(_)), |panel| panel.track_focus(sheet.focus()))
+                // The form is the tallest sheet: it scrolls inside a short or narrow window.
+                .when(matches!(sheet, Sheet::SavedQuery(_)), |panel| {
+                    panel
+                        .max_w(window.viewport_size().width - px(24.))
+                        .max_h(window.viewport_size().height - px(50.))
+                        .overflow_y_scroll()
+                })
                 .on_action(
                     cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.activate_sheet(window, cx)),
                 )
                 .on_action(
                     cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_sheet(window, cx)),
                 )
-                .when(matches!(sheet, Sheet::Onboarding { .. } | Sheet::Conflict { .. }), |panel| {
+                .when(!matches!(sheet, Sheet::SavedQuery(_) | Sheet::BatchRename(_)), |panel| {
                     panel.on_key_down(sheet_tab)
                 })
                 .p_4()

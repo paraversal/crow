@@ -28,9 +28,9 @@ use gpui::{
 };
 
 use crate::actions::{
-    CloseSearch, CopyFiles, CopyPath, CutFiles, CycleMatch, DeletePermanently, MoveDown, MoveToFirst, MoveToLast,
-    MoveToTrash, MoveUp, OpenSelection, QuickLook, Rename, SearchEverything, SearchFocusField, SearchFocusResults,
-    SearchHome, SearchReveal, SelectAll,
+    CloseSearch, CopyFiles, CopyPath, CutFiles, CycleMatch, DeletePermanently, ExtendDown, ExtendUp, MoveDown,
+    MoveToFirst, MoveToLast, MoveToTrash, MoveUp, OpenSelection, QuickLook, Rename, SearchEverything, SearchFocusField,
+    SearchFocusResults, SearchHome, SearchReveal, SelectAll,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::cloud_status::{self, CloudStatusService};
@@ -2256,13 +2256,22 @@ impl SearchView {
             return;
         }
         self.user_moved = true;
+        // AppKit wants the mouse-down event when a GPUI drag later leaves the window.
+        crow_macos::remember_mouse_down();
         if event.modifiers.platform {
             self.selection.toggle(row.path.clone());
-            if self.selection.cursor().is_none() {
-                self.cursor = ix;
+            // The cursor follows the model, or Return, Quick Look and the arrows
+            // would act on the row the toggle left.
+            let cursor = self.selection.cursor().cloned();
+            if let Some(index) = cursor.and_then(|path| self.results.iter().position(|row| row.path == path)) {
+                self.cursor = index;
             }
         } else if event.modifiers.shift {
             self.extend_to(ix, cx);
+        } else if self.selection.contains(&row.path) {
+            // A press inside the selection keeps it, so the whole set can be dragged.
+            self.selection.set_cursor(row.path.clone());
+            self.cursor = ix;
         } else {
             self.selection.select_only(row.path.clone());
             self.cursor = ix;
@@ -2544,6 +2553,26 @@ impl SearchView {
         if self.cursor + 1 < self.results.len() {
             self.select_only(self.cursor + 1, window, cx);
         }
+    }
+
+    /// Shift-↑: extend the selection one row up from the anchor.
+    fn extend_up(&mut self, _: &ExtendUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.extend_by(-1, window, cx);
+    }
+
+    fn extend_down(&mut self, _: &ExtendDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.extend_by(1, window, cx);
+    }
+
+    fn extend_by(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.cursor.checked_add_signed(delta).filter(|target| *target < self.results.len()) else {
+            return;
+        };
+        self.extend_to(target, cx);
+        window.focus(&self.focus, cx);
+        self.scroll.scroll_to_item(target, ScrollStrategy::Top);
+        self.load_preview(cx);
+        cx.notify();
     }
 
     /// ↓ in the field: land on the current cursor row. With no results it does nothing,
@@ -3395,6 +3424,8 @@ impl SearchView {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
+            .on_action(cx.listener(Self::extend_up))
+            .on_action(cx.listener(Self::extend_down))
             .on_action(cx.listener(Self::focus_field_from_results))
             .on_action(cx.listener(Self::move_to_first))
             .on_action(cx.listener(Self::move_to_last))
