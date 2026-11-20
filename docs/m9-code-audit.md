@@ -45,7 +45,34 @@ Crow entered M9 with 58,706 Rust lines across 89 files (38,848 non-test lines, 4
 | `crow-plugin-git` | 2 | 1,493 | 943 | 550 | 180 | +141 |
 | `crow-theme` | 1 | 453 | 372 | 81 | 40 | 0 |
 
-**Method.** Counts come from [`scripts/code-index.py`](../scripts/code-index.py), calibrated against the P2 audit's baseline (`crow-theme` matches identically at 453/372/81/40; total decision points are within 1.8% across 78k lines due to macro-opaque tokenization). Physical lines include comments and blanks across tracked `crates/**/*.rs`. Test lines cover `tests/`, `*_tests.rs`, `window/tests.rs`, and `#[cfg(test)]` / `#[test]` items. Decision points count `if`, `while`, `for`, `loop`, `match` arms (`arms - 1`) and guards, `&&`, `||`, `?`, and `let … else` inside non-test named functions and methods.
+**Method.** Counts come from [`scripts/code-index.py`](../scripts/code-index.py), calibrated against the P2 audit's baseline (`crow-theme` matches identically at 453/372/81/40; total decision points are within 1.8% across 78k lines due to macro-opaque tokenization). Physical lines include comments and blanks across tracked `crates/**/*.rs`. Test lines cover `tests/`, `*_tests.rs`, `window/tests.rs`, and `#[cfg(test)]` / `#[test]` items. Runnable harnesses such as the motion lab and live fuzzer are in the non-test column. Decision points count `if`, `while`, `for`, `loop`, `match` arms (`arms - 1`) and guards, `&&`, `||`, `?`, and `let … else` inside non-test named functions and methods. Macro bodies are opaque.
+
+### Where M9 added code
+
+| Milestone | Net Rust lines | Main source of change |
+| --- | ---: | --- |
+| P1A (`083d40c`) | +7,147 | Package loading, grants, workers, the public API and settings |
+| P9A (`fbdb8c1`) | +375 | Test fixture ownership and cleanup |
+| P9B (`9d074d6`) | +376 | Test and fuzz instrumentation |
+| P9C (`b035537`) | +40 | Extracted window modules |
+| P8 (`d5cab1e`) | +1,753 | Cloud metadata, per-file read policy and UI |
+| P1B (`7b58509`) | +6,557 | Passive contribution coordination, integration and tests |
+| P2 pre-audit (`922c1a0`) | +3,188 | Git provider, Projects, source-path fidelity and Git-specific integration |
+| P2 audit (`aab54a0`) | −65 | Shared worktree snapshots, batched visible line counts, bounded viewport versions (−236 non-test lines, +171 test lines) |
+| P2 follow-up (`0eeb0e2`) | +1,341 | Git review and diff pane, pinned repository status, resizable side panes |
+| Nav follow-up (`e7fc40b`) | +819 | List and Columns transitions, reveal feedback, persistent sidebar width, bulk selection scaling tests |
+| P3A icon packs (`5d5b9d3`) | +2,129 | Local data-only icon packs, 4-tier resolution, live reload and fallback |
+| List/Preview fit (`925ce2f`) | +33 | List column width fitting alongside Preview |
+| Settings overhaul (`3219b37`) | +4,356 | 6-category sidebar, live settings search, shared config error banner, preview provider editor |
+| P3B icon grid (`3990a45`) | +2,989 | Virtualized sorted icon grid, 2D keyboard navigation, marquee and Cmd-drag additive selection |
+| P3C gallery (`6f662cd`) | +2,179 | Gallery view, two-item comparison, shared Quick Look thumbnail and preview pipeline |
+| P4A saved queries (`8fc76ab`) | +4,234 | `saved-queries.toml`, live virtual destinations, typed kind/age/tag predicates, background counts |
+| P4B Finder tags (`08c4f9d`) | +1,832 | Finder tags in sidebar, `/` local tag filter and picker, saved-query tag predicates |
+| P5A copy engine (`c04cde3`) | +2,237 | Resumable copy/move runner, byte-offset chunk resume, typed conflict protocol and replacement staging |
+| P5B copy queue (`dc25fae`) | +2,140 | App-wide FIFO transfer queue in Activity, pause/resume, Conflict and Stop sheets |
+| P6 batch rename (`b4d6404`) | +2,886 | Find/replace, add text and numbering modes, staged two-phase commits for cycles, single undo group |
+| P9D Explorer path (`31ca1a2`) | +378 | Opt-in Explorer-style path bar, resting frame, click-to-edit and Go button |
+| P7 drop & spring (`fb3c58e`) | +2,271 | Unified drop target router, 600 ms spring-loaded folder state machine, Back spring and GPUI drag operation mask patch |
 
 ### Largest files and split proposals
 
@@ -91,9 +118,18 @@ Crow entered M9 with 58,706 Rust lines across 89 files (38,848 non-test lines, 4
 
 `Cargo.lock` grew from 615 to 697 unique crates (+82: 2 local crates `crow-plugin` and `crow-plugin-git`, 52 `gix-*` crates, 10 `rhai` transitive crates, 17 `gix` transitive crates, and `unicode-normalization`). Crow added no direct duplicate dependency (aside from `anyhow` in `crow-app` for 2 lines of GPUI's `Action::build` signature; already in lockfile). Transitive overlaps come from `gix = "=0.90.0"` (`jiff`/`filetime` alongside `chrono`/`time`, a 3rd `hashbrown` version via `dashmap`, two `defmt` versions via `faster-hex`, and unused `gix-protocol`/`gix-transport`) and `rhai` (`smartstring` + `compact_str` + `thin-vec`, `ahash`).
 
-## What changed since the P2 audit
+## What changed
 
-- **P2 audit changes retained:** Worktree snapshot sharing, 15.2× faster visible line-count batches (146.78 ms → 9.66 ms on 64 modified tracked files in 100k), bounded viewport version tracking, and bundled Git isolation remain intact.
+### In the P2 code audit
+
+- **Worktree scans.** Folder lookup resolves a canonical worktree and then consumes one cached status snapshot shared across folders and windows. Two fresh folder scopes in one repository now require one full scan, versus two at the P2 baseline. The GPUI regression opens a second scope through a symlink and checks that it gets the same snapshot and the correct file's Git values. It then stages the file using Git and checks that the watcher updates the index and worktree fields. Snapshot jobs are bounded across polls. The watcher registers its paths together off the UI thread and coalesces changes. A notification arriving during a scan remains queued for the next scan. [Git app service](../crates/crow-app/src/git.rs)
+- **Visible line counts.** Each batch opens the repository and builds its filter-free diff state once. It computes the changed sides recorded in the snapshot and publishes a total only when every changed side yields a count. Line work is capped at four concurrent batches. Windows share the cache by repository snapshot and relative path, including aliases of the same file. Regression cases cover stale snapshots, mixed binary/text sides and the size limit. [Provider](../crates/crow-plugin-git/src/lib.rs) · [Git oracle](../crates/crow-plugin-git/tests/oracle.rs)
+- **Reply lifetime.** Replacing a Projects scan retires its result stream, including an already queued completion. Git snapshot invalidation cancels old plugin requests and discards their queued demand. Line completion invalidates only matching folder scopes, leaving search and virtual surfaces untouched. [Coordinator](../crates/crow-app/src/plugins/coordinator.rs)
+- **Viewport version map.** Visible row tracking retains only the current viewport's entry versions, so scrolling a 100k folder does not accumulate per-row entries across the whole listing. [Folder state](../crates/crow-app/src/folder.rs)
+- **Bundled Git isolation.** The bundled Git script is loaded from the embedded source rather than an external disk path, keeping startup deterministic. [Plugin service](../crates/crow-app/src/plugins.rs)
+
+### After P2 (P2 follow-up through P7)
+
 - **Features shipped after P2:** Git review/diff and pinned repository status (#68), navigation motion and persistent sidebar width (#69), data-only icon packs (#71), List/Preview column fitting (#72), categorized searchable Settings overhaul (#73), sorted Icon grid with marquee selection (#74), Gallery view with two-item comparison (#75), Saved Queries as live destinations (#76), Finder Tags in sidebar, `/` filter and saved queries (#77), resumable copy jobs and conflict protocol (#78), app-wide copy queue and Activity (#79), batch rename with staged cycles and grouped undo (#80), opt-in Explorer-style path bar (#81), and native external drop routing with spring-loaded folders (#82).
 - **Rules sweep summary:** Zero Theme role violations in M9 UI; zero AppKit/Foundation code outside `crow-macos`; zero `TODO`/`FIXME` comments added in M9; all 9 `patches/gpui-*.patch` apply cleanly in order to upstream `6ceb6fe` (producing a byte-identical `vendor/zed`), though re-running `scripts/fetch-gpui.sh` on an already-patched tree fails due to overlapping hunks between `gpui-drag-lifecycle.patch` and `gpui-drag-operations.patch`.
 - **Cross-feature audit summary:** Auditing the 22 merged pieces together uncovered real cross-feature regressions that per-branch reviews missed: sidebar `drop_hit` section-header offset, scrolled Gallery drop sign inversion, unguarded `pane.dir()` panics on virtual destinations, Command Palette acting on the hidden folder behind ephemeral Cmd-F search, view-switch history corruption on virtual destinations, `save_as_defaults` wiping M9 per-folder keys, iCloud read-policy bypasses in Git and saved-query counts, and macOS TCC `EPERM` on `~/.Trash` swallowed as "Trash is already empty".
@@ -145,7 +181,23 @@ All four B4 workloads stay within budget (+0.4% to +7.4% total, first hit within
 | Copy 20k × 1 KiB (cross-vol APFS DMG) | Crow **5849.6 ms** (3344.1–6743.2); with 20 ms pause+resume **6119.5 ms** (pause ack **0.02 ms**) | `cp -R` 6621.6 ms · `ditto` 6704.6 ms |
 | Idle memory & CPU (100k Git worktree, Git on, saved query & pinned tag, 120 s) | RSS 245.5 → 253.3 MiB (flat after +60 s); 0.0% instantaneous CPU, **0.38% average CPU** (0.46 s CPU time / 120 s) | Near zero idle CPU; no RSS drift |
 
-*(P2 reference: visible Git line-count batch of 64 modified tracked files in 100k improved from 146.78 ms at P2 baseline to 9.66 ms, 15.2× faster.)*
+Scrolling Icons and Gallery through 2,000 images holds peak RSS at 159 MiB and 168 MiB (versus 155 MiB and 167 MiB on 300 images) under the 48 MiB / 512-entry thumbnail cache cap, and closing a tab or switching out of Gallery releases its decoded preview textures (`Preview::release_image`, `gallery::release`, `Pane::release_listings`).
+
+### P2 Git status and line-count benchmarks (retained from P2 audit)
+
+| Release build (100k Git worktree, 120 Hz) | Warm first paint | Scroll p99 | Background Git status scan |
+| --- | ---: | ---: | ---: |
+| `main` before P2 (`7b58509`) | 6 ms (5–10) | 8.69 ms (8.52–8.73) | — |
+| P2 baseline (`922c1a0`), Git enabled | 5 ms (5–6) | 8.51 ms (8.51–8.64) | 243 ms (240–756) |
+| P2 audited (`aab54a0`), Git enabled | 5 ms (4–5) | 8.58 ms (8.57–8.59) | 232 ms (228–234) |
+| P2 audited (`aab54a0`), Git disabled | 5 ms (4–5) | 8.72 ms (8.60–8.77) | — |
+
+| Line-count batch (64 modified tracked files in 100k, 18 samples) | Median | Range |
+| --- | ---: | ---: |
+| P2 baseline (`922c1a0`) | 146.78 ms | 145.09–153.48 ms |
+| P2 audited (`aab54a0`) | 9.66 ms | 9.39–10.48 ms |
+
+That line-count batch is **15.2× as fast** after opening the repository and building filter-free diff state once per batch.
 
 ## Remaining findings
 
@@ -172,7 +224,7 @@ Triaged with the owner on 2026-11-20.
 
 - **Drop, spring & virtual parity:** Gallery background drop outline and blank-preview hit target (`pane/gallery.rs:514-555`, `pane.rs:3580`), breadcrumb/PathBar spring blocked by ancestor check (`drag.rs:193`, `window.rs:1404`), hover validity (`drop_would_act`) in sidebar/path bar/search, `go_back` after `spring_commit` using `all_present` (`pane.rs:1421-1428`), virtual spring origin & Cmd-F restore on cancel (`window.rs:1492, 1674-1676`), `SearchView::run_command` missing `Rename` (`search.rs:2636`), `ReviewGitChanges` virtual guard (`window/git_review.rs:136`), unconditional `cx.notify()` on every drag pointer sample (`window.rs:1513`).
 - **iCloud, Activity & permission UX:** Drag promotion calling `icon_png` directly instead of cloud-safe `type_icon_png` (`pane.rs:289`, `search.rs:3637`), Empty Trash missing from Activity (`window/operation_ui.rs:381-398, 794-827`), dedicated in-pane permission state for unreadable (`EPERM`/`EACCES`) folders with Retry and Open Full Disk Access (`folder.rs:1660-1667`).
-- **Config, reachability, bar & logging:** `OpenSavedQueriesToml` omitted from `settings_window/catalog.rs:318-340`, unified clickable/clearing error slots for `plugins.toml` and `pack.toml`, inline `#` comment preservation (`views.rs:440`, `sidebar.rs:502`, `grants.rs:139`), Projects commands menu/context-menu reachability (`palette.rs:362-384`), bottom-bar config-error `Open` button clipped at 640 px (`bottom_bar.rs`), `logging.rs:47` panic on unwritable log file.
+- **Config, reachability, bar & logging:** `OpenSavedQueriesToml` omitted from `settings_window/catalog.rs:318-340`, unified clickable/clearing error slots for `plugins.toml` and `pack.toml`, inline `#` comment preservation (`views.rs:440`, `sidebar.rs:502`, `grants.rs:139`), Projects commands menu/context-menu reachability (`palette.rs:362-384`), 640 px bottom-bar config-error `Open` button and right-pane `Git Diff` tab / Preview `info_row` clipping (`bottom_bar.rs:594-631`, `info_pane.rs:590-635`, `preview.rs:572-581`), `logging.rs:47` panic on unwritable log file.
 - **Selection, sheets, a11y & tags:** Saved-search form root role/label & `aria_toggled` (`saved_query_form.rs:430, 458-462`), Search/Saved/Tag mouse-down selection collapse, Cmd-click cursor desync, missing Shift-Arrow `ExtendUp`/`ExtendDown`, and post-batch-rename selection remap (`search.rs:2251-2269, 3391`, `pane.rs:1600`), `Folder::click`/`Selection::select_all`/`set_selection_paths` cursor/anchor sync, Stop/Empty Trash/Delete Tab rings, Conflict Space handler, Tag Picker `Clear` focusability, `CrowWindow` Saved-search form 640×500 scroll clamp & `SettingsWindow` missing `.key_context("Sheet")`, Settings Escape in stepper/terminal inputs, `[`-prefixed tag round-trip (`saved_query_form.rs:46-52`), bounded background refresh for Finder tag discovery (`tags.rs:143-158`).
 - **Async freshness, watchers, batch scale & grid motion:** `Pane::release_listings` leaking `tag_sessions` (`pane.rs:1551-1583`), `Sidebar::release_plugins` not cancelling saved-query counts, `Folder` tag-scan & `list_in_stages` cancel flags + overlapping-generation test, `path_edit`/`palette_view`/`refresh_recent`/`refresh_volumes` generation guards, `FolderSizes::pause()` not dropping root `/` FSEvents stream (`folder_sizes.rs:353-355`), batch-rename main-thread preview rebuild per keystroke (`batch_rename.rs:69, 191, 208, 223`), icon-grid preset and debounced window-resize animation (`pane.rs`).
 - **Visual polish, deduplication, tooling & fuzz:** `scripts/fetch-gpui.sh:28-32` re-run idempotency, `io_guard.rs` covering `crow_macos::` disk calls and `write_atomic`, sidebar Tag/SavedQuery icons clobbered by icon pack (`sidebar.rs:1928-1930`), Icons/Gallery `cut_outline` consistency (`pane.rs:4695`, `pane/gallery.rs`), replacing `window.rs:1902` `home_dir` with `Ui.home`, consolidating icon-fallback/sheet/SelectionSummary duplicates and tightening `coordinator.rs`/`plugins.rs` allows + deprecated `iconForFileType:`, and expanding `fuzz.rs` + `debug_selectors`/`text_focused` to cover M9 surfaces.
