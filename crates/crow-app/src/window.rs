@@ -184,6 +184,10 @@ pub struct CrowWindow {
     sprung_search: Option<Entity<SearchView>>,
     /// ⌘L or a double-click on empty path space: the bar's path slot is a field.
     path_edit: Option<path_edit::PathEdit>,
+    /// Bumped for every typed-path lookup (⌘L Return/Tab/preview, ⌘K Return). A
+    /// reply applies only while it is the latest and the tab still shows the
+    /// folder it was resolved against.
+    edit_generation: u64,
     /// The path bar's hover state, so the pill can fade.
     path_hovered: bool,
     /// A deferred re-focus into an open overlay is already scheduled.
@@ -355,6 +359,7 @@ impl CrowWindow {
             search: None,
             sprung_search: None,
             path_edit: None,
+            edit_generation: 0,
             path_hovered: false,
             refocus_overlay: false,
             window_was_active: false,

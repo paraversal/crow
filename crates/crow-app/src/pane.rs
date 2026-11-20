@@ -722,6 +722,12 @@ impl Pane {
         cx.emit(PaneEvent::ChooseTags);
     }
 
+    /// Open saved-query and tag sessions, for release tests.
+    #[cfg(test)]
+    pub fn session_counts_for_test(&self) -> (usize, usize) {
+        (self.saved_sessions.len(), self.tag_sessions.len())
+    }
+
     #[cfg(test)]
     pub fn focused_folder_for_test(&self) -> Entity<Folder> {
         self.focused_folder().clone()
@@ -1569,7 +1575,13 @@ impl Pane {
         }
         self.plugin_selection.clear();
         self.plugin_scope = None;
-        for (_, session) in self.saved_sessions.drain() {
+        let sessions: Vec<SavedSession> = self
+            .saved_sessions
+            .drain()
+            .map(|(_, session)| session)
+            .chain(self.tag_sessions.drain().map(|(_, session)| session))
+            .collect();
+        for session in sessions {
             if cx.try_global::<crate::plugins::Plugins>().is_some() {
                 let id = session.view.read(cx).plugin_surface();
                 cx.global_mut::<crate::plugins::Plugins>().surfaces.drop_surface(id);
@@ -1580,6 +1592,7 @@ impl Pane {
             });
         }
         self.active_saved = None;
+        self.active_tag = None;
         self.preview_cancel.store(true, Ordering::Relaxed);
         self.clear_preview(cx);
         self.preview_key = None;
@@ -4255,6 +4268,19 @@ impl Pane {
         if let Some(old) = self.grid {
             if old != geometry {
                 self.cancel_marquee(cx);
+                // A preset change or a window resize that changes the column count
+                // glides the visible tiles from where the last frame drew them. A
+                // listing change alone (rows added) keeps the grid and does not.
+                let (before, after) = (old.metrics(), geometry.metrics());
+                let reflowed = old.columns() != geometry.columns()
+                    || before.tile_width != after.tile_width
+                    || before.tile_height != after.tile_height
+                    || before.icon_size != after.icon_size;
+                if reflowed
+                    && let Some(motion) = ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, Instant::now(), cx)
+                {
+                    self.view_motion = Some(motion);
+                }
             }
             let folder = folder_entity.read(cx);
             let viewport = self.icon_viewport.borrow();

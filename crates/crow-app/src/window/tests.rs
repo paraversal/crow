@@ -2540,6 +2540,61 @@ fn icon_caption_reserves_a_line_and_off_removes_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn icon_presets_glide_tiles_in_full_motion_and_snap_otherwise(cx: &mut TestAppContext) {
+    let root = TestRoot::new("icon-preset-motion");
+    for i in 0..40 {
+        std::fs::write(root.join(format!("f{i:02}.txt")), "x").expect("create fixture");
+    }
+    for (mode, tracked) in [("full", true), ("low", false), ("off", false)] {
+        let (view, mut cx) = open_sized(cx, &root, 840., 500.);
+        set_motion(&mut cx, mode);
+        cx.simulate_keystrokes("cmd-1");
+        settle(&view, &mut cx);
+        let pane = pane(&view, &cx);
+        // Let the view-change glide finish so the capture is the settled grid.
+        std::thread::sleep(Duration::from_millis(300));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let before = cx.debug_bounds("tile-f05.txt").expect("a visible tile");
+        cx.dispatch_action(crate::actions::IconSizeCompact);
+        let origin = pane.read_with(&cx, |pane, _| pane.view_motion_origin(&root.join("f05.txt")));
+        if tracked {
+            assert_eq!(origin, Some(before), "{mode}: the glide starts where the last frame drew the tile");
+        } else {
+            assert!(origin.is_none(), "{mode}: no tile glide, the preset snaps");
+        }
+        let after = cx.debug_bounds("tile-f05.txt").expect("the destination tile is interactive at once");
+        assert_ne!(after.size, before.size, "{mode}: the new preset is laid out immediately");
+    }
+}
+
+#[gpui::test]
+fn a_resize_that_changes_the_column_count_glides_the_tiles(cx: &mut TestAppContext) {
+    let root = TestRoot::new("icon-resize-motion");
+    for i in 0..40 {
+        std::fs::write(root.join(format!("f{i:02}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open_sized(cx, &root, 840., 500.);
+    set_motion(&mut cx, "full");
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    std::thread::sleep(Duration::from_millis(300));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let pane = pane(&view, &cx);
+    let before = cx.debug_bounds("tile-f05.txt").expect("a visible tile");
+    // Same width: no reflow, no glide.
+    cx.simulate_resize(size(px(840.), px(420.)));
+    cx.run_until_parked();
+    let same = pane.read_with(&cx, |pane, _| pane.view_motion_origin(&root.join("f05.txt")));
+    assert_ne!(same, Some(before), "a height-only resize keeps the columns and does not glide");
+    cx.simulate_resize(size(px(420.), px(420.)));
+    cx.run_until_parked();
+    let glide = pane.read_with(&cx, |pane, _| pane.view_motion_origin(&root.join("f05.txt")));
+    assert!(glide.is_some(), "fewer columns reflow the tiles from where they were");
+}
+
+#[gpui::test]
 fn icon_view_transitions_track_the_same_paths(cx: &mut TestAppContext) {
     let root = fixture("icon-motion");
     let (view, mut cx) = open_sized(cx, &root, 840., 500.);
@@ -7889,6 +7944,71 @@ fn tag_filter_requires_every_tag_and_reuses_metadata_for_name_changes(cx: &mut T
     cx.simulate_keystrokes("escape");
     settle(&view, &mut cx);
     assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0), ("beta".to_owned(), 0), ("notes.txt".to_owned(), 0)]);
+}
+
+/// Holds every tag read until the test opens the gate, so two scans overlap.
+struct HeldTags {
+    open: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl crow_search::TagReader for HeldTags {
+    fn read_tags(&self, path: &Path) -> Result<Vec<String>, String> {
+        let (lock, wake) = &*self.open;
+        let mut open = lock.lock().expect("gate");
+        while !*open {
+            open = wake.wait(open).expect("gate");
+        }
+        Ok(if path.ends_with("alpha") { vec!["Work".into(), "review".into()] } else { vec!["Work".into()] })
+    }
+}
+
+#[gpui::test]
+fn a_stale_tag_scan_that_finishes_late_is_dropped(cx: &mut TestAppContext) {
+    let root = fixture("tag-stale");
+    let (view, mut cx) = open(cx, &root);
+    let folder = pane(&view, &cx).read_with(&cx, |pane, _| pane.focused_folder_for_test());
+    let open_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    folder.update(&mut cx, |folder, _| folder.set_tag_reader_for_test(Arc::new(HeldTags { open: open_gate.clone() })));
+
+    // Scan 1 (`Work`: alpha and beta) is held inside the reader when the
+    // constraint changes to `review` (alpha only) and scan 2 starts. The gate
+    // opens from another thread, since the parked executor waits on the readers.
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["Work".into()], cx));
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.set_folder_tag_filter(vec!["review".into()], cx));
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let (lock, wake) = &*open_gate;
+        *lock.lock().expect("gate") = true;
+        wake.notify_all();
+    });
+    settle(&view, &mut cx);
+    assert_eq!(rows(&view, &cx), [("alpha".to_owned(), 0)], "scan 1's `Work` snapshot never lands");
+}
+
+#[gpui::test]
+fn closing_a_tab_with_a_tag_destination_drops_its_session(cx: &mut TestAppContext) {
+    let root = fixture("tag-release");
+    let (view, mut cx) = open(cx, &root);
+    let window = cx.update(|_, cx| cx.windows()[0]);
+    let tag = crow_core::TagId::new("Work");
+    let pane_entity = pane(&view, &cx);
+    cx.update_window(window, |_, window, cx| {
+        pane_entity.update(cx, |pane, cx| pane.open_tag(tag.clone(), window, cx));
+    })
+    .expect("open the tag");
+    wait_for_pane_search(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.session_counts_for_test()), (0, 1));
+    pane(&view, &cx).update(&mut cx, |pane, cx| pane.release_listings(cx));
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.session_counts_for_test()), (0, 0));
+}
+
+#[gpui::test]
+fn releasing_the_window_sidebar_cancels_saved_query_counts(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-release");
+    let (view, mut cx) = open(cx, &root);
+    let sidebar = view.read_with(&cx, |view, _| view.sidebar.clone());
+    sidebar.update(&mut cx, |sidebar, cx| sidebar.release_plugins(cx));
+    assert!(sidebar.read_with(&cx, |sidebar, _| sidebar.counts_cancelled_for_test()));
 }
 
 struct AllWorkTags {
@@ -15802,6 +15922,44 @@ fn batch_rename_sheet_previews_applies_one_activity_and_undo_selects(cx: &mut Te
         (6, 2),
         "redo maps the selected total forward without double counting"
     );
+}
+
+#[gpui::test]
+fn a_large_batch_rename_builds_its_preview_off_the_main_thread(cx: &mut TestAppContext) {
+    let root = TestRoot::new("crow-app-batch-large-");
+    for index in 0..600 {
+        std::fs::write(root.join(format!("file-{index:03}.txt")), "x").expect("create fixture");
+    }
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-a f2");
+    settle(&view, &mut cx);
+    assert!(sheet_open(&view, &cx));
+    let preview_names = |view: &Entity<CrowWindow>, cx: &VisualTestContext| {
+        view.read_with(cx, |w, _| match &w.sheet {
+            Some(Sheet::BatchRename(sheet)) => {
+                (sheet.preview.rows.len(), sheet.preview.rows[0].destination_name.clone())
+            }
+            _ => panic!("batch sheet"),
+        })
+    };
+    assert_eq!(preview_names(&view, &cx), (600, "file-000.txt".to_owned()));
+
+    // Typing does not rebuild 600 rows on the main thread: the rows on screen stay
+    // and the sheet is busy until the debounced background preview lands.
+    cx.simulate_input("file");
+    assert_eq!(preview_names(&view, &cx).1, "file-000.txt");
+    assert!(view.read_with(&cx, |w, _| match &w.sheet {
+        Some(Sheet::BatchRename(sheet)) => sheet.validating && !sheet.can_submit(),
+        _ => false,
+    }));
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("doc");
+    pump_batch(&mut cx);
+    assert_eq!(preview_names(&view, &cx), (600, "doc-000.txt".to_owned()), "the latest form wins");
+    assert!(view.read_with(&cx, |w, _| match &w.sheet {
+        Some(Sheet::BatchRename(sheet)) => sheet.can_submit(),
+        _ => false,
+    }));
 }
 
 #[gpui::test]

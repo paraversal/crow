@@ -661,6 +661,7 @@ impl CrowWindow {
         let typed = palette.input.read(cx).text().to_owned();
         let home = cx.global::<Ui>().home.clone();
         let cwd = self.pane().read(cx).focused_path(cx).unwrap_or_else(|| home.clone());
+        let (generation, folder) = self.begin_edit_lookup(cx);
         let task = cx.background_spawn(async move {
             let cleaned = crow_core::clean_pasted_path(&typed).unwrap_or_else(|| typed.clone());
             let target = crow_core::resolve_typed(&cleaned, &cwd, &home);
@@ -670,6 +671,9 @@ impl CrowWindow {
             let found = task.await;
             this.update_in(cx, |this, window, cx| {
                 let Some(palette) = this.palette.as_ref() else { return };
+                if !this.edit_lookup_current(generation, &folder, cx) {
+                    return;
+                }
                 match found {
                     Some((is_dir, target, typed)) if palette.input.read(cx).text() == typed => {
                         this.palette = None;
