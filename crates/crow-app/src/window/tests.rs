@@ -16562,6 +16562,16 @@ fn audit_batch_one_saved_query_batch_rename_updates_a_hidden_gallery_listing(cx:
     assert!(root.join("notes renamed.txt").is_file());
     assert!(root.join("other-notes renamed.txt").is_file());
     assert!(pane(&view, &cx).read_with(&cx, |p, _| matches!(p.location(), crow_core::Location::SavedQuery(_))));
+
+    // A watcher batch on the hidden listing reaches the pane while its Gallery
+    // is virtual; it must not reload a preview through the missing folder path.
+    let hidden = pane(&view, &cx).read_with(&cx, |pane, _| pane.focused_folder_for_test());
+    hidden.update(&mut cx, |folder, cx| {
+        folder.set_cursor_ix_for_test(Some(0));
+        cx.emit(crate::folder::FolderEvent::Changed);
+    });
+    settle(&view, &mut cx);
+    assert!(pane(&view, &cx).read_with(&cx, |p, _| matches!(p.location(), crow_core::Location::SavedQuery(_))));
 }
 
 #[gpui::test]
