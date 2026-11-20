@@ -1981,6 +1981,9 @@ enum Sheet {
     /// Emptying is permanent and covers the home Trash and every volume.
     ConfirmEmptyTrash {
         folders: Vec<PathBuf>,
+        /// macOS keeps Crow from listing a Trash folder (no Full Disk Access),
+        /// so Finder does the emptying and the sheet says why.
+        finder: bool,
         focus: FocusHandle,
     },
     /// Quitting or closing the last window would stop the queue partway.

@@ -46,6 +46,7 @@ use crate::style::{
     format_time, format_time_short, highlight_text, inactive_selection, map_range, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
+use crate::trash::PRIVACY_SETTINGS_URL;
 use crate::ui::Ui;
 
 /// Rows for strong name matches (the name contains the query contiguously). When
@@ -55,8 +56,6 @@ pub(crate) const MAX_STRONG_ROWS: usize = 20_000;
 /// When these fill, contents stop being read; names keep streaming.
 pub(crate) const MAX_OTHER_ROWS: usize = 20_000;
 const ROW_HEIGHT: f32 = 40.0;
-/// Full Disk Access, where the user grants a folder like `~` to Crow.
-const PRIVACY_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -3640,7 +3639,7 @@ impl SearchView {
                         move |selection, window, cx| {
                             let entries = selection.entries.as_slice();
                             if let Some((path, is_dir)) = entries.first()
-                                && let Some(png) = crow_macos::icon_png(path, *is_dir, 22)
+                                && let Some(png) = crate::style::drag_icon_png(cx, path, *is_dir, 22)
                                 && crate::effects::effects(cx).begin_drag(
                                     window,
                                     &crow_macos::ComboDrag {

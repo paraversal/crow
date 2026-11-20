@@ -9,7 +9,10 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use crow_fs::{AllowAll, ReadDecision, ReadGate, ReadHint};
 
 use gix::bstr::BStr;
 use gix::status::plumbing::index_as_worktree::traits::SubmoduleStatus;
@@ -335,6 +338,18 @@ fn safe_resource_cache(
 
 /// Compute the combined status without running repository-configured filters.
 pub fn status_snapshot(repo: &gix::Repository, cancel: &AtomicBool) -> gix::Result<StatusSnapshot> {
+    status_snapshot_gated(repo, cancel, Arc::new(AllowAll))
+}
+
+/// [`status_snapshot`] with the app's read gate consulted before any worktree
+/// file is hashed. A file the gate refuses (an iCloud placeholder, or a path
+/// whose cloud state is unknown) is never opened; it is reported as unchanged
+/// unless its size alone already says it differs.
+pub fn status_snapshot_gated(
+    repo: &gix::Repository,
+    cancel: &AtomicBool,
+    gate: Arc<dyn ReadGate>,
+) -> gix::Result<StatusSnapshot> {
     let check_cancel = || -> gix::Result<()> {
         if cancel.load(Ordering::Relaxed) { Err(gix::error::message("status cancelled").into()) } else { Ok(()) }
     };
@@ -350,7 +365,7 @@ pub fn status_snapshot(repo: &gix::Repository, cancel: &AtomicBool) -> gix::Resu
         entry.renamed_from = staged.renamed_from;
     }
     check_cancel()?;
-    for worktree in worktree_status(repo, &index, cancel)? {
+    for worktree in worktree_status(repo, &index, cancel, &gate)? {
         let entry = entries.entry(worktree.path).or_default();
         if worktree.ignored {
             entry.ignored = true;
@@ -491,6 +506,39 @@ fn staged_status(
     Ok(out)
 }
 
+/// `FastEq` that asks the read gate before hashing a same-sized file.
+#[derive(Clone)]
+struct GatedEq<'a> {
+    index: &'a gix::index::State,
+    workdir: &'a Path,
+    gate: Arc<dyn ReadGate>,
+}
+
+impl gix::status::plumbing::index_as_worktree::traits::CompareBlobs for GatedEq<'_> {
+    type Output = ();
+
+    fn compare_blobs<'a, 'b>(
+        &mut self,
+        entry: &gix::index::Entry,
+        worktree_blob_size: u64,
+        data: impl gix::status::plumbing::index_as_worktree::traits::ReadData<'a>,
+        buf: &mut Vec<u8>,
+    ) -> gix::Result<Option<()>> {
+        use gix::status::plumbing::index_as_worktree::traits::FastEq;
+        let size_differs =
+            u64::from(entry.stat.size) != worktree_blob_size && (entry.id.is_empty_blob() || entry.stat.size != 0);
+        if !size_differs {
+            // A name that cannot be a path is never opened either.
+            let Ok(relative) = gix::path::from_bstr(entry.path(self.index)) else { return Ok(None) };
+            let path = self.workdir.join(relative);
+            if self.gate.check(&path, ReadHint::for_path(&path)) != ReadDecision::Readable {
+                return Ok(None);
+            }
+        }
+        FastEq.compare_blobs(entry, worktree_blob_size, data, buf)
+    }
+}
+
 struct WorktreeEntry {
     path: PathBuf,
     kind: StatusKind,
@@ -501,6 +549,7 @@ fn worktree_status(
     repo: &gix::Repository,
     index: &gix::index::State,
     cancel: &AtomicBool,
+    gate: &Arc<dyn ReadGate>,
 ) -> gix::Result<Vec<WorktreeEntry>> {
     let workdir =
         repo.workdir().ok_or_else(|| gix::Error::from_error(gix::error::message("repository has no worktree")))?;
@@ -542,7 +591,7 @@ fn worktree_status(
         index,
         workdir,
         &mut recorder,
-        gix::status::plumbing::index_as_worktree::traits::FastEq,
+        GatedEq { index, workdir, gate: gate.clone() },
         NoSubmodules,
         repo.objects.clone().into_arc().expect("an arc-backed object store"),
         &mut progress,
@@ -741,10 +790,17 @@ pub struct LineDiff<'repo> {
     head: gix::Tree<'repo>,
     staged: gix::diff::blob::Platform,
     unstaged: gix::diff::blob::Platform,
+    gate: Arc<dyn ReadGate>,
 }
 
 impl<'repo> LineDiff<'repo> {
     pub fn new(repo: &'repo gix::Repository) -> gix::Result<Self> {
+        Self::with_gate(repo, Arc::new(AllowAll))
+    }
+
+    /// Unstaged layers are only computed for files the gate allows; others
+    /// report [`DiffLayer::Unavailable`] without being opened.
+    pub fn with_gate(repo: &'repo gix::Repository, gate: Arc<dyn ReadGate>) -> gix::Result<Self> {
         let workdir =
             repo.workdir().ok_or_else(|| gix::Error::from_error(gix::error::message("repository has no worktree")))?;
         let index = repo.index_or_empty()?;
@@ -752,7 +808,7 @@ impl<'repo> LineDiff<'repo> {
         let staged = safe_resource_cache(repo, &index, mode, None, None)?;
         let unstaged = safe_resource_cache(repo, &index, mode, None, Some(workdir.to_owned()))?;
         let head = repo.find_tree(repo.head_tree_id_or_empty()?)?;
-        Ok(Self { repo, index, head, staged, unstaged })
+        Ok(Self { repo, index, head, staged, unstaged, gate })
     }
 
     pub fn counts(&mut self, snapshot: &StatusSnapshot, relative: &Path) -> gix::Result<Option<LineCounts>> {
@@ -818,7 +874,10 @@ impl<'repo> LineDiff<'repo> {
         };
         let unstaged = if status.worktree.is_some() {
             let live = self.repo.workdir().expect("a worktree").join(relative);
-            if std::fs::symlink_metadata(live).is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_LINE_DIFF_BYTES) {
+            if self.gate.check(&live, ReadHint::for_path(&live)) == ReadDecision::Readable
+                && std::fs::symlink_metadata(&live)
+                    .is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_LINE_DIFF_BYTES)
+            {
                 diff(&mut self.unstaged, new, DiffSide { id: None, ..new }, self.repo)?
                     .map_or(DiffLayer::Unavailable, DiffLayer::Text)
             } else {

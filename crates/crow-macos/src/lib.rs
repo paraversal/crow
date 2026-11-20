@@ -91,6 +91,22 @@ pub fn reveal_in_finder(paths: &[std::path::PathBuf]) {
         .activateFileViewerSelectingURLs(&objc2_foundation::NSArray::from_retained_slice(&urls));
 }
 
+/// Ask Finder to empty the Trash through an Apple event. Finder holds the
+/// access Crow lacks without Full Disk Access. Blocks until Finder answers, so
+/// call it off the main thread. The first use asks the user to allow Crow to
+/// control Finder.
+pub fn finder_empty_trash() -> Result<(), String> {
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", "tell application \"Finder\" to empty the trash"])
+        .output()
+        .map_err(|e| format!("Finder: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(if detail.is_empty() { "Finder could not empty the Trash".to_owned() } else { detail })
+}
+
 /// Open the folder `dir` itself in a Finder window.
 pub fn open_folder_in_finder(dir: &Path) -> bool {
     main_thread().is_some() && NSWorkspace::sharedWorkspace().selectFile_inFileViewerRootedAtPath(None, &ns_string(dir))

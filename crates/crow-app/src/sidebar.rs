@@ -555,6 +555,7 @@ impl Sidebar {
         let cancel = Arc::new(AtomicBool::new(false));
         self.count_cancel = cancel.clone();
         let worker_cancel = cancel.clone();
+        let gate = crate::cloud_status::read_gate(cx);
         let revision = self.count_revision;
         let task = cx.background_spawn(async move {
             let mut out = Vec::new();
@@ -563,7 +564,10 @@ impl Sidebar {
                     break;
                 }
                 let id = query.id.clone();
-                out.push((id, crate::saved_query_counts::count_saved_query(&query, &home, &exclude, &cancel)));
+                out.push((
+                    id,
+                    crate::saved_query_counts::count_saved_query(&query, &home, &exclude, &cancel, gate.clone()),
+                ));
             }
             out
         });

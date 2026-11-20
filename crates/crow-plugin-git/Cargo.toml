@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+crow-fs.workspace = true
 gix = { version = "=0.90.0", default-features = false, features = [
     "status",
     "revision",

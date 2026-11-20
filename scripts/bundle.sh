@@ -87,6 +87,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>NSDocumentsFolderUsageDescription</key><string>Crow shows and manages the files in Documents.</string>
   <key>NSDownloadsFolderUsageDescription</key><string>Crow shows and manages the files in Downloads.</string>
   <key>NSRemovableVolumesUsageDescription</key><string>Crow shows and manages files on external drives.</string>
+  <key>NSAppleEventsUsageDescription</key><string>Crow asks Finder to empty the Trash when macOS keeps Crow from reading it.</string>
   <key>NSNetworkVolumesUsageDescription</key><string>Crow shows and manages files on network shares.</string>
 </dict>
 </plist>

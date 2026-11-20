@@ -70,6 +70,9 @@ pub trait Effects: Send + Sync {
 
     /// Eject the volume at `path`.
     fn eject(&self, path: &Path) -> Result<(), String>;
+    /// Have Finder empty the Trash, for when Crow itself may not read it.
+    /// Blocks; call off the main thread.
+    fn finder_empty_trash(&self) -> Result<(), String>;
     /// Run Spotlight (`mdfind`) for `query`, streaming hits into `sink`.
     fn spotlight_names(
         &self,
@@ -210,6 +213,10 @@ impl Effects for SystemEffects {
         crow_macos::eject(path).map_err(|e| e.to_string())
     }
 
+    fn finder_empty_trash(&self) -> Result<(), String> {
+        crow_macos::finder_empty_trash()
+    }
+
     fn spotlight_names(
         &self,
         query: &str,
@@ -306,6 +313,7 @@ pub enum Call {
     AboutPanel,
     AppIcon(usize),
     BeginDrag(Vec<PathBuf>),
+    FinderEmptyTrash,
     StartWindowMove,
     TitlebarDoubleClick,
     Eject(PathBuf),
@@ -325,6 +333,8 @@ struct Script {
     write_change_count: Option<isize>,
     open_error: Option<String>,
     begin_drag: bool,
+    /// Makes the scripted Finder Empty Trash fail with this message.
+    finder_trash_error: Option<String>,
     /// The recorder's stand-in for the pasteboard's text.
     text: Option<String>,
     /// Scripted Spotlight answers, one batch queue per call. Empty means no hits.
@@ -404,6 +414,11 @@ impl RecordingEffects {
     /// The count `write_file_urls` reports; `None` keeps tests' own-clipboard semantics.
     pub fn set_write_change_count(&self, count: Option<isize>) {
         self.script.lock().expect("the effect script is not poisoned").write_change_count = count;
+    }
+
+    /// Make Finder's Empty Trash fail with `error`.
+    pub fn set_finder_trash_error(&self, error: Option<String>) {
+        self.script.lock().expect("the effect script is not poisoned").finder_trash_error = error;
     }
 
     /// Make `open_path` fail with `error`.
@@ -576,6 +591,14 @@ impl Effects for RecordingEffects {
     fn eject(&self, path: &Path) -> Result<(), String> {
         self.record(Call::Eject(path.to_path_buf()));
         Ok(())
+    }
+
+    fn finder_empty_trash(&self) -> Result<(), String> {
+        self.record(Call::FinderEmptyTrash);
+        match self.script.lock().expect("the effect script is not poisoned").finder_trash_error.clone() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn spotlight_names(

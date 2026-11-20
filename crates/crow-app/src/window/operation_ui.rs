@@ -349,6 +349,7 @@ impl CrowWindow {
         let volumes: Vec<PathBuf> = cx.global::<Ui>().volumes.iter().map(|volume| volume.path.clone()).collect();
         // A fuzz run must never reach the user's real Trash on a mounted volume.
         let jail = cx.global::<Operations>().jail().map(Path::to_path_buf);
+        let jailed = jail.is_some();
         cx.spawn_in(window, async move |this, cx| {
             let (folders, count) = cx
                 .background_spawn(async move {
@@ -361,14 +362,21 @@ impl CrowWindow {
                 if this.sheet.is_some() {
                     return;
                 }
-                if count == 0 {
+                // A Trash macOS will not let Crow list is unknown, never empty.
+                let denied = !count.denied.is_empty();
+                if denied && jailed {
+                    operations::message(crate::trash::denied_message(&count.denied), true, cx);
+                    cx.notify();
+                    return;
+                }
+                if count.items == 0 && !denied {
                     operations::message("The Trash is already empty.", false, cx);
                     cx.notify();
                     return;
                 }
                 let focus = cx.focus_handle();
                 window.focus(&focus, cx);
-                this.sheet = Some(Sheet::ConfirmEmptyTrash { folders, focus });
+                this.sheet = Some(Sheet::ConfirmEmptyTrash { folders, finder: denied, focus });
                 cx.notify();
             })
             .ok();
@@ -378,15 +386,27 @@ impl CrowWindow {
 
     /// Remove every folder's items in the background, then report and play the
     /// sound. Failures leave the rest removed and name what stayed.
-    fn run_empty_trash(&mut self, folders: Vec<PathBuf>, cx: &mut Context<Self>) {
+    fn run_empty_trash(&mut self, folders: Vec<PathBuf>, finder: bool, cx: &mut Context<Self>) {
         if !operations::begin_maintenance(Maintenance::EmptyTrash, cx) {
             return;
         }
+        let effects = crate::effects::effects(cx);
         cx.spawn(async move |_, cx| {
-            let report = cx.background_spawn(async move { crow_fs::trash::empty(&folders) }).await;
-            let (text, is_error) = crate::trash::message(&report);
-            let play = report.removed > 0;
+            let (text, is_error, play) = cx
+                .background_spawn(async move {
+                    if finder {
+                        return match effects.finder_empty_trash() {
+                            Ok(()) => ("Emptied the Trash with Finder.".to_owned(), false, true),
+                            Err(error) => (crate::trash::finder_failure(&error), true, false),
+                        };
+                    }
+                    let report = crow_fs::trash::empty(&folders);
+                    let (text, is_error) = crate::trash::message(&report);
+                    (text, is_error, report.removed > 0)
+                })
+                .await;
             cx.update(|cx| {
+                operations::log_maintenance(&text, is_error, cx);
                 operations::message(text, is_error, cx);
                 if play {
                     crate::feedback::play(crow_core::motion::Event::EmptyTrash, cx);
@@ -413,7 +433,7 @@ impl CrowWindow {
             Some(Sheet::ConfirmDelete { paths, .. }) => {
                 operations::enqueue(Request::DeletePermanently { paths }, self.origin(window, cx), cx);
             }
-            Some(Sheet::ConfirmEmptyTrash { folders, .. }) => self.run_empty_trash(folders, cx),
+            Some(Sheet::ConfirmEmptyTrash { folders, finder, .. }) => self.run_empty_trash(folders, finder, cx),
             Some(Sheet::StopOperation { intent, .. }) => {
                 let handle = window.window_handle().downcast::<CrowWindow>();
                 stop_then(intent, handle, cx);
@@ -524,31 +544,50 @@ impl CrowWindow {
                         .into_any_element(),
                 )
             }
-            Sheet::ConfirmEmptyTrash { .. } => (
-                "Empty the Trash?".to_owned(),
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(div().text_color(color(muted)).child(
-                        "Every item in the Trash, on this Mac and your other disks, will be deleted. This can't be undone.",
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                button("sheet-cancel", "Cancel".into(), false, None)
-                                    .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
-                            )
-                            .child(
-                                button("sheet-confirm", "Empty Trash".into(), true, None)
+            Sheet::ConfirmEmptyTrash { finder, .. } => {
+                let finder = *finder;
+                (
+                    if finder { "Empty the Trash with Finder?" } else { "Empty the Trash?" }.to_owned(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(div().text_color(color(muted)).child(if finder {
+                            "macOS does not let Crow read the Trash without Full Disk Access. Finder can empty it, or you can allow Crow access. Every item in the Trash will be deleted. This can't be undone."
+                        } else {
+                            "Every item in the Trash, on this Mac and your other disks, will be deleted. This can't be undone."
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    button("sheet-cancel", "Cancel".into(), false, None)
+                                        .on_click(cx.listener(|this, _, window, cx| this.close_sheet(window, cx))),
+                                )
+                                .when(finder, |row| {
+                                    row.child(
+                                        button("sheet-full-disk-access", "Open Full Disk Access…".into(), false, None)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                cx.open_url(crate::trash::PRIVACY_SETTINGS_URL);
+                                                this.close_sheet(window, cx);
+                                            })),
+                                    )
+                                })
+                                .child(
+                                    button(
+                                        "sheet-confirm",
+                                        if finder { "Empty with Finder" } else { "Empty Trash" }.into(),
+                                        true,
+                                        None,
+                                    )
                                     .on_click(cx.listener(|this, _, window, cx| this.confirm_sheet(window, cx))),
-                            ),
-                    )
-                    .into_any_element(),
-            ),
+                                ),
+                        )
+                        .into_any_element(),
+                )
+            }
             Sheet::StopOperation { intent, .. } => {
                 let label = operations::stop_label(cx);
                 let queued = cx.global::<Operations>().queued_count();
@@ -791,7 +830,7 @@ impl CrowWindow {
         let theme = cx.global::<Ui>().theme.clone();
         let muted = color(theme.role("fg-muted"));
         let border = color(theme.role("border"));
-        let (active, queued, running, prompt_job, idle) = {
+        let (active, queued, running, prompt_job, idle, emptying_trash) = {
             let ops = cx.global::<Operations>();
             let active = ops.active.as_ref().map(|active| {
                 (active.id, active.label.clone(), active.phase, active.pause_supported, active.conflict.is_some())
@@ -802,7 +841,14 @@ impl CrowWindow {
                 running.queued = 0;
                 running
             });
-            (active, queued, running, ops.prompt.as_ref().map(|prompt| prompt.job), ops.is_idle())
+            (
+                active,
+                queued,
+                running,
+                ops.prompt.as_ref().map(|prompt| prompt.job),
+                ops.is_idle(),
+                ops.maintenance == Some(Maintenance::EmptyTrash),
+            )
         };
         let entries: Vec<(usize, String, String, bool)> = cx
             .global::<Operations>()
@@ -952,6 +998,18 @@ impl CrowWindow {
             })
             .collect();
         let active_row = active_row.map(IntoElement::into_any_element);
+        let trash_row = emptying_trash.then(|| {
+            div()
+                .id("activity-empty-trash")
+                .debug_selector(|| "activity-empty-trash".into())
+                .role(Role::ListItem)
+                .aria_label("Emptying the Trash, running")
+                .flex()
+                .flex_col()
+                .child(div().child("Empty the Trash"))
+                .child(div().text_size(px(11.)).text_color(muted).child("Emptying…"))
+                .into_any_element()
+        });
         let has_history = !entries.is_empty();
         let history: Vec<_> = entries
             .into_iter()
@@ -1022,10 +1080,11 @@ impl CrowWindow {
             .border_color(border)
             .shadow_lg()
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Activity"))
-            .when(active_row.is_none() && queued_rows.is_empty() && !has_history, |list| {
+            .when(active_row.is_none() && trash_row.is_none() && queued_rows.is_empty() && !has_history, |list| {
                 list.child(div().text_color(muted).child("Nothing yet"))
             })
             .children(active_row)
+            .children(trash_row)
             .children(queued_rows)
             .when(has_history, |list| list.child(div().h(px(1.)).bg(border).my_1()))
             .children(history)

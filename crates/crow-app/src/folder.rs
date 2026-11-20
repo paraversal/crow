@@ -203,6 +203,27 @@ struct ChildFolder {
     _subscription: Subscription,
 }
 
+/// Why a folder could not be listed, when the reason changes what the pane offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderErrorKind {
+    /// `EACCES`, or `EPERM` from macOS privacy protection. `tcc_likely` is the
+    /// `EPERM` case, where Full Disk Access is the fix.
+    PermissionDenied {
+        tcc_likely: bool,
+    },
+    Other,
+}
+
+impl FolderErrorKind {
+    fn of(error: &std::io::Error) -> Self {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            Self::PermissionDenied { tcc_likely: error.raw_os_error() == Some(1) }
+        } else {
+            Self::Other
+        }
+    }
+}
+
 enum Load {
     Partial(Vec<Entry>),
     Done(std::io::Result<(Vec<Entry>, f64)>),
@@ -331,6 +352,7 @@ pub struct Folder {
     sort_delay: Duration,
     _watcher: Option<FolderWatcher>,
     error: Option<SharedString>,
+    error_kind: Option<FolderErrorKind>,
     /// Paths a watcher batch added; re-stat them once the stream is quiet,
     /// because FSEvents may coalesce away the delete that follows a rename.
     reconcile: Vec<PathBuf>,
@@ -427,6 +449,7 @@ impl Folder {
             sort_delay: Duration::ZERO,
             _watcher: watcher,
             error: None,
+            error_kind: None,
             reconcile: Vec::new(),
             reconcile_gen: 0,
             reconciling: false,
@@ -527,6 +550,20 @@ impl Folder {
 
     pub fn error(&self) -> Option<&SharedString> {
         self.error.as_ref()
+    }
+
+    pub fn error_kind(&self) -> Option<FolderErrorKind> {
+        self.error_kind
+    }
+
+    /// Test seam: the state a failed listing leaves, for the kinds a test
+    /// cannot get from the file system (`EPERM` without Full Disk Access).
+    #[cfg(test)]
+    pub fn set_error_for_test(&mut self, kind: FolderErrorKind, cx: &mut Context<Self>) {
+        self.error = Some("Can't open this folder".into());
+        self.error_kind = Some(kind);
+        cx.emit(FolderEvent::Loaded);
+        cx.notify();
     }
 
     pub fn load_ms(&self) -> f64 {
@@ -1662,6 +1699,8 @@ impl Folder {
                         Load::Done(Ok((entries, ms))) => {
                             // `finish_apply` clears `loading` when the rows are in place.
                             this.load_done = true;
+                            this.error = None;
+                            this.error_kind = None;
                             this.load_ms = ms;
                             tracing::debug!(items = entries.len(), ms, dir = %this.dir.display(), "loaded");
                             this.replace_entries(entries, cx);
@@ -1672,6 +1711,7 @@ impl Folder {
                             this.load_done = false;
                             tracing::warn!("open {}: {e}", this.dir.display());
                             this.error = Some(format!("Can't open “{}”: {e}", this.dir.display()).into());
+                            this.error_kind = Some(FolderErrorKind::of(&e));
                             cx.emit(FolderEvent::Loaded);
                             cx.notify();
                         }

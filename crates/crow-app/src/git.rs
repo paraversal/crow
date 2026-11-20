@@ -396,13 +396,13 @@ fn resolve_folder(folder: &Path) -> Option<FolderRepo> {
     Some(FolderRepo { worktree, alias_prefix })
 }
 
-fn scan_repository(worktree: &Path, cancel: &AtomicBool) -> Option<StatusSnapshot> {
+fn scan_repository(worktree: &Path, cancel: &AtomicBool, gate: Arc<dyn crow_fs::ReadGate>) -> Option<StatusSnapshot> {
     let started = Instant::now();
     let repo = crow_plugin_git::open_worktree(worktree).ok()?;
     let snapshot = if crow_plugin_git::is_cloud_backed_worktree(worktree) {
         crow_plugin_git::unavailable_snapshot(&repo)
     } else {
-        crow_plugin_git::status_snapshot(&repo, cancel)
+        crow_plugin_git::status_snapshot_gated(&repo, cancel, gate)
     }
     .ok()?;
     tracing::info!(
@@ -431,12 +431,14 @@ fn request_repos(cx: &mut App, now: Instant) {
         git.dirty.remove(worktree);
         git.pending_repos.insert(worktree.clone());
     }
+    let gate = crate::cloud_status::read_gate(cx);
     for worktree in jobs {
+        let gate = gate.clone();
         let previous = cx.global::<Git>().snapshot(&worktree).cloned();
         let sender = sender.clone();
         let cancel = cancel.clone();
         cx.background_spawn(async move {
-            let snapshot = scan_repository(&worktree, &cancel).map(Arc::new);
+            let snapshot = scan_repository(&worktree, &cancel, gate).map(Arc::new);
             let refresh = plugin_refresh(previous.as_deref(), snapshot.as_deref());
             sender.send(GitEvent::Repo { worktree, snapshot, refresh }).ok();
         })
@@ -596,7 +598,9 @@ fn schedule_lines(cx: &mut App) {
     git.pending_line_jobs += groups.len();
     let sender = git.tx.clone();
     let cancel = git.cancel.clone();
+    let gate = crate::cloud_status::read_gate(cx);
     for (worktree, rows) in groups {
+        let gate = gate.clone();
         let git = cx.global_mut::<Git>();
         git.pending_lines.extend(rows.iter().map(|relative| (worktree.clone(), relative.clone())));
         let snapshot = git.snapshot(&worktree).expect("lines need a snapshot").clone();
@@ -604,7 +608,7 @@ fn schedule_lines(cx: &mut App) {
         let cancel = cancel.clone();
         cx.background_spawn(async move {
             let repo = crow_plugin_git::open_worktree(&worktree).ok();
-            let mut diff = repo.as_ref().and_then(|repo| crow_plugin_git::LineDiff::new(repo).ok());
+            let mut diff = repo.as_ref().and_then(|repo| crow_plugin_git::LineDiff::with_gate(repo, gate).ok());
             let results = rows
                 .into_iter()
                 .take_while(|_| !cancel.load(Ordering::Relaxed))
@@ -684,6 +688,7 @@ fn start_projects(cx: &mut App, roots: Vec<PathBuf>) {
     if roots.is_empty() {
         return;
     }
+    let gate = crate::cloud_status::read_gate(cx);
     cx.background_spawn(async move {
         let report = crow_plugin_git::discover(
             &roots,
@@ -706,7 +711,9 @@ fn start_projects(cx: &mut App, roots: Vec<PathBuf>) {
                     None
                 } else {
                     crow_plugin_git::open_worktree(&found.identity.worktree).ok().and_then(|repo| {
-                        crow_plugin_git::status_snapshot(&repo, &cancel).ok().map(|snapshot| snapshot.changed_count)
+                        crow_plugin_git::status_snapshot_gated(&repo, &cancel, gate.clone())
+                            .ok()
+                            .map(|snapshot| snapshot.changed_count)
                     })
                 };
                 sender
