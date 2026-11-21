@@ -210,11 +210,17 @@ fn slide_look(mode: crow_core::motion::Effective, opening: bool, t: f32) -> Slid
     }
 }
 
+struct WhySheet {
+    focus: FocusHandle,
+    buttons: [FocusHandle; 4],
+    scroll: gpui::ScrollHandle,
+}
+
 /// Closed overlays whose last picture is still fading out.
 #[derive(Default)]
 struct Exits {
     sheet: Option<crate::motion_ui::Leaving<Sheet>>,
-    why: Option<crate::motion_ui::Leaving<FocusHandle>>,
+    why: Option<crate::motion_ui::Leaving<WhySheet>>,
     picker: Option<crate::motion_ui::Leaving<ThemePicker>>,
     palette: Option<crate::motion_ui::Leaving<palette_view::Palette>>,
     git_review: Option<crate::motion_ui::Leaving<git_review::GitReview>>,
@@ -256,7 +262,7 @@ pub struct CrowWindow {
     activity_focus: FocusHandle,
     activity_controls: HashMap<(&'static str, u64), FocusHandle>,
     /// "Why this view?", while open.
-    why: Option<FocusHandle>,
+    why: Option<WhySheet>,
     picker: Option<ThemePicker>,
     /// Cmd-K, while open.
     palette: Option<palette_view::Palette>,
@@ -540,9 +546,19 @@ impl CrowWindow {
         } else if let Some(picker) = &self.picker {
             allowed.push(("picker", picker.focus.clone()));
         } else if let Some(why) = &self.why {
-            allowed.push(("why", why.clone()));
+            allowed.push(("why", why.focus.clone()));
+            let has_override =
+                self.pane().read(cx).folder().is_some_and(|dir| cx.global::<Ui>().views.has_folder_override(dir));
+            allowed.extend(
+                why.buttons
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != 1 || has_override)
+                    .map(|(_, focus)| ("why button", focus.clone())),
+            );
         } else if let Some(picker) = &self.column_picker {
             allowed.push(("column picker", picker.focus.clone()));
+            allowed.extend(picker.buttons.iter().cloned().map(|focus| ("column picker button", focus)));
         } else if let Some(picker) = &self.tag_picker {
             allowed.push(("tag picker", picker.focus.clone()));
             allowed.extend(picker.buttons().iter().cloned().map(|focus| ("tag picker button", focus)));
@@ -901,6 +917,7 @@ impl CrowWindow {
             path: path.clone(),
             is_dir: true,
             is_symlink: false,
+            icon_kind: crow_fs::IconKind::default(),
             hidden: false,
             dataless: false,
             size: 0,
@@ -990,7 +1007,11 @@ impl CrowWindow {
     fn render_title_bar(&self, title: &str, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let viewport = window.viewport_size().width;
-        let narrow = viewport < px(760.);
+        let sidebar_hidden = cx.global::<Ui>().sidebar_hidden;
+        let width = viewport - if sidebar_hidden { px(0.) } else { self.side_panes.left_width() };
+        let narrow = viewport < px(760.) || width < px(530.);
+        let search_icon_only = width < px(450.);
+        let tight = width < px(330.);
         let (back, forward, mode, back_label, forward_label) = {
             let pane = self.pane().read(cx);
             let back_label = pane
@@ -1234,15 +1255,9 @@ impl CrowWindow {
             .role(Role::Button)
             .aria_label(format!("Search {title}, Command F"))
             .aria_keyshortcuts("Command+F")
-            .w(px(240.))
-            .min_w(px(160.))
             .h(px(30.))
-            .flex_shrink(1.)
             .rounded(px(8.))
             .bg(surface)
-            .pl(px(10.))
-            .pr(px(6.))
-            .gap(px(8.))
             .flex()
             .items_center()
             .border_1()
@@ -1250,19 +1265,29 @@ impl CrowWindow {
             .hover(|style| style.border_color(color(theme.role("border"))))
             .cursor(CursorStyle::IBeam)
             .on_click(|_, window, cx| window.dispatch_action(Box::new(ShowSearch), cx))
+            .when(search_icon_only, |field| field.w(px(30.)).flex_none().justify_center())
             .child(icons::glyph(Glyph::Search, 14., "fg-muted", &theme))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(13.))
-                    .text_color(muted)
-                    .child(format!("Search {title}")),
-            )
-            .children(search_keys);
+            .when(!search_icon_only, |field| {
+                field
+                    .w(px(240.))
+                    .min_w(px(160.))
+                    .flex_shrink(1.)
+                    .pl(px(10.))
+                    .pr(px(6.))
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(13.))
+                            .text_color(muted)
+                            .child(format!("Search {title}")),
+                    )
+                    .children(search_keys)
+            });
         let search_field =
             with_action_tooltip(search_field, "Search names and contents", &ShowSearch, KeyScope::Window, cx);
 
@@ -1293,18 +1318,24 @@ impl CrowWindow {
             .h(px(BAND_HEIGHT))
             .flex_none()
             // With the sidebar hidden the traffic lights sit at the toolbar's left.
-            .pl(px(if cx.global::<Ui>().sidebar_hidden { 86. } else { 12. }))
-            .pr_3()
+            .pl(px(if sidebar_hidden {
+                86.
+            } else if tight {
+                8.
+            } else {
+                12.
+            }))
+            .pr(px(if tight { 8. } else { 12. }))
             .flex()
             .items_center()
-            .gap(px(10.))
+            .gap(px(if tight { 4. } else { 10. }))
             .border_b_1()
             .border_color(crate::style::hairline(&theme))
             .child(nav)
             .when(self.active_search(cx).is_some(), |bar| bar.when_some(band, |bar, band| bar.child(band)))
             .when(self.active_search(cx).is_none(), |bar| {
                 let search_field = match closing {
-                    Some(look) if look.widen > 0.0 => {
+                    Some(look) if look.widen > 0.0 && !search_icon_only => {
                         let wide = f32::from(window.viewport_size().width);
                         search_field.w(px(240. + (wide - 240.) * look.widen))
                     }
@@ -1358,15 +1389,6 @@ impl CrowWindow {
         let theme = cx.global::<Ui>().theme.clone();
         let active = self.tabs.active_index();
         let count = self.tabs.len();
-        let tabs: Vec<(usize, String)> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(i, (_, pane))| {
-                let location = pane.read(cx).location().clone();
-                (i, self.location_name(&location, cx))
-            })
-            .collect();
         let mode = cx.global::<Ui>().feedback.mode;
         let now = std::time::Instant::now();
         let progress = |motion: &TabMotion| {
@@ -1394,49 +1416,51 @@ impl CrowWindow {
                     el.left(gpui::relative(x))
                 })
         });
-        let tab_bar_item = |i: usize, name: String, selected: bool, grow: f32, fade: f32, live: bool| {
-            let tab = div()
-                .id(("tab", i))
-                .debug_selector(move || if live { format!("tab-{i}") } else { "tab-ghost".into() })
-                .role(Role::Tab)
-                .aria_label(name.clone())
-                .aria_selected(selected)
-                .aria_position_in_set(i + 1)
-                .aria_size_of_set(count)
-                .flex_1()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(12.))
-                .border_r_1()
-                .border_color(crate::style::hairline(&theme))
-                .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
-                .when(selected && !glide, |tab| tab.bg(color(theme.role("bg"))));
-            let mut tab = tab.when(fade < 1.0, |tab| tab.opacity(fade));
-            if grow != 1.0 {
-                tab.style().flex_grow = Some(grow);
-            }
-            tab.when(live, |tab| {
-                tab.on_click(cx.listener(move |this, _, window, cx| {
-                    if i == this.tabs.active_index() {
-                        return;
-                    }
-                    if this.search.is_some() {
-                        this.close_search(window, cx);
-                    }
-                    this.close_tip(cx);
-                    this.tabs.activate(i);
-                    this.sync_tab_activity(cx);
-                    this.announce_active_scope(cx);
-                    this.focus_center(window, cx);
-                    cx.notify();
-                }))
-            })
-            .child(name)
-            .into_any_element()
-        };
+        let tab_bar_item =
+            |i: usize, name: String, parent: Option<String>, selected: bool, grow: f32, fade: f32, live: bool| {
+                let label = parent.map_or_else(|| name.clone(), |parent| format!("{name}, in {parent}"));
+                let tab = div()
+                    .id(("tab", i))
+                    .debug_selector(move || if live { format!("tab-{i}") } else { "tab-ghost".into() })
+                    .role(Role::Tab)
+                    .aria_label(label.clone())
+                    .aria_selected(selected)
+                    .aria_position_in_set(i + 1)
+                    .aria_size_of_set(count)
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.))
+                    .border_r_1()
+                    .border_color(crate::style::hairline(&theme))
+                    .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
+                    .when(selected && !glide, |tab| tab.bg(color(theme.role("bg"))));
+                let mut tab = tab.when(fade < 1.0, |tab| tab.opacity(fade));
+                if grow != 1.0 {
+                    tab.style().flex_grow = Some(grow);
+                }
+                tab.when(live, |tab| {
+                    chrome::with_tooltip(tab, label, None).on_click(cx.listener(move |this, _, window, cx| {
+                        if i == this.tabs.active_index() {
+                            return;
+                        }
+                        if this.search.is_some() {
+                            this.close_search(window, cx);
+                        }
+                        this.close_tip(cx);
+                        this.tabs.activate(i);
+                        this.sync_tab_activity(cx);
+                        this.announce_active_scope(cx);
+                        this.focus_center(window, cx);
+                        cx.notify();
+                    }))
+                })
+                .child(name)
+                .into_any_element()
+            };
         let mut items: Vec<gpui::AnyElement> = Vec::new();
         let mut ghosts: Vec<&TabMotion> = self
             .tab_motions
@@ -1446,12 +1470,18 @@ impl CrowWindow {
             })
             .collect();
         ghosts.sort_by_key(|motion| motion.index);
-        for (ix, (id, name)) in
-            self.tabs.iter().zip(tabs.iter().map(|(_, name)| name)).map(|((id, _), n)| (id, n)).enumerate()
-        {
+        for (ix, (id, pane)) in self.tabs.iter().enumerate() {
+            let location = pane.read(cx).location();
+            let name = self.location_name(location, cx);
+            let parent = match location {
+                Location::Folder(path) => {
+                    path.parent().map(|parent| crate::style::display_path(parent, &cx.global::<Ui>().home))
+                }
+                _ => None,
+            };
             while let Some(ghost) = ghosts.first().filter(|ghost| ghost.index <= ix) {
                 let left = 1.0 - progress(ghost).unwrap_or(1.0);
-                items.push(tab_bar_item(usize::MAX - ghost.index, ghost.name.clone(), false, left, left, false));
+                items.push(tab_bar_item(usize::MAX - ghost.index, ghost.name.clone(), None, false, left, left, false));
                 ghosts.remove(0);
             }
             let opening = self.tab_motions.iter().find(|motion| motion.id == id && motion.opening);
@@ -1460,11 +1490,11 @@ impl CrowWindow {
                 Some(t) => (1.0, t),
                 None => (1.0, 1.0),
             };
-            items.push(tab_bar_item(ix, name.clone(), ix == active, grow, fade, true));
+            items.push(tab_bar_item(ix, name, parent, ix == active, grow, fade, true));
         }
         for ghost in ghosts {
             let left = 1.0 - progress(ghost).unwrap_or(1.0);
-            items.push(tab_bar_item(usize::MAX - ghost.index, ghost.name.clone(), false, left, left, false));
+            items.push(tab_bar_item(usize::MAX - ghost.index, ghost.name.clone(), None, false, left, left, false));
         }
         div()
             .id("tabs")
@@ -2377,8 +2407,6 @@ impl CrowWindow {
                         ui::record_visit(dir, cx);
                     }
                 }
-                let dir = dir.clone();
-                self.sidebar.update(cx, |s, cx| s.set_current(dir, cx));
             }
             PaneEvent::SaveSearch => self.save_search(&SaveSearch, window, cx),
             PaneEvent::FocusSidebar => {
@@ -2390,8 +2418,6 @@ impl CrowWindow {
                 operations::clear_message(cx);
                 self.close_tip(cx);
                 self.close_path_edit(false, window, cx);
-                let location = self.pane().read(cx).location().clone();
-                self.sidebar.update(cx, |s, cx| s.set_current_location(location, cx));
                 self.announce_active_scope(cx);
                 self.sync_info_target(window, cx);
                 cx.notify();
@@ -2614,7 +2640,11 @@ impl CrowWindow {
         } else {
             let focus = cx.focus_handle();
             window.focus(&focus, cx);
-            self.why = Some(focus);
+            self.why = Some(WhySheet {
+                focus,
+                buttons: std::array::from_fn(|_| cx.focus_handle()),
+                scroll: gpui::ScrollHandle::new(),
+            });
         }
         cx.notify();
     }
@@ -2636,14 +2666,29 @@ impl CrowWindow {
         ui::reset_view(dir, cx);
     }
 
-    fn render_why(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let focus = self.why.as_ref()?;
+    fn activate_why(&mut self, button: usize, window: &mut Window, cx: &mut Context<Self>) {
+        match button {
+            0 => {
+                let views_file = cx.global::<Ui>().config_dir.join("views.toml");
+                if let Err(e) = crate::effects::effects(cx).open_text(&views_file) {
+                    tracing::warn!("open views.toml: {e}");
+                }
+                return;
+            }
+            1 => self.reset_folder_view(&ResetFolderView, window, cx),
+            2 => self.use_view_as_defaults(&UseViewAsDefaults, window, cx),
+            _ => {}
+        }
+        self.close_why(window, cx);
+    }
+
+    fn render_why(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let why = self.why.as_ref()?;
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let dir = self.pane().read(cx).folder()?.to_path_buf();
         let resolved = ui.views.resolve(&dir);
         let has_override = ui.views.has_folder_override(&dir);
-        let views_file = ui.config_dir.join("views.toml");
         let folder = crate::style::display_path(&dir, &ui.home);
         let (fg, muted) = (theme.role("fg"), theme.role("fg-muted"));
         // With `view_per_folder = false` the window's own view is what shows.
@@ -2724,80 +2769,118 @@ impl CrowWindow {
         } else {
             format!("Matching rules, in order: {}", resolved.matched_rules.join(", "))
         };
-        let button = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .role(Role::Button)
-                .aria_label(label)
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .bg(color(theme.role("surface-raised")))
-                .child(label)
+        let button = |index, id, label| {
+            chrome::sheet_button(id, label, false, &theme)
+                .track_focus(&why.buttons[index])
+                .focus_visible(|style| style.shadow(cursor_ring(&theme)))
+                .on_click(cx.listener(move |this, _, window, cx| this.activate_why(index, window, cx)))
         };
         Some(chrome::sheet(
             chrome::sheet_panel("why-this-view", SheetWidth::Wide, &theme)
                 .aria_label(format!("Why this view: {folder}"))
-                // keys::context_stack (KeyScope::Sheet) mirrors this.
                 .key_context("Sheet")
-                .track_focus(focus)
-                .on_action(cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| this.close_why(window, cx)))
+                .track_focus(&why.focus)
+                .max_w(window.viewport_size().width - px(24.))
+                .max_h(window.viewport_size().height - px(BAND_HEIGHT + 12.))
+                .on_action(cx.listener(|this, _: &crate::actions::SheetConfirm, window, cx| {
+                    let Some(why) = &this.why else { return };
+                    let index = why.buttons.iter().position(|button| button.is_focused(window)).unwrap_or(3);
+                    this.activate_why(index, window, cx);
+                }))
                 .on_action(cx.listener(|this, _: &crate::actions::SheetCancel, window, cx| this.close_why(window, cx)))
+                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                    let Some(why) = &this.why else { return };
+                    let modifiers = event.keystroke.modifiers;
+                    match event.keystroke.key.as_str() {
+                        "tab" if !modifiers.control && !modifiers.alt && !modifiers.platform => {
+                            let controls: Vec<_> = std::iter::once(why.focus.clone())
+                                .chain(
+                                    why.buttons
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(i, _)| *i != 1 || has_override)
+                                        .map(|(_, button)| button.clone()),
+                                )
+                                .collect();
+                            chrome::cycle_focus(&controls, !modifiers.shift, window, cx);
+                        }
+                        "space" if !modifiers.modified() => {
+                            let Some(index) = why.buttons.iter().position(|button| button.is_focused(window)) else {
+                                return;
+                            };
+                            this.activate_why(index, window, cx);
+                        }
+                        "up" | "down" | "pageup" | "pagedown"
+                            if !modifiers.modified() && why.focus.is_focused(window) =>
+                        {
+                            let step = match event.keystroke.key.as_str() {
+                                "up" => -24.,
+                                "down" => 24.,
+                                "pageup" => -f32::from(why.scroll.bounds().size.height),
+                                _ => f32::from(why.scroll.bounds().size.height),
+                            };
+                            let mut offset = why.scroll.offset();
+                            offset.y = (offset.y - px(step)).clamp(-why.scroll.max_offset().y, px(0.));
+                            why.scroll.set_offset(offset);
+                        }
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
                 .p_4()
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Why this view? {folder}")))
-                .children(lines.into_iter().enumerate().map(|(i, (what, value, source))| {
+                .child(
                     div()
-                        .id(("why-line", i))
-                        .role(Role::ListItem)
-                        .aria_label(format!("{what}: {value}, from {source}"))
-                        .flex()
-                        .gap_3()
-                        .child(div().w(px(70.)).text_color(color(muted)).child(what))
-                        .child(div().w(px(190.)).text_color(color(fg)).child(value))
-                        .child(div().flex_1().text_size(px(12.)).text_color(color(muted)).child(source))
-                }))
-                .child(div().pt_1().text_size(px(12.)).text_color(color(muted)).child(rules))
-                .when_some(pack_error, |sheet, error| {
-                    sheet.child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(color(theme.role("error")))
-                            .child(format!("{error} (last good icons kept)")),
-                    )
-                })
+                        .id("why-details")
+                        .debug_selector(|| "why-details".into())
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&why.scroll)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div().font_weight(FontWeight::SEMIBOLD).child(format!("Why this view? {folder}")),
+                                )
+                                .children(lines.into_iter().enumerate().map(|(i, (what, value, source))| {
+                                    div()
+                                        .id(("why-line", i))
+                                        .role(Role::ListItem)
+                                        .aria_label(format!("{what}: {value}, from {source}"))
+                                        .flex()
+                                        .gap_3()
+                                        .child(div().w(px(70.)).text_color(color(muted)).child(what))
+                                        .child(div().w(px(190.)).text_color(color(fg)).child(value))
+                                        .child(div().flex_1().text_size(px(12.)).text_color(color(muted)).child(source))
+                                }))
+                                .child(div().pt_1().text_size(px(12.)).text_color(color(muted)).child(rules))
+                                .when_some(pack_error, |details, error| {
+                                    details.child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(color(theme.role("error")))
+                                            .child(format!("{error} (last good icons kept)")),
+                                    )
+                                }),
+                        ),
+                )
                 .child(
                     div()
                         .flex()
+                        .flex_none()
+                        .flex_wrap()
                         .gap_2()
                         .pt_2()
-                        .child(button("why-open-file", "Edit views.toml").on_click(move |_, _, cx| {
-                            if let Err(e) = crate::effects::effects(cx).open_text(&views_file) {
-                                tracing::warn!("open views.toml: {e}");
-                            }
-                        }))
+                        .child(button(0, "why-open-file", "Edit views.toml"))
                         .child(div().flex_1())
-                        .when(has_override, |row| {
-                            row.child(button("why-reset", "Reset This Folder").on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.reset_folder_view(&ResetFolderView, window, cx);
-                                    this.close_why(window, cx);
-                                },
-                            )))
-                        })
-                        .child(button("why-defaults", "Use as Defaults").on_click(cx.listener(
-                            |this, _, window, cx| {
-                                this.use_view_as_defaults(&UseViewAsDefaults, window, cx);
-                                this.close_why(window, cx);
-                            },
-                        )))
-                        .child(
-                            button("why-close", "Close")
-                                .on_click(cx.listener(|this, _, window, cx| this.close_why(window, cx))),
-                        ),
+                        .when(has_override, |row| row.child(button(1, "why-reset", "Reset This Folder")))
+                        .child(button(2, "why-defaults", "Use as Defaults"))
+                        .child(button(3, "why-close", "Close")),
                 ),
             &theme,
             cx.global::<Ui>().feedback.mode,
@@ -3542,20 +3625,17 @@ impl Render for CrowWindow {
         if self.search_motion.is_some() {
             window.request_animation_frame();
         }
-        let title_bar = self.render_title_bar(&title, window, cx);
         let tab_now = std::time::Instant::now();
         self.track_tabs(cx.global::<Ui>().feedback.mode, tab_now, cx);
         if !self.tab_motions.is_empty() {
             window.request_animation_frame();
         }
         let tab_bar = (self.tabs.len() > 1).then(|| self.render_tab_bar(cx));
-        let (current, active_saved) = {
-            let pane = self.pane().read(cx);
-            let location = pane.focused_path(cx).map_or_else(|| pane.location().clone(), Location::Folder);
-            (location, pane.location().saved_query_id().cloned())
-        };
+        let pane = self.pane().read(cx);
+        let (current, loaded) = pane.sidebar_location(cx);
+        let active_saved = pane.location().saved_query_id().cloned();
         self.sidebar.update(cx, |s, cx| {
-            s.set_current_location(current, cx);
+            s.sync_current(current, loaded, cx);
             s.set_active_saved(active_saved, cx);
         });
         let sidebar_focused = self.sidebar.read(cx).focus_handle(cx).is_focused(window);
@@ -3574,6 +3654,7 @@ impl Render for CrowWindow {
             self.info.read(cx).preferred_width,
             show_preview && active_search.is_none() && mode == ViewMode::Gallery,
         );
+        let title_bar = self.render_title_bar(&title, window, cx);
         let translucent = cx.global::<Ui>().translucent;
         let sidebar = (!cx.global::<Ui>().sidebar_hidden).then(|| {
             let tone = if translucent {
@@ -3719,10 +3800,10 @@ impl Render for CrowWindow {
         }
         let sheet = lend!(sheet, self.render_sheet(window, cx));
         let activity = self.show_activity.then(|| self.render_activity(window, cx));
-        let why = lend!(why, self.render_why(cx));
+        let why = lend!(why, self.render_why(window, cx));
         let picker = lend!(picker, self.render_picker(cx));
         let git_review = lend!(git_review, self.render_git_review(cx));
-        let column_picker = lend!(column_picker, self.render_column_picker(cx));
+        let column_picker = lend!(column_picker, self.render_column_picker(window, cx));
         let tag_picker = lend!(tag_picker, self.render_tag_picker(cx));
         let palette = lend!(palette, self.render_palette(window, cx));
         if !behind.is_empty() {

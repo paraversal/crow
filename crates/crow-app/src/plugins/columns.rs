@@ -95,6 +95,7 @@ mod tests {
             path: PathBuf::from("/tmp/a.txt"),
             is_dir: false,
             is_symlink: false,
+            icon_kind: crow_fs::IconKind::default(),
             hidden: false,
             dataless: false,
             size: 3,

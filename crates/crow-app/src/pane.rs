@@ -53,8 +53,8 @@ use crate::palette::CommandId;
 use crate::preview::{self, Preview};
 use crate::search::{SearchEvent, SearchView};
 use crate::style::{
-    active_selection, cloud_icon, color, color_alpha, content_opacity, cut_outline, display_text, drop_outline,
-    effect_tint, focused_column, format_time, highlight_text, inactive_selection, kind, map_range, truncate_middle,
+    active_selection, color, color_alpha, content_opacity, cut_outline, display_text, drop_outline, effect_tint,
+    focused_column, format_time, highlight_text, inactive_selection, kind, map_range, truncate_middle,
     truncate_middle_parts, truncate_middle_parts_to_fit,
 };
 use crate::text_input::{TextInput, TextInputEvent};
@@ -698,6 +698,16 @@ impl Pane {
         self.location().as_folder()
     }
 
+    pub(crate) fn sidebar_location(&self, cx: &App) -> (Location, Option<bool>) {
+        if self.folder().is_some() {
+            let folder = self.focused_folder().read(cx);
+            let loaded = (!folder.is_loading()).then(|| folder.error().is_none());
+            (Location::Folder(folder.dir().to_path_buf()), loaded)
+        } else {
+            (self.location().clone(), Some(true))
+        }
+    }
+
     /// The real folder the user is in, including the focused column in Columns.
     pub fn focused_path(&self, cx: &gpui::App) -> Option<PathBuf> {
         self.folder().map(|_| self.current_dir(cx))
@@ -1164,6 +1174,7 @@ impl Pane {
                 path: dir.to_path_buf(),
                 is_dir: true,
                 is_symlink: false,
+                icon_kind: crow_fs::IconKind::default(),
                 hidden: false,
                 dataless: false,
                 size: 0,
@@ -4108,7 +4119,7 @@ impl Pane {
                 } else {
                     Arc::new(vec![(entry.path.clone(), entry.is_dir)])
                 };
-                let drag_icon = cloud_icon(cloud, &entry.path, entry.is_dir, 22);
+                let drag_icon = crate::style::entry_cloud_icon(cloud, &entry, 22);
                 let drag_count = drag_entries.len();
                 let drag_label: SharedString = if drag_count > 1 {
                     format!("{drag_count} items").into()
@@ -4669,7 +4680,7 @@ impl Pane {
                     } else {
                         Arc::new(vec![(entry.path.clone(), entry.is_dir)])
                     };
-                    let drag_icon = cloud_icon(cloud, &entry.path, entry.is_dir, 22);
+                    let drag_icon = crate::style::entry_cloud_icon(cloud, &entry, 22);
                     let drag_count = drag_entries.len();
                     let drag_label: SharedString = if drag_count > 1 {
                         format!("{drag_count} items").into()
@@ -4692,15 +4703,7 @@ impl Pane {
                     }
                     let thumb = match thumbnail {
                         Some(image) => img(image).size(px(metrics.icon_size)).into_any_element(),
-                        None => crate::preview::path_icon(
-                            &icons,
-                            &entry.path,
-                            entry.is_dir,
-                            entry.is_package(),
-                            cloud,
-                            theme,
-                            metrics.icon_size,
-                        ),
+                        None => crate::preview::entry_icon(&icons, &entry, cloud, theme, metrics.icon_size),
                     };
                     let thumb = div()
                         .relative()
@@ -5176,7 +5179,7 @@ impl Pane {
                 } else {
                     Arc::new(vec![(entry.path.clone(), entry.is_dir)])
                 };
-                let drag_icon = cloud_icon(cloud, &entry.path, entry.is_dir, 22);
+                let drag_icon = crate::style::entry_cloud_icon(cloud, &entry, 22);
                 let drag_count = drag_entries.len();
                 let drag_label: SharedString = if drag_count > 1 {
                     format!("{drag_count} items").into()
@@ -5829,7 +5832,7 @@ fn row_icon(
     cloud: Option<CloudStatus>,
     icons: &crate::icon_packs::Resolver,
 ) -> Div {
-    let content = crate::preview::path_icon(icons, &entry.path, entry.is_dir, entry.is_package(), cloud, theme, 16.);
+    let content = crate::preview::entry_icon(icons, entry, cloud, theme, 16.);
     div().relative().size(px(16.)).flex_none().child(div().opacity((1.0 - look.trash) * dim).child(content)).when(
         look.trash > 0.0,
         |slot| {

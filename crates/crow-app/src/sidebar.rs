@@ -527,12 +527,19 @@ fn bar_tone(used: f32) -> BarTone {
     if used >= DISK_WARNING_USED { BarTone::Warning } else { BarTone::Neutral }
 }
 
+struct PendingCurrent {
+    target: Location,
+    previous: Location,
+    rejected: bool,
+}
+
 pub struct Sidebar {
     focus: FocusHandle,
     /// Index into the selectable rows (favorites, recents, volumes).
     cursor: usize,
     /// The folder the window shows, highlighted when it's in the sidebar.
     current: Location,
+    pending_current: Option<PendingCurrent>,
     /// Where each direct child of the list sits, captured when it is prepainted.
     /// A cell so prepaint can fill it without scheduling another render.
     layout: RowLayout,
@@ -548,11 +555,10 @@ pub struct Sidebar {
     dragging_favorite: Rc<Cell<bool>>,
     /// Where a dragged favorite would be inserted: group and index before the move.
     insert_slot: Option<Slot>,
-    /// Finder's display names per path, volume first. Filled on demand; `displayNameAtPath`
-    /// runs once per path instead of once per row per render.
-    names: RefCell<HashMap<PathBuf, Rc<[String]>>>,
-    /// The paths in `names`, in row order, so a changed sidebar prunes stale entries.
-    name_paths: RefCell<Vec<PathBuf>>,
+    /// Finder's display names per destination, volume first.
+    names: HashMap<PathBuf, Rc<[String]>>,
+    name_paths: Vec<PathBuf>,
+    name_worker: Option<Task<()>>,
     /// A row pulsing because a move landed in its folder, and when it started.
     receive: Option<(PathBuf, Instant)>,
     /// Bumped per pulse, so an older timer cannot clear a newer one.
@@ -609,6 +615,7 @@ impl Sidebar {
             focus: cx.focus_handle(),
             cursor: 1,
             current: Location::Folder(PathBuf::new()),
+            pending_current: None,
             layout: Rc::default(),
             last_rows: Vec::new(),
             section_motions: Vec::new(),
@@ -616,8 +623,9 @@ impl Sidebar {
             drop_target: None,
             dragging_favorite: Rc::new(Cell::new(false)),
             insert_slot: None,
-            names: RefCell::new(HashMap::new()),
-            name_paths: RefCell::new(Vec::new()),
+            names: HashMap::new(),
+            name_paths: Vec::new(),
+            name_worker: None,
             receive: None,
             receive_generation: 0,
             menu: None,
@@ -940,12 +948,34 @@ impl Sidebar {
     }
 
     pub fn set_current(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        self.set_current_location(Location::Folder(dir), cx);
+        self.sync_current(Location::Folder(dir), Some(true), cx);
     }
 
-    pub fn set_current_location(&mut self, location: Location, cx: &mut Context<Self>) {
-        if self.current != location {
-            self.current = location;
+    fn visible_current(&self) -> &Location {
+        match &self.pending_current {
+            Some(pending) if pending.rejected => &pending.previous,
+            Some(pending) => &pending.target,
+            None => &self.current,
+        }
+    }
+
+    /// A folder reports None while its listing is loading, then success or failure.
+    pub fn sync_current(&mut self, location: Location, loaded: Option<bool>, cx: &mut Context<Self>) {
+        let before = self.visible_current().clone();
+        if let Some(pending) = &mut self.pending_current {
+            if pending.target == location {
+                match loaded {
+                    Some(true) => self.pending_current = None,
+                    Some(false) => pending.rejected = true,
+                    None => {}
+                }
+            } else if self.current != location {
+                self.pending_current = None;
+                self.navigation_generation = self.navigation_generation.wrapping_add(1);
+            }
+        }
+        self.current = location;
+        if *self.visible_current() != before {
             cx.notify();
         }
     }
@@ -975,23 +1005,73 @@ impl Sidebar {
         self.layout.borrow().get(i).map(|(_, _, bounds)| *bounds)
     }
 
-    /// Finder's display names for `path`, volume first. Cached: the ancestors are
-    /// filesystem calls on the main thread, so each path is asked once.
-    fn components(&self, path: &Path) -> Rc<[String]> {
-        if let Some(names) = self.names.borrow().get(path) {
-            return names.clone();
+    fn refresh_names(&mut self, rows: &[Row], cx: &mut Context<Self>) {
+        let paths = rows.iter().filter(|row| !matches!(row, Row::Volume(_))).filter_map(Row::path);
+        if !paths.clone().eq(self.name_paths.iter().map(PathBuf::as_path)) {
+            self.name_paths = paths.map(Path::to_path_buf).collect();
+            let keep: HashSet<_> = self.name_paths.iter().map(PathBuf::as_path).collect();
+            self.names.retain(|path, _| keep.contains(path.as_path()));
         }
-        let names: Rc<[String]> = crow_macos::display_components(path)
-            .into_iter()
-            .map(|(name, _)| display_text(&name).into_owned())
-            .collect::<Vec<_>>()
-            .into();
-        self.names.borrow_mut().insert(path.to_path_buf(), names.clone());
-        names
+        if self.name_worker.is_some() {
+            return;
+        }
+        let missing: HashSet<_> =
+            self.name_paths.iter().filter(|path| !self.names.contains_key(*path)).cloned().collect();
+        if missing.is_empty() {
+            return;
+        }
+        let load = cx.background_spawn(async move {
+            let mut ancestors = HashMap::new();
+            missing
+                .into_iter()
+                .map(|path| {
+                    let names = crow_macos::display_component_paths(&path)
+                        .into_iter()
+                        .map(|part| {
+                            ancestors
+                                .entry(part)
+                                .or_insert_with_key(|part| {
+                                    display_text(&crow_macos::localized_display_name_at(part)).into_owned()
+                                })
+                                .clone()
+                        })
+                        .collect::<Vec<_>>();
+                    (path, names)
+                })
+                .collect::<Vec<_>>()
+        });
+        self.name_worker = Some(cx.spawn(async move |this, cx| {
+            let names = load.await;
+            this.update(cx, |this, cx| {
+                let keep: HashSet<_> = this.name_paths.iter().map(PathBuf::as_path).collect();
+                this.names.extend(
+                    names
+                        .into_iter()
+                        .filter(|(path, _)| keep.contains(path.as_path()))
+                        .map(|(path, names)| (path, names.into())),
+                );
+                this.name_worker = None;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
-    /// Finder's name for a folder ("Macintosh HD" for `/`).
-    /// A label for a row that is closing away: just its words.
+    /// Use the path components while Finder's names are loading.
+    fn components(&self, path: &Path) -> Rc<[String]> {
+        self.names.get(path).cloned().unwrap_or_else(|| {
+            crow_macos::display_component_paths(path)
+                .iter()
+                .map(|part| {
+                    let name = part.file_name().map_or_else(|| part.to_string_lossy(), |name| name.to_string_lossy());
+                    display_text(&name).into_owned()
+                })
+                .collect::<Vec<_>>()
+                .into()
+        })
+    }
+
+    /// A label for a row that is closing away.
     fn ghost_label(&self, row: &Row) -> String {
         match row {
             Row::Favorite(_, f) => {
@@ -1068,20 +1148,8 @@ impl Sidebar {
         self.components(path).last().cloned().unwrap_or_else(|| display_text(&path.display().to_string()).into_owned())
     }
 
-    /// Drop cached names for paths that left the sidebar.
-    fn prune_names(&self, rows: &[Row]) {
-        let paths: Vec<PathBuf> = rows.iter().filter_map(|r| r.path().map(Path::to_path_buf)).collect();
-        if *self.name_paths.borrow() == paths {
-            return;
-        }
-        let keep: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
-        self.names.borrow_mut().retain(|path, _| keep.contains(path.as_path()));
-        *self.name_paths.borrow_mut() = paths;
-    }
-
     /// What every selectable row shows, in row order. Headers get no look.
     fn looks(&self, rows: &[Row], focused: bool, ui: &Ui) -> Vec<RowLook> {
-        self.prune_names(rows);
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
         let selectable: Vec<&Row> = rows.iter().collect();
         let labels: Vec<String> = selectable
@@ -1213,7 +1281,7 @@ impl Sidebar {
                 right,
                 badge,
                 spoken,
-                current: row.location().as_ref() == Some(&self.current),
+                current: row.location().as_ref() == Some(self.visible_current()),
                 ring: focused && i == self.cursor,
                 drop: !self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Row(i)),
                 bar,
@@ -1227,7 +1295,7 @@ impl Sidebar {
     pub fn looks_for_test(&self, window: &Window, cx: &gpui::App) -> Vec<RowLook> {
         let ui = cx.global::<Ui>();
         let rows = rows(ui, &self.plugin_sections);
-        self.looks(&rows, self.focus.is_focused(window), ui)
+        self.looks(&rows, self.focus.is_focused(window) && window.last_input_was_keyboard(), ui)
     }
 
     fn cursor_row(&self, cx: &gpui::App) -> Option<Row> {
@@ -1483,10 +1551,18 @@ impl Sidebar {
     /// stale result; the live row and section revision are checked again on the
     /// main thread.
     fn navigate_row(&mut self, index: usize, nav: SidebarNav, cx: &mut Context<Self>) {
+        self.navigate(index, nav, false, cx);
+    }
+
+    fn navigate(&mut self, index: usize, nav: SidebarNav, clicked: bool, cx: &mut Context<Self>) {
+        let previous = self.pending_current.take().map_or_else(|| self.current.clone(), |pending| pending.previous);
         self.cursor_key = None;
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
         let generation = self.navigation_generation;
         let Some(row) = self.selectable(cx).into_iter().nth(index) else { return };
+        if clicked {
+            self.pending_current = row.location().map(|target| PendingCurrent { target, previous, rejected: false });
+        }
         if let Row::SectionHeader { id, collapsed, .. } = row {
             if nav == SidebarNav::Open && collapsed {
                 set_collapsed(id, false, cx);
@@ -1544,7 +1620,7 @@ impl Sidebar {
         cx.spawn(async move |this, cx| {
             let matches = task.await;
             this.update(cx, |this, cx| {
-                if this.navigation_generation != generation || this.section_revision() != revision {
+                if this.navigation_generation != generation {
                     return;
                 }
                 let live = this.selectable(cx).into_iter().nth(index);
@@ -1553,13 +1629,19 @@ impl Sidebar {
                     Some(Row::PluginItem { section: s, row })
                         if s == section && row.id == row_id && row.folder_path() == Some(expected_path.as_path())
                 );
-                if !live {
+                if this.section_revision() != revision || !live {
+                    this.pending_current = None;
+                    cx.notify();
                     return;
                 }
                 if matches {
                     emit_nav(nav, Location::Folder(expected_path), cx);
-                } else if nav != SidebarNav::Show {
-                    cx.emit(SidebarEvent::Message("That folder is no longer available".into(), true));
+                } else {
+                    this.pending_current = None;
+                    cx.notify();
+                    if nav != SidebarNav::Show {
+                        cx.emit(SidebarEvent::Message("That folder is no longer available".into(), true));
+                    }
                 }
             })
             .ok();
@@ -1831,6 +1913,7 @@ impl Render for Sidebar {
         self.update_plugin_sections(cx);
         self.request_inactive_counts(cx);
         let rows = rows(cx.global::<Ui>(), &self.plugin_sections);
+        self.refresh_names(&rows, cx);
         let (motion_mode, motion_now) = (cx.global::<Ui>().feedback.mode, Instant::now());
         self.track_sections(&rows, motion_mode, motion_now);
         if !self.section_motions.is_empty() || self.reorder.is_some() {
@@ -1857,7 +1940,7 @@ impl Render for Sidebar {
         let icons = crate::icon_packs::Resolver::for_source(cx, &ui.settings.icon_pack);
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
         self.stabilize_plugin_cursor(&rows);
-        let focused = self.focus.is_focused(window);
+        let focused = self.focus.is_focused(window) && window.last_input_was_keyboard();
         let selectable_count = rows.len();
         self.cursor = self.cursor.min(selectable_count.saturating_sub(1));
         let section_of: Vec<Option<String>> = rows
@@ -1891,7 +1974,7 @@ impl Render for Sidebar {
             self.insert_slot = None;
             self.dragging_favorite.set(false);
         }
-        let current_child = rows.iter().position(|row| row.location().as_ref() == Some(&self.current));
+        let current_child = rows.iter().position(|row| row.location().as_ref() == Some(self.visible_current()));
         let fill = {
             let layout = self.layout.borrow();
             let current_bounds = current_child.and_then(|ix| layout.get(ix).map(|(_, _, bounds)| *bounds));
@@ -1984,7 +2067,8 @@ impl Render for Sidebar {
                         .aria_position_in_set(i + 1)
                         .aria_size_of_set(selectable_count)
                         .aria_selected(cursor)
-                        .when(cursor, |header| header.aria_active_descendant().shadow(cursor_ring(&theme)))
+                        .when(cursor && self.focus.is_focused(window), |header| header.aria_active_descendant())
+                        .when(look.ring, |header| header.shadow(cursor_ring(&theme)))
                         .mt(px(HEADER_GAP))
                         .px_2()
                         .py(px(3.))
@@ -2138,7 +2222,7 @@ impl Render for Sidebar {
                     }
                     this.cursor = i;
                     if navigable {
-                        this.navigate_row(i, SidebarNav::Open, cx);
+                        this.navigate(i, SidebarNav::Open, true, cx);
                     }
                     cx.notify();
                 }));
@@ -2457,6 +2541,29 @@ mod tests {
 
     fn recent(name: &str) -> Row {
         Row::Recent(PathBuf::from(format!("/{name}")))
+    }
+
+    #[gpui::test]
+    fn background_names_only_cache_sidebar_destinations_still_present(cx: &mut gpui::TestAppContext) {
+        let old = [recent("old")];
+        let new = [recent("new")];
+        let sidebar = cx.update(|cx| cx.new(Sidebar::new));
+        sidebar.update(cx, |this, cx| {
+            this.refresh_names(&old, cx);
+            assert!(this.names.is_empty(), "the first frame uses the path");
+            assert_eq!(this.display_name(Path::new("/old")), "old");
+            this.refresh_names(&new, cx);
+        });
+        cx.run_until_parked();
+        sidebar.update(cx, |this, cx| {
+            assert!(!this.names.contains_key(Path::new("/old")));
+            this.refresh_names(&new, cx);
+        });
+        cx.run_until_parked();
+        sidebar.read_with(cx, |this, _| {
+            let names = this.names.get(Path::new("/new")).expect("worker loaded the current destination");
+            assert_eq!(names.last().map(String::as_str), Some("new"));
+        });
     }
 
     #[test]

@@ -123,6 +123,7 @@ mod tests {
             path: PathBuf::from("/d").join(name),
             is_dir: false,
             is_symlink: false,
+            icon_kind: crate::IconKind::default(),
             hidden: false,
             dataless: false,
             size,

@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use crow_theme::{Rgb, Theme, Variant};
 use gpui::{
@@ -158,9 +158,10 @@ pub fn ui_font(family: &str) -> String {
     if family.is_empty() { ".SystemUIFont".to_owned() } else { family.to_owned() }
 }
 
+type NativeImages = HashMap<usize, (Weak<Vec<u8>>, Arc<Image>)>;
+
 thread_local! {
-    // crow-macos caches PNG bytes per file type; this wraps each in a GPUI image once.
-    static IMAGES: RefCell<HashMap<usize, Arc<Image>>> = RefCell::new(HashMap::new());
+    static IMAGES: RefCell<NativeImages> = RefCell::new(HashMap::new());
 }
 
 /// Finder's icon for `path` at `points`, as a GPUI image.
@@ -168,14 +169,32 @@ pub fn icon(path: &Path, is_dir: bool, points: u32) -> Option<Arc<Image>> {
     cloud_icon(None, path, is_dir, points)
 }
 
+pub fn entry_cloud_icon(
+    status: Option<crow_fs::CloudStatus>,
+    entry: &crow_fs::Entry,
+    points: u32,
+) -> Option<Arc<Image>> {
+    native_icon(status, &entry.path, entry.is_dir, entry.icon_kind, points).and_then(image_from_png)
+}
+
 /// Use a type icon while a potential cloud item is unprobed or unavailable.
 pub fn cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path, is_dir: bool, points: u32) -> Option<Arc<Image>> {
+    native_icon(status, path, is_dir, crow_fs::IconKind::Path, points).and_then(image_from_png)
+}
+
+fn native_icon(
+    status: Option<crow_fs::CloudStatus>,
+    path: &Path,
+    is_dir: bool,
+    kind: crow_fs::IconKind,
+    points: u32,
+) -> Option<Arc<Vec<u8>>> {
     if native_cloud_icon(status, path) {
         let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-        return image_from_png(crow_macos::type_icon_png(ext, is_dir, points)?);
+        return crow_macos::type_icon_png(ext, is_dir, points);
     }
-    // io-ok: render-time Finder icon, cached by AppKit per path type; the first fetch is a known main-thread cost (#47).
-    image_from_png(crow_macos::icon_png(path, is_dir, points)?)
+    // io-ok: render-time AppKit icon, cached by type or by path for item-specific icons (#47).
+    crow_macos::icon_png(path, kind, points)
 }
 
 /// PNG bytes of the Finder icon for a drag, never inspecting a cloud
@@ -183,12 +202,7 @@ pub fn cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path, is_dir: boo
 pub fn drag_icon_png(cx: &gpui::App, path: &Path, is_dir: bool, points: u32) -> Option<Arc<Vec<u8>>> {
     let status =
         cx.try_global::<crate::cloud_status::CloudStatusService>().and_then(|service| service.0.read(cx).status(path));
-    if native_cloud_icon(status, path) {
-        let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-        return crow_macos::type_icon_png(ext, is_dir, points);
-    }
-    // io-ok: drag-start icon, once per drag.
-    crow_macos::icon_png(path, is_dir, points)
+    native_icon(status, path, is_dir, crow_fs::IconKind::Path, points)
 }
 
 /// A cloud placeholder (or an unprobed cloud candidate) keeps its native
@@ -198,13 +212,19 @@ pub fn native_cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path) -> b
 }
 
 fn image_from_png(png: Arc<Vec<u8>>) -> Option<Arc<Image>> {
+    const MAX_CACHED_IMAGES: usize = 4096;
     let key = Arc::as_ptr(&png) as usize;
-    Some(IMAGES.with(|images| {
-        images
-            .borrow_mut()
-            .entry(key)
-            .or_insert_with(|| Arc::new(Image::from_bytes(ImageFormat::Png, png.as_ref().clone())))
-            .clone()
+    Some(IMAGES.with_borrow_mut(|images| {
+        if let Some((_, image)) = images.get(&key) {
+            return image.clone();
+        }
+        if images.len() >= MAX_CACHED_IMAGES {
+            images.clear();
+        }
+        let image = Arc::new(Image::from_bytes(ImageFormat::Png, png.as_ref().clone()));
+        // Keep the pointer identity reserved when the native cache evicts the PNG.
+        images.insert(key, (Arc::downgrade(&png), image.clone()));
+        image
     }))
 }
 

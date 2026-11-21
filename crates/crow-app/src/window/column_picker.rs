@@ -2,18 +2,20 @@
 
 use std::path::PathBuf;
 
-use gpui::{Context, FocusHandle, FontWeight, IntoElement, Role, Toggled, Window, div, prelude::*, px};
+use gpui::{Context, FocusHandle, FontWeight, IntoElement, Role, ScrollHandle, Toggled, Window, div, prelude::*, px};
 
 use crate::actions::{ChooseListColumns, SheetCancel, SheetConfirm};
 use crate::chrome::{self, SheetWidth};
 use crate::extensions::Ext;
-use crate::style::active_selection;
+use crate::style::{active_selection, cursor_ring};
 use crate::ui::{self, Ui};
 
 use super::CrowWindow;
 
 pub(super) struct ColumnPicker {
     pub(super) focus: FocusHandle,
+    pub(super) buttons: [FocusHandle; 3],
+    scroll: ScrollHandle,
     folder: PathBuf,
     columns: Vec<String>,
     cursor: usize,
@@ -51,7 +53,14 @@ impl CrowWindow {
         let columns = cx.global::<Ui>().views.resolve(&folder).columns.0;
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        self.column_picker = Some(ColumnPicker { focus, folder, columns, cursor: 0 });
+        self.column_picker = Some(ColumnPicker {
+            focus,
+            buttons: std::array::from_fn(|_| cx.focus_handle()),
+            scroll: ScrollHandle::new(),
+            folder,
+            columns,
+            cursor: 0,
+        });
         cx.notify();
     }
 
@@ -72,7 +81,20 @@ impl CrowWindow {
         self.close_column_picker(window, cx);
     }
 
-    pub(super) fn render_column_picker(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    fn activate_column_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = &self.column_picker else { return };
+        if picker.buttons[1].is_focused(window) {
+            self.close_column_picker(window, cx);
+        } else {
+            self.save_columns(picker.buttons[0].is_focused(window), window, cx);
+        }
+    }
+
+    pub(super) fn render_column_picker(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
         let picker = self.column_picker.as_ref()?;
         let choices = available(cx);
         let ui = cx.global::<Ui>();
@@ -96,11 +118,14 @@ impl CrowWindow {
                     .rounded_sm()
                     .flex()
                     .gap_2()
-                    .when(picker.cursor == index, |row| row.bg(active_selection(&theme)))
+                    .when(picker.cursor == index && picker.focus.is_focused(window), |row| {
+                        row.bg(active_selection(&theme))
+                    })
                     .child(div().w(px(17.)).child(if checked { "✓" } else { "" }))
                     .child(title)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(picker) = &mut this.column_picker {
+                            window.focus(&picker.focus, cx);
                             picker.cursor = index;
                             toggle(&mut picker.columns, &id);
                             cx.notify();
@@ -108,24 +133,47 @@ impl CrowWindow {
                     }))
             })
             .collect::<Vec<_>>();
-        let button =
-            |id: &'static str, label: &'static str| crate::chrome::sheet_button(id, label, false, &theme).px_2();
+        let button = |index: usize, id: &'static str, label: &'static str| {
+            crate::chrome::sheet_button(id, label, false, &theme)
+                .px_2()
+                .track_focus(&picker.buttons[index])
+                .focus_visible(|style| style.shadow(cursor_ring(&theme)))
+        };
         Some(chrome::sheet(
             chrome::sheet_panel("list-columns-picker", SheetWidth::Compact, &theme)
                 .aria_label("List Columns")
                 .key_context("Sheet")
                 .track_focus(&picker.focus)
                 .on_action(cx.listener(|this, _: &SheetCancel, window, cx| this.close_column_picker(window, cx)))
-                .on_action(cx.listener(|this, _: &SheetConfirm, window, cx| this.save_columns(false, window, cx)))
-                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                .on_action(cx.listener(|this, _: &SheetConfirm, window, cx| this.activate_column_picker(window, cx)))
+                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                     let Some(picker) = &mut this.column_picker else { return };
+                    let modifiers = event.keystroke.modifiers;
                     match event.keystroke.key.as_str() {
-                        "up" => picker.cursor = picker.cursor.saturating_sub(1),
-                        "down" => picker.cursor = (picker.cursor + 1).min(limit),
-                        "space" => {
+                        "tab" if !modifiers.control && !modifiers.alt && !modifiers.platform => {
+                            let controls = [
+                                picker.focus.clone(),
+                                picker.buttons[0].clone(),
+                                picker.buttons[1].clone(),
+                                picker.buttons[2].clone(),
+                            ];
+                            chrome::cycle_focus(&controls, !modifiers.shift, window, cx);
+                        }
+                        "space" if !modifiers.modified() && !picker.focus.is_focused(window) => {
+                            this.activate_column_picker(window, cx);
+                        }
+                        "space" if !modifiers.modified() => {
                             if let Some(id) = &selected {
                                 toggle(&mut picker.columns, id);
                             }
+                        }
+                        "up" | "down" if !modifiers.modified() && picker.focus.is_focused(window) => {
+                            picker.cursor = if event.keystroke.key == "up" {
+                                picker.cursor.saturating_sub(1)
+                            } else {
+                                (picker.cursor + 1).min(limit)
+                            };
+                            picker.scroll.scroll_to_item(picker.cursor);
                         }
                         _ => return,
                     }
@@ -144,6 +192,7 @@ impl CrowWindow {
                         .aria_label("Available columns")
                         .max_h(px(218.))
                         .overflow_y_scroll()
+                        .track_scroll(&picker.scroll)
                         .children(options),
                 )
                 .child(
@@ -151,16 +200,16 @@ impl CrowWindow {
                         .flex()
                         .gap_2()
                         .child(
-                            button("columns-default", "Save as Default")
+                            button(0, "columns-default", "Save as Default")
                                 .on_click(cx.listener(|this, _, window, cx| this.save_columns(true, window, cx))),
                         )
                         .child(div().flex_1())
                         .child(
-                            button("columns-cancel", "Cancel")
+                            button(1, "columns-cancel", "Cancel")
                                 .on_click(cx.listener(|this, _, window, cx| this.close_column_picker(window, cx))),
                         )
                         .child(
-                            button("columns-done", "Done")
+                            button(2, "columns-done", "Done")
                                 .on_click(cx.listener(|this, _, window, cx| this.save_columns(false, window, cx))),
                         ),
                 ),

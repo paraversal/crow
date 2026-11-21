@@ -607,6 +607,39 @@ fn the_column_picker_toggles_list_columns_with_the_keyboard(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn column_picker_tabs_to_each_footer_action(cx: &mut TestAppContext) {
+    let root = fixture("chooser-footer");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    let open_picker = |cx: &mut VisualTestContext| {
+        view.update_in(cx, |this, window, cx| this.choose_list_columns(&crate::actions::ChooseListColumns, window, cx));
+        view.read_with(cx, |this, _| {
+            let picker = this.column_picker.as_ref().unwrap();
+            (picker.focus.clone(), picker.buttons.clone())
+        })
+    };
+
+    let (choices, buttons) = open_picker(&mut cx);
+    cx.simulate_keystrokes("shift-tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[2].clone()));
+    cx.simulate_keystrokes("tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(choices));
+    cx.simulate_keystrokes("down space tab tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[1].clone()));
+    cx.simulate_keystrokes("space");
+    assert!(view.read_with(&cx, |this, _| this.column_picker.is_none()));
+    let (_, buttons) = open_picker(&mut cx);
+    cx.simulate_keystrokes("down space");
+    let changed = view.read_with(&cx, |this, _| this.column_picker.as_ref().unwrap().columns_for_test().to_vec());
+    cx.simulate_keystrokes("tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[0].clone()));
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |this, _| this.column_picker.is_none()));
+    cx.update(|_, cx| assert_eq!(cx.global::<Ui>().views.resolve(Path::new("/another-folder")).columns.0, changed));
+}
+
+#[gpui::test]
 fn no_matches_show_the_folder_summary(cx: &mut TestAppContext) {
     let root = fixture("no-match-summary");
     let src = root.join("src");
@@ -1433,6 +1466,64 @@ fn sidebar_twin_in_home_shows_a_tilde(cx: &mut TestAppContext) {
     assert_eq!(looks[0].hint.as_deref(), Some("~"));
     assert_eq!(looks[1].hint.as_deref(), Some("other"));
     assert_eq!(looks[0].spoken, format!("git, in {}", root.file_name().unwrap().to_string_lossy()));
+}
+
+#[gpui::test]
+fn sidebar_click_shows_fill_before_window_confirms_navigation(cx: &mut TestAppContext) {
+    let root = fixture("pending-sidebar-click");
+    let (view, mut browser) = open(cx, &root.join("alpha"));
+    write_config(&view, &mut browser, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+
+    // Render the sidebar on its own so the click emits navigation but the
+    // browser cannot confirm it before we inspect the first frame.
+    let window = cx
+        .update(|cx| {
+            cx.open_window(WindowOptions::default(), |window, cx| {
+                cx.new(|cx| {
+                    let mut sidebar = Sidebar::new(cx);
+                    sidebar.set_current(root.join("alpha"), cx);
+                    window.focus(&sidebar.focus_handle(cx), cx);
+                    sidebar
+                })
+            })
+        })
+        .expect("sidebar window");
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    let sidebar = window.root(&mut cx).expect("sidebar");
+    cx.run_until_parked();
+    let beta = cx.debug_bounds("sidebar-2").expect("beta row");
+    cx.simulate_mouse_down(beta.center(), gpui::MouseButton::Left, Default::default());
+    cx.simulate_mouse_up(beta.center(), gpui::MouseButton::Left, Default::default());
+    cx.run_until_parked();
+    let looks = cx.update(|window, cx| sidebar.read(cx).looks_for_test(window, cx));
+    assert!(looks[2].current && !looks[1].current);
+    assert!(looks.iter().all(|look| !look.ring));
+
+    cx.simulate_keystrokes("up");
+    let looks = cx.update(|window, cx| sidebar.read(cx).looks_for_test(window, cx));
+    assert!(looks[1].ring, "up shows the keyboard cursor");
+}
+
+#[gpui::test]
+fn sidebar_failed_click_restores_fill_and_keeps_the_error(cx: &mut TestAppContext) {
+    let root = fixture("failed-sidebar-click");
+    let alpha = root.join("alpha");
+    let missing = root.join("missing");
+    let (view, mut cx) = open(cx, &alpha);
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha, &missing]));
+    let target = cx.debug_bounds("sidebar-2").expect("missing favorite");
+    cx.simulate_mouse_down(target.center(), gpui::MouseButton::Left, Default::default());
+    cx.simulate_mouse_up(target.center(), gpui::MouseButton::Left, Default::default());
+    settle(&view, &mut cx);
+
+    let listing = pane(&view, &cx).read_with(&cx, |p, _| p.focused_folder_for_test());
+    listing.read_with(&cx, |listing, _| {
+        assert_eq!(listing.dir(), missing);
+        assert!(listing.error().is_some());
+    });
+    let looks = row_looks(&view, &mut cx);
+    assert!(looks[0].current && !looks[1].current);
+    assert!(looks.iter().all(|look| !look.ring));
 }
 
 #[gpui::test]
@@ -3164,6 +3255,40 @@ fn gallery_stacks_a_pair_in_a_narrow_window(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("info-body").is_some());
     let alpha = cx.debug_bounds("gallery-cell-alpha").expect("first cell with Info open");
     assert!(alpha.size.width >= px(120.), "Info leaves room for the preview: {alpha:?}");
+}
+
+#[gpui::test]
+fn gallery_preserves_the_sidebar_edge_with_info_open(cx: &mut TestAppContext) {
+    let root = fixture("gallery-sidebar-edge");
+    for (width, preferred) in [(640., 210), (760., 350), (760., 470)] {
+        let (view, mut cx) = open_sized(cx, &root, width, 500.);
+        write_config(
+            &view,
+            &mut cx,
+            "settings.toml",
+            &format!("motion = \"off\"\n[window]\nsidebar_width = {preferred}\n"),
+        );
+        cx.simulate_keystrokes("cmd-i");
+        settle(&view, &mut cx);
+        let edge = cx.debug_bounds("toolbar").unwrap().left();
+        assert_eq!(edge, px(preferred as f32));
+        let search = cx.debug_bounds("toolbar-search").unwrap();
+        assert!(search.right() <= px(width), "Search fits in List: {search:?}");
+        let path_edge = cx.debug_bounds("path-bar").unwrap().left();
+        cx.simulate_keystrokes("cmd-4");
+        settle(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("toolbar").unwrap().left(), edge);
+        assert_eq!(cx.debug_bounds("path-bar").unwrap().left(), path_edge);
+        assert_eq!(cx.debug_bounds("toolbar-search"), Some(search), "Gallery keeps Search in the same place");
+        let rail = cx.debug_bounds("gallery-rail").unwrap();
+        let preview = cx.debug_bounds("gallery-preview").unwrap();
+        assert_eq!(rail.left(), edge);
+        assert!(rail.right() <= preview.left());
+        assert!(preview.right() <= cx.debug_bounds("info-body").unwrap().left());
+        cx.simulate_keystrokes("cmd-2");
+        settle(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("toolbar").unwrap().left(), edge);
+    }
 }
 
 #[gpui::test]
@@ -7505,16 +7630,35 @@ fn control_command_s_hides_and_shows_the_sidebar(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn why_sheet_keeps_focus_on_arrows_and_tab(cx: &mut TestAppContext) {
+fn why_sheet_scrolls_details_and_keeps_the_footer_reachable(cx: &mut TestAppContext) {
     let root = fixture("why-focus");
-    let (view, mut cx) = open(cx, &root);
+    let folder = root.join("a deep folder with a long name".repeat(5)).join("another long folder".repeat(8));
+    std::fs::create_dir_all(&folder).expect("create the deep fixture");
+    let (view, mut cx) = open_sized(cx, &folder, 760., 400.);
+    settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-j");
-    let focus = view.read_with(&cx, |w, _| w.why.clone()).expect("Why opens");
-    cx.simulate_keystrokes("right down tab");
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "the sheet stays open");
-    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(focus), "focus stays in the sheet");
+    let (details, buttons, scroll) = view.read_with(&cx, |w, _| {
+        let why = w.why.as_ref().expect("Why opens");
+        (why.focus.clone(), why.buttons.clone(), why.scroll.clone())
+    });
+    for selector in ["why-open-file", "why-defaults", "why-close"] {
+        let button = cx.debug_bounds(selector).expect("the footer button is drawn");
+        assert!(button.bottom() <= px(400.), "{selector} must fit: {button:?}");
+    }
+    let details_bottom = cx.debug_bounds("why-details").unwrap().bottom();
+    assert!(details_bottom < cx.debug_bounds("why-close").unwrap().top());
+    assert!(scroll.max_offset().y > px(0.), "the long details overflow");
+    cx.simulate_keystrokes("right down");
+    assert!(scroll.offset().y < px(0.), "the keyboard scrolls the details");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(details));
+    cx.simulate_keystrokes("tab tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[2].clone()));
+    cx.simulate_keystrokes("shift-tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[0].clone()));
     let found = violations(&view, &mut cx);
     assert!(found.is_empty(), "{found:?}");
+    cx.simulate_keystrokes("shift-tab shift-tab space");
+    assert!(view.read_with(&cx, |w, _| w.why.is_none()), "Space activates Close");
 }
 
 #[gpui::test]
@@ -7533,7 +7677,7 @@ fn a_pending_rename_does_not_take_focus_from_an_overlay(cx: &mut TestAppContext)
         folder.update(cx, |folder, cx| folder.reload(cx));
     });
     settle(&view, &mut cx);
-    let why = view.read_with(&cx, |w, _| w.why.clone()).expect("Why opens");
+    let why = view.read_with(&cx, |w, _| w.why.as_ref().map(|why| why.focus.clone())).expect("Why opens");
     cx.simulate_keystrokes("down");
     assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(why), "focus stays in the sheet");
     assert!(violations(&view, &mut cx).is_empty());
@@ -7662,6 +7806,29 @@ fn tabs_open_next_to_the_active_one_and_close(cx: &mut TestAppContext) {
 
     cx.simulate_keystrokes("cmd-w");
     assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 1);
+}
+
+#[gpui::test]
+fn same_named_tabs_announce_their_parent_paths(cx: &mut TestAppContext) {
+    let root = fixture("tab-parents");
+    let first = root.join("first/Shared");
+    let second = root.join("second/Shared");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let (view, mut cx) = open(cx, &first);
+    view.update_in(&mut cx, |this, window, cx| this.open_tab_at(second.clone(), window, cx));
+    settle(&view, &mut cx);
+
+    let elements = cx.update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec());
+    for (selector, path) in [("tab-0", &first), ("tab-1", &second)] {
+        let tab = elements.iter().find(|element| element.selector.as_deref() == Some(selector)).unwrap();
+        assert_eq!(tab.role, Some(Role::Tab));
+        let label = format!("Shared, in {}", path.parent().unwrap().display());
+        assert_eq!(tab.label.as_deref(), Some(label.as_str()));
+    }
+    let first_tab = cx.debug_bounds("tab-0").unwrap();
+    cx.simulate_click(first_tab.center(), Default::default());
+    assert_eq!(dir(&view, &cx), first);
 }
 
 #[gpui::test]
@@ -14914,6 +15081,7 @@ fn a_watcher_batch_prunes_only_the_paths_it_removed(cx: &mut TestAppContext) {
                 path: root.join(format!("file-{i:06}.txt")),
                 is_dir: false,
                 is_symlink: false,
+                icon_kind: crow_fs::IconKind::default(),
                 hidden: false,
                 dataless: false,
                 size: 0,
@@ -14964,6 +15132,7 @@ fn selection_totals_follow_every_selection_change(cx: &mut TestAppContext) {
         path: root.join(name),
         is_dir,
         is_symlink: false,
+        icon_kind: crow_fs::IconKind::default(),
         hidden: false,
         dataless: false,
         size,
@@ -15039,6 +15208,7 @@ fn a_removed_selected_row_does_not_keep_the_cursor(cx: &mut TestAppContext) {
         path: root.join(name),
         is_dir: false,
         is_symlink: false,
+        icon_kind: crow_fs::IconKind::default(),
         hidden: false,
         dataless: false,
         size: 1,
@@ -15082,6 +15252,7 @@ fn synthetic_folder(
             path: root.join(name),
             is_dir: false,
             is_symlink: false,
+            icon_kind: crow_fs::IconKind::default(),
             hidden: false,
             dataless: false,
             size: 1,
@@ -15404,6 +15575,7 @@ fn a_large_select_when_present_avoids_quadratic_apply(cx: &mut TestAppContext) {
                     name,
                     is_dir: false,
                     is_symlink: false,
+                    icon_kind: crow_fs::IconKind::default(),
                     hidden: false,
                     dataless: false,
                     size: 0,
