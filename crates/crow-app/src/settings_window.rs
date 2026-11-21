@@ -4744,8 +4744,18 @@ preview_providers = ["example.one.preview"]
         view.update(vcx, |view, cx| {
             view.set_theme_entries_for_tests(
                 vec![
-                    ThemeInfo { id: "dark-one".into(), name: "Dark One".into(), variant: Variant::Dark },
-                    ThemeInfo { id: "light-one".into(), name: "Light One".into(), variant: Variant::Light },
+                    ThemeInfo {
+                        id: "dark-one".into(),
+                        name: "Dark One".into(),
+                        variant: Variant::Dark,
+                        source: crow_theme::Source::Index,
+                    },
+                    ThemeInfo {
+                        id: "light-one".into(),
+                        name: "Light One".into(),
+                        variant: Variant::Light,
+                        source: crow_theme::Source::Index,
+                    },
                 ],
                 "system",
             );

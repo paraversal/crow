@@ -2573,6 +2573,10 @@ impl CrowWindow {
     /// "Apply to All Apps": the chosen theme becomes the global pick for its variant,
     /// and Crow follows "System" from then on.
     fn apply_everywhere(&mut self, _: &ApplyThemeEverywhere, window: &mut Window, cx: &mut Context<Self>) {
+        // Without a theme index no other app reads the choice, so there is nothing to apply to.
+        if !self.picker.as_ref().is_some_and(|picker| picker.choice.index) {
+            return;
+        }
         let Some(picker) = self.picker.take() else { return };
         let dir = cx.global::<Ui>().themes_dir.clone();
         match picker.choice.entries.get(picker.choice.cursor) {
@@ -3044,11 +3048,19 @@ impl CrowWindow {
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
         let count = picker.choice.entries.len();
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
-        let mut last_variant = None;
+        let mut last_group = None;
         for (i, entry) in picker.choice.entries.iter().enumerate() {
-            let variant = entry.as_ref().map(|e| e.variant);
-            if variant.is_some() && variant != last_variant {
-                let title = if variant == Some(crow_theme::Variant::Light) { "Light" } else { "Dark" };
+            let group = entry.as_ref().map(|e| (e.source, e.variant));
+            if let Some((source, variant)) = group
+                && group != last_group
+            {
+                let kind = if variant == crow_theme::Variant::Light { "Light" } else { "Dark" };
+                // The source is named only when there are two: with no index, "Dark" and "Light" say it all.
+                let title = if source == crow_theme::Source::Index && picker.choice.index {
+                    format!("Theme index · {kind}")
+                } else {
+                    kind.to_owned()
+                };
                 rows.push(
                     div()
                         .px_2()
@@ -3059,7 +3071,7 @@ impl CrowWindow {
                         .child(title)
                         .into_any_element(),
                 );
-                last_variant = variant;
+                last_group = group;
             }
             let label = picker.choice.label(i);
             let selected = i == picker.choice.cursor;
@@ -3100,12 +3112,14 @@ impl CrowWindow {
         };
         let keep = keys::text(&crate::actions::SheetConfirm, KeyScope::ThemePicker, cx);
         let everywhere = keys::text(&ApplyThemeEverywhere, KeyScope::ThemePicker, cx);
-        let hint = match (keep, everywhere) {
-            (Some(keep), Some(everywhere)) => format!(
+        let hint = match (keep, everywhere, picker.choice.index) {
+            (Some(keep), Some(everywhere), true) => format!(
                 "{keep} keeps it for Crow. Apply to All Apps ({everywhere}) sets it for every app that reads the theme index."
             ),
-            _ => "Apply to All Apps sets it for every app that reads the theme index.".to_owned(),
+            (_, _, true) => "Apply to All Apps sets it for every app that reads the theme index.".to_owned(),
+            (..) => String::new(),
         };
+        let index = picker.choice.index;
         Some(chrome::sheet(
             chrome::sheet_panel("theme-picker", SheetWidth::Compact, &theme)
                 .aria_label("Theme")
@@ -3138,14 +3152,20 @@ impl CrowWindow {
                         .gap(px(1.))
                         .children(rows),
                 )
-                .child(div().text_size(px(12.)).text_color(color(muted)).child(hint))
+                .when(index, |panel| panel.child(div().text_size(px(12.)).text_color(color(muted)).child(hint)))
                 .child(
                     div()
                         .flex()
                         .gap_2()
-                        .child(button("theme-everywhere", "Apply to All Apps", false).on_click(
-                            cx.listener(|this, _, window, cx| this.apply_everywhere(&ApplyThemeEverywhere, window, cx)),
-                        ))
+                        .when(index, |row| {
+                            row.child(
+                                button("theme-everywhere", "Apply to All Apps", false)
+                                    .debug_selector(|| "theme-everywhere".into())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.apply_everywhere(&ApplyThemeEverywhere, window, cx)
+                                    })),
+                            )
+                        })
                         .child(div().flex_1())
                         .child(
                             button("theme-cancel", "Cancel", false)

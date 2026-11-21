@@ -1,8 +1,8 @@
 //! The theme list shared by the ⌥⌘T picker and the settings window: "System"
-//! first, then the index's themes dark before light. Moving the cursor previews
+//! first, then the built-ins, then the index's themes, each group dark before light. Moving the cursor previews
 //! a theme in every window; the caller decides when to keep it.
 
-use crow_theme::{ThemeInfo, Variant};
+use crow_theme::{Source, ThemeInfo, Variant};
 use gpui::{App, AppContext, Task};
 
 use crate::ui::{self, Ui};
@@ -11,17 +11,22 @@ pub struct ThemeChoice {
     /// `None` is "System".
     pub entries: Vec<Option<ThemeInfo>>,
     pub cursor: usize,
+    /// Whether the theme index has any theme: only then does "Apply to All Apps" mean anything.
+    pub index: bool,
 }
 
 impl ThemeChoice {
     pub fn new(infos: Vec<ThemeInfo>, current: &str) -> Self {
         let mut infos = infos;
-        // Grouped like the theme index's own split: dark themes, then light.
-        infos.sort_by_key(|info| (info.variant == Variant::Light, info.name.to_lowercase()));
+        let index = infos.iter().any(|info| info.source == Source::Index);
+        // Built-ins first, then the index; dark themes before light in each.
+        infos.sort_by_key(|info| {
+            (info.source == Source::Index, info.variant == Variant::Light, info.name.to_lowercase())
+        });
         let mut entries: Vec<Option<ThemeInfo>> = vec![None];
         entries.extend(infos.into_iter().map(Some));
         let cursor = entries.iter().position(|entry| entry_id(entry) == current).unwrap_or(0);
-        Self { entries, cursor }
+        Self { entries, cursor, index }
     }
 
     pub fn id(&self, index: usize) -> String {

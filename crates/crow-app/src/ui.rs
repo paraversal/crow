@@ -120,6 +120,10 @@ pub struct Ui {
     pub volumes_refresh: u64,
     pub themes_dir: PathBuf,
     pub themes_state_dir: PathBuf,
+    /// The saved theme id last reported as missing, so the notice shows once.
+    pub missing_theme_notice: Option<String>,
+    /// The last theme load error shown, so it isn't repeated on every reload.
+    pub theme_error: Option<String>,
     pub config_dir: PathBuf,
     config_writes: [Option<ConfigWrite>; SAVED_QUERIES + 1],
     config_write_revision: [u64; SAVED_QUERIES + 1],
@@ -224,6 +228,8 @@ impl Ui {
             volumes_refresh: 0,
             themes_dir: crow_theme::themes_dir(),
             themes_state_dir: crow_theme::state_dir(),
+            missing_theme_notice: None,
+            theme_error: None,
             config_dir,
             config_writes: Default::default(),
             config_write_revision: Default::default(),
@@ -404,7 +410,9 @@ struct Watchers {
     config_rx: Receiver<()>,
     icon_rx: Receiver<()>,
     mounts_rx: Receiver<()>,
-    _theme: Option<RecommendedWatcher>,
+    _theme: Option<crow_theme::ThemeWatcher>,
+    colors_rx: Receiver<()>,
+    _colors: Option<crow_macos::SystemColorWatcher>,
     _config: Option<RecommendedWatcher>,
     _icon: Option<RecommendedWatcher>,
     _mounts: Option<crow_macos::MountWatcher>,
@@ -430,7 +438,8 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     // io-ok: startup: the pack folder must exist before it is watched
     std::fs::create_dir_all(&icon_packs_dir).ok();
     let mut ui = Ui::new(config_dir.clone(), state_dir, home, crow_theme::fallback(), true);
-    let theme = crow_theme::current(ui.settings.theme_id(), variant_of(cx.window_appearance()));
+    let theme =
+        crow_theme::current(ui.settings.theme_id(), variant_of(cx.window_appearance())).resolve_system(&system_color);
     tracing::info!(theme = %theme.name, "starting");
     ui.target = theme.clone();
     ui.theme = theme;
@@ -454,6 +463,8 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     feedback::preload(feedback.sound, cx);
     // After the first frame: decoding the icon is not worth delaying first paint for.
     cx.defer(refresh_app_icon);
+    // A saved theme that no longer exists is said once, which needs the message list.
+    cx.defer(reload_theme);
     crate::usage::init(cx);
     crate::tips::init(cx);
     crate::onboarding::init(cx);
@@ -483,7 +494,13 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     let mounts = crow_macos::watch_mounts(move || {
         mounts_tx.send(()).ok();
     });
+    let (colors_tx, colors_rx) = mpsc::channel();
+    let colors = crow_macos::watch_system_colors(move || {
+        colors_tx.send(()).ok();
+    });
     cx.set_global(Watchers {
+        colors_rx,
+        _colors: colors,
         theme_rx,
         config_rx,
         icon_rx,
@@ -557,9 +574,13 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     std::fs::create_dir_all(&state_dir).ok();
     // io-ok: test-only state
     std::fs::write(state_dir.join(crow_core::ONBOARDING_FILE), "{\"tips_choice\": true}\n").ok();
-    cx.default_global::<TestRoots>().0.push(root);
-    let ui = Ui::new(config_dir.clone(), state_dir, crow_core::home(), crow_theme::fallback(), false);
+    // No theme index unless a test installs one: never the developer's own `~/.config/themes`.
+    let (themes_dir, themes_state_dir) = (root.path().join("no-themes"), root.path().join("no-themes-state"));
+    let mut ui = Ui::new(config_dir.clone(), state_dir, crow_core::home(), crow_theme::fallback(), false);
+    ui.themes_dir = themes_dir;
+    ui.themes_state_dir = themes_state_dir;
     cx.set_global(ui);
+    cx.default_global::<TestRoots>().0.push(root);
     crate::extensions::init(cx);
     crate::icon_packs::install(cx);
     crate::cloud_status::init_for_tests(cx);
@@ -579,7 +600,9 @@ fn poll(cx: &mut App) {
     let watchers = cx.global::<Watchers>();
     let config_changed = watchers.config_rx.try_iter().count() > 0;
     let icon_packs_changed = watchers.icon_rx.try_iter().count() > 0;
-    let theme_changed = watchers.theme_rx.try_iter().count() > 0;
+    let index_changed = watchers.theme_rx.try_iter().count() > 0;
+    let colors_changed = watchers.colors_rx.try_iter().count() > 0;
+    let theme_changed = index_changed || colors_changed;
     let mounts_changed = watchers.mounts_rx.try_iter().count() > 0;
     if config_changed {
         reload_config(cx);
@@ -592,6 +615,10 @@ fn poll(cx: &mut App) {
     // Reduce Motion and the UI-sounds switch can change without a config edit.
     refresh_feedback(cx);
     refresh_clipboard(cx);
+    if index_changed && let Some(watcher) = cx.global_mut::<Watchers>()._theme.as_mut() {
+        // The index may have appeared or vanished: watch where it is now.
+        watcher.refresh();
+    }
     if config_changed || theme_changed {
         reload_theme(cx);
     }
@@ -939,12 +966,49 @@ pub fn reload_theme(cx: &mut App) {
         Some(id) => Some(id.clone()),
         None => ui.settings.theme_id().map(str::to_owned),
     };
-    let loaded = crow_theme::resolve_theme_id(saved.as_deref(), variant, &dir, &state)
-        .ok_or_else(|| "no themes in the index".to_owned())
-        .and_then(|id| crow_theme::load_theme(&dir, &id));
-    match loaded {
-        Ok(theme) => set_theme(theme, cx),
-        Err(e) => tracing::warn!("theme reload skipped: {e}"),
+    let id = crow_theme::resolve_theme_id(saved.as_deref(), variant, &dir, &state);
+    let missing = crow_theme::missing_saved(saved.as_deref(), &dir).map(str::to_owned);
+    match crow_theme::load_theme(&dir, &id) {
+        Ok(theme) => {
+            let theme = theme.resolve_system(&system_color);
+            // Said once per missing id, not on every reload.
+            cx.global_mut::<Ui>().theme_error = None;
+            if cx.global::<Ui>().missing_theme_notice != missing && cx.has_global::<crate::operations::Operations>() {
+                cx.global_mut::<Ui>().missing_theme_notice = missing.clone();
+                if let Some(missing) = missing {
+                    crate::operations::message(format!("Theme ‘{missing}’ not found; using {}", theme.name), false, cx);
+                }
+            }
+            set_theme(theme, cx);
+        }
+        Err(e) => {
+            tracing::warn!("theme reload skipped: {e}");
+            // The last good theme stays; the file and line are said once per distinct error.
+            if cx.global::<Ui>().theme_error.as_deref() != Some(e.as_str())
+                && cx.has_global::<crate::operations::Operations>()
+            {
+                cx.global_mut::<Ui>().theme_error = Some(e.clone());
+                crate::operations::message(e, true, cx);
+            }
+        }
+    }
+}
+
+/// A system colour for a theme's `system:*` role (Finder follows the accent colour).
+fn system_color(reference: &str) -> Option<crow_theme::Rgb> {
+    #[cfg(test)]
+    {
+        let _ = reference;
+        None
+    }
+    #[cfg(not(test))]
+    {
+        let rgb = match reference {
+            "system:accent" => crow_macos::accent_color(),
+            "system:selection" => crow_macos::unfocused_selection_color(),
+            _ => None,
+        };
+        rgb.map(crow_theme::Rgb)
     }
 }
 

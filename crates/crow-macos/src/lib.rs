@@ -16,6 +16,7 @@ mod names;
 mod quick_look;
 mod sound;
 mod spotlight;
+mod system_colors;
 mod volumes;
 
 pub use cloud::{SystemReadGate, status as cloud_status, status_batch as cloud_status_batch};
@@ -30,6 +31,7 @@ pub use names::{display_component_paths, display_components, display_name_at};
 pub use quick_look::{QuickLookKey, set_quick_look_key_handler, toggle_quick_look, update_quick_look};
 pub use sound::{Sound, beep, play, preload, set_volume, stop, ui_sounds_enabled};
 pub use spotlight::{SpotlightHit, SpotlightPredicate, spotlight_expression, spotlight_names};
+pub use system_colors::{SystemColorWatcher, accent_color, unfocused_selection_color, watch_system_colors};
 pub use volumes::{MountWatcher, Volume, eject, reduce_motion, volumes, watch_mounts};
 
 use objc2::MainThreadMarker;
