@@ -1375,15 +1375,6 @@ impl CrowWindow {
         let theme = cx.global::<Ui>().theme.clone();
         let active = self.tabs.active_index();
         let count = self.tabs.len();
-        let tabs: Vec<(usize, String)> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(i, (_, pane))| {
-                let location = pane.read(cx).location().clone();
-                (i, self.location_name(&location, cx))
-            })
-            .collect();
         let mode = cx.global::<Ui>().feedback.mode;
         let now = std::time::Instant::now();
         let progress = |motion: &TabMotion| {
@@ -1411,49 +1402,51 @@ impl CrowWindow {
                     el.left(gpui::relative(x))
                 })
         });
-        let tab_bar_item = |i: usize, name: String, selected: bool, grow: f32, fade: f32, live: bool| {
-            let tab = div()
-                .id(("tab", i))
-                .debug_selector(move || if live { format!("tab-{i}") } else { "tab-ghost".into() })
-                .role(Role::Tab)
-                .aria_label(name.clone())
-                .aria_selected(selected)
-                .aria_position_in_set(i + 1)
-                .aria_size_of_set(count)
-                .flex_1()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(12.))
-                .border_r_1()
-                .border_color(crate::style::hairline(&theme))
-                .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
-                .when(selected && !glide, |tab| tab.bg(color(theme.role("bg"))));
-            let mut tab = tab.when(fade < 1.0, |tab| tab.opacity(fade));
-            if grow != 1.0 {
-                tab.style().flex_grow = Some(grow);
-            }
-            tab.when(live, |tab| {
-                tab.on_click(cx.listener(move |this, _, window, cx| {
-                    if i == this.tabs.active_index() {
-                        return;
-                    }
-                    if this.search.is_some() {
-                        this.close_search(window, cx);
-                    }
-                    this.close_tip(cx);
-                    this.tabs.activate(i);
-                    this.sync_tab_activity(cx);
-                    this.announce_active_scope(cx);
-                    this.focus_center(window, cx);
-                    cx.notify();
-                }))
-            })
-            .child(name)
-            .into_any_element()
-        };
+        let tab_bar_item =
+            |i: usize, name: String, parent: Option<String>, selected: bool, grow: f32, fade: f32, live: bool| {
+                let label = parent.map_or_else(|| name.clone(), |parent| format!("{name}, in {parent}"));
+                let tab = div()
+                    .id(("tab", i))
+                    .debug_selector(move || if live { format!("tab-{i}") } else { "tab-ghost".into() })
+                    .role(Role::Tab)
+                    .aria_label(label.clone())
+                    .aria_selected(selected)
+                    .aria_position_in_set(i + 1)
+                    .aria_size_of_set(count)
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.))
+                    .border_r_1()
+                    .border_color(crate::style::hairline(&theme))
+                    .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
+                    .when(selected && !glide, |tab| tab.bg(color(theme.role("bg"))));
+                let mut tab = tab.when(fade < 1.0, |tab| tab.opacity(fade));
+                if grow != 1.0 {
+                    tab.style().flex_grow = Some(grow);
+                }
+                tab.when(live, |tab| {
+                    chrome::with_tooltip(tab, label, None).on_click(cx.listener(move |this, _, window, cx| {
+                        if i == this.tabs.active_index() {
+                            return;
+                        }
+                        if this.search.is_some() {
+                            this.close_search(window, cx);
+                        }
+                        this.close_tip(cx);
+                        this.tabs.activate(i);
+                        this.sync_tab_activity(cx);
+                        this.announce_active_scope(cx);
+                        this.focus_center(window, cx);
+                        cx.notify();
+                    }))
+                })
+                .child(name)
+                .into_any_element()
+            };
         let mut items: Vec<gpui::AnyElement> = Vec::new();
         let mut ghosts: Vec<&TabMotion> = self
             .tab_motions
@@ -1463,12 +1456,18 @@ impl CrowWindow {
             })
             .collect();
         ghosts.sort_by_key(|motion| motion.index);
-        for (ix, (id, name)) in
-            self.tabs.iter().zip(tabs.iter().map(|(_, name)| name)).map(|((id, _), n)| (id, n)).enumerate()
-        {
+        for (ix, (id, pane)) in self.tabs.iter().enumerate() {
+            let location = pane.read(cx).location();
+            let name = self.location_name(location, cx);
+            let parent = match location {
+                Location::Folder(path) => {
+                    path.parent().map(|parent| crate::style::display_path(parent, &cx.global::<Ui>().home))
+                }
+                _ => None,
+            };
             while let Some(ghost) = ghosts.first().filter(|ghost| ghost.index <= ix) {
                 let left = 1.0 - progress(ghost).unwrap_or(1.0);
-                items.push(tab_bar_item(usize::MAX - ghost.index, ghost.name.clone(), false, left, left, false));
+                items.push(tab_bar_item(usize::MAX - ghost.index, ghost.name.clone(), None, false, left, left, false));
                 ghosts.remove(0);
             }
             let opening = self.tab_motions.iter().find(|motion| motion.id == id && motion.opening);
@@ -1477,11 +1476,11 @@ impl CrowWindow {
                 Some(t) => (1.0, t),
                 None => (1.0, 1.0),
             };
-            items.push(tab_bar_item(ix, name.clone(), ix == active, grow, fade, true));
+            items.push(tab_bar_item(ix, name, parent, ix == active, grow, fade, true));
         }
         for ghost in ghosts {
             let left = 1.0 - progress(ghost).unwrap_or(1.0);
-            items.push(tab_bar_item(usize::MAX - ghost.index, ghost.name.clone(), false, left, left, false));
+            items.push(tab_bar_item(usize::MAX - ghost.index, ghost.name.clone(), None, false, left, left, false));
         }
         div()
             .id("tabs")

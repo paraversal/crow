@@ -7806,6 +7806,29 @@ fn tabs_open_next_to_the_active_one_and_close(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn same_named_tabs_announce_their_parent_paths(cx: &mut TestAppContext) {
+    let root = fixture("tab-parents");
+    let first = root.join("first/Shared");
+    let second = root.join("second/Shared");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let (view, mut cx) = open(cx, &first);
+    view.update_in(&mut cx, |this, window, cx| this.open_tab_at(second.clone(), window, cx));
+    settle(&view, &mut cx);
+
+    let elements = cx.update(|window, _| window.debug_interactive_elements().expect("recorded").to_vec());
+    for (selector, path) in [("tab-0", &first), ("tab-1", &second)] {
+        let tab = elements.iter().find(|element| element.selector.as_deref() == Some(selector)).unwrap();
+        assert_eq!(tab.role, Some(Role::Tab));
+        let label = format!("Shared, in {}", path.parent().unwrap().display());
+        assert_eq!(tab.label.as_deref(), Some(label.as_str()));
+    }
+    let first_tab = cx.debug_bounds("tab-0").unwrap();
+    cx.simulate_click(first_tab.center(), Default::default());
+    assert_eq!(dir(&view, &cx), first);
+}
+
+#[gpui::test]
 fn closing_the_last_window_leaves_the_app_running(app: &mut TestAppContext) {
     let root = fixture("close-resident");
     let (_view, mut cx) = open(app, &root);
