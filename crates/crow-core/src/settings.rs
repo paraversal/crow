@@ -51,12 +51,6 @@ motion = "auto"
 # interface sound effects" off silences all but the alert.
 sound = "crow"
 
-# The Dock icon: "refined" (default; black crow on bone), "sun" (crow before an
-# amber disc), "graphite" (folded grey planes) or "bone" (folded black planes on
-# bone). It changes the Dock while Crow runs; scripts/bundle.sh bakes this choice
-# into Crow.app, so Finder and Launchpad show it after the next bundle.
-app_icon = "refined"
-
 # Icons in the file list, sidebar, palette and previews: "native" (default) uses
 # macOS icons. Set a pack id to use a data-only pack from icon-packs/<id>/ or a
 # plugin pack named <plugin-id>.<pack-id>. views.toml can override this per folder.
@@ -249,29 +243,6 @@ impl FolderSizesMode {
     }
 }
 
-/// Which of Crow's icons the Dock shows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AppIcon {
-    #[default]
-    Refined,
-    Sun,
-    Graphite,
-    Bone,
-}
-
-impl AppIcon {
-    /// The name in `settings.toml`, which is also the asset's file stem.
-    pub fn key(self) -> &'static str {
-        match self {
-            AppIcon::Refined => "refined",
-            AppIcon::Sun => "sun",
-            AppIcon::Graphite => "graphite",
-            AppIcon::Bone => "bone",
-        }
-    }
-}
-
 /// How the bottom bar shows its path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -328,7 +299,6 @@ pub struct Settings {
     pub folder_sizes: FolderSizesMode,
     pub motion: MotionMode,
     pub sound: SoundSet,
-    pub app_icon: AppIcon,
     #[serde(default = "native_icon_pack", deserialize_with = "icon_pack_value")]
     pub icon_pack: String,
     pub path_bar: PathBarMode,
@@ -356,7 +326,6 @@ impl Default for Settings {
             folder_sizes: FolderSizesMode::Off,
             motion: MotionMode::Auto,
             sound: SoundSet::Crow,
-            app_icon: AppIcon::Refined,
             icon_pack: native_icon_pack(),
             path_bar: PathBarMode::Crow,
             translucent_sidebar: false,
@@ -680,16 +649,6 @@ mod tests {
         let err = load_settings(&dir).expect_err("rejects an unknown mode").to_string();
         assert!(err.contains("settings.toml"), "{err}");
         assert!(err.contains("line 1"), "{err}");
-    }
-
-    #[test]
-    fn app_icon_values_parse() {
-        let parse = |text: &str| toml::from_str::<Settings>(text).expect("parses");
-        for icon in [AppIcon::Refined, AppIcon::Sun, AppIcon::Graphite, AppIcon::Bone] {
-            assert_eq!(parse(&format!("app_icon = \"{}\"", icon.key())).app_icon, icon);
-        }
-        assert_eq!(parse("theme = \"system\"").app_icon, AppIcon::Refined, "a missing line is Refined");
-        assert!(toml::from_str::<Settings>("app_icon = \"moon\"").is_err());
     }
 
     #[test]

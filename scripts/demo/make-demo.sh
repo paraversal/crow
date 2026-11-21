@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build target/demo/home: a small, believable home folder for screenshots and clips.
 # Nothing in it comes from this Mac: notes and Git history are generated, pictures are
-# CC0 photos from Wikimedia Commons (photos.tsv),
+# public-domain photos from pxhere (photos.tsv),
 # names are made up, and every file gets a fixed date so shots can be retaken.
 #
 #   scripts/demo/make-demo.sh [out-dir]     # default target/demo/home, rebuilt from scratch
@@ -69,23 +69,24 @@ cupsfilter -m application/pdf "/tmp/crow-demo-$$.txt" >Documents/Lease.pdf 2>/de
 rm -f "/tmp/crow-demo-$$.txt"
 
 # --- Pictures --------------------------------------------------------------
-# Real photos, all CC0 from Wikimedia Commons (photos.tsv lists author and source).
-# They are downloaded once into target/demo/photos and copied from there.
+# Real mountain photos, all public domain (CC0) from pxhere (photos.tsv lists the source).
+# They are downloaded once into target/demo/photos, scaled to 1920 px, and copied from there.
 photos=$root/target/demo/photos
 mkdir -p "$photos"
 grep -v '^#' "$root/scripts/demo/photos.tsv" | while IFS=$'\t' read -r rel _ lic _ url; do
   [ "$lic" = CC0 ] || { echo "make-demo: $rel is not CC0" >&2; exit 1; }
   cached="$photos/$(basename "$rel")"
   if [ ! -s "$cached" ]; then
-    curl -fsSL -A "crow-demo-builder/0.1" -o "$cached.part" "$url" && mv "$cached.part" "$cached"
-    sleep 1 # Commons rate-limits bursts
+    curl -fsSL -A "crow-demo-builder/0.1" -o "$cached.part" "$url"
+    sips -Z 1920 "$cached.part" --out "$cached" >/dev/null && rm "$cached.part"
+    sleep 1 # be gentle with the host
   fi
   mkdir -p "Pictures/$(dirname "$rel")"
   cp "$cached" "Pictures/$rel"
 done
 mkdir -p Pictures/Screenshots
-cp "Pictures/Wallpapers/Lagoon.jpg" "Pictures/Screenshots/Screenshot 2026-11-12 at 09.14.02.jpg"
-cp "Pictures/Trips/Karystos.jpg" "Pictures/Screenshots/Screenshot 2026-11-13 at 17.40.51.jpg"
+cp "Pictures/Wallpapers/Blue sky.jpg" "Pictures/Screenshots/Screenshot 2026-11-12 at 09.14.02.jpg"
+cp "Pictures/Trips/Lake shore.jpg" "Pictures/Screenshots/Screenshot 2026-11-13 at 17.40.51.jpg"
 
 # --- Downloads -------------------------------------------------------------
 mkdir -p Downloads
@@ -99,10 +100,10 @@ chmod +x Downloads/install
 
 # --- Desktop, Music, Movies -----------------------------------------------
 mkdir -p Desktop Music Movies
-cp "Pictures/Wallpapers/Mountain lake.jpg" "Desktop/Wallpaper.jpg"
+cp "Pictures/Wallpapers/Turquoise lake.jpg" "Desktop/Wallpaper.jpg"
 printf 'Call the landlord\n' >Desktop/todo.txt
 ln -s ../Documents/Notes Desktop/Notes
-cp "Pictures/Trips/Parasols.jpg" "Desktop/Screenshot 2026-11-14 at 10.02.11.jpg"
+cp "Pictures/Trips/Meadow.jpg" "Desktop/Screenshot 2026-11-14 at 10.02.11.jpg"
 printf 'Dentist Tue 9:30\nReturn library books\n' >Desktop/reminders.txt
 
 # --- More of everything: a home that has been lived in ---------------------
@@ -129,8 +130,8 @@ printf 'Warranty: dishwasher, until 2028\n' >Documents/Warranty.txt
 
 pdf Downloads/Train\ tickets.pdf "Train tickets"
 pdf Downloads/manual-espresso-machine.pdf "Espresso machine manual"
-cp "Pictures/Klingenmünster.jpg" Downloads/IMG_4021.jpg
-cp "Pictures/Trips/Herekino harbour.jpg" Downloads/IMG_4022.jpg
+cp "Pictures/Golden forest.jpg" Downloads/IMG_4021.jpg
+cp "Pictures/Trips/Larches.jpg" Downloads/IMG_4022.jpg
 printf '{ "theme": "finder-dark" }\n' >Downloads/settings-backup.json
 printf 'BEGIN:VCALENDAR\nEND:VCALENDAR\n' >Downloads/invite.ics
 (cd Documents && zip -qr ../Downloads/notes-backup.zip Notes)
@@ -258,8 +259,8 @@ tag() { # tag <file> <name>\n<color> ...
 }
 tag "Documents/Taxes 2025" $'Important\n2'
 tag Documents/Notes/Ideas.md $'Home\n4'
-tag "Pictures/Trips/Great Sand Dunes.jpg" $'Travel\n6'
-tag "Pictures/Trips/Fjord road.jpg" $'Travel\n6'
+tag "Pictures/Trips/Jagged peaks.jpg" $'Travel\n6'
+tag "Pictures/Trips/Lake at dusk.jpg" $'Travel\n6'
 
 # --- Fixed dates -----------------------------------------------------------
 # Spread over a few days so the Date column reads like a real folder; Git's own files keep theirs.

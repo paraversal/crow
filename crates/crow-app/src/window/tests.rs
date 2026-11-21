@@ -1037,25 +1037,6 @@ fn write_config(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, name: &st
 }
 
 #[gpui::test]
-fn app_icon_setting_switches_the_dock_icon_live(cx: &mut TestAppContext) {
-    use crow_core::AppIcon;
-    let root = fixture("app-icon");
-    let (view, mut cx) = open(cx, &root);
-    let applied = |cx: &mut VisualTestContext| cx.update(|_, cx| cx.global::<Ui>().applied_icon);
-    write_config(&view, &mut cx, "settings.toml", "app_icon = \"sun\"\n");
-    assert_eq!(applied(&mut cx), Some(AppIcon::Sun));
-    let calls = effect_calls(&mut cx);
-    assert!(calls.contains(&crate::effects::Call::AppIcon(crate::ui::app_icon_png(AppIcon::Sun).len())), "{calls:?}");
-    write_config(&view, &mut cx, "settings.toml", "app_icon = \"moon\"\n");
-    assert_eq!(applied(&mut cx), Some(AppIcon::Sun), "a bad value keeps the last good icon");
-    write_config(&view, &mut cx, "settings.toml", "theme = \"system\"\n");
-    assert_eq!(applied(&mut cx), Some(AppIcon::Refined), "deleting the line goes back to the default");
-    for icon in [AppIcon::Refined, AppIcon::Sun, AppIcon::Graphite, AppIcon::Bone] {
-        assert!(crate::ui::app_icon_png(icon).starts_with(b"\x89PNG"), "{icon:?} is an embedded PNG");
-    }
-}
-
-#[gpui::test]
 fn icon_packs_follow_settings_and_view_layers_without_re_reading(cx: &mut TestAppContext) {
     const GLYPH: &str =
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/></svg>"#;

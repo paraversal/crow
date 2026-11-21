@@ -41,4 +41,4 @@ folders, keyboard-first, and themeable. Free software under the GPL-3.0-or-later
 - No AirDrop and no iCloud Drive sharing.
 - The Intel half of the universal build is compiled but has not been run on an Intel Mac.
 
-[0.1.0]: https://github.com/paraversal/file-crow/releases/tag/v0.1.0
+[0.1.0]: https://github.com/paraversal/crow/releases/tag/v0.1.0

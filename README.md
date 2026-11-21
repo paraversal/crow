@@ -9,7 +9,7 @@
 
 Crow is a file explorer for macOS that keeps what Finder gets right and fixes the parts that get in the way.
 It’s built in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), the GPU-accelerated UI framework behind the Zed editor.
-[Download](https://github.com/paraversal/file-crow/releases/latest) · [Install guide](docs/install.md) · [Website](https://paraversal.github.io/file-crow/)
+[Download](https://github.com/paraversal/crow/releases/latest) · [Install guide](docs/install.md) · [Website](https://paraversal.github.io/crow/)
 
 ## Why Crow
 
@@ -47,8 +47,9 @@ cargo run --release -p crow-app  # opens your home folder
 
 Running as `Crow.app` makes macOS privacy prompts name Crow instead of your terminal. With a code-signing certificate named
 "Crow Dev" in your keychain (see `scripts/bundle.sh`), macOS keeps those permissions from one build to the next.
-The app icon's sources are SVGs in `crates/crow-app/assets/app-icon`; after editing one, run
-`swift scripts/render-app-icons.swift` to redraw the PNGs the app and bundle use.
+The app icon is one square PNG, `assets/app-icon.png` (1024 px). Replace it and the next build
+uses it everywhere: the Dock, the bundle (`bundle.sh`) and the website (`scripts/site.sh`, which
+GitHub Pages runs).
 
 ## Command line
 
@@ -89,7 +90,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), folder sizes (`folder_sizes`: `"off"` or `"visible"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), the icon source (`icon_pack`: `"native"` or a pack id), the bottom bar's path (`path_bar`: `"crow"` for the breadcrumb or `"explorer"` for a visible field), font, a translucent sidebar (`translucent_sidebar`, default off; it stays solid while macOS Reduce Transparency is on), the terminal app Open Terminal Here uses (`terminal`: a name like `"Terminal"` or `"iTerm"`, or a path to an app), hidden files (shown by default), whether search still matches hidden items while they are hidden (`search_includes_hidden`, default on), the mode new searches start in (`search_match`: `"all"`, `"names"` or `"contents"`), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for the preferences it lists; the file stays authoritative and the window follows edits made in a text editor |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), folder sizes (`folder_sizes`: `"off"` or `"visible"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the icon source (`icon_pack`: `"native"` or a pack id), the bottom bar's path (`path_bar`: `"crow"` for the breadcrumb or `"explorer"` for a visible field), font, a translucent sidebar (`translucent_sidebar`, default off; it stays solid while macOS Reduce Transparency is on), the terminal app Open Terminal Here uses (`terminal`: a name like `"Terminal"` or `"iTerm"`, or a path to an app), hidden files (shown by default), whether search still matches hidden items while they are hidden (`search_includes_hidden`, default on), the mode new searches start in (`search_match`: `"all"`, `"names"` or `"contents"`), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for the preferences it lists; the file stays authoritative and the window follows edits made in a text editor |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Also chooses the icons/list/columns/gallery view, the icon size preset and optional icon caption, list columns and plugin preview providers. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (a group takes an optional `icon`, a short text or emoji shown before its title, like a favorite's own `icon`; none by default, and `[section.<id>]` takes the same `icon` for the built-in and plugin sections. Favorites take optional `name`, `icon`, `color` and Vim mark `key`), whether Recent and Locations show, `pinned_tags` for Finder tags that should appear even when Spotlight has not indexed a use for them, the order/visibility/collapse state of built-in (`tags`, `saved-queries`, `recent`, `locations`) and plugin sections, and `[projects] roots`, the folders the Projects section scans for Git repositories |
 | `plugins.toml` | One approval record per plugin, including the bundled Git package: `enabled`, package `digest` and the API-1 `fs` capability. Installed bundles live in `plugins/`; see [docs/plugins.md](docs/plugins.md). |

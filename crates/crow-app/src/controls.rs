@@ -10,8 +10,8 @@ use std::cell::RefCell;
 use crow_core::motion::Effective;
 use crow_theme::Theme;
 use gpui::{
-    AnimationExt as _, App, Bounds, Div, Entity, FocusHandle, FontWeight, Image, IntoElement, Role, ScrollHandle,
-    SharedString, Toggled, Window, anchored, deferred, div, img, prelude::*, px,
+    AnimationExt as _, App, Bounds, Div, Entity, FocusHandle, FontWeight, IntoElement, Role, ScrollHandle,
+    SharedString, Toggled, Window, anchored, deferred, div, prelude::*, px,
 };
 
 use crate::icons::{Glyph, glyph};
@@ -226,71 +226,6 @@ pub fn segmented(
         None => div().child(group),
     };
     row(meta, theme, control)
-}
-
-/// One image-and-label choice.
-pub struct Tile {
-    pub label: &'static str,
-    pub image: std::sync::Arc<Image>,
-}
-
-/// Image tiles with radio semantics. ← → move and select.
-pub fn tile_choice(
-    meta: ControlMeta,
-    tiles: &[Tile],
-    selected: usize,
-    style: ControlStyle,
-    select: Select,
-) -> gpui::Stateful<Div> {
-    let ControlStyle { focus, focused, theme, .. } = style;
-    let control_id = meta.id;
-    let group = div()
-        .id(control_id)
-        .debug_selector(move || format!("{control_id}-control"))
-        .role(Role::RadioGroup)
-        .aria_label(meta.label)
-        .aria_disabled(!meta.enabled)
-        .track_focus(focus)
-        .flex()
-        .items_start()
-        .gap(px(8.))
-        .p(px(2.))
-        .rounded(px(8.))
-        .when(focused, |group| group.shadow(cursor_ring(theme)))
-        .when(!meta.enabled, |group| group.opacity(0.45))
-        .children(tiles.iter().enumerate().map(|(index, tile)| {
-            let select = select.clone();
-            let mut option = div()
-                .id((meta.id, index))
-                .role(Role::RadioButton)
-                .aria_label(tile.label)
-                .aria_disabled(!meta.enabled)
-                .aria_selected(index == selected)
-                .aria_position_in_set(index + 1)
-                .aria_size_of_set(tiles.len())
-                .w(px(84.))
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(4.))
-                .p(px(6.))
-                .rounded(px(7.))
-                .border_1()
-                .border_color(color(if index == selected { theme.role("accent") } else { theme.role("border") }))
-                .when(index != selected, |option| option.hover(|style| style.bg(color(theme.role("surface")))))
-                .child(img(tile.image.clone()).size(px(64.)))
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(color(if index == selected { theme.role("fg") } else { theme.role("fg-muted") }))
-                        .child(tile.label),
-                );
-            if meta.enabled {
-                option = option.cursor_pointer().on_click(move |_, window, cx| select(index, window, cx));
-            }
-            option
-        }));
-    row(meta, theme, group)
 }
 
 /// A numeric field with a spin-button role. The caller owns the `TextInput` and

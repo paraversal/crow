@@ -1,0 +1,48 @@
+[[group]]
+name = "Favorites"
+items = [
+  { path = "@HOME@/Projects", icon = "🎛️", color = "purple" },
+  { path = "@HOME@/Sample Library", icon = "🥁", color = "orange" },
+  { path = "@HOME@/Mixdowns", icon = "🎚️", color = "red" },
+  { path = "@HOME@/Releases", icon = "💿", color = "yellow" },
+]
+
+[[group]]
+name = "In the studio"
+icon = "🔊"
+items = [
+  { path = "@HOME@/Projects/Night Drive", icon = "🌃", color = "blue" },
+  { path = "@HOME@/Projects/Glass Rain", icon = "🌧️", color = "cyan" },
+  { path = "@HOME@/Projects/Violet Hour", icon = "🟣", color = "purple" },
+]
+
+[[group]]
+name = "Sounds"
+icon = "🎹"
+items = [
+  { path = "@HOME@/Sample Library/Drums/Kicks", name = "Kicks", icon = "🦶", color = "red" },
+  { path = "@HOME@/Sample Library/Drums/Hats", name = "Hats", icon = "🎩", color = "orange" },
+  { path = "@HOME@/Sample Library/Synths/Pads", name = "Pads", icon = "☁️", color = "cyan" },
+  { path = "@HOME@/Sample Library/FX/Foley", name = "Foley", icon = "🚪", color = "green" },
+]
+
+[[group]]
+name = "Locations"
+icon = "💾"
+items = [
+  { path = "@HOME@/Volumes/Session Drive", icon = "⚡", color = "orange" },
+  { path = "@HOME@/Volumes/Sample Library SSD", icon = "🎼", color = "purple" },
+  { path = "@HOME@/Volumes/Studio Backup", icon = "🛡️", color = "green" },
+]
+
+[recent]
+show = false
+
+[locations]
+show = false
+
+[section."tags"]
+show = false
+
+[sections]
+order = []

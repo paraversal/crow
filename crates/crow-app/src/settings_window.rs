@@ -6,21 +6,19 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{self, Effective, Event, MotionMode, SoundSet};
 use crow_core::{
-    AppIcon, DefaultsChange, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, PathBarMode, SearchMatch, TipsMode,
-    ViewMode,
+    DefaultsChange, EnterAction, FolderSizesMode, HintsMode, KeymapLayer, PathBarMode, SearchMatch, TipsMode, ViewMode,
 };
 use crow_fs::SortKey;
 use crow_plugin::{PluginEntry, PluginHandle, PluginState};
 use crow_theme::Theme;
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, Image, ImageFormat, IntoElement, KeyBinding,
-    KeyDownEvent, Render, Role, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, actions, div, prelude::*, px, size,
+    App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding, KeyDownEvent, Render,
+    Role, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
+    prelude::*, px, size,
 };
 
 use crate::actions::OpenSettings;
@@ -163,7 +161,6 @@ fn open_window(cx: &mut App) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ControlId {
     Theme,
-    AppIcon,
     IconPack,
     PathBar,
     TranslucentSidebar,
@@ -221,10 +218,9 @@ enum ControlId {
 impl ControlId {
     /// Every control, used to build focus handles. Reading order comes from
     /// `catalog::units`, so a category can be reordered without touching this.
-    const ALL: [ControlId; 54] = [
+    const ALL: [ControlId; 53] = [
         ControlId::Theme,
         ControlId::TranslucentSidebar,
-        ControlId::AppIcon,
         ControlId::IconPack,
         ControlId::PathBar,
         ControlId::FontFamily,
@@ -281,7 +277,6 @@ impl ControlId {
     fn key(self) -> &'static str {
         match self {
             ControlId::Theme => "settings-theme",
-            ControlId::AppIcon => "settings-app-icon",
             ControlId::IconPack => "settings-icon-pack",
             ControlId::PathBar => "settings-path-bar",
             ControlId::FontFamily => "settings-font-family",
@@ -343,7 +338,6 @@ impl ControlId {
     fn selector(self) -> String {
         match self {
             ControlId::Theme
-            | ControlId::AppIcon
             | ControlId::IconPack
             | ControlId::FontFamily
             | ControlId::FontSize
@@ -380,7 +374,6 @@ impl ControlId {
     fn label(self) -> &'static str {
         match self {
             ControlId::Theme => "Theme",
-            ControlId::AppIcon => "App icon",
             ControlId::IconPack => "Icon pack",
             ControlId::PathBar => "Path bar",
             ControlId::FontFamily => "Font",
@@ -445,8 +438,7 @@ impl ControlId {
             | ControlId::DefaultSort
             | ControlId::PreviewRuleSelect
             | ControlId::PreviewAdd => Role::ComboBox,
-            ControlId::AppIcon
-            | ControlId::Keymap
+            ControlId::Keymap
             | ControlId::Enter
             | ControlId::Hints
             | ControlId::Tips
@@ -495,7 +487,6 @@ impl ControlId {
     fn description(self, cx: &App) -> Option<SharedString> {
         let text = match self {
             ControlId::Theme => "Themes from ~/.config/themes.",
-            ControlId::AppIcon => "The Dock switches now; Finder after the next scripts/bundle.sh.",
             ControlId::IconPack => {
                 "Native, local icon-packs and approved plugin packs; a folder's views.toml source wins."
             }
@@ -1620,8 +1611,7 @@ impl SettingsWindow {
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => {
                 self.commit_stepper(id, window, cx);
             }
-            ControlId::AppIcon
-            | ControlId::Keymap
+            ControlId::Keymap
             | ControlId::Enter
             | ControlId::Hints
             | ControlId::Tips
@@ -1638,7 +1628,6 @@ impl SettingsWindow {
         let Some(id) = self.focused_control(window) else { return };
         match id {
             ControlId::KeyboardList => self.keyboard_horizontal(delta, cx),
-            ControlId::AppIcon => self.move_app_icon(delta, window, cx),
             ControlId::Keymap
             | ControlId::Enter
             | ControlId::Hints
@@ -1981,25 +1970,6 @@ impl SettingsWindow {
             _ => return,
         };
         ui::set_setting(change, cx);
-        cx.notify();
-    }
-
-    fn move_app_icon(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let current = app_icon_index(cx.global::<Ui>().settings.app_icon);
-        let next = (current as isize + delta).clamp(0, 3) as usize;
-        if next != current {
-            self.select_app_icon(next, window, cx);
-        }
-    }
-
-    fn select_app_icon(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
-        let icon = match index {
-            0 => AppIcon::Refined,
-            1 => AppIcon::Sun,
-            2 => AppIcon::Graphite,
-            _ => AppIcon::Bone,
-        };
-        ui::set_setting(SettingChange::AppIcon(icon), cx);
         cx.notify();
     }
 
@@ -2415,7 +2385,6 @@ impl SettingsWindow {
             enabled: id.enabled(cx),
             selected: match id {
                 ControlId::Theme => Some(self.theme.cursor),
-                ControlId::AppIcon => Some(app_icon_index(settings.app_icon)),
                 ControlId::FontFamily => Some(self.font_cursor),
                 ControlId::Keymap => Some(keymap_index(settings.keymap)),
                 ControlId::Enter => Some(enter_index(settings.enter)),
@@ -2524,17 +2493,6 @@ impl Render for SettingsWindow {
         let theme_row = self
             .dropdown(ControlId::Theme, &theme_labels, self.theme.cursor, &self.theme_scroll, window, &theme, cx)
             .on_key_down(cx.listener(|this, event, _, cx| this.menu_type_ahead(ControlId::Theme, event, cx)));
-
-        let tiles = [AppIcon::Refined, AppIcon::Sun, AppIcon::Graphite, AppIcon::Bone]
-            .map(|icon| controls::Tile { label: app_icon_label(icon), image: app_icon_image(icon) });
-        let app_icon_select = select_callback(cx, |this, index, window, cx| this.select_app_icon(index, window, cx));
-        let app_icon_row = controls::tile_choice(
-            self.meta(ControlId::AppIcon, cx),
-            &tiles,
-            app_icon_index(settings.app_icon),
-            self.style(ControlId::AppIcon, window, &theme),
-            app_icon_select,
-        );
 
         let font_row = self
             .dropdown(ControlId::FontFamily, &self.fonts, self.font_cursor, &self.font_scroll, window, &theme, cx)
@@ -2855,7 +2813,6 @@ impl Render for SettingsWindow {
         let plugin_row = self.plugin_section(&theme, window, cx);
         let mut rows: HashMap<ControlId, gpui::AnyElement> = HashMap::new();
         rows.insert(ControlId::Theme, theme_row.into_any_element());
-        rows.insert(ControlId::AppIcon, app_icon_row.into_any_element());
         rows.insert(ControlId::IconPack, icon_row.into_any_element());
         rows.insert(ControlId::PathBar, path_bar_row.into_any_element());
         rows.insert(ControlId::FontFamily, font_row.into_any_element());
@@ -3395,32 +3352,6 @@ fn sound_index(value: SoundSet) -> usize {
         SoundSet::Finder => 1,
         SoundSet::Off => 2,
     }
-}
-
-fn app_icon_index(value: AppIcon) -> usize {
-    match value {
-        AppIcon::Refined => 0,
-        AppIcon::Sun => 1,
-        AppIcon::Graphite => 2,
-        AppIcon::Bone => 3,
-    }
-}
-
-fn app_icon_label(value: AppIcon) -> &'static str {
-    match value {
-        AppIcon::Refined => "Refined",
-        AppIcon::Sun => "Sun",
-        AppIcon::Graphite => "Graphite",
-        AppIcon::Bone => "Bone",
-    }
-}
-
-fn app_icon_image(icon: AppIcon) -> Arc<Image> {
-    static ICONS: LazyLock<[Arc<Image>; 4]> = LazyLock::new(|| {
-        [AppIcon::Refined, AppIcon::Sun, AppIcon::Graphite, AppIcon::Bone]
-            .map(|icon| Arc::new(Image::from_bytes(ImageFormat::Png, ui::app_icon_png(icon).to_vec())))
-    });
-    ICONS[app_icon_index(icon)].clone()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4851,16 +4782,6 @@ preview_providers = ["example.one.preview"]
     }
 
     #[gpui::test]
-    fn tile_choice_moves_with_arrows(cx: &mut TestAppContext) {
-        let (view, mut vcx) = open_settings(cx);
-        focus_control(&view, &mut vcx, ControlId::AppIcon);
-        vcx.simulate_keystrokes("right");
-        assert_eq!(state(&view, &vcx, ControlId::AppIcon).selected, Some(1));
-        assert_eq!(vcx.read_global::<Ui, _>(|ui, _| ui.settings.app_icon), AppIcon::Sun);
-        wait_for(&vcx, "app_icon = \"sun\"");
-    }
-
-    #[gpui::test]
     fn stepper_arrows_and_typed_digits(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
         focus_control(&view, &mut vcx, ControlId::FontSize);
@@ -5033,7 +4954,9 @@ preview_providers = ["example.one.preview"]
         assert_eq!(menu(&view, &vcx), None, "a second click on the button closes it");
 
         click(&mut vcx, button);
-        let elsewhere = vcx.debug_bounds("settings-app-icon-control").expect("app icon").center();
+        // The theme row's label, left of the button: outside the menu, and not a control.
+        let label = vcx.debug_bounds("settings-theme-row").expect("theme row");
+        let elsewhere = gpui::point(label.left() + px(8.), label.center().y);
         click(&mut vcx, elsewhere);
         assert_eq!(menu(&view, &vcx), None, "a click outside closes it");
         assert_eq!(saved_theme(&vcx), "system");
@@ -5070,14 +4993,14 @@ preview_providers = ["example.one.preview"]
         let (view, mut vcx) = open_settings(cx);
         set_two_themes(&view, &mut vcx);
         draw(&mut vcx);
-        let below = vcx.debug_bounds("settings-app-icon-row").expect("app icon row");
+        let below = vcx.debug_bounds("settings-icon-pack-row").expect("icon pack row");
         focus_control(&view, &mut vcx, ControlId::Theme);
         vcx.simulate_keystrokes("space");
         draw(&mut vcx);
         let menu = vcx.debug_bounds("settings-theme-menu").expect("the open menu draws");
         let button = vcx.debug_bounds("settings-theme-control").expect("theme button");
         assert!(menu.top() >= button.bottom(), "the menu opens under its button");
-        assert_eq!(vcx.debug_bounds("settings-app-icon-row"), Some(below), "opening it moves nothing on the page");
+        assert_eq!(vcx.debug_bounds("settings-icon-pack-row"), Some(below), "opening it moves nothing on the page");
     }
 
     #[gpui::test]
@@ -5085,7 +5008,7 @@ preview_providers = ["example.one.preview"]
         let (view, mut vcx) = open_settings(cx);
         draw(&mut vcx);
         let before = vcx.debug_bounds("settings-theme-control").expect("theme control bounds");
-        focus_control(&view, &mut vcx, ControlId::AppIcon);
+        focus_control(&view, &mut vcx, ControlId::IconPack);
         draw(&mut vcx);
         let after = vcx.debug_bounds("settings-theme-control").expect("theme control bounds");
         assert_eq!(before, after, "the focus ring is inset and never resizes the control");

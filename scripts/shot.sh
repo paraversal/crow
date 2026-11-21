@@ -16,10 +16,13 @@
 #   wait:1.5         sleep that many seconds (a search settling, a tip appearing)
 # CROW_SHOT_HOME=<dir> runs Crow with HOME set to <dir> (scripts/demo/make-demo.sh builds
 # one), so the path bar reads ~/... and the sidebar lists that home's folders.
-# Tags and Locations come from this Mac (Spotlight, mounted volumes), so a demo-home
-# shot hides them; its Projects folder is the Git projects root.
+# Tags come from this Mac's Spotlight, so a demo-home shot hides them; Locations (this
+# Mac's volumes) stay unless CROW_SHOT_LOCATIONS=false. Its Projects folder is the Git
+# projects root.
 # CROW_SHOT_CUSTOM=1 (with CROW_SHOT_HOME) dresses the window up: emoji and colours in
 # the sidebar, a second group, and the demo icon pack (scripts/demo/icon-pack).
+# CROW_SHOT_PERSONA=<id> (with CROW_SHOT_HOME, a make-personas.sh home) uses that persona's
+# sidebar groups, settings and the Lucide icon pack instead of the generic demo setup.
 # CROW_SHOT_SIDEBAR sets the sidebar width in points (default 300: Projects rows fit).
 # CROW_SHOT_SETTINGS adds lines to settings.toml (e.g. 'show_preview = true').
 # Without [keys] the script waits for Return: set up the state by hand, then
@@ -60,6 +63,7 @@ hints = "always"
 motion = "off"
 ${CROW_SHOT_SETTINGS:-}
 $( [ -n "${CROW_SHOT_CUSTOM:-}" ] && [ -n "${CROW_SHOT_HOME:-}" ] && echo 'icon_pack = "linework"' )
+$( [ -n "${CROW_SHOT_PERSONA:-}" ] && cat "$(dirname "$0")/demo/personas/$CROW_SHOT_PERSONA/settings.toml" )
 [window]
 width = 1280
 height = 800
@@ -100,9 +104,12 @@ items = [
     mkdir -p "$work/config/icon-packs"
     cp -R "$root/scripts/demo/icon-pack" "$work/config/icon-packs/linework"
   fi
-  shot_locations=false
+  shot_locations=${CROW_SHOT_LOCATIONS:-true}
   shot_sections="[section.\"tags\"]
 show = false
+
+[sections]
+order = [\"recent\", \"crow.projects\", \"locations\"]
 
 [projects]
 roots = [\"$shot_home/Projects\"]"
@@ -128,6 +135,16 @@ count = 6
 show = ${shot_locations:-true}
 ${shot_sections:-}
 EOF
+
+# A persona (scripts/demo/personas/<id>/) brings its own sidebar groups and the Lucide
+# icon pack; its home comes from scripts/demo/make-personas.sh.
+if [ -n "${CROW_SHOT_PERSONA:-}" ]; then
+  pdir="$root/scripts/demo/personas/$CROW_SHOT_PERSONA"
+  sed "s|@HOME@|$shot_home|g" "$pdir/sidebar.toml" >"$work/config/sidebar.toml"
+  [ -f "$pdir/views.toml" ] && cp "$pdir/views.toml" "$work/config/views.toml"
+  mkdir -p "$work/config/icon-packs"
+  "$root/scripts/demo/make-lucide-pack.sh" "$work/config/icon-packs/lucide" >/dev/null
+fi
 
 # The bundled Git package runs only with a grant for its exact digest; a demo-home
 # shot copies just that record from your config, so badges and Projects show.

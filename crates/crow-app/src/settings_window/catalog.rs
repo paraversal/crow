@@ -97,14 +97,6 @@ pub(super) const UNITS: &[Unit] = &[
         &[ControlId::Theme],
     ),
     unit(
-        ControlId::AppIcon,
-        Category::Appearance,
-        "App icon",
-        &["dock", "icon", "crow icon"],
-        &["app_icon"],
-        &[ControlId::AppIcon],
-    ),
-    unit(
         ControlId::IconPack,
         Category::Appearance,
         "Icon pack",

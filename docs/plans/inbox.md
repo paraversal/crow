@@ -11,7 +11,7 @@ Ideas and unscheduled work go here. Move accepted milestone work to the [roadmap
 
 ### Git decorations flash during refresh
 
-**Medium priority · Fixed in [P5B PR #79](https://github.com/paraversal/file-crow/pull/79) · Pending bundled hand check.** Already decorated rows intermittently reverted to their default appearance for about 100 ms. For example, an ignored file flashed white before returning to blue.
+**Medium priority · Fixed in [P5B PR #79](https://github.com/paraversal/crow/pull/79) · Pending bundled hand check.** Already decorated rows intermittently reverted to their default appearance for about 100 ms. For example, an ignored file flashed white before returning to blue.
 
 - A repository rescan used to clear every cached Git decoration, even when the status matched. Folder watcher batches also evicted results for untouched siblings. Crow now retains ready decorations for unchanged entries, refreshes the affected worktree, and replaces old styling when the current worker reply arrives.
 - In the bundle, open a subfolder with a visible ignored file and wait for its Git styling. Touch an already ignored file in a sibling folder in the same worktree, then touch a different file in the open folder. The first ignored row and Git status bar should stay steady. Remove its ignore rule and check that it loses the ignored styling. Disable Git and check that its remaining decorations clear immediately.
