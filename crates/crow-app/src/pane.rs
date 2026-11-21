@@ -6331,6 +6331,7 @@ impl Render for Pane {
                     .on_action(cx.listener(Self::paste_move_files))
                     .on_action(cx.listener(Self::copy_path))
                     .on_action(cx.listener(Self::show_in_finder))
+                    .on_action(cx.listener(Self::open_terminal))
                     .on_action(cx.listener(Self::begin_mark))
                     .on_action(cx.listener(Self::begin_jump))
                     .on_action(cx.listener(Self::start_filter))

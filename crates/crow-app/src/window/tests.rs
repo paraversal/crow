@@ -4162,6 +4162,84 @@ fn terminal_menu_follows_the_selection(cx: &mut TestAppContext) {
     assert_eq!(enabled(&mut cx), Some(false), "a multi-selection has no single here");
 }
 
+// The palette calls the pane directly; the context menus and the menu bar dispatch
+// `OpenTerminal`, so these go through the action the way a click does.
+#[gpui::test]
+fn open_terminal_from_the_row_menu_opens_that_folder(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("terminal-row-menu");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<Ui>().settings.terminal = "Ghostty".into());
+    let beta = row_center(&mut cx, "row-beta");
+    right_click(&mut cx, beta);
+    effect_calls(&mut cx);
+    choose(&view, &mut cx, CommandId::OpenTerminal);
+    assert!(
+        effect_calls(&mut cx).contains(&Call::OpenTerminal("Ghostty".into(), root.join("beta"))),
+        "the folder row the menu was opened for"
+    );
+
+    let notes = row_center(&mut cx, "row-notes.txt");
+    right_click(&mut cx, notes);
+    choose(&view, &mut cx, CommandId::OpenTerminal);
+    assert!(
+        effect_calls(&mut cx).contains(&Call::OpenTerminal("Ghostty".into(), root.to_path_buf())),
+        "a file row opens its parent folder"
+    );
+}
+
+#[gpui::test]
+fn open_terminal_from_the_empty_space_menu_opens_the_shown_folder(cx: &mut TestAppContext) {
+    use crate::context_menu::MenuKind;
+    use crate::effects::Call;
+    let root = fixture("terminal-folder-menu");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<Ui>().settings.terminal = "Ghostty".into());
+    let empty = below_rows(&mut cx, "row-notes.txt");
+    right_click(&mut cx, empty);
+    assert_eq!(open_menu(&view, &cx), Some(MenuKind::Folder));
+    effect_calls(&mut cx);
+    choose(&view, &mut cx, CommandId::OpenTerminal);
+    assert!(
+        effect_calls(&mut cx).contains(&Call::OpenTerminal("Ghostty".into(), root.to_path_buf())),
+        "empty space opens the shown folder"
+    );
+}
+
+#[gpui::test]
+fn open_terminal_from_the_file_menu_opens_the_selected_folder(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("terminal-file-menu");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| {
+        crate::menus::init_for_tests(cx);
+        cx.global_mut::<Ui>().settings.terminal = "Ghostty".into();
+    });
+    assert_eq!(selected(&view, &cx).as_deref(), Some("alpha"));
+    effect_calls(&mut cx);
+    dispatch_menu("File", "Open Terminal Here", &mut cx);
+    assert!(
+        effect_calls(&mut cx).contains(&Call::OpenTerminal("Ghostty".into(), root.join("alpha"))),
+        "File > Open Terminal Here opens the selected folder"
+    );
+}
+
+/// A menu-bar or context-menu line dispatches its action, so a list command the
+/// palette runs directly still needs a handler on the list's focus path.
+#[gpui::test]
+fn every_list_menu_command_has_a_handler_in_the_list(cx: &mut TestAppContext) {
+    use crate::keys::KeyScope;
+    let root = fixture("list-menu-handlers");
+    let (_view, mut cx) = open(cx, &root);
+    let missing: Vec<_> = crate::palette::COMMANDS
+        .iter()
+        .filter(|command| command.scope == KeyScope::List && command.menu.is_some())
+        .filter(|command| !action_available(command.action, &mut cx))
+        .map(|command| command.id)
+        .collect();
+    assert!(missing.is_empty(), "list menu commands with no handler: {missing:?}");
+}
+
 #[gpui::test]
 fn context_menu_records_entries_and_runs_a_scripted_choice(cx: &mut TestAppContext) {
     use crate::context_menu::{MenuKind, slots};
