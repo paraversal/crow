@@ -1548,7 +1548,7 @@ fn vim_marks_show_as_letters_in_the_sidebar(cx: &mut TestAppContext) {
     let root = fixture("marks-letters");
     let (view, mut cx) = open(cx, &root);
     let toml = format!(
-        "[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\", key = \"a\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n",
+        "pinned_tags = [\"Red\"]\n[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\", key = \"a\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n",
         root.join("alpha").display(),
         root.join("beta").display()
     );
@@ -13529,6 +13529,35 @@ fn fuzz_sidebar_toml(root: &Path) -> String {
     )
 }
 
+/// The M9 surfaces a run should find on screen: one saved query, a local icon
+/// pack the settings select, and the Explorer-style path field. (The pinned
+/// tag lives in `fuzz_sidebar_toml`.)
+fn fuzz_seed_m9(view: &Entity<CrowWindow>, tree: &Path, cx: &mut VisualTestContext) {
+    let config = config_dir(cx);
+    let pack = config.join("icon-packs/fuzz");
+    std::fs::create_dir_all(&pack).expect("pack dir");
+    std::fs::write(
+        pack.join("pack.toml"),
+        "api = 1\nname = \"Fuzz\"\n[generic]\nfile = { icon = \"glyph.svg\", color = \"accent\" }\nfolder = { icon = \"glyph.svg\", color = \"base0D\" }\n",
+    )
+    .expect("pack");
+    std::fs::write(
+        pack.join("glyph.svg"),
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/></svg>"#,
+    )
+    .expect("glyph");
+    std::fs::write(config.join("settings.toml"), "icon_pack = \"fuzz\"\npath_bar = \"explorer\"\n").expect("settings");
+    write_config(
+        view,
+        cx,
+        "saved-queries.toml",
+        &format!(
+            "[[query]]\nid = \"fuzz-notes\"\nname = \"Fuzz notes\"\nscope = \"folder\"\nroot = \"{}\"\ntext = \"file\"\nmatch = \"names\"\n",
+            tree.display()
+        ),
+    );
+}
+
 /// A fuzz tree that restores mode-000 entries before deleting, including when a
 /// run fails or unwinds.
 struct FuzzRoot {
@@ -13640,8 +13669,10 @@ fn selector_bounds(
     if let Some(bounds) = view.read_with(cx, |window, cx| window.debug_selector_bounds(selector, cx)) {
         return Some(bounds);
     }
-    let selector = static_selector(selector)?;
-    cx.debug_bounds(selector)
+    if let Some(selector) = static_selector(selector) {
+        return cx.debug_bounds(selector);
+    }
+    cx.update(|window, _| window.debug_bounds(selector))
 }
 
 fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -13673,6 +13704,21 @@ fn apply_step(
         Step::Click(selector) => {
             if let Some(bounds) = selector_bounds(view, selector, cx) {
                 cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+            }
+        }
+        Step::ClickWith(selector, mods) => {
+            if let Some(bounds) = selector_bounds(view, selector, cx) {
+                cx.simulate_click(bounds.center(), crate::fuzz::modifiers(*mods));
+            }
+        }
+        Step::Drag(from, to, mods) => {
+            if let (Some(from), Some(to)) = (selector_bounds(view, from, cx), selector_bounds(view, to, cx)) {
+                let modifiers = crate::fuzz::modifiers(*mods);
+                let (start, end) = (from.center(), to.center());
+                cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+                cx.simulate_mouse_move(start + (end - start) * 0.5, Some(gpui::MouseButton::Left), modifiers);
+                cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), modifiers);
+                cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
             }
         }
         Step::RightClick(selector, choice) => {
@@ -13833,6 +13879,7 @@ fn replay_script(
     reset_tree(tree, options.files, &options.edge, seed);
     let (view, mut cx) = open(cx, tree);
     write_config(&view, &mut cx, "sidebar.toml", &fuzz_sidebar_toml(tree));
+    fuzz_seed_m9(&view, tree, &mut cx);
     fuzz_confine(tree, &mut cx);
     crate::fuzz::logs::install();
     let churn_handle = options.churn.then(|| Churn::start(tree, seed));
@@ -14558,6 +14605,57 @@ fn fuzz_smoke_edge_trees(cx: &mut TestAppContext) {
         panic!("{}\n{}", failure.print(), failure.finding_row());
     }
     let _ = crow_fs::testing::remove_tree(&edge_tree);
+}
+
+/// B7 #33: every M9 surface exposes selectors that are laid out, and a sheet's
+/// fields count as text fields so `Step::Type` reaches them.
+#[gpui::test]
+fn fuzz_selectors_reach_the_m9_surfaces(cx: &mut TestAppContext) {
+    let tree = fuzz_tree("fuzz-m9-selectors", 10);
+    let (view, mut cx) = open(cx, &tree);
+    fuzz_seed_m9(&view, &tree, &mut cx);
+    let reached = |view: &Entity<CrowWindow>, cx: &mut VisualTestContext, wanted: &[&str]| {
+        let listed = view.read_with(cx, |w, cx| w.debug_selectors(cx));
+        for name in wanted {
+            assert!(listed.iter().any(|id| id == name), "{name} is listed: {listed:?}");
+            assert!(selector_bounds(view, name, cx).is_some(), "{name} is laid out");
+        }
+    };
+    // Activity.
+    cx.simulate_keystrokes("alt-cmd-l");
+    settle(&view, &mut cx);
+    reached(&view, &mut cx, &["activity"]);
+    cx.simulate_keystrokes("escape");
+    // Batch Rename: the Find field has focus, so the fuzzer types.
+    cx.simulate_keystrokes("cmd-a f2");
+    settle(&view, &mut cx);
+    reached(&view, &mut cx, &["batch-rule-add", "batch-cancel", "batch-rename-submit"]);
+    assert!(cx.update(|window, cx| view.read(cx).text_focused(window, cx)), "the sheet field is a text field");
+    cx.simulate_keystrokes("escape");
+    // Saved Search form.
+    let id = crow_core::SavedQueryId::new("fuzz-notes").unwrap();
+    view.update_in(&mut cx, |w, window, cx| w.edit_saved_search_by_id(id, window, cx));
+    settle(&view, &mut cx);
+    reached(&view, &mut cx, &["saved-query-form", "saved-match-all", "saved-save"]);
+    assert!(cx.update(|window, cx| view.read(cx).text_focused(window, cx)), "the form's name field is focused");
+    cx.simulate_keystrokes("escape");
+    // Tag picker, with a pinned tag to list.
+    cx.update(|_, cx| cx.global_mut::<Ui>().tags.set_pinned(vec!["Red".into()]));
+    view.update_in(&mut cx, |w, window, cx| w.open_tag_picker(window, cx));
+    settle(&view, &mut cx);
+    reached(&view, &mut cx, &["tag-toggle-0", "tags-done"]);
+    cx.simulate_keystrokes("escape");
+    // Column picker, from the List header's context menu.
+    let at = cx.debug_bounds("table-header").expect("List header").center();
+    cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::default());
+    cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::default());
+    reached(&view, &mut cx, &["column-toggle-0", "columns-done"]);
+    cx.simulate_keystrokes("escape");
+    // The local icon pack and the Explorer path field are in force.
+    let (pack, path_bar) =
+        cx.read(|cx| (cx.global::<Ui>().settings.icon_pack.clone(), cx.global::<Ui>().settings.path_bar));
+    assert_eq!(pack, "fuzz");
+    assert_eq!(path_bar, crow_core::PathBarMode::Explorer);
 }
 
 /// Replay options for a headless seed. The seed and tree build the same disk,

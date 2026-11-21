@@ -686,6 +686,7 @@ impl CrowWindow {
                         let on = value == choice;
                         div()
                             .id(("conflict-choice", value as usize))
+                            .debug_selector(move || format!("conflict-choice-{}", value as usize))
                             .track_focus(focus)
                             .focus_visible(|style| style.shadow(cursor_ring(&theme)))
                             .role(Role::RadioButton)
@@ -702,6 +703,7 @@ impl CrowWindow {
                     };
                     let apply_all = div()
                         .id("conflict-all")
+                        .debug_selector(|| "conflict-all".into())
                         .track_focus(&controls[3])
                         .focus_visible(|style| style.shadow(cursor_ring(&theme)))
                         .role(Role::CheckBox)
@@ -1068,6 +1070,7 @@ impl CrowWindow {
         let forward_controls = controls.clone();
         div()
             .id("activity")
+            .debug_selector(|| "activity".into())
             .track_focus(&self.activity_focus)
             .on_action(move |_: &SwitchFocus, window, cx| {
                 cycle_focus(&forward_controls, true, window, cx);

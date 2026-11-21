@@ -7,6 +7,11 @@
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
+/// Modifier bits of `Step::ClickWith` and `Step::Drag`.
+pub const MOD_SHIFT: u8 = 1;
+pub const MOD_CMD: u8 = 2;
+pub const MOD_ALT: u8 = 4;
+
 /// One action the runner applies. `Click`/`RightClick` name a `debug_selector`;
 /// `RightClick`'s second field is the menu slot chosen (`None` dismisses it,
 /// as does a slot past the end of that menu).
@@ -16,6 +21,12 @@ pub enum Step {
     Type(String),
     Click(String),
     RightClick(String, Option<usize>),
+    /// A click with modifiers held (`MOD_SHIFT`, `MOD_CMD`, `MOD_ALT` or'd together):
+    /// range and additive selection, and the modified-click paths of every view.
+    ClickWith(String, u8),
+    /// Press on the first selector, move to the second and release, with the
+    /// modifiers held: a marquee over empty space, or a row drag onto a target.
+    Drag(String, String, u8),
     Resize(f32, f32),
     Settle,
     AdvanceClock(u64),
@@ -34,6 +45,8 @@ impl Step {
             Step::Type(_) => "Type",
             Step::Click(_) => "Click",
             Step::RightClick(..) => "RightClick",
+            Step::ClickWith(..) => "ClickWith",
+            Step::Drag(..) => "Drag",
             Step::Resize(..) => "Resize",
             Step::Settle => "Settle",
             Step::AdvanceClock(_) => "AdvanceClock",
@@ -162,6 +175,11 @@ impl StepGen {
         Step::Keys(pool[self.rng.random_range(0..pool.len())].clone())
     }
 
+    /// Shift, ⌘, ⌥ or none, so ranges, additive marquees and copy drags all occur.
+    fn modifiers(&mut self) -> u8 {
+        [0, MOD_SHIFT, MOD_CMD, MOD_ALT][self.rng.random_range(0..4)]
+    }
+
     fn type_text(&mut self) -> Step {
         let mut text = String::new();
         for _ in 0..self.rng.random_range(1..=3) {
@@ -173,7 +191,14 @@ impl StepGen {
     fn click(&mut self, state: &GenState, right: bool) -> Step {
         let selector = state.selectors[self.rng.random_range(0..state.selectors.len())].clone();
         if !right {
-            return Step::Click(selector);
+            return match self.rng.random_range(0..10) {
+                0..=1 => Step::ClickWith(selector, self.modifiers()),
+                2 => {
+                    let to = state.selectors[self.rng.random_range(0..state.selectors.len())].clone();
+                    Step::Drag(selector, to, self.modifiers())
+                }
+                _ => Step::Click(selector),
+            };
         }
         let choice = if self.rng.random_bool(0.25) { None } else { Some(self.rng.random_range(0..MENU_SLOTS)) };
         Step::RightClick(selector, choice)
@@ -245,6 +270,8 @@ fn step_source(step: &Step) -> String {
         Step::Type(text) => format!("Step::Type({text:?}.into())"),
         Step::Click(selector) => format!("Step::Click({selector:?}.into())"),
         Step::RightClick(selector, choice) => format!("Step::RightClick({selector:?}.into(), {choice:?})"),
+        Step::ClickWith(selector, mods) => format!("Step::ClickWith({selector:?}.into(), {mods})"),
+        Step::Drag(from, to, mods) => format!("Step::Drag({from:?}.into(), {to:?}.into(), {mods})"),
         Step::Resize(width, height) => format!("Step::Resize({width:?}, {height:?})"),
         Step::Settle => "Step::Settle".to_owned(),
         Step::AdvanceClock(ms) => format!("Step::AdvanceClock({ms})"),
@@ -344,6 +371,17 @@ pub mod logs {
 
     pub fn reset() {
         ERRORS.with(|count| count.set(0));
+    }
+}
+
+/// The GPUI modifiers for a `Step`'s modifier bits.
+#[cfg(test)]
+pub fn modifiers(mask: u8) -> gpui::Modifiers {
+    gpui::Modifiers {
+        shift: mask & MOD_SHIFT != 0,
+        platform: mask & MOD_CMD != 0,
+        alt: mask & MOD_ALT != 0,
+        ..gpui::Modifiers::default()
     }
 }
 
@@ -581,6 +619,29 @@ mod tests {
         }
         assert!(delete > 0 && replace > 0, "{delete} {replace}");
         assert!(delete + replace < 1_000, "low weight: {delete} {replace}");
+    }
+
+    #[test]
+    fn modified_clicks_and_drags_are_generated_and_print() {
+        let state = state();
+        let mut generator = StepGen::new(11);
+        let (mut with, mut drag) = (0, 0);
+        for _ in 0..3_000 {
+            match generator.next(&state) {
+                Step::ClickWith(_, mods) => {
+                    assert!(mods <= MOD_SHIFT | MOD_CMD | MOD_ALT);
+                    with += 1;
+                }
+                Step::Drag(..) => drag += 1,
+                _ => {}
+            }
+        }
+        assert!(with > 0 && drag > 0, "{with} {drag}");
+        let script = Script(vec![Step::ClickWith("row-a".into(), MOD_CMD), Step::Drag("a".into(), "b".into(), 0)]);
+        assert_eq!(
+            script.print(),
+            "crate::script![Step::ClickWith(\"row-a\".into(), 2), Step::Drag(\"a\".into(), \"b\".into(), 0)]"
+        );
     }
 
     #[test]
