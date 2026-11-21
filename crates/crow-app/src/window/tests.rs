@@ -3961,7 +3961,8 @@ fn sidebar_favorites_and_recent_use_the_board_icons(cx: &mut TestAppContext) {
     );
     cx.simulate_keystrokes("down cmd-down");
     settle(&view, &mut cx);
-    assert!(cx.debug_bounds("sidebar-folder-icon-1").is_some(), "the favorite's folder is a line icon");
+    assert!(cx.debug_bounds("sidebar-native-icon-1").is_some(), "the favorite's folder is Finder's own icon");
+    assert!(cx.debug_bounds("sidebar-folder-icon-1").is_none(), "not the line folder");
     assert!(cx.debug_bounds("sidebar-clock-icon-3").is_some(), "Recent's clock is a line icon");
 }
 
@@ -3987,7 +3988,7 @@ fn sidebar_favorites_use_a_pack_unless_they_have_their_own_icon(cx: &mut TestApp
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha]));
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("sidebar-pack-icon-1").is_some(), "the favorite uses the pack's folder glyph");
-    assert!(cx.debug_bounds("sidebar-folder-icon-1").is_none(), "the line folder glyph is replaced");
+    assert!(cx.debug_bounds("sidebar-native-icon-1").is_none(), "the native icon is replaced");
 
     let own = favorites_toml(&[&alpha]).replace("{ path =", "{ icon = \"★\", path =");
     write_config(&view, &mut cx, "sidebar.toml", &own);

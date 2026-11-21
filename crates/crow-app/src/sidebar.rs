@@ -2142,6 +2142,7 @@ impl Render for Sidebar {
             kinds.push((droppable.then_some(DropTarget::Row(i)), favorite_slot));
             let path = row.path().map(Path::to_path_buf).unwrap_or_default();
             let navigable = row.location().is_some();
+            let path_less = row.path().is_none();
             let current_description = if row.path().is_some() {
                 "current folder"
             } else if matches!(&row, Row::PluginItem { row, .. } if matches!(row.destination, SectionDestination::Tag { .. }))
@@ -2160,23 +2161,24 @@ impl Render for Sidebar {
                 look.spoken.push_str(", ");
                 look.spoken.push_str(&pin.spoken);
             }
-            // Favorites and Recent use the board's line icons; a favorite's
-            // custom text icon and its palette color still win. Volumes and the
-            // file list keep Finder's icons.
+            // Favorites draw Finder's own icons (Home, Desktop, Documents…), an icon
+            // pack's match winning. A favorite's custom text icon wins over both,
+            // and a favorite with a palette color keeps the tintable line folder
+            // (a native icon cannot be recolored). Recent keeps its clock.
             let (glyph, line_icon, tint) = match &row {
-                Row::Favorite(_, f) => (
-                    f.icon.clone(),
-                    f.icon.is_none().then_some(crate::icons::Glyph::Folder),
-                    f.color.as_deref().and_then(|c| favorite_color(c, &theme)),
-                ),
+                Row::Favorite(_, f) => {
+                    let tint = f.color.as_deref().and_then(|c| favorite_color(c, &theme));
+                    (f.icon.clone(), (f.icon.is_none() && tint.is_some()).then_some(crate::icons::Glyph::Folder), tint)
+                }
                 Row::Recent(_) => (None, Some(crate::icons::Glyph::Clock), None),
-                Row::PluginItem { row, .. } => (
+                Row::PluginItem { row: item, .. } => (
                     None,
-                    Some(if matches!(row.destination, SectionDestination::Tag { .. }) {
-                        crate::icons::Glyph::Tag
+                    if matches!(item.destination, SectionDestination::Tag { .. }) {
+                        Some(crate::icons::Glyph::Tag)
                     } else {
-                        crate::icons::Glyph::Folder
-                    }),
+                        // A saved query has no folder to ask Finder about.
+                        path_less.then_some(crate::icons::Glyph::Folder)
+                    },
                     None,
                 ),
                 _ => (None, None, None),
@@ -2309,10 +2311,27 @@ impl Render for Sidebar {
                                 .into_any_element()
                         }
                     }
-                    None if navigable => div()
-                        .w(px(16.))
-                        .children(icon(&path, true, 16).map(|i| img(i).size(px(16.))))
-                        .into_any_element(),
+                    None if navigable => {
+                        let packed = matches!(row, Row::Favorite(..) | Row::PluginItem { .. })
+                            .then(|| icons.resolve(&path, true, false))
+                            .flatten();
+                        if let Some(packed) = packed {
+                            let icon_tint = color(packed.color.rgb(&theme));
+                            div()
+                                .w(px(16.))
+                                .flex()
+                                .justify_center()
+                                .debug_selector(move || format!("sidebar-pack-icon-{i}"))
+                                .child(crate::icons::pack_glyph(&packed.asset, 15., icon_tint))
+                                .into_any_element()
+                        } else {
+                            div()
+                                .w(px(16.))
+                                .debug_selector(move || format!("sidebar-native-icon-{i}"))
+                                .children(icon(&path, true, 16).map(|i| img(i).size(px(16.))))
+                                .into_any_element()
+                        }
+                    }
                     None => div().w(px(16.)).into_any_element(),
                 },
             };
