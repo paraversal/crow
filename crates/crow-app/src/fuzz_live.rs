@@ -24,7 +24,7 @@ use crate::effects::{self, RecordingEffects};
 use crate::fuzz::{Step, StepGen, Violation};
 use crate::operations::{self, FolderTrash, Operations};
 use crate::window::CrowWindow;
-use crate::{actions, extensions, icons, logging, menus, settings_window, text_input, ui, window};
+use crate::{extensions, icons, logging, menus, ui, window};
 use crow_fs::testing::{Churn, ChurnHandle, EdgeTree, make_tree, remove_tree};
 
 /// A frame over this is a slow step.
@@ -261,10 +261,7 @@ pub fn run(args: &[String]) -> ExitCode {
         crate::plugins::init(cx);
         crate::icon_packs::reload(cx);
         cx.global_mut::<Operations>().jail = Some(app_setup.root.clone());
-        cx.bind_keys(actions::finder_keymap());
-        cx.bind_keys(actions::vim_keymap());
-        cx.bind_keys(text_input::keymap());
-        cx.bind_keys(settings_window::keymap());
+        crate::keymap::install(cx);
         menus::init(cx);
         cx.set_global(window::LaunchFolder(app_setup.root.clone()));
         cx.on_window_closed(|cx, _| {

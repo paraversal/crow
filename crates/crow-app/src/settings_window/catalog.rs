@@ -10,6 +10,7 @@ use super::ControlId;
 pub(super) enum Category {
     Appearance,
     Behaviour,
+    Keyboard,
     ViewsPreview,
     Search,
     Plugins,
@@ -17,9 +18,10 @@ pub(super) enum Category {
 }
 
 impl Category {
-    pub(super) const ALL: [Category; 6] = [
+    pub(super) const ALL: [Category; 7] = [
         Category::Appearance,
         Category::Behaviour,
+        Category::Keyboard,
         Category::ViewsPreview,
         Category::Search,
         Category::Plugins,
@@ -31,6 +33,7 @@ impl Category {
         match self {
             Category::Appearance => "appearance",
             Category::Behaviour => "behaviour",
+            Category::Keyboard => "keyboard",
             Category::ViewsPreview => "views-preview",
             Category::Search => "search",
             Category::Plugins => "plugins",
@@ -51,6 +54,7 @@ impl Category {
         match self {
             Category::Appearance => "Appearance",
             Category::Behaviour => "Behavior",
+            Category::Keyboard => "Keyboard",
             Category::ViewsPreview => "Views & Preview",
             Category::Search => "Search",
             Category::Plugins => "Plugins",
@@ -230,6 +234,14 @@ pub(super) const UNITS: &[Unit] = &[
         &[ControlId::FolderSizes],
     ),
     unit(
+        ControlId::KeyboardList,
+        Category::Keyboard,
+        "Keyboard shortcuts",
+        &["shortcuts", "keymap", "keybindings", "key bindings", "hotkeys", "rebind", "remap", "conflict"],
+        &["keys.toml"],
+        &[ControlId::KeyboardSearch, ControlId::KeyboardList, ControlId::KeyboardResetAll],
+    ),
+    unit(
         ControlId::DefaultView,
         Category::ViewsPreview,
         "Default view",
@@ -333,6 +345,7 @@ pub(super) const UNITS: &[Unit] = &[
             "exclude.toml",
             "plugins.toml",
             "saved-queries.toml",
+            "keys.toml",
             "config folder",
             "reveal",
             "open file",
@@ -345,6 +358,7 @@ pub(super) const UNITS: &[Unit] = &[
             ControlId::OpenExcludeToml,
             ControlId::OpenPluginsToml,
             ControlId::OpenSavedQueriesToml,
+            ControlId::OpenKeysToml,
             ControlId::ShowConfig,
         ],
     ),

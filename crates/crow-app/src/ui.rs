@@ -93,6 +93,8 @@ pub struct Ui {
     pub exclude: Exclude,
     /// Counts `exclude.toml` reloads that changed it, so a running search can restart.
     pub exclude_generation: u64,
+    /// The user's key overrides (`keys.toml`); a broken file keeps the last good set.
+    pub keys: crow_core::keymap_edit::KeyOverrides,
     /// Saved searches, reloaded live with the other config. A broken file keeps
     /// the last good set; open destinations rerun against the new specs.
     pub saved_queries: SavedQueries,
@@ -141,7 +143,7 @@ pub struct Ui {
     pub settings_folder: Option<PathBuf>,
     settings_category_write: Option<Shared<Task<Result<(), String>>>>,
     /// One message per config file that doesn't load; shown in the status line until fixed.
-    errors: [Option<SharedString>; 5],
+    errors: [Option<SharedString>; 6],
 }
 
 /// A config file problem as the Settings window lists it, with the config
@@ -188,7 +190,8 @@ pub fn config_error_file(cx: &App) -> Option<(SharedString, PathBuf)> {
     Some((issue.message, issue.path))
 }
 
-const CONFIG_FILES: [&str; 5] = ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml", "saved-queries.toml"];
+const CONFIG_FILES: [&str; 6] =
+    ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml", "saved-queries.toml", "keys.toml"];
 
 impl Global for Ui {}
 
@@ -197,6 +200,7 @@ const VIEWS: usize = 1;
 const SIDEBAR: usize = 2;
 const EXCLUDE: usize = 3;
 const SAVED_QUERIES: usize = 4;
+const KEYS: usize = 5;
 
 impl Ui {
     fn new(config_dir: PathBuf, state_dir: PathBuf, home: PathBuf, theme: Theme, fade_enabled: bool) -> Ui {
@@ -221,6 +225,7 @@ impl Ui {
             sidebar: SidebarConfig::parse(crow_core::DEFAULT_SIDEBAR).unwrap_or_default(),
             exclude: Exclude::default(),
             exclude_generation: 0,
+            keys: Default::default(),
             recent,
             recent_commands,
             zoxide: Vec::new(),
@@ -254,6 +259,7 @@ impl Ui {
         ui.load_views();
         ui.load_sidebar();
         ui.load_exclude();
+        ui.load_keys();
         ui.apply_loaded_saved_queries(load_saved_queries(&ui.config_dir, &ui.home));
         ui.feedback = Feedback::read(&ui.settings);
         ui
@@ -362,6 +368,30 @@ impl Ui {
                 self.set_error(SIDEBAR, Ok(())) || changed
             }
             Err(e) => self.set_error(SIDEBAR, Err(e)),
+        }
+    }
+
+    /// Reload `keys.toml`; a broken file keeps the last good keys. True if the keys changed.
+    pub fn load_keys(&mut self) -> bool {
+        let result = crow_core::keymap_edit::load_keys(&self.config_dir).and_then(|keys| {
+            for command in keys.finder.keys().chain(keys.vim.keys()) {
+                if crate::palette::CommandId::from_key(command).is_none() {
+                    return Err(format!("keys.toml: unknown command `{command}`"));
+                }
+            }
+            Ok(keys)
+        });
+        match result {
+            Ok(keys) => {
+                let changed = keys != self.keys;
+                self.keys = keys;
+                self.set_error(KEYS, Ok(()));
+                changed
+            }
+            Err(e) => {
+                self.set_error(KEYS, Err(e));
+                false
+            }
         }
     }
 
@@ -715,7 +745,8 @@ pub fn reload_config(cx: &mut App) {
     ui.load_views();
     let sidebar = ui.load_sidebar();
     let exclude = ui.load_exclude();
-    if settings || sidebar || exclude {
+    let keys = ui.load_keys();
+    if settings || sidebar || exclude || keys {
         tracing::info!("config reloaded");
     }
     if sidebar {
@@ -731,11 +762,29 @@ pub fn reload_config(cx: &mut App) {
     if icon_changed {
         crate::icon_packs::reload(cx);
     }
+    if keys {
+        apply_keys(cx);
+    }
     reload_saved_queries(cx);
     refresh_feedback(cx);
     refresh_translucency(cx);
     refresh_app_icon(cx);
     crate::plugins::reload(cx);
+    cx.refresh_windows();
+}
+
+/// Rebind from `keys.toml` and refresh everything that shows a key.
+fn apply_keys(cx: &mut App) {
+    crate::keymap::install(cx);
+    crate::menus::refresh(cx);
+    cx.refresh_windows();
+}
+
+/// Reload `keys.toml` after Settings wrote it.
+pub fn reload_keys(cx: &mut App) {
+    if cx.global_mut::<Ui>().load_keys() {
+        apply_keys(cx);
+    }
     cx.refresh_windows();
 }
 

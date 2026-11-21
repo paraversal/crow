@@ -33,6 +33,7 @@ use crate::theme_choice::{self, ThemeChoice};
 use crate::ui::{self, SettingChange, Ui};
 
 mod catalog;
+mod keyboard;
 mod preview;
 mod saved_queries;
 mod search;
@@ -64,7 +65,9 @@ actions!(
         /// ⌘F.
         FocusSearch,
         /// ⌘W.
-        CloseSettings
+        CloseSettings,
+        /// Delete on a Keyboard row: back to the default shortcut.
+        ResetShortcut
     ]
 );
 
@@ -86,6 +89,8 @@ pub fn keymap() -> Vec<KeyBinding> {
         KeyBinding::new("escape", Cancel, settings),
         KeyBinding::new("cmd-w", CloseSettings, settings),
         KeyBinding::new("cmd-f", FocusSearch, settings),
+        KeyBinding::new("backspace", ResetShortcut, Some("Settings && !TextInput")),
+        KeyBinding::new("delete", ResetShortcut, Some("Settings && !TextInput")),
         KeyBinding::new("cmd-,", OpenSettings, settings),
     ]
     .into_iter()
@@ -132,9 +137,11 @@ fn open_window(cx: &mut App) {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
             title: Some("Settings".into()),
-            appears_transparent: false,
-            traffic_light_position: None,
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(px(14.), px(19.))),
         }),
+        // Like the main window: the band below moves the window.
+        app_owns_titlebar_drag: true,
         is_resizable: true,
         window_min_size: Some(size(px(640.), px(420.))),
         ..Default::default()
@@ -198,6 +205,9 @@ enum ControlId {
     PreviewAdd,
     PreviewClear,
     Plugins,
+    KeyboardSearch,
+    KeyboardList,
+    KeyboardResetAll,
     EditSettings,
     ShowConfig,
     OpenSidebarToml,
@@ -205,12 +215,13 @@ enum ControlId {
     OpenExcludeToml,
     OpenPluginsToml,
     OpenSavedQueriesToml,
+    OpenKeysToml,
 }
 
 impl ControlId {
     /// Every control, used to build focus handles. Reading order comes from
     /// `catalog::units`, so a category can be reordered without touching this.
-    const ALL: [ControlId; 50] = [
+    const ALL: [ControlId; 54] = [
         ControlId::Theme,
         ControlId::TranslucentSidebar,
         ControlId::AppIcon,
@@ -254,6 +265,9 @@ impl ControlId {
         ControlId::SavedQueryList,
         ControlId::NewSavedQuery,
         ControlId::Plugins,
+        ControlId::KeyboardSearch,
+        ControlId::KeyboardList,
+        ControlId::KeyboardResetAll,
         ControlId::EditSettings,
         ControlId::ShowConfig,
         ControlId::OpenSidebarToml,
@@ -261,6 +275,7 @@ impl ControlId {
         ControlId::OpenExcludeToml,
         ControlId::OpenPluginsToml,
         ControlId::OpenSavedQueriesToml,
+        ControlId::OpenKeysToml,
     ];
 
     fn key(self) -> &'static str {
@@ -308,6 +323,9 @@ impl ControlId {
             ControlId::PreviewAdd => "settings-preview-add",
             ControlId::PreviewClear => "settings-preview-clear",
             ControlId::Plugins => "settings-plugins",
+            ControlId::KeyboardSearch => "settings-keyboard-search",
+            ControlId::KeyboardList => "settings-keyboard-list",
+            ControlId::KeyboardResetAll => "settings-keyboard-reset-all",
             ControlId::EditSettings => "settings-edit-file",
             ControlId::ShowConfig => "settings-show-config",
             ControlId::OpenSidebarToml => "settings-open-sidebar",
@@ -315,6 +333,7 @@ impl ControlId {
             ControlId::OpenExcludeToml => "settings-open-exclude",
             ControlId::OpenPluginsToml => "settings-open-plugins",
             ControlId::OpenSavedQueriesToml => "settings-open-saved-queries",
+            ControlId::OpenKeysToml => "settings-open-keys",
         }
     }
 
@@ -397,6 +416,9 @@ impl ControlId {
             ControlId::PreviewRulePattern => "New rule pattern",
             ControlId::PreviewAddRule => "Add Preview Rule",
             ControlId::PreviewList => "Providers",
+            ControlId::KeyboardSearch => "Search shortcuts",
+            ControlId::KeyboardList => "Keyboard shortcuts",
+            ControlId::KeyboardResetAll => "Reset all",
             ControlId::PreviewMoveUp => "Move Up",
             ControlId::PreviewMoveDown => "Move Down",
             ControlId::PreviewRemove => "Remove",
@@ -410,6 +432,7 @@ impl ControlId {
             ControlId::OpenExcludeToml => "exclude.toml",
             ControlId::OpenPluginsToml => "plugins.toml",
             ControlId::OpenSavedQueriesToml => "saved-queries.toml",
+            ControlId::OpenKeysToml => "keys.toml",
         }
     }
 
@@ -444,8 +467,12 @@ impl ControlId {
             | ControlId::DefaultFoldersFirst => Role::Switch,
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => Role::SpinButton,
             ControlId::Terminal | ControlId::PreviewRulePattern => Role::TextInput,
-            ControlId::Plugins | ControlId::PreviewList | ControlId::SavedQueryList => Role::ListBox,
+            ControlId::KeyboardSearch => Role::SearchInput,
+            ControlId::Plugins | ControlId::PreviewList | ControlId::SavedQueryList | ControlId::KeyboardList => {
+                Role::ListBox
+            }
             ControlId::PlaySound
+            | ControlId::KeyboardResetAll
             | ControlId::NewSavedQuery
             | ControlId::EditSettings
             | ControlId::ShowConfig
@@ -454,6 +481,7 @@ impl ControlId {
             | ControlId::OpenExcludeToml
             | ControlId::OpenPluginsToml
             | ControlId::OpenSavedQueriesToml
+            | ControlId::OpenKeysToml
             | ControlId::PreviewCurrentFolder
             | ControlId::PreviewChooseFolder
             | ControlId::PreviewAddRule
@@ -556,14 +584,16 @@ impl ControlId {
             ControlId::Sound => "Crow adds soft ticks to Finder's sounds; Off is silent.",
             ControlId::PlaySound => "Play the trash sound in the chosen set.",
             ControlId::WindowWidth | ControlId::WindowHeight => "600 to 4000 points.",
-            ControlId::Plugins => return None,
+            ControlId::Plugins | ControlId::KeyboardSearch | ControlId::KeyboardList => return None,
+            ControlId::KeyboardResetAll => "Remove every shortcut change in the chosen layer.",
             ControlId::EditSettings => "Open settings.toml in its default app.",
             ControlId::ShowConfig => "Open ~/.config/crow in Finder.",
             ControlId::OpenSidebarToml
             | ControlId::OpenViewsToml
             | ControlId::OpenExcludeToml
             | ControlId::OpenPluginsToml
-            | ControlId::OpenSavedQueriesToml => return None,
+            | ControlId::OpenSavedQueriesToml
+            | ControlId::OpenKeysToml => return None,
         };
         Some(text.into())
     }
@@ -581,8 +611,11 @@ impl ControlId {
             | ControlId::OpenViewsToml
             | ControlId::OpenExcludeToml
             | ControlId::OpenPluginsToml
-            | ControlId::OpenSavedQueriesToml => true,
+            | ControlId::OpenSavedQueriesToml
+            | ControlId::OpenKeysToml => true,
             ControlId::SavedQueryList => !ui.saved_queries.is_empty() && ui.file_error("saved-queries.toml").is_none(),
+            ControlId::KeyboardSearch | ControlId::KeyboardList => true,
+            ControlId::KeyboardResetAll => ui.file_error("keys.toml").is_none(),
             ControlId::NewSavedQuery => ui.file_error("saved-queries.toml").is_none(),
             ControlId::DefaultView
             | ControlId::DefaultSort
@@ -722,8 +755,16 @@ enum FocusTarget {
 
 /// The files the error region covers. `plugins.toml` comes from the plugin
 /// inventory and `pack.toml` from the icon pack loader; the rest from the config loader.
-const ERROR_FILES: [&str; 7] =
-    ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml", "plugins.toml", "saved-queries.toml", "pack.toml"];
+const ERROR_FILES: [&str; 8] = [
+    "settings.toml",
+    "views.toml",
+    "sidebar.toml",
+    "exclude.toml",
+    "plugins.toml",
+    "saved-queries.toml",
+    "keys.toml",
+    "pack.toml",
+];
 
 /// The preview editor's layer. The target within the layer is kept while the
 /// editor is on screen.
@@ -792,6 +833,7 @@ pub struct SettingsWindow {
     preview_rule: Option<crow_core::RuleLocator>,
     preview_rule_new: bool,
     preview_pattern: Entity<TextInput>,
+    keyboard: keyboard::KeyboardState,
     preview_pattern_text: String,
     preview_new_providers: Vec<String>,
     preview_list_cursor: usize,
@@ -875,7 +917,11 @@ impl SettingsWindow {
                 .with_aria_label("New rule pattern")
         });
 
+        let keyboard = keyboard::KeyboardState::new(cx);
         let mut subscriptions = Vec::new();
+        subscriptions.push(cx.subscribe_in(&keyboard.search, window, |this, _, event, window, cx| {
+            this.on_keyboard_search_event(event, window, cx);
+        }));
         for (id, input) in [
             (ControlId::FontSize, &font_size),
             (ControlId::WindowWidth, &window_width),
@@ -903,6 +949,7 @@ impl SettingsWindow {
                 ControlId::WindowWidth => window_width.read(cx).focus_handle(cx),
                 ControlId::WindowHeight => window_height.read(cx).focus_handle(cx),
                 ControlId::PreviewRulePattern => preview_pattern.read(cx).focus_handle(cx),
+                ControlId::KeyboardSearch => keyboard.search.read(cx).focus_handle(cx),
                 _ => cx.focus_handle(),
             };
             // The window owns the order (category and search change it). These
@@ -1019,6 +1066,7 @@ impl SettingsWindow {
             preview_rule: None,
             preview_rule_new: false,
             preview_pattern,
+            keyboard,
             preview_pattern_text: String::new(),
             preview_new_providers: Vec::new(),
             preview_list_cursor: 0,
@@ -1243,7 +1291,7 @@ impl SettingsWindow {
         self.menu.is_some()
     }
 
-    /// The fuzzer's invariants for this window: focus stays on a control, and
+    /// The fuzzer's invariants for this window: focus stays on a control (or in the saved-query editor), and
     /// every painted interactive element has a role and a label. The runner
     /// compares the shown values to `settings.toml` after a settle.
     #[cfg(any(test, feature = "fuzz"))]
@@ -1255,6 +1303,8 @@ impl SettingsWindow {
             && !self.sidebar_focused(window)
             && !self.clear_search.is_focused(window)
             && !on_error
+            // The saved-query editor is a sheet over the page; its fields are controls too.
+            && !self.saved_query_form.as_ref().is_some_and(|form| form.focus.contains_focused(window, cx))
         {
             out.push(crate::fuzz::Violation::new("settings focus", "focus is not on a control"));
         }
@@ -1484,6 +1534,10 @@ impl SettingsWindow {
         if self.saved_query_form.is_some() {
             return;
         }
+        if self.category == Category::Keyboard && self.query.is_empty() {
+            self.focus_keyboard_search(window, cx);
+            return;
+        }
         let input = self.search.clone();
         let len = input.read(cx).text().len();
         input.update(cx, |input, cx| input.select_range(0..len, window, cx));
@@ -1529,6 +1583,9 @@ impl SettingsWindow {
             ControlId::PreviewRemove => self.preview_remove_provider(cx),
             ControlId::PreviewClear => self.preview_clear(cx),
             ControlId::PreviewList | ControlId::PreviewRulePattern => {}
+            ControlId::KeyboardList => self.keyboard_activate(window, cx),
+            ControlId::KeyboardResetAll => self.ask_reset_all(cx),
+            ControlId::KeyboardSearch => {}
             ControlId::DefaultView => {
                 let index = view_index(cx.global::<Ui>().views.defaults_layer().view.unwrap_or_default());
                 self.select_default_view(index, cx);
@@ -1559,6 +1616,7 @@ impl SettingsWindow {
             ControlId::OpenExcludeToml => ui::open_config_file("exclude.toml", cx),
             ControlId::OpenPluginsToml => ui::open_config_file("plugins.toml", cx),
             ControlId::OpenSavedQueriesToml => ui::open_config_file("saved-queries.toml", cx),
+            ControlId::OpenKeysToml => ui::open_config_file("keys.toml", cx),
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => {
                 self.commit_stepper(id, window, cx);
             }
@@ -1579,6 +1637,7 @@ impl SettingsWindow {
     fn move_horizontal(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.focused_control(window) else { return };
         match id {
+            ControlId::KeyboardList => self.keyboard_horizontal(delta, cx),
             ControlId::AppIcon => self.move_app_icon(delta, window, cx),
             ControlId::Keymap
             | ControlId::Enter
@@ -1651,6 +1710,7 @@ impl SettingsWindow {
             }
             ControlId::Plugins => self.move_plugin_cursor(delta, cx),
             ControlId::SavedQueryList => self.move_saved_query_cursor(delta, cx),
+            ControlId::KeyboardList => self.move_keyboard_cursor(delta, cx),
             _ => {}
         }
     }
@@ -2260,6 +2320,7 @@ impl SettingsWindow {
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.saved_query_form.is_some() {
             self.close_saved_query_editor(window, cx);
+        } else if self.keyboard_cancel(cx) {
         } else if self.menu.is_some() {
             self.close_menu(window, cx);
         } else if !self.query.is_empty() {
@@ -2710,13 +2771,14 @@ impl Render for SettingsWindow {
             .child(link(self, ControlId::OpenExcludeToml, "exclude.toml", window, &theme, cx))
             .child(link(self, ControlId::OpenPluginsToml, "plugins.toml", window, &theme, cx))
             .child(link(self, ControlId::OpenSavedQueriesToml, "saved-queries.toml", window, &theme, cx))
+            .child(link(self, ControlId::OpenKeysToml, "keys.toml", window, &theme, cx))
             .child(show_config);
         let config_row = controls::labeled(
             ControlMeta {
                 id: "settings-config-files",
                 label: "Config files",
                 description: Some(
-                    "The six TOML files stay authoritative and editable; Crow writes back only the key you change."
+                    "The seven TOML files stay authoritative and editable; Crow writes back only the key you change."
                         .into(),
                 ),
                 enabled: true,
@@ -2824,7 +2886,39 @@ impl Render for SettingsWindow {
         rows.insert(ControlId::SavedQueryList, self.render_saved_queries(window, &theme, cx));
         rows.insert(ControlId::PreviewScope, self.render_preview_unit(window, &theme, cx));
         rows.insert(ControlId::Plugins, plugin_row);
+        rows.insert(
+            ControlId::KeyboardList,
+            self.render_keyboard(self.query.is_empty() && self.category == Category::Keyboard, window, &theme, cx),
+        );
         rows.insert(ControlId::EditSettings, config_row.into_any_element());
+
+        // The titlebar is transparent, so the window's own background shows through
+        // it in every theme. A press moves the window; a double-click does what
+        // the system setting says.
+        let titlebar = div()
+            .id("settings-titlebar")
+            .debug_selector(|| "settings-titlebar".to_owned())
+            .flex_none()
+            .h(px(38.))
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(13.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(color(theme.role("fg-muted")))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
+                    let effects = crate::effects::effects(cx);
+                    if event.click_count > 1 {
+                        effects.titlebar_double_click(window);
+                    } else {
+                        effects.start_window_move(window);
+                    }
+                }),
+            )
+            .child("Settings");
 
         let search_focused = self.search_handle(cx).is_focused(window);
         let search_row = div()
@@ -2834,7 +2928,7 @@ impl Render for SettingsWindow {
             .items_center()
             .gap(px(7.))
             .mx(px(16.))
-            .mt(px(10.))
+            .mt(px(8.))
             .h(px(28.))
             .pl(px(9.))
             .pr(px(8.))
@@ -2894,6 +2988,7 @@ impl Render for SettingsWindow {
 
         let mut scroll = div()
             .id("settings-scroll")
+            .debug_selector(|| "settings-scroll".to_owned())
             .flex_1()
             .min_w_0()
             .min_h_0()
@@ -2929,6 +3024,11 @@ impl Render for SettingsWindow {
             .on_action(cx.listener(|this, _: &FocusPrev, window, cx| this.advance_focus(-1, window, cx)))
             .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)))
+            .on_action(cx.listener(|this, _: &ResetShortcut, window, cx| {
+                if this.is_focused(ControlId::KeyboardList, window) {
+                    this.keyboard_reset_cursor_row(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &CloseSettings, window, cx| this.close(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 window.activate_window();
@@ -2941,6 +3041,7 @@ impl Render for SettingsWindow {
             .text_color(color(theme.role("fg")))
             .font_family(font)
             .text_size(px(font_size))
+            .child(titlebar)
             .child(search_row)
             .children(error_region)
             .child(div().flex_1().min_h_0().flex().child(self.sidebar(&theme, window, cx)).child(scroll))
@@ -3041,7 +3142,7 @@ fn add_category(
 ) {
     page.push(section_heading(category.label(), theme, 0.0).into_any_element());
     for unit in catalog::units_in(category) {
-        push_unit(page, indices, unit, theme, rows);
+        push_unit(page, indices, unit, theme, rows, true);
     }
 }
 
@@ -3062,7 +3163,7 @@ fn add_search_results(
         }
         page.push(section_heading(category.label(), theme, 0.0).into_any_element());
         for unit in units {
-            push_unit(page, indices, unit, theme, rows);
+            push_unit(page, indices, unit, theme, rows, false);
         }
     }
 }
@@ -3073,8 +3174,11 @@ fn push_unit(
     unit: &catalog::Unit,
     theme: &Theme,
     rows: &mut HashMap<ControlId, gpui::AnyElement>,
+    category_page: bool,
 ) {
     let Some(row) = rows.remove(&unit.id) else { return };
+    // The Keyboard list takes the page's remaining height instead of a fixed one.
+    let fill = category_page && unit.id == ControlId::KeyboardList;
     let index = page.len();
     for id in unit.controls {
         indices.insert(*id, index);
@@ -3083,10 +3187,9 @@ fn push_unit(
         div()
             .w_full()
             .max_w(px(720.))
-            .pb(px(10.))
-            .mb(px(10.))
-            .border_b_1()
-            .border_color(color(theme.role("border")))
+            .when(fill, |d| d.flex_1().min_h_0())
+            // The page's only unit, so no divider under it.
+            .when(!fill, |d| d.pb(px(10.)).mb(px(10.)).border_b_1().border_color(color(theme.role("border"))))
             .child(row)
             .into_any_element(),
     );
@@ -3118,6 +3221,7 @@ fn link(
         ControlId::OpenExcludeToml => "exclude.toml",
         ControlId::OpenPluginsToml => "plugins.toml",
         ControlId::OpenSavedQueriesToml => "saved-queries.toml",
+        ControlId::OpenKeysToml => "keys.toml",
         _ => unreachable!("{id:?} is not a config-file link"),
     };
     let activate = callback(cx, move |_, _, cx| ui::open_config_file(name, cx));
@@ -3573,10 +3677,7 @@ mod tests {
             let trash = config.parent().expect("test root").join("trash");
             std::fs::create_dir_all(&trash).ok();
             crate::operations::init(cx, std::sync::Arc::new(crate::operations::FolderTrash(trash)));
-            cx.bind_keys(crate::actions::finder_keymap());
-            cx.bind_keys(crate::actions::vim_keymap());
-            cx.bind_keys(crate::text_input::keymap());
-            cx.bind_keys(keymap());
+            crate::keymap::install(cx);
             crate::menus::init(cx);
         });
     }
@@ -5026,6 +5127,18 @@ preview_providers = ["example.one.preview"]
     }
 
     #[gpui::test]
+    fn the_settings_titlebar_band_moves_the_window(cx: &mut TestAppContext) {
+        use crate::effects::Call;
+        let (_view, mut vcx) = open_settings(cx);
+        draw(&mut vcx);
+        let at = vcx.debug_bounds("settings-titlebar").expect("titlebar band").center();
+        vcx.simulate_click(at, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        let calls = vcx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").take_calls());
+        assert!(calls.contains(&Call::StartWindowMove), "{calls:?}");
+    }
+
+    #[gpui::test]
     fn every_control_has_a_role_and_label(cx: &mut TestAppContext) {
         let (view, vcx) = open_settings(cx);
         for id in ControlId::ALL {
@@ -5500,5 +5613,208 @@ permissions = { fs = "none" }
         vcx.simulate_keystrokes("left");
         wait_for(&vcx, "tips = \"auto\"");
         assert_eq!(state(&view, &vcx, ControlId::Tips).selected, Some(0), "Auto shows again");
+    }
+
+    fn keyboard_rows_text(view: &Entity<SettingsWindow>, vcx: &VisualTestContext) -> Vec<String> {
+        view.read_with(vcx, |view, cx| view.keyboard_rows(cx).into_iter().map(|row| row.label.to_owned()).collect())
+    }
+
+    fn keys_of(vcx: &VisualTestContext, command: &str) -> Option<Vec<String>> {
+        vcx.read(|cx| cx.global::<Ui>().keys.finder.get(command).cloned())
+    }
+
+    fn keyboard_row_cursor(view: &Entity<SettingsWindow>, vcx: &mut VisualTestContext, label: &str) {
+        let at = keyboard_rows_text(view, vcx).iter().position(|l| l == label).expect("row exists");
+        view.update(vcx, |view, _| view.keyboard.cursor = at);
+        draw(vcx);
+    }
+
+    fn settle_writes(vcx: &mut VisualTestContext) {
+        for _ in 0..40 {
+            vcx.run_until_parked();
+            vcx.cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        draw(vcx);
+    }
+
+    #[gpui::test]
+    fn keyboard_rows_show_each_key_once(cx: &mut TestAppContext) {
+        let (_view, vcx) = open_settings(cx);
+        let rows = vcx.read(|cx| crate::keymap::rows(crow_core::KeymapLayer::Finder, cx));
+        for row in rows {
+            let mut seen = std::collections::HashSet::new();
+            assert!(row.keys.iter().all(|k| seen.insert(k.clone())), "{}: {:?}", row.label, row.keys);
+        }
+    }
+
+    #[gpui::test]
+    fn keyboard_list_fills_the_page_height(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        draw(&mut vcx);
+        let list = vcx.debug_bounds("settings-keyboard-list").expect("list rendered");
+        let scroll = vcx.debug_bounds("settings-scroll").expect("page rendered");
+        assert!(list.size.height > px(440.), "not capped at a fixed height: {:?}", list.size.height);
+        let gap = scroll.bottom() - list.bottom();
+        assert!(gap < px(60.), "list reaches the page bottom, gap {gap:?}");
+    }
+
+    #[gpui::test]
+    fn keyboard_page_lists_every_command_and_filters_by_name_or_key(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        let all = keyboard_rows_text(&view, &vcx);
+        assert_eq!(all.len(), crate::palette::COMMANDS.len());
+        view.update(&mut vcx, |view, cx| {
+            view.keyboard.search.update(cx, |input, cx| input.set_text_silent("go to", cx))
+        });
+        view.update(&mut vcx, |view, _| view.keyboard.query = "go to".into());
+        let found = keyboard_rows_text(&view, &vcx);
+        assert!(found.iter().any(|l| l.contains("Go to")), "{found:?}");
+        assert!(found.len() < all.len());
+        view.update(&mut vcx, |view, _| view.keyboard.query = "⇧⌘g".into());
+        assert!(keyboard_rows_text(&view, &vcx).iter().any(|l| l.contains("Go to Folder")), "search by key text");
+        view.update(&mut vcx, |view, _| view.keyboard.query = "zzzz".into());
+        assert!(keyboard_rows_text(&view, &vcx).is_empty());
+    }
+
+    #[gpui::test]
+    fn clicking_a_row_and_typing_rebinds_the_command(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        keyboard_row_cursor(&view, &mut vcx, "View as Columns");
+        vcx.simulate_keystrokes("enter");
+        assert!(view.read_with(&vcx, |v, _| v.keyboard.capture.is_some()), "Return starts capture");
+        vcx.simulate_keystrokes("cmd-shift-9");
+        settle_writes(&mut vcx);
+        assert!(view.read_with(&vcx, |v, _| v.keyboard.capture.is_none()));
+        assert_eq!(keys_of(&vcx, "view-as-columns"), Some(vec!["cmd-shift-9".to_owned()]));
+        let text = std::fs::read_to_string(vcx.read(|cx| cx.global::<Ui>().config_dir.join("keys.toml"))).unwrap();
+        assert!(text.contains("view-as-columns"), "{text}");
+    }
+
+    #[gpui::test]
+    fn capture_swallows_window_keys_and_escape_cancels(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        keyboard_row_cursor(&view, &mut vcx, "View as Columns");
+        vcx.simulate_keystrokes("enter");
+        // ⌘W would close the window, ⌘, reopens Settings; both must reach only the capture.
+        vcx.simulate_keystrokes("cmd-w");
+        settle_writes(&mut vcx);
+        assert!(
+            vcx.cx.update(|cx| cx.windows().iter().any(|h| h.downcast::<SettingsWindow>().is_some())),
+            "⌘W did not close it"
+        );
+        assert!(view.read_with(&vcx, |v, _| v.keyboard.prompt.is_some()), "⌘W was captured as a key, not run");
+    }
+
+    #[gpui::test]
+    fn reserved_keys_are_refused_with_a_reason(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        keyboard_row_cursor(&view, &mut vcx, "View as Columns");
+        vcx.simulate_keystrokes("enter cmd-q");
+        settle_writes(&mut vcx);
+        let notice = view.read_with(&vcx, |v, _| v.keyboard.notice.clone());
+        assert!(notice.is_some_and(|(_, text)| text.contains("quits")));
+        assert_eq!(keys_of(&vcx, "view-as-columns"), None, "nothing was written");
+    }
+
+    #[gpui::test]
+    fn escape_cancels_capture_and_backspace_unbinds(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        keyboard_row_cursor(&view, &mut vcx, "View as Columns");
+        vcx.simulate_keystrokes("enter escape");
+        assert!(view.read_with(&vcx, |v, _| v.keyboard.capture.is_none()));
+        assert_eq!(keys_of(&vcx, "view-as-columns"), None);
+        vcx.simulate_keystrokes("enter backspace");
+        settle_writes(&mut vcx);
+        assert_eq!(keys_of(&vcx, "view-as-columns"), Some(Vec::new()), "unbound");
+    }
+
+    #[gpui::test]
+    fn a_conflicting_key_asks_and_replace_moves_it(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        keyboard_row_cursor(&view, &mut vcx, "View as Columns");
+        vcx.simulate_keystrokes("enter cmd-2");
+        settle_writes(&mut vcx);
+        let asked = view.read_with(&vcx, |v, _| v.keyboard.prompt.is_some());
+        assert!(asked, "⌘2 belongs to View as List");
+        assert_eq!(keys_of(&vcx, "view-as-columns"), None, "nothing is written until answered");
+        vcx.simulate_keystrokes("escape");
+        assert!(view.read_with(&vcx, |v, _| v.keyboard.prompt.is_none()));
+        vcx.simulate_keystrokes("enter cmd-2");
+        vcx.simulate_keystrokes("enter");
+        settle_writes(&mut vcx);
+        assert_eq!(keys_of(&vcx, "view-as-columns"), Some(vec!["cmd-2".to_owned()]));
+        assert_eq!(keys_of(&vcx, "view-as-list"), Some(Vec::new()), "Replace took it off View as List");
+    }
+
+    #[gpui::test]
+    fn reset_restores_a_row_and_reset_all_asks_first(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        keyboard_row_cursor(&view, &mut vcx, "View as Columns");
+        vcx.simulate_keystrokes("enter cmd-shift-9");
+        settle_writes(&mut vcx);
+        assert!(keys_of(&vcx, "view-as-columns").is_some());
+        vcx.simulate_keystrokes("delete");
+        settle_writes(&mut vcx);
+        assert_eq!(keys_of(&vcx, "view-as-columns"), None, "Delete resets the row");
+        vcx.simulate_keystrokes("enter cmd-shift-9");
+        settle_writes(&mut vcx);
+        view.update(&mut vcx, |view, cx| view.ask_reset_all(cx));
+        draw(&mut vcx);
+        assert!(keys_of(&vcx, "view-as-columns").is_some(), "asking does not reset");
+        vcx.simulate_keystrokes("left enter");
+        settle_writes(&mut vcx);
+        assert_eq!(keys_of(&vcx, "view-as-columns"), None, "Reset all clears the layer");
+    }
+
+    #[gpui::test]
+    fn keyboard_rows_have_roles_and_labels(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        assert!(vcx.debug_bounds("settings-keyboard-list").is_some());
+        assert!(vcx.debug_bounds("settings-keyboard-row-go-to-folder").is_some());
+    }
+
+    #[gpui::test]
+    fn vim_layer_captures_a_sequence_ended_with_return(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        vcx.simulate_keystrokes("right");
+        assert_eq!(view.read_with(&vcx, |v, _| v.keyboard.layer), KeymapLayer::Vim, "→ switches the layer");
+        keyboard_row_cursor(&view, &mut vcx, "Copy");
+        vcx.simulate_keystrokes("enter y c enter");
+        settle_writes(&mut vcx);
+        let keys = vcx.read(|cx| cx.global::<Ui>().keys.vim.get("copy").cloned());
+        assert_eq!(keys, Some(vec!["y c".to_owned()]));
+        assert!(vcx.read(|cx| cx.global::<Ui>().keys.finder.is_empty()), "the Finder layer is untouched");
+    }
+
+    #[gpui::test]
+    fn keyboard_page_fits_a_narrow_window_and_a_broken_file_blocks_edits(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        let dir = vcx.read(|cx| cx.global::<Ui>().config_dir.clone());
+        std::fs::write(dir.join("keys.toml"), "[finder\n").unwrap();
+        vcx.update(|_, cx| crate::ui::reload_config(cx));
+        draw(&mut vcx);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        vcx.simulate_keystrokes("enter");
+        assert!(view.read_with(&vcx, |v, _| v.keyboard.capture.is_none()), "a broken keys.toml blocks capture");
+        assert!(view.read_with(&vcx, |v, _| v.keyboard.notice.is_some()));
     }
 }

@@ -4,9 +4,8 @@ Ideas and unscheduled work go here. Move accepted milestone work to the [roadmap
 
 ## Untriaged
 
-- **Custom keybindings.** Let users set, see, and persist a key for a command, including Open Terminal Here. Decide on the config format and how to report conflicts across keymap layers.
 - **Sidebar text filter.** Filter native and contributed sidebar sections. Plan matching, focus, cursor fallback, and Escape together. The existing `/` binding filters the file pane.
-- **Design-board follow-ups.** Line icons per favorite, clock icons in Recent, syntax highlighting and line numbers in previews, 196 px columns, a stronger focused-column tint, and a scope token in the search field. See the [UI design overview](ui-overhaul/README.md).
+- **Design-board follow-ups.** Clock icons in Recent (favorites now use Finder icons), syntax highlighting and line numbers in previews, 196 px columns, a stronger focused-column tint, and a scope token in the search field. See the [UI design overview](ui-overhaul/README.md).
 
 ## Triaged backlog
 
@@ -33,3 +32,7 @@ Ideas and unscheduled work go here. Move accepted milestone work to the [roadmap
 - **Structural splits and UI-free crate placement (M9 audit #38, carried P3–P6).** Split growing app files (`pane.rs` 6.4k lines, `settings_window.rs` 5.3k, `search.rs` 4.4k, `window.rs` 3.6k, `folder.rs` 3.1k), split `plugins/coordinator.rs` (`finish`, O(N) `RowCache::evict`, 7 `too_many_arguments` allows), split `crow-plugin/src/registry.rs::validate_registration`, unify `palette.rs::CommandId::key` (72 arms) with command metadata, and move UI-free logic (`coordinator.rs`, `icon_packs.rs` loader, `operations.rs` drop routing, `saved_query_counts.rs`, `tags.rs` index) into `crow-plugin` / `crow-core` / `crow-fs` / `crow-search`.
 - **Remaining live-app freezes (M9 audit #47, partial in batch 5).** Batch 5 cut freezes over 250 ms in the live-fuzz replay (`crow --fuzz --seed 20261120 --tree small --until 6913`) from about 25 to 6. Leaf `displayNameAtPath` calls (#36 above) and creating the Settings window still block the main thread.
 - **Remaining Settings UI for TOML-only keys (M9 audit #39).** Add Settings or contextual UI coverage for `views.toml` (`icon_source`, default `icon_size`/`icon_caption`/`columns`), `sidebar.toml` (`pinned_tags`, `[sections].order`, `[section].show`, `[projects].roots`), and `settings.toml` (`[window].sidebar_width`), plus switch first-launch `settings.toml` creation (`settings.rs:465`) to `write_atomic`.
+
+### Icon pack editor in Settings (user idea, 2026-11-21, untriaged)
+
+Settings ▸ Appearance gets an editor for the local icon pack: add/remove rules (exact path, file name, folder name, extension, UTType, generic) with icon + theme colour, a live preview, and an icon picker that browses a data-dir icon folder with fuzzy search. Writes `pack.toml` through `crow_core::edit_toml`. Open questions: where icons come from (drop SVGs into the folder; a bundled Lucide set vs an integrated downloader), missing icon references (the loader already reports them; the editor should mark them), and whether packs become stackable (`icon_pack` as a list, first match wins) so a personal pack can sit over a general one. Related: R4 step 8 (native icons for sidebar favorites).

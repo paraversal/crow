@@ -44,6 +44,7 @@ mod icons;
 mod info_pane;
 #[cfg(test)]
 mod io_guard;
+mod keymap;
 mod keys;
 mod logging;
 mod menus;
@@ -601,10 +602,7 @@ fn main() -> ExitCode {
         operations::init(cx, std::sync::Arc::new(crow_macos::SystemTrash));
         plugins::init(cx);
         icon_packs::reload(cx);
-        cx.bind_keys(actions::finder_keymap());
-        cx.bind_keys(actions::vim_keymap());
-        cx.bind_keys(text_input::keymap());
-        cx.bind_keys(settings_window::keymap());
+        keymap::install(cx);
         menus::init(cx);
         let initial = {
             let mut pending = pending_urls.lock().unwrap();
