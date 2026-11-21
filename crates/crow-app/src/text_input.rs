@@ -146,6 +146,8 @@ pub struct TextInput {
     /// A refused key: the field shakes (Full) or its ring tints red (Low) until this passes.
     refuse: Option<(u64, Instant)>,
     refuse_generation: u64,
+    /// When the field first showed: its outline fades in from here (`FIELD_IN`).
+    shown_at: Instant,
 }
 
 /// The field's own undo history. Inside a text field ⌘Z undoes typing, never a file operation.
@@ -212,6 +214,7 @@ impl TextInput {
             blink_loop: false,
             refuse: None,
             refuse_generation: 0,
+            shown_at: Instant::now(),
         }
     }
 
@@ -1169,10 +1172,16 @@ impl Render for TextInput {
             Some(motion::look_in(&phases, mode, Fx::Refuse, started, now))
         });
         let tint = refuse_look.and_then(|look| effect_tint(look, &theme));
-        let border = match refuse_look {
+        let mut border = match refuse_look {
             Some(look) if look.tint > 0.0 => color(theme.role("error")),
             _ => color(theme.role("accent")),
         };
+        // The outline fades in as the field opens; the text, selection and caret are there
+        // from the first frame. Opacity only, so Low and Full are alike.
+        if let Some(t) = motion::progress(mode, self.shown_at, now, motion::ms::FIELD_IN, motion::ms::FIELD_IN) {
+            border.a *= t;
+            window.request_animation_frame();
+        }
         div()
             .id(self.id.clone())
             .role(self.role)

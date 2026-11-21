@@ -17935,3 +17935,23 @@ fn the_filter_row_opens_and_closes_its_height_in_full_only(cx: &mut TestAppConte
         assert!(cx.debug_bounds("filter-ghost").is_none(), "{mode:?}: ghost gone");
     }
 }
+
+#[gpui::test]
+fn a_sort_the_user_asks_for_glides_visible_rows_only_in_full(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, captured) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("sort-glide");
+        std::fs::write(root.join("big.bin"), vec![0u8; 5000]).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        settle(&view, &mut cx);
+        view.update(&mut cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        pane(&view, &cx)
+            .update(&mut cx, |p, cx| p.set_sort(crow_fs::Sort::default().toggled(crow_fs::SortKey::Size), cx));
+        let origin = pane(&view, &cx).read_with(&cx, |p, _| p.view_motion_origin(&root.join("notes.txt")));
+        assert_eq!(origin.is_some(), captured, "{mode:?}: rows are captured from where they were");
+        settle(&view, &mut cx);
+        assert_eq!(names(&view, &cx), ["alpha", "beta", "big.bin", "notes.txt"], "{mode:?}: sorted at once");
+    }
+}

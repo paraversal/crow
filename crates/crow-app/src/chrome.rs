@@ -137,7 +137,7 @@ impl Render for Tooltip {
         let theme = &ui.theme;
         let label = self.label.clone();
         let keys = self.keys.clone();
-        div()
+        let tip = div()
             .id("tooltip")
             .debug_selector(|| "tooltip".into())
             .role(Role::Tooltip)
@@ -153,7 +153,17 @@ impl Render for Tooltip {
             .items_center()
             .gap(px(8.))
             .child(div().text_color(color(theme.role("fg"))).child(label))
-            .children(keys.map(|keys| Keycap::text(keys, KeycapWeight::Text)))
+            .children(keys.map(|keys| Keycap::text(keys, KeycapWeight::Text)));
+        // Fades in; a tooltip is a fresh view each time, so the clock starts as it shows.
+        // It goes at once. Opacity only, so Low and Full are alike.
+        match ui.feedback.mode {
+            Effective::Off => tip.into_any_element(),
+            _ => tip
+                .with_animation("tooltip-in", Animation::new(Duration::from_millis(motion::ms::TOOLTIP)), |el, t| {
+                    el.opacity(motion::ease_out(t))
+                })
+                .into_any_element(),
+        }
     }
 }
 

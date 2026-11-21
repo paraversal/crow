@@ -64,6 +64,9 @@ use crow_fs::ops::Request;
 mod gallery;
 mod pane_filter;
 mod view_motion;
+
+/// More visible rows than this and a reorder snaps instead of gliding.
+const REORDER_MAX_ROWS: usize = 200;
 use pane_filter::FilterPlace;
 use view_motion::ViewMotion;
 
@@ -1776,7 +1779,16 @@ impl Pane {
 
     /// Sort as the user asked (a header click), and remember it for this folder.
     pub fn set_sort(&mut self, sort: Sort, cx: &mut Context<Self>) {
+        if self.sort == sort || self.folder().is_none() {
+            return;
+        }
+        // Visible rows glide to their new places and rows that come into view fade in
+        // (Low fades the list). A grid of more than ~200 visible tiles just snaps.
+        let motion = ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, Instant::now(), cx)
+            .filter(|motion| motion.captured_rows() <= REORDER_MAX_ROWS)
+            .map(ViewMotion::for_reorder);
         if self.apply_sort(sort, cx) {
+            self.view_motion = motion;
             self.remember(ViewChange::Sort(sort), cx);
         }
     }
