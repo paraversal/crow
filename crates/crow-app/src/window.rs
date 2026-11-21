@@ -1,5 +1,6 @@
 //! One Crow window: title bar, tabs, sidebar, the active pane, preview and path bar.
 
+use gpui::AnimationExt as _;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
@@ -168,6 +169,16 @@ macro_rules! retire {
     };
 }
 
+/// A tab growing in or shrinking away.
+struct TabMotion {
+    id: crow_core::TabId,
+    opening: bool,
+    started: std::time::Instant,
+    /// Closing: the place it had and its name, drawn until it is gone.
+    index: usize,
+    name: String,
+}
+
 /// The right column opening or closing after ⇧⌘P or ⌘I.
 #[derive(Clone, Copy)]
 struct PaneSlide {
@@ -227,6 +238,12 @@ pub struct CrowWindow {
     /// A sheet asking before an operation runs (conflicts, permanent delete).
     sheet: Option<Sheet>,
     exits: Exits,
+    /// The tabs of the last tab-bar draw, to see which opened or closed.
+    last_tabs: Vec<(crow_core::TabId, String)>,
+    tab_motions: Vec<TabMotion>,
+    /// Cmd-F opening or closing the search band, and whether search was open last draw.
+    search_motion: Option<(bool, std::time::Instant)>,
+    last_search_open: bool,
     /// A ⇧⌘P / ⌘I show or hide of the right column that is still moving.
     pane_slide: Option<PaneSlide>,
     /// Set while a leaving overlay renders: its opacity (1 → 0).
@@ -412,6 +429,10 @@ impl CrowWindow {
             search_includes_hidden,
             sheet,
             exits: Exits::default(),
+            search_motion: None,
+            last_search_open: false,
+            last_tabs: Vec::new(),
+            tab_motions: Vec::new(),
             pane_slide: None,
             exit_fade: std::cell::Cell::new(None),
             show_activity: false,
@@ -1059,19 +1080,41 @@ impl CrowWindow {
                 }),
             )
             .child(title.to_owned());
+        // Full: the selected segment's fill glides to the new mode (a spring) while the
+        // buttons themselves stay unfilled; the slots are 32 px wide with a 2 px gap.
+        let glide_views = cx.global::<Ui>().feedback.mode == crow_core::motion::Effective::Full;
+        let slot = match mode {
+            ViewMode::Icons => 0.0,
+            ViewMode::List => 1.0,
+            ViewMode::Columns => 2.0,
+            ViewMode::Gallery => 3.0,
+        };
+        let view_fill = glide_views.then(|| {
+            div()
+                .absolute()
+                .top(px(2.))
+                .w(px(32.))
+                .h(px(26.))
+                .rounded(px(6.))
+                .bg(color(theme.role("surface-raised")))
+                .debug_selector(|| "view-glide".into())
+                .with_spring("view-glide", crate::motion_ui::glide(px(2.0 + slot * 34.0)), |el, x| el.left(x))
+        });
         let views = div()
             .id("view-switcher")
             .role(Role::RadioGroup)
             .aria_label("View")
+            .relative()
             .flex()
             .flex_none()
             .gap(px(2.))
             .p(px(2.))
             .rounded(px(8.))
             .bg(surface)
+            .children(view_fill)
             .child(
                 with_action_tooltip(
-                    view_button("view-icons", "as Icons", Glyph::Grid, mode == ViewMode::Icons, &theme),
+                    view_button("view-icons", "as Icons", Glyph::Grid, mode == ViewMode::Icons, !glide_views, &theme),
                     "View as Icons",
                     &ViewAsIcons,
                     KeyScope::Window,
@@ -1083,7 +1126,7 @@ impl CrowWindow {
             )
             .child(
                 with_action_tooltip(
-                    view_button("view-list", "as List", Glyph::List, mode == ViewMode::List, &theme),
+                    view_button("view-list", "as List", Glyph::List, mode == ViewMode::List, !glide_views, &theme),
                     "View as List",
                     &ViewAsList,
                     KeyScope::Window,
@@ -1095,7 +1138,14 @@ impl CrowWindow {
             )
             .child(
                 with_action_tooltip(
-                    view_button("view-columns", "as Columns", Glyph::Columns, mode == ViewMode::Columns, &theme),
+                    view_button(
+                        "view-columns",
+                        "as Columns",
+                        Glyph::Columns,
+                        mode == ViewMode::Columns,
+                        !glide_views,
+                        &theme,
+                    ),
                     "View as Columns",
                     &ViewAsColumns,
                     KeyScope::Window,
@@ -1107,7 +1157,14 @@ impl CrowWindow {
             )
             .child(
                 with_action_tooltip(
-                    view_button("view-gallery", "as Gallery", Glyph::Gallery, mode == ViewMode::Gallery, &theme),
+                    view_button(
+                        "view-gallery",
+                        "as Gallery",
+                        Glyph::Gallery,
+                        mode == ViewMode::Gallery,
+                        !glide_views,
+                        &theme,
+                    ),
                     "View as Gallery",
                     &ViewAsGallery,
                     KeyScope::Window,
@@ -1189,9 +1246,24 @@ impl CrowWindow {
         let search_field =
             with_action_tooltip(search_field, "Search names and contents", &ShowSearch, KeyScope::Window, cx);
 
-        let band = self
-            .active_search(cx)
-            .map(|search| search.update(cx, |search, cx| search.render_band(window, cx).into_any_element()));
+        let band_mode = cx.global::<Ui>().feedback.mode;
+        let band_look = self.search_motion.and_then(|(opening, started)| {
+            crow_core::motion::progress(
+                band_mode,
+                started,
+                std::time::Instant::now(),
+                crow_core::motion::ms::SEARCH_BAND,
+                crow_core::motion::ms::LOW_IN,
+            )
+            .map(|t| crow_core::motion::band_look(band_mode, opening, t))
+        });
+        let band_opening = self.search_motion.is_some_and(|(opening, _)| opening);
+        let band = self.active_search(cx).map(|search| {
+            let look = band_look.filter(|_| band_opening);
+            search.update(cx, |search, cx| search.render_band(look, window, cx).into_any_element())
+        });
+        // Closing: the toolbar's own field starts as wide as the band was and narrows back.
+        let closing = band_look.filter(|_| !band_opening);
 
         div()
             .id("toolbar")
@@ -1210,8 +1282,55 @@ impl CrowWindow {
             .child(nav)
             .when(self.active_search(cx).is_some(), |bar| bar.when_some(band, |bar, band| bar.child(band)))
             .when(self.active_search(cx).is_none(), |bar| {
-                bar.child(title_label).child(views).child(go_to).child(search_field)
+                let search_field = match closing {
+                    Some(look) if look.widen > 0.0 => {
+                        let wide = f32::from(window.viewport_size().width);
+                        search_field.w(px(240. + (wide - 240.) * look.widen))
+                    }
+                    _ => search_field,
+                };
+                let fade = closing.map_or(1.0, |look| look.fade);
+                bar.child(title_label.when(fade < 1.0, |el| el.opacity(fade)))
+                    .child(views.when(fade < 1.0, |el| el.opacity(fade)))
+                    .child(go_to.when(fade < 1.0, |el| el.opacity(fade)))
+                    .child(search_field)
             })
+    }
+
+    /// Notice tabs that opened or closed since the last draw and start their motion.
+    fn track_tabs(&mut self, mode: crow_core::motion::Effective, now: std::time::Instant, cx: &mut Context<Self>) {
+        let tabs: Vec<(crow_core::TabId, String)> = self
+            .tabs
+            .iter()
+            .map(|(id, pane)| {
+                let location = pane.read(cx).location().clone();
+                (id, self.location_name(&location, cx))
+            })
+            .collect();
+        if mode != crow_core::motion::Effective::Off && !self.last_tabs.is_empty() {
+            let before: Vec<_> = self.last_tabs.iter().map(|(id, _)| *id).collect();
+            let now_ids: Vec<_> = tabs.iter().map(|(id, _)| *id).collect();
+            let changes = crow_core::tab_changes(&before, &now_ids);
+            for id in changes.opened {
+                self.tab_motions.push(TabMotion { id, opening: true, started: now, index: 0, name: String::new() });
+            }
+            for (index, id) in changes.closed {
+                let name = self.last_tabs[index].1.clone();
+                self.tab_motions.retain(|motion| motion.id != id);
+                self.tab_motions.push(TabMotion { id, opening: false, started: now, index, name });
+            }
+        }
+        self.tab_motions.retain(|motion| {
+            crow_core::motion::progress(
+                mode,
+                motion.started,
+                now,
+                crow_core::motion::ms::TAB,
+                crow_core::motion::ms::LOW_IN,
+            )
+            .is_some()
+        });
+        self.last_tabs = tabs;
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1227,51 +1346,118 @@ impl CrowWindow {
                 (i, self.location_name(&location, cx))
             })
             .collect();
+        let mode = cx.global::<Ui>().feedback.mode;
+        let now = std::time::Instant::now();
+        let progress = |motion: &TabMotion| {
+            crow_core::motion::progress(
+                mode,
+                motion.started,
+                now,
+                crow_core::motion::ms::TAB,
+                crow_core::motion::ms::LOW_IN,
+            )
+        };
+        let moving = self.tab_motions.iter().any(|motion| progress(motion).is_some());
+        // Full: the active tab's fill glides between equal slots (a spring). While tabs
+        // grow or shrink the slots are not equal, so each tab fills itself then.
+        let glide = mode == crow_core::motion::Effective::Full && !moving && count > 1;
+        let fill = glide.then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .w(gpui::relative(1.0 / count as f32))
+                .bg(color(theme.role("bg")))
+                .debug_selector(|| "tab-glide".into())
+                .with_spring(("tab-glide", count), crate::motion_ui::glide(active as f32 / count as f32), |el, x| {
+                    el.left(gpui::relative(x))
+                })
+        });
+        let tab_bar_item = |i: usize, name: String, selected: bool, grow: f32, fade: f32, live: bool| {
+            let tab = div()
+                .id(("tab", i))
+                .debug_selector(move || if live { format!("tab-{i}") } else { "tab-ghost".into() })
+                .role(Role::Tab)
+                .aria_label(name.clone())
+                .aria_selected(selected)
+                .aria_position_in_set(i + 1)
+                .aria_size_of_set(count)
+                .flex_1()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.))
+                .border_r_1()
+                .border_color(color(theme.role("border")))
+                .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
+                .when(selected && !glide, |tab| tab.bg(color(theme.role("bg"))));
+            let mut tab = tab.when(fade < 1.0, |tab| tab.opacity(fade));
+            if grow != 1.0 {
+                tab.style().flex_grow = Some(grow);
+            }
+            tab.when(live, |tab| {
+                tab.on_click(cx.listener(move |this, _, window, cx| {
+                    if i == this.tabs.active_index() {
+                        return;
+                    }
+                    if this.search.is_some() {
+                        this.close_search(window, cx);
+                    }
+                    this.close_tip(cx);
+                    this.tabs.activate(i);
+                    this.sync_tab_activity(cx);
+                    this.announce_active_scope(cx);
+                    this.focus_center(window, cx);
+                    cx.notify();
+                }))
+            })
+            .child(name)
+            .into_any_element()
+        };
+        let mut items: Vec<gpui::AnyElement> = Vec::new();
+        let mut ghosts: Vec<&TabMotion> = self
+            .tab_motions
+            .iter()
+            .filter(|motion| {
+                !motion.opening && mode == crow_core::motion::Effective::Full && progress(motion).is_some()
+            })
+            .collect();
+        ghosts.sort_by_key(|motion| motion.index);
+        for (ix, (id, name)) in
+            self.tabs.iter().zip(tabs.iter().map(|(_, name)| name)).map(|((id, _), n)| (id, n)).enumerate()
+        {
+            while let Some(ghost) = ghosts.first().filter(|ghost| ghost.index <= ix) {
+                let left = 1.0 - progress(ghost).unwrap_or(1.0);
+                items.push(tab_bar_item(usize::MAX - ghost.index, ghost.name.clone(), false, left, left, false));
+                ghosts.remove(0);
+            }
+            let opening = self.tab_motions.iter().find(|motion| motion.id == id && motion.opening);
+            let (grow, fade) = match opening.and_then(progress) {
+                Some(t) if mode == crow_core::motion::Effective::Full => (t, t),
+                Some(t) => (1.0, t),
+                None => (1.0, 1.0),
+            };
+            items.push(tab_bar_item(ix, name.clone(), ix == active, grow, fade, true));
+        }
+        for ghost in ghosts {
+            let left = 1.0 - progress(ghost).unwrap_or(1.0);
+            items.push(tab_bar_item(usize::MAX - ghost.index, ghost.name.clone(), false, left, left, false));
+        }
         div()
             .id("tabs")
             .role(Role::TabList)
             .aria_label("Tabs")
             .h(px(30.))
             .flex_none()
+            .relative()
             .flex()
             .border_b_1()
             .border_color(color(theme.role("border")))
             .bg(color(theme.role("bg-inset")))
-            .children(tabs.into_iter().map(|(i, name)| {
-                let selected = i == active;
-                div()
-                    .id(("tab", i))
-                    .debug_selector(move || format!("tab-{i}"))
-                    .role(Role::Tab)
-                    .aria_label(name.clone())
-                    .aria_selected(selected)
-                    .aria_position_in_set(i + 1)
-                    .aria_size_of_set(count)
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(12.))
-                    .border_r_1()
-                    .border_color(color(theme.role("border")))
-                    .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
-                    .when(selected, |tab| tab.bg(color(theme.role("bg"))))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if i == this.tabs.active_index() {
-                            return;
-                        }
-                        if this.search.is_some() {
-                            this.close_search(window, cx);
-                        }
-                        this.close_tip(cx);
-                        this.tabs.activate(i);
-                        this.sync_tab_activity(cx);
-                        this.announce_active_scope(cx);
-                        this.focus_center(window, cx);
-                        cx.notify();
-                    }))
-                    .child(name)
-            }))
+            .children(fill)
+            .children(items)
     }
 
     /// List view's right-hand column (column view shows it as its last column).
@@ -2038,6 +2224,8 @@ fn view_button(
     label: &'static str,
     icon: Glyph,
     selected: bool,
+    // Whether the selected button paints its own fill (not when a glide does).
+    fill: bool,
     theme: &crow_theme::Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let hover_icon = color(theme.role("fg"));
@@ -2054,7 +2242,7 @@ fn view_button(
         .items_center()
         .justify_center()
         .group(id)
-        .when(selected, |b| b.bg(color(theme.role("surface-raised"))))
+        .when(selected && fill, |b| b.bg(color(theme.role("surface-raised"))))
         .child(
             icons::glyph(icon, 16., if selected { "fg" } else { "fg-muted" }, theme)
                 .id("icon")
@@ -3301,7 +3489,22 @@ impl Render for CrowWindow {
         let mode = self.pane().read(cx).mode();
         let list_view = mode != ViewMode::Columns;
         window.set_window_title(&title);
+        let band_mode = cx.global::<Ui>().feedback.mode;
+        let search_open = self.search.is_some();
+        if search_open != self.last_search_open {
+            self.last_search_open = search_open;
+            self.search_motion =
+                (band_mode != crow_core::motion::Effective::Off).then(|| (search_open, std::time::Instant::now()));
+        }
+        if self.search_motion.is_some() {
+            window.request_animation_frame();
+        }
         let title_bar = self.render_title_bar(&title, window, cx);
+        let tab_now = std::time::Instant::now();
+        self.track_tabs(cx.global::<Ui>().feedback.mode, tab_now, cx);
+        if !self.tab_motions.is_empty() {
+            window.request_animation_frame();
+        }
         let tab_bar = (self.tabs.len() > 1).then(|| self.render_tab_bar(cx));
         let (current, active_saved) = {
             let pane = self.pane().read(cx);

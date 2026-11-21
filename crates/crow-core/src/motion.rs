@@ -405,6 +405,32 @@ pub fn phases(mode: Effective, fx: Fx) -> Vec<Duration> {
     }
 }
 
+/// How the toolbar looks while the search band opens (`opening`) or closes, at
+/// eased progress `t`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BandLook {
+    /// How far the field has widened across the band (0 = the toolbar's own search
+    /// field, 1 = the full band).
+    pub widen: f32,
+    /// The match, Save and Done controls' opacity.
+    pub controls: f32,
+    /// The opacity of what is changing in (Low fades; Full draws at once).
+    pub fade: f32,
+}
+
+/// Full: the field widens across the band, then the controls fade in; closing
+/// reverses it. Low: the band and the toolbar swap at once and fade in.
+pub fn band_look(mode: Effective, opening: bool, t: f32) -> BandLook {
+    let t = t.clamp(0.0, 1.0);
+    match mode {
+        Effective::Full => {
+            let widen = if opening { t } else { 1.0 - t };
+            BandLook { widen, controls: ((widen - 0.5) * 2.0).clamp(0.0, 1.0), fade: 1.0 }
+        }
+        _ => BandLook { widen: if opening { 1.0 } else { 0.0 }, controls: 1.0, fade: t },
+    }
+}
+
 /// A copy's tint pulse: 1 at the start, fading to 0 over `COPY_FADE`. Off has
 /// none; Low keeps the tint (it is color, not movement).
 pub fn copy_flash(mode: Effective, started: Instant, now: Instant) -> f32 {
@@ -532,6 +558,22 @@ mod tests {
             navigation_progress(Effective::Low, start, at(119), 999),
             progress(Effective::Low, start, at(119), 0, 120)
         );
+    }
+
+    #[test]
+    fn the_search_band_widens_then_shows_its_controls_and_reverses() {
+        let start = band_look(Effective::Full, true, 0.0);
+        assert_eq!((start.widen, start.controls), (0.0, 0.0));
+        let half = band_look(Effective::Full, true, 0.5);
+        assert_eq!(half.controls, 0.0, "the controls wait for the field");
+        assert_eq!(band_look(Effective::Full, true, 1.0), BandLook { widen: 1.0, controls: 1.0, fade: 1.0 });
+        let closing = band_look(Effective::Full, false, 0.25);
+        assert_eq!((closing.widen, closing.controls), (0.75, 0.5), "closing is the reverse");
+        for t in [0.0, 0.4, 1.0] {
+            assert_eq!(band_look(Effective::Low, true, t).widen, 1.0, "Low never widens gradually");
+            assert_eq!(band_look(Effective::Low, false, t).widen, 0.0);
+            assert_eq!(band_look(Effective::Low, true, t).fade, t);
+        }
     }
 
     #[test]

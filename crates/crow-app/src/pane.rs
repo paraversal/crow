@@ -467,6 +467,8 @@ pub struct Pane {
     mark_pending: Option<MarkPending>,
     /// The `/` filter field, while open.
     filtering: Option<Filtering>,
+    /// The filter row opening or closing (`pane_filter::row_look`).
+    filter_motion: Option<pane_filter::FilterMotion>,
     /// An empty-space drag selecting tiles in icon view.
     marquee: Option<Marquee>,
     marquee_scroll_gen: u64,
@@ -636,6 +638,7 @@ impl Pane {
             return_selection: None,
             mark_pending: None,
             filtering: None,
+            filter_motion: None,
             marquee: None,
             marquee_scroll_gen: 0,
             tip_inset: false,
@@ -2080,6 +2083,7 @@ impl Pane {
         self.view_motion = None;
         self.child_reveal = None;
         if self.filtering.take().is_some() {
+            self.filter_motion = None;
             // Navigating away ends the filter session like Esc does.
             self.emit_filter_end(cx);
             self.focus_list_after_filter = true;
@@ -2434,6 +2438,7 @@ impl Pane {
         let focus = input.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         self.filtering = Some(Filtering { input, _subscription: subscription });
+        self.filter_motion = pane_filter::FilterMotion::opening(cx);
         cx.notify();
     }
 
@@ -2488,7 +2493,9 @@ impl Pane {
     /// Close the filter without taking focus, returning its query. ⌘F uses this to hand
     /// the text to search; the search field gets focus instead.
     pub fn take_filter(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let ghost = self.filter_ghost(cx);
         let filtering = self.filtering.take()?;
+        self.filter_motion = ghost;
         let query = filtering.input.read(cx).text().to_owned();
         for folder in &self.folders {
             folder.update(cx, |folder, cx| {
@@ -2508,9 +2515,11 @@ impl Pane {
     /// Close the filter field and clear every folder's filter. Callers decide
     /// where focus goes next. Returns whether a filter was open.
     fn end_filter(&mut self, cx: &mut Context<Self>) -> bool {
+        let ghost = self.filter_ghost(cx);
         if self.filtering.take().is_none() {
             return false;
         }
+        self.filter_motion = ghost;
         self.emit_filter_end(cx);
         self.filter_announce = SharedString::default();
         self.filter_announce_gen += 1;

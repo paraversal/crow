@@ -2695,7 +2695,14 @@ impl SearchView {
 
     /// The window's band while search is open: the query field and Done.
     /// The window places this between Back/Forward and the window edge.
-    pub fn render_band(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// The toolbar's band. `look` is set while it opens (`crow_core::motion::band_look`).
+    pub fn render_band(
+        &mut self,
+        look: Option<crow_core::motion::BandLook>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let viewport = f32::from(window.viewport_size().width);
         let theme = cx.global::<Ui>().theme.clone();
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let ring = if focused { field_ring(&theme) } else { color(theme.role("surface")) };
@@ -2725,7 +2732,11 @@ impl SearchView {
             .text_color(color(theme.role("fg")))
             .child(icons::glyph(Glyph::Search, 15., "fg-muted", &theme))
             .child(div().flex_1().min_w_0().child(self.input.clone()))
-            .child(self.render_match_control(focused, cx));
+            .child(div().opacity(look.map_or(1.0, |look| look.controls)).child(self.render_match_control(focused, cx)));
+        let field = match look {
+            Some(look) if look.widen < 1.0 => field.max_w(px(240. + (viewport - 240.) * look.widen)),
+            _ => field,
+        };
         let title_color = color(theme.role("fg-muted"));
         let save_surface = color(theme.role("surface"));
         let band_fg = color(theme.role("fg"));
@@ -2749,6 +2760,7 @@ impl SearchView {
             .child("Done")
             .child(Keycap::text("esc", KeycapWeight::Outline));
         let mut band = div().flex_1().min_w_0().flex().items_center().gap(px(10.)).child(field);
+        let controls = look.map_or(1.0, |look| look.controls);
         let save_label = if self.saved.is_some() { "Update…" } else { "Save…" };
         band = band.child(
             div()
@@ -2766,6 +2778,7 @@ impl SearchView {
                 .text_color(band_fg)
                 .hover(move |style| style.bg(save_surface))
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(SearchEvent::Save)))
+                .opacity(controls)
                 .child(save_label),
         );
         if self.saved.is_some() || self.tag.is_some() {
@@ -2784,9 +2797,9 @@ impl SearchView {
                     .child(self.title.clone()),
             );
         } else {
-            band = band.child(done);
+            band = band.child(done.opacity(controls));
         }
-        band
+        band.opacity(look.map_or(1.0, |look| look.fade))
     }
 
     fn render_match_control(&self, focused: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {

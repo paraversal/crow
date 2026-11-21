@@ -4610,6 +4610,7 @@ fn search_empty_offers_all_match(cx: &mut TestAppContext) {
     let root = corpus_fixture("search-empty-all-match");
     let (view, mut cx) = open(cx, &root.join("backup"));
     cx.simulate_keystrokes("cmd-f");
+    finish_motion(&view, &mut cx);
     click_selector(&mut cx, "search-match-names");
     cx.simulate_input("needle");
     wait_for_search(&view, &mut cx);
@@ -8225,6 +8226,7 @@ fn filter_tag_control_opens_a_picker_and_applies_every_tag(cx: &mut TestAppConte
 
     cx.simulate_keystrokes("/");
     settle(&view, &mut cx);
+    finish_motion(&view, &mut cx);
     let control = cx.debug_bounds("filter-tags").expect("the visible tag control");
     cx.simulate_click(control.center(), gpui::Modifiers::default());
     settle(&view, &mut cx);
@@ -8517,6 +8519,7 @@ fn filter_field_opens_above_the_list_rows(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root);
     cx.simulate_keystrokes("/");
     settle(&view, &mut cx);
+    finish_motion(&view, &mut cx);
     let header = cx.debug_bounds("table-header").expect("header");
     let field = cx.debug_bounds("filter-field").expect("field");
     let row = cx.debug_bounds("row-alpha").expect("first row");
@@ -17826,5 +17829,109 @@ fn a_collapsing_sidebar_section_leaves_fading_rows_only_in_full(cx: &mut TestApp
         sidebar.update(&mut cx, |_, cx| cx.notify());
         cx.run_until_parked();
         assert!(cx.debug_bounds("sidebar-section-ghost").is_none(), "{mode:?}: gone after the motion");
+    }
+}
+
+#[gpui::test]
+fn window_tabs_grow_in_and_shrink_away_only_with_motion(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, moves) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("tab-motion");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        cx.simulate_keystrokes("cmd-t");
+        let (first, second) = (cx.debug_bounds("tab-0").expect("tab 0"), cx.debug_bounds("tab-1").expect("tab 1"));
+        if moves {
+            assert!(second.size.width < first.size.width, "{mode:?}: the new tab starts narrow: {second:?} {first:?}");
+        } else {
+            assert_eq!(second.size.width, first.size.width, "{mode:?}: equal tabs at once");
+        }
+        finish_motion(&view, &mut cx);
+        let (first, second) = (cx.debug_bounds("tab-0").expect("tab 0"), cx.debug_bounds("tab-1").expect("tab 1"));
+        assert_eq!(second.size.width, first.size.width, "{mode:?}: equal tabs after the motion");
+        // A third tab, then close the active one: a ghost keeps its place while it shrinks.
+        cx.simulate_keystrokes("cmd-t");
+        finish_motion(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-w");
+        let ghosts = usize::from(cx.debug_bounds("tab-ghost").is_some());
+        assert_eq!(ghosts, usize::from(moves), "{mode:?}: the closing tab's picture");
+        assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2, "{mode:?}: closed at once");
+        finish_motion(&view, &mut cx);
+        assert!(cx.debug_bounds("tab-ghost").is_none(), "{mode:?}: ghost gone");
+    }
+}
+
+#[gpui::test]
+fn the_view_switcher_fill_glides_only_in_full(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, glides) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("view-glide");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        view.update(&mut cx, |_, cx| cx.notify());
+        settle(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("view-glide").is_some(), glides, "{mode:?}");
+        cx.simulate_keystrokes("cmd-1");
+        settle(&view, &mut cx);
+        let icons = cx.debug_bounds("view-icons").expect("icons button");
+        if glides {
+            let fill = cx.debug_bounds("view-glide").expect("fill");
+            assert_eq!(fill.size, icons.size, "{mode:?}: the fill is a button's size");
+        }
+    }
+}
+
+#[gpui::test]
+fn the_search_band_widens_across_the_toolbar_in_full_only(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    let mut finals = Vec::new();
+    for (mode, widens) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("band-motion");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        cx.simulate_keystrokes("cmd-f");
+        let started = cx.debug_bounds("search-field").expect("the field is there from the first frame").size.width;
+        // Typing works at once, mid-motion.
+        cx.simulate_input("ab");
+        assert_eq!(
+            view.read_with(&cx, |w, cx| w.search.as_ref().map(|s| s.read(cx).query_text(cx))),
+            Some("ab".to_owned()),
+            "{mode:?}: the first letters are not lost"
+        );
+        finish_motion(&view, &mut cx);
+        let full = cx.debug_bounds("search-field").expect("the field").size.width;
+        finals.push(full);
+        assert_eq!(started < full, widens, "{mode:?}: widens while opening ({started:?} -> {full:?})");
+    }
+    assert!(finals.windows(2).all(|w| w[0] == w[1]), "every mode ends on the same band: {finals:?}");
+}
+
+#[gpui::test]
+fn the_filter_row_opens_and_closes_its_height_in_full_only(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, moves) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("filter-motion");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        cx.simulate_keystrokes("/");
+        let field = cx.debug_bounds("filter-field").expect("the field exists from the first frame");
+        cx.simulate_input("al");
+        assert_eq!(
+            pane(&view, &cx).read_with(&cx, |pane, cx| pane.filter_query(cx)),
+            Some("al".to_owned()),
+            "{mode:?}: typed letters land during the motion"
+        );
+        finish_motion(&view, &mut cx);
+        let settled = cx.debug_bounds("filter-field").expect("the field").size.height;
+        assert_eq!(field.size.height, settled, "{mode:?}: the field itself keeps its size; the row's wrapper moves");
+        cx.simulate_keystrokes("escape");
+        assert_eq!(
+            cx.debug_bounds("filter-ghost").is_some(),
+            moves,
+            "{mode:?}: the closing row's picture lingers only in Full"
+        );
+        assert!(pane(&view, &cx).read_with(&cx, |pane, _| !pane.is_filtering()), "{mode:?}: closed at once");
+        finish_motion(&view, &mut cx);
+        assert!(cx.debug_bounds("filter-ghost").is_none(), "{mode:?}: ghost gone");
     }
 }

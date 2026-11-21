@@ -1,3 +1,19 @@
+/// What changed between two lists of tabs, for the tab bar's motion: the tabs
+/// that are new, and the tabs that are gone with the place each one had.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct TabChanges {
+    pub opened: Vec<TabId>,
+    pub closed: Vec<(usize, TabId)>,
+}
+
+/// Compare the tabs of the last draw with the tabs now (both in bar order).
+pub fn tab_changes(before: &[TabId], now: &[TabId]) -> TabChanges {
+    TabChanges {
+        opened: now.iter().copied().filter(|id| !before.contains(id)).collect(),
+        closed: before.iter().copied().enumerate().filter(|(_, id)| !now.contains(id)).collect(),
+    }
+}
+
 /// Identifies a tab for its whole life, even as tabs around it open and close.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TabId(u64);
@@ -73,6 +89,27 @@ impl<T> Tabs<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_changes_finds_opened_and_closed_tabs_with_their_old_places() {
+        let mut t = Tabs::new("a");
+        t.open("b");
+        t.open("c");
+        let before: Vec<TabId> = t.iter().map(|(id, _)| id).collect();
+        assert_eq!(tab_changes(&before, &before), TabChanges::default());
+        t.open("d");
+        let after_open: Vec<TabId> = t.iter().map(|(id, _)| id).collect();
+        let opened = tab_changes(&before, &after_open);
+        assert_eq!(opened.opened.len(), 1);
+        assert!(opened.closed.is_empty());
+        t.close_active();
+        t.close_active();
+        let after_close: Vec<TabId> = t.iter().map(|(id, _)| id).collect();
+        let closed = tab_changes(&after_open, &after_close);
+        assert!(closed.opened.is_empty());
+        assert_eq!(closed.closed.len(), 2);
+        assert!(closed.closed.windows(2).all(|w| w[0].0 < w[1].0), "in bar order");
+    }
 
     fn names(t: &Tabs<&'static str>) -> Vec<&'static str> {
         t.iter().map(|(_, name)| *name).collect()

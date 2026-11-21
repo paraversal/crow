@@ -5,8 +5,6 @@
 //! `window.rs`) so built-in and plugin routes can converge there.
 
 use super::*;
-use gpui::AnimationExt as _;
-
 use crate::palette::{Item, Row, Source};
 
 /// Which half of the palette is showing.
