@@ -3155,10 +3155,8 @@ fn push_unit(
             .w_full()
             .max_w(px(720.))
             .when(fill, |d| d.flex_1().min_h_0())
-            .pb(px(10.))
-            .mb(px(10.))
-            .border_b_1()
-            .border_color(color(theme.role("border")))
+            // The page's only unit, so no divider under it.
+            .when(!fill, |d| d.pb(px(10.)).mb(px(10.)).border_b_1().border_color(color(theme.role("border"))))
             .child(row)
             .into_any_element(),
     );
