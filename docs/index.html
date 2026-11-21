@@ -148,9 +148,18 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .dots i { width: 14px; height: 14px; border-radius: 50%; margin-left: -4px; box-shadow: 0 0 0 2px var(--bg); }
 .dots i:first-child { margin-left: 0; }
 .stage { display: grid; }
-.stage > img { grid-area: 1 / 1; transition: opacity .18s ease; }
+.stage > img { grid-area: 1 / 1; transition: opacity .3s ease, transform .3s ease, visibility .3s; }
 .stage > img[hidden] { display: block; opacity: 0; visibility: hidden; }
-@media (prefers-reduced-motion: reduce) { .stage > img { transition: none; } }
+/* The hero settles in on load: a short rise and fade, one element after another. */
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } }
+.hero h1, .hero .lede, .hero .get, .hero-shot { animation: rise .6s cubic-bezier(.2, .7, .2, 1) both; }
+.hero .lede { animation-delay: .08s; }
+.hero .get { animation-delay: .16s; }
+.hero-shot { animation-delay: .26s; }
+@media (prefers-reduced-motion: reduce) {
+  .stage > img { transition: none; }
+  .hero h1, .hero .lede, .hero .get, .hero-shot { animation: none; }
+}
 .after { margin: 28px 0 0; color: var(--muted); font-size: 15px; }
 .after code { color: var(--ink); }
 
@@ -370,13 +379,27 @@ footer nav { gap: 22px; }
 <script>
 // Theme swatches: click, or arrow keys within the list.
 const buttons = [...document.querySelectorAll('#themes [role="tab"]')];
+const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const panel = b => document.getElementById(b.getAttribute('aria-controls'));
 const select = (b, focus) => {
+  const from = buttons.find(x => x.getAttribute('aria-selected') === 'true');
+  const dir = from && from !== b ? Math.sign(buttons.indexOf(b) - buttons.indexOf(from)) : 0;
   buttons.forEach(x => {
     const on = x === b;
     x.setAttribute('aria-selected', on);
     x.tabIndex = on ? 0 : -1;
-    document.getElementById(x.getAttribute('aria-controls')).hidden = !on;
+    panel(x).hidden = !on;
   });
+  if (dir && !calm) {
+    // The new shot slides in from the side the tab lies on; the old one leaves the other way.
+    const [out, into] = [panel(from), panel(b)];
+    into.style.transition = 'none';
+    into.style.transform = `translateX(${dir * 28}px)`;
+    void into.offsetWidth;
+    into.style.transition = '';
+    into.style.transform = '';
+    out.style.transform = `translateX(${-dir * 28}px)`;
+  }
   if (focus) b.focus();
 };
 buttons.forEach((b, i) => {
