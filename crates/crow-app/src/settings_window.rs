@@ -1291,7 +1291,7 @@ impl SettingsWindow {
         self.menu.is_some()
     }
 
-    /// The fuzzer's invariants for this window: focus stays on a control, and
+    /// The fuzzer's invariants for this window: focus stays on a control (or in the saved-query editor), and
     /// every painted interactive element has a role and a label. The runner
     /// compares the shown values to `settings.toml` after a settle.
     #[cfg(any(test, feature = "fuzz"))]
@@ -1303,6 +1303,8 @@ impl SettingsWindow {
             && !self.sidebar_focused(window)
             && !self.clear_search.is_focused(window)
             && !on_error
+            // The saved-query editor is a sheet over the page; its fields are controls too.
+            && !self.saved_query_form.as_ref().is_some_and(|form| form.focus.contains_focused(window, cx))
         {
             out.push(crate::fuzz::Violation::new("settings focus", "focus is not on a control"));
         }
@@ -2926,7 +2928,7 @@ impl Render for SettingsWindow {
             .items_center()
             .gap(px(7.))
             .mx(px(16.))
-            .mt(px(2.))
+            .mt(px(8.))
             .h(px(28.))
             .pl(px(9.))
             .pr(px(8.))
