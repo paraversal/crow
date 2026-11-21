@@ -6,7 +6,15 @@
 #   scripts/bundle.sh --open      ...then launch it
 #   scripts/bundle.sh --install   ...then copy it to /Applications (replacing an older Crow)
 #                                 and install the `crow` command for the terminal
+#   scripts/bundle.sh --release   what scripts/release.sh ships: always signed ad hoc (the
+#                                 local "Crow Dev" identity means nothing on other Macs)
 #
+# CROW_BINARY=path uses that prebuilt binary (release.sh passes its universal one) instead
+# of running cargo.
+#
+# Version: [workspace.package] in Cargo.toml is the one source. The bundle's
+# CFBundleShortVersionString is that version; CFBundleVersion is the commit count, so every
+# build is newer than the last for macOS; the short commit hash goes in the About credits.
 # The options combine: `--install --open` launches the installed copy.
 # Set CROW_INSTALL_DIR to install the app somewhere else (e.g. ~/Applications);
 # set CROW_BIN_DIR to put the `crow` command elsewhere (default ~/.local/bin).
@@ -27,23 +35,43 @@ cd "$(dirname "$0")/.."
 
 open_after=false
 install=false
+release=false
 for arg in "$@"; do
   case "$arg" in
     --open) open_after=true ;;
     --install) install=true ;;
-    *) echo "unknown option: $arg (use --open, --install)" >&2; exit 2 ;;
+    --release) release=true ;;
+    *) echo "unknown option: $arg (use --open, --install, --release)" >&2; exit 2 ;;
   esac
 done
 
 [ -d vendor/zed/.git ] || ./scripts/fetch-gpui.sh
-cargo build --release -p crow-app
 
-version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/crow-app/Cargo.toml | head -1)
+pkgid=$(cargo pkgid -p crow-app)
+version=${pkgid##*[@#]}
+build=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+commit=$(git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
+export CROW_BUILD="$build" CROW_COMMIT="$commit"
+
+binary="${CROW_BINARY:-}"
+if [ -z "$binary" ]; then
+  cargo build --release -p crow-app
+  binary=target/release/crow
+fi
+
 app=target/bundle/Crow.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/crow "$app/Contents/MacOS/crow"
+cp "$binary" "$app/Contents/MacOS/crow"
 cp crates/crow-app/assets/icons/LICENSE "$app/Contents/Resources/Lucide-LICENSE.txt"
+cp LICENSE "$app/Contents/Resources/LICENSE.txt"
+cp THIRD-PARTY-NOTICES.md "$app/Contents/Resources/THIRD-PARTY-NOTICES.md"
+# The standard About panel shows version and build from Info.plist and this file below them.
+cat > "$app/Contents/Resources/Credits.html" <<CREDITS
+<html><body style="font-family: -apple-system; font-size: 11px; text-align: center;">
+<p>Commit ${commit}<br>Free software under the GNU GPL, version 3 or later.<br>Help &gt; Acknowledgements lists the third-party licences.</p>
+</body></html>
+CREDITS
 
 # The icon: CROW_APP_ICON, else app_icon from settings.toml, else refined.
 config_dir="${CROW_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/crow}"
@@ -79,7 +107,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${version}</string>
-  <key>CFBundleVersion</key><string>${version}</string>
+  <key>CFBundleVersion</key><string>${build}</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © Crow contributors. GPL-3.0-or-later.</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -94,12 +123,14 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 
 identity="${CROW_SIGN_IDENTITY:-}"
-if [ -z "$identity" ] && security find-identity -p codesigning 2>/dev/null | grep -q '"Crow Dev"'; then
+if $release; then
+  identity=-
+elif [ -z "$identity" ] && security find-identity -p codesigning 2>/dev/null | grep -q '"Crow Dev"'; then
   identity="Crow Dev"
 fi
 codesign --force --sign "${identity:--}" --timestamp=none "$app"
 [ "${identity:--}" = "-" ] && signer="ad hoc" || signer="$identity"
-echo "built $app ($version, $icon icon), signed $signer"
+echo "built $app ($version, build $build, $commit, $icon icon), signed $signer"
 
 if $install; then
   dest_dir="${CROW_INSTALL_DIR:-/Applications}"

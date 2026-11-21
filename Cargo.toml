@@ -6,7 +6,8 @@ exclude = ["vendor"]
 
 [workspace.package]
 edition = "2024"
-license = "MIT OR Apache-2.0"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 raw-window-handle = "0.6"

@@ -1191,6 +1191,34 @@ pub fn edit_settings_file(cx: &mut App) {
     open_config_file("settings.toml", cx);
 }
 
+/// Where the third-party notices live: the bundle's Resources, else the source tree.
+fn acknowledgements_candidates() -> Vec<PathBuf> {
+    let bundled = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("Resources").join("THIRD-PARTY-NOTICES.md")));
+    bundled.into_iter().chain([Path::new(env!("CARGO_MANIFEST_DIR")).join("../../THIRD-PARTY-NOTICES.md")]).collect()
+}
+
+/// Help ▸ Acknowledgements: show THIRD-PARTY-NOTICES.md in the text editor.
+pub fn open_acknowledgements(cx: &mut App) {
+    let found = cx.background_spawn(async move {
+        acknowledgements_candidates().into_iter().find(|path| path.is_file()) // io-ok: inside background_spawn
+    });
+    cx.spawn(async move |cx| {
+        let opened = match found.await {
+            Some(path) => cx.update(|cx| crate::effects::effects(cx).open_text(&path)),
+            None => Err("the notices file is missing from this build".to_owned()),
+        };
+        if let Err(e) = opened {
+            cx.update(|cx| {
+                crate::operations::message(format!("Couldn't open the acknowledgements: {e}"), true, cx);
+                cx.refresh_windows();
+            });
+        }
+    })
+    .detach();
+}
+
 /// Open `name` from the config folder in its default app.
 pub fn open_config_file(name: &str, cx: &mut App) {
     let path = cx.global::<Ui>().config_dir.join(name);

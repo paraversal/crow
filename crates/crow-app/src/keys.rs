@@ -410,6 +410,7 @@ mod tests {
                 CommandId::ShowInFinder,
                 CommandId::OpenTerminal,
                 CommandId::EditSettings,
+                CommandId::Acknowledgements,
                 CommandId::CalculateFolderSizes,
                 CommandId::AddProjectRoot,
                 CommandId::RemoveProjectRoot,
@@ -430,7 +431,7 @@ mod tests {
                 let command = COMMANDS.iter().find(|c| c.id == id).unwrap();
                 assert_eq!(text(command.action, command.scope, cx), None, "{id:?} has no binding");
             }
-            assert_eq!(COMMANDS.len(), expected.len() + 21, "every command is in the table");
+            assert_eq!(COMMANDS.len(), expected.len() + 22, "every command is in the table");
         });
     }
 }
