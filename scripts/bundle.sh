@@ -65,6 +65,8 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/crow"
 cp crates/crow-app/assets/icons/LICENSE "$app/Contents/Resources/Lucide-LICENSE.txt"
 cp LICENSE "$app/Contents/Resources/LICENSE.txt"
+# The terminal launcher; the Homebrew cask links it onto PATH as `crow`.
+install -m 755 scripts/crow "$app/Contents/Resources/crow"
 cp THIRD-PARTY-NOTICES.md "$app/Contents/Resources/THIRD-PARTY-NOTICES.md"
 # The standard About panel shows version and build from Info.plist and this file below them.
 cat > "$app/Contents/Resources/Credits.html" <<CREDITS
