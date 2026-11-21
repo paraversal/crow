@@ -28,6 +28,7 @@ use super::{
     DragHandoff, DraggedSelection, FilterPlace, LIST_SIDE_INSET, Pane, drag_combo, drop_outline, promote_drag,
     row_icon, shown_offset,
 };
+use crate::operations::Operations;
 use crate::preview::{self, Preview};
 
 /// Fixed rail row height. The metadata layout changes with width, not height,
@@ -692,6 +693,11 @@ fn render_rows(
             let cloud_spoken =
                 cloud.and_then(CloudStatus::spoken_suffix).map(|suffix| format!(", {suffix}")).unwrap_or_default();
             let cursor_here = cursor == Some(ix);
+            let cut = cx
+                .global::<Operations>()
+                .clipboard
+                .as_ref()
+                .is_some_and(|clipboard| clipboard.cut && clipboard.marked && clipboard.contains(&entry.path));
             div()
                 .id(ix)
                 .role(Role::ListBoxOption)
@@ -719,6 +725,12 @@ fn render_rows(
                     let opacity = crate::drag_drop::cue_opacity(cx, &entry.path);
                     row.child(
                         drop_outline(&theme).left(px(2.)).right(px(2.)).top(px(1.)).bottom(px(1.)).opacity(opacity),
+                    )
+                })
+                .when(cut, |row| {
+                    row.child(
+                        crate::style::cut_outline(&theme, true, true)
+                            .debug_selector(|| format!("gallery-cut-outline-{}", entry.name)),
                     )
                 })
                 .debug_selector(|| format!("gallery-row-{}", entry.name))

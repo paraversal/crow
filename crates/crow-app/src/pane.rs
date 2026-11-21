@@ -4750,12 +4750,8 @@ impl Pane {
                         .when_some(flash, |tile, tint| tile.child(div().absolute().inset_0().rounded_md().bg(tint)))
                         .when(cut, |tile| {
                             tile.child(
-                                div()
-                                    .absolute()
-                                    .inset(px(1.))
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(color(theme.role("accent"))),
+                                cut_outline(&theme, true, true)
+                                    .debug_selector(|| format!("tile-cut-outline-{}", entry.name)),
                             )
                         })
                         .when(look.opacity < 1.0, |tile| tile.opacity(look.opacity))

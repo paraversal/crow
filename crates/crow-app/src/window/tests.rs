@@ -3688,6 +3688,33 @@ fn a_huge_copy_keeps_the_clipboard_in_crow(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn cut_items_get_the_shared_dashed_outline_in_icons_and_gallery(cx: &mut TestAppContext) {
+    let root = fixture("cut-outline-views");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.mode()), ViewMode::Icons);
+    cx.simulate_keystrokes("cmd-c");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("tile-cut-outline-alpha").is_none(), "a copy is not outlined");
+    cx.simulate_keystrokes("cmd-x");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("tile-cut-outline-alpha").is_some(), "the cut tile is outlined");
+    assert!(cx.debug_bounds("tile-cut-outline-beta").is_none(), "an uncut tile is not");
+    assert!(cx.debug_bounds("drop-outline").is_none(), "the cut mark is not the drop outline");
+
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.mode()), ViewMode::Gallery);
+    assert!(cx.debug_bounds("gallery-cut-outline-alpha").is_some(), "the cut rail row is outlined");
+    assert!(cx.debug_bounds("gallery-cut-outline-beta").is_none(), "an uncut rail row is not");
+    assert!(cx.debug_bounds("drop-outline").is_none(), "the cut mark is not the drop outline");
+    cx.simulate_keystrokes("cmd-c");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("gallery-cut-outline-alpha").is_none(), "a new copy clears the outline");
+}
+
+#[gpui::test]
 fn copy_flashes_and_cut_is_marked(cx: &mut TestAppContext) {
     let root = fixture("copy-feedback");
     let (view, mut cx) = open(cx, &root);
@@ -3859,9 +3886,7 @@ fn sidebar_tag_and_saved_query_rows_keep_their_glyphs_under_a_generic_folder_pac
     );
     settle(&view, &mut cx);
     let mut count = |name: &str| {
-        (0..20)
-            .filter(|i| cx.debug_bounds(Box::leak(format!("sidebar-{name}-{i}").into_boxed_str())).is_some())
-            .count()
+        (0..20).filter(|i| cx.debug_bounds(Box::leak(format!("sidebar-{name}-{i}").into_boxed_str())).is_some()).count()
     };
     assert_eq!(count("pack-icon"), 1, "only the favorite takes the pack's generic folder");
     assert_eq!(count("line-icon"), 1, "the pinned tag keeps its tag glyph");
