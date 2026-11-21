@@ -1,12 +1,16 @@
 //! The user's system colours for themes that follow them (Finder): the accent colour and the
 //! unfocused selection grey, plus the notification that fires when either changes.
 
+use std::cell::Cell;
 use std::ptr::NonNull;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
-use objc2_app_kit::{NSColor, NSColorSpace, NSSystemColorsDidChangeNotification};
+use objc2_app_kit::{
+    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSColor, NSColorSpace,
+    NSSystemColorsDidChangeNotification,
+};
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSOperationQueue};
 
 use crate::main_thread;
@@ -18,16 +22,28 @@ fn srgb(color: &NSColor) -> Option<u32> {
     Some(byte(color.redComponent()) << 16 | byte(color.greenComponent()) << 8 | byte(color.blueComponent()))
 }
 
-/// The system accent colour (System Settings ▸ Appearance ▸ Accent colour).
-pub fn accent_color() -> Option<u32> {
+/// Read `color` as it looks in the Light or Dark appearance. System colours answer for the
+/// current drawing appearance (the OS's), which is wrong when a theme is Light on a Dark Mac.
+fn in_appearance(dark: bool, color: impl Fn() -> Retained<NSColor>) -> Option<u32> {
     main_thread()?;
-    srgb(&NSColor::controlAccentColor())
+    // SAFETY: framework constants.
+    let name = unsafe { if dark { NSAppearanceNameDarkAqua } else { NSAppearanceNameAqua } };
+    let appearance = NSAppearance::appearanceNamed(name)?;
+    let out = Cell::new(None);
+    appearance.performAsCurrentDrawingAppearance(&RcBlock::new(|| out.set(srgb(&color()))));
+    out.get()
 }
 
-/// The selection colour for a window that isn't focused: Finder's grey row.
-pub fn unfocused_selection_color() -> Option<u32> {
-    main_thread()?;
-    srgb(&NSColor::unemphasizedSelectedContentBackgroundColor())
+/// The system accent colour (System Settings ▸ Appearance ▸ Accent colour), in the Light or
+/// Dark appearance.
+pub fn accent_color(dark: bool) -> Option<u32> {
+    in_appearance(dark, NSColor::controlAccentColor)
+}
+
+/// The selection colour for a window that isn't focused: Finder's grey row, in the Light or
+/// Dark appearance.
+pub fn unfocused_selection_color(dark: bool) -> Option<u32> {
+    in_appearance(dark, NSColor::unemphasizedSelectedContentBackgroundColor)
 }
 
 /// Observer of system colour changes; dropping it stops it.

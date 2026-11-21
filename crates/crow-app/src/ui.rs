@@ -444,8 +444,8 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     // io-ok: startup: the pack folder must exist before it is watched
     std::fs::create_dir_all(&icon_packs_dir).ok();
     let mut ui = Ui::new(config_dir.clone(), state_dir, home, crow_theme::fallback(), true);
-    let theme =
-        crow_theme::current(ui.settings.theme_id(), variant_of(cx.window_appearance())).resolve_system(&system_color);
+    let theme = crow_theme::current(ui.settings.theme_id(), variant_of(cx.window_appearance()));
+    let theme = resolve_system_colors(theme);
     tracing::info!(theme = %theme.name, "starting");
     ui.target = theme.clone();
     ui.theme = theme;
@@ -1020,7 +1020,7 @@ pub fn reload_theme(cx: &mut App) {
     let missing = crow_theme::missing_saved(saved.as_deref(), &dir).map(str::to_owned);
     match crow_theme::load_theme(&dir, &id) {
         Ok(theme) => {
-            let theme = theme.resolve_system(&system_color);
+            let theme = resolve_system_colors(theme);
             // Said once per missing id, not on every reload.
             cx.global_mut::<Ui>().theme_error = None;
             if cx.global::<Ui>().missing_theme_notice != missing && cx.has_global::<crate::operations::Operations>() {
@@ -1046,18 +1046,25 @@ pub fn reload_theme(cx: &mut App) {
     }
 }
 
+/// Apply the system colours as they look in the theme's own variant, not the OS's.
+fn resolve_system_colors(theme: Theme) -> Theme {
+    let variant = theme.variant;
+    theme.resolve_system(&|reference| system_color(reference, variant))
+}
+
 /// A system colour for a theme's `system:*` role (Finder follows the accent colour).
-fn system_color(reference: &str) -> Option<crow_theme::Rgb> {
+fn system_color(reference: &str, variant: crow_theme::Variant) -> Option<crow_theme::Rgb> {
     #[cfg(test)]
     {
-        let _ = reference;
+        let _ = (reference, variant);
         None
     }
     #[cfg(not(test))]
     {
+        let dark = variant == crow_theme::Variant::Dark;
         let rgb = match reference {
-            "system:accent" => crow_macos::accent_color(),
-            "system:selection" => crow_macos::unfocused_selection_color(),
+            "system:accent" => crow_macos::accent_color(dark),
+            "system:selection" => crow_macos::unfocused_selection_color(dark),
             _ => None,
         };
         rgb.map(crow_theme::Rgb)
