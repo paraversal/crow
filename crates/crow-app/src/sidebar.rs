@@ -170,6 +170,64 @@ impl Row {
     }
 }
 
+/// One collapsible section in the drawn rows: where its children start and how many.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SectionSpan {
+    id: String,
+    collapsed: bool,
+    /// Index into the rows of the first child (just after the header).
+    start: usize,
+    len: usize,
+}
+
+/// The collapsible sections in `rows`, in order. A section's children run up to
+/// the next header of any kind.
+fn section_spans(rows: &[Row]) -> Vec<SectionSpan> {
+    let mut spans: Vec<SectionSpan> = Vec::new();
+    let mut open = false;
+    for (ix, row) in rows.iter().enumerate() {
+        match row {
+            Row::SectionHeader { id, collapsed, .. } => {
+                spans.push(SectionSpan { id: id.clone(), collapsed: *collapsed, start: ix + 1, len: 0 });
+                open = true;
+            }
+            Row::Header(..) => open = false,
+            _ if open => {
+                if let Some(span) = spans.last_mut() {
+                    span.len += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    spans
+}
+
+/// Sections whose collapsed flag changed between two draws: `(id, opening, old
+/// span)`. A section that appears or disappears is not a transition.
+fn section_transitions(before: &[SectionSpan], now: &[SectionSpan]) -> Vec<(String, bool, SectionSpan)> {
+    now.iter()
+        .filter_map(|span| {
+            let old = before.iter().find(|old| old.id == span.id)?;
+            (old.collapsed != span.collapsed).then(|| (span.id.clone(), !span.collapsed, old.clone()))
+        })
+        .collect()
+}
+
+/// A section's rows opening or closing. Closing keeps the old rows' labels so
+/// they can fade out while the gap closes.
+struct SectionMotion {
+    id: String,
+    opening: bool,
+    started: Instant,
+    /// Closing: the rows' labels and the height they took.
+    ghost: Vec<String>,
+    height: f32,
+}
+
+/// How tall an opening row may grow to; real rows are about 26 px.
+const SECTION_ROW_MAX: f32 = 30.;
+
 /// A cheap identity for the drawn rows: a reorder, added favorite or section
 /// change invalidates a pending spring timer without invalidating a stationary
 /// pointer over an unchanged row.
@@ -412,6 +470,9 @@ pub struct Sidebar {
     /// Where each direct child of the list sits, captured when it is prepainted.
     /// A cell so prepaint can fill it without scheduling another render.
     layout: RowLayout,
+    /// The rows of the last draw, to see which sections opened or closed.
+    last_rows: Vec<Row>,
+    section_motions: Vec<SectionMotion>,
     /// What a drag outside the list would drop on, drawn from state rather than a
     /// drag-over style so the highlight cannot flicker between frames.
     drop_target: Option<DropTarget>,
@@ -480,6 +541,8 @@ impl Sidebar {
             cursor: 0,
             current: Location::Folder(PathBuf::new()),
             layout: Rc::default(),
+            last_rows: Vec::new(),
+            section_motions: Vec::new(),
             drop_target: None,
             dragging_favorite: Rc::new(Cell::new(false)),
             insert_slot: None,
@@ -867,6 +930,50 @@ impl Sidebar {
     }
 
     /// Finder's name for a folder ("Macintosh HD" for `/`).
+    /// A label for a row that is closing away: just its words.
+    fn ghost_label(&self, row: &Row) -> String {
+        match row {
+            Row::Favorite(_, f) => {
+                f.name.as_deref().map_or_else(|| self.display_name(&f.path), |name| display_text(name).into_owned())
+            }
+            Row::Recent(path) => self.display_name(path),
+            Row::Volume(v) => display_text(&v.name).into_owned(),
+            Row::PluginItem { row, .. } => display_text(&row.text).into_owned(),
+            Row::SectionHeader { title, .. } => display_text(title).into_owned(),
+            Row::Header(name, _) => display_text(name).into_owned(),
+        }
+    }
+
+    /// Notice sections that opened or closed since the last draw and start their
+    /// motion; drop the finished ones. Off has none.
+    fn track_sections(&mut self, rows: &[Row], mode: Effective, now: Instant) {
+        if mode != Effective::Off {
+            let before = section_spans(&self.last_rows);
+            for (id, opening, old) in section_transitions(&before, &section_spans(rows)) {
+                let (ghost, height) = if opening || old.len == 0 {
+                    (Vec::new(), 0.0)
+                } else {
+                    let ghost = self.last_rows[old.start..old.start + old.len]
+                        .iter()
+                        .map(|row| self.ghost_label(row))
+                        .collect();
+                    let layout = self.layout.borrow();
+                    let height = match (layout.get(old.start), layout.get(old.start + old.len - 1)) {
+                        (Some(first), Some(last)) => f32::from(last.2.bottom() - first.2.top()),
+                        _ => old.len as f32 * SECTION_ROW_MAX,
+                    };
+                    (ghost, height)
+                };
+                self.section_motions.retain(|motion| motion.id != id);
+                self.section_motions.push(SectionMotion { id, opening, started: now, ghost, height });
+            }
+        }
+        self.section_motions.retain(|motion| {
+            motion::progress(mode, motion.started, now, motion::ms::SECTION, motion::ms::LOW_IN).is_some()
+        });
+        self.last_rows = rows.to_vec();
+    }
+
     fn display_name(&self, path: &Path) -> String {
         self.components(path).last().cloned().unwrap_or_else(|| display_text(&path.display().to_string()).into_owned())
     }
@@ -1637,6 +1744,11 @@ impl Render for Sidebar {
         self.update_plugin_sections(cx);
         self.request_inactive_counts(cx);
         let rows = rows(cx.global::<Ui>(), &self.plugin_sections);
+        let (motion_mode, motion_now) = (cx.global::<Ui>().feedback.mode, Instant::now());
+        self.track_sections(&rows, motion_mode, motion_now);
+        if !self.section_motions.is_empty() {
+            window.request_animation_frame();
+        }
         let wants_pin_lines = self.layout.borrow().first().is_some_and(|(_, _, bounds)| bounds.size.width >= px(300.));
         let pin_summaries: HashMap<_, _> = if crate::git::provider_enabled(cx) {
             rows.iter()
@@ -1737,8 +1849,16 @@ impl Render for Sidebar {
         let mut looks = self.looks(&rows, focused, ui).into_iter();
         let mut index = 0;
         let mut children = Vec::with_capacity(rows.len());
+        let mut ghost_child: Option<usize> = None;
+        let mut current_section: Option<String> = None;
+        let section_progress = |id: &str| {
+            self.section_motions.iter().find(|m| m.id == id).and_then(|m| {
+                motion::progress(mode, m.started, now, motion::ms::SECTION, motion::ms::LOW_IN).map(|t| (m, t))
+            })
+        };
         for row in rows {
             if let Row::Header(title, group) = &row {
+                current_section = None;
                 let header = div()
                     .id(SharedString::from(format!("sidebar-header-{title}")))
                     .debug_selector({
@@ -1775,6 +1895,22 @@ impl Render for Sidebar {
             if let Row::SectionHeader { id, title, collapsed } = &row {
                 let id = id.clone();
                 let collapsed = *collapsed;
+                current_section = Some(id.clone());
+                let moving = section_progress(&id);
+                // Full crossfades the two chevrons as the section moves (text glyphs don't rotate).
+                let chevron: gpui::AnyElement = match moving {
+                    Some((motion, t)) if mode == Effective::Full => {
+                        let open = if motion.opening { t } else { 1.0 - t };
+                        div()
+                            .relative()
+                            .w(px(10.))
+                            .h(px(14.))
+                            .child(div().absolute().top_0().left_0().opacity(1.0 - open).child("▸"))
+                            .child(div().absolute().top_0().left_0().opacity(open).child("▾"))
+                            .into_any_element()
+                    }
+                    _ => (if collapsed { "▸" } else { "▾" }).into_any_element(),
+                };
                 kinds.push((None, None));
                 let i = index;
                 index += 1;
@@ -1814,10 +1950,37 @@ impl Render for Sidebar {
                                 cx,
                             );
                         }))
-                        .child(if collapsed { "▸" } else { "▾" })
+                        .child(chevron)
                         .child(title.clone())
                         .into_any_element(),
                 );
+                // Full: the closing rows fade away while the gap shrinks. Low has no
+                // room to fade in (gaps snap), so its rows go at once.
+                if let Some((motion, t)) = moving.filter(|(motion, _)| mode == Effective::Full && !motion.opening)
+                    && !motion.ghost.is_empty()
+                {
+                    let left = 1.0 - t;
+                    let each = motion.height / motion.ghost.len() as f32;
+                    ghost_child = Some(children.len());
+                    children.push(
+                        div()
+                            .h(px(motion.height * left))
+                            .overflow_hidden()
+                            .opacity(left)
+                            .debug_selector(|| "sidebar-section-ghost".into())
+                            .children(motion.ghost.iter().map(|label| {
+                                div()
+                                    .h(px(each))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(13.))
+                                    .text_color(color(fg))
+                                    .child(label.clone())
+                            }))
+                            .into_any_element(),
+                    );
+                }
                 continue;
             }
             let i = index;
@@ -2117,7 +2280,17 @@ impl Render for Sidebar {
             if let Some(label) = volume_label {
                 item = with_tooltip(item, label, None);
             }
-            children.push(item.into_any_element());
+            // Rows of a section that is opening grow and fade in (Low only fades).
+            let item = match current_section.as_deref().and_then(&section_progress) {
+                Some((motion, t)) if motion.opening => div()
+                    .overflow_hidden()
+                    .opacity(t)
+                    .when(mode == Effective::Full, |wrap| wrap.max_h(px(SECTION_ROW_MAX * t)))
+                    .child(item)
+                    .into_any_element(),
+                _ => item.into_any_element(),
+            };
+            children.push(item);
         }
 
         let mut context = "Sidebar".to_owned();
@@ -2132,7 +2305,13 @@ impl Render for Sidebar {
                 let mut bounds = bounds.into_iter();
                 let _fill = bounds.next();
                 let was_empty = layout.borrow().is_empty();
-                let bounds: Vec<_> = bounds.collect();
+                let mut bounds: Vec<_> = bounds.collect();
+                // A closing section's ghost rows are not a row of the list.
+                if let Some(ghost) = ghost_child
+                    && ghost < bounds.len()
+                {
+                    bounds.remove(ghost);
+                }
                 *layout.borrow_mut() = kinds
                     .iter()
                     .copied()
@@ -2193,6 +2372,55 @@ impl Render for Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn header(id: &str, collapsed: bool) -> Row {
+        Row::SectionHeader { id: id.into(), title: id.into(), collapsed }
+    }
+
+    fn recent(name: &str) -> Row {
+        Row::Recent(PathBuf::from(format!("/{name}")))
+    }
+
+    #[test]
+    fn section_spans_count_the_rows_up_to_the_next_header() {
+        let rows = vec![
+            Row::Header("Favorites".into(), Some(0)),
+            recent("a"),
+            header("recent", false),
+            recent("b"),
+            recent("c"),
+            header("locations", true),
+            Row::Header("Other".into(), None),
+            recent("d"),
+        ];
+        let spans = section_spans(&rows);
+        assert_eq!(
+            spans,
+            vec![
+                SectionSpan { id: "recent".into(), collapsed: false, start: 3, len: 2 },
+                SectionSpan { id: "locations".into(), collapsed: true, start: 6, len: 0 },
+            ],
+            "the favorite before and the row after a plain header belong to no section"
+        );
+    }
+
+    #[test]
+    fn only_a_flipped_collapsed_flag_is_a_section_transition() {
+        let open = vec![header("recent", false), recent("b"), recent("c")];
+        let shut = vec![header("recent", true)];
+        let (open_spans, shut_spans) = (section_spans(&open), section_spans(&shut));
+        let closing = section_transitions(&open_spans, &shut_spans);
+        assert_eq!(closing.len(), 1);
+        assert_eq!(
+            (closing[0].0.as_str(), closing[0].1, closing[0].2.len),
+            ("recent", false, 2),
+            "closing remembers its rows"
+        );
+        let opening = section_transitions(&shut_spans, &open_spans);
+        assert_eq!((opening[0].1, opening[0].2.len), (true, 0));
+        assert!(section_transitions(&open_spans, &open_spans).is_empty(), "no change, no motion");
+        assert!(section_transitions(&[], &open_spans).is_empty(), "a section that just appeared does not move");
+    }
 
     #[test]
     fn sizes_read_like_finder() {

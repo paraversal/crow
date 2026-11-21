@@ -168,6 +168,36 @@ macro_rules! retire {
     };
 }
 
+/// The right column opening or closing after ⇧⌘P or ⌘I.
+#[derive(Clone, Copy)]
+struct PaneSlide {
+    started: std::time::Instant,
+    opening: bool,
+}
+
+/// How the right column looks `slide` into its show or hide.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SlideLook {
+    /// The share of the column's width that takes room (the list gives way).
+    width: f32,
+    /// The column's content opacity.
+    opacity: f32,
+    /// Low closes by fading a column that no longer takes room.
+    overlay: bool,
+}
+
+/// Full eases the width and fades the content in after half the slide (and out
+/// during the first half of a hide); Low snaps the width and fades the content.
+fn slide_look(mode: crow_core::motion::Effective, opening: bool, t: f32) -> SlideLook {
+    let f = if opening { t } else { 1.0 - t };
+    match mode {
+        crow_core::motion::Effective::Full => {
+            SlideLook { width: f, opacity: ((f - 0.5) * 2.0).clamp(0.0, 1.0), overlay: false }
+        }
+        _ => SlideLook { width: if opening { 1.0 } else { 0.0 }, opacity: f, overlay: !opening },
+    }
+}
+
 /// Closed overlays whose last picture is still fading out.
 #[derive(Default)]
 struct Exits {
@@ -197,6 +227,8 @@ pub struct CrowWindow {
     /// A sheet asking before an operation runs (conflicts, permanent delete).
     sheet: Option<Sheet>,
     exits: Exits,
+    /// A ⇧⌘P / ⌘I show or hide of the right column that is still moving.
+    pane_slide: Option<PaneSlide>,
     /// Set while a leaving overlay renders: its opacity (1 → 0).
     exit_fade: std::cell::Cell<Option<f32>>,
     show_activity: bool,
@@ -380,6 +412,7 @@ impl CrowWindow {
             search_includes_hidden,
             sheet,
             exits: Exits::default(),
+            pane_slide: None,
             exit_fade: std::cell::Cell::new(None),
             show_activity: false,
             activity_focus: cx.focus_handle(),
@@ -652,8 +685,17 @@ impl CrowWindow {
         cx.notify();
     }
 
+    /// Start the right column's slide if its visibility changed since `was_visible`.
+    fn begin_pane_slide(&mut self, was_visible: bool, cx: &mut Context<Self>) {
+        let visible = self.info.read(cx).visible();
+        if visible != was_visible {
+            self.pane_slide = Some(PaneSlide { started: std::time::Instant::now(), opening: visible });
+        }
+    }
+
     fn toggle_preview(&mut self, _: &TogglePreview, _: &mut Window, cx: &mut Context<Self>) {
         let show = !self.info.read(cx).visible();
+        let was_visible = !show;
         crate::ui::set_show_preview(show, cx);
         self.info.update(cx, |info, cx| {
             info.set_visible(show, cx);
@@ -661,6 +703,7 @@ impl CrowWindow {
                 info.set_tab(InfoTab::Preview, cx);
             }
         });
+        self.begin_pane_slide(was_visible, cx);
         cx.notify();
     }
 
@@ -686,10 +729,12 @@ impl CrowWindow {
     /// in a window whose default is off.
     fn show_git_diff(&mut self, _: &crate::actions::ShowGitDiff, _: &mut Window, cx: &mut Context<Self>) {
         if crate::git::provider_enabled(cx) {
+            let was_visible = self.info.read(cx).visible();
             self.info.update(cx, |info, cx| {
                 info.set_visible(true, cx);
                 info.set_tab(InfoTab::GitDiff, cx);
             });
+            self.begin_pane_slide(was_visible, cx);
             cx.notify();
         }
     }
@@ -708,6 +753,7 @@ impl CrowWindow {
                 info.set_tab(InfoTab::Info, cx);
             });
         }
+        self.begin_pane_slide(visible, cx);
         cx.notify();
     }
 
@@ -3293,7 +3339,25 @@ impl Render for CrowWindow {
         let narrow = window.viewport_size().width < px(900.);
         // A narrow search hides the column by default; ⌘I or ⇧⌘P still opens it.
         let explicit = self.info.read(cx).explicit();
-        let preview: Option<gpui::AnyElement> = if !show_preview {
+        let mode_now = cx.global::<Ui>().feedback.mode;
+        let slide = self.pane_slide.and_then(|slide| {
+            crow_core::motion::progress(
+                mode_now,
+                slide.started,
+                std::time::Instant::now(),
+                crow_core::motion::ms::PANE_SLIDE,
+                crow_core::motion::ms::LOW_IN,
+            )
+            .map(|t| slide_look(mode_now, slide.opening, t))
+        });
+        if slide.is_none() {
+            self.pane_slide = None;
+        } else {
+            window.request_animation_frame();
+        }
+        // While a hide is still moving, the column is drawn though the setting is off.
+        let sliding_out = slide.is_some() && !show_preview;
+        let preview: Option<gpui::AnyElement> = if !show_preview && !sliding_out {
             None
         } else if active_search.is_some() {
             if narrow && !explicit { None } else { search_preview }.map(|(entry, preview)| {
@@ -3311,6 +3375,26 @@ impl Render for CrowWindow {
         } else {
             None
         };
+        let preview = match (preview, slide) {
+            (Some(column), Some(look)) if active_search.is_none() || !narrow => {
+                let width = f32::from(self.side_panes.right_width());
+                let column = div().w(px(width)).h_full().flex_none().opacity(look.opacity).child(column);
+                Some(if look.overlay {
+                    div().absolute().top_0().right_0().bottom_0().w(px(width)).child(column).into_any_element()
+                } else {
+                    div()
+                        .h_full()
+                        .flex_none()
+                        .overflow_hidden()
+                        .w(px(width * look.width))
+                        .child(column)
+                        .into_any_element()
+                })
+            }
+            (preview, _) => preview,
+        };
+        // The list gives way by the column's animated share of the width.
+        let preview_share = slide.map_or(1.0, |look| if look.overlay { 0.0 } else { look.width });
         let path_bar = self.render_bottom_bar(window, cx);
         // Close a tip whose reason is gone: hints off, another window owns it, or a
         // blocking state started (rename, drag, overlay, activity).
@@ -3375,7 +3459,7 @@ impl Render for CrowWindow {
                 let pane = self.pane().clone();
                 let mut width = window.viewport_size().width - self.side_panes.left_width();
                 if preview.is_some() {
-                    width -= self.side_panes.right_width();
+                    width -= self.side_panes.right_width() * preview_share;
                 }
                 pane.update(cx, |pane, _| pane.set_content_width(width));
                 div().flex_1().min_w_0().h_full().child(pane).into_any_element()

@@ -699,6 +699,14 @@ fn open_with_before(
 }
 
 /// Folders load on real threads; wait until every tab has finished.
+/// Let a motion that runs on the real clock (a sliding column, a fading sheet)
+/// run out, so geometry assertions see the end state.
+fn finish_motion(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+    std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::PANE_SLIDE + 40));
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+}
+
 fn settle(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
     for _ in 0..400 {
         // Operation events arrive through a 16 ms poll; the test clock must move
@@ -2235,6 +2243,7 @@ fn icon_grid_arrows_follow_the_tile_geometry(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     // Hide Preview so the 600 pt window leaves a three-column pane.
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     let bounds = |cx: &VisualTestContext, name: &str| {
         view.read_with(cx, |window, cx| window.debug_selector_bounds(&format!("tile-{name}"), cx)).expect("tile")
@@ -2296,6 +2305,7 @@ fn marquee_selects_columns_and_restores_the_start_on_escape(cx: &mut TestAppCont
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     let bounds = |cx: &VisualTestContext, name: &str| {
         view.read_with(cx, |window, cx| window.debug_selector_bounds(&format!("tile-{name}"), cx)).expect("tile")
@@ -2346,6 +2356,7 @@ fn cmd_marquee_keeps_the_starting_selection(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     let list = cx.debug_bounds("file-list").expect("icon viewport");
     let tile = |cx: &VisualTestContext, name: &str| {
@@ -2380,6 +2391,7 @@ fn a_watch_update_mid_marquee_cancels_and_restores_the_start(cx: &mut TestAppCon
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     let list = cx.debug_bounds("file-list").expect("icon viewport");
     let tile = |cx: &VisualTestContext, name: &str| {
@@ -2424,6 +2436,7 @@ fn marquee_edge_autoscroll_reaches_rows_below_the_viewport(cx: &mut TestAppConte
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     let list = cx.debug_bounds("file-list").expect("icon viewport");
     let start = gpui::point(list.right() - px(2.), list.bottom() - px(80.));
@@ -2775,6 +2788,7 @@ fn focus_and_tab_changes_cancel_a_marquee(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     let list = cx.debug_bounds("file-list").expect("icon viewport");
     let tile = |cx: &VisualTestContext, name: &str| {
@@ -7710,7 +7724,7 @@ fn list_columns_fit_with_preview_open_at_launch(cx: &mut TestAppContext) {
     let root = fixture("preview-list-width");
     let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1200.), px(760.)));
     let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
-    let (_view, mut cx) = open_with_before(cx, &root, options, |cx| {
+    let (view, mut cx) = open_with_before(cx, &root, options, |cx| {
         let config = &cx.global::<Ui>().config_dir;
         std::fs::write(config.join("settings.toml"), "show_preview = true\n[window]\nsidebar_width = 294\n")
             .expect("write settings");
@@ -7731,11 +7745,15 @@ fn list_columns_fit_with_preview_open_at_launch(cx: &mut TestAppContext) {
     assert_eq!(row_name.right() + px(8.), name.right(), "the name cell ends at the same divider");
 
     cx.simulate_keystrokes("cmd-shift-p");
+
+    finish_motion(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_none());
     assert!(header(&mut cx, "column-header-0").size.width > name.size.width);
     assert!(header(&mut cx, "column-header-3").size.width > kind.size.width);
 
     cx.simulate_keystrokes("cmd-shift-p");
+
+    finish_motion(&view, &mut cx);
     assert_eq!(header(&mut cx, "column-header-0"), name);
     assert_eq!(header(&mut cx, "column-header-3"), kind);
 }
@@ -9917,6 +9935,7 @@ fn preview_toggle_hides_it_in_list_and_columns(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root);
     assert!(cx.debug_bounds("preview").is_some(), "list view shows the preview");
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_none(), "hiding removes the list preview");
     assert!(!cx.read(|cx| cx.global::<Ui>().settings.show_preview), "the setting is off");
@@ -9929,6 +9948,8 @@ fn preview_toggle_hides_it_in_list_and_columns(cx: &mut TestAppContext) {
     );
 
     cx.simulate_keystrokes("cmd-shift-p");
+
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_some(), "showing it again");
 
@@ -9938,6 +9959,7 @@ fn preview_toggle_hides_it_in_list_and_columns(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview-column").is_some(), "a file's preview is the last column");
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview-column").is_none(), "hiding removes the preview column");
     assert_eq!(view.read_with(&cx, |w, cx| w.pane().read(cx).mode()), ViewMode::Columns);
@@ -9952,6 +9974,8 @@ fn cmd_i_opens_info_and_a_second_closes_it(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Preview);
 
     cx.simulate_keystrokes("cmd-i");
+
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_some(), "⌘I keeps the column open");
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
@@ -9974,9 +9998,12 @@ fn cmd_i_opens_info_and_a_second_closes_it(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("preview").is_some());
 
     cx.simulate_keystrokes("cmd-i");
+
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
     cx.simulate_keystrokes("cmd-i");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_none(), "a second ⌘I closes the column");
     assert!(cx.read(|cx| cx.global::<Ui>().settings.show_preview), "the setting is still the default");
@@ -9992,17 +10019,23 @@ fn info_opens_when_the_default_is_off(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("preview").is_none(), "the default hides the column");
 
     cx.simulate_keystrokes("cmd-i");
+
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_some(), "⌘I opens it anyway");
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
     assert!(!cx.read(|cx| cx.global::<Ui>().settings.show_preview), "the default stays off");
 
     cx.simulate_keystrokes("cmd-shift-p");
+
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_none(), "⇧⌘P hides the explicit column");
     assert!(!cx.read(|cx| cx.global::<Ui>().settings.show_preview));
 
     cx.simulate_keystrokes("cmd-shift-p");
+
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_some(), "⇧⌘P shows it again");
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Preview, "⇧⌘P shows the Preview tab");
@@ -17692,5 +17725,106 @@ fn a_closed_palette_fades_out_in_full_and_is_gone_at_once_in_off(cx: &mut TestAp
         cx.run_until_parked();
         assert!(cx.debug_bounds("sheet-panel").is_none(), "{mode:?}: gone after the fade");
         assert!(view.read_with(&cx, |w, _| w.exits.palette.is_none()), "{mode:?}: the holder is dropped");
+    }
+}
+
+#[gpui::test]
+fn the_palette_highlight_glides_only_in_full(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, glides) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("palette-glide");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("palette-glide").is_some(), glides, "{mode:?}: a gliding fill");
+        let first = cx.debug_bounds("palette-row-0").expect("the first row");
+        if glides {
+            let fill = cx.debug_bounds("palette-glide").unwrap();
+            assert_eq!(fill.size.height, first.size.height, "{mode:?}: the fill is as tall as its row");
+        }
+        // Moving the cursor moves the logical cursor at once; the fill only follows.
+        cx.simulate_keystrokes("down");
+        assert_eq!(view.read_with(&cx, |w, _| w.palette.as_ref().map(|p| p.cursor)), Some(1), "{mode:?}");
+    }
+}
+
+#[test]
+fn the_right_column_slide_looks() {
+    use crow_core::motion::Effective::{Full, Low};
+    let at = |mode, opening, t| super::slide_look(mode, opening, t);
+    let open_start = at(Full, true, 0.0);
+    assert_eq!((open_start.width, open_start.opacity), (0.0, 0.0));
+    let open_end = at(Full, true, 1.0);
+    assert_eq!((open_end.width, open_end.opacity), (1.0, 1.0));
+    assert_eq!(at(Full, true, 0.5).opacity, 0.0, "content fades in after half the slide");
+    let closing = at(Full, false, 0.5);
+    assert_eq!((closing.width, closing.opacity), (0.5, 0.0), "content is gone by the half way point");
+    assert_eq!(at(Full, false, 1.0).width, 0.0);
+    // Low never changes the width gradually.
+    for t in [0.0, 0.3, 0.9] {
+        assert_eq!(at(Low, true, t).width, 1.0, "opening: the list gives way at once");
+        assert_eq!(at(Low, false, t).width, 0.0, "closing: the list takes the room at once");
+        assert!(at(Low, false, t).overlay && !at(Low, true, t).overlay);
+    }
+    assert_eq!(at(Low, true, 0.25).opacity, 0.25);
+}
+
+#[gpui::test]
+fn toggling_the_right_column_slides_in_full_and_is_instant_in_off(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, slides) in [(Effective::Full, true), (Effective::Low, true), (Effective::Off, false)] {
+        let root = fixture("column-slide");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        settle(&view, &mut cx);
+        let was_visible = view.read_with(&cx, |w, cx| w.info.read(cx).visible());
+        cx.simulate_keystrokes("cmd-shift-p");
+        let now_visible = view.read_with(&cx, |w, cx| w.info.read(cx).visible());
+        assert_ne!(was_visible, now_visible, "{mode:?}: the toggle takes effect at once");
+        assert_eq!(
+            view.read_with(&cx, |w, _| w.pane_slide.is_some()),
+            slides,
+            "{mode:?}: a slide starts only with motion"
+        );
+        if !now_visible && slides {
+            assert!(cx.debug_bounds("preview").is_some(), "{mode:?}: the hiding column is still drawn");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::PANE_SLIDE + 40));
+        view.update(&mut cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(view.read_with(&cx, |w, _| w.pane_slide.is_none()), "{mode:?}: the slide ends");
+        assert_eq!(cx.debug_bounds("preview").is_some(), now_visible, "{mode:?}: the end state");
+    }
+}
+
+#[gpui::test]
+fn a_collapsing_sidebar_section_leaves_fading_rows_only_in_full(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, ghost) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("sidebar-section-motion");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]).replace("show = false", "show = true"));
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        cx.simulate_keystrokes("tab");
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        let recent = sidebar
+            .read_with(&cx, |sidebar, cx| sidebar.index_of_section_for_test("recent", cx))
+            .expect("Recent heading");
+        sidebar.update(&mut cx, |sidebar, cx| sidebar.set_cursor_for_test(recent, cx));
+        cx.simulate_keystrokes("left");
+        assert_eq!(
+            cx.debug_bounds("sidebar-section-ghost").is_some(),
+            ghost,
+            "{mode:?}: the collapsed rows' last picture"
+        );
+        assert!(
+            sidebar_looks(&view, &mut cx).iter().any(|look| look.spoken.contains("Recent section, collapsed")),
+            "{mode:?}: the logical state changes at once"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::SECTION + 40));
+        sidebar.update(&mut cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-section-ghost").is_none(), "{mode:?}: gone after the motion");
     }
 }
