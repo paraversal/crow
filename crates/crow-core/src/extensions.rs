@@ -855,6 +855,7 @@ mod tests {
             path: std::path::PathBuf::from("/tmp/link"),
             is_dir: true,
             is_symlink: true,
+            icon_kind: crow_fs::IconKind::Path,
             hidden: false,
             dataless: false,
             size: 0,

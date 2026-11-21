@@ -168,14 +168,32 @@ pub fn icon(path: &Path, is_dir: bool, points: u32) -> Option<Arc<Image>> {
     cloud_icon(None, path, is_dir, points)
 }
 
+pub fn entry_cloud_icon(
+    status: Option<crow_fs::CloudStatus>,
+    entry: &crow_fs::Entry,
+    points: u32,
+) -> Option<Arc<Image>> {
+    native_icon(status, &entry.path, entry.is_dir, entry.icon_kind, points).and_then(image_from_png)
+}
+
 /// Use a type icon while a potential cloud item is unprobed or unavailable.
 pub fn cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path, is_dir: bool, points: u32) -> Option<Arc<Image>> {
+    native_icon(status, path, is_dir, crow_fs::IconKind::Path, points).and_then(image_from_png)
+}
+
+fn native_icon(
+    status: Option<crow_fs::CloudStatus>,
+    path: &Path,
+    is_dir: bool,
+    kind: crow_fs::IconKind,
+    points: u32,
+) -> Option<Arc<Vec<u8>>> {
     if native_cloud_icon(status, path) {
         let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-        return image_from_png(crow_macos::type_icon_png(ext, is_dir, points)?);
+        return crow_macos::type_icon_png(ext, is_dir, points);
     }
-    // io-ok: render-time Finder icon, cached by AppKit per path type; the first fetch is a known main-thread cost (#47).
-    image_from_png(crow_macos::icon_png(path, is_dir, points)?)
+    // io-ok: render-time AppKit icon, cached by type or by path for item-specific icons (#47).
+    crow_macos::icon_png(path, kind, points)
 }
 
 /// PNG bytes of the Finder icon for a drag, never inspecting a cloud
@@ -183,12 +201,7 @@ pub fn cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path, is_dir: boo
 pub fn drag_icon_png(cx: &gpui::App, path: &Path, is_dir: bool, points: u32) -> Option<Arc<Vec<u8>>> {
     let status =
         cx.try_global::<crate::cloud_status::CloudStatusService>().and_then(|service| service.0.read(cx).status(path));
-    if native_cloud_icon(status, path) {
-        let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-        return crow_macos::type_icon_png(ext, is_dir, points);
-    }
-    // io-ok: drag-start icon, once per drag.
-    crow_macos::icon_png(path, is_dir, points)
+    native_icon(status, path, is_dir, crow_fs::IconKind::Path, points)
 }
 
 /// A cloud placeholder (or an unprobed cloud candidate) keeps its native

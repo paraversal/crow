@@ -679,7 +679,7 @@ fn render_rows(
                 crate::style::display_text(&entry.name).into_owned().into()
             };
             let handoff = DragHandoff::new();
-            let drag_icon = crate::style::cloud_icon(cloud, &entry.path, entry.is_dir, 22);
+            let drag_icon = crate::style::entry_cloud_icon(cloud, &entry, 22);
             let drop_target = pane
                 .drop_target
                 .as_ref()
@@ -1181,7 +1181,7 @@ fn folder_heading(
         .items_center()
         .gap(px(10.))
         .min_w_0()
-        .child(preview::path_icon(resolver, &entry.path, true, false, *cloud, theme, 40.))
+        .child(preview::entry_icon(resolver, entry, *cloud, theme, 40.))
         .child(
             div()
                 .flex_1()

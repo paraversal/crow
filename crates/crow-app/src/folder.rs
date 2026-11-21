@@ -3086,6 +3086,7 @@ mod tests {
             path: PathBuf::from("/").join(name),
             is_dir,
             is_symlink: false,
+            icon_kind: crow_fs::IconKind::default(),
             hidden: false,
             dataless: false,
             size,

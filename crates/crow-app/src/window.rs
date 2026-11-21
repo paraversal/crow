@@ -901,6 +901,7 @@ impl CrowWindow {
             path: path.clone(),
             is_dir: true,
             is_symlink: false,
+            icon_kind: crow_fs::IconKind::default(),
             hidden: false,
             dataless: false,
             size: 0,

@@ -1,68 +1,92 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crow_fs::IconKind;
 use objc2::AnyThread;
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSWorkspace};
 use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
-use objc2_uniform_type_identifiers::{UTType, UTTypeData, UTTypeFolder};
+use objc2_uniform_type_identifiers::{UTType, UTTypeData, UTTypeFolder, UTTypeUnixExecutable};
 
 use crate::{main_thread, ns_string};
 
-/// PNG bytes per (cache key, size); `None` remembers that AppKit could not render it.
-type IconCache = HashMap<(String, u32), Option<Arc<Vec<u8>>>>;
+#[derive(Hash, PartialEq, Eq)]
+enum IconKey {
+    Data,
+    Folder,
+    Executable,
+    Extension(String),
+    Path(PathBuf),
+}
+
+/// PNG bytes per icon and size. A cached None means AppKit could not render it.
+type IconCache = HashMap<(IconKey, u32), Option<Arc<Vec<u8>>>>;
 
 thread_local! {
     static CACHE: RefCell<IconCache> = RefCell::new(HashMap::new());
 }
 
-/// Icons depend on file type, except for bundles, volumes and home folders,
-/// which can carry their own icon and are keyed by path.
-fn cache_key(path: &Path, is_dir: bool) -> String {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    if !is_dir {
-        return format!("ext:{ext}");
+fn type_key(ext: &str, is_dir: bool) -> IconKey {
+    if is_dir {
+        IconKey::Folder
+    } else if ext.is_empty() {
+        IconKey::Data
+    } else {
+        IconKey::Extension(ext.to_lowercase())
     }
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let special = path == Path::new("/")
-        || path.starts_with("/Volumes")
-        || home.as_deref().is_some_and(|h| path == h || path.parent() == Some(h));
-    if special || !ext.is_empty() { format!("path:{}", path.display()) } else { "dir".to_owned() }
 }
 
-/// Finder's icon for a content type rather than a path. Used when a cloud
-/// placeholder must not make AppKit inspect the item's custom icon resource.
+/// Finder's icon for a content type, without inspecting the path. Used for
+/// cloud placeholders and ordinary files that can share an icon.
 pub fn type_icon_png(ext: &str, is_dir: bool, points: u32) -> Option<Arc<Vec<u8>>> {
-    main_thread()?;
-    let key = (format!("type:{}", if is_dir { "dir" } else { ext }), points);
-    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
-        return hit;
-    }
-    // SAFETY: the UTType constants are immutable for the process lifetime.
-    let image = if is_dir {
-        NSWorkspace::sharedWorkspace().iconForContentType(unsafe { UTTypeFolder })
-    } else {
-        match UTType::typeWithFilenameExtension(&NSString::from_str(ext)) {
-            Some(content_type) => NSWorkspace::sharedWorkspace().iconForContentType(&content_type),
-            None => NSWorkspace::sharedWorkspace().iconForContentType(unsafe { UTTypeData }),
-        }
-    };
-    let png = png_of(&image, points * 2).map(Arc::new);
-    CACHE.with(|c| c.borrow_mut().insert(key, png.clone()));
-    png
+    cached_icon(type_key(ext, is_dir), points)
 }
 
 /// Finder's icon for `path` as PNG bytes, rendered at `points` × 2 for Retina.
-/// Cached per type; `None` if AppKit could not render it.
-pub fn icon_png(path: &Path, is_dir: bool, points: u32) -> Option<Arc<Vec<u8>>> {
+/// The listing supplies the icon class so aliases and custom icons cannot
+/// enter a shared type cache. Callers without metadata use `IconKind::Path`.
+pub fn icon_png(path: &Path, kind: IconKind, points: u32) -> Option<Arc<Vec<u8>>> {
+    let key = match kind {
+        IconKind::File => type_key(path.extension().and_then(|ext| ext.to_str()).unwrap_or(""), false),
+        IconKind::Executable => IconKey::Executable,
+        IconKind::Folder => {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            if path == Path::new("/")
+                || path.starts_with("/Volumes")
+                || home.as_deref().is_some_and(|home| path == home || path.parent() == Some(home))
+            {
+                IconKey::Path(path.to_path_buf())
+            } else {
+                IconKey::Folder
+            }
+        }
+        IconKind::Path => IconKey::Path(path.to_path_buf()),
+    };
+    cached_icon(key, points)
+}
+
+fn cached_icon(key: IconKey, points: u32) -> Option<Arc<Vec<u8>>> {
     main_thread()?;
-    let key = (cache_key(path, is_dir), points);
+    let key = (key, points);
     if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return hit;
     }
     let _span = tracing::debug_span!("icon fetch").entered();
-    let image = NSWorkspace::sharedWorkspace().iconForFile(&ns_string(path));
+    let workspace = NSWorkspace::sharedWorkspace();
+    // SAFETY: the UTType constants are immutable for the process lifetime.
+    let image = unsafe {
+        match &key.0 {
+            IconKey::Data => workspace.iconForContentType(UTTypeData),
+            IconKey::Folder => workspace.iconForContentType(UTTypeFolder),
+            IconKey::Executable => workspace.iconForContentType(UTTypeUnixExecutable),
+            IconKey::Extension(ext) => {
+                let content_type = UTType::typeWithFilenameExtension(&NSString::from_str(ext));
+                workspace.iconForContentType(content_type.as_deref().unwrap_or(UTTypeData))
+            }
+            IconKey::Path(path) => workspace.iconForFile(&ns_string(path)),
+        }
+    };
     let png = png_of(&image, points * 2).map(Arc::new);
     CACHE.with(|c| c.borrow_mut().insert(key, png.clone()));
     png

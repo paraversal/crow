@@ -506,11 +506,31 @@ pub(crate) fn path_icon(
 ) -> gpui::AnyElement {
     let packed =
         (!crate::style::native_cloud_icon(cloud, path)).then(|| resolver.resolve(path, is_dir, is_package)).flatten();
+    render_icon(packed, || cloud_icon(cloud, path, is_dir, size as u32), theme, size)
+}
+
+pub(crate) fn entry_icon(
+    resolver: &crate::icon_packs::Resolver,
+    entry: &Entry,
+    cloud: Option<CloudStatus>,
+    theme: &Theme,
+    size: f32,
+) -> gpui::AnyElement {
+    let packed = (!crate::style::native_cloud_icon(cloud, &entry.path))
+        .then(|| resolver.resolve(&entry.path, entry.is_dir, entry.is_package()))
+        .flatten();
+    render_icon(packed, || crate::style::entry_cloud_icon(cloud, entry, size as u32), theme, size)
+}
+
+fn render_icon(
+    packed: Option<crate::icon_packs::ResolvedIcon>,
+    native: impl FnOnce() -> Option<Arc<gpui::Image>>,
+    theme: &Theme,
+    size: f32,
+) -> gpui::AnyElement {
     match packed {
         Some(icon) => crate::icons::pack_glyph(&icon.asset, size, color(icon.color.rgb(theme))).into_any_element(),
-        None => div()
-            .children(cloud_icon(cloud, path, is_dir, size as u32).map(|image| img(image).flex_none().size(px(size))))
-            .into_any_element(),
+        None => div().children(native().map(|image| img(image).flex_none().size(px(size)))).into_any_element(),
     }
 }
 
@@ -566,7 +586,7 @@ pub fn contents(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(path_icon(resolver, &entry.path, entry.is_dir, entry.is_package(), cloud, theme, 128.))
+                .child(entry_icon(resolver, entry, cloud, theme, 128.))
                 .into_any_element(),
         }
     };
@@ -647,7 +667,7 @@ pub(crate) fn gallery_content(
             .flex()
             .items_center()
             .justify_center()
-            .child(path_icon(resolver, &entry.path, entry.is_dir, entry.is_package(), cloud, theme, 160.))
+            .child(entry_icon(resolver, entry, cloud, theme, 160.))
             .into_any_element(),
     }
 }
@@ -734,6 +754,7 @@ mod tests {
             path: std::path::PathBuf::from("/tmp").join(name),
             is_dir,
             is_symlink: false,
+            icon_kind: crow_fs::IconKind::default(),
             hidden: false,
             dataless: false,
             size,

@@ -7,6 +7,42 @@ use std::os::macos::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+/// Whether an item's native icon can be shared by type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IconKind {
+    File,
+    Folder,
+    Executable,
+    /// A symlink, alias, custom icon, package, or item with unknown metadata.
+    #[default]
+    Path,
+}
+
+impl IconKind {
+    fn classify(path: &Path, is_dir: bool, symlink: bool, mode: Option<u32>, finder_flags: u16) -> Self {
+        const HAS_CUSTOM_ICON: u16 = 0x0400;
+        const IS_ALIAS: u16 = 0x8000;
+        if symlink || finder_flags & (HAS_CUSTOM_ICON | IS_ALIAS) != 0 {
+            return Self::Path;
+        }
+        if is_dir {
+            // Preserve Finder's special folder icons, including packages.
+            return if path.extension().is_some() { Self::Path } else { Self::Folder };
+        }
+        match mode {
+            Some(mode) if mode & 0o111 != 0 => {
+                if path.extension().is_some() {
+                    Self::Path
+                } else {
+                    Self::Executable
+                }
+            }
+            Some(_) => Self::File,
+            None => Self::Path,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
@@ -18,6 +54,7 @@ pub struct Entry {
     pub hidden: bool,
     /// The file is a cloud placeholder (`SF_DATALESS`); reading it would hydrate.
     pub dataless: bool,
+    pub icon_kind: IconKind,
     pub size: u64,
     pub modified: Option<SystemTime>,
     pub created: Option<SystemTime>,
@@ -117,9 +154,13 @@ pub fn stat_entry(path: &Path) -> std::io::Result<Option<Entry>> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let is_dir = meta.is_dir() || (meta.file_type().is_symlink() && path.is_dir());
     #[cfg(target_os = "macos")]
-    let (hidden_flag, added) = bulk::flags_and_added(path);
+    let (hidden_flag, added, finder_flags) = bulk::item_attributes(path);
     #[cfg(not(target_os = "macos"))]
-    let (hidden_flag, added) = (false, None);
+    let (hidden_flag, added, finder_flags) = (false, None, 0);
+    #[cfg(unix)]
+    let mode = Some(std::os::unix::fs::MetadataExt::mode(&meta));
+    #[cfg(not(unix))]
+    let mode = Some(0);
     #[cfg(target_os = "macos")]
     let dataless = crate::cloud::dataless_flags(meta.st_flags());
     #[cfg(not(target_os = "macos"))]
@@ -131,6 +172,7 @@ pub fn stat_entry(path: &Path) -> std::io::Result<Option<Entry>> {
         is_dir,
         is_symlink: meta.file_type().is_symlink(),
         dataless,
+        icon_kind: IconKind::classify(path, is_dir, meta.file_type().is_symlink(), mode, finder_flags),
         size: if is_dir { 0 } else { meta.len() },
         modified: meta.modified().ok(),
         created: meta.created().ok(),
@@ -198,7 +240,7 @@ pub(crate) use bulk::list_raw;
 
 #[cfg(target_os = "macos")]
 mod bulk {
-    use super::{Entry, FolderSample, SampleIncomplete};
+    use super::{Entry, FolderSample, IconKind, SampleIncomplete};
     use std::ffi::CString;
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStrExt;
@@ -216,7 +258,11 @@ mod bulk {
             | libc::ATTR_CMN_FLAGS
             | libc::ATTR_CMN_FILEID;
         if times {
-            common |= libc::ATTR_CMN_CRTIME | libc::ATTR_CMN_MODTIME | libc::ATTR_CMN_ADDEDTIME;
+            common |= libc::ATTR_CMN_CRTIME
+                | libc::ATTR_CMN_MODTIME
+                | libc::ATTR_CMN_FNDRINFO
+                | libc::ATTR_CMN_ACCESSMASK
+                | libc::ATTR_CMN_ADDEDTIME;
         }
         common
     }
@@ -267,6 +313,12 @@ mod bulk {
             let since = Duration::new(secs.unsigned_abs(), nanos.clamp(0, 999_999_999) as u32);
             Some(if secs >= 0 { UNIX_EPOCH + since } else { UNIX_EPOCH - since })
         }
+        fn finder_flags(&mut self) -> Option<u16> {
+            let finder_info = self.take::<32>()?;
+            // FinderInfo stores its flags in big-endian order at offset eight.
+            Some(u16::from_be_bytes([finder_info[8], finder_info[9]]))
+        }
+
         /// An `attrreference_t`: offset (relative to the reference itself) and length.
         /// The bytes are kept exactly; macOS does not require UTF-8 file names.
         fn name(&mut self) -> Option<OsString> {
@@ -292,6 +344,8 @@ mod bulk {
         pub nlink: u32,
         pub size: u64,
         pub flags: u32,
+        finder_flags: u16,
+        mode: Option<u32>,
         pub created: Option<SystemTime>,
         pub modified: Option<SystemTime>,
         pub added: Option<SystemTime>,
@@ -325,6 +379,7 @@ mod bulk {
             let is_symlink = self.is_symlink();
             let path = self.path();
             Some(Entry {
+                icon_kind: IconKind::classify(&path, is_dir, is_symlink, self.mode, self.finder_flags),
                 hidden,
                 name: self.name.to_string_lossy().into_owned(),
                 path,
@@ -351,12 +406,28 @@ mod bulk {
         let objtype = if common & libc::ATTR_CMN_OBJTYPE != 0 { c.u32()? } else { 0 };
         let created = if common & libc::ATTR_CMN_CRTIME != 0 { c.time() } else { None };
         let modified = if common & libc::ATTR_CMN_MODTIME != 0 { c.time() } else { None };
+        let finder_flags = if common & libc::ATTR_CMN_FNDRINFO != 0 { c.finder_flags()? } else { 0 };
+        let mode = if common & libc::ATTR_CMN_ACCESSMASK != 0 { Some(c.u32()?) } else { None };
         let flags = if common & libc::ATTR_CMN_FLAGS != 0 { c.u32()? } else { 0 };
         let fileid = if common & libc::ATTR_CMN_FILEID != 0 { c.u64()? } else { 0 };
         let added = if common & libc::ATTR_CMN_ADDEDTIME != 0 { c.time() } else { None };
         let nlink = if file & libc::ATTR_FILE_LINKCOUNT != 0 { c.u32()? } else { 1 };
         let size = if file & libc::ATTR_FILE_TOTALSIZE != 0 { c.i64().map_or(0, |s| s.max(0) as u64) } else { 0 };
-        Some(RawEntry { name, dir, objtype, dev, fileid, nlink, size, flags, created, modified, added })
+        Some(RawEntry {
+            name,
+            dir,
+            objtype,
+            dev,
+            fileid,
+            nlink,
+            size,
+            flags,
+            finder_flags,
+            mode,
+            created,
+            modified,
+            added,
+        })
     }
 
     pub fn list(dir: &Path, show_hidden: bool, on_batch: &mut dyn FnMut(Vec<Entry>)) -> std::io::Result<()> {
@@ -465,10 +536,13 @@ mod bulk {
         }
     }
 
-    /// The Finder hidden flag and Date Added for one path, for single-item updates.
-    pub fn flags_and_added(path: &Path) -> (bool, Option<SystemTime>) {
-        let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else { return (false, None) };
-        let mut attrs = attr_list(libc::ATTR_CMN_RETURNED_ATTRS | libc::ATTR_CMN_FLAGS | libc::ATTR_CMN_ADDEDTIME, 0);
+    /// Finder flags and Date Added for a single-item listing update.
+    pub fn item_attributes(path: &Path) -> (bool, Option<SystemTime>, u16) {
+        let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else { return (false, None, 0) };
+        let mut attrs = attr_list(
+            libc::ATTR_CMN_RETURNED_ATTRS | libc::ATTR_CMN_FNDRINFO | libc::ATTR_CMN_FLAGS | libc::ATTR_CMN_ADDEDTIME,
+            0,
+        );
         let mut buffer = [0u8; 128];
         // SAFETY: valid path, attrs and buffer; FSOPT_NOFOLLOW reads the link itself.
         let rc = unsafe {
@@ -481,14 +555,15 @@ mod bulk {
             )
         };
         if rc != 0 {
-            return (false, None);
+            return (false, None, 0);
         }
         let mut c = Cursor { entry: &buffer, at: 4 };
-        let Some(common) = c.u32() else { return (false, None) };
+        let Some(common) = c.u32() else { return (false, None, 0) };
         c.at += 16; // the other four groups of attribute_set_t
+        let finder_flags = if common & libc::ATTR_CMN_FNDRINFO != 0 { c.finder_flags().unwrap_or(0) } else { 0 };
         let flags = if common & libc::ATTR_CMN_FLAGS != 0 { c.u32().unwrap_or(0) } else { 0 };
         let added = if common & libc::ATTR_CMN_ADDEDTIME != 0 { c.time() } else { None };
-        (flags & UF_HIDDEN != 0, added)
+        (flags & UF_HIDDEN != 0, added, finder_flags)
     }
 }
 
@@ -525,11 +600,49 @@ mod tests {
             assert_eq!(entry.size, expected.size, "{name}");
             assert_eq!(entry.modified, expected.modified, "{name}");
             assert_eq!(entry.hidden, expected.hidden, "{name}");
+            assert_eq!(entry.icon_kind, expected.icon_kind, "{name}");
         }
         assert!(listed["link-to-folder"].is_dir);
         assert!(!listed["dangling"].is_dir);
         assert_eq!(listed["ünïcødé 名前.md"].size, 5000);
         assert!(!collect(&dir, false).contains_key(".dot"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_icon_kinds_agree_between_bulk_and_single_item_updates() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("icons");
+        for name in [".localized", "run", "alias.txt", "custom.txt"] {
+            std::fs::write(dir.join(name), "").unwrap();
+        }
+        std::fs::set_permissions(dir.join("run"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir(dir.join("Test.app")).unwrap();
+
+        for (name, flags) in [("alias.txt", 0x8000u16), ("custom.txt", 0x0400u16)] {
+            let path = std::ffi::CString::new(dir.join(name).as_os_str().as_bytes()).unwrap();
+            let mut finder_info = [0u8; 32];
+            finder_info[8..10].copy_from_slice(&flags.to_be_bytes());
+            // SAFETY: both C strings and the attribute bytes live through the call.
+            let result = unsafe {
+                libc::setxattr(path.as_ptr(), c"com.apple.FinderInfo".as_ptr(), finder_info.as_ptr().cast(), 32, 0, 0)
+            };
+            assert_eq!(result, 0, "{name}: {}", std::io::Error::last_os_error());
+        }
+
+        let listed = collect(&dir, true);
+        for (name, expected) in [
+            (".localized", IconKind::File),
+            ("run", IconKind::Executable),
+            ("alias.txt", IconKind::Path),
+            ("custom.txt", IconKind::Path),
+            ("Test.app", IconKind::Path),
+        ] {
+            assert_eq!(listed[name].icon_kind, expected, "{name} from bulk listing");
+            assert_eq!(stat_entry(&dir.join(name)).unwrap().unwrap().icon_kind, expected, "{name} from stat");
+        }
     }
 
     #[test]

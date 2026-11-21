@@ -1025,6 +1025,7 @@ mod tests {
             path,
             is_dir: false,
             is_symlink: false,
+            icon_kind: crow_fs::IconKind::default(),
             hidden: false,
             dataless: false,
             size: 12,

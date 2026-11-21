@@ -172,6 +172,7 @@ mod sort_tests {
             path: format!("/x/{name}").into(),
             is_dir,
             is_symlink: false,
+            icon_kind: crate::IconKind::default(),
             hidden: false,
             dataless: false,
             size,
