@@ -52,6 +52,9 @@ use crate::ui::Ui;
 /// Rows for strong name matches (the name contains the query contiguously). When
 /// these fill, the search is cancelled: the query is too broad to be useful.
 pub(crate) const MAX_STRONG_ROWS: usize = 20_000;
+/// How long a renamed row outlives a refresh that did not report it. Spotlight
+/// answers a renamed item with nothing for a couple of seconds (measured 2.4 s).
+const RENAME_PIN: Duration = Duration::from_secs(10);
 /// Rows for everything else: content-only and weak (scattered) fuzzy name hits.
 /// When these fill, contents stop being read; names keep streaming.
 pub(crate) const MAX_OTHER_ROWS: usize = 20_000;
@@ -176,6 +179,8 @@ pub struct SearchView {
     metadata_capped: bool,
     /// Paths seen by the current run, for refresh pruning.
     seen: std::collections::HashSet<PathBuf>,
+    /// Rows a batch rename or its Undo just moved, kept until a run reports them.
+    pinned: HashMap<PathBuf, Instant>,
     /// A refresh keeps the old snapshot until a complete generation proves removals.
     refreshing: bool,
     refresh_names: usize,
@@ -606,6 +611,7 @@ impl SearchView {
             metadata_only: false,
             metadata_capped: false,
             seen: std::collections::HashSet::new(),
+            pinned: HashMap::new(),
             refreshing: false,
             refresh_names: 0,
             refresh_other: 0,
@@ -707,6 +713,25 @@ impl SearchView {
             }
         })
         .detach();
+    }
+
+    #[cfg(test)]
+    pub fn empty_message_for_test(&self, cx: &App) -> String {
+        self.empty_message(cx)
+    }
+
+    #[cfg(test)]
+    pub fn pinned_count_for_test(&self) -> usize {
+        self.pinned.len()
+    }
+
+    /// Age every renamed-row pin past its limit, as if `RENAME_PIN` had passed.
+    #[cfg(test)]
+    pub fn expire_pins_for_test(&mut self) {
+        let old = Instant::now().checked_sub(RENAME_PIN + Duration::from_secs(1)).expect("an old instant");
+        for at in self.pinned.values_mut() {
+            *at = old;
+        }
     }
 
     /// A watcher notification in tests (and the real debounced path): mark the
@@ -1446,6 +1471,16 @@ impl SearchView {
 
     /// Drop rows the completed generation did not report, rebuilding the tables.
     fn prune_unseen(&mut self) {
+        // A run that reports a pinned row ends its pin; an old one expires.
+        let now = Instant::now();
+        self.pinned.retain(|path, at| !self.seen.contains(path) && now.duration_since(*at) < RENAME_PIN);
+        if !self.pinned.is_empty() {
+            let pinned = &self.pinned;
+            let seen = std::mem::take(&mut self.seen);
+            self.results.retain(|row| seen.contains(&row.path) || pinned.contains_key(&row.path));
+            self.seen = seen;
+            return;
+        }
         if self.seen.len() == self.results.len() && self.results.iter().all(|row| self.seen.contains(&row.path)) {
             return;
         }
@@ -1967,6 +2002,23 @@ impl SearchView {
         self.input.read(cx).text().to_owned()
     }
 
+    /// The empty state names what ran: the text, else the tag or saved query
+    /// (a tag or metadata-only query has no text).
+    fn empty_message(&self, cx: &App) -> String {
+        let text = self.query(cx);
+        let scope = self.scope_label();
+        if !text.trim().is_empty() {
+            return format!("No results for \"{text}\" in {scope}");
+        }
+        if let Some(tag) = &self.tag {
+            return format!("No results for tag \"{}\" in {scope}", tag.as_str());
+        }
+        if self.saved.is_some() {
+            return format!("No results for \"{}\" in {scope}", self.title);
+        }
+        format!("No results in {scope}")
+    }
+
     #[cfg(test)]
     pub fn scroll_for_test(&self) -> &UniformListScrollHandle {
         &self.scroll
@@ -2356,8 +2408,11 @@ impl SearchView {
             return;
         }
         let mut changed = false;
+        let now = Instant::now();
         for row in &mut self.results {
             if let Some(new) = map.get(&row.path) {
+                self.pinned.remove(&row.path);
+                self.pinned.insert(new.clone(), now);
                 row.path = new.clone();
                 row.name = new.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
                 changed = true;
@@ -3256,7 +3311,7 @@ impl SearchView {
                 .child("Searching…")
                 .into_any_element();
         }
-        let message = format!("No results for \"{}\" in {}", self.query(cx), self.scope_label());
+        let message = self.empty_message(cx);
         let spoken_everything =
             keys::spoken_for(&SearchEverything, KeyScope::Search, cx).unwrap_or_else(|| "Shift Command A".to_owned());
         let spoken_home =
