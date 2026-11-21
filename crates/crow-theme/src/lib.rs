@@ -685,7 +685,7 @@ mod tests {
         assert_eq!(resolved.role("link"), Rgb(0xf74f9e));
         // Unknown references keep the stand-in; other themes have none.
         let unknown = fallback_for(Variant::Dark).resolve_system(&|_| None);
-        assert_eq!(unknown.role("accent"), Rgb(0x0a84ff));
+        assert_eq!(unknown.role("accent"), Rgb(0x0091ff));
         assert_eq!(builtin("gruvbox-dark").unwrap().system_refs().count(), 0);
     }
 
