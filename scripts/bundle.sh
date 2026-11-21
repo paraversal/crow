@@ -27,7 +27,7 @@
 # Create a Certificate, name "Crow Dev", type "Code Signing" (it needn't be trusted).
 # Set CROW_SIGN_IDENTITY to use another identity (e.g. a Developer ID for distribution).
 #
-# Icon: assets/app-icon.png (square, 1024 px). Replace that file and bundle again; the
+# Icon: assets/app-icon.png (square, any size; full-bleed art gets the Dock's margin added). Replace that file and bundle again; the
 # app embeds the same PNG for the Dock, and scripts/site.sh makes the website's sizes.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -74,9 +74,13 @@ cat > "$app/Contents/Resources/Credits.html" <<CREDITS
 </body></html>
 CREDITS
 
-icon_png=assets/app-icon.png
+icon_src=assets/app-icon.png
 iconset=$(mktemp -d)/AppIcon.iconset
 mkdir -p "$iconset"
+# The Dock draws icons inside a template (artwork ~80% of the canvas); pad-icon.swift adds
+# that margin to full-bleed art and leaves art that already has one alone.
+icon_png=$(dirname "$iconset")/padded.png
+swift scripts/pad-icon.swift "$icon_src" "$icon_png"
 for size in 16 32 128 256 512; do
   sips -z "$size" "$size" "$icon_png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
   sips -z $((size * 2)) $((size * 2)) "$icon_png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null

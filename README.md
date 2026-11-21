@@ -47,7 +47,7 @@ cargo run --release -p crow-app  # opens your home folder
 
 Running as `Crow.app` makes macOS privacy prompts name Crow instead of your terminal. With a code-signing certificate named
 "Crow Dev" in your keychain (see `scripts/bundle.sh`), macOS keeps those permissions from one build to the next.
-The app icon is one square PNG, `assets/app-icon.png` (1024 px). Replace it and the next build
+The app icon is one square PNG, `assets/app-icon.png`; art that fills the canvas gets the Dock's margin added automatically. Replace it and the next build
 uses it everywhere: the Dock, the bundle (`bundle.sh`) and the website (`scripts/site.sh`, which
 GitHub Pages runs).
 
