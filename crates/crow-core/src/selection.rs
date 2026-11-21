@@ -107,6 +107,19 @@ impl<K: Clone + Eq + Hash> Selection<K> {
         (from, to)
     }
 
+    /// Shift-Option-arrow: add `keys` (a run of rows ending at the new cursor) to the
+    /// selection and move the cursor to `cursor`. Everything already selected stays, and
+    /// the anchor stays, so a later Shift-arrow still shrinks or extends from it; with no
+    /// anchor yet, the run's `start` becomes it.
+    pub fn extend_through(&mut self, keys: impl IntoIterator<Item = K>, start: K, cursor: K) {
+        self.selected.extend(keys);
+        self.selected.insert(cursor.clone());
+        if self.anchor.is_none() {
+            self.anchor = Some(start);
+        }
+        self.cursor = Some(cursor);
+    }
+
     /// Replace keys by path after a rename, keeping the cursor and anchor on
     /// the same items.
     pub fn remap(&mut self, map: &std::collections::HashMap<K, K>) {
@@ -206,6 +219,35 @@ impl TypeSelect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extending_through_keeps_the_selection_and_the_anchor() {
+        let rows = [0, 1, 2, 3, 4, 5, 6];
+        let mut selection = Selection::default();
+        selection.select_only(2);
+        selection.extend_to(4, |k| Some(*k as usize), |i| rows[i]);
+        assert_eq!(selection.len(), 3);
+        // Down from the cursor (4) through the last row.
+        selection.extend_through(rows[4..=6].iter().copied(), 4, 6);
+        let mut all: Vec<_> = selection.iter().copied().collect();
+        all.sort();
+        assert_eq!(all, [2, 3, 4, 5, 6]);
+        assert_eq!(selection.cursor(), Some(&6));
+        // The anchor is still 2: Shift-Up shrinks from it.
+        selection.extend_to(5, |k| Some(*k as usize), |i| rows[i]);
+        let mut shrunk: Vec<_> = selection.iter().copied().collect();
+        shrunk.sort();
+        assert_eq!(shrunk, [2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn extending_through_with_no_anchor_starts_one() {
+        let mut selection: Selection<i32> = Selection::default();
+        selection.extend_through(0..=3, 0, 3);
+        assert_eq!(selection.len(), 4);
+        selection.extend_to(1, |k| Some(*k as usize), |i| i as i32);
+        assert_eq!(selection.len(), 2, "the anchor is the run's start");
+    }
 
     #[test]
     fn replacing_the_selection_drops_a_cursor_and_anchor_that_left_it() {

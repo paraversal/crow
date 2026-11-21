@@ -12,14 +12,14 @@ use gpui::{Action, SharedString};
 
 use crate::actions::{
     Acknowledgements, AddToSidebar, CalculateFolderSizes, ChooseTags, CloseTab, CopyFiles, CopyPath, CutFiles,
-    DeletePermanently, Duplicate, EditPath, EditSavedSearch, EditSettings, Eject, EmptyTrash, GoBack, GoForward,
-    GoToFolder, IconCaptionLines, IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard, MoveFavoriteDown,
-    MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, OpenSettings,
-    OpenTerminal, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, RemoveSavedSearch, Rename,
-    ResetFolderView, SaveSearch, SearchEverything, SearchHome, SearchReveal, SelectAll, ShowCommandPalette,
-    ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles,
-    TogglePreview, ToggleSidebar, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList,
-    WhyThisView,
+    DeletePermanently, Duplicate, EditPath, EditSavedSearch, EditSettings, Eject, EmptyTrash, ExtendToFirst,
+    ExtendToLast, GoBack, GoForward, GoToFolder, IconCaptionLines, IconCaptionOff, IconSizeCompact, IconSizeLarge,
+    IconSizeStandard, MoveFavoriteDown, MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent,
+    OpenSelection, OpenSettings, OpenTerminal, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar,
+    RemoveSavedSearch, Rename, ResetFolderView, SaveSearch, SearchEverything, SearchHome, SearchReveal, SelectAll,
+    ShowCommandPalette, ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity,
+    ToggleHiddenFiles, TogglePreview, ToggleSidebar, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery,
+    ViewAsIcons, ViewAsList, WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -114,6 +114,8 @@ pub enum CommandId {
     ShowInFinder,
     OpenTerminal,
     SelectAll,
+    ExtendSelectionToStart,
+    ExtendSelectionToEnd,
     StartFilter,
     ChooseTags,
     Undo,
@@ -224,6 +226,8 @@ impl CommandId {
             CommandId::ShowInFinder => "show-in-finder",
             CommandId::OpenTerminal => "open-terminal",
             CommandId::SelectAll => "select-all",
+            CommandId::ExtendSelectionToStart => "extend-selection-to-start",
+            CommandId::ExtendSelectionToEnd => "extend-selection-to-end",
             CommandId::StartFilter => "start-filter",
             CommandId::ChooseTags => "choose-tags",
             CommandId::Undo => "undo",
@@ -473,6 +477,22 @@ pub const COMMANDS: &[Command] = &[
         action: &SelectAll,
         scope: KeyScope::List,
         menu: Some(MenuSlot { menu: MenuName::Edit, section: 1, title: "Select All" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::ExtendSelectionToStart,
+        label: "Extend Selection to Start",
+        action: &ExtendToFirst,
+        scope: KeyScope::List,
+        menu: Some(MenuSlot { menu: MenuName::Edit, section: 1, title: "Extend Selection to Start" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::ExtendSelectionToEnd,
+        label: "Extend Selection to End",
+        action: &ExtendToLast,
+        scope: KeyScope::List,
+        menu: Some(MenuSlot { menu: MenuName::Edit, section: 1, title: "Extend Selection to End" }),
         palette: true,
     },
     Command {

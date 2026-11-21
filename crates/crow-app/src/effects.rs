@@ -63,6 +63,10 @@ pub trait Effects: Send + Sync {
     fn set_app_icon(&self, png: &[u8]);
     /// Start a native drag of `drag`'s items; false to let GPUI's own drag run.
     fn begin_drag(&self, window: &mut Window, drag: &ComboDrag<'_>) -> bool;
+    /// True when a native drop arrives while the mouse button is still physically down. A
+    /// window switcher such as AltTab posts a synthetic mouse-up when it focuses a window,
+    /// which AppKit reads as the end of the drag.
+    fn drop_is_premature(&self) -> bool;
     /// Move the window from an app-owned titlebar drag (`app_owns_titlebar_drag`).
     fn start_window_move(&self, window: &mut Window);
     /// The titlebar's double-click action, as the system's preference chooses it.
@@ -201,6 +205,10 @@ impl Effects for SystemEffects {
         crow_macos::begin_drag(window, drag)
     }
 
+    fn drop_is_premature(&self) -> bool {
+        crow_macos::drop_is_premature()
+    }
+
     fn start_window_move(&self, window: &mut Window) {
         window.start_window_move();
     }
@@ -333,6 +341,8 @@ struct Script {
     write_change_count: Option<isize>,
     open_error: Option<String>,
     begin_drag: bool,
+    /// Makes every native drop look like one that arrived with the button still down.
+    premature_drop: bool,
     /// Makes the scripted Finder Empty Trash fail with this message.
     finder_trash_error: Option<String>,
     /// The recorder's stand-in for the pasteboard's text.
@@ -431,6 +441,11 @@ impl RecordingEffects {
     /// Whether a native drag should claim the drag (false lets GPUI's own run).
     pub fn set_begin_drag(&self, enabled: bool) {
         self.script.lock().expect("the effect script is not poisoned").begin_drag = enabled;
+    }
+
+    /// Whether native drops arrive while the button is still down.
+    pub fn set_premature_drop(&self, premature: bool) {
+        self.script.lock().expect("the effect script is not poisoned").premature_drop = premature;
     }
 
     /// Answer the next Spotlight calls with these batches, in order.
@@ -592,6 +607,10 @@ impl Effects for RecordingEffects {
     fn begin_drag(&self, _window: &mut Window, drag: &ComboDrag<'_>) -> bool {
         self.record(Call::BeginDrag(drag.paths.iter().map(|(path, _)| path.clone()).collect()));
         self.script.lock().expect("the effect script is not poisoned").begin_drag
+    }
+
+    fn drop_is_premature(&self) -> bool {
+        self.script.lock().expect("the effect script is not poisoned").premature_drop
     }
 
     fn start_window_move(&self, _window: &mut Window) {

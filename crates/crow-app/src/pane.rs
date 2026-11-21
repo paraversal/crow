@@ -35,9 +35,9 @@ use gpui::{
 
 use crate::actions::{
     BeginJump, BeginMark, ChooseTags, ClearFilter, CopyFiles, CopyPath, CutFiles, DeletePermanently, Duplicate,
-    EnterRow, ExtendDown, ExtendUp, FilterFocusField, FilterFocusResults, MoveDown, MoveLeft, MoveRight, MoveToFirst,
-    MoveToLast, MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection, OpenTerminal, PasteFiles, PasteMoveFiles,
-    QuickLook, Rename, SelectAll, ShowInFinder, StartFilter,
+    EnterRow, ExtendDown, ExtendToFirst, ExtendToLast, ExtendUp, FilterFocusField, FilterFocusResults, MoveDown,
+    MoveLeft, MoveRight, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, NewFile, NewFolder, OpenSelection, OpenTerminal,
+    PasteFiles, PasteMoveFiles, QuickLook, Rename, SelectAll, ShowInFinder, StartFilter,
 };
 use crate::chrome::with_tooltip;
 use crate::cloud_status::{self, CloudSource, CloudStatusService};
@@ -76,6 +76,14 @@ const CAPTION_LINE_HEIGHT: f32 = 16.0;
 const ICON_TILE_TOP: f32 = 3.0;
 const ICON_TILE_GAP: f32 = 2.0;
 const ICON_BOX_PADDING: f32 = 4.0;
+/// A tile's status badge keeps this far from the tile's left edge.
+const ICON_BADGE_INSET: f32 = 2.0;
+
+/// The width left for a tile's status badge between the tile's left edge and the icon
+/// box, past `ICON_BADGE_INSET`.
+fn icon_badge_room(tile_width: f32, icon_size: f32) -> f32 {
+    ((tile_width - (icon_size + ICON_BOX_PADDING)) / 2.0 - ICON_BADGE_INSET).max(0.0)
+}
 
 fn icon_name_line_height(font_size: f32) -> f32 {
     (font_size * 1.25).ceil()
@@ -1778,6 +1786,8 @@ impl Pane {
             CommandId::ShowInFinder => self.show_in_finder(&ShowInFinder, window, cx),
             CommandId::OpenTerminal => self.open_terminal(&OpenTerminal, window, cx),
             CommandId::SelectAll => self.select_all(&SelectAll, window, cx),
+            CommandId::ExtendSelectionToStart => self.extend_to_first(&ExtendToFirst, window, cx),
+            CommandId::ExtendSelectionToEnd => self.extend_to_last(&ExtendToLast, window, cx),
             CommandId::StartFilter => self.start_filter(&StartFilter, window, cx),
             CommandId::ChooseTags => self.choose_tags(&ChooseTags, window, cx),
             _ => {}
@@ -2637,6 +2647,17 @@ impl Pane {
             return;
         }
         self.with_focused(cx, |f, cx| f.extend_to(f.step(1), cx));
+    }
+
+    /// ⇧⌥↑: add everything from the first row through the cursor. Order is the view's own
+    /// row order, so in the icon grid "up" means towards the start, not a tile column.
+    fn extend_to_first(&mut self, _: &ExtendToFirst, _: &mut Window, cx: &mut Context<Self>) {
+        self.with_focused(cx, |f, cx| f.extend_through(false, cx));
+    }
+
+    /// ⇧⌥↓: add everything from the cursor through the last row.
+    fn extend_to_last(&mut self, _: &ExtendToLast, _: &mut Window, cx: &mut Context<Self>) {
+        self.with_focused(cx, |f, cx| f.extend_through(true, cx));
     }
 
     /// The tile arrow keys land on: vertical moves keep the column, horizontal
@@ -4133,14 +4154,11 @@ impl Pane {
                 let is_flash = flash_flags[ix - range_start];
                 let cut_edge = cut_edges.get(ix - flags_first).copied().flatten();
                 let presentation = presentations.get(&entry.path).cloned().unwrap_or_default();
-                let dim = if presentation.dim {
-                    content_opacity(true, false)
-                } else {
-                    content_opacity(
-                        entry.hidden,
-                        self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
-                    )
-                };
+                let dim = crate::style::row_opacity(
+                    entry.hidden,
+                    presentation.dim,
+                    self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
+                );
                 let plugin_spoken = if presentation.spoken.is_empty() {
                     String::new()
                 } else {
@@ -4308,6 +4326,7 @@ impl Pane {
                                     .relative()
                                     .left(px(look.dx))
                                     .opacity(dim)
+                                    .when(presentation.dim, |name| name.italic())
                                     .when_some(presentation.tint.filter(|_| !selected), |cell, tint| {
                                         cell.text_color(color(theme.role(tint.key())))
                                     })
@@ -4656,14 +4675,11 @@ impl Pane {
                     let caption_spoken = caption.as_ref().and_then(|value| {
                         value.spoken.clone().or_else(|| Some(format!("{} {}", value.title, value.text)))
                     });
-                    let dim = if presentation.dim {
-                        content_opacity(true, false)
-                    } else {
-                        content_opacity(
-                            entry.hidden,
-                            self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
-                        )
-                    };
+                    let dim = crate::style::row_opacity(
+                        entry.hidden,
+                        presentation.dim,
+                        self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
+                    );
                     let plugin_spoken = if presentation.spoken.is_empty() {
                         String::new()
                     } else {
@@ -4730,16 +4746,27 @@ impl Pane {
                         .children(
                             crate::cloud_status::badge(cloud, theme)
                                 .map(|badge| div().absolute().top(px(0.)).right(px(0.)).child(badge)),
-                        )
-                        .children(presentation.badge.clone().map(|badge| {
-                            div()
-                                .absolute()
-                                .top(px(0.))
-                                .left(px(0.))
-                                .text_size(px(11.))
-                                .text_color(color(theme.role("fg-muted")))
-                                .child(badge)
-                        }));
+                        );
+                    // The status badge sits in the tile's side margin, beside the icon box
+                    // (never over it): a margin as wide as the tile leaves the icon.
+                    let badge_room = icon_badge_room(metrics.tile_width, metrics.icon_size);
+                    let badge_visual = presentation.badge.clone().map(|badge| {
+                        div()
+                            .debug_selector({
+                                let name = entry.name.clone();
+                                move || format!("tile-badge-{name}")
+                            })
+                            .absolute()
+                            .top(px(ICON_TILE_TOP))
+                            .left(px(ICON_BADGE_INSET))
+                            .w(px(badge_room))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(px(11.))
+                            .text_color(color(theme.role("fg-muted")))
+                            .opacity((1.0 - look.trash) * dim)
+                            .child(badge)
+                    });
                     let name = fit_icon_name(&entry.name, text_width, font_size, window);
                     let clipped = name.cut.is_some();
                     let label = div().w(text_width).h(line_height * 2).flex_none().overflow_hidden();
@@ -4759,6 +4786,7 @@ impl Pane {
                                 .text_size(font_size)
                                 .text_color(color(theme.role("fg")))
                                 .opacity(dim)
+                                .when(presentation.dim, |name| name.italic())
                                 .child(if ranges.is_empty() {
                                     name.text.into_any_element()
                                 } else {
@@ -4881,6 +4909,7 @@ impl Pane {
                         }))
                         .when_some(tint, |tile, tint| tile.child(div().absolute().inset_0().rounded_md().bg(tint)))
                         .when_some(flash, |tile, tint| tile.child(div().absolute().inset_0().rounded_md().bg(tint)))
+                        .children(badge_visual)
                         .when(cut, |tile| {
                             tile.child(
                                 cut_outline(theme, true, true)
@@ -5192,14 +5221,11 @@ impl Pane {
                 let tint = effect_tint(look, theme);
                 let is_flash = flash_flags[ix - range_start];
                 let cut_edge = cut_edges.get(ix - flags_first).copied().flatten();
-                let dim = if presentation.dim {
-                    content_opacity(true, false)
-                } else {
-                    content_opacity(
-                        entry.hidden,
-                        self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
-                    )
-                };
+                let dim = crate::style::row_opacity(
+                    entry.hidden,
+                    presentation.dim,
+                    self.renaming.as_ref().is_some_and(|renaming| renaming.path == entry.path),
+                );
                 let plugin_spoken = if presentation.spoken.is_empty() {
                     String::new()
                 } else {
@@ -5333,6 +5359,7 @@ impl Pane {
                             .flex_1()
                             .min_w_0()
                             .opacity(dim)
+                            .when(presentation.dim, |name| name.italic())
                             .when_some(presentation.tint.filter(|_| !selected), |cell, tint| {
                                 cell.text_color(color(theme.role(tint.key())))
                             })
@@ -5692,7 +5719,7 @@ fn drag_combo_left(cursor_x: f32, width: f32) -> f32 {
 /// different one that sits lower in its box.
 /// The disclosure chevron, turned `turn` of the way from closed (0, pointing
 /// right) to open (1, pointing down); Full motion turns it in between.
-fn chevron_glyph(turn: f32, chevron: gpui::Rgba) -> impl IntoElement {
+pub(crate) fn chevron_glyph(turn: f32, chevron: gpui::Rgba) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -6312,6 +6339,8 @@ impl Render for Pane {
                     .on_action(cx.listener(Self::extend_up))
                     .on_action(cx.listener(Self::extend_down))
                     .on_action(cx.listener(Self::move_to_first))
+                    .on_action(cx.listener(Self::extend_to_first))
+                    .on_action(cx.listener(Self::extend_to_last))
                     .on_action(cx.listener(Self::move_to_last))
                     .on_action(cx.listener(Self::select_all))
                     .on_action(cx.listener(Self::move_left))
@@ -6331,6 +6360,7 @@ impl Render for Pane {
                     .on_action(cx.listener(Self::paste_move_files))
                     .on_action(cx.listener(Self::copy_path))
                     .on_action(cx.listener(Self::show_in_finder))
+                    .on_action(cx.listener(Self::open_terminal))
                     .on_action(cx.listener(Self::begin_mark))
                     .on_action(cx.listener(Self::begin_jump))
                     .on_action(cx.listener(Self::start_filter))
@@ -6635,6 +6665,23 @@ impl Pane {
 #[cfg(test)]
 mod tests {
     use super::{IslandEdges, drag_combo_left, draws_selection_fill, island_edges, selection_islands};
+
+    #[test]
+    fn a_tile_badge_never_reaches_the_icon_at_any_size() {
+        for size in [crow_core::IconSize::Compact, crow_core::IconSize::Standard, crow_core::IconSize::Large] {
+            let metrics = size.metrics();
+            let box_left = (metrics.tile_width - (metrics.icon_size + super::ICON_BOX_PADDING)) / 2.0;
+            let badge_right = super::ICON_BADGE_INSET + super::icon_badge_room(metrics.tile_width, metrics.icon_size);
+            assert!(
+                badge_right <= box_left,
+                "{size:?}: badge ends at {badge_right}, the icon box starts at {box_left}"
+            );
+            assert!(
+                super::icon_badge_room(metrics.tile_width, metrics.icon_size) >= 11.0,
+                "{size:?}: room for one 11 px letter"
+            );
+        }
+    }
 
     #[gpui::test]
     fn icon_names_fit_two_real_lines_and_keep_the_extension(cx: &mut gpui::TestAppContext) {

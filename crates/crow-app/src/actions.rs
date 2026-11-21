@@ -87,6 +87,10 @@ actions!(
         MoveToLast,
         ExtendUp,
         ExtendDown,
+        /// ⇧⌥↑: extend the selection from the cursor through the first row.
+        ExtendToFirst,
+        /// ⇧⌥↓: extend the selection from the cursor through the last row.
+        ExtendToLast,
         SelectAll,
         OpenSelection,
         /// Return in the list: Rename or Open, read from `settings.enter`.
@@ -242,6 +246,8 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("end", MoveToLast, Some("FileList && !Filter && !TextInput")),
         KeyBinding::new("shift-up", ExtendUp, Some(LIST)),
         KeyBinding::new("shift-down", ExtendDown, Some(LIST)),
+        KeyBinding::new("alt-shift-up", ExtendToFirst, Some(LIST)),
+        KeyBinding::new("alt-shift-down", ExtendToLast, Some(LIST)),
         KeyBinding::new("cmd-a", SelectAll, Some(LIST)),
         KeyBinding::new("/", StartFilter, Some(LIST)),
         KeyBinding::new("escape", ClearFilter, Some(LIST_FILTERED)),
@@ -350,6 +356,8 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("down", MoveDown, Some("SearchResults")),
         KeyBinding::new("shift-up", ExtendUp, Some("SearchResults")),
         KeyBinding::new("shift-down", ExtendDown, Some("SearchResults")),
+        KeyBinding::new("alt-shift-up", ExtendToFirst, Some("SearchResults")),
+        KeyBinding::new("alt-shift-down", ExtendToLast, Some("SearchResults")),
         // ↓ in the field enters the results (no sidebar fallback); ↑ on the first row
         // comes back. "Search" is the band's own context level, so it reaches the field
         // without stealing the results list's plain ↓ (that binding matches deeper).

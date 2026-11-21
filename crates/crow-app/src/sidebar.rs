@@ -336,6 +336,9 @@ fn section_order(ui: &Ui, sections: &[Section]) -> Vec<String> {
 /// Space above a section title, a margin so the cursor ring hugs the label.
 const HEADER_GAP: f32 = 10.;
 
+/// How far a heading's title slides right when its chevron shows.
+const CHEVRON_ROOM: f32 = 14.;
+
 /// The section id of favorites group `g`: its header collapses like any section.
 fn group_section_id(g: usize) -> String {
     format!("favorites-group-{g}")
@@ -546,6 +549,8 @@ pub struct Sidebar {
     /// The rows of the last draw, to see which sections opened or closed.
     last_rows: Vec<Row>,
     section_motions: Vec<SectionMotion>,
+    /// How far each heading's chevron has slid in (0 hidden, 1 shown), easing with the pointer.
+    header_hover: Vec<HeaderHover>,
     /// Favorites that changed places: each row's offset from its new place, easing to 0.
     reorder: Option<Reorder>,
     /// What a drag outside the list would drop on, drawn from state rather than a
@@ -619,6 +624,7 @@ impl Sidebar {
             layout: Rc::default(),
             last_rows: Vec::new(),
             section_motions: Vec::new(),
+            header_hover: Vec::new(),
             reorder: None,
             drop_target: None,
             dragging_favorite: Rc::new(Cell::new(false)),
@@ -1904,6 +1910,40 @@ impl Sidebar {
     }
 }
 
+/// A heading's chevron reveal: easing from `from` to `target` since `since`.
+struct HeaderHover {
+    id: String,
+    from: f32,
+    target: f32,
+    since: Instant,
+}
+
+impl HeaderHover {
+    /// The slide amount now, and whether it is still moving.
+    fn amount(&self, mode: Effective, now: Instant) -> (f32, bool) {
+        match motion::progress(mode, self.since, now, motion::ms::SECTION, motion::ms::LOW_IN) {
+            Some(t) => (self.from + (self.target - self.from) * t, true),
+            None => (self.target, false),
+        }
+    }
+}
+
+impl Sidebar {
+    fn header_amount(&self, id: &str, mode: Effective, now: Instant) -> f32 {
+        self.header_hover.iter().find(|h| h.id == id).map_or(0.0, |h| h.amount(mode, now).0)
+    }
+
+    fn set_header_hover(&mut self, id: &str, hovered: bool, cx: &mut Context<Self>) {
+        let mode = cx.global::<Ui>().feedback.mode;
+        let now = Instant::now();
+        let target = f32::from(hovered);
+        let from = self.header_amount(id, mode, now);
+        self.header_hover.retain(|h| h.id != id);
+        self.header_hover.push(HeaderHover { id: id.to_owned(), from, target, since: now });
+        cx.notify();
+    }
+}
+
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The receive pulse is drawn from the clock: keep frames coming while it runs.
@@ -1916,7 +1956,9 @@ impl Render for Sidebar {
         self.refresh_names(&rows, cx);
         let (motion_mode, motion_now) = (cx.global::<Ui>().feedback.mode, Instant::now());
         self.track_sections(&rows, motion_mode, motion_now);
-        if !self.section_motions.is_empty() || self.reorder.is_some() {
+        self.header_hover.retain(|h| h.amount(motion_mode, motion_now).1 || h.target > 0.0);
+        let hovering_moves = self.header_hover.iter().any(|h| h.amount(motion_mode, motion_now).1);
+        if !self.section_motions.is_empty() || self.reorder.is_some() || hovering_moves {
             window.request_animation_frame();
         }
         let wants_pin_lines = self.layout.borrow().first().is_some_and(|(_, _, bounds)| bounds.size.width >= px(300.));
@@ -2041,14 +2083,54 @@ impl Render for Sidebar {
                     }
                     _ => f32::from(!collapsed),
                 };
-                let chevron = div()
-                    .relative()
-                    .flex_none()
-                    .w(px(10.))
-                    .h(px(14.))
-                    .child(div().absolute().top_0().left_0().opacity(1.0 - open).child("▸"))
-                    .child(div().absolute().top_0().left_0().opacity(open).child("▾"));
                 let group = group_of_section(&id);
+                let cursor_here = self.cursor == index;
+                let ring_here = cursor_here && focused;
+                let slide = self.header_amount(&id, mode, now).max(f32::from(ring_here));
+                let icon_text = match group {
+                    Some(g) => ui.sidebar.group_icon(g),
+                    None => ui.sidebar.section_icon(&id),
+                }
+                .map(str::to_owned);
+                // The chevron is out of the flow: it fades in over the heading's left edge
+                // while the title (and icon) slide right to make room, so nothing around
+                // the heading moves and the row's height stays the same.
+                let chevron = div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(8. - 6. * (1.0 - slide)))
+                    .flex()
+                    .items_center()
+                    .opacity(slide)
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("sidebar-chevron-{id}")
+                    })
+                    .child(crate::pane::chevron_glyph(open, color(muted)));
+                let lead = div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .min_h(px(14.))
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("sidebar-heading-{id}")
+                    })
+                    .pl(px(CHEVRON_ROOM * slide))
+                    .when_some(icon_text, |lead, text| {
+                        lead.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.))
+                                .debug_selector({
+                                    let id = id.clone();
+                                    move || format!("sidebar-header-icon-{id}")
+                                })
+                                .child(text),
+                        )
+                    })
+                    .child(title.clone());
                 kinds.push((group.map(DropTarget::Group), None));
                 let i = index;
                 index += 1;
@@ -2081,6 +2163,10 @@ impl Render for Sidebar {
                         .text_color(color(muted))
                         .cursor_pointer()
                         .hover(move |style| style.text_color(color(fg)))
+                        .on_hover({
+                            let id = id.clone();
+                            cx.listener(move |this, hovered: &bool, _, cx| this.set_header_hover(&id, *hovered, cx))
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.cursor = i;
                             this.cursor_key = None;
@@ -2088,7 +2174,7 @@ impl Render for Sidebar {
                         }))
                         .relative()
                         .child(chevron)
-                        .child(title.clone())
+                        .child(lead)
                         .when_some(group, |header, g| {
                             header
                                 .when(
