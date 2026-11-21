@@ -2122,6 +2122,11 @@ impl CrowWindow {
     }
 
     fn drop_external(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        // The button is still down: the mouse-up was a window switcher's, not the user's.
+        // The native session starts again, so the drop waits for the real release.
+        if crate::effects::effects(cx).drop_is_premature() {
+            return;
+        }
         let operations = window.file_drop_operations();
         self.accept_drop(paths.paths().to_vec(), operations, window, cx);
     }

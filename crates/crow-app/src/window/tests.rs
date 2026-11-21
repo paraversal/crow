@@ -12240,6 +12240,26 @@ fn dropping_a_file_back_into_its_expanded_folder_is_a_no_op(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn a_drop_while_the_button_is_still_down_does_not_act(cx: &mut TestAppContext) {
+    let root = fixture("drop-premature");
+    let (view, mut cx) = open(cx, &root);
+    set_motion(&mut cx, "off");
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").set_premature_drop(true));
+
+    // A window switcher's synthetic mouse-up ends the native session over a folder.
+    drop_on(&mut cx, "row-beta", vec![root.join("notes.txt")]);
+    settle(&view, &mut cx);
+    assert!(root.join("notes.txt").exists(), "the file stays put");
+    assert!(!root.join("beta/notes.txt").exists(), "and is not dropped into the folder");
+
+    // The user then releases the button, which is the drop that counts.
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").set_premature_drop(false));
+    drop_on(&mut cx, "row-beta", vec![root.join("notes.txt")]);
+    settle(&view, &mut cx);
+    assert!(root.join("beta/notes.txt").exists(), "the real release drops it");
+}
+
+#[gpui::test]
 fn dropping_from_an_expanded_folder_into_a_sibling_moves_it(cx: &mut TestAppContext) {
     let root = fixture("drop-sibling");
     std::fs::remove_dir_all(root.join("alpha/inner")).expect("drop fixture dir");

@@ -21,7 +21,7 @@ mod volumes;
 
 pub use cloud::{SystemReadGate, status as cloud_status, status_batch as cloud_status_batch};
 pub use context_menu::{ContextMenuEntry, MenuShortcut, show_context_menu};
-pub use drag::{ComboDrag, begin_drag, remember_mouse_down};
+pub use drag::{ComboDrag, begin_drag, drop_is_premature, remember_mouse_down};
 pub use files::{SystemTrash, open_path, pasteboard_change_count, read_file_urls, write_file_urls};
 pub use fonts::available_font_families;
 pub use fsevents::{Event, EventFlags, FsEvents, current_event_id, volume_uuid, watch, watch_under};
