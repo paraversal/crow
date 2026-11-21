@@ -9,6 +9,7 @@ mod extensions;
 mod grid;
 mod history;
 pub mod icon_pack;
+pub mod keymap_edit;
 mod location;
 pub mod motion;
 mod onboarding;
