@@ -7454,6 +7454,17 @@ fn system_in_light_appearance_is_finder_light(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_translucent_sidebar_is_opt_in_and_follows_the_setting(cx: &mut TestAppContext) {
+    let root = fixture("translucent");
+    let (_view, mut cx) = open(cx, &root);
+    assert!(!cx.read(|cx| cx.global::<Ui>().translucent), "off by default, even for the Finder themes");
+    cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::TranslucentSidebar(true), cx));
+    assert!(cx.read(|cx| cx.global::<Ui>().translucent));
+    cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::TranslucentSidebar(false), cx));
+    assert!(!cx.read(|cx| cx.global::<Ui>().translucent));
+}
+
+#[gpui::test]
 fn why_sheet_keeps_focus_on_arrows_and_tab(cx: &mut TestAppContext) {
     let root = fixture("why-focus");
     let (view, mut cx) = open(cx, &root);

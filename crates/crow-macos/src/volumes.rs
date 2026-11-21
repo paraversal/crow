@@ -154,6 +154,11 @@ pub fn reduce_motion() -> bool {
     main_thread().is_some() && NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
 }
 
+/// The "Reduce transparency" accessibility setting.
+pub fn reduce_transparency() -> bool {
+    main_thread().is_some() && NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

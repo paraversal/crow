@@ -85,6 +85,7 @@ pub fn open(
         app_owns_titlebar_drag: true,
         // Sidebar 210 plus a usable center; below this the band's parts no longer fit.
         window_min_size: Some(size(px(640.), px(400.))),
+        window_background: ui::window_background(cx.global::<Ui>().translucent),
         ..Default::default()
     };
     cx.open_window(options, |window, cx| cx.new(|cx| CrowWindow::new(dir, bench, bench_filter, window, cx)))
@@ -3272,6 +3273,17 @@ impl Render for CrowWindow {
             .w(self.side_panes.left_width())
             .child(self.sidebar.clone())
             .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme));
+        let translucent = cx.global::<Ui>().translucent;
+        let sidebar_width = self.side_panes.left_width();
+        let bg_solid = color(theme.role("bg"));
+        // A full-width strip painted solid while the window itself is see-through.
+        let solid = move |element: gpui::AnyElement| {
+            if translucent {
+                div().w_full().flex_none().bg(bg_solid).child(element).into_any_element()
+            } else {
+                element
+            }
+        };
         let search_preview = active_search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);
         // A narrow search hides the column by default; ⌘I or ⇧⌘P still opens it.
@@ -3489,14 +3501,46 @@ impl Render for CrowWindow {
             .size_full()
             .flex()
             .flex_col()
-            .bg(color(theme.role("bg")))
+            // Translucent: the window shows the blurred desktop, so the sidebar column
+            // (and the toolbar above it) is the only part not painted solid.
+            .when(!translucent, |root| root.bg(color(theme.role("bg"))))
             .text_color(color(theme.role("fg")))
             .font_family(font)
             .text_size(px(font_size))
-            .child(title_bar)
-            .children(tab_bar)
-            .child(div().relative().flex_1().min_h_0().flex().child(sidebar).child(center).children(preview))
-            .child(path_bar)
+            .child(if translucent {
+                // The sidebar's tone runs up behind the traffic lights, like Finder's.
+                div()
+                    .relative()
+                    .w_full()
+                    .flex_none()
+                    .child(
+                        div().absolute().top_0().bottom_0().left_0().w(sidebar_width).bg(crate::style::color_alpha(
+                            theme.role("bg-inset"),
+                            crate::style::TRANSLUCENT_SIDEBAR_ALPHA,
+                        )),
+                    )
+                    .child(
+                        div().absolute().top_0().bottom_0().left(sidebar_width).right_0().bg(color(theme.role("bg"))),
+                    )
+                    .child(title_bar)
+                    .into_any_element()
+            } else {
+                title_bar.into_any_element()
+            })
+            .children(tab_bar.map(|bar| solid(bar.into_any_element())))
+            .child(
+                div().relative().flex_1().min_h_0().flex().child(sidebar).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .when(translucent, |rest| rest.bg(color(theme.role("bg"))))
+                        .child(center)
+                        .children(preview),
+                ),
+            )
+            .child(solid(path_bar.into_any_element()))
             .children(tip)
             .children(sheet)
             .children(activity)

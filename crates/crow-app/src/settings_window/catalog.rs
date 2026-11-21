@@ -117,6 +117,14 @@ pub(super) const UNITS: &[Unit] = &[
         &[ControlId::PathBar],
     ),
     unit(
+        ControlId::TranslucentSidebar,
+        Category::Appearance,
+        "Translucent sidebar",
+        &["vibrancy", "blur", "transparency", "transparent", "frosted"],
+        &["translucent_sidebar"],
+        &[ControlId::TranslucentSidebar],
+    ),
+    unit(
         ControlId::FontFamily,
         Category::Appearance,
         "Font",

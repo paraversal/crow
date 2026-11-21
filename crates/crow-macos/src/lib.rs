@@ -32,7 +32,7 @@ pub use quick_look::{QuickLookKey, set_quick_look_key_handler, toggle_quick_look
 pub use sound::{Sound, beep, play, preload, set_volume, stop, ui_sounds_enabled};
 pub use spotlight::{SpotlightHit, SpotlightPredicate, spotlight_expression, spotlight_names};
 pub use system_colors::{SystemColorWatcher, accent_color, unfocused_selection_color, watch_system_colors};
-pub use volumes::{MountWatcher, Volume, eject, reduce_motion, volumes, watch_mounts};
+pub use volumes::{MountWatcher, Volume, eject, reduce_motion, reduce_transparency, volumes, watch_mounts};
 
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;

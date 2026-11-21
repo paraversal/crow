@@ -159,6 +159,7 @@ enum ControlId {
     AppIcon,
     IconPack,
     PathBar,
+    TranslucentSidebar,
     FontFamily,
     FontSize,
     Terminal,
@@ -209,8 +210,9 @@ enum ControlId {
 impl ControlId {
     /// Every control, used to build focus handles. Reading order comes from
     /// `catalog::units`, so a category can be reordered without touching this.
-    const ALL: [ControlId; 49] = [
+    const ALL: [ControlId; 50] = [
         ControlId::Theme,
+        ControlId::TranslucentSidebar,
         ControlId::AppIcon,
         ControlId::IconPack,
         ControlId::PathBar,
@@ -283,6 +285,7 @@ impl ControlId {
             ControlId::ShowPreview => "settings-show-preview",
             ControlId::ViewPerFolder => "settings-view-per-folder",
             ControlId::PaletteRecent => "settings-palette-recent",
+            ControlId::TranslucentSidebar => "settings-translucent-sidebar",
             ControlId::Motion => "settings-motion",
             ControlId::Sound => "settings-sound",
             ControlId::PlaySound => "settings-play-sound",
@@ -338,6 +341,7 @@ impl ControlId {
             | ControlId::ShowPreview
             | ControlId::ViewPerFolder
             | ControlId::PaletteRecent
+            | ControlId::TranslucentSidebar
             | ControlId::Motion
             | ControlId::Sound
             | ControlId::WindowWidth
@@ -376,6 +380,7 @@ impl ControlId {
             ControlId::ShowPreview => "Show preview",
             ControlId::ViewPerFolder => "Folders keep their own view",
             ControlId::PaletteRecent => "Remember recent commands in ⌘K",
+            ControlId::TranslucentSidebar => "Translucent sidebar",
             ControlId::Motion => "Motion",
             ControlId::Sound => "Sounds",
             ControlId::PlaySound => "Play",
@@ -435,6 +440,7 @@ impl ControlId {
             | ControlId::ShowPreview
             | ControlId::ViewPerFolder
             | ControlId::PaletteRecent
+            | ControlId::TranslucentSidebar
             | ControlId::DefaultFoldersFirst => Role::Switch,
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => Role::SpinButton,
             ControlId::Terminal | ControlId::PreviewRulePattern => Role::TextInput,
@@ -485,6 +491,9 @@ impl ControlId {
             ControlId::ShowPreview => "The right column's default in list and column view: Preview and Info tabs.",
             ControlId::ViewPerFolder => "Each folder opens in its saved view; off keeps the window's view.",
             ControlId::PaletteRecent => "List the commands you ran from ⌘K under Recently used.",
+            ControlId::TranslucentSidebar => {
+                "The sidebar shows the blurred desktop behind it. Stays solid while macOS Reduce Transparency is on."
+            }
             ControlId::DefaultView => "The view for folders without their own: Icons, List, Columns or Gallery.",
             ControlId::DefaultSort => "The [defaults] order; a rule or folder override still wins.",
             ControlId::DefaultDirection => {
@@ -1529,7 +1538,8 @@ impl SettingsWindow {
             | ControlId::SearchHidden
             | ControlId::ShowPreview
             | ControlId::ViewPerFolder
-            | ControlId::PaletteRecent => self.toggle_bool(id, cx),
+            | ControlId::PaletteRecent
+            | ControlId::TranslucentSidebar => self.toggle_bool(id, cx),
             ControlId::PlaySound => crate::feedback::play(Event::Trash, cx),
             ControlId::EditSettings => ui::edit_settings_file(cx),
             ControlId::Plugins => self.activate_plugin(cx),
@@ -1903,6 +1913,7 @@ impl SettingsWindow {
             ControlId::ShowPreview => SettingChange::ShowPreview(!settings.show_preview),
             ControlId::ViewPerFolder => SettingChange::ViewPerFolder(!settings.view_per_folder),
             ControlId::PaletteRecent => SettingChange::PaletteRecentCommands(!settings.palette_recent_commands),
+            ControlId::TranslucentSidebar => SettingChange::TranslucentSidebar(!settings.translucent_sidebar),
             _ => return,
         };
         ui::set_setting(change, cx);
@@ -2369,6 +2380,7 @@ impl SettingsWindow {
                 ControlId::ShowPreview => Some(settings.show_preview),
                 ControlId::ViewPerFolder => Some(settings.view_per_folder),
                 ControlId::PaletteRecent => Some(settings.palette_recent_commands),
+                ControlId::TranslucentSidebar => Some(settings.translucent_sidebar),
                 ControlId::DefaultFoldersFirst => {
                     Some(cx.global::<Ui>().views.defaults_layer().folders_first.unwrap_or(true))
                 }
@@ -2587,6 +2599,8 @@ impl Render for SettingsWindow {
         );
         let show_preview = switch_row(self, ControlId::ShowPreview, settings.show_preview, window, &theme, cx);
         let view_per_folder = switch_row(self, ControlId::ViewPerFolder, settings.view_per_folder, window, &theme, cx);
+        let translucent =
+            switch_row(self, ControlId::TranslucentSidebar, settings.translucent_sidebar, window, &theme, cx);
         let palette_recent =
             switch_row(self, ControlId::PaletteRecent, settings.palette_recent_commands, window, &theme, cx);
 
@@ -2780,6 +2794,7 @@ impl Render for SettingsWindow {
         rows.insert(ControlId::Tips, tips_row.into_any_element());
         rows.insert(ControlId::Terminal, terminal_row.into_any_element());
         rows.insert(ControlId::PaletteRecent, palette_recent.into_any_element());
+        rows.insert(ControlId::TranslucentSidebar, translucent.into_any_element());
         rows.insert(ControlId::Motion, motion_row.into_any_element());
         rows.insert(ControlId::Sound, sound_row.into_any_element());
         rows.insert(ControlId::WindowWidth, width_row.into_any_element());

@@ -67,6 +67,10 @@ icon_pack = "native"
 # field with a Go button; Return, Escape and Tab work the same in both.
 path_bar = "crow"
 
+# Let the sidebar show the blurred desktop behind it, like Finder's. Off by default.
+# It stays opaque while macOS Reduce Transparency is on. Themes can't turn it on.
+translucent_sidebar = false
+
 # Interface font. Empty uses the system font.
 font_family = ""
 font_size = 13.0
@@ -328,6 +332,7 @@ pub struct Settings {
     #[serde(default = "native_icon_pack", deserialize_with = "icon_pack_value")]
     pub icon_pack: String,
     pub path_bar: PathBarMode,
+    pub translucent_sidebar: bool,
     pub font_family: String,
     pub font_size: f32,
     pub terminal: String,
@@ -354,6 +359,7 @@ impl Default for Settings {
             app_icon: AppIcon::Refined,
             icon_pack: native_icon_pack(),
             path_bar: PathBarMode::Crow,
+            translucent_sidebar: false,
             font_family: String::new(),
             font_size: 13.0,
             terminal: "Terminal".into(),
@@ -563,6 +569,9 @@ mod tests {
         assert!(!load_settings(&dir).unwrap().show_preview, "reloads as off");
         save_bool_setting(&dir, "show_preview", true).unwrap();
         assert!(load_settings(&dir).unwrap().show_preview);
+        assert!(!load_settings(&dir).unwrap().translucent_sidebar, "translucency is opt-in");
+        save_bool_setting(&dir, "translucent_sidebar", true).unwrap();
+        assert!(load_settings(&dir).unwrap().translucent_sidebar);
     }
 
     #[test]

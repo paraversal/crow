@@ -122,6 +122,8 @@ pub struct Ui {
     pub themes_state_dir: PathBuf,
     /// The saved theme id last reported as missing, so the notice shows once.
     pub missing_theme_notice: Option<String>,
+    /// Whether windows are blurred and the sidebar translucent right now.
+    pub translucent: bool,
     /// The last theme load error shown, so it isn't repeated on every reload.
     pub theme_error: Option<String>,
     pub config_dir: PathBuf,
@@ -229,6 +231,7 @@ impl Ui {
             themes_dir: crow_theme::themes_dir(),
             themes_state_dir: crow_theme::state_dir(),
             missing_theme_notice: None,
+            translucent: false,
             theme_error: None,
             config_dir,
             config_writes: Default::default(),
@@ -443,6 +446,7 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     tracing::info!(theme = %theme.name, "starting");
     ui.target = theme.clone();
     ui.theme = theme;
+    ui.translucent = translucency_wanted(&ui.settings);
     cx.set_global(ui);
     cx.on_app_quit(|cx| {
         let pending = cx.global::<Ui>().config_writes.clone();
@@ -614,6 +618,7 @@ fn poll(cx: &mut App) {
     crate::git::poll(cx);
     // Reduce Motion and the UI-sounds switch can change without a config edit.
     refresh_feedback(cx);
+    refresh_translucency(cx);
     refresh_clipboard(cx);
     if index_changed && let Some(watcher) = cx.global_mut::<Watchers>()._theme.as_mut() {
         // The index may have appeared or vanished: watch where it is now.
@@ -666,6 +671,37 @@ pub fn refresh_feedback(cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// Whether the sidebar should be translucent now: the setting, unless macOS Reduce
+/// Transparency is on.
+pub fn translucency_wanted(settings: &crow_core::Settings) -> bool {
+    #[cfg(test)]
+    {
+        settings.translucent_sidebar
+    }
+    #[cfg(not(test))]
+    {
+        settings.translucent_sidebar && !crow_macos::reduce_transparency()
+    }
+}
+
+/// Make every window's background match `translucent_sidebar`, if that changed since the last call.
+pub fn refresh_translucency(cx: &mut App) {
+    let want = translucency_wanted(&cx.global::<Ui>().settings);
+    if cx.global::<Ui>().translucent == want {
+        return;
+    }
+    cx.global_mut::<Ui>().translucent = want;
+    for handle in cx.windows() {
+        handle.update(cx, |_, window, _| window.set_background_appearance(window_background(want))).ok();
+    }
+    cx.refresh_windows();
+}
+
+/// The window background for a translucency choice: blurred only while the sidebar needs it.
+pub fn window_background(translucent: bool) -> gpui::WindowBackgroundAppearance {
+    if translucent { gpui::WindowBackgroundAppearance::Blurred } else { gpui::WindowBackgroundAppearance::Opaque }
+}
+
 /// Reload every config file. Views always count as changed (cheap, and panes only
 /// re-apply what differs); the others only when their contents did.
 pub fn reload_config(cx: &mut App) {
@@ -694,6 +730,7 @@ pub fn reload_config(cx: &mut App) {
     }
     reload_saved_queries(cx);
     refresh_feedback(cx);
+    refresh_translucency(cx);
     refresh_app_icon(cx);
     crate::plugins::reload(cx);
     cx.refresh_windows();
@@ -744,6 +781,7 @@ pub enum SettingChange {
     SearchMatch(SearchMatch),
     ShowPreview(bool),
     PaletteRecentCommands(bool),
+    TranslucentSidebar(bool),
     ViewPerFolder(bool),
     WindowWidth(u32),
     WindowHeight(u32),
@@ -775,6 +813,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             SettingChange::SearchMatch(value) => replace(&mut settings.search_match, *value),
             SettingChange::ShowPreview(value) => replace(&mut settings.show_preview, *value),
             SettingChange::PaletteRecentCommands(value) => replace(&mut settings.palette_recent_commands, *value),
+            SettingChange::TranslucentSidebar(value) => replace(&mut settings.translucent_sidebar, *value),
             SettingChange::ViewPerFolder(value) => replace(&mut settings.view_per_folder, *value),
             SettingChange::WindowWidth(value) => replace(&mut settings.window.width, *value),
             SettingChange::WindowHeight(value) => replace(&mut settings.window.height, *value),
@@ -794,6 +833,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
         SettingChange::ShowHiddenFiles(show) => crate::window::apply_show_hidden(*show, cx),
         SettingChange::SearchIncludesHidden(include) => crate::window::apply_search_includes_hidden(*include, cx),
         SettingChange::ShowPreview(_) => crate::menus::refresh(cx),
+        SettingChange::TranslucentSidebar(_) => refresh_translucency(cx),
         _ => {}
     }
     cx.refresh_windows();
@@ -875,6 +915,13 @@ fn write_setting(change: SettingChange, cx: &mut App) {
         }
         SettingChange::ShowPreview(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_bool_setting(config, "show_preview", value), cx);
+        }
+        SettingChange::TranslucentSidebar(value) => {
+            write_config(
+                SETTINGS,
+                move |config, _| crow_core::save_bool_setting(config, "translucent_sidebar", value),
+                cx,
+            );
         }
         SettingChange::PaletteRecentCommands(value) => {
             write_config(

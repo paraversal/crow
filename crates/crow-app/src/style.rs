@@ -45,6 +45,10 @@ pub fn active_selection(theme: &Theme) -> Rgba {
     color_alpha(theme.role("accent"), 0x55)
 }
 
+/// How solid the sidebar stays while the window is translucent: enough of the blurred desktop
+/// shows to read as glass, enough tone stays for the labels to keep their contrast on any backdrop.
+pub const TRANSLUCENT_SIDEBAR_ALPHA: u8 = 0xcc;
+
 /// A selection without focus.
 pub fn inactive_selection(theme: &Theme) -> Rgba {
     color(theme.role("selection"))
