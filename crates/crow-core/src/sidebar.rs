@@ -12,7 +12,9 @@ use crate::config::{abbreviate_home, edit_toml, expand_home};
 pub const DEFAULT_SIDEBAR: &str = r##"# Crow sidebar. Crow updates this file when you drag favorites around or add
 # and remove them; your comments stay.
 #
-# Each [[group]] is a section of favorites. Items take:
+# Each [[group]] is a section of favorites. A group takes `collapsed = true` to
+# hide its items under the title (Crow writes it when you collapse the group).
+# Items take:
 #   path   the folder ("~" is your home folder)
 #   name   label, if not the folder's own name
 #   icon   a short text or emoji shown instead of the folder icon
