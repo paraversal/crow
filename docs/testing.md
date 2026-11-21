@@ -438,6 +438,11 @@ classification and row-build work; the tag predicate itself is read through the 
 The idle cost is the ordinary `--bench` run, since the tag control only exists inside `/`.
 
 `--bench` scrolls 600 frames and prints first paint, load time and frame times.
+`CROW_BENCH_TRASH=N crow --bench DIR` instead swallows N rows in the middle of the folder (the
+row effect only) and prints `BENCH-TRASH` with the idle frame interval, the live p50/p95/max and
+the hitches (intervals over 1.5 x idle) with their ms since the start. Add
+`CROW_BENCH_TRASH_REMOVE=1` to also delete those files, so the watcher's diff lands mid-effect as
+after a real trash; run that on a copy (`cp -c -R target/fixture-100k target/fixture-100k-copy`).
 `CROW_BENCH_VIEW=icons` (or `list`/`columns`/`gallery`) forces the view for that run, so the
 icon grid is measured on the same fixture and path as the list.
 `--bench-filter <query>` applies the name filter first, so the scroll times are for

@@ -506,6 +506,21 @@ struct Bench {
     scrolled: Option<String>,
     /// The name filter applied before scrolling, so highlighted rows are what is timed.
     filter: Option<String>,
+    /// `CROW_BENCH_TRASH=N`: swallow N rows in the middle of the folder (the effect
+    /// only, nothing is deleted) and time the frames while it runs.
+    trash: Option<TrashBench>,
+}
+
+/// The motion bench: frame intervals before, during and after a trash effect.
+struct TrashBench {
+    rows: usize,
+    started: Option<Instant>,
+    last: Option<Instant>,
+    frame: usize,
+    idle: Vec<f64>,
+    live: Vec<f64>,
+    /// ms since the effect started, per live frame.
+    at: Vec<f64>,
 }
 
 impl Pane {
@@ -578,6 +593,15 @@ impl Pane {
                 last: None,
                 scrolled: None,
                 filter: bench_filter,
+                trash: std::env::var("CROW_BENCH_TRASH").ok().and_then(|n| n.parse().ok()).map(|rows| TrashBench {
+                    rows,
+                    started: None,
+                    last: None,
+                    frame: 0,
+                    idle: Vec::new(),
+                    live: Vec::new(),
+                    at: Vec::new(),
+                }),
             }),
             applied_view: None,
             list_bounds: Rc::new(Cell::new(None)),
@@ -3678,6 +3702,79 @@ impl Pane {
         self.drop_column
     }
 
+    /// One frame of the trash motion bench: 60 idle frames for the display's own
+    /// interval, then the effect on the middle rows, then a line with hitches
+    /// (intervals over 1.5 x the idle median) and the worst interval.
+    fn trash_bench_step(&mut self, now: Instant, cx: &mut Context<Self>) {
+        let folder = self.folders[0].clone();
+        let shown = folder.read(cx).row_count();
+        let Some(trash) = self.bench.as_mut().and_then(|bench| bench.trash.as_mut()) else { return };
+        let interval = trash.last.replace(now).map(|prev| (now - prev).as_secs_f64() * 1000.0);
+        trash.frame += 1;
+        if trash.frame == 20 {
+            folder.read(cx).scroll_strict(shown / 2);
+        }
+        if let Some(interval) = interval {
+            match trash.started {
+                None if trash.frame > 40 => trash.idle.push(interval),
+                Some(at) => {
+                    trash.live.push(interval);
+                    trash.at.push((now - at).as_secs_f64() * 1000.0);
+                }
+                None => {}
+            }
+        }
+        if trash.started.is_none() && trash.frame == 100 {
+            let rows = trash.rows;
+            trash.started = Some(now);
+            let paths: Vec<PathBuf> = (shown / 2..shown / 2 + rows)
+                .filter_map(|ix| folder.read(cx).row(ix).map(|(entry, _)| entry.path.clone()))
+                .collect();
+            // CROW_BENCH_TRASH_REMOVE=1 also deletes the files (use a copy of the fixture):
+            // the watcher's removal then lands while the effect runs, as after a real trash.
+            if std::env::var_os("CROW_BENCH_TRASH_REMOVE").is_some() {
+                let doomed = paths.clone();
+                cx.background_spawn(async move {
+                    for path in doomed {
+                        std::fs::remove_file(path).ok(); // io-ok: bench: stands in for the trash call
+                    }
+                })
+                .detach();
+            }
+            self.start_effect(&paths, Fx::Trash, cx);
+            return;
+        }
+        let Some(started) = trash.started else { return };
+        if now.duration_since(started) < Duration::from_millis(900) {
+            return;
+        }
+        let stats = |v: &[f64]| {
+            let mut v = v.to_vec();
+            v.sort_by(f64::total_cmp);
+            let at = |q: f64| v.get(((v.len().max(1) - 1) as f64 * q) as usize).copied().unwrap_or_default();
+            (at(0.5), at(0.95), at(1.0))
+        };
+        let (idle50, _, _) = stats(&trash.idle);
+        let (live50, live95, live_max) = stats(&trash.live);
+        let hitches = trash.live.iter().filter(|ms| **ms > idle50 * 1.5).count();
+        let line = format!(
+            "BENCH-TRASH rows={} idle_p50={idle50:.2}ms live_frames={} live_p50={live50:.2}ms live_p95={live95:.2}ms live_max={live_max:.2}ms hitches={hitches}",
+            trash.rows,
+            trash.live.len(),
+        );
+        let slow: Vec<String> = trash
+            .live
+            .iter()
+            .zip(&trash.at)
+            .filter(|(ms, _)| **ms > idle50 * 1.5)
+            .map(|(ms, at)| format!("{ms:.1}ms@{at:.0}"))
+            .collect();
+        let line = format!("{line} slow=[{}]", slow.join(" "));
+        println!("{line}");
+        tracing::info!("{line}");
+        cx.quit();
+    }
+
     fn bench_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mode = self.mode;
         let icon_scroll = self.icon_scroll.clone();
@@ -3691,6 +3788,10 @@ impl Pane {
             return;
         }
         let now = Instant::now();
+        if bench.trash.is_some() {
+            self.trash_bench_step(now, cx);
+            return;
+        }
         if let Some(prev) = bench.last.replace(now) {
             bench.intervals.push((now - prev).as_secs_f64() * 1000.0);
         }
