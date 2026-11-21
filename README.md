@@ -292,5 +292,6 @@ Fuzzing: `cargo test -p crow-app fuzz_smoke`; long runs and replay: [docs/testin
 Dev tools: `crow --motion-lab` opens a fake folder where every feedback event (trash, move,
 undo, new folder, refuse, copy, tip, empty Trash) can be fired in the three motion modes and
 three sound sets, with slow motion ×5 and the cursor glide — the reference the app's motion
-is tuned against. `crow --bench DIR` and the other `--bench-*` flags are listed in
+is tuned against. Every surface's effect, the timings and what moves in each mode are in
+[docs/motion.md](docs/motion.md). `crow --bench DIR` and the other `--bench-*` flags are listed in
 [docs/testing.md](docs/testing.md#performance).

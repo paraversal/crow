@@ -1164,18 +1164,27 @@ pub fn render(
                     .into_any_element(),
             )
         }
-        Primary::Running(running) => Some(
-            div()
+        Primary::Running(running) => {
+            let bar = div()
                 .id("bar-progress")
                 .debug_selector(|| "bar-progress".into())
                 .absolute()
                 .top_0()
                 .left_0()
                 .h(px(2.))
-                .w(relative(running.fraction))
-                .bg(color(theme.role("accent")))
-                .into_any_element(),
-        ),
+                .bg(color(theme.role("accent")));
+            // Full eases toward each new value (a critically damped spring); Low and Off step.
+            Some(if ui.feedback.mode == Effective::Full {
+                bar.with_spring(
+                    "bar-progress-fill",
+                    crate::motion_ui::ease_progress(running.fraction),
+                    |el, fraction| el.w(relative(fraction)),
+                )
+                .into_any_element()
+            } else {
+                bar.w(relative(running.fraction)).into_any_element()
+            })
+        }
         _ => state.progress_done.and_then(|fraction| {
             if ui.feedback.mode == Effective::Off {
                 return None;

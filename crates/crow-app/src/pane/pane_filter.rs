@@ -2,7 +2,12 @@
 //! frame), the search footer, and the no-matches block. Split out of `pane.rs`
 //! so the pane's own render code stays readable.
 
-use gpui::{AnyElement, Context, CursorStyle, Focusable, IntoElement, MouseButton, Role, Window, div, prelude::*, px};
+use std::time::Instant;
+
+use crow_core::motion::{self, Effective};
+use gpui::{
+    AnyElement, App, Context, CursorStyle, Focusable, IntoElement, MouseButton, Role, Window, div, prelude::*, px,
+};
 
 use crate::actions::{ChooseTags, ShowSearch};
 use crate::chrome::{Keycap, KeycapWeight};
@@ -13,6 +18,44 @@ use crate::style::{color, color_alpha, display_name, field_ring};
 use crate::text_input::Cancel;
 use crate::ui::Ui;
 
+/// The filter row opening or closing. Closing keeps the query and count so a
+/// picture of the field can shrink away after the real one is gone.
+#[derive(Clone)]
+pub(super) struct FilterMotion {
+    started: Instant,
+    opening: bool,
+    ghost: Option<(String, String)>,
+}
+
+impl FilterMotion {
+    pub(super) fn opening(cx: &App) -> Option<Self> {
+        (cx.global::<Ui>().feedback.mode != Effective::Off).then(|| FilterMotion {
+            started: Instant::now(),
+            opening: true,
+            ghost: None,
+        })
+    }
+
+    fn closing(query: String, count: String, cx: &App) -> Option<Self> {
+        (cx.global::<Ui>().feedback.mode == Effective::Full).then(|| FilterMotion {
+            started: Instant::now(),
+            opening: false,
+            ghost: Some((query, count)),
+        })
+    }
+}
+
+/// How tall the row is (share of its full height) and how visible at eased
+/// progress `t`: Full opens and closes the height with the fade; Low opens
+/// with a fade and a full-height row (gaps snap).
+pub(super) fn row_look(mode: Effective, opening: bool, t: f32) -> (f32, f32) {
+    let f = if opening { t } else { 1.0 - t };
+    match mode {
+        Effective::Full => (f, f),
+        _ => (1.0, f),
+    }
+}
+
 /// Which frame the field sits in; the margins line it up with that frame's rows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FilterPlace {
@@ -21,6 +64,14 @@ pub(super) enum FilterPlace {
 }
 
 impl Pane {
+    /// What the row leaves behind when the filter closes, for its shrink.
+    pub(super) fn filter_ghost(&self, cx: &App) -> Option<FilterMotion> {
+        let filtering = self.filtering.as_ref()?;
+        let folder = self.focused_folder().read(cx);
+        let count = format!("{} of {}", folder.row_count(), folder.entries().len());
+        FilterMotion::closing(filtering.input.read(cx).text().to_owned(), count, cx)
+    }
+
     /// The field, when a filter is open: accent `/`, query, "n of N", Outline `esc`.
     pub(super) fn render_filter_field(
         &self,
@@ -28,7 +79,47 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let filtering = self.filtering.as_ref()?;
+        let mode = cx.global::<Ui>().feedback.mode;
+        let full_height = if place == FilterPlace::List { 36. } else { 32. };
+        let progress = self.filter_motion.as_ref().and_then(|m| {
+            motion::progress(mode, m.started, Instant::now(), motion::ms::FILTER_ROW, motion::ms::LOW_IN)
+        });
+        if progress.is_some() {
+            window.request_animation_frame();
+        }
+        let Some(filtering) = self.filtering.as_ref() else {
+            // Closing: a still picture of the field shrinks away (Full only).
+            let (m, t) = self.filter_motion.as_ref().zip(progress)?;
+            let (query, count) = m.ghost.as_ref()?;
+            let theme = &cx.global::<Ui>().theme;
+            let (height, opacity) = row_look(mode, false, t);
+            let picture = div()
+                .h(px(28.))
+                .rounded(px(6.))
+                .bg(color(theme.role("surface")))
+                .pl(px(9.))
+                .pr(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(7.))
+                .when(place == FilterPlace::Column, |field| field.mx_1().mb_1())
+                .when(place == FilterPlace::List, |field| field.mx_2().my_1())
+                .text_size(px(13.))
+                .text_color(color(theme.role("fg")))
+                .child(div().text_color(color(theme.role("accent"))).font_weight(gpui::FontWeight::SEMIBOLD).child("/"))
+                .child(div().flex_1().min_w_0().child(query.clone()))
+                .child(div().text_size(px(12.)).text_color(color(theme.role("fg-muted"))).child(count.clone()));
+            return Some(
+                div()
+                    .h(px(full_height * height))
+                    .flex_none()
+                    .overflow_hidden()
+                    .opacity(opacity)
+                    .debug_selector(|| "filter-ghost".into())
+                    .child(picture)
+                    .into_any_element(),
+            );
+        };
         let ui = cx.global::<Ui>();
         let theme = &ui.theme;
         let (shown, total, dir, tags, scanning, errors) = {
@@ -144,6 +235,20 @@ impl Pane {
                     .child(count),
             )
             .children(esc);
+        // Opening: the row grows and fades in (Low fades). The field and its caret
+        // are live from the first frame, so a letter typed right away lands.
+        if let Some((_, t)) = self.filter_motion.as_ref().zip(progress).filter(|(m, _)| m.opening) {
+            let (height, opacity) = row_look(mode, true, t);
+            return Some(
+                div()
+                    .flex_none()
+                    .overflow_hidden()
+                    .when(height < 1.0, |wrap| wrap.h(px(full_height * height)))
+                    .opacity(opacity)
+                    .child(field)
+                    .into_any_element(),
+            );
+        }
         Some(field.into_any_element())
     }
 

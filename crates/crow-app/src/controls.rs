@@ -5,10 +5,13 @@
 
 use std::rc::Rc;
 
+use std::cell::RefCell;
+
+use crow_core::motion::Effective;
 use crow_theme::Theme;
 use gpui::{
-    App, Div, Entity, FocusHandle, FontWeight, Image, IntoElement, Role, ScrollHandle, SharedString, Toggled, Window,
-    anchored, deferred, div, img, prelude::*, px,
+    AnimationExt as _, App, Bounds, Div, Entity, FocusHandle, FontWeight, Image, IntoElement, Role, ScrollHandle,
+    SharedString, Toggled, Window, anchored, deferred, div, img, prelude::*, px,
 };
 
 use crate::icons::{Glyph, glyph};
@@ -30,6 +33,7 @@ pub struct ControlStyle<'a> {
     pub focus: &'a FocusHandle,
     pub focused: bool,
     pub theme: &'a Theme,
+    pub mode: Effective,
 }
 
 pub type Activate = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -65,7 +69,7 @@ fn row(meta: ControlMeta, theme: &Theme, control: impl IntoElement) -> gpui::Sta
 
 /// A pill switch. Space toggles it; the caller binds the key.
 pub fn switch(meta: ControlMeta, on: bool, style: ControlStyle, toggle: Activate) -> gpui::Stateful<Div> {
-    let ControlStyle { focus, focused, theme } = style;
+    let ControlStyle { focus, focused, theme, mode } = style;
     let accent = color(theme.role("accent"));
     let raised = color(theme.role("surface-raised"));
     let knob = color(theme.role("bg"));
@@ -84,10 +88,34 @@ pub fn switch(meta: ControlMeta, on: bool, style: ControlStyle, toggle: Activate
         .rounded(px(12.))
         .flex()
         .items_center()
-        .bg(if on { accent } else { raised })
         .when(focused, |pill| pill.shadow(cursor_ring(theme)))
-        .when(!meta.enabled, |pill| pill.opacity(0.45))
-        .child(div().size(px(18.)).flex_none().rounded_full().bg(knob).ml(px(if on { 23. } else { 3. })));
+        .when(!meta.enabled, |pill| pill.opacity(0.45));
+    // Full slides the knob and fades the accent in (a spring, so a second click
+    // reverses smoothly); Low only fades the colour; Off swaps at once.
+    let knob_x = if on { 23. } else { 3. };
+    let knob_el = div().size(px(18.)).flex_none().rounded_full().bg(knob);
+    let knob_el: gpui::AnyElement = match mode {
+        Effective::Full => knob_el
+            .with_spring(
+                SharedString::from(format!("{control_id}-knob")),
+                crate::motion_ui::glide(px(knob_x)),
+                |el, x| el.ml(x),
+            )
+            .into_any_element(),
+        _ => knob_el.ml(px(knob_x)).into_any_element(),
+    };
+    let tint = div().absolute().inset_0().rounded(px(12.)).bg(accent);
+    let tint: gpui::AnyElement = match mode {
+        Effective::Off => tint.opacity(if on { 1.0 } else { 0.0 }).into_any_element(),
+        _ => tint
+            .with_spring(
+                SharedString::from(format!("{control_id}-tint")),
+                crate::motion_ui::glide(if on { 1.0f32 } else { 0.0 }),
+                |el, alpha| el.opacity(alpha),
+            )
+            .into_any_element(),
+    };
+    pill = pill.relative().bg(raised).child(tint).child(knob_el);
     if meta.enabled {
         pill = pill.cursor_pointer().on_click(move |_, window, cx| toggle(window, cx));
     }
@@ -104,9 +132,17 @@ pub fn segmented(
     select: Select,
     trailing: Option<gpui::AnyElement>,
 ) -> gpui::Stateful<Div> {
-    let ControlStyle { focus, focused, theme } = style;
+    let ControlStyle { focus, focused, theme, mode } = style;
     let control_id = meta.id;
+    let glide_fill = mode == Effective::Full && meta.enabled;
+    let recorded: Rc<RefCell<Vec<Bounds<gpui::Pixels>>>> = Rc::default();
     let group = div()
+        .when(glide_fill, |group| {
+            let recorded = recorded.clone();
+            group.on_children_prepainted(move |bounds, _, _| {
+                *recorded.borrow_mut() = bounds.into_iter().skip(1).collect();
+            })
+        })
         .id(control_id)
         .debug_selector(move || format!("{control_id}-control"))
         .role(Role::RadioGroup)
@@ -121,6 +157,45 @@ pub fn segmented(
         .bg(color(theme.role("surface")))
         .when(focused, |group| group.shadow(cursor_ring(theme)))
         .when(!meta.enabled, |group| group.opacity(0.45))
+        .relative()
+        .children(glide_fill.then(|| {
+            // Full: the selected segment's fill glides between the segments (a spring on
+            // the segment index), painted under their labels.
+            let fill = color(theme.role("surface-raised"));
+            let recorded = recorded.clone();
+            div().absolute().size(px(0.)).with_spring(
+                SharedString::from(format!("{control_id}-segment")),
+                crate::motion_ui::glide(selected as f32),
+                move |el, position| {
+                    el.child(
+                        gpui::canvas(
+                            |_, _, _| (),
+                            move |_, (), window, _| {
+                                let boxes = recorded.borrow();
+                                let position = position.clamp(0.0, boxes.len().saturating_sub(1) as f32);
+                                let (low, high) = (position.floor() as usize, position.ceil() as usize);
+                                let (Some(from), Some(to)) = (boxes.get(low), boxes.get(high)) else { return };
+                                let t = position.fract();
+                                let left = from.left() + (to.left() - from.left()) * t;
+                                let width = from.size.width + (to.size.width - from.size.width) * t;
+                                let area =
+                                    Bounds::new(gpui::point(left, from.top()), gpui::size(width, from.size.height));
+                                window.paint_quad(gpui::quad(
+                                    area,
+                                    px(5.),
+                                    fill,
+                                    gpui::Edges::default(),
+                                    gpui::transparent_black(),
+                                    gpui::BorderStyle::default(),
+                                ));
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                },
+            )
+        }))
         .children(options.iter().enumerate().map(|(index, label)| {
             let select = select.clone();
             let mut option = div()
@@ -137,9 +212,8 @@ pub fn segmented(
                 .items_center()
                 .rounded(px(5.))
                 .text_size(px(12.))
-                .when(index == selected, |option| {
-                    option.bg(color(theme.role("surface-raised"))).text_color(color(theme.role("fg")))
-                })
+                .when(index == selected && !glide_fill, |option| option.bg(color(theme.role("surface-raised"))))
+                .when(index == selected, |option| option.text_color(color(theme.role("fg"))))
                 .when(index != selected, |option| option.text_color(color(theme.role("fg-muted"))))
                 .child(*label);
             if meta.enabled {
@@ -168,7 +242,7 @@ pub fn tile_choice(
     style: ControlStyle,
     select: Select,
 ) -> gpui::Stateful<Div> {
-    let ControlStyle { focus, focused, theme } = style;
+    let ControlStyle { focus, focused, theme, .. } = style;
     let control_id = meta.id;
     let group = div()
         .id(control_id)
@@ -278,7 +352,7 @@ pub fn dropdown(
     toggle: Activate,
     select: Select,
 ) -> gpui::Stateful<Div> {
-    let ControlStyle { focus, focused, theme } = style;
+    let ControlStyle { focus, focused, theme, .. } = style;
     let control_id = meta.id;
     let value = options.get(selected).cloned().unwrap_or_default();
     let mut button = div()
@@ -380,7 +454,7 @@ pub fn menu_button(
     toggle: Activate,
     select: Select,
 ) -> gpui::Stateful<Div> {
-    let ControlStyle { focus, focused, theme } = style;
+    let ControlStyle { focus, focused, theme, .. } = style;
     let control_id = meta.id;
     let open = menu.is_some();
     let mut button = div()
@@ -471,7 +545,7 @@ pub fn button(
     style: ControlStyle,
     activate: Activate,
 ) -> gpui::Stateful<Div> {
-    let ControlStyle { focus, focused, theme } = style;
+    let ControlStyle { focus, focused, theme, .. } = style;
     let mut button = div()
         .id(id)
         .debug_selector(move || id.into())
@@ -510,7 +584,7 @@ pub fn link_button(
     style: ControlStyle,
     activate: Activate,
 ) -> gpui::Stateful<Div> {
-    let ControlStyle { focus, focused, theme } = style;
+    let ControlStyle { focus, focused, theme, .. } = style;
     let mut button = div()
         .id(id)
         .debug_selector(move || id.into())

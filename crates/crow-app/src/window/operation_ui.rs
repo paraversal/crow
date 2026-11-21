@@ -270,7 +270,7 @@ impl CrowWindow {
             }
             Some(Sheet::Conflict { .. }) => {
                 // A newer attempt (or job) replaced the question; show that one.
-                self.sheet = None;
+                retire!(self, cx, sheet);
                 self.show_conflict(window, cx)
             }
             Some(_) => false,
@@ -293,7 +293,7 @@ impl CrowWindow {
         if !matches {
             return;
         }
-        self.sheet = None;
+        retire!(self, cx, sheet);
         if let Some(prompt) = cx.global_mut::<Operations>().prompt.as_mut()
             && prompt.host == Some(window.window_handle().window_id())
         {
@@ -417,21 +417,34 @@ impl CrowWindow {
             self.confirm_saved_query_form(window, cx);
             return;
         }
-        match self.sheet.take() {
+        // The answer is read from the sheet, then the sheet retires (its picture fades
+        // while the operation starts at once).
+        match &self.sheet {
             Some(Sheet::Conflict { job, key, choice, all, .. }) => {
+                let (job, key, choice, all) = (*job, *key, *choice, *all);
+                retire!(self, cx, sheet);
                 operations::resolve_prompt(job, key, choice, all, cx);
             }
             Some(Sheet::ConfirmDelete { paths, .. }) => {
+                let paths = paths.clone();
+                retire!(self, cx, sheet);
                 operations::enqueue(Request::DeletePermanently { paths }, self.origin(window, cx), cx);
             }
-            Some(Sheet::ConfirmEmptyTrash { folders, finder, .. }) => self.run_empty_trash(folders, finder, cx),
+            Some(Sheet::ConfirmEmptyTrash { folders, finder, .. }) => {
+                let (folders, finder) = (folders.clone(), *finder);
+                retire!(self, cx, sheet);
+                self.run_empty_trash(folders, finder, cx);
+            }
             Some(Sheet::StopOperation { intent, .. }) => {
+                let intent = *intent;
+                retire!(self, cx, sheet);
                 let handle = window.window_handle().downcast::<CrowWindow>();
                 stop_then(intent, handle, cx);
                 return;
             }
-            Some(Sheet::SavedQuery(_)) => {}
-            Some(Sheet::BatchRename(_)) => {}
+            Some(Sheet::SavedQuery(_) | Sheet::BatchRename(_)) => {
+                retire!(self, cx, sheet);
+            }
             Some(Sheet::Onboarding { no, .. }) => {
                 // Return activates the focused choice; the panel focus means the
                 // default, Show tips.
@@ -842,6 +855,7 @@ impl CrowWindow {
                 .child(body),
                 &theme,
                 cx.global::<Ui>().feedback.mode,
+                self.exit_fade.get(),
                 cx.listener(|this, _, window, cx| this.close_sheet(window, cx)),
             )
             .into_any_element(),
@@ -916,6 +930,7 @@ impl CrowWindow {
                 .text_color(color(if primary { theme.role("on-accent") } else { theme.role("fg") }))
                 .child(label)
         };
+        let running_label = active.as_ref().map(|(_, label, ..)| operations::running_label(label));
         let active_row = active.map(|(id, label, phase, pause_supported, has_conflict)| {
             let detail = running.as_ref().map_or_else(String::new, |running| {
                 let view = crate::bottom_bar::RunningView::new(running);
@@ -1020,7 +1035,44 @@ impl CrowWindow {
                     .into_any_element()
             })
             .collect();
-        let active_row = active_row.map(IntoElement::into_any_element);
+        let mode = cx.global::<Ui>().feedback.mode;
+        let now = std::time::Instant::now();
+        // A job that just finished leaves a picture of its row that shrinks and fades
+        // (Full); Low and Off drop it at once.
+        let still_running = running_label.is_some();
+        if !still_running
+            && mode == crow_core::motion::Effective::Full
+            && let Some(label) = self.activity_last.take()
+        {
+            self.activity_ghost = Some((label, now));
+        }
+        self.activity_last = running_label;
+        let ghost_row = self.activity_ghost.clone().and_then(|(label, started)| {
+            let progress = crow_core::motion::progress(
+                mode,
+                started,
+                now,
+                crow_core::motion::ms::SECTION,
+                crow_core::motion::ms::SECTION,
+            );
+            let Some(t) = progress.filter(|_| !still_running) else {
+                self.activity_ghost = None;
+                return None;
+            };
+            window.request_animation_frame();
+            let left = 1.0 - t;
+            let label = crate::style::display_text(&label).into_owned();
+            Some(
+                div()
+                    .h(px(36. * left))
+                    .overflow_hidden()
+                    .opacity(left)
+                    .debug_selector(|| "activity-ghost".into())
+                    .child(div().h(px(36.)).flex().items_center().child(label))
+                    .into_any_element(),
+            )
+        });
+        let active_row = active_row.map(IntoElement::into_any_element).or(ghost_row);
         let trash_row = emptying_trash.then(|| {
             div()
                 .id("activity-empty-trash")

@@ -21,6 +21,8 @@ pub(super) struct ViewMotion {
     started: Instant,
     mode: Effective,
     pub folder: EntityId,
+    /// How long the Full motion runs.
+    full_ms: u64,
     origins: HashMap<PathBuf, RowOrigin>,
 }
 
@@ -59,14 +61,25 @@ impl ViewMotion {
         }
         let folder = pane.focused_folder();
         let origins = if mode == Effective::Full { Self::visible_origins(pane, now, cx) } else { HashMap::new() };
-        Some(Self { started: now, mode, folder: folder.entity_id(), origins })
+        Some(Self { started: now, mode, folder: folder.entity_id(), full_ms: motion::ms::VIEW_CHANGE, origins })
+    }
+
+    /// A sort's glide is a little shorter than a view change.
+    pub fn for_reorder(mut self) -> Self {
+        self.full_ms = motion::ms::REORDER;
+        self
+    }
+
+    /// How many visible rows were captured.
+    pub fn captured_rows(&self) -> usize {
+        self.origins.len()
     }
 
     pub fn progress(&self, mode: Effective, now: Instant) -> Option<f32> {
         if self.mode != mode {
             return None;
         }
-        motion::navigation_progress(mode, self.started, now, motion::ms::VIEW_CHANGE)
+        motion::navigation_progress(mode, self.started, now, self.full_ms)
     }
 
     pub fn row(&self, folder: EntityId, path: &Path, t: f32) -> Option<MovingRow> {

@@ -924,7 +924,12 @@ fn render_preview(
             .child(if sampleable(entry) {
                 folder_cell(pane, entry, sample, size, cloud, theme, cell_width, i, window, cx).into_any_element()
             } else {
-                file_cell(pane, entry, preview, size, cloud, theme, i, cell_width < 240.0, cx).into_any_element()
+                crate::motion_ui::fade_when_loaded(
+                    file_cell(pane, entry, preview, size, cloud, theme, i, cell_width < 240.0, cx),
+                    preview.is_some_and(|p| p.image.is_some() || p.content.is_some()),
+                    &entry.path,
+                    cx.global::<crate::ui::Ui>().feedback.mode,
+                )
             });
         wrapper = wrapper.child(cell);
     }

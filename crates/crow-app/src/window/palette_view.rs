@@ -41,6 +41,9 @@ pub(super) struct Palette {
     /// Path mode's parent listing, while the query is a path.
     pub(super) path: Option<PathState>,
     pub(super) cursor: usize,
+    /// Bumped whenever the rows change under the cursor (typing, a folder
+    /// listing arriving): the highlight snaps then instead of gliding.
+    listing_generation: u32,
     folders: Vec<palette::FolderCandidate>,
     /// The current folder's full listing (hidden entries too), for typed queries.
     pub(super) here_dir: Option<PaletteDir>,
@@ -137,6 +140,11 @@ fn list_palette_dir(parent: PathBuf, cx: &App) -> Task<PaletteDir> {
         });
         PaletteDir { folders, files, missing: listed.is_err() }
     })
+}
+
+/// Whether the cursor row's fill is the gliding one (Full motion) instead of the row's own.
+fn palette_glides(cx: &App) -> bool {
+    cx.global::<Ui>().feedback.mode == crow_core::motion::Effective::Full
 }
 
 /// The list's content height, padding included.
@@ -286,6 +294,7 @@ impl CrowWindow {
             here,
             path: None,
             cursor: 0,
+            listing_generation: 0,
             folders,
             here_dir: None,
             file_narrow: None,
@@ -403,11 +412,13 @@ impl CrowWindow {
         {
             let palette = self.palette.as_mut().expect("checked above");
             palette.cursor = 0;
+            palette.listing_generation += 1;
             palette.scroll.set_offset(point(px(0.), px(0.)));
             if palette.mode == PaletteMode::Commands {
                 palette.path = None;
                 if let Some(listing) = command_listing {
                     palette.listing = listing;
+                    palette.listing_generation += 1;
                 }
             } else if let Some((parent, partial)) = palette::path_query(query, &cwd, &home) {
                 let relist = match &mut palette.path {
@@ -434,6 +445,7 @@ impl CrowWindow {
                 }
                 let hidden = palette::hidden_match(&partial, show_hidden, search_includes_hidden);
                 let state = palette.path.as_ref().expect("set above");
+                palette.listing_generation += 1;
                 palette.listing = match (&state.children, state.missing) {
                     (None, _) => palette::loading_path_listing(&state.parent),
                     (Some(_), true) => palette::missing_path_listing(&state.parent, &home),
@@ -453,6 +465,7 @@ impl CrowWindow {
                     })
                 };
                 let files: &[palette::PathEntry] = palette.here_dir.as_ref().map_or(&[], |dir| dir.files.as_slice());
+                palette.listing_generation += 1;
                 palette.listing = palette::folder_listing(
                     query,
                     &palette.folders,
@@ -570,7 +583,7 @@ impl CrowWindow {
     }
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.take().is_none() {
+        if !retire!(self, cx, palette) {
             return;
         }
         self.focus_center(window, cx);
@@ -602,7 +615,7 @@ impl CrowWindow {
         // Typing a whole path for a folder the palette already offers is the slow way.
         let path_mode = palette.path.is_some();
         let plugin_context = palette.plugin_context.clone();
-        self.palette = None;
+        retire!(self, cx, palette);
         self.focus_center(window, cx);
         match item {
             Some(Item::Command { command, .. }) => {
@@ -676,7 +689,7 @@ impl CrowWindow {
                 }
                 match found {
                     Some((is_dir, target, typed)) if palette.input.read(cx).text() == typed => {
-                        this.palette = None;
+                        retire!(this, cx, palette);
                         this.focus_center(window, cx);
                         if is_dir {
                             let known = this.known_folder(&target, cx);
@@ -708,6 +721,7 @@ impl CrowWindow {
         let scroll = palette.scroll.clone();
         let count = palette.listing.count.clone();
         let commands = palette.mode == PaletteMode::Commands;
+        let generation = palette.listing_generation;
         let content = palette_content_height(&palette.listing);
         let height = palette_list_height(window, content);
         let width = palette_width(window);
@@ -808,6 +822,24 @@ impl CrowWindow {
             .track_scroll(&scroll)
             .p(px(PALETTE_LIST_PAD))
             .children(rows);
+        // Full: the cursor row's fill glides between rows (a spring, like the list's).
+        // Typing or a new listing changes the key, so the fill starts at its new place.
+        let fill = (palette_glides(cx) && !palette.listing.items.is_empty()).then(|| {
+            let (y, row_height) = palette_row_y(&palette.listing, palette.cursor);
+            let offset = f32::from(scroll.offset().y);
+            div()
+                .absolute()
+                .left(px(PALETTE_LIST_PAD))
+                .right(px(PALETTE_LIST_PAD))
+                .h(px(row_height))
+                .rounded(px(8.))
+                .bg(active_selection(&theme))
+                .debug_selector(|| "palette-glide".into())
+                .with_spring(("palette-glide", generation), crate::motion_ui::glide(px(y)), move |el, y| {
+                    el.top(px(f32::from(y) + offset))
+                })
+        });
+        let list = div().relative().h(px(height)).children(fill).child(list.h_full());
         Some(chrome::sheet(
             chrome::sheet_panel("palette", SheetWidth::Wide, &theme)
                 .w(px(width))
@@ -824,6 +856,7 @@ impl CrowWindow {
                 .child(footer),
             &theme,
             cx.global::<Ui>().feedback.mode,
+            self.exit_fade.get(),
             cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
         ))
     }
@@ -1001,7 +1034,7 @@ impl CrowWindow {
             .flex()
             .items_center()
             .gap(px(12.))
-            .when(selected, |row| row.bg(active_selection(theme)))
+            .when(selected && !palette_glides(cx), |row| row.bg(active_selection(theme)))
             .when(!selected, |row| row.hover(move |style| style.bg(hover)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(palette) = &mut this.palette {
@@ -1104,7 +1137,7 @@ impl CrowWindow {
             .flex()
             .items_center()
             .gap(px(12.))
-            .when(selected, |row| row.bg(active_selection(theme)))
+            .when(selected && !palette_glides(cx), |row| row.bg(active_selection(theme)))
             .when(!selected, |row| row.hover(move |style| style.bg(hover)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(palette) = &mut this.palette {
@@ -1163,7 +1196,7 @@ impl CrowWindow {
             .flex()
             .items_center()
             .gap(px(12.))
-            .when(selected, |row| row.bg(active_selection(theme)))
+            .when(selected && !palette_glides(cx), |row| row.bg(active_selection(theme)))
             .when(!selected, |row| row.hover(move |style| style.bg(hover)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(palette) = &mut this.palette {

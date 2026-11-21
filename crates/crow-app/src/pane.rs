@@ -29,8 +29,8 @@ use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter,
     ExternalDragPayload, FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle,
-    ScrollStrategy, SharedString, SpringAnimation, SpringConfig, Subscription, UniformListScrollHandle, Window, canvas,
-    div, img, point, prelude::*, px, size, uniform_list,
+    ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window, canvas, div, img, point, prelude::*,
+    px, size, uniform_list,
 };
 
 use crate::actions::{
@@ -64,6 +64,9 @@ use crow_fs::ops::Request;
 mod gallery;
 mod pane_filter;
 mod view_motion;
+
+/// More visible rows than this and a reorder snaps instead of gliding.
+const REORDER_MAX_ROWS: usize = 200;
 use pane_filter::FilterPlace;
 use view_motion::ViewMotion;
 
@@ -467,6 +470,10 @@ pub struct Pane {
     mark_pending: Option<MarkPending>,
     /// The `/` filter field, while open.
     filtering: Option<Filtering>,
+    /// The filter row opening or closing (`pane_filter::row_look`).
+    filter_motion: Option<pane_filter::FilterMotion>,
+    /// The list crossfading after ⌘⇧. (rows come and go at once; the fade hides the swap).
+    list_fade: Option<Instant>,
     /// An empty-space drag selecting tiles in icon view.
     marquee: Option<Marquee>,
     marquee_scroll_gen: u64,
@@ -506,6 +513,21 @@ struct Bench {
     scrolled: Option<String>,
     /// The name filter applied before scrolling, so highlighted rows are what is timed.
     filter: Option<String>,
+    /// `CROW_BENCH_TRASH=N`: swallow N rows in the middle of the folder (the effect
+    /// only, nothing is deleted) and time the frames while it runs.
+    trash: Option<TrashBench>,
+}
+
+/// The motion bench: frame intervals before, during and after a trash effect.
+struct TrashBench {
+    rows: usize,
+    started: Option<Instant>,
+    last: Option<Instant>,
+    frame: usize,
+    idle: Vec<f64>,
+    live: Vec<f64>,
+    /// ms since the effect started, per live frame.
+    at: Vec<f64>,
 }
 
 impl Pane {
@@ -578,6 +600,15 @@ impl Pane {
                 last: None,
                 scrolled: None,
                 filter: bench_filter,
+                trash: std::env::var("CROW_BENCH_TRASH").ok().and_then(|n| n.parse().ok()).map(|rows| TrashBench {
+                    rows,
+                    started: None,
+                    last: None,
+                    frame: 0,
+                    idle: Vec::new(),
+                    live: Vec::new(),
+                    at: Vec::new(),
+                }),
             }),
             applied_view: None,
             list_bounds: Rc::new(Cell::new(None)),
@@ -612,6 +643,8 @@ impl Pane {
             return_selection: None,
             mark_pending: None,
             filtering: None,
+            filter_motion: None,
+            list_fade: None,
             marquee: None,
             marquee_scroll_gen: 0,
             tip_inset: false,
@@ -1740,6 +1773,17 @@ impl Pane {
         }
     }
 
+    /// Start the list's crossfade for a change the user asked for that swaps many rows
+    /// at once (hidden files shown or hidden).
+    #[cfg(test)]
+    pub fn list_fading(&self) -> bool {
+        self.list_fade.is_some()
+    }
+
+    pub fn begin_list_fade(&mut self) {
+        self.list_fade = Some(Instant::now());
+    }
+
     pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
         self.show_hidden = show;
         for folder in &self.folders {
@@ -1749,7 +1793,16 @@ impl Pane {
 
     /// Sort as the user asked (a header click), and remember it for this folder.
     pub fn set_sort(&mut self, sort: Sort, cx: &mut Context<Self>) {
+        if self.sort == sort || self.folder().is_none() {
+            return;
+        }
+        // Visible rows glide to their new places and rows that come into view fade in
+        // (Low fades the list). A grid of more than ~200 visible tiles just snaps.
+        let motion = ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, Instant::now(), cx)
+            .filter(|motion| motion.captured_rows() <= REORDER_MAX_ROWS)
+            .map(ViewMotion::for_reorder);
         if self.apply_sort(sort, cx) {
+            self.view_motion = motion;
             self.remember(ViewChange::Sort(sort), cx);
         }
     }
@@ -2056,6 +2109,7 @@ impl Pane {
         self.view_motion = None;
         self.child_reveal = None;
         if self.filtering.take().is_some() {
+            self.filter_motion = None;
             // Navigating away ends the filter session like Esc does.
             self.emit_filter_end(cx);
             self.focus_list_after_filter = true;
@@ -2410,6 +2464,7 @@ impl Pane {
         let focus = input.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         self.filtering = Some(Filtering { input, _subscription: subscription });
+        self.filter_motion = pane_filter::FilterMotion::opening(cx);
         cx.notify();
     }
 
@@ -2464,7 +2519,9 @@ impl Pane {
     /// Close the filter without taking focus, returning its query. ⌘F uses this to hand
     /// the text to search; the search field gets focus instead.
     pub fn take_filter(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let ghost = self.filter_ghost(cx);
         let filtering = self.filtering.take()?;
+        self.filter_motion = ghost;
         let query = filtering.input.read(cx).text().to_owned();
         for folder in &self.folders {
             folder.update(cx, |folder, cx| {
@@ -2484,9 +2541,11 @@ impl Pane {
     /// Close the filter field and clear every folder's filter. Callers decide
     /// where focus goes next. Returns whether a filter was open.
     fn end_filter(&mut self, cx: &mut Context<Self>) -> bool {
+        let ghost = self.filter_ghost(cx);
         if self.filtering.take().is_none() {
             return false;
         }
+        self.filter_motion = ghost;
         self.emit_filter_end(cx);
         self.filter_announce = SharedString::default();
         self.filter_announce_gen += 1;
@@ -3678,6 +3737,79 @@ impl Pane {
         self.drop_column
     }
 
+    /// One frame of the trash motion bench: 60 idle frames for the display's own
+    /// interval, then the effect on the middle rows, then a line with hitches
+    /// (intervals over 1.5 x the idle median) and the worst interval.
+    fn trash_bench_step(&mut self, now: Instant, cx: &mut Context<Self>) {
+        let folder = self.folders[0].clone();
+        let shown = folder.read(cx).row_count();
+        let Some(trash) = self.bench.as_mut().and_then(|bench| bench.trash.as_mut()) else { return };
+        let interval = trash.last.replace(now).map(|prev| (now - prev).as_secs_f64() * 1000.0);
+        trash.frame += 1;
+        if trash.frame == 20 {
+            folder.read(cx).scroll_strict(shown / 2);
+        }
+        if let Some(interval) = interval {
+            match trash.started {
+                None if trash.frame > 40 => trash.idle.push(interval),
+                Some(at) => {
+                    trash.live.push(interval);
+                    trash.at.push((now - at).as_secs_f64() * 1000.0);
+                }
+                None => {}
+            }
+        }
+        if trash.started.is_none() && trash.frame == 100 {
+            let rows = trash.rows;
+            trash.started = Some(now);
+            let paths: Vec<PathBuf> = (shown / 2..shown / 2 + rows)
+                .filter_map(|ix| folder.read(cx).row(ix).map(|(entry, _)| entry.path.clone()))
+                .collect();
+            // CROW_BENCH_TRASH_REMOVE=1 also deletes the files (use a copy of the fixture):
+            // the watcher's removal then lands while the effect runs, as after a real trash.
+            if std::env::var_os("CROW_BENCH_TRASH_REMOVE").is_some() {
+                let doomed = paths.clone();
+                cx.background_spawn(async move {
+                    for path in doomed {
+                        std::fs::remove_file(path).ok(); // io-ok: bench: stands in for the trash call
+                    }
+                })
+                .detach();
+            }
+            self.start_effect(&paths, Fx::Trash, cx);
+            return;
+        }
+        let Some(started) = trash.started else { return };
+        if now.duration_since(started) < Duration::from_millis(900) {
+            return;
+        }
+        let stats = |v: &[f64]| {
+            let mut v = v.to_vec();
+            v.sort_by(f64::total_cmp);
+            let at = |q: f64| v.get(((v.len().max(1) - 1) as f64 * q) as usize).copied().unwrap_or_default();
+            (at(0.5), at(0.95), at(1.0))
+        };
+        let (idle50, _, _) = stats(&trash.idle);
+        let (live50, live95, live_max) = stats(&trash.live);
+        let hitches = trash.live.iter().filter(|ms| **ms > idle50 * 1.5).count();
+        let line = format!(
+            "BENCH-TRASH rows={} idle_p50={idle50:.2}ms live_frames={} live_p50={live50:.2}ms live_p95={live95:.2}ms live_max={live_max:.2}ms hitches={hitches}",
+            trash.rows,
+            trash.live.len(),
+        );
+        let slow: Vec<String> = trash
+            .live
+            .iter()
+            .zip(&trash.at)
+            .filter(|(ms, _)| **ms > idle50 * 1.5)
+            .map(|(ms, at)| format!("{ms:.1}ms@{at:.0}"))
+            .collect();
+        let line = format!("{line} slow=[{}]", slow.join(" "));
+        println!("{line}");
+        tracing::info!("{line}");
+        cx.quit();
+    }
+
     fn bench_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mode = self.mode;
         let icon_scroll = self.icon_scroll.clone();
@@ -3691,6 +3823,10 @@ impl Pane {
             return;
         }
         let now = Instant::now();
+        if bench.trash.is_some() {
+            self.trash_bench_step(now, cx);
+            return;
+        }
         if let Some(prev) = bench.last.replace(now) {
             bench.intervals.push((now - prev).as_secs_f64() * 1000.0);
         }
@@ -5342,12 +5478,9 @@ impl Pane {
                                 .bg(active_selection(&theme));
                             with_island_rounding(fill, edges)
                                 .debug_selector(move || format!("column-glide-{k}"))
-                                .with_spring(
-                                    ("glide", k),
-                                    SpringAnimation::new(SpringConfig::new(2500.0, 2.0 * 2500.0f32.sqrt(), 1.0))
-                                        .to(px(y)),
-                                    move |el, y| el.top(px(f32::from(y) + offset)),
-                                )
+                                .with_spring(("glide", k), crate::motion_ui::glide(px(y)), move |el, y| {
+                                    el.top(px(f32::from(y) + offset))
+                                })
                         })
                     } else {
                         None
@@ -6057,12 +6190,7 @@ impl Render for Pane {
                                             .bg(active_selection(&theme));
                                         with_island_rounding(fill, edges).debug_selector(|| "glide".into()).with_spring(
                                             "glide",
-                                            SpringAnimation::new(SpringConfig::new(
-                                                2500.0,
-                                                2.0 * 2500.0f32.sqrt(),
-                                                1.0,
-                                            ))
-                                            .to(px(y)),
+                                            crate::motion_ui::glide(px(y)),
                                             move |el, y| el.top(px(f32::from(y) + offset + LIST_TOP_INSET)),
                                         )
                                     })
@@ -6238,6 +6366,20 @@ impl Render for Pane {
             // Wider-than-pane tables are clipped for now; horizontal scrolling comes with view settings.
             .overflow_hidden()
             .child(body);
+        // The list crossfades after a hidden-files toggle (Low and Full alike: opacity only).
+        let list = match self
+            .list_fade
+            .and_then(|started| motion::progress(mode, started, now, motion::ms::REORDER, motion::ms::REORDER))
+        {
+            Some(t) => {
+                window.request_animation_frame();
+                div().size_full().flex().flex_col().opacity(0.4 + 0.6 * t).child(list).into_any_element()
+            }
+            None => {
+                self.list_fade = None;
+                list.into_any_element()
+            }
+        };
         if self.focus_list_after_filter {
             self.focus_list_after_filter = false;
             cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));
