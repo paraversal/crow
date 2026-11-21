@@ -13,7 +13,7 @@ use crow_core::{Location, SidebarEdit, Tabs, TipId, TipsMode, ViewMode, ZeroMatc
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement,
     MouseButton, Render, Role, ScrollHandle, SharedString, Subscription, Task, TitlebarOptions, Toggled, Window,
-    WindowBounds, WindowOptions, div, img, point, prelude::*, px, size, transparent_black,
+    WindowBounds, WindowOptions, div, point, prelude::*, px, size, transparent_black,
 };
 
 use crate::actions::{
@@ -41,7 +41,7 @@ use crate::preview;
 use crate::search::{SearchEvent, SearchView};
 use crate::sidebar::{Sidebar, SidebarEvent};
 use crate::style::{
-    BAND_HEIGHT, active_selection, color, color_alpha, content_opacity, cursor_ring, highlight_text, icon,
+    BAND_HEIGHT, active_selection, color, color_alpha, content_opacity, cursor_ring, highlight_text,
     truncate_middle_with_ranges, ui_font,
 };
 use crate::text_input::{TextInput, TextInputEvent};

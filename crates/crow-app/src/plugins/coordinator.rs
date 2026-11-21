@@ -38,7 +38,6 @@ pub fn new_surface() -> SurfaceId {
 pub enum ScopeKey {
     Folder(PathBuf),
     /// Search sessions are distinct even when they cover the same origin.
-    #[allow(dead_code)]
     Search {
         session: u64,
         origin: PathBuf,
@@ -68,7 +67,6 @@ pub struct PublishedSurfaces {
     pub packs: BTreeMap<ExtensionId, RegisteredIconPack>,
 }
 
-#[allow(dead_code)]
 impl PublishedSurfaces {
     pub fn extension(&self, id: &ExtensionId) -> Option<&PublishedExtension> {
         self.extensions.get(id)
@@ -80,10 +78,6 @@ impl PublishedSurfaces {
 
     pub fn has_kind(&self, kind: ExtensionKind) -> bool {
         self.extensions.values().any(|extension| extension.descriptor.kind == kind)
-    }
-
-    pub fn has_any(&self, kinds: &[ExtensionKind]) -> bool {
-        self.extensions.values().any(|extension| kinds.contains(&extension.descriptor.kind))
     }
 }
 
@@ -169,6 +163,7 @@ struct RowCache {
 }
 
 impl RowCache {
+    #[cfg(test)]
     fn get(&mut self, key: &RowKey) -> Option<RowValue> {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
@@ -399,7 +394,6 @@ impl Default for PluginSurfaces {
     }
 }
 
-#[allow(dead_code)]
 impl PluginSurfaces {
     pub fn snapshot(&self) -> std::sync::Arc<PublishedSurfaces> {
         self.snapshot.clone()
@@ -441,6 +435,7 @@ impl PluginSurfaces {
         self.rows.bytes()
     }
 
+    #[cfg(test)]
     pub fn pending_tickets(&self) -> usize {
         self.tickets.len()
     }
@@ -1299,6 +1294,7 @@ impl PluginSurfaces {
     }
 
     /// Ready value for one row; missing values are cached as empty rows.
+    #[cfg(test)]
     pub fn row_value(
         &mut self,
         extension: &ExtensionId,
@@ -1315,19 +1311,6 @@ impl PluginSurfaces {
             version,
         };
         self.rows.get(&key)
-    }
-
-    pub fn has_row(&self, extension: &ExtensionId, scope: &ScopeKey, path: &Path, version: u64) -> bool {
-        let Some(published) = self.snapshot.extension(extension) else { return false };
-        self.rows
-            .peek(&RowKey {
-                extension: extension.clone(),
-                generation: published.generation,
-                scope: scope.clone(),
-                path: path.to_path_buf(),
-                version,
-            })
-            .is_some()
     }
 
     pub fn invalidate_paths(&mut self, scope: &ScopeKey, paths: &[PathBuf]) {
@@ -1589,11 +1572,6 @@ impl PluginSurfaces {
     }
 
     #[cfg(test)]
-    pub fn queue_hook_for_test(&mut self, event: HookEvent, now: Instant) {
-        self.queue_hook(HookSlot::Operation, event, None, now);
-    }
-
-    #[cfg(test)]
     pub fn track_ticket_for_test(
         &mut self,
         extension: ExtensionId,
@@ -1678,15 +1656,6 @@ impl PluginSurfaces {
             || self.status.contains_key(&surface)
             || self.info.contains_key(&surface)
             || self.sidebar.contains_key(&surface)
-    }
-
-    #[cfg(test)]
-    pub fn tracked_surface_count(&self) -> usize {
-        let mut ids: HashSet<SurfaceId> = self.surfaces.keys().copied().collect();
-        ids.extend(self.status.keys().copied());
-        ids.extend(self.info.keys().copied());
-        ids.extend(self.sidebar.keys().copied());
-        ids.len()
     }
 
     #[cfg(test)]

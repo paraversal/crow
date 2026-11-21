@@ -2932,7 +2932,7 @@ impl SettingsWindow {
             let selected = self.query.is_empty() && category == self.category;
             let cursor = category == self.sidebar_cursor && focused;
             let fill = if focused { active_selection(theme) } else { inactive_selection(theme) };
-            let mut row = div()
+            let row = div()
                 .id(("settings-category", index))
                 .debug_selector({
                     let id = category.id();
@@ -2959,9 +2959,6 @@ impl SettingsWindow {
                     this.select_category(category, window, cx);
                 }))
                 .child(category.label());
-            if cursor {
-                row = row.aria_active_descendant();
-            }
             rows.push(row.into_any_element());
         }
         div()

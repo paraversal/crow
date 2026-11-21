@@ -823,14 +823,7 @@ pub fn render(
             let pane = pane.clone();
             let is_dir = i < last || last_is_dir;
             let is_package = is_dir && crow_fs::is_package_path(target);
-            let source = {
-                let ui = cx.global::<Ui>();
-                ui.views
-                    .resolve(target)
-                    .icon_source
-                    .map(|(source, _)| source)
-                    .unwrap_or_else(|| ui.settings.icon_pack.clone())
-            };
+            let source = crate::icon_packs::effective_icon_source(cx.global::<Ui>(), target);
             let icons = crate::icon_packs::Resolver::for_source(cx, &source);
             let spoke = if is_dir { format!("Go to {name}") } else { format!("Open {name}") };
             let part = div()

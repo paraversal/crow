@@ -10,19 +10,7 @@ use crate::operations::{self, JobPhase, Maintenance, Origin, RequestId, StopInte
 use crow_core::motion::Fx;
 use crow_fs::ops::{ConflictKey, Resolution};
 
-fn cycle_focus(controls: &[FocusHandle], forward: bool, window: &mut Window, cx: &mut App) {
-    if controls.is_empty() {
-        return;
-    }
-    let current = controls.iter().position(|control| control.is_focused(window));
-    let next = match (current, forward) {
-        (Some(index), true) => (index + 1) % controls.len(),
-        (Some(index), false) => (index + controls.len() - 1) % controls.len(),
-        (None, true) => 0,
-        (None, false) => controls.len() - 1,
-    };
-    window.focus(&controls[next], cx);
-}
+use crate::chrome::cycle_focus;
 
 /// Quit, unless work is pending: then the active Crow window asks first. With no
 /// window open, one opens at the launch folder to ask.
@@ -512,19 +500,9 @@ impl CrowWindow {
         };
         let button = |id: &'static str, label: String, primary: bool, focus: Option<&FocusHandle>| {
             let focused = focus.is_some_and(|focus| focus.is_focused(window));
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .role(Role::Button)
-                .aria_label(label.clone())
+            crate::chrome::sheet_button(id, label, primary, &theme)
                 .when_some(focus, |button, focus| button.track_focus(focus).tab_stop(true))
                 .when(focused, |button| button.shadow(cursor_ring(&theme)))
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .bg(color(if primary { accent } else { theme.role("surface-raised") }))
-                .text_color(color(if primary { theme.role("on-accent") } else { fg }))
-                .child(label)
         };
         let (title, body): (String, gpui::AnyElement) = match sheet {
             Sheet::ConfirmDelete { paths, buttons, .. } => {

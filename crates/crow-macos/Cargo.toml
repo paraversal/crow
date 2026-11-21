@@ -17,7 +17,7 @@ dispatch2 = "0.3"
 objc2-core-text = "0.3"
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGImage"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSGeometry", "NSObject", "NSData", "NSDictionary", "NSAttributedString", "NSFileManager", "NSValue", "NSError", "NSNotification", "NSUserDefaults", "NSOperation", "block2"] }
-objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSView", "NSWindow", "NSResponder", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSPasteboard", "NSPasteboardItem", "NSEvent", "NSApplication", "NSAccessibility", "NSFont", "NSColor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSSound", "NSGraphics", "NSMenu", "NSMenuItem", "objc2-core-graphics"] }
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "NSView", "NSWindow", "NSResponder", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSPasteboard", "NSPasteboardItem", "NSEvent", "NSApplication", "NSAccessibility", "NSFont", "NSColor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSSound", "NSGraphics", "NSMenu", "NSMenuItem", "objc2-core-graphics", "objc2-uniform-type-identifiers"] }
 objc2-quick-look-ui = { version = "0.3", features = ["QLPreviewPanel", "QLPreviewItem", "objc2-app-kit"] }
 objc2-uniform-type-identifiers = { version = "0.3", features = ["UTType"] }
 objc2-quick-look-thumbnailing = { version = "0.3", features = ["QLThumbnailGenerator", "QLThumbnailGenerationRequest", "QLThumbnailRepresentation", "block2", "objc2-core-graphics"] }

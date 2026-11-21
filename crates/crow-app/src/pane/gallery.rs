@@ -645,12 +645,7 @@ fn render_rows(
             );
             let thumbnails = thumbnails.as_ref();
             let image = thumbnails.and_then(|service| service.read(cx).image(&key));
-            let thumbnailable = thumbnails.is_some()
-                && (!entry.is_dir || entry.is_package())
-                && !entry.is_symlink
-                && !entry.dataless
-                && cloud.is_none_or(CloudStatus::is_local)
-                && !crate::style::native_cloud_icon(cloud, &entry.path);
+            let thumbnailable = thumbnails.is_some() && crate::thumbnails::thumbnailable(&entry, cloud);
             if image.is_none() && thumbnailable && !thumbnails.is_some_and(|service| service.read(cx).is_cached(&key)) {
                 requests.push(crate::thumbnails::ThumbnailRequest { key: key.clone(), gate: gate.clone() });
             }

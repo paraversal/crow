@@ -20,12 +20,11 @@ mod columns;
 mod coordinator;
 mod demand;
 pub use columns::PluginColumn;
-#[allow(unused_imports)]
 pub use coordinator::{
-    CommandCapture, HOOK_DEBOUNCE, MAX_BATCH, MAX_PASSIVE_PER_PLUGIN, MAX_PASSIVE_REQUESTS, MAX_ROW_BYTES,
-    MAX_ROW_VALUES, PluginCounters, PluginEffect, PluginSurfaces, PublishedExtension, PublishedSurfaces, RowInput,
-    RowValue, ScopeKey, SidebarDir, SurfaceId, new_surface,
+    CommandCapture, PluginEffect, PluginSurfaces, RowInput, ScopeKey, SidebarDir, SurfaceId, new_surface,
 };
+#[cfg(test)]
+pub use coordinator::{PublishedExtension, PublishedSurfaces};
 pub use demand::PluginRows;
 /// The file surface the menu/palette would act on. Views update it only while
 /// their own focus is live; a text field, sidebar, sheet or another window has

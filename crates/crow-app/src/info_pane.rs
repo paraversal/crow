@@ -97,6 +97,69 @@ impl InfoTarget {
     }
 }
 
+/// Accumulates a selection's rows into a `SelectionSummary`: the common parent
+/// and kind, and the capped path list for the shared-tag read. One pass; the
+/// file list and search results feed it their own row types.
+#[derive(Default)]
+pub struct SelectionSummaryBuilder {
+    count: usize,
+    common_parent: Option<PathBuf>,
+    parent_set: bool,
+    parent_mixed: bool,
+    common_kind: Option<(String, bool)>,
+    kind_mixed: bool,
+    tag_paths: Vec<PathBuf>,
+}
+
+impl SelectionSummaryBuilder {
+    /// Add one selected row; `ext` is its extension, `is_folder` is true for a
+    /// folder that is not a package.
+    pub fn add(&mut self, path: &Path, ext: &str, is_folder: bool) {
+        self.count += 1;
+        let parent = path.parent().map(Path::to_path_buf);
+        if !self.parent_set {
+            self.common_parent = parent;
+            self.parent_set = true;
+        } else if !self.parent_mixed && self.common_parent != parent {
+            self.parent_mixed = true;
+        }
+        if !self.kind_mixed {
+            match &self.common_kind {
+                None => {
+                    self.common_kind =
+                        Some(if is_folder { (String::new(), true) } else { (ext.to_lowercase(), false) });
+                }
+                Some((first_ext, first_is_folder)) => {
+                    if *first_is_folder != is_folder || (!is_folder && !ext.eq_ignore_ascii_case(first_ext)) {
+                        self.kind_mixed = true;
+                    }
+                }
+            }
+        }
+        if self.tag_paths.len() < TAG_SCAN_CAP {
+            self.tag_paths.push(path.to_path_buf());
+        }
+    }
+
+    /// `bytes` is `None` when the loader must stat the paths; `folders` counts
+    /// every directory in the selection, packages included.
+    pub fn finish(self, bytes: Option<u64>, folders: usize) -> SelectionSummary {
+        SelectionSummary {
+            count: self.count,
+            bytes,
+            folders,
+            kind: if self.kind_mixed {
+                None
+            } else {
+                self.common_kind.map(|(ext, is_folder)| crow_macos::kind_name(&ext, is_folder))
+            },
+            parent: if self.parent_mixed { None } else { self.common_parent },
+            tags_truncated: self.count > TAG_SCAN_CAP,
+            tag_paths: self.tag_paths.into(),
+        }
+    }
+}
+
 impl SelectionSummary {
     /// The key for the Info pane's load: the selection generation plus the ends of
     /// the capped path list, which differ when two tabs' selections share a generation.
