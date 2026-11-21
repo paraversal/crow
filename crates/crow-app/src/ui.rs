@@ -124,6 +124,8 @@ pub struct Ui {
     pub missing_theme_notice: Option<String>,
     /// Whether windows are blurred and the sidebar translucent right now.
     pub translucent: bool,
+    /// View ▸ Hide Sidebar: the left column is collapsed in every window. Not saved.
+    pub sidebar_hidden: bool,
     /// The last theme load error shown, so it isn't repeated on every reload.
     pub theme_error: Option<String>,
     pub config_dir: PathBuf,
@@ -232,6 +234,7 @@ impl Ui {
             themes_state_dir: crow_theme::state_dir(),
             missing_theme_notice: None,
             translucent: false,
+            sidebar_hidden: false,
             theme_error: None,
             config_dir,
             config_writes: Default::default(),

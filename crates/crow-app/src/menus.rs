@@ -42,16 +42,24 @@ fn plugin_menu_commands(cx: &App) -> Vec<MenuPluginCommand> {
 }
 
 /// The toggle names the action it will take, so the menu says what a click does.
-fn menu_title(command: &Command, slot: MenuSlot, show_preview: bool) -> &'static str {
+fn menu_title(command: &Command, slot: MenuSlot, show_preview: bool, sidebar_visible: bool) -> &'static str {
     match command.id {
         CommandId::TogglePreview if show_preview => "Hide Preview",
         CommandId::TogglePreview => "Show Preview",
+        CommandId::ToggleSidebar if sidebar_visible => "Hide Sidebar",
+        CommandId::ToggleSidebar => "Show Sidebar",
         _ => slot.title,
     }
 }
 
-fn command_item(command: &Command, slot: MenuSlot, show_preview: bool, folder_sizes_visible: bool) -> MenuItem {
-    let title = menu_title(command, slot, show_preview);
+fn command_item(
+    command: &Command,
+    slot: MenuSlot,
+    show_preview: bool,
+    sidebar_visible: bool,
+    folder_sizes_visible: bool,
+) -> MenuItem {
+    let title = menu_title(command, slot, show_preview, sidebar_visible);
     let os_action = match command.id {
         CommandId::Undo => Some(OsAction::Undo),
         CommandId::Redo => Some(OsAction::Redo),
@@ -73,7 +81,12 @@ fn command_item(command: &Command, slot: MenuSlot, show_preview: bool, folder_si
 }
 
 /// The whole menu bar in macOS order: Crow, File, Edit, View, Go, Window, Help.
-pub fn app_menus(show_preview: bool, folder_sizes_visible: bool, plugin_commands: &[MenuPluginCommand]) -> Vec<Menu> {
+pub fn app_menus(
+    show_preview: bool,
+    sidebar_visible: bool,
+    folder_sizes_visible: bool,
+    plugin_commands: &[MenuPluginCommand],
+) -> Vec<Menu> {
     let mut menus = Vec::with_capacity(MenuName::ALL.len());
     for menu in MenuName::ALL {
         let mut items = Vec::new();
@@ -106,7 +119,7 @@ pub fn app_menus(show_preview: bool, folder_sizes_visible: bool, plugin_commands
             if section.is_some_and(|previous| previous != slot.section) {
                 items.push(MenuItem::separator());
             }
-            items.push(command_item(command, slot, show_preview, folder_sizes_visible));
+            items.push(command_item(command, slot, show_preview, sidebar_visible, folder_sizes_visible));
             section = Some(slot.section);
         }
 
@@ -149,7 +162,8 @@ pub fn refresh(cx: &mut App) {
         let settings = &cx.global::<Ui>().settings;
         (settings.show_preview, settings.folder_sizes == crow_core::FolderSizesMode::Visible)
     };
-    cx.set_menus(app_menus(show_preview, folder_sizes_visible, &plugin_menu_commands(cx)));
+    let sidebar_visible = !cx.global::<Ui>().sidebar_hidden;
+    cx.set_menus(app_menus(show_preview, sidebar_visible, folder_sizes_visible, &plugin_menu_commands(cx)));
 }
 
 #[cfg(test)]
@@ -198,7 +212,7 @@ mod tests {
             MenuPluginCommand { extension: id("a"), generation: 1, title: "Copy".into() },
             MenuPluginCommand { extension: id("c"), generation: 3, title: "Only".into() },
         ];
-        let menus = app_menus(false, false, &commands);
+        let menus = app_menus(false, true, false, &commands);
         let file = menus.iter().find(|menu| menu.name.as_ref() == "File").expect("File menu");
         let MenuItem::Submenu(plugins) = file
             .items
@@ -220,7 +234,7 @@ mod tests {
 
     #[test]
     fn every_menu_command_is_in_the_menus() {
-        let menus = app_menus(true, false, &[]);
+        let menus = app_menus(true, true, false, &[]);
         for command in COMMANDS {
             let Some(slot) = command.menu else { continue };
             let menu = menus.iter().find(|menu| menu.name.as_ref() == slot.menu.title()).expect("menu exists");
@@ -228,7 +242,7 @@ mod tests {
                 .items
                 .iter()
                 .filter_map(|item| match item {
-                    MenuItem::Action { name, action, .. } if name.as_ref() == menu_title(command, slot, true) => {
+                    MenuItem::Action { name, action, .. } if name.as_ref() == menu_title(command, slot, true, true) => {
                         Some(action)
                     }
                     _ => None,
@@ -243,7 +257,8 @@ mod tests {
                 if let MenuItem::Action { name, action, .. } = item {
                     let from_registry = COMMANDS.iter().any(|command| {
                         command.menu.is_some_and(|slot| {
-                            slot.menu.title() == menu.name.as_ref() && menu_title(command, slot, true) == name.as_ref()
+                            slot.menu.title() == menu.name.as_ref()
+                                && menu_title(command, slot, true, true) == name.as_ref()
                         })
                     });
                     assert!(
@@ -260,7 +275,7 @@ mod tests {
     #[test]
     fn preview_menu_names_the_action() {
         let view_items = |show_preview: bool| {
-            let menus = app_menus(show_preview, false, &[]);
+            let menus = app_menus(show_preview, true, false, &[]);
             let view = menus.iter().find(|menu| menu.name.as_ref() == "View").expect("View menu");
             titles(&view.items).into_iter().map(str::to_owned).collect::<Vec<_>>()
         };
@@ -271,7 +286,7 @@ mod tests {
     #[test]
     fn calculate_folder_sizes_is_disabled_when_the_setting_is_visible() {
         let disabled = |folder_sizes_visible: bool| {
-            let menus = app_menus(false, folder_sizes_visible, &[]);
+            let menus = app_menus(false, true, folder_sizes_visible, &[]);
             let view = menus.iter().find(|menu| menu.name.as_ref() == "View").expect("View menu");
             view.items.iter().find_map(|item| match item {
                 MenuItem::Action { name, disabled, .. } if name.as_ref() == "Calculate Folder Sizes" => Some(*disabled),
@@ -284,7 +299,7 @@ mod tests {
 
     #[test]
     fn menus_are_in_bar_order() {
-        let menus = app_menus(true, false, &[]);
+        let menus = app_menus(true, true, false, &[]);
         let names: Vec<&str> = menus.iter().map(|menu| menu.name.as_ref()).collect();
         assert_eq!(names, ["Crow", "File", "Edit", "View", "Go", "Window", "Help"]);
 
@@ -357,6 +372,7 @@ mod tests {
                 "—",
                 "Show Hidden Files",
                 "Hide Preview",
+                "Hide Sidebar",
                 "Show Info",
                 "Show Git Diff",
                 "Calculate Folder Sizes",

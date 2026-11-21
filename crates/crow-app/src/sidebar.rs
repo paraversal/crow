@@ -2182,12 +2182,7 @@ impl Render for Sidebar {
             .px_2()
             .pb_2()
             .overflow_y_scroll()
-            .bg(if cx.global::<Ui>().translucent {
-                // See-through enough for the blurred desktop to read, solid enough for the text.
-                crate::style::color_alpha(theme.role("bg-inset"), crate::style::TRANSLUCENT_SIDEBAR_ALPHA)
-            } else {
-                color(theme.role("bg-inset"))
-            })
+            // The window paints the column's tone, so the traffic lights' strip above shares it.
             .border_r_1()
             .border_color(color(theme.role("border")))
             .flex()

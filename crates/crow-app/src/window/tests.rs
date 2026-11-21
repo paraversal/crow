@@ -3537,11 +3537,11 @@ fn the_bar_names_the_queue_and_opens_activity(cx: &mut TestAppContext) {
         cx.global_mut::<Operations>().active.as_mut().unwrap().phase = crate::operations::JobPhase::AwaitingConflict;
         cx.refresh_windows();
     });
-    cx.simulate_resize(size(px(640.), px(640.)));
+    cx.simulate_resize(size(px(760.), px(640.)));
     cx.run_until_parked();
     let cancel = cx.debug_bounds("bar-cancel").expect("Cancel remains available");
     let transient = cx.debug_bounds("bar-transient").expect("the operation status region");
-    assert!(cancel.right() <= transient.right(), "the cancel button fits at 640 points");
+    assert!(cancel.right() <= transient.right(), "the cancel button fits at the 760 point minimum width");
     let bounds = cx.debug_bounds("bar-activity").expect("the bar offers Activity");
     cx.simulate_click(bounds.center(), gpui::Modifiers::default());
     assert!(view.read_with(&cx, |this, _| this.show_activity), "the affordance opens Activity");
@@ -7462,6 +7462,23 @@ fn the_translucent_sidebar_is_opt_in_and_follows_the_setting(cx: &mut TestAppCon
     assert!(cx.read(|cx| cx.global::<Ui>().translucent));
     cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::TranslucentSidebar(false), cx));
     assert!(!cx.read(|cx| cx.global::<Ui>().translucent));
+}
+
+#[gpui::test]
+fn control_command_s_hides_and_shows_the_sidebar(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-toggle");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    let toolbar = |cx: &mut VisualTestContext| cx.debug_bounds("toolbar").expect("the toolbar is drawn");
+    let sidebar = cx.debug_bounds("sidebar").expect("the sidebar shows at first");
+    assert_eq!(toolbar(&mut cx).left(), sidebar.right(), "the toolbar sits right of the full-height sidebar");
+    cx.simulate_keystrokes("ctrl-cmd-s");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("sidebar").is_none(), "the sidebar is gone");
+    assert_eq!(toolbar(&mut cx).left(), px(0.), "the toolbar takes the whole width");
+    cx.simulate_keystrokes("ctrl-cmd-s");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("sidebar").is_some(), "the same key brings it back");
 }
 
 #[gpui::test]

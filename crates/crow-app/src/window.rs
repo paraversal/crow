@@ -22,8 +22,8 @@ use crate::actions::{
     KeyboardShortcuts, Minimize, MoveDown, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover,
     PathUnhover, PluginCommand, PluginCommandResult, PreviousTab, RemoveSavedSearch, ResetFolderView, SaveSearch,
     SearchEverything, SearchHome, ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus,
-    ToggleHiddenFiles, TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList,
-    WhyThisView, Zoom,
+    ToggleHiddenFiles, TogglePreview, ToggleSidebar, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons,
+    ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -83,8 +83,8 @@ pub fn open(
         // The band draws its own titlebar and starts the move itself, so a drag on
         // a toolbar control never moves the window (D3).
         app_owns_titlebar_drag: true,
-        // Sidebar 210 plus a usable center; below this the band's parts no longer fit.
-        window_min_size: Some(size(px(640.), px(400.))),
+        // The toolbar sits right of the sidebar column: below this its parts no longer fit.
+        window_min_size: Some(size(px(760.), px(400.))),
         window_background: ui::window_background(cx.global::<Ui>().translucent),
         ..Default::default()
     };
@@ -622,6 +622,17 @@ impl CrowWindow {
         cx.notify();
     }
 
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
+        let hide = !cx.global::<Ui>().sidebar_hidden;
+        cx.global_mut::<Ui>().sidebar_hidden = hide;
+        // Focus must not stay in a column that is gone.
+        if hide && self.sidebar.read(cx).focus_handle(cx).contains_focused(window, cx) {
+            self.focus_center(window, cx);
+        }
+        crate::menus::refresh(cx);
+        cx.refresh_windows();
+    }
+
     fn toggle_preview(&mut self, _: &TogglePreview, _: &mut Window, cx: &mut Context<Self>) {
         let show = !self.info.read(cx).visible();
         crate::ui::set_show_preview(show, cx);
@@ -1124,7 +1135,8 @@ impl CrowWindow {
             .aria_label("Toolbar")
             .h(px(BAND_HEIGHT))
             .flex_none()
-            .pl(px(86.))
+            // With the sidebar hidden the traffic lights sit at the toolbar's left.
+            .pl(px(if cx.global::<Ui>().sidebar_hidden { 86. } else { 12. }))
             .pr_3()
             .flex()
             .items_center()
@@ -1426,7 +1438,8 @@ impl CrowWindow {
             }
         }
         // Narrow windows lose hints from the right and fold the path's middle (I7).
-        bottom_bar::fit_to_window(&mut state, window);
+        let left = if cx.global::<Ui>().sidebar_hidden { px(0.) } else { self.side_panes.left_width() };
+        bottom_bar::fit_to_window(&mut state, window, left);
         state
     }
 
@@ -2973,6 +2986,7 @@ impl CrowWindow {
             CommandId::SwitchFocus => self.switch_focus(&SwitchFocus, window, cx),
             CommandId::ToggleHiddenFiles => self.toggle_hidden(&ToggleHiddenFiles, window, cx),
             CommandId::TogglePreview => self.toggle_preview(&TogglePreview, window, cx),
+            CommandId::ToggleSidebar => self.toggle_sidebar(&ToggleSidebar, window, cx),
             CommandId::ShowInfo => self.show_info(&ShowInfo, window, cx),
             CommandId::ShowGitDiff => self.show_git_diff(&crate::actions::ShowGitDiff, window, cx),
             CommandId::ChooseListColumns => self.choose_list_columns(&crate::actions::ChooseListColumns, window, cx),
@@ -3266,24 +3280,39 @@ impl Render for CrowWindow {
             self.info.read(cx).preferred_width,
             show_preview && active_search.is_none() && mode == ViewMode::Gallery,
         );
-        let sidebar = div()
-            .relative()
-            .h_full()
-            .flex_none()
-            .w(self.side_panes.left_width())
-            .child(self.sidebar.clone())
-            .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme));
         let translucent = cx.global::<Ui>().translucent;
-        let sidebar_width = self.side_panes.left_width();
-        let bg_solid = color(theme.role("bg"));
-        // A full-width strip painted solid while the window itself is see-through.
-        let solid = move |element: gpui::AnyElement| {
-            if translucent {
-                div().w_full().flex_none().bg(bg_solid).child(element).into_any_element()
+        let sidebar = (!cx.global::<Ui>().sidebar_hidden).then(|| {
+            let tone = if translucent {
+                // See-through enough for the blurred desktop to read, solid enough for the labels.
+                color_alpha(theme.role("bg-inset"), crate::style::TRANSLUCENT_SIDEBAR_ALPHA)
             } else {
-                element
-            }
-        };
+                color(theme.role("bg-inset"))
+            };
+            div()
+                .relative()
+                .h_full()
+                .flex_none()
+                .w(self.side_panes.left_width())
+                .flex()
+                .flex_col()
+                .bg(tone)
+                .child(
+                    // The traffic lights' strip: it moves the window like the toolbar does.
+                    div().h(px(BAND_HEIGHT)).flex_none().w_full().on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
+                            let effects = crate::effects::effects(cx);
+                            if event.click_count > 1 {
+                                effects.titlebar_double_click(window);
+                            } else {
+                                effects.start_window_move(window);
+                            }
+                        }),
+                    ),
+                )
+                .child(div().flex_1().min_h_0().w_full().child(self.sidebar.clone()))
+                .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme))
+        });
         let search_preview = active_search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);
         // A narrow search hides the column by default; ⌘I or ⇧⌘P still opens it.
@@ -3393,6 +3422,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::switch_focus))
             .on_action(cx.listener(Self::toggle_hidden))
             .on_action(cx.listener(Self::toggle_preview))
+            .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::show_info))
             .when(crate::git::provider_enabled(cx), |root| {
                 root.on_action(cx.listener(Self::review_git_command))
@@ -3501,46 +3531,29 @@ impl Render for CrowWindow {
             .size_full()
             .flex()
             .flex_col()
-            // Translucent: the window shows the blurred desktop, so the sidebar column
-            // (and the toolbar above it) is the only part not painted solid.
+            // Translucent: the window shows the blurred desktop, so every part but the
+            // sidebar column paints itself solid.
             .when(!translucent, |root| root.bg(color(theme.role("bg"))))
             .text_color(color(theme.role("fg")))
             .font_family(font)
             .text_size(px(font_size))
-            .child(if translucent {
-                // The sidebar's tone runs up behind the traffic lights, like Finder's.
-                div()
-                    .relative()
-                    .w_full()
-                    .flex_none()
-                    .child(
-                        div().absolute().top_0().bottom_0().left_0().w(sidebar_width).bg(crate::style::color_alpha(
-                            theme.role("bg-inset"),
-                            crate::style::TRANSLUCENT_SIDEBAR_ALPHA,
-                        )),
-                    )
-                    .child(
-                        div().absolute().top_0().bottom_0().left(sidebar_width).right_0().bg(color(theme.role("bg"))),
-                    )
-                    .child(title_bar)
-                    .into_any_element()
-            } else {
-                title_bar.into_any_element()
-            })
-            .children(tab_bar.map(|bar| solid(bar.into_any_element())))
             .child(
-                div().relative().flex_1().min_h_0().flex().child(sidebar).child(
+                // Finder's layout: the sidebar is a full-height column (the traffic lights sit
+                // at its top) and the toolbar, tabs, folder and path bar share the column to its right.
+                div().relative().flex_1().min_h_0().w_full().flex().children(sidebar).child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .h_full()
                         .flex()
-                        .when(translucent, |rest| rest.bg(color(theme.role("bg"))))
-                        .child(center)
-                        .children(preview),
+                        .flex_col()
+                        .bg(color(theme.role("bg")))
+                        .child(title_bar)
+                        .children(tab_bar)
+                        .child(div().relative().flex_1().min_h_0().flex().child(center).children(preview))
+                        .child(path_bar),
                 ),
             )
-            .child(solid(path_bar.into_any_element()))
             .children(tip)
             .children(sheet)
             .children(activity)

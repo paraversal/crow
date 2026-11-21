@@ -352,6 +352,7 @@ mod tests {
                 (CommandId::SwitchFocus, "⇥"),
                 (CommandId::ToggleHiddenFiles, "⇧⌘."),
                 (CommandId::TogglePreview, "⇧⌘P"),
+                (CommandId::ToggleSidebar, "⌃⌘S"),
                 (CommandId::ShowInfo, "⌘I"),
                 (CommandId::OpenParent, "⌘↑"),
                 (CommandId::GoBack, "⌘["),

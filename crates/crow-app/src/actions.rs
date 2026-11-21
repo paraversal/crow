@@ -197,6 +197,8 @@ actions!(
         SwitchFocus,
         ToggleHiddenFiles,
         TogglePreview,
+        /// View ▸ Hide/Show Sidebar (⌃⌘S): collapse the left column to give the folder the width.
+        ToggleSidebar,
         /// ⌘I: open the right column on its Info tab, or close it when Info shows.
         ShowInfo,
         /// View ▸ Calculate Folder Sizes: measure the current folder's folders once.
@@ -281,6 +283,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("left", NoAction {}, Some("Sheet")),
         KeyBinding::new("right", NoAction {}, Some("Sheet")),
         KeyBinding::new("cmd-shift-backspace", NoAction {}, Some("Sheet")),
+        KeyBinding::new("ctrl-cmd-s", NoAction {}, Some("Sheet")),
         KeyBinding::new("left", MoveLeft, Some(COLUMNS)),
         KeyBinding::new("right", MoveRight, Some(COLUMNS)),
         KeyBinding::new("left", MoveLeft, Some(LIST_NOT_COLUMNS)),
@@ -315,6 +318,7 @@ pub fn finder_keymap() -> Vec<KeyBinding> {
         KeyBinding::new("tab", SwitchFocus, Some("Crow")),
         KeyBinding::new("cmd-shift-.", ToggleHiddenFiles, Some("Crow")),
         KeyBinding::new("cmd-shift-p", TogglePreview, Some("Crow")),
+        KeyBinding::new("ctrl-cmd-s", ToggleSidebar, Some("Crow")),
         KeyBinding::new("cmd-i", ShowInfo, Some("Crow")),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("ctrl-cmd-t", AddToSidebar, Some("Crow")),

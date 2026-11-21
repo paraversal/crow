@@ -433,9 +433,9 @@ pub fn fit(bar: Pixels, fixed: Pixels, segments: &[Pixels], ellipsis: Pixels, ot
     Fit { hints: kept, hidden, transient_max }
 }
 
-/// Fit the bar to the window: measure with the bar's 12 px text, then drop hints,
+/// Fit the bar to its room (the window minus `left`, the sidebar column beside it): measure with the bar's 12 px text, then drop hints,
 /// fold the path and cap the transient slot.
-pub fn fit_to_window(state: &mut BarState, window: &Window) {
+pub fn fit_to_window(state: &mut BarState, window: &Window, left: Pixels) {
     let font = window.text_style().font();
     let measure = |text: &str| {
         let run = TextRun {
@@ -470,7 +470,7 @@ pub fn fit_to_window(state: &mut BarState, window: &Window) {
     // The "…" segment: its px_1, the "…", the separator's 12 px and "›".
     let ellipsis = px(8.) + measure("…") + px(12.) + measure("›");
 
-    let bar = window.viewport_size().width - px(24.);
+    let bar = window.viewport_size().width - left - px(24.);
     let fixed = measure(&state.count.text) + px(12. + 1.) + px(2. * GAP);
     let mut other = match &state.primary {
         Primary::Pending(text) => measure(text),

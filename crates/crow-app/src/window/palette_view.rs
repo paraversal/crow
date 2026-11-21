@@ -587,6 +587,7 @@ impl CrowWindow {
             palette::CommandId::ToggleHiddenFiles => Some(self.show_hidden),
             palette::CommandId::ToggleActivity => Some(self.show_activity),
             palette::CommandId::TogglePreview => Some(cx.global::<Ui>().settings.show_preview),
+            palette::CommandId::ToggleSidebar => Some(!cx.global::<Ui>().sidebar_hidden),
             _ => None,
         }
     }
