@@ -453,6 +453,10 @@ pub struct Pane {
     column_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
     presented_layout: Option<(ViewMode, EntityId)>,
     view_motion: Option<ViewMotion>,
+    /// What the last icon reflow captured; unlike `view_motion` it never expires,
+    /// so tests don't race the glide's wall clock on a loaded machine.
+    #[cfg(test)]
+    reflow_capture: Option<ViewMotion>,
     child_reveal: Option<(EntityId, Instant)>,
     /// The column and row a drag would drop on in column view.
     drop_column: Option<(usize, usize)>,
@@ -600,6 +604,8 @@ impl Pane {
             column_bounds: Rc::new(RefCell::new(HashMap::new())),
             presented_layout: None,
             view_motion: None,
+            #[cfg(test)]
+            reflow_capture: None,
             child_reveal: None,
             drop_column: None,
             spring: None,
@@ -992,6 +998,12 @@ impl Pane {
     #[cfg(test)]
     pub fn animating(&self, cx: &gpui::App) -> bool {
         self.focused_folder().read(cx).animating(Instant::now())
+    }
+
+    /// Where the last icon reflow found `path`, even after its glide expired.
+    #[cfg(test)]
+    pub fn reflow_origin(&self, path: &Path) -> Option<Bounds<Pixels>> {
+        self.reflow_capture.as_ref()?.captured_row(path)
     }
 
     #[cfg(test)]
@@ -4279,6 +4291,10 @@ impl Pane {
                 if reflowed
                     && let Some(motion) = ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, Instant::now(), cx)
                 {
+                    #[cfg(test)]
+                    {
+                        self.reflow_capture = Some(motion.clone());
+                    }
                     self.view_motion = Some(motion);
                 }
             }

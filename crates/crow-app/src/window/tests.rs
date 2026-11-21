@@ -2557,7 +2557,7 @@ fn icon_presets_glide_tiles_in_full_motion_and_snap_otherwise(cx: &mut TestAppCo
         cx.run_until_parked();
         let before = cx.debug_bounds("tile-f05.txt").expect("a visible tile");
         cx.dispatch_action(crate::actions::IconSizeCompact);
-        let origin = pane.read_with(&cx, |pane, _| pane.view_motion_origin(&root.join("f05.txt")));
+        let origin = pane.read_with(&cx, |pane, _| pane.reflow_origin(&root.join("f05.txt")));
         if tracked {
             assert_eq!(origin, Some(before), "{mode}: the glide starts where the last frame drew the tile");
         } else {
@@ -2590,7 +2590,7 @@ fn a_resize_that_changes_the_column_count_glides_the_tiles(cx: &mut TestAppConte
     assert_ne!(same, Some(before), "a height-only resize keeps the columns and does not glide");
     cx.simulate_resize(size(px(420.), px(420.)));
     cx.run_until_parked();
-    let glide = pane.read_with(&cx, |pane, _| pane.view_motion_origin(&root.join("f05.txt")));
+    let glide = pane.read_with(&cx, |pane, _| pane.reflow_origin(&root.join("f05.txt")));
     assert!(glide.is_some(), "fewer columns reflow the tiles from where they were");
 }
 
