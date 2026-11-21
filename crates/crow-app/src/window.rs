@@ -796,8 +796,13 @@ impl CrowWindow {
     /// Shift-Cmd-G: the palette with this folder's path typed, ready for a child's
     /// name, Tab completion or a whole new path (Finder's Go to Folder, in Cmd-K).
     fn go_to_folder(&mut self, _: &GoToFolder, window: &mut Window, cx: &mut Context<Self>) {
-        let current =
-            self.pane().read(cx).focused_path(cx).as_deref().map(home_relative).unwrap_or_else(|| "~/".to_owned());
+        let home = cx.global::<Ui>().home.clone();
+        let current = self
+            .pane()
+            .read(cx)
+            .focused_path(cx)
+            .map(|path| crow_core::abbreviate_home(&path, &home))
+            .unwrap_or_else(|| "~/".to_owned());
         let typed = if current.ends_with('/') { current } else { format!("{current}/") };
         self.open_palette(&typed, window, cx);
     }
@@ -1978,19 +1983,6 @@ fn view_button(
                 .id("icon")
                 .group_hover(id, move |s| s.text_color(hover_icon)),
         )
-}
-
-fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
-}
-
-/// `~/Documents` for paths in the home folder, like Finder's Go to Folder.
-fn home_relative(path: &Path) -> String {
-    match path.strip_prefix(home_dir()) {
-        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => path.display().to_string(),
-    }
 }
 
 /// A question to answer before an operation runs, or before one is cut off.

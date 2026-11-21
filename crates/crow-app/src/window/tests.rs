@@ -8916,6 +8916,35 @@ fn double_click(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
 }
 
 #[gpui::test]
+fn path_edit_and_save_search_abbreviate_against_the_ui_home(cx: &mut TestAppContext) {
+    let root = fixture("ui-home");
+    let (view, mut cx) = open(cx, &root);
+    let home = root.parent().expect("fixture parent").to_path_buf();
+    assert_ne!(std::env::var_os("HOME").map(PathBuf::from), Some(home.clone()), "the env HOME is a different folder");
+    cx.update(|_, cx| cx.global_mut::<Ui>().home = home.clone());
+    let name = root.file_name().expect("fixture name").to_string_lossy().into_owned();
+
+    cx.simulate_keystrokes("cmd-l");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx), Some(format!("~/{name}/alpha")), "Cmd-L abbreviates against Ui.home");
+    cx.simulate_keystrokes("escape");
+
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    let window = cx.update(|_, cx| cx.windows()[0]);
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |this, cx| this.save_search(&SaveSearch, window, cx));
+    })
+    .expect("open the save form");
+    let shown = view.read_with(&cx, |w, cx| match &w.sheet {
+        Some(Sheet::SavedQuery(form)) => form.root.read(cx).text().to_owned(),
+        _ => String::new(),
+    });
+    assert_eq!(shown, format!("~/{name}"), "the Save Search folder abbreviates against Ui.home");
+}
+
+#[gpui::test]
 fn path_bar_edits_the_path_with_cmd_l(cx: &mut TestAppContext) {
     let root = fixture("path-edit");
     let (view, mut cx) = open(cx, &root);

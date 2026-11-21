@@ -126,10 +126,11 @@ impl SavedQueryForm {
             },
             |saved| saved.name.clone(),
         );
-        let root = existing
-            .as_ref()
-            .and_then(|saved| saved.root.clone())
-            .or_else(|| (scope == SavedScope::Folder).then(|| folder.map(|folder| home_relative(&folder))).flatten());
+        let root = existing.as_ref().and_then(|saved| saved.root.clone()).or_else(|| {
+            (scope == SavedScope::Folder)
+                .then(|| folder.map(|folder| crow_core::abbreviate_home(&folder, &cx.global::<Ui>().home)))
+                .flatten()
+        });
         let (kind, days) = predicates;
         let focus = cx.focus_handle();
         let name = field(name, "Name", "Saved search name", cx);
