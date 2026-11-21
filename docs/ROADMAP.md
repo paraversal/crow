@@ -53,7 +53,7 @@ The [inbox](plans/inbox.md) holds work awaiting triage, including custom keybind
 | File operations | Resumable copy jobs, app-wide copy queue with pause, resume and conflicts, batch rename with preview and one undo | [#78](https://github.com/paraversal/file-crow/pull/78), [#79](https://github.com/paraversal/file-crow/pull/79), [#80](https://github.com/paraversal/file-crow/pull/80) |
 | Paths and drops | Explorer-style path bar, drops from other apps and spring-loaded folders | [#81](https://github.com/paraversal/file-crow/pull/81), [#82](https://github.com/paraversal/file-crow/pull/82) |
 | Test tooling | Owned temp fixtures, cross-run test and fuzz reports, module extraction | [#62](https://github.com/paraversal/file-crow/pull/62), [#63](https://github.com/paraversal/file-crow/pull/63), [#64](https://github.com/paraversal/file-crow/pull/64) |
-| Audit and fixes | Through-M9 audit and seven fix batches | [#83](https://github.com/paraversal/file-crow/pull/83)–[#87](https://github.com/paraversal/file-crow/pull/87), [#89](https://github.com/paraversal/file-crow/pull/89)–[#91](https://github.com/paraversal/file-crow/pull/91) |
+| Audit and fixes | Through-M9 audit, seven fix batches and the saved-rename fix | [#83](https://github.com/paraversal/file-crow/pull/83)–[#87](https://github.com/paraversal/file-crow/pull/87), [#89](https://github.com/paraversal/file-crow/pull/89)–[#92](https://github.com/paraversal/file-crow/pull/92) |
 
 Not planned: Solarized Light contrast in the shared theme index (P9E); Crow uses the theme index as it is.
 
