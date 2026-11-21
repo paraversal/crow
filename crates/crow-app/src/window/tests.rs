@@ -607,6 +607,39 @@ fn the_column_picker_toggles_list_columns_with_the_keyboard(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn column_picker_tabs_to_each_footer_action(cx: &mut TestAppContext) {
+    let root = fixture("chooser-footer");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    let open_picker = |cx: &mut VisualTestContext| {
+        view.update_in(cx, |this, window, cx| this.choose_list_columns(&crate::actions::ChooseListColumns, window, cx));
+        view.read_with(cx, |this, _| {
+            let picker = this.column_picker.as_ref().unwrap();
+            (picker.focus.clone(), picker.buttons.clone())
+        })
+    };
+
+    let (choices, buttons) = open_picker(&mut cx);
+    cx.simulate_keystrokes("shift-tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[2].clone()));
+    cx.simulate_keystrokes("tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(choices));
+    cx.simulate_keystrokes("down space tab tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[1].clone()));
+    cx.simulate_keystrokes("space");
+    assert!(view.read_with(&cx, |this, _| this.column_picker.is_none()));
+    let (_, buttons) = open_picker(&mut cx);
+    cx.simulate_keystrokes("down space");
+    let changed = view.read_with(&cx, |this, _| this.column_picker.as_ref().unwrap().columns_for_test().to_vec());
+    cx.simulate_keystrokes("tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[0].clone()));
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |this, _| this.column_picker.is_none()));
+    cx.update(|_, cx| assert_eq!(cx.global::<Ui>().views.resolve(Path::new("/another-folder")).columns.0, changed));
+}
+
+#[gpui::test]
 fn no_matches_show_the_folder_summary(cx: &mut TestAppContext) {
     let root = fixture("no-match-summary");
     let src = root.join("src");
@@ -7563,16 +7596,35 @@ fn control_command_s_hides_and_shows_the_sidebar(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn why_sheet_keeps_focus_on_arrows_and_tab(cx: &mut TestAppContext) {
+fn why_sheet_scrolls_details_and_keeps_the_footer_reachable(cx: &mut TestAppContext) {
     let root = fixture("why-focus");
-    let (view, mut cx) = open(cx, &root);
+    let folder = root.join("a deep folder with a long name".repeat(5)).join("another long folder".repeat(8));
+    std::fs::create_dir_all(&folder).expect("create the deep fixture");
+    let (view, mut cx) = open_sized(cx, &folder, 760., 400.);
+    settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-j");
-    let focus = view.read_with(&cx, |w, _| w.why.clone()).expect("Why opens");
-    cx.simulate_keystrokes("right down tab");
-    assert!(view.read_with(&cx, |w, _| w.why.is_some()), "the sheet stays open");
-    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(focus), "focus stays in the sheet");
+    let (details, buttons, scroll) = view.read_with(&cx, |w, _| {
+        let why = w.why.as_ref().expect("Why opens");
+        (why.focus.clone(), why.buttons.clone(), why.scroll.clone())
+    });
+    for selector in ["why-open-file", "why-defaults", "why-close"] {
+        let button = cx.debug_bounds(selector).expect("the footer button is drawn");
+        assert!(button.bottom() <= px(400.), "{selector} must fit: {button:?}");
+    }
+    let details_bottom = cx.debug_bounds("why-details").unwrap().bottom();
+    assert!(details_bottom < cx.debug_bounds("why-close").unwrap().top());
+    assert!(scroll.max_offset().y > px(0.), "the long details overflow");
+    cx.simulate_keystrokes("right down");
+    assert!(scroll.offset().y < px(0.), "the keyboard scrolls the details");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(details));
+    cx.simulate_keystrokes("tab tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[2].clone()));
+    cx.simulate_keystrokes("shift-tab");
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(buttons[0].clone()));
     let found = violations(&view, &mut cx);
     assert!(found.is_empty(), "{found:?}");
+    cx.simulate_keystrokes("shift-tab shift-tab space");
+    assert!(view.read_with(&cx, |w, _| w.why.is_none()), "Space activates Close");
 }
 
 #[gpui::test]
@@ -7591,7 +7643,7 @@ fn a_pending_rename_does_not_take_focus_from_an_overlay(cx: &mut TestAppContext)
         folder.update(cx, |folder, cx| folder.reload(cx));
     });
     settle(&view, &mut cx);
-    let why = view.read_with(&cx, |w, _| w.why.clone()).expect("Why opens");
+    let why = view.read_with(&cx, |w, _| w.why.as_ref().map(|why| why.focus.clone())).expect("Why opens");
     cx.simulate_keystrokes("down");
     assert_eq!(cx.update(|window, cx| window.focused(cx)), Some(why), "focus stays in the sheet");
     assert!(violations(&view, &mut cx).is_empty());
