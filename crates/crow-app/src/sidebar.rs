@@ -1987,20 +1987,25 @@ impl Render for Sidebar {
                 let collapsed = *collapsed;
                 current_section = Some(id.clone());
                 let moving = section_progress(&id);
-                // Full crossfades the two chevrons as the section moves (text glyphs don't rotate).
-                let chevron: gpui::AnyElement = match moving {
+                // One fixed-size box in every state, so the label never shifts. Full
+                // crossfades the two glyphs as the section moves (text glyphs don't rotate).
+                let open = match moving {
                     Some((motion, t)) if mode == Effective::Full => {
-                        let open = if motion.opening { t } else { 1.0 - t };
-                        div()
-                            .relative()
-                            .w(px(10.))
-                            .h(px(14.))
-                            .child(div().absolute().top_0().left_0().opacity(1.0 - open).child("▸"))
-                            .child(div().absolute().top_0().left_0().opacity(open).child("▾"))
-                            .into_any_element()
+                        if motion.opening {
+                            t
+                        } else {
+                            1.0 - t
+                        }
                     }
-                    _ => (if collapsed { "▸" } else { "▾" }).into_any_element(),
+                    _ => f32::from(!collapsed),
                 };
+                let chevron = div()
+                    .relative()
+                    .flex_none()
+                    .w(px(10.))
+                    .h(px(14.))
+                    .child(div().absolute().top_0().left_0().opacity(1.0 - open).child("▸"))
+                    .child(div().absolute().top_0().left_0().opacity(open).child("▾"));
                 kinds.push((None, None));
                 let i = index;
                 index += 1;
@@ -2020,9 +2025,9 @@ impl Render for Sidebar {
                         .aria_size_of_set(selectable_count)
                         .aria_selected(cursor)
                         .when(cursor, |header| header.aria_active_descendant().shadow(cursor_ring(&theme)))
+                        .mt(px(10.))
                         .px_2()
-                        .pt_3()
-                        .pb_1()
+                        .py(px(3.))
                         .rounded_md()
                         .flex()
                         .items_center()
