@@ -117,3 +117,146 @@ pub fn install_with(overrides: &KeyOverrides, cx: &mut App) {
     cx.bind_keys(crate::text_input::keymap());
     cx.bind_keys(crate::settings_window::keymap());
 }
+
+/// Every binding in force for one layer: the defaults with the user's keys.
+pub fn effective(layer: KeymapLayer, cx: &App) -> Vec<KeyBinding> {
+    let overrides = cx.try_global::<Ui>().map(|ui| ui.keys.clone()).unwrap_or_default();
+    match layer {
+        KeymapLayer::Finder => apply_layer(crate::actions::finder_keymap(), layer, &overrides.finder, cx).0,
+        KeymapLayer::Vim => apply_layer(crate::actions::vim_keymap(), layer, &overrides.vim, cx).0,
+    }
+}
+
+/// One line of Settings ▸ Keyboard.
+#[derive(Clone, Debug)]
+pub struct ShortcutRow {
+    pub id: CommandId,
+    pub label: &'static str,
+    /// The menu the command lives in, for grouping and search.
+    pub group: &'static str,
+    /// Normalised key sequences, empty when unbound.
+    pub keys: Vec<String>,
+    /// Whether `keys.toml` overrides this command in the layer.
+    pub changed: bool,
+}
+
+fn keys_of(bindings: &[KeyBinding], command: &crate::palette::Command) -> Vec<String> {
+    bindings.iter().filter(|b| b.action().partial_eq(command.action)).map(key_text).collect()
+}
+
+/// Every command with the keys it has in `layer`, in menu order.
+pub fn rows(layer: KeymapLayer, cx: &App) -> Vec<ShortcutRow> {
+    let bindings = effective(layer, cx);
+    let overrides = cx.try_global::<Ui>().map(|ui| ui.keys.layer(layer).clone()).unwrap_or_default();
+    COMMANDS
+        .iter()
+        .map(|command| ShortcutRow {
+            id: command.id,
+            label: command.label,
+            group: command.menu.map_or("Commands", |slot| slot.menu.title()),
+            keys: keys_of(&bindings, command),
+            changed: overrides.contains_key(command.id.key()),
+        })
+        .collect()
+}
+
+/// Another command (or navigation key) that a new shortcut would collide with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conflict {
+    pub label: String,
+    /// The command, when it is one the editor can change.
+    pub command: Option<CommandId>,
+    /// The key text that collides, normalised.
+    pub key: String,
+}
+
+/// Whether two predicates can both hold in one of the real focus stacks.
+fn overlap(a: Option<&Rc<KeyBindingContextPredicate>>, b: Option<&Rc<KeyBindingContextPredicate>>) -> bool {
+    use crate::keys::context_stack;
+    const SCOPES: [KeyScope; 13] = [
+        KeyScope::Window,
+        KeyScope::List,
+        KeyScope::Columns,
+        KeyScope::ListFiltered,
+        KeyScope::ColumnsFiltered,
+        KeyScope::Sidebar,
+        KeyScope::Filter,
+        KeyScope::PathBar,
+        KeyScope::Search,
+        KeyScope::SearchResults,
+        KeyScope::Palette,
+        KeyScope::ThemePicker,
+        KeyScope::Sheet,
+    ];
+    [KeymapLayer::Finder, KeymapLayer::Vim].into_iter().any(|layer| {
+        SCOPES.into_iter().any(|scope| {
+            let stack = context_stack(scope, layer);
+            a.is_none_or(|p| p.eval(&stack)) && b.is_none_or(|p| p.eval(&stack))
+        })
+    })
+}
+
+/// The bindings that `sequence` would collide with if given to `command` in `layer`.
+pub fn conflicts(layer: KeymapLayer, command: CommandId, sequence: &str, cx: &App) -> Vec<Conflict> {
+    let Some(this) = COMMANDS.iter().find(|c| c.id == command) else { return Vec::new() };
+    let mine = effective(layer, cx);
+    let predicate = mine
+        .iter()
+        .find(|b| b.action().partial_eq(this.action))
+        .and_then(|b| b.predicate())
+        .or_else(|| KeyBindingContextPredicate::parse(default_context(this.scope, layer)).ok().map(Rc::new));
+    let mut out: Vec<Conflict> = Vec::new();
+    for l in [KeymapLayer::Finder, KeymapLayer::Vim] {
+        for binding in effective(l, cx) {
+            if binding.action().partial_eq(this.action) || binding.action().partial_eq(&NoAction {}) {
+                continue;
+            }
+            let key = key_text(&binding);
+            if !crow_core::keymap_edit::sequences_conflict(sequence, &key)
+                || !overlap(predicate.as_ref(), binding.predicate().as_ref())
+            {
+                continue;
+            }
+            let other = COMMANDS.iter().find(|c| binding.action().partial_eq(c.action));
+            let label = other.map_or_else(|| binding.action().name().to_owned(), |c| c.label.to_owned());
+            let found = Conflict { label, command: other.map(|c| c.id), key };
+            if !out.contains(&found) {
+                out.push(found);
+            }
+        }
+    }
+    out
+}
+
+/// A binding that only draws `sequence`: the caps and spoken form for a row.
+pub fn display(sequence: &str, cx: &App) -> Option<KeyBinding> {
+    KeyBinding::load(sequence, Box::new(NoAction {}), None, false, None, cx).ok()
+}
+
+/// Commands whose key collides with another binding that can be active with it.
+pub fn duplicates(layer: KeymapLayer, cx: &App) -> std::collections::HashSet<CommandId> {
+    let mut out = std::collections::HashSet::new();
+    let bindings = effective(layer, cx);
+    let others: Vec<(KeymapLayer, Vec<KeyBinding>)> =
+        [KeymapLayer::Finder, KeymapLayer::Vim].into_iter().map(|l| (l, effective(l, cx))).collect();
+    for command in COMMANDS {
+        let mine: Vec<&KeyBinding> = bindings.iter().filter(|b| b.action().partial_eq(command.action)).collect();
+        'command: for binding in mine {
+            let key = key_text(binding);
+            for (_, list) in &others {
+                for other in list {
+                    if other.action().partial_eq(command.action) || other.action().partial_eq(&NoAction {}) {
+                        continue;
+                    }
+                    if crow_core::keymap_edit::sequences_conflict(&key, &key_text(other))
+                        && overlap(binding.predicate().as_ref(), other.predicate().as_ref())
+                    {
+                        out.insert(command.id);
+                        break 'command;
+                    }
+                }
+            }
+        }
+    }
+    out
+}

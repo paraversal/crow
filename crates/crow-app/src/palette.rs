@@ -67,7 +67,7 @@ pub struct MenuSlot {
     pub title: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CommandId {
     NewTab,
     CloseTab,

@@ -141,39 +141,6 @@ pub fn sequences_conflict(a: &str, b: &str) -> bool {
     n > 0 && a[..n] == b[..n]
 }
 
-/// Contexts that never hold at the same time. `Filter`, `Search` and the
-/// modifiers of a list (`ColumnView`, `vim`) are not exclusive.
-const EXCLUSIVE: [&str; 6] = ["Sidebar", "FileList", "SearchResults", "Sheet", "ThemePicker", "Palette"];
-
-struct Predicate {
-    on: Vec<String>,
-    off: Vec<String>,
-}
-
-fn parse_predicate(source: &str) -> Option<Predicate> {
-    let mut p = Predicate { on: Vec::new(), off: Vec::new() };
-    for atom in source.split("&&").flat_map(str::split_whitespace) {
-        match atom.strip_prefix('!') {
-            Some(name) => p.off.push(name.to_owned()),
-            None => p.on.push(atom.to_owned()),
-        }
-    }
-    Some(p)
-}
-
-/// Whether two binding contexts can be active together. Unknown shapes count
-/// as overlapping, so a warning errs on the side of showing.
-pub fn contexts_overlap(a: &str, b: &str) -> bool {
-    let (Some(a), Some(b)) = (parse_predicate(a), parse_predicate(b)) else {
-        return true;
-    };
-    if a.on.iter().any(|x| b.off.contains(x)) || b.on.iter().any(|x| a.off.contains(x)) {
-        return false;
-    }
-    let pick = |p: &Predicate| p.on.iter().find(|x| EXCLUSIVE.contains(&x.as_str())).cloned();
-    !matches!((pick(&a), pick(&b)), (Some(x), Some(y)) if x != y)
-}
-
 /// Why a key sequence cannot be assigned to any command, or `None`.
 pub fn reserved_reason(sequence: &str) -> Option<&'static str> {
     Some(match sequence {
@@ -187,6 +154,20 @@ pub fn reserved_reason(sequence: &str) -> Option<&'static str> {
         "escape" => "Escape cancels and closes things",
         _ => return None,
     })
+}
+
+/// Why `sequence` cannot be assigned in `layer`, or `None`. Reserved keys belong
+/// to macOS or the app frame; in the Finder layer a bare letter or digit would
+/// fight type-to-select (the Vim layer binds plain keys on purpose).
+pub fn assign_problem(layer: KeymapLayer, sequence: &str) -> Option<String> {
+    if let Some(reason) = reserved_reason(sequence) {
+        return Some(reason.to_owned());
+    }
+    let bare = |step: &str| step.chars().count() == 1 && step.chars().all(|c| c.is_alphanumeric());
+    if layer == KeymapLayer::Finder && sequence.split_whitespace().any(bare) {
+        return Some("Plain letters and digits select files by typing; add ⌘, ⌃ or ⌥".to_owned());
+    }
+    None
 }
 
 /// `keys.toml` problems carry what is wrong; the file stays authoritative, so
@@ -316,22 +297,22 @@ mod tests {
     }
 
     #[test]
-    fn contexts_overlap_unless_siblings_or_negated() {
-        assert!(contexts_overlap("Crow", "FileList && !Filter"));
-        assert!(contexts_overlap("Crow", "Sheet"));
-        assert!(!contexts_overlap("Sidebar", "FileList"));
-        assert!(!contexts_overlap("Sidebar && vim", "SearchResults && vim"));
-        assert!(!contexts_overlap("FileList && !Filter", "Filter"));
-        assert!(contexts_overlap("FileList && !Filter", "FileList && Filtered && !Filter"));
-        assert!(contexts_overlap("FileList", "FileList && ColumnView"));
-    }
-
-    #[test]
     fn reserved_keys_carry_a_reason() {
         assert!(reserved_reason("cmd-q").unwrap().contains("quits"));
         assert!(reserved_reason("cmd-space").is_some());
         assert!(reserved_reason("cmd-k").is_none());
         assert!(reserved_reason("cmd-c").is_none(), "⌘C conflicts with Copy rather than being reserved");
+    }
+
+    #[test]
+    fn plain_letters_are_refused_in_the_finder_layer_only() {
+        assert!(assign_problem(KeymapLayer::Finder, "a").is_some());
+        assert!(assign_problem(KeymapLayer::Finder, "g g").is_some());
+        assert!(assign_problem(KeymapLayer::Vim, "g g").is_none());
+        assert!(assign_problem(KeymapLayer::Finder, "cmd-a").is_none());
+        assert!(assign_problem(KeymapLayer::Finder, "/").is_none());
+        assert!(assign_problem(KeymapLayer::Finder, "f2").is_none());
+        assert!(assign_problem(KeymapLayer::Vim, "cmd-q").is_some());
     }
 
     #[test]

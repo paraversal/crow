@@ -763,14 +763,28 @@ pub fn reload_config(cx: &mut App) {
         crate::icon_packs::reload(cx);
     }
     if keys {
-        crate::keymap::install(cx);
-        crate::menus::refresh(cx);
+        apply_keys(cx);
     }
     reload_saved_queries(cx);
     refresh_feedback(cx);
     refresh_translucency(cx);
     refresh_app_icon(cx);
     crate::plugins::reload(cx);
+    cx.refresh_windows();
+}
+
+/// Rebind from `keys.toml` and refresh everything that shows a key.
+fn apply_keys(cx: &mut App) {
+    crate::keymap::install(cx);
+    crate::menus::refresh(cx);
+    cx.refresh_windows();
+}
+
+/// Reload `keys.toml` after Settings wrote it.
+pub fn reload_keys(cx: &mut App) {
+    if cx.global_mut::<Ui>().load_keys() {
+        apply_keys(cx);
+    }
     cx.refresh_windows();
 }
 
