@@ -2948,9 +2948,14 @@ impl Render for SettingsWindow {
     }
 }
 
+fn category_colors(theme: &Theme, focused: bool) -> (gpui::Rgba, gpui::Rgba) {
+    (color(theme.role("fg")), if focused { active_selection(theme) } else { inactive_selection(theme) })
+}
+
 impl SettingsWindow {
     fn sidebar(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let focused = self.sidebar.is_focused(window);
+        let (text, fill) = category_colors(theme, focused);
         let count = Category::ALL.len();
         let mut rows = Vec::new();
         for (index, category) in Category::ALL.into_iter().enumerate() {
@@ -2958,7 +2963,6 @@ impl SettingsWindow {
             // selected page until the query is cleared.
             let selected = self.query.is_empty() && category == self.category;
             let cursor = category == self.sidebar_cursor && focused;
-            let fill = if focused { active_selection(theme) } else { inactive_selection(theme) };
             let row = div()
                 .id(("settings-category", index))
                 .debug_selector({
@@ -2971,9 +2975,7 @@ impl SettingsWindow {
                 .aria_position_in_set(index + 1)
                 .aria_size_of_set(count)
                 .when(selected, |row| row.bg(fill))
-                .when(selected && focused, |row| row.text_color(color(theme.role("on-accent"))))
-                .when(selected && !focused, |row| row.text_color(color(theme.role("fg"))))
-                .when(!selected, |row| row.text_color(color(theme.role("fg"))))
+                .text_color(text)
                 .when(cursor, |row| row.aria_active_descendant())
                 .when(cursor && window.last_input_was_keyboard(), |row| row.shadow(cursor_ring(theme)))
                 .px(px(9.))
@@ -3839,6 +3841,27 @@ mod tests {
         assert!(results.contains(&ControlId::OpenSavedQueriesToml), "search finds the Config Files link: {results:?}");
     }
 
+    #[test]
+    fn selected_settings_category_has_readable_composited_text_contrast() {
+        fn luminance(color: gpui::Rgba) -> f32 {
+            let linear = |c: f32| {
+                if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+        }
+        let schemes = tempfile::tempdir().unwrap();
+        for id in ["finder-light", "finder-dark", "catppuccin-mocha"] {
+            let theme = crow_theme::load_theme(schemes.path(), id).unwrap();
+            for focused in [false, true] {
+                let (text, fill) = category_colors(&theme, focused);
+                let text = luminance(text);
+                let base = luminance(color(theme.role("bg")).blend(fill));
+                let contrast = (text.max(base) + 0.05) / (text.min(base) + 0.05);
+                assert!(contrast >= 4.5, "{id}, focused={focused}: {contrast:.2}:1");
+            }
+        }
+    }
+
     #[gpui::test]
     fn sidebar_arrows_move_the_cursor_and_return_chooses(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
@@ -3904,7 +3927,7 @@ mod tests {
         assert_eq!(view.read_with(&vcx, |view, cx| view.visible_controls(cx)), vec![ControlId::Keymap]);
         assert!(vcx.debug_bounds("settings-keymap-control").is_some(), "the category row is rendered in results");
         assert!(vcx.debug_bounds("settings-theme-control").is_none(), "a nonmatching category control is not mounted");
-        assert!(vcx.debug_bounds("Behaviour").is_some(), "its category heading is rendered");
+        assert!(vcx.debug_bounds("Behavior").is_some(), "its category heading is rendered");
 
         vcx.simulate_keystrokes("tab");
         assert_eq!(vcx.update(|window, cx| view.read(cx).focused_control(window)), Some(ControlId::Keymap));

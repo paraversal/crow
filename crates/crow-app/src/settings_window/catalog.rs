@@ -50,7 +50,7 @@ impl Category {
     pub(super) fn label(self) -> &'static str {
         match self {
             Category::Appearance => "Appearance",
-            Category::Behaviour => "Behaviour",
+            Category::Behaviour => "Behavior",
             Category::ViewsPreview => "Views & Preview",
             Category::Search => "Search",
             Category::Plugins => "Plugins",
