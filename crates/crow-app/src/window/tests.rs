@@ -3825,6 +3825,50 @@ fn sidebar_favorites_use_a_pack_unless_they_have_their_own_icon(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn sidebar_tag_and_saved_query_rows_keep_their_glyphs_under_a_generic_folder_pack(cx: &mut TestAppContext) {
+    const GLYPH: &str =
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/></svg>"#;
+    let root = fixture("sidebar-pack-virtual");
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        let config = cx.global::<Ui>().config_dir.clone();
+        let home = cx.global::<Ui>().home.clone();
+        let pack = config.join("icon-packs/sample");
+        std::fs::create_dir_all(&pack).expect("pack dir");
+        std::fs::write(pack.join("pack.toml"), "api = 1\n[generic]\nfolder = { icon = \"folder.svg\" }\n")
+            .expect("pack");
+        std::fs::write(pack.join("folder.svg"), GLYPH).expect("glyph");
+        std::fs::write(config.join("settings.toml"), "icon_pack = \"sample\"\n").expect("settings");
+        crate::ui::reload_config(cx);
+        let snapshot = crate::icon_packs::load_catalog(&config, &home).expect("catalog");
+        cx.global_mut::<crate::icon_packs::IconPacks>().install_for_tests(snapshot);
+    });
+    write_config(
+        &view,
+        &mut cx,
+        "sidebar.toml",
+        &format!(
+            "pinned_tags = [\"Work\"]\n[[group]]\nname = \"Favorites\"\nitems = [{{ path = \"{}\" }}]\n[recent]\nshow = false\n[sections]\norder = [\"tags\", \"saved-queries\"]\n",
+            root.display()
+        ),
+    );
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &saved_queries_toml(&[("pdfs", "PDFs", &root.display().to_string(), Some("pdf"))]),
+    );
+    settle(&view, &mut cx);
+    let mut count = |name: &str| {
+        (0..20)
+            .filter(|i| cx.debug_bounds(Box::leak(format!("sidebar-{name}-{i}").into_boxed_str())).is_some())
+            .count()
+    };
+    assert_eq!(count("pack-icon"), 1, "only the favorite takes the pack's generic folder");
+    assert_eq!(count("line-icon"), 1, "the pinned tag keeps its tag glyph");
+    assert_eq!(count("folder-icon"), 1, "the saved query keeps its own glyph");
+}
+
+#[gpui::test]
 fn columns_give_names_room_without_changing_width_on_selection(cx: &mut TestAppContext) {
     let root = fixture("columns-room");
     std::fs::write(root.join("report with a long descriptive filename.pdf"), "").expect("create fixture");
