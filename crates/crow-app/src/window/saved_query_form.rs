@@ -126,10 +126,11 @@ impl SavedQueryForm {
             },
             |saved| saved.name.clone(),
         );
-        let root = existing
-            .as_ref()
-            .and_then(|saved| saved.root.clone())
-            .or_else(|| (scope == SavedScope::Folder).then(|| folder.map(|folder| home_relative(&folder))).flatten());
+        let root = existing.as_ref().and_then(|saved| saved.root.clone()).or_else(|| {
+            (scope == SavedScope::Folder)
+                .then(|| folder.map(|folder| crow_core::abbreviate_home(&folder, &cx.global::<Ui>().home)))
+                .flatten()
+        });
         let (kind, days) = predicates;
         let focus = cx.focus_handle();
         let name = field(name, "Name", "Saved search name", cx);
@@ -444,17 +445,7 @@ impl SavedQueryForm {
                 .child(text)
         };
         let button = |id: &'static str, text: &'static str, primary: bool| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .role(Role::Button)
-                .aria_label(text)
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .bg(color(if primary { theme.role("accent") } else { theme.role("surface-raised") }))
-                .text_color(color(if primary { theme.role("on-accent") } else { theme.role("fg") }))
-                .child(text)
+            crate::chrome::sheet_button(id, text, primary, &theme)
         };
         let choice = |id, label, selected, action| control(choice(id, label, selected), action);
         let toggle = |id, label, selected, action| control(toggle(id, label, selected), action);

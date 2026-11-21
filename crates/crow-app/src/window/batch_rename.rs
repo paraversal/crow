@@ -405,14 +405,7 @@ impl CrowWindow {
     pub(super) fn batch_rename_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Sheet::BatchRename(sheet)) = &self.sheet else { return };
         let order = sheet.tab_order(cx);
-        let current = order.iter().position(|focus| focus.is_focused(window));
-        let next = match (current, forward) {
-            (Some(index), true) => (index + 1) % order.len(),
-            (Some(index), false) => (index + order.len() - 1) % order.len(),
-            (None, true) => 0,
-            (None, false) => order.len() - 1,
-        };
-        window.focus(&order[next], cx);
+        crate::chrome::cycle_focus(&order, forward, window, cx);
         cx.notify();
     }
 
@@ -579,21 +572,12 @@ impl CrowWindow {
         };
         let can_submit = sheet.can_submit();
         let button = |id: &'static str, label: &'static str, primary: bool, focus: &FocusHandle| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .role(Role::Button)
-                .aria_label(label)
-                .aria_disabled(primary && !can_submit)
+            let dead = primary && !can_submit;
+            crate::chrome::sheet_button(id, label, primary && can_submit, &theme)
+                .aria_disabled(dead)
                 .track_focus(focus)
                 .focus_visible(|style| style.shadow(cursor_ring(&theme)))
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .bg(color(if primary && can_submit { theme.role("accent") } else { theme.role("surface-raised") }))
-                .text_color(if primary && can_submit { color(theme.role("on-accent")) } else { fg })
-                .when(primary && !can_submit, |el| el.opacity(0.5))
-                .child(label)
+                .when(dead, |el| el.opacity(0.5))
         };
         let body = div()
             .id("batch-rename")

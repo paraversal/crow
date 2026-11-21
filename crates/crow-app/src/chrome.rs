@@ -284,6 +284,44 @@ pub fn sheet_panel(id: impl Into<gpui::ElementId>, width: SheetWidth, theme: &cr
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
+/// A sheet's push button: raised, or accent-filled when `primary`. Callers add
+/// focus tracking, a disabled look and the click.
+pub fn sheet_button(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    primary: bool,
+    theme: &crow_theme::Theme,
+) -> Stateful<Div> {
+    let label: SharedString = label.into();
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .bg(color(if primary { theme.role("accent") } else { theme.role("surface-raised") }))
+        .text_color(color(if primary { theme.role("on-accent") } else { theme.role("fg") }))
+        .child(label)
+}
+
+/// Move focus to the next (or previous) control, wrapping at the ends; from
+/// outside the list, to its first (or last).
+pub fn cycle_focus(controls: &[gpui::FocusHandle], forward: bool, window: &mut Window, cx: &mut App) {
+    if controls.is_empty() {
+        return;
+    }
+    let current = controls.iter().position(|control| control.is_focused(window));
+    let next = match (current, forward) {
+        (Some(index), true) => (index + 1) % controls.len(),
+        (Some(index), false) => (index + controls.len() - 1) % controls.len(),
+        (None, true) => 0,
+        (None, false) => controls.len() - 1,
+    };
+    window.focus(&controls[next], cx);
+}
+
 /// A full-window scrim with a centered panel. A left mouse-down outside the
 /// panel runs the overlay's own cancel path (`on_dismiss`), exactly like Esc.
 pub fn sheet(

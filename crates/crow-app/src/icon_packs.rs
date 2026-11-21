@@ -107,6 +107,12 @@ pub struct Resolver {
     source: Arc<str>,
 }
 
+/// The icon source for items under `dir`: its `views.toml` override, else
+/// `settings.toml`'s pack.
+pub fn effective_icon_source(ui: &Ui, dir: &Path) -> String {
+    ui.views.resolve(dir).icon_source.map_or_else(|| ui.settings.icon_pack.clone(), |(source, _)| source)
+}
+
 impl Resolver {
     pub fn for_source(cx: &App, source: &str) -> Self {
         if source == NATIVE_ICON_SOURCE {

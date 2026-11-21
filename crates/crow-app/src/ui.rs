@@ -905,6 +905,7 @@ pub fn save_settings_category(id: &str, cx: &mut App) {
             if let Some(previous) = previous {
                 let _ = previous.await;
             }
+            // io-ok: runs inside the `background_spawn` above.
             crow_core::write_atomic(&state_dir.join("settings-category"), &id).map_err(|error| error.to_string())
         })
         .shared();

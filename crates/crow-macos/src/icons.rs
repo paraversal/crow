@@ -6,7 +6,7 @@ use std::sync::Arc;
 use objc2::AnyThread;
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSWorkspace};
 use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
-use objc2_uniform_type_identifiers::{UTType, UTTypeFolder};
+use objc2_uniform_type_identifiers::{UTType, UTTypeData, UTTypeFolder};
 
 use crate::{main_thread, ns_string};
 
@@ -40,15 +40,14 @@ pub fn type_icon_png(ext: &str, is_dir: bool, points: u32) -> Option<Arc<Vec<u8>
         return hit;
     }
     // SAFETY: the UTType constants are immutable for the process lifetime.
-    let identifier = if is_dir {
-        unsafe { UTTypeFolder }.identifier().to_string()
+    let image = if is_dir {
+        NSWorkspace::sharedWorkspace().iconForContentType(unsafe { UTTypeFolder })
     } else {
-        UTType::typeWithFilenameExtension(&NSString::from_str(ext))
-            .map(|content_type| content_type.identifier().to_string())
-            .unwrap_or_else(|| "public.data".into())
+        match UTType::typeWithFilenameExtension(&NSString::from_str(ext)) {
+            Some(content_type) => NSWorkspace::sharedWorkspace().iconForContentType(&content_type),
+            None => NSWorkspace::sharedWorkspace().iconForContentType(unsafe { UTTypeData }),
+        }
     };
-    #[allow(deprecated)]
-    let image = NSWorkspace::sharedWorkspace().iconForFileType(&NSString::from_str(&identifier));
     let png = png_of(&image, points * 2).map(Arc::new);
     CACHE.with(|c| c.borrow_mut().insert(key, png.clone()));
     png

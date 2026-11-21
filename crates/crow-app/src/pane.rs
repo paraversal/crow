@@ -694,19 +694,18 @@ impl Pane {
     /// The icon source this pane shows: the focused folder's `views.toml`
     /// override, else `settings.toml`'s pack.
     pub fn icon_source(&self, cx: &gpui::App) -> String {
+        self.column_icon_source(self.focused, cx)
+    }
+
+    fn column_icon_source(&self, column: usize, cx: &gpui::App) -> String {
         self.folders
-            .get(self.focused)
+            .get(column)
             .and_then(|folder| folder.read(cx).icon_source().map(str::to_owned))
             .unwrap_or_else(|| cx.global::<Ui>().settings.icon_pack.clone())
     }
 
     fn icon_resolver(&self, column: usize, cx: &gpui::App) -> crate::icon_packs::Resolver {
-        let source = self
-            .folders
-            .get(column)
-            .and_then(|folder| folder.read(cx).icon_source().map(str::to_owned))
-            .unwrap_or_else(|| cx.global::<Ui>().settings.icon_pack.clone());
-        crate::icon_packs::Resolver::for_source(cx, &source)
+        crate::icon_packs::Resolver::for_source(cx, &self.column_icon_source(column, cx))
     }
 
     /// Apply the `/` filter's tag constraint to the focused column.
@@ -4544,33 +4543,24 @@ impl Pane {
                     let thumbnail = thumbnail_service.as_ref().and_then(|service| service.read(cx).image(&key));
                     let thumbnail_known =
                         thumbnail_service.as_ref().is_some_and(|service| service.read(cx).is_cached(&key));
-                    let thumbnailable = thumbnail_service.is_some()
-                        && (!entry.is_dir || entry.is_package())
-                        && !entry.is_symlink
-                        && !entry.dataless
-                        && cloud.is_none_or(CloudStatus::is_local)
-                        && !crate::style::native_cloud_icon(cloud, &entry.path);
+                    let thumbnailable = thumbnail_service.is_some() && crate::thumbnails::thumbnailable(&entry, cloud);
                     if thumbnail.is_none() && !thumbnail_known && thumbnailable {
                         thumbnail_requests.push(crate::thumbnails::ThumbnailRequest {
                             key: key.clone(),
                             gate: thumbnail_gate.clone(),
                         });
                     }
-                    let packed = (!crate::style::native_cloud_icon(cloud, &entry.path))
-                        .then(|| icons.resolve(&entry.path, entry.is_dir, entry.is_package()))
-                        .flatten();
                     let thumb = match thumbnail {
                         Some(image) => img(image).size(px(metrics.icon_size)).into_any_element(),
-                        None => match packed {
-                            Some(icon) => {
-                                crate::icons::pack_glyph(&icon.asset, metrics.icon_size, color(icon.color.rgb(theme)))
-                                    .into_any_element()
-                            }
-                            None => match cloud_icon(cloud, &entry.path, entry.is_dir, points) {
-                                Some(image) => img(image).size(px(metrics.icon_size)).into_any_element(),
-                                None => div().size(px(metrics.icon_size)).into_any_element(),
-                            },
-                        },
+                        None => crate::preview::path_icon(
+                            &icons,
+                            &entry.path,
+                            entry.is_dir,
+                            entry.is_package(),
+                            cloud,
+                            theme,
+                            metrics.icon_size,
+                        ),
                     };
                     let thumb = div()
                         .relative()
@@ -4750,12 +4740,8 @@ impl Pane {
                         .when_some(flash, |tile, tint| tile.child(div().absolute().inset_0().rounded_md().bg(tint)))
                         .when(cut, |tile| {
                             tile.child(
-                                div()
-                                    .absolute()
-                                    .inset(px(1.))
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(color(theme.role("accent"))),
+                                cut_outline(theme, true, true)
+                                    .debug_selector(|| format!("tile-cut-outline-{}", entry.name)),
                             )
                         })
                         .when(look.opacity < 1.0, |tile| tile.opacity(look.opacity))
@@ -5700,15 +5686,7 @@ fn row_icon(
     cloud: Option<CloudStatus>,
     icons: &crate::icon_packs::Resolver,
 ) -> Div {
-    let packed = (!crate::style::native_cloud_icon(cloud, &entry.path))
-        .then(|| icons.resolve(&entry.path, entry.is_dir, entry.is_package()))
-        .flatten();
-    let content = match packed {
-        Some(icon) => crate::icons::pack_glyph(&icon.asset, 16., color(icon.color.rgb(theme))).into_any_element(),
-        None => div()
-            .children(cloud_icon(cloud, &entry.path, entry.is_dir, 16).map(|i| img(i).size(px(16.))))
-            .into_any_element(),
-    };
+    let content = crate::preview::path_icon(icons, &entry.path, entry.is_dir, entry.is_package(), cloud, theme, 16.);
     div().relative().size(px(16.)).flex_none().child(div().opacity((1.0 - look.trash) * dim).child(content)).when(
         look.trash > 0.0,
         |slot| {

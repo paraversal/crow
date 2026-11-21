@@ -1971,9 +1971,12 @@ impl Render for Sidebar {
                     .into_any_element(),
                 None => match line_icon {
                     Some(glyph) => {
-                        let packed = matches!(row, Row::Favorite(..) | Row::PluginItem { .. })
-                            .then(|| icons.resolve(&path, true, false))
-                            .flatten();
+                        // Tag and Saved Query rows have no folder path: an icon pack's
+                        // `[generic].folder` must not replace their own glyph.
+                        let packed = (matches!(row, Row::Favorite(..) | Row::PluginItem { .. })
+                            && row.path().is_some())
+                        .then(|| icons.resolve(&path, true, false))
+                        .flatten();
                         if let Some(packed) = packed {
                             let icon_tint = tint.map(color).unwrap_or_else(|| color(packed.color.rgb(&theme)));
                             div()

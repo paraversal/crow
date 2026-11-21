@@ -106,6 +106,7 @@ impl TagInventory for SystemInventory {
                     cancel.store(true, Ordering::Relaxed);
                     return;
                 }
+                // io-ok: tag discovery and search engines run on background threads.
                 if let Ok(tags) = crow_macos::tags_checked(&hit.path) {
                     for tag in tags {
                         names.entry(normalize_tag(&tag)).or_insert(tag);
@@ -131,6 +132,7 @@ pub struct SystemTags;
 
 impl crow_search::TagReader for SystemTags {
     fn read_tags(&self, path: &Path) -> Result<Vec<String>, String> {
+        // io-ok: tag discovery and search engines run on background threads.
         crow_macos::tags_checked(path)
     }
 }

@@ -88,6 +88,16 @@ impl Cache {
     }
 }
 
+/// Whether a row's thumbnail is worth requesting: a readable local file or
+/// package, never a folder, symlink or cloud placeholder.
+pub fn thumbnailable(entry: &crow_fs::Entry, cloud: Option<crow_fs::CloudStatus>) -> bool {
+    (!entry.is_dir || entry.is_package())
+        && !entry.is_symlink
+        && !entry.dataless
+        && cloud.is_none_or(crow_fs::CloudStatus::is_local)
+        && !crate::style::native_cloud_icon(cloud, &entry.path)
+}
+
 /// The platform call, behind a trait so tests never start Quick Look.
 pub trait Generator: Send + Sync {
     fn thumbnail(&self, path: &Path, points: u32) -> Option<Vec<u8>>;
@@ -97,6 +107,7 @@ struct QuickLook;
 
 impl Generator for QuickLook {
     fn thumbnail(&self, path: &Path, points: u32) -> Option<Vec<u8>> {
+        // io-ok: the thumbnail service calls this from a background task.
         crow_macos::thumbnail_png(path, f64::from(points))
     }
 }

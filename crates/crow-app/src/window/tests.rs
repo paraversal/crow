@@ -3688,6 +3688,33 @@ fn a_huge_copy_keeps_the_clipboard_in_crow(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn cut_items_get_the_shared_dashed_outline_in_icons_and_gallery(cx: &mut TestAppContext) {
+    let root = fixture("cut-outline-views");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-1");
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.mode()), ViewMode::Icons);
+    cx.simulate_keystrokes("cmd-c");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("tile-cut-outline-alpha").is_none(), "a copy is not outlined");
+    cx.simulate_keystrokes("cmd-x");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("tile-cut-outline-alpha").is_some(), "the cut tile is outlined");
+    assert!(cx.debug_bounds("tile-cut-outline-beta").is_none(), "an uncut tile is not");
+    assert!(cx.debug_bounds("drop-outline").is_none(), "the cut mark is not the drop outline");
+
+    cx.simulate_keystrokes("cmd-4");
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |pane, _| pane.mode()), ViewMode::Gallery);
+    assert!(cx.debug_bounds("gallery-cut-outline-alpha").is_some(), "the cut rail row is outlined");
+    assert!(cx.debug_bounds("gallery-cut-outline-beta").is_none(), "an uncut rail row is not");
+    assert!(cx.debug_bounds("drop-outline").is_none(), "the cut mark is not the drop outline");
+    cx.simulate_keystrokes("cmd-c");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("gallery-cut-outline-alpha").is_none(), "a new copy clears the outline");
+}
+
+#[gpui::test]
 fn copy_flashes_and_cut_is_marked(cx: &mut TestAppContext) {
     let root = fixture("copy-feedback");
     let (view, mut cx) = open(cx, &root);
@@ -3822,6 +3849,48 @@ fn sidebar_favorites_use_a_pack_unless_they_have_their_own_icon(cx: &mut TestApp
     write_config(&view, &mut cx, "sidebar.toml", &own);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("sidebar-pack-icon-0").is_none(), "a favorite's own icon wins");
+}
+
+#[gpui::test]
+fn sidebar_tag_and_saved_query_rows_keep_their_glyphs_under_a_generic_folder_pack(cx: &mut TestAppContext) {
+    const GLYPH: &str =
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/></svg>"#;
+    let root = fixture("sidebar-pack-virtual");
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        let config = cx.global::<Ui>().config_dir.clone();
+        let home = cx.global::<Ui>().home.clone();
+        let pack = config.join("icon-packs/sample");
+        std::fs::create_dir_all(&pack).expect("pack dir");
+        std::fs::write(pack.join("pack.toml"), "api = 1\n[generic]\nfolder = { icon = \"folder.svg\" }\n")
+            .expect("pack");
+        std::fs::write(pack.join("folder.svg"), GLYPH).expect("glyph");
+        std::fs::write(config.join("settings.toml"), "icon_pack = \"sample\"\n").expect("settings");
+        crate::ui::reload_config(cx);
+        let snapshot = crate::icon_packs::load_catalog(&config, &home).expect("catalog");
+        cx.global_mut::<crate::icon_packs::IconPacks>().install_for_tests(snapshot);
+    });
+    write_config(
+        &view,
+        &mut cx,
+        "sidebar.toml",
+        &format!(
+            "pinned_tags = [\"Work\"]\n[[group]]\nname = \"Favorites\"\nitems = [{{ path = \"{}\" }}]\n[recent]\nshow = false\n[sections]\norder = [\"tags\", \"saved-queries\"]\n",
+            root.display()
+        ),
+    );
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        &saved_queries_toml(&[("pdfs", "PDFs", &root.display().to_string(), Some("pdf"))]),
+    );
+    settle(&view, &mut cx);
+    let mut count = |name: &str| {
+        (0..20).filter(|i| cx.debug_bounds(Box::leak(format!("sidebar-{name}-{i}").into_boxed_str())).is_some()).count()
+    };
+    assert_eq!(count("pack-icon"), 1, "only the favorite takes the pack's generic folder");
+    assert_eq!(count("line-icon"), 1, "the pinned tag keeps its tag glyph");
+    assert_eq!(count("folder-icon"), 1, "the saved query keeps its own glyph");
 }
 
 #[gpui::test]
@@ -5997,7 +6066,11 @@ fn shipped_fixture_command_runs_through_the_real_service(cx: &mut TestAppContext
     let run = |cx: &mut VisualTestContext, saved_context: &crate::plugins::FileCommandContext| {
         effect_calls(cx);
         // Wait for this run's write, not the previous run's text.
-        cx.update(|_, cx| crate::effects::recording(cx).expect("tests install recording effects").clear_text());
+        cx.update(|_, cx| {
+            let recorder = crate::effects::recording(cx).expect("tests install recording effects");
+            recorder.clear_text();
+            recorder.take_written();
+        });
         cx.simulate_keystrokes("cmd-k");
         cx.run_until_parked();
         assert!(view.read_with(cx, |view, _| view.palette.is_some()), "⌘K opens the palette");
@@ -6048,10 +6121,11 @@ fn shipped_fixture_command_runs_through_the_real_service(cx: &mut TestAppContext
         }
         let calls = effect_calls(cx);
         let status = cx.read(|cx| cx.global::<crate::operations::Operations>().message.clone());
+        let written = cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").take_written());
         assert_eq!(
             calls.iter().filter(|call| matches!(call, Call::WriteText)).count(),
             1,
-            "one command activation writes once: {calls:?}; status={status:?}"
+            "one command activation writes once: {calls:?}; written={written:?}; status={status:?}"
         );
         assert_eq!(
             cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text())).as_deref(),
@@ -8844,6 +8918,35 @@ fn double_click(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
         button: gpui::MouseButton::Left,
         click_count: 2,
     });
+}
+
+#[gpui::test]
+fn path_edit_and_save_search_abbreviate_against_the_ui_home(cx: &mut TestAppContext) {
+    let root = fixture("ui-home");
+    let (view, mut cx) = open(cx, &root);
+    let home = root.parent().expect("fixture parent").to_path_buf();
+    assert_ne!(std::env::var_os("HOME").map(PathBuf::from), Some(home.clone()), "the env HOME is a different folder");
+    cx.update(|_, cx| cx.global_mut::<Ui>().home = home.clone());
+    let name = root.file_name().expect("fixture name").to_string_lossy().into_owned();
+
+    cx.simulate_keystrokes("cmd-l");
+    settle(&view, &mut cx);
+    assert_eq!(path_edit_text(&view, &cx), Some(format!("~/{name}/alpha")), "Cmd-L abbreviates against Ui.home");
+    cx.simulate_keystrokes("escape");
+
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("notes");
+    wait_for_search(&view, &mut cx);
+    let window = cx.update(|_, cx| cx.windows()[0]);
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |this, cx| this.save_search(&SaveSearch, window, cx));
+    })
+    .expect("open the save form");
+    let shown = view.read_with(&cx, |w, cx| match &w.sheet {
+        Some(Sheet::SavedQuery(form)) => form.root.read(cx).text().to_owned(),
+        _ => String::new(),
+    });
+    assert_eq!(shown, format!("~/{name}"), "the Save Search folder abbreviates against Ui.home");
 }
 
 #[gpui::test]

@@ -33,6 +33,7 @@ impl Previewer for QuickLookThumbnail {
         if gate.check(&entry.path, ReadHint::for_path(&entry.path)) != ReadDecision::Readable {
             return None;
         }
+        // io-ok: previewers run inside the preview loader's background task.
         crow_macos::thumbnail_png(&entry.path, f64::from(image_points)).map(|png| PreviewContent::Image(Arc::new(png)))
     }
 }

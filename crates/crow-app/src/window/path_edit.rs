@@ -43,7 +43,7 @@ impl CrowWindow {
         let typed = {
             let pane = self.pane().read(cx);
             let (target, _) = self.bar_target(pane, cx);
-            home_relative(&target)
+            crow_core::abbreviate_home(&target, &cx.global::<Ui>().home)
         };
         let input = cx.new(|cx| TextInput::new(typed.clone(), "Path", cx).bare().with_aria_label("Path"));
         input.update(cx, |input, cx| input.select_range(0..typed.len(), window, cx));

@@ -24,7 +24,7 @@ use gpui::{
 };
 
 use crate::folder_sizes::FolderSizes;
-use crate::info_pane::{SelectionSummary, TAG_SCAN_CAP};
+use crate::info_pane::{SelectionSummary, SelectionSummaryBuilder};
 use crate::style::kind;
 
 /// Candidates whose tags are read in one background batch.
@@ -773,61 +773,18 @@ impl Folder {
             return summary.clone();
         }
         let (bytes, folders) = self.selection_totals;
-        let mut count = 0;
-        let mut common_parent: Option<PathBuf> = None;
-        let mut parent_set = false;
-        let mut parent_mixed = false;
-        let mut common_kind: Option<(String, bool)> = None;
-        let mut kind_mixed = false;
-        let mut tag_paths = Vec::new();
+        let mut builder = SelectionSummaryBuilder::default();
         for row in self.rows.iter() {
             let entry = match row {
                 FlatRow::Own(i) => self.entries.get(*i),
                 FlatRow::Child(entry, _) => Some(entry),
             };
             let Some(entry) = entry else { continue };
-            if !self.selection.contains(&entry.path) {
-                continue;
-            }
-            count += 1;
-            let parent = entry.path.parent().map(Path::to_path_buf);
-            if !parent_set {
-                common_parent = parent;
-                parent_set = true;
-            } else if !parent_mixed && common_parent != parent {
-                parent_mixed = true;
-            }
-            if !kind_mixed {
-                let is_folder = entry.is_dir && !entry.is_package();
-                match &common_kind {
-                    None => {
-                        common_kind =
-                            Some(if is_folder { (String::new(), true) } else { (entry.ext().to_lowercase(), false) });
-                    }
-                    Some((ext, first_is_folder)) => {
-                        if *first_is_folder != is_folder || (!is_folder && !entry.ext().eq_ignore_ascii_case(ext)) {
-                            kind_mixed = true;
-                        }
-                    }
-                }
-            }
-            if tag_paths.len() < TAG_SCAN_CAP {
-                tag_paths.push(entry.path.clone());
+            if self.selection.contains(&entry.path) {
+                builder.add(&entry.path, entry.ext(), entry.is_dir && !entry.is_package());
             }
         }
-        let summary = SelectionSummary {
-            count,
-            bytes: Some(bytes),
-            folders,
-            kind: if kind_mixed {
-                None
-            } else {
-                common_kind.map(|(ext, is_folder)| crow_macos::kind_name(&ext, is_folder))
-            },
-            parent: if parent_mixed { None } else { common_parent },
-            tag_paths: tag_paths.into(),
-            tags_truncated: count > TAG_SCAN_CAP,
-        };
+        let summary = builder.finish(Some(bytes), folders);
         *self.selection_summary.borrow_mut() = Some((self.selection_generation, summary.clone()));
         summary
     }

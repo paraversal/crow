@@ -36,7 +36,7 @@ use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::cloud_status::{self, CloudStatusService};
 use crate::extensions::Ext;
 use crate::icons::{self, Glyph};
-use crate::info_pane::{InfoKey, InfoTarget, SelectionSummary, TAG_SCAN_CAP};
+use crate::info_pane::{InfoKey, InfoTarget, SelectionSummary, SelectionSummaryBuilder};
 use crate::keys::{self, KeyScope};
 use crate::operations::Operations;
 use crate::pane::{DraggedSelection, island_edges};
@@ -1946,61 +1946,19 @@ impl SearchView {
         {
             return summary.clone();
         }
-        let mut count = 0;
+        let mut builder = SelectionSummaryBuilder::default();
         let mut folders = 0;
-        let mut common_parent: Option<PathBuf> = None;
-        let mut parent_set = false;
-        let mut parent_mixed = false;
-        let mut common_kind: Option<(String, bool)> = None;
-        let mut kind_mixed = false;
-        let mut tag_paths = Vec::new();
         for row in &self.results {
             if !self.selection.contains(&row.path) {
                 continue;
             }
-            count += 1;
             if row.is_dir {
                 folders += 1;
             }
-            let parent = row.path.parent().map(Path::to_path_buf);
-            if !parent_set {
-                common_parent = parent;
-                parent_set = true;
-            } else if !parent_mixed && common_parent != parent {
-                parent_mixed = true;
-            }
-            if !kind_mixed {
-                let is_folder = row.is_dir && !row.is_package;
-                match &common_kind {
-                    None => {
-                        let ext = Path::new(&row.name).extension().and_then(|e| e.to_str()).unwrap_or("");
-                        common_kind = Some(if is_folder { (String::new(), true) } else { (ext.to_lowercase(), false) });
-                    }
-                    Some((ext, first_is_folder)) => {
-                        let this_ext = Path::new(&row.name).extension().and_then(|e| e.to_str()).unwrap_or("");
-                        if *first_is_folder != is_folder || (!is_folder && !this_ext.eq_ignore_ascii_case(ext)) {
-                            kind_mixed = true;
-                        }
-                    }
-                }
-            }
-            if tag_paths.len() < TAG_SCAN_CAP {
-                tag_paths.push(row.path.clone());
-            }
+            let ext = Path::new(&row.name).extension().and_then(|e| e.to_str()).unwrap_or("");
+            builder.add(&row.path, ext, row.is_dir && !row.is_package);
         }
-        let summary = SelectionSummary {
-            count,
-            bytes: None,
-            folders,
-            kind: if kind_mixed {
-                None
-            } else {
-                common_kind.map(|(ext, is_folder)| crow_macos::kind_name(&ext, is_folder))
-            },
-            parent: if parent_mixed { None } else { common_parent },
-            tag_paths: tag_paths.into(),
-            tags_truncated: count > TAG_SCAN_CAP,
-        };
+        let summary = builder.finish(None, folders);
         *self.summary_cache.borrow_mut() = Some((self.selection_generation, summary.clone()));
         summary
     }
@@ -2187,12 +2145,7 @@ impl SearchView {
     /// Search uses the origin folder's `views.toml` icon source, else the
     /// global pack. Re-resolved per render, so a config edit applies live.
     pub fn icon_source(&self, cx: &gpui::App) -> String {
-        let ui = cx.global::<Ui>();
-        ui.views
-            .resolve(&self.folder)
-            .icon_source
-            .map(|(source, _)| source)
-            .unwrap_or_else(|| ui.settings.icon_pack.clone())
+        crate::icon_packs::effective_icon_source(cx.global::<Ui>(), &self.folder)
     }
 
     #[cfg(test)]
@@ -3698,20 +3651,17 @@ impl SearchView {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().size(px(16.)).flex_none().opacity(content_opacity(row.hidden, false)).child({
-                                let packed = (!crate::style::native_cloud_icon(cloud, &row.path))
-                                    .then(|| icons.resolve(&row.path, row.is_dir, row.is_package))
-                                    .flatten();
-                                match packed {
-                                    Some(icon) => {
-                                        crate::icons::pack_glyph(&icon.asset, 16., color(icon.color.rgb(theme)))
-                                            .into_any_element()
-                                    }
-                                    None => cloud_icon(cloud, &row.path, row.is_dir, 16)
-                                        .map(|image| img(image).size(px(16.)).into_any_element())
-                                        .unwrap_or_else(|| div().into_any_element()),
-                                }
-                            }))
+                            .child(div().size(px(16.)).flex_none().opacity(content_opacity(row.hidden, false)).child(
+                                crate::preview::path_icon(
+                                    &icons,
+                                    &row.path,
+                                    row.is_dir,
+                                    row.is_package,
+                                    cloud,
+                                    theme,
+                                    16.,
+                                ),
+                            ))
                             .child(
                                 div()
                                     .flex_1()

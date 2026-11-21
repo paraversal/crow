@@ -7,7 +7,7 @@ use gpui::{Context, FocusHandle, FontWeight, IntoElement, Role, Toggled, Window,
 use crate::actions::{ChooseListColumns, SheetCancel, SheetConfirm};
 use crate::chrome::{self, SheetWidth};
 use crate::extensions::Ext;
-use crate::style::{active_selection, color};
+use crate::style::active_selection;
 use crate::ui::{self, Ui};
 
 use super::CrowWindow;
@@ -106,17 +106,8 @@ impl CrowWindow {
                     }))
             })
             .collect::<Vec<_>>();
-        let button = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .role(Role::Button)
-                .aria_label(label)
-                .rounded_md()
-                .px_2()
-                .py_1()
-                .bg(color(theme.role("surface-raised")))
-                .child(label)
-        };
+        let button =
+            |id: &'static str, label: &'static str| crate::chrome::sheet_button(id, label, false, &theme).px_2();
         Some(chrome::sheet(
             chrome::sheet_panel("list-columns-picker", SheetWidth::Compact, &theme)
                 .aria_label("List Columns")

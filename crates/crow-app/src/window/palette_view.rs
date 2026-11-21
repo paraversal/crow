@@ -1012,17 +1012,15 @@ impl CrowWindow {
             .child(div().size(px(22.)).flex_none().opacity(content_opacity(hidden, false)).child({
                 let is_dir = *source != Source::File;
                 let icons = crate::icon_packs::Resolver::for_source(cx, &cx.global::<Ui>().settings.icon_pack);
-                let packed = (!crate::style::native_cloud_icon(None, path))
-                    .then(|| icons.resolve(path, is_dir, is_dir && crow_fs::is_package_path(path)))
-                    .flatten();
-                match packed {
-                    Some(packed) => {
-                        crate::icons::pack_glyph(&packed.asset, 22., color(packed.color.rgb(theme))).into_any_element()
-                    }
-                    None => icon(path, is_dir, 22)
-                        .map(|image| img(image).size(px(22.)).into_any_element())
-                        .unwrap_or_else(|| div().into_any_element()),
-                }
+                crate::preview::path_icon(
+                    &icons,
+                    path,
+                    is_dir,
+                    is_dir && crow_fs::is_package_path(path),
+                    None,
+                    theme,
+                    22.,
+                )
             }))
             .child(
                 div()

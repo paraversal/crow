@@ -48,10 +48,12 @@ pub struct SystemProvider;
 
 impl CloudProvider for SystemProvider {
     fn status(&self, path: &Path) -> CloudStatus {
+        // io-ok: the cloud status service probes on a background task.
         crow_macos::cloud_status(path)
     }
 
     fn batch(&self, paths: &[PathBuf]) -> Vec<CloudStatus> {
+        // io-ok: the cloud status service probes on a background task.
         crow_macos::cloud_status_batch(paths)
     }
 }

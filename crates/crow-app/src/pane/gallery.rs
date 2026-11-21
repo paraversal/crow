@@ -28,6 +28,7 @@ use super::{
     DragHandoff, DraggedSelection, FilterPlace, LIST_SIDE_INSET, Pane, drag_combo, drop_outline, promote_drag,
     row_icon, shown_offset,
 };
+use crate::operations::Operations;
 use crate::preview::{self, Preview};
 
 /// Fixed rail row height. The metadata layout changes with width, not height,
@@ -644,12 +645,7 @@ fn render_rows(
             );
             let thumbnails = thumbnails.as_ref();
             let image = thumbnails.and_then(|service| service.read(cx).image(&key));
-            let thumbnailable = thumbnails.is_some()
-                && (!entry.is_dir || entry.is_package())
-                && !entry.is_symlink
-                && !entry.dataless
-                && cloud.is_none_or(CloudStatus::is_local)
-                && !crate::style::native_cloud_icon(cloud, &entry.path);
+            let thumbnailable = thumbnails.is_some() && crate::thumbnails::thumbnailable(&entry, cloud);
             if image.is_none() && thumbnailable && !thumbnails.is_some_and(|service| service.read(cx).is_cached(&key)) {
                 requests.push(crate::thumbnails::ThumbnailRequest { key: key.clone(), gate: gate.clone() });
             }
@@ -692,6 +688,11 @@ fn render_rows(
             let cloud_spoken =
                 cloud.and_then(CloudStatus::spoken_suffix).map(|suffix| format!(", {suffix}")).unwrap_or_default();
             let cursor_here = cursor == Some(ix);
+            let cut = cx
+                .global::<Operations>()
+                .clipboard
+                .as_ref()
+                .is_some_and(|clipboard| clipboard.cut && clipboard.marked && clipboard.contains(&entry.path));
             div()
                 .id(ix)
                 .role(Role::ListBoxOption)
@@ -719,6 +720,12 @@ fn render_rows(
                     let opacity = crate::drag_drop::cue_opacity(cx, &entry.path);
                     row.child(
                         drop_outline(&theme).left(px(2.)).right(px(2.)).top(px(1.)).bottom(px(1.)).opacity(opacity),
+                    )
+                })
+                .when(cut, |row| {
+                    row.child(
+                        crate::style::cut_outline(&theme, true, true)
+                            .debug_selector(|| format!("gallery-cut-outline-{}", entry.name)),
                     )
                 })
                 .debug_selector(|| format!("gallery-row-{}", entry.name))

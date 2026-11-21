@@ -135,19 +135,11 @@ impl CrowWindow {
             })
             .collect::<Vec<_>>();
         let button = |id: &'static str, label: &'static str, focus: &FocusHandle| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .role(Role::Button)
-                .aria_label(label)
+            crate::chrome::sheet_button(id, label, false, &theme)
+                .px_2()
                 .track_focus(focus)
                 .tab_stop(true)
                 .focus_visible(|style| style.shadow(crate::style::cursor_ring(&theme)))
-                .rounded_md()
-                .px_2()
-                .py_1()
-                .bg(color(theme.role("surface-raised")))
-                .child(label)
         };
         let empty = choices.is_empty().then(|| {
             div()
