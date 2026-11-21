@@ -461,6 +461,12 @@ pub struct Sidebar {
     count_done: HashSet<SavedQueryId>,
 }
 
+impl Drop for Sidebar {
+    fn drop(&mut self) {
+        self.count_cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 impl Focusable for Sidebar {
     fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus.clone()
@@ -514,6 +520,12 @@ impl Sidebar {
         self.active_saved = id;
         self.cancel_counts();
         cx.notify();
+    }
+
+    /// Whether the running count worker was told to stop, for release tests.
+    #[cfg(test)]
+    pub fn counts_cancelled_for_test(&self) -> bool {
+        self.count_cancel.load(Ordering::Relaxed)
     }
 
     fn cancel_counts(&mut self) {
@@ -752,6 +764,7 @@ impl Sidebar {
         self.plugin_identities.clear();
         self.visible_sections.borrow_mut().clear();
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
+        self.cancel_counts();
     }
 
     /// Pulse the row for `path` after a move lands in its folder. Full waits out the

@@ -283,6 +283,8 @@ pub struct Folder {
     tag_first_batch_ms: Option<f64>,
     tag_scan_generation: u64,
     tag_scan_cancel: Arc<AtomicBool>,
+    /// Set when a newer listing or a release makes the running one pointless.
+    load_cancel: Arc<AtomicBool>,
     /// Tag facts by path, invalidated by watcher batches and relists. Name
     /// filter changes reuse it, so typing never rereads metadata.
     tag_cache: Arc<Mutex<HashMap<PathBuf, TagFact>>>,
@@ -351,6 +353,12 @@ pub struct Folder {
     #[cfg(test)]
     sort_delay: Duration,
     _watcher: Option<FolderWatcher>,
+    /// The first load attaches the watcher on its background thread.
+    watch: Option<(
+        std::sync::mpsc::Sender<crow_fs::FolderChange>,
+        futures::channel::oneshot::Sender<Option<FolderWatcher>>,
+    )>,
+    _attach: Task<()>,
     error: Option<SharedString>,
     error_kind: Option<FolderErrorKind>,
     /// Paths a watcher batch added; re-stat them once the stream is quiet,
@@ -379,9 +387,16 @@ impl Folder {
                 }
             }
         });
-        let watcher = crow_fs::watch_folder(&dir, changes_tx)
-            .inspect_err(|e| tracing::warn!("watch {}: {e}", dir.display()))
-            .ok();
+        // Attaching the FSEvents stream resolves paths (disk I/O), so the first
+        // load does it on its background thread, before listing: a change after
+        // the listing still reaches the watcher.
+        let (watcher_tx, watcher_rx) = futures::channel::oneshot::channel();
+        let watch = Some((changes_tx, watcher_tx));
+        let attach = cx.spawn(async move |this, cx| {
+            if let Ok(watcher) = watcher_rx.await {
+                this.update(cx, |this, _| this._watcher = watcher).ok();
+            }
+        });
         let mut folder = Self {
             dir,
             icon_source: None,
@@ -414,6 +429,7 @@ impl Folder {
             tag_first_batch_ms: None,
             tag_scan_generation: 0,
             tag_scan_cancel: Arc::new(AtomicBool::new(false)),
+            load_cancel: Arc::new(AtomicBool::new(false)),
             tag_cache: Arc::new(Mutex::new(HashMap::new())),
             tag_reader: crate::tags::reader(),
             show_tree: true,
@@ -447,7 +463,9 @@ impl Folder {
             pending_rescan: false,
             #[cfg(test)]
             sort_delay: Duration::ZERO,
-            _watcher: watcher,
+            _watcher: None,
+            watch,
+            _attach: attach,
             error: None,
             error_kind: None,
             reconcile: Vec::new(),
@@ -1679,7 +1697,19 @@ impl Folder {
         let (generation, dir, hidden, sort) = (self.generation, self.dir.clone(), self.show_hidden, self.sort);
         let (tx, mut rx) = unbounded();
         let started = Instant::now();
-        cx.background_spawn(async move { list_in_stages(&dir, hidden, sort, started, &tx) }).detach();
+        let cancel = Arc::new(AtomicBool::new(false));
+        std::mem::replace(&mut self.load_cancel, cancel.clone()).store(true, Ordering::Relaxed);
+        let watch = self.watch.take();
+        cx.background_spawn(async move {
+            if let Some((changes, attached)) = watch {
+                let watcher = crow_fs::watch_folder(&dir, changes)
+                    .inspect_err(|e| tracing::warn!("watch {}: {e}", dir.display()))
+                    .ok();
+                attached.send(watcher).ok();
+            }
+            list_in_stages(&dir, hidden, sort, started, &tx, &cancel)
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             while let Some(mut update) = rx.next().await {
                 // A busy main thread queues several staged partials; only the
@@ -1836,6 +1866,8 @@ impl Folder {
     /// before the entity is dropped. The pane calls this when it navigates away,
     /// closes a tab or collapses an inline folder.
     pub fn release_listing(&mut self, cx: &mut Context<Self>) {
+        self.load_cancel.store(true, Ordering::Relaxed);
+        self.tag_scan_cancel.store(true, Ordering::Relaxed);
         let children: Vec<Entity<Folder>> = self.children.values().map(|child| child.folder.clone()).collect();
         for child in children {
             child.update(cx, |child, cx| child.release_listing(cx));
@@ -2888,11 +2920,21 @@ fn name_match(name: &str, query: &str, lower_query: &str) -> Option<Range<usize>
 
 /// Runs on a background thread: list `dir`, sending sorted partial listings at most every
 /// 50 ms, then the full sorted listing.
-fn list_in_stages(dir: &Path, hidden: bool, sort: Sort, started: Instant, tx: &UnboundedSender<Load>) {
+fn list_in_stages(
+    dir: &Path,
+    hidden: bool,
+    sort: Sort,
+    started: Instant,
+    tx: &UnboundedSender<Load>,
+    cancel: &AtomicBool,
+) {
     let mut all: Vec<Entry> = Vec::new();
     let mut last_partial = started;
     let result = crow_fs::list_dir(dir, hidden, |batch| {
         all.extend(batch);
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
         if last_partial.elapsed() >= PARTIAL_EVERY || (last_partial == started && !all.is_empty()) {
             last_partial = Instant::now();
             let mut partial = all.clone();
@@ -2901,6 +2943,10 @@ fn list_in_stages(dir: &Path, hidden: bool, sort: Sort, started: Instant, tx: &U
             tx.unbounded_send(Load::Partial(partial)).ok();
         }
     });
+    if cancel.load(Ordering::Relaxed) {
+        // Superseded or released: nobody reads the result, so skip the sort.
+        return;
+    }
     let done = result.map(|()| {
         crow_fs::sort_entries(&mut all, &sort, &kind);
         (all, started.elapsed().as_secs_f64() * 1000.0)

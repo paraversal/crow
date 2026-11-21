@@ -352,6 +352,9 @@ impl FolderSizes {
     /// The setting turned off: cancel the visible requests and stop reporting.
     pub fn pause(&mut self) {
         self.scheduler.clear_visible();
+        // Off keeps no stream open: it watches `/` and wakes the process for every
+        // change on the disk. `observe` starts it again when sizes come back.
+        self.fsevents = None;
     }
 
     /// View ▸ Calculate Folder Sizes: measure `paths` once, regardless of the
@@ -701,6 +704,26 @@ mod tests {
             cache.mark_stale(Path::new(path));
         }
         cache
+    }
+
+    struct NoSizer;
+
+    impl Sizer for NoSizer {
+        fn measure(&self, _: &Path, _: &Cancel) -> Option<Measured> {
+            None
+        }
+    }
+
+    #[gpui::test]
+    fn turning_sizes_off_closes_the_disk_wide_stream(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| init_for_tests(cx, Arc::new(NoSizer)));
+        let service = cx.update(|cx| cx.global::<SizeService>().0.clone());
+        service.update(cx, |service, _| {
+            service.fsevents = crow_macos::watch(crow_macos::current_event_id(), FSEVENTS_LATENCY, |_| {});
+            assert!(service.fsevents.is_some(), "the stream starts while sizes are visible");
+            service.pause();
+            assert!(service.fsevents.is_none(), "off closes it");
+        });
     }
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {

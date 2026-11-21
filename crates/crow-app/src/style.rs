@@ -247,29 +247,38 @@ pub fn display_text(text: &str) -> Cow<'_, str> {
 
 /// Finder's display names for one path: (name, path) from the volume down.
 type DisplayNames = Arc<[(String, PathBuf)]>;
-type DisplayCache = RefCell<HashMap<PathBuf, DisplayNames>>;
+type DisplayCache = RefCell<HashMap<PathBuf, String>>;
 
 /// Finder's display names for a path's ancestors, volume first, cached per thread.
 /// Each name is a LaunchServices filesystem query (`displayNameAtPath`), and the tab
-/// strip, title bar, bottom bar and path bar ask for the same paths every frame:
-/// 40–50% of the main thread's busy time in the 100k fuzz profile. A renamed folder
-/// or volume changes the path, so a path's cached names stay valid.
+/// strip, title bar, bottom bar and path bar ask for the same paths every frame.
+/// The cache holds one name per path, not per whole path: the bottom bar follows the
+/// cursor, so every arrow key asks for a new leaf under the same ancestors, and a
+/// whole-path key re-queried every ancestor (up to a second of main-thread stall in the
+/// live fuzz). A renamed folder or volume changes the path, so a cached name stays valid.
 pub fn display_components(path: &Path) -> DisplayNames {
-    const MAX: usize = 512;
     thread_local! {
         static CACHE: DisplayCache = RefCell::new(HashMap::new());
     }
-    if let Some(hit) = CACHE.with_borrow(|cache| cache.get(path).cloned()) {
-        return hit;
-    }
-    let parts: DisplayNames = crow_macos::display_components(path).into();
-    CACHE.with_borrow_mut(|cache| {
-        if cache.len() >= MAX {
-            cache.clear();
-        }
-        cache.insert(path.to_path_buf(), parts.clone());
-    });
-    parts
+    CACHE.with_borrow_mut(|cache| display_components_cached(path, cache, crow_macos::display_name_at))
+}
+
+fn display_components_cached(
+    path: &Path,
+    cache: &mut HashMap<PathBuf, String>,
+    lookup: impl Fn(&Path) -> String,
+) -> DisplayNames {
+    const MAX: usize = 2048;
+    crow_macos::display_component_paths(path)
+        .into_iter()
+        .map(|part| {
+            if cache.len() >= MAX && !cache.contains_key(&part) {
+                cache.clear();
+            }
+            let name = cache.entry(part.clone()).or_insert_with(|| lookup(&part)).clone();
+            (name, part)
+        })
+        .collect()
 }
 
 /// A folder's own name for labels: the volume name at the root, else the last
@@ -433,7 +442,31 @@ fn clamped(text: &str, range: std::ops::Range<usize>) -> std::ops::Range<usize> 
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
+
+    #[test]
+    fn display_names_are_cached_per_ancestor_so_a_new_leaf_costs_one_query() {
+        let queries = Cell::new(0);
+        let lookup = |path: &Path| {
+            queries.set(queries.get() + 1);
+            path.file_name().map_or_else(|| "/".to_owned(), |name| name.to_string_lossy().into_owned())
+        };
+        let mut cache = HashMap::new();
+        let first = display_components_cached(Path::new("/Users/me/Notes/a.txt"), &mut cache, lookup);
+        assert_eq!(
+            first.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            ["/", "Users", "me", "Notes", "a.txt"]
+        );
+        assert_eq!(queries.get(), 5);
+        // The cursor moves to the next file: only the new leaf is asked.
+        display_components_cached(Path::new("/Users/me/Notes/b.txt"), &mut cache, lookup);
+        assert_eq!(queries.get(), 6);
+        // The same path again asks nothing.
+        display_components_cached(Path::new("/Users/me/Notes/b.txt"), &mut cache, lookup);
+        assert_eq!(queries.get(), 6);
+    }
 
     #[test]
     fn hidden_items_are_dimmed_except_while_renamed() {

@@ -93,6 +93,19 @@ impl CrowWindow {
         self.confirm_path_edit(window, cx);
     }
 
+    /// Start a typed-path lookup: the generation it must still own and the folder
+    /// it resolves against.
+    pub(super) fn begin_edit_lookup(&mut self, cx: &App) -> (u64, PathBuf) {
+        self.edit_generation = self.edit_generation.wrapping_add(1);
+        (self.edit_generation, self.pane().read(cx).current_dir(cx))
+    }
+
+    /// Whether a lookup's reply still answers the field: not superseded, and the
+    /// active tab still shows the folder it was resolved against.
+    pub(super) fn edit_lookup_current(&self, generation: u64, cwd: &Path, cx: &App) -> bool {
+        self.edit_generation == generation && self.pane().read(cx).current_dir(cx) == cwd
+    }
+
     /// Return in the path field, or the Explorer Go chevron: go to the folder, or
     /// reveal the file. A path that doesn't exist beeps and leaves the field open,
     /// with the reason in the bar.
@@ -101,7 +114,8 @@ impl CrowWindow {
         let input = edit.input.clone();
         let typed = input.read(cx).text().to_owned();
         let query = typed.clone();
-        let cwd = self.pane().read(cx).current_dir(cx);
+        let (generation, cwd) = self.begin_edit_lookup(cx);
+        let reply_cwd = cwd.clone();
         let home = cx.global::<Ui>().home.clone();
         let task = cx.background_spawn(async move {
             let cleaned = crow_core::clean_pasted_path(&query).unwrap_or_else(|| query.clone());
@@ -120,7 +134,7 @@ impl CrowWindow {
             let found = task.await;
             this.update_in(cx, |this, window, cx| {
                 let Some(edit) = &this.path_edit else { return };
-                if edit.input.read(cx).text() != typed {
+                if edit.input.read(cx).text() != typed || !this.edit_lookup_current(generation, &reply_cwd, cx) {
                     return;
                 }
                 match found {
@@ -156,12 +170,13 @@ impl CrowWindow {
         let Some(edit) = &self.path_edit else { return };
         let input = edit.input.clone();
         let query = input.read(cx).text().to_owned();
+        let (generation, cwd) = self.begin_edit_lookup(cx);
         let task = self.complete_typed_path(query.clone(), cx);
         cx.spawn_in(window, async move |this, cx| {
             let completed = task.await;
             this.update_in(cx, |this, window, cx| {
                 let Some(edit) = &this.path_edit else { return };
-                if edit.input.read(cx).text() != query {
+                if edit.input.read(cx).text() != query || !this.edit_lookup_current(generation, &cwd, cx) {
                     return;
                 }
                 if let Some(completed) = completed {
@@ -181,12 +196,15 @@ impl CrowWindow {
         let Some(edit) = &self.path_edit else { return };
         let input = edit.input.clone();
         let typed = input.read(cx).text().to_owned();
+        // The muted preview never bumps the generation: a later keystroke's
+        // preview must not cancel a Return already on its way.
+        let cwd = self.pane().read(cx).current_dir(cx);
         let task = self.complete_typed_path(typed.clone(), cx);
         cx.spawn_in(window, async move |this, cx| {
             let completed = task.await;
             this.update_in(cx, |this, window, cx| {
                 let Some(edit) = &this.path_edit else { return };
-                if edit.input.read(cx).text() != typed {
+                if edit.input.read(cx).text() != typed || this.pane().read(cx).current_dir(cx) != cwd {
                     return;
                 }
                 let suffix = completed.and_then(|completed| {

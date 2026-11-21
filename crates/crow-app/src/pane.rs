@@ -453,6 +453,10 @@ pub struct Pane {
     column_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
     presented_layout: Option<(ViewMode, EntityId)>,
     view_motion: Option<ViewMotion>,
+    /// What the last icon reflow captured; unlike `view_motion` it never expires,
+    /// so tests don't race the glide's wall clock on a loaded machine.
+    #[cfg(test)]
+    reflow_capture: Option<ViewMotion>,
     child_reveal: Option<(EntityId, Instant)>,
     /// The column and row a drag would drop on in column view.
     drop_column: Option<(usize, usize)>,
@@ -600,6 +604,8 @@ impl Pane {
             column_bounds: Rc::new(RefCell::new(HashMap::new())),
             presented_layout: None,
             view_motion: None,
+            #[cfg(test)]
+            reflow_capture: None,
             child_reveal: None,
             drop_column: None,
             spring: None,
@@ -720,6 +726,12 @@ impl Pane {
             self.start_filter(&StartFilter, window, cx);
         }
         cx.emit(PaneEvent::ChooseTags);
+    }
+
+    /// Open saved-query and tag sessions, for release tests.
+    #[cfg(test)]
+    pub fn session_counts_for_test(&self) -> (usize, usize) {
+        (self.saved_sessions.len(), self.tag_sessions.len())
     }
 
     #[cfg(test)]
@@ -986,6 +998,12 @@ impl Pane {
     #[cfg(test)]
     pub fn animating(&self, cx: &gpui::App) -> bool {
         self.focused_folder().read(cx).animating(Instant::now())
+    }
+
+    /// Where the last icon reflow found `path`, even after its glide expired.
+    #[cfg(test)]
+    pub fn reflow_origin(&self, path: &Path) -> Option<Bounds<Pixels>> {
+        self.reflow_capture.as_ref()?.captured_row(path)
     }
 
     #[cfg(test)]
@@ -1569,7 +1587,13 @@ impl Pane {
         }
         self.plugin_selection.clear();
         self.plugin_scope = None;
-        for (_, session) in self.saved_sessions.drain() {
+        let sessions: Vec<SavedSession> = self
+            .saved_sessions
+            .drain()
+            .map(|(_, session)| session)
+            .chain(self.tag_sessions.drain().map(|(_, session)| session))
+            .collect();
+        for session in sessions {
             if cx.try_global::<crate::plugins::Plugins>().is_some() {
                 let id = session.view.read(cx).plugin_surface();
                 cx.global_mut::<crate::plugins::Plugins>().surfaces.drop_surface(id);
@@ -1580,6 +1604,7 @@ impl Pane {
             });
         }
         self.active_saved = None;
+        self.active_tag = None;
         self.preview_cancel.store(true, Ordering::Relaxed);
         self.clear_preview(cx);
         self.preview_key = None;
@@ -4255,6 +4280,23 @@ impl Pane {
         if let Some(old) = self.grid {
             if old != geometry {
                 self.cancel_marquee(cx);
+                // A preset change or a window resize that changes the column count
+                // glides the visible tiles from where the last frame drew them. A
+                // listing change alone (rows added) keeps the grid and does not.
+                let (before, after) = (old.metrics(), geometry.metrics());
+                let reflowed = old.columns() != geometry.columns()
+                    || before.tile_width != after.tile_width
+                    || before.tile_height != after.tile_height
+                    || before.icon_size != after.icon_size;
+                if reflowed
+                    && let Some(motion) = ViewMotion::capture(self, cx.global::<Ui>().feedback.mode, Instant::now(), cx)
+                {
+                    #[cfg(test)]
+                    {
+                        self.reflow_capture = Some(motion.clone());
+                    }
+                    self.view_motion = Some(motion);
+                }
             }
             let folder = folder_entity.read(cx);
             let viewport = self.icon_viewport.borrow();

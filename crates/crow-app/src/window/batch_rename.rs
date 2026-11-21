@@ -40,6 +40,24 @@ pub(crate) struct BatchRenameSheet {
 /// closed sheet can never match the next sheet's revision after it reopens.
 static NEXT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Selections above this build their preview off the main thread.
+const LARGE_SELECTION: usize = 500;
+/// Keystrokes within this window share one preview rebuild on a large selection.
+const PREVIEW_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(50);
+
+fn batch_inputs(preview: &Preview) -> Vec<BatchRenameInput> {
+    preview
+        .rows
+        .iter()
+        .map(|row| BatchRenameInput {
+            source: row.source.clone(),
+            name: row.original_name.clone(),
+            is_dir: row.is_dir,
+            target_name: row.destination_name.clone(),
+        })
+        .collect()
+}
+
 enum BatchRenameActivation {
     Kind(RenameKind),
     Side(AddPosition),
@@ -99,16 +117,7 @@ impl BatchRenameSheet {
     }
 
     pub(crate) fn inputs(&self) -> Vec<BatchRenameInput> {
-        self.preview
-            .rows
-            .iter()
-            .map(|row| BatchRenameInput {
-                source: row.source.clone(),
-                name: row.original_name.clone(),
-                is_dir: row.is_dir,
-                target_name: row.destination_name.clone(),
-            })
-            .collect()
+        batch_inputs(&self.preview)
     }
 
     pub(crate) fn can_submit(&self) -> bool {
@@ -198,14 +207,13 @@ impl CrowWindow {
         let first = sheet.find.read(cx).focus_handle(cx);
         self.sheet = Some(Sheet::BatchRename(Box::new(sheet)));
         window.focus(&first, cx);
-        self.refresh_batch_rename(window, cx);
+        // The opening preview is the untouched form's, which `new` already built.
         cx.notify();
     }
 
     pub(super) fn refresh_batch_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Sheet::BatchRename(sheet)) = &mut self.sheet else { return };
         let form = sheet.form(cx);
-        sheet.preview = preview(&sheet.snapshot, &form);
         sheet.revision = sheet.revision.wrapping_add(1);
         let revision = sheet.revision;
         if let Some(cancel) = sheet.validation_cancel.take() {
@@ -214,31 +222,60 @@ impl CrowWindow {
         sheet.checks = None;
         sheet.validation_error = None;
         sheet.submit = None;
-        if !sheet.preview.complete() {
-            sheet.validating = false;
-            cx.notify();
-            return;
+        // A big selection builds its preview (one row per item) off the main
+        // thread after a short debounce; the rows on screen stay until it lands.
+        let large = sheet.snapshot.len() > LARGE_SELECTION;
+        if !large {
+            sheet.preview = preview(&sheet.snapshot, &form);
+            if !sheet.preview.complete() {
+                sheet.validating = false;
+                cx.notify();
+                return;
+            }
         }
         sheet.validating = true;
-        let inputs = sheet.inputs();
+        let snapshot = sheet.snapshot.clone();
+        let ready = (!large).then(|| sheet.inputs());
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         sheet.validation_cancel = Some(cancel.clone());
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let checked = cx.background_spawn(async move { validate_batch_rename(&inputs, &cancel) }).await;
+            if large {
+                cx.background_executor().timer(PREVIEW_DEBOUNCE).await;
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+            }
+            let (built, checked) = cx
+                .background_spawn(async move {
+                    match ready {
+                        Some(inputs) => (None, Some(validate_batch_rename(&inputs, &cancel))),
+                        None => {
+                            let built = preview(&snapshot, &form);
+                            let checked =
+                                built.complete().then(|| validate_batch_rename(&batch_inputs(&built), &cancel));
+                            (Some(built), checked)
+                        }
+                    }
+                })
+                .await;
             this.update_in(cx, |this, window, cx| {
                 let Some(Sheet::BatchRename(sheet)) = &mut this.sheet else { return };
                 if sheet.revision != revision {
                     return;
                 }
+                if let Some(built) = built {
+                    sheet.preview = built;
+                }
                 sheet.validating = false;
                 match checked {
-                    Ok(checked) => apply_validation(sheet, checked),
-                    Err(error) => {
+                    Some(Ok(checked)) => apply_validation(sheet, checked),
+                    Some(Err(error)) => {
                         sheet.validation_error = Some(error.to_string().into());
                         sheet.checks = None;
                         sheet.submit = None;
                     }
+                    None => {}
                 }
                 cx.notify();
                 window.refresh();

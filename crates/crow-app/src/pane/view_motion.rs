@@ -16,6 +16,7 @@ use super::{
     NAME_INSET, Pane, ROW_HEIGHT, TRIANGLE_WIDTH, gallery, icon_name_line_height, shown_offset,
 };
 
+#[cfg_attr(test, derive(Clone))]
 pub(super) struct ViewMotion {
     started: Instant,
     mode: Effective,

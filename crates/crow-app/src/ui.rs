@@ -114,6 +114,10 @@ pub struct Ui {
     pub volumes: Vec<crow_macos::Volume>,
     /// Sidebar rows whose path is a symlink, filled by the Recent refresh.
     pub aliases: HashSet<PathBuf>,
+    /// Latest background refresh of Recent / volumes; an older reply that lands
+    /// after a newer one started is dropped.
+    pub recent_refresh: u64,
+    pub volumes_refresh: u64,
     pub themes_dir: PathBuf,
     pub themes_state_dir: PathBuf,
     pub config_dir: PathBuf,
@@ -216,6 +220,8 @@ impl Ui {
             palette_recents: Vec::new(),
             volumes: Vec::new(),
             aliases: HashSet::new(),
+            recent_refresh: 0,
+            volumes_refresh: 0,
             themes_dir: crow_theme::themes_dir(),
             themes_state_dir: crow_theme::state_dir(),
             config_dir,
@@ -1126,6 +1132,9 @@ fn read_settings_category(path: PathBuf) -> Option<String> {
 /// Recompute Recent's list off the main thread (it checks each folder still exists)
 /// and save the visit history.
 pub fn refresh_recent(cx: &mut App) {
+    let ui = cx.global_mut::<Ui>();
+    ui.recent_refresh += 1;
+    let generation = ui.recent_refresh;
     let ui = cx.global::<Ui>();
     let recent = ui.recent.clone();
     let zoxide = ui.zoxide.clone();
@@ -1162,6 +1171,9 @@ pub fn refresh_recent(cx: &mut App) {
         let (list, aliases, sidebar) = task.await;
         cx.update(|cx| {
             let ui = cx.global_mut::<Ui>();
+            if ui.recent_refresh != generation {
+                return;
+            }
             let changed = ui.recent_list != sidebar || ui.palette_recents != list || ui.aliases != aliases;
             ui.recent_list = sidebar;
             ui.palette_recents = list;
@@ -1193,11 +1205,17 @@ pub fn refresh_volumes(cx: &mut App) {
     if cx.try_global::<Watchers>().is_none() {
         return;
     }
+    let ui = cx.global_mut::<Ui>();
+    ui.volumes_refresh += 1;
+    let generation = ui.volumes_refresh;
     let task = cx.background_spawn(async { crow_macos::volumes() });
     cx.spawn(async move |cx| {
         let volumes = task.await;
         cx.update(|cx| {
             let ui = cx.global_mut::<Ui>();
+            if ui.volumes_refresh != generation {
+                return;
+            }
             if ui.volumes != volumes {
                 ui.volumes = volumes;
                 cx.refresh_windows();
