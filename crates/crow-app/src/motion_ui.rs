@@ -12,9 +12,41 @@ pub fn glide_config() -> SpringConfig {
     SpringConfig::new(2500.0, 2.0 * 2500.0f32.sqrt(), 1.0)
 }
 
+/// The spring a progress bar eases with: critically damped and slow enough to
+/// span `ms::PROGRESS`, so a burst of updates never overshoots or jitters.
+pub fn progress_config() -> SpringConfig {
+    let stiffness = 300.0f32;
+    SpringConfig::new(stiffness, 2.0 * stiffness.sqrt(), 1.0)
+}
+
 /// A glide to `target` (a position or size) with the shared spring.
 pub fn glide<T: gpui::SpringTarget>(target: T) -> SpringAnimation<T> {
     SpringAnimation::new(glide_config()).to(target)
+}
+
+pub fn ease_progress(fraction: f32) -> SpringAnimation<f32> {
+    SpringAnimation::new(progress_config()).to(fraction)
+}
+
+/// A big preview that has just loaded fades in over `PREVIEW_FADE`. Only a
+/// loaded preview is wrapped, and its animation is keyed by the item: a preview
+/// loads after a pause (the loader waits for the cursor to rest), so arrowing
+/// fast shows placeholders that never fade, and each landing preview does.
+pub fn fade_when_loaded(element: gpui::Div, loaded: bool, key: &std::path::Path, mode: Effective) -> gpui::AnyElement {
+    use gpui::{Animation, AnimationExt as _, IntoElement as _, Styled as _};
+    if !loaded || mode == Effective::Off {
+        return element.into_any_element();
+    }
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    element
+        .with_animation(
+            gpui::ElementId::from(("preview-fade", hasher.finish() as usize)),
+            Animation::new(std::time::Duration::from_millis(motion::ms::PREVIEW_FADE)),
+            |el, t| el.opacity(motion::ease_out(t)),
+        )
+        .into_any_element()
 }
 
 /// A value a view keeps after the logical state has changed, so its last

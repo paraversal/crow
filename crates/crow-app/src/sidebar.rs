@@ -225,6 +225,63 @@ struct SectionMotion {
     height: f32,
 }
 
+/// Favorites that moved: each moved row starts this far (px) from where it now sits.
+struct Reorder {
+    started: Instant,
+    offsets: HashMap<PathBuf, f32>,
+}
+
+/// The favorites of `rows` as `(group, path)` in drawn order.
+fn favorite_order(rows: &[Row]) -> Vec<(usize, PathBuf)> {
+    rows.iter()
+        .filter_map(|row| match row {
+            Row::Favorite((group, _), favorite) => Some((*group, favorite.path.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// For rows that changed places within the same set of favorites: how far above
+/// (negative) or below (positive) its new place each one was. `old_tops` and
+/// `heights` are the rows' drawn tops and heights, by path, in the old order.
+fn reorder_offsets(
+    before: &[(usize, PathBuf)],
+    after: &[(usize, PathBuf)],
+    old_tops: &HashMap<PathBuf, f32>,
+    heights: &HashMap<PathBuf, f32>,
+    gap: f32,
+) -> HashMap<PathBuf, f32> {
+    let mut offsets = HashMap::new();
+    let (mut sorted_before, mut sorted_after) = (before.to_vec(), after.to_vec());
+    sorted_before.sort();
+    sorted_after.sort();
+    if before == after || sorted_before != sorted_after {
+        return offsets;
+    }
+    let mut cursor: Option<(usize, f32)> = None;
+    for (group, path) in after {
+        let Some(old_top) = old_tops.get(path) else { continue };
+        let top = match cursor {
+            Some((current, next)) if current == *group => next,
+            _ => {
+                // The group's first row now sits where the group began: the highest old top in it.
+                let start = before
+                    .iter()
+                    .filter(|(g, _)| g == group)
+                    .filter_map(|(_, p)| old_tops.get(p))
+                    .fold(f32::INFINITY, |least, top| least.min(*top));
+                if start.is_finite() { start } else { *old_top }
+            }
+        };
+        let height = heights.get(path).copied().unwrap_or(0.0);
+        cursor = Some((*group, top + height + gap));
+        if (old_top - top).abs() > 0.5 {
+            offsets.insert(path.clone(), old_top - top);
+        }
+    }
+    offsets
+}
+
 /// How tall an opening row may grow to; real rows are about 26 px.
 const SECTION_ROW_MAX: f32 = 30.;
 
@@ -473,6 +530,8 @@ pub struct Sidebar {
     /// The rows of the last draw, to see which sections opened or closed.
     last_rows: Vec<Row>,
     section_motions: Vec<SectionMotion>,
+    /// Favorites that changed places: each row's offset from its new place, easing to 0.
+    reorder: Option<Reorder>,
     /// What a drag outside the list would drop on, drawn from state rather than a
     /// drag-over style so the highlight cannot flicker between frames.
     drop_target: Option<DropTarget>,
@@ -543,6 +602,7 @@ impl Sidebar {
             layout: Rc::default(),
             last_rows: Vec::new(),
             section_motions: Vec::new(),
+            reorder: None,
             drop_target: None,
             dragging_favorite: Rc::new(Cell::new(false)),
             insert_slot: None,
@@ -947,6 +1007,36 @@ impl Sidebar {
     /// Notice sections that opened or closed since the last draw and start their
     /// motion; drop the finished ones. Off has none.
     fn track_sections(&mut self, rows: &[Row], mode: Effective, now: Instant) {
+        if mode == Effective::Full {
+            let (before, after) = (favorite_order(&self.last_rows), favorite_order(rows));
+            if before != after && !before.is_empty() {
+                let layout = self.layout.borrow();
+                let mut tops = HashMap::new();
+                let mut heights = HashMap::new();
+                let mut previous_bottom: Option<f32> = None;
+                let mut gap = 0.0;
+                for (row, (_, _, bounds)) in self.last_rows.iter().zip(layout.iter()) {
+                    if let Row::Favorite(_, favorite) = row {
+                        let top = f32::from(bounds.top());
+                        if let Some(bottom) = previous_bottom {
+                            gap = top - bottom;
+                        }
+                        previous_bottom = Some(f32::from(bounds.bottom()));
+                        tops.insert(favorite.path.clone(), top);
+                        heights.insert(favorite.path.clone(), f32::from(bounds.size.height));
+                    } else {
+                        previous_bottom = None;
+                    }
+                }
+                let offsets = reorder_offsets(&before, &after, &tops, &heights, gap.max(0.0));
+                self.reorder = (!offsets.is_empty()).then_some(Reorder { started: now, offsets });
+            }
+        }
+        if self.reorder.as_ref().is_some_and(|reorder| {
+            motion::progress(mode, reorder.started, now, motion::ms::REORDER, motion::ms::REORDER).is_none()
+        }) {
+            self.reorder = None;
+        }
         if mode != Effective::Off {
             let before = section_spans(&self.last_rows);
             for (id, opening, old) in section_transitions(&before, &section_spans(rows)) {
@@ -1746,7 +1836,7 @@ impl Render for Sidebar {
         let rows = rows(cx.global::<Ui>(), &self.plugin_sections);
         let (motion_mode, motion_now) = (cx.global::<Ui>().feedback.mode, Instant::now());
         self.track_sections(&rows, motion_mode, motion_now);
-        if !self.section_motions.is_empty() {
+        if !self.section_motions.is_empty() || self.reorder.is_some() {
             window.request_animation_frame();
         }
         let wants_pin_lines = self.layout.borrow().first().is_some_and(|(_, _, bounds)| bounds.size.width >= px(300.));
@@ -2280,6 +2370,22 @@ impl Render for Sidebar {
             if let Some(label) = volume_label {
                 item = with_tooltip(item, label, None);
             }
+            // A favorite that changed places glides in from its old place.
+            let item = match (&row, &self.reorder) {
+                (Row::Favorite(_, favorite), Some(reorder)) => {
+                    match reorder.offsets.get(&favorite.path).zip(motion::progress(
+                        mode,
+                        reorder.started,
+                        now,
+                        motion::ms::REORDER,
+                        motion::ms::REORDER,
+                    )) {
+                        Some((offset, t)) => item.relative().top(px(offset * (1.0 - t))),
+                        None => item,
+                    }
+                }
+                _ => item,
+            };
             // Rows of a section that is opening grow and fade in (Low only fades).
             let item = match current_section.as_deref().and_then(&section_progress) {
                 Some((motion, t)) if motion.opening => div()
@@ -2379,6 +2485,24 @@ mod tests {
 
     fn recent(name: &str) -> Row {
         Row::Recent(PathBuf::from(format!("/{name}")))
+    }
+
+    #[test]
+    fn a_swapped_pair_of_favorites_starts_each_one_at_the_other_s_place() {
+        let path = |name: &str| (0usize, PathBuf::from(name));
+        let (before, after) = (vec![path("a"), path("b"), path("c")], vec![path("a"), path("c"), path("b")]);
+        let tops: HashMap<_, _> =
+            [("a", 100.0), ("b", 126.0), ("c", 152.0)].into_iter().map(|(n, t)| (PathBuf::from(n), t)).collect();
+        let heights: HashMap<_, _> = ["a", "b", "c"].into_iter().map(|n| (PathBuf::from(n), 24.0)).collect();
+        let offsets = reorder_offsets(&before, &after, &tops, &heights, 2.0);
+        assert_eq!(offsets.get(&PathBuf::from("c")), Some(&26.0), "c was 26 px below where it now sits");
+        assert_eq!(offsets.get(&PathBuf::from("b")), Some(&-26.0), "b was 26 px above");
+        assert!(!offsets.contains_key(&PathBuf::from("a")), "a did not move");
+        assert!(reorder_offsets(&before, &before, &tops, &heights, 2.0).is_empty(), "no change");
+        assert!(
+            reorder_offsets(&before, &[path("a")], &tops, &heights, 2.0).is_empty(),
+            "added or removed rows don't glide"
+        );
     }
 
     #[test]

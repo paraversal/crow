@@ -249,6 +249,9 @@ pub struct CrowWindow {
     /// Set while a leaving overlay renders: its opacity (1 → 0).
     exit_fade: std::cell::Cell<Option<f32>>,
     show_activity: bool,
+    /// The Activity panel's running row from the last draw, and a finished one fading away.
+    activity_last: Option<String>,
+    activity_ghost: Option<(String, std::time::Instant)>,
     activity_focus: FocusHandle,
     activity_controls: HashMap<(&'static str, u64), FocusHandle>,
     /// "Why this view?", while open.
@@ -436,6 +439,8 @@ impl CrowWindow {
             pane_slide: None,
             exit_fade: std::cell::Cell::new(None),
             show_activity: false,
+            activity_last: None,
+            activity_ghost: None,
             activity_focus: cx.focus_handle(),
             activity_controls: HashMap::new(),
             why: None,
@@ -1506,9 +1511,12 @@ impl CrowWindow {
         };
         let body = match tab {
             InfoTab::Preview => match entry {
-                Some(entry) => {
-                    preview::contents(entry, preview, theme, folder_size, cloud, &resolver).into_any_element()
-                }
+                Some(entry) => crate::motion_ui::fade_when_loaded(
+                    preview::contents(entry, preview, theme, folder_size, cloud, &resolver),
+                    preview.is_some_and(|p| p.image.is_some() || p.content.is_some()),
+                    &entry.path,
+                    cx.global::<Ui>().feedback.mode,
+                ),
                 None => div().into_any_element(),
             },
             InfoTab::Info => self.info.clone().into_any_element(),
