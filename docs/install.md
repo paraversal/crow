@@ -41,5 +41,8 @@ System Settings > Privacy & Security.
 
 ## Removing
 
-Delete `Crow.app`. Settings, state, caches and logs are in `~/.config/crow`, `~/.local/state/crow`,
-`~/Library/Caches/crow` and `~/Library/Logs/Crow`; delete those too for a clean removal.
+Delete `Crow.app` (or `brew uninstall --cask crow`). Crow's state, caches and logs are in
+`~/.local/state/crow`, `~/Library/Caches/crow` and `~/Library/Logs/Crow`;
+`brew uninstall --zap --cask crow` moves those to the Trash. Your settings in `~/.config/crow`
+(`settings.toml`, `keys.toml`, ...) are yours: Crow and the cask never remove them, so delete
+that folder yourself if you want a clean slate.
