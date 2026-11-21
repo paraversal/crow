@@ -20,6 +20,15 @@ const PATTERNS: &[&str] = &[
     ".symlink_metadata(",
     ".canonicalize(",
     ".read_dir(",
+    // crow_macos calls that read the disk (xattrs, thumbnails, iCloud, TCC probes).
+    "crow_macos::tags(",
+    "crow_macos::tags_checked(",
+    "crow_macos::thumbnail_png(",
+    "crow_macos::cloud_status(",
+    "crow_macos::cloud_status_batch(",
+    "crow_macos::icon_png(",
+    "crow_macos::permissions(",
+    "write_atomic(",
 ];
 
 /// Files that are not the app's main thread: the fuzz runner, test modules, this test.

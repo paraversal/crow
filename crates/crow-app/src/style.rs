@@ -159,6 +159,7 @@ pub fn cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path, is_dir: boo
         let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
         return image_from_png(crow_macos::type_icon_png(ext, is_dir, points)?);
     }
+    // io-ok: render-time Finder icon, cached by AppKit per path type; the first fetch is a known main-thread cost (#47).
     image_from_png(crow_macos::icon_png(path, is_dir, points)?)
 }
 
@@ -171,6 +172,7 @@ pub fn drag_icon_png(cx: &gpui::App, path: &Path, is_dir: bool, points: u32) -> 
         let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
         return crow_macos::type_icon_png(ext, is_dir, points);
     }
+    // io-ok: drag-start icon, once per drag.
     crow_macos::icon_png(path, is_dir, points)
 }
 

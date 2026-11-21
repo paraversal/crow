@@ -97,6 +97,7 @@ struct QuickLook;
 
 impl Generator for QuickLook {
     fn thumbnail(&self, path: &Path, points: u32) -> Option<Vec<u8>> {
+        // io-ok: the thumbnail service calls this from a background task.
         crow_macos::thumbnail_png(path, f64::from(points))
     }
 }

@@ -166,6 +166,7 @@ pub async fn plugin_preview(
                     return None;
                 }
                 let path = entry.path.clone();
+                // io-ok: inside `background_spawn`.
                 let tags = cx.background_spawn(async move { crow_macos::tags(&path) }).await;
                 if cancelled.load(Ordering::Relaxed) {
                     return None;
@@ -322,6 +323,7 @@ fn fetch_at(
         path: entry.path.clone(),
         content,
         image,
+        // io-ok: `fetch_at` runs on the preview loader's background task.
         tags: crow_macos::tags(&entry.path),
         excerpt,
         cloud,

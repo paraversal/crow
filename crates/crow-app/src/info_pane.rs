@@ -889,7 +889,9 @@ fn real_load(target: &InfoTarget) -> LoadedInfo {
             let symlink = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
             LoadedInfo {
                 entry: fresh_entry(path),
+                // io-ok: Info pane background loader (`real_load`).
                 permissions: crow_macos::permissions(path),
+                // io-ok: Info pane background loader (`real_load`).
                 tags: crow_macos::tags(path),
                 tags_partial: false,
                 bytes: None,
@@ -906,6 +908,7 @@ fn real_load(target: &InfoTarget) -> LoadedInfo {
             let read_tags = !summary.tags_truncated;
             for path in summary.tag_paths.iter() {
                 if read_tags {
+                    // io-ok: Info pane background loader (`real_load`).
                     let item_tags = crow_macos::tags(path);
                     tags = Some(match tags {
                         None => item_tags,
