@@ -3258,6 +3258,37 @@ fn gallery_stacks_a_pair_in_a_narrow_window(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn gallery_preserves_the_sidebar_edge_with_info_open(cx: &mut TestAppContext) {
+    let root = fixture("gallery-sidebar-edge");
+    for (width, preferred) in [(640., 210), (760., 350)] {
+        let (view, mut cx) = open_sized(cx, &root, width, 500.);
+        write_config(
+            &view,
+            &mut cx,
+            "settings.toml",
+            &format!("motion = \"off\"\n[window]\nsidebar_width = {preferred}\n"),
+        );
+        cx.simulate_keystrokes("cmd-i");
+        settle(&view, &mut cx);
+        let edge = cx.debug_bounds("toolbar").unwrap().left();
+        assert_eq!(edge, px(preferred as f32));
+        let path_edge = cx.debug_bounds("path-bar").unwrap().left();
+        cx.simulate_keystrokes("cmd-4");
+        settle(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("toolbar").unwrap().left(), edge);
+        assert_eq!(cx.debug_bounds("path-bar").unwrap().left(), path_edge);
+        let rail = cx.debug_bounds("gallery-rail").unwrap();
+        let preview = cx.debug_bounds("gallery-preview").unwrap();
+        assert_eq!(rail.left(), edge);
+        assert!(rail.right() <= preview.left());
+        assert!(preview.right() <= cx.debug_bounds("info-body").unwrap().left());
+        cx.simulate_keystrokes("cmd-2");
+        settle(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("toolbar").unwrap().left(), edge);
+    }
+}
+
+#[gpui::test]
 fn gallery_rows_use_the_rail_width_and_scroll_to_home_and_end(cx: &mut TestAppContext) {
     let root = fixture("gallery-rail-width");
     for i in 0..100 {

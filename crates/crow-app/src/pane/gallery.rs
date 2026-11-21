@@ -443,7 +443,10 @@ impl Second {
 /// One frame of the Gallery body.
 fn rail_width(width: Pixels) -> f32 {
     let width = f32::from(width).max(1.0);
-    (width * 0.36).clamp(RAIL_MIN, RAIL_MAX).min(width)
+    // Reserve room for the preview. When neither preferred width fits,
+    // the rail and preview can share the available space equally.
+    let available = (width - 145.0).max(width * 0.5);
+    (width * 0.36).clamp(RAIL_MIN, RAIL_MAX).min(available)
 }
 
 pub(super) fn render(pane: &mut Pane, window: &mut Window, cx: &mut Context<Pane>) -> impl IntoElement + use<> {
@@ -871,11 +874,13 @@ fn render_preview(
             .child("No selection");
     }
     let side_by_side = entries.len() == 2 && width >= SIDE_BY_SIDE_MIN;
-    let cell_width = if side_by_side { (width - 36.0) / 2.0 } else { width - 24.0 };
+    let padding = if width < 145.0 { 4.0 } else { 12.0 };
+    let available = (width - 2.0 * padding).max(0.0);
+    let cell_width = if side_by_side { (available - 12.0) / 2.0 } else { available };
     let mut wrapper = div()
         .debug_selector(|| "gallery-preview".into())
         .size_full()
-        .p(px(12.))
+        .p(px(padding))
         .gap(px(12.))
         .overflow_hidden()
         .when(side_by_side, |wrapper| wrapper.flex().flex_row())

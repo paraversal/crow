@@ -70,11 +70,14 @@ impl SidePanes {
         preferred_right: Option<Pixels>,
         gallery_with_info: bool,
     ) {
-        let center_min = if gallery_with_info { px(320.) } else { px(130.) };
+        let center_min = px(130.);
         let right_min = px(160.);
         let left = self.drag.as_ref().and_then(Drag::resized_left).unwrap_or(preferred_left).clamp(LEFT_MIN, LEFT_MAX);
         self.left = px(left as f32).min((viewport - center_min - right_min).max(px(LEFT_MIN as f32)));
-        self.right = preferred_right.unwrap_or(px(300.)).min((viewport - self.left - center_min).max(right_min));
+        // The sidebar edge is shared by the toolbar and status bar in every view.
+        // Gallery's extra room comes from Info first, then the rail adapts.
+        let preferred_center = if gallery_with_info { px(320.) } else { center_min };
+        self.right = preferred_right.unwrap_or(px(300.)).min((viewport - self.left - preferred_center).max(right_min));
     }
 
     pub(super) fn left_width(&self) -> Pixels {

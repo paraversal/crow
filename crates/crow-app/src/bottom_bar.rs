@@ -492,12 +492,14 @@ pub fn fit_to_window(state: &mut BarState, window: &Window, left: Pixels) {
         }
         other += measure(query);
     }
+    let mut error_controls = px(0.);
     if let Some(error) = &state.error {
         if other > px(0.) {
             other += px(GAP);
         }
         let open = if error.file.is_some() { measure("Open") + px(12. + 8.) } else { px(0.) };
-        other += px(8. + 13. + 8. + 4.) + measure(&error.text).min(px(420.)) + open;
+        error_controls = px(8. + 13. + 8. + 4.) + open;
+        other += error_controls + measure(&error.text).min(px(420.));
     }
     let hint_widths: Vec<Pixels> = match &state.primary {
         Primary::Hints(hints) => hints.iter().map(|hint| cap(&hint.keys) + px(5.) + measure(hint.label)).collect(),
@@ -543,7 +545,8 @@ pub fn fit_to_window(state: &mut BarState, window: &Window, left: Pixels) {
         hints.truncate(fit.hints);
     }
     state.path.hidden = if state.editing.is_some() { None } else { fit.hidden };
-    state.transient_max = Some(fit.transient_max);
+    // Let the breadcrumb clip further before clipping the error's Open button.
+    state.transient_max = Some(fit.transient_max.max(error_controls.min((bar - fixed).max(px(0.)))));
 }
 
 /// The bar's hints in `scope`, with idle ones filtered by the setting and use counts.
