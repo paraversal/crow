@@ -337,7 +337,7 @@ fn section_order(ui: &Ui, sections: &[Section]) -> Vec<String> {
 const HEADER_GAP: f32 = 10.;
 
 /// How far a heading's title slides right when its chevron shows.
-const CHEVRON_ROOM: f32 = 14.;
+const CHEVRON_ROOM: f32 = 20.;
 
 /// The section id of favorites group `g`: its header collapses like any section.
 fn group_section_id(g: usize) -> String {
