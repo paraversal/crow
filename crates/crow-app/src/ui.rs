@@ -1027,6 +1027,7 @@ pub fn reload_theme(cx: &mut App) {
                 cx.global_mut::<Ui>().missing_theme_notice = missing.clone();
                 if let Some(missing) = missing {
                     crate::operations::message(format!("Theme ‘{missing}’ not found; using {}", theme.name), false, cx);
+                    cx.refresh_windows();
                 }
             }
             set_theme(theme, cx);
@@ -1039,6 +1040,7 @@ pub fn reload_theme(cx: &mut App) {
             {
                 cx.global_mut::<Ui>().theme_error = Some(e.clone());
                 crate::operations::message(e, true, cx);
+                cx.refresh_windows();
             }
         }
     }

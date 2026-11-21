@@ -49,7 +49,7 @@ macOS privacy prompts naming Crow.
 | `crates/crow-search` | Search and exclusion rules (M6) |
 | `crates/crow-plugin` | Versioned Rhai plugin packages, grants and workers (M9) |
 | `crates/crow-plugin-git` | Read-only Git repository status, line counts, and diffs |
-| `crates/crow-theme` | Reader for the global theme index in `~/.config/themes` |
+| `crates/crow-theme` | The built-in themes and the optional global theme index in `~/.config/themes` |
 
 ## Configuration
 
@@ -58,7 +58,7 @@ Changes apply immediately, and Crow keeps your comments when it writes to them.
 
 | File | What it holds |
 | --- | --- |
-| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), folder sizes (`folder_sizes`: `"off"` or `"visible"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), the icon source (`icon_pack`: `"native"` or a pack id), the bottom bar's path (`path_bar`: `"crow"` for the breadcrumb or `"explorer"` for a visible field), font, the terminal app Open Terminal Here uses (`terminal`: a name like `"Terminal"` or `"iTerm"`, or a path to an app), hidden files (shown by default), whether search still matches hidden items while they are hidden (`search_includes_hidden`, default on), the mode new searches start in (`search_match`: `"all"`, `"names"` or `"contents"`), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for the preferences it lists; the file stays authoritative and the window follows edits made in a text editor |
+| `settings.toml` | Theme, keymap (`"finder"` or `"vim"`), what Return does (`enter`: `"rename"` or `"open"`), key hints (`"auto"`, `"always"` or `"off"`), tips (`"auto"` or `"off"`), folder sizes (`folder_sizes`: `"off"` or `"visible"`), motion (`"auto"`, `"off"`, `"low"` or `"full"`), sounds (`"crow"`, `"finder"` or `"off"`), the app icon (`app_icon`: `"refined"`, `"sun"`, `"graphite"` or `"bone"`; the Dock switches live, `bundle.sh` bakes it into Crow.app), the icon source (`icon_pack`: `"native"` or a pack id), the bottom bar's path (`path_bar`: `"crow"` for the breadcrumb or `"explorer"` for a visible field), font, a translucent sidebar (`translucent_sidebar`, default off; it stays solid while macOS Reduce Transparency is on), the terminal app Open Terminal Here uses (`terminal`: a name like `"Terminal"` or `"iTerm"`, or a path to an app), hidden files (shown by default), whether search still matches hidden items while they are hidden (`search_includes_hidden`, default on), the mode new searches start in (`search_match`: `"all"`, `"names"` or `"contents"`), the right column's default (`show_preview`: Preview and Info tabs), whether views follow folders (`view_per_folder`), whether the palette remembers recent commands (`palette_recent_commands`), window size. ⌘, opens the Settings window for the preferences it lists; the file stays authoritative and the window follows edits made in a text editor |
 | `views.toml` | How folders are shown, in three layers: `[defaults]`, `[[rule]]` path patterns, and `[folder."…"]` for one folder. Also chooses the icons/list/columns/gallery view, the icon size preset and optional icon caption, list columns and plugin preview providers. Changing a folder's view or sort saves it as that folder's own setting. View ▸ Why This View? (Cmd-J) shows which layer decided what. |
 | `sidebar.toml` | Groups of favorites (with optional `name`, `icon`, `color` and Vim mark `key`), whether Recent and Locations show, `pinned_tags` for Finder tags that should appear even when Spotlight has not indexed a use for them, the order/visibility/collapse state of built-in (`tags`, `saved-queries`, `recent`, `locations`) and plugin sections, and `[projects] roots`, the folders the Projects section scans for Git repositories |
 | `plugins.toml` | One approval record per plugin, including the bundled Git package: `enabled`, package `digest` and the API-1 `fs` capability. Installed bundles live in `plugins/`; see [docs/plugins.md](docs/plugins.md). |
@@ -81,8 +81,11 @@ Pin a worktree root to see its branch, changed-path count and ahead/behind from 
 
 The Projects sidebar section lists repositories found under `[projects]` `roots` in `sidebar.toml` with their branch and changed count. Roots are empty by default and can be managed with the palette's "Add Current Folder as Project Root", "Remove Current Folder from Project Roots" and "Refresh Projects".
 
-Themes come from the global index in `~/.config/themes`. View ▸ Theme… (Cmd-Option-T)
-previews each theme as you move through the list; Apply to All Apps (Cmd-Return) sets it for every app that reads the index.
+Crow ships eight themes: Finder Light and Dark, Catppuccin Latte and Mocha, Gruvbox Light and Dark, Solarized Light and Dark (sources and licences in `crates/crow-theme/themes/NOTICE.md`). "System" follows macOS and shows Finder Light or Dark; Finder's selection follows your accent colour. Crow reads and writes no theme files of its own.
+
+If `~/.config/themes/schemes/` exists, its themes are listed too (a theme there with a built-in's id replaces it), and View ▸ Theme… (Cmd-Option-T) offers Apply to All Apps (Cmd-Return), which sets the theme for every app that reads the index. To add a theme, drop a Base24 scheme JSON (`name`, `variant`, 24 `palette` slots, optional `roles`) into `~/.config/themes/schemes/`; it appears at once. View ▸ Theme… previews each theme as you move through the list.
+
+View ▸ Hide Sidebar (Control-Command-S) collapses the sidebar column.
 
 Motion follows `motion`: `"auto"` (default) uses Full unless macOS Reduce Motion is on, then Low;
 `"off"` changes state in one frame; `"low"` fades opacity and color only; `"full"` also moves —

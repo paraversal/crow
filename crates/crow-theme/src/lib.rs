@@ -322,7 +322,7 @@ pub fn list_themes(dir: &Path) -> Vec<String> {
 }
 
 fn parse_theme(id: &str, scheme_json: &str, roles_json: &str) -> Result<Theme, String> {
-    let scheme: SchemeFile = serde_json::from_str(scheme_json).map_err(|e| format!("{id}: {e}"))?;
+    let scheme: SchemeFile = serde_json::from_str(scheme_json).map_err(|e| format!("{id}.json: {e}"))?;
     let base: HashMap<String, String> = serde_json::from_str(roles_json).map_err(|e| format!("roles.json: {e}"))?;
     let palette: HashMap<String, Rgb> =
         scheme.palette.iter().filter_map(|(k, v)| Some((k.clone(), Rgb::parse(v)?))).collect();
@@ -367,7 +367,7 @@ fn builtin(id: &str) -> Option<Theme> {
 pub fn load_theme(dir: &Path, id: &str) -> Result<Theme, String> {
     let path = dir.join("schemes").join(format!("{id}.json"));
     match fs::read_to_string(&path) {
-        Ok(scheme) => parse_theme(id, &scheme, &index_roles(dir)).map_err(|e| format!("{}: {e}", path.display())),
+        Ok(scheme) => parse_theme(id, &scheme, &index_roles(dir)),
         Err(_) => builtin(id).ok_or_else(|| format!("{id}: not found")),
     }
 }
