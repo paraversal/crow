@@ -116,26 +116,17 @@ pub enum CursorKind {
 
 #[derive(Clone, Debug, PartialEq)]
 enum Row {
-    /// A section title; `Some(group)` for favorites groups, which accept folders.
-    Header(String, Option<usize>),
-    SectionHeader {
-        id: String,
-        title: String,
-        collapsed: bool,
-    },
+    SectionHeader { id: String, title: String, collapsed: bool },
     Favorite(Slot, Favorite),
     Recent(PathBuf),
     Volume(crow_macos::Volume),
-    PluginItem {
-        section: String,
-        row: SectionRow,
-    },
+    PluginItem { section: String, row: SectionRow },
 }
 
 impl Row {
     fn path(&self) -> Option<&Path> {
         match self {
-            Row::Header(..) | Row::SectionHeader { .. } => None,
+            Row::SectionHeader { .. } => None,
             Row::Favorite(_, f) => Some(&f.path),
             Row::Recent(p) => Some(p),
             Row::Volume(v) => Some(&v.path),
@@ -153,7 +144,7 @@ impl Row {
                 SectionDestination::Tag { id } => Some(Location::Tag(id.clone())),
                 SectionDestination::DisplayOnly => None,
             },
-            Row::Header(..) | Row::SectionHeader { .. } => None,
+            Row::SectionHeader { .. } => None,
         }
     }
 
@@ -191,7 +182,6 @@ fn section_spans(rows: &[Row]) -> Vec<SectionSpan> {
                 spans.push(SectionSpan { id: id.clone(), collapsed: *collapsed, start: ix + 1, len: 0 });
                 open = true;
             }
-            Row::Header(..) => open = false,
             _ if open => {
                 if let Some(span) = spans.last_mut() {
                     span.len += 1;
@@ -294,11 +284,6 @@ fn sidebar_layout_generation(rows: &[Row]) -> u64 {
     rows.len().hash(&mut hasher);
     for row in rows {
         match row {
-            Row::Header(name, group) => {
-                0u8.hash(&mut hasher);
-                name.hash(&mut hasher);
-                group.hash(&mut hasher);
-            }
             Row::SectionHeader { id, collapsed, .. } => {
                 1u8.hash(&mut hasher);
                 id.hash(&mut hasher);
@@ -348,11 +333,35 @@ fn section_order(ui: &Ui, sections: &[Section]) -> Vec<String> {
     order
 }
 
+/// Space above a section title, a margin so the cursor ring hugs the label.
+const HEADER_GAP: f32 = 10.;
+
+/// The section id of favorites group `g`: its header collapses like any section.
+fn group_section_id(g: usize) -> String {
+    format!("favorites-group-{g}")
+}
+
+fn group_of_section(id: &str) -> Option<usize> {
+    id.strip_prefix("favorites-group-")?.parse().ok()
+}
+
+/// Write a section's or favorites group's collapse flag.
+fn set_collapsed(id: String, collapsed: bool, cx: &mut gpui::App) {
+    let edit = match group_of_section(&id) {
+        Some(group) => SidebarEdit::SetGroupCollapsed { group, collapsed },
+        None => SidebarEdit::SetSectionCollapsed { id, collapsed },
+    };
+    ui::edit_sidebar(edit, cx);
+}
+
 fn rows(ui: &Ui, sections: &[Section]) -> Vec<Row> {
     let mut rows = Vec::new();
     for (g, (name, favorites)) in ui.favorites().into_iter().enumerate() {
-        rows.push(Row::Header(name, Some(g)));
-        rows.extend(favorites.into_iter().enumerate().map(|(i, f)| Row::Favorite((g, i), f)));
+        let collapsed = ui.sidebar.group_collapsed(g);
+        rows.push(Row::SectionHeader { id: group_section_id(g), title: name, collapsed });
+        if !collapsed {
+            rows.extend(favorites.into_iter().enumerate().map(|(i, f)| Row::Favorite((g, i), f)));
+        }
     }
     for id in section_order(ui, sections) {
         match id.as_str() {
@@ -596,8 +605,9 @@ impl Focusable for Sidebar {
 impl Sidebar {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            // Row 0 is the first group's title; the cursor starts on the first row under it.
             focus: cx.focus_handle(),
-            cursor: 0,
+            cursor: 1,
             current: Location::Folder(PathBuf::new()),
             layout: Rc::default(),
             last_rows: Vec::new(),
@@ -797,7 +807,7 @@ impl Sidebar {
     }
 
     fn stabilize_plugin_cursor(&mut self, rows: &[Row]) {
-        let selectable: Vec<&Row> = rows.iter().filter(|row| !matches!(row, Row::Header(..))).collect();
+        let selectable: Vec<&Row> = rows.iter().collect();
         if let Some((section, id)) = &self.cursor_key
             && let Some(index) = selectable
                 .iter()
@@ -941,7 +951,7 @@ impl Sidebar {
     }
 
     fn selectable(&self, cx: &gpui::App) -> Vec<Row> {
-        rows(cx.global::<Ui>(), &self.plugin_sections).into_iter().filter(|r| !matches!(r, Row::Header(..))).collect()
+        rows(cx.global::<Ui>(), &self.plugin_sections).into_iter().collect()
     }
 
     /// The selectors a fuzzer can click in the sidebar.
@@ -960,18 +970,9 @@ impl Sidebar {
 
     /// Bounds for selectable row `i`, from the prepaint layout.
     #[cfg(any(test, feature = "fuzz"))]
-    pub fn debug_row_bounds(&self, i: usize, cx: &gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {
-        let mut selectable = 0;
-        for (layout_index, row) in rows(cx.global::<Ui>(), &self.plugin_sections).iter().enumerate() {
-            if matches!(row, Row::Header(..)) {
-                continue;
-            }
-            if selectable == i {
-                return self.layout.borrow().get(layout_index).map(|(_, _, bounds)| *bounds);
-            }
-            selectable += 1;
-        }
-        None
+    pub fn debug_row_bounds(&self, i: usize, _cx: &gpui::App) -> Option<gpui::Bounds<gpui::Pixels>> {
+        // Every row is selectable, so the layout index is the selectable index.
+        self.layout.borrow().get(i).map(|(_, _, bounds)| *bounds)
     }
 
     /// Finder's display names for `path`, volume first. Cached: the ancestors are
@@ -1000,7 +1001,6 @@ impl Sidebar {
             Row::Volume(v) => display_text(&v.name).into_owned(),
             Row::PluginItem { row, .. } => display_text(&row.text).into_owned(),
             Row::SectionHeader { title, .. } => display_text(title).into_owned(),
-            Row::Header(name, _) => display_text(name).into_owned(),
         }
     }
 
@@ -1083,7 +1083,7 @@ impl Sidebar {
     fn looks(&self, rows: &[Row], focused: bool, ui: &Ui) -> Vec<RowLook> {
         self.prune_names(rows);
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
-        let selectable: Vec<&Row> = rows.iter().filter(|row| !matches!(row, Row::Header(..))).collect();
+        let selectable: Vec<&Row> = rows.iter().collect();
         let labels: Vec<String> = selectable
             .iter()
             .map(|row| match row {
@@ -1094,7 +1094,6 @@ impl Sidebar {
                 Row::Volume(v) => display_text(&v.name).into_owned(),
                 Row::SectionHeader { title, .. } => display_text(title).into_owned(),
                 Row::PluginItem { row, .. } => display_text(&row.text).into_owned(),
-                Row::Header(..) => unreachable!(),
             })
             .collect();
 
@@ -1252,7 +1251,7 @@ impl Sidebar {
             Row::Recent(_) => Some(CursorKind::Recent),
             Row::Volume(_) => Some(CursorKind::Volume),
             Row::PluginItem { .. } => Some(CursorKind::Plugin),
-            Row::Header(..) | Row::SectionHeader { .. } => None,
+            Row::SectionHeader { .. } => None,
         }
     }
 
@@ -1267,7 +1266,7 @@ impl Sidebar {
             Row::Recent(_) => Some(("Recent".into(), cx.global::<Ui>().recent_list.len())),
             Row::Volume(_) => Some(("Locations".into(), cx.global::<Ui>().volumes.len())),
             Row::PluginItem { section, .. } => Some((section.clone(), 1)),
-            Row::Header(..) | Row::SectionHeader { .. } => None,
+            Row::SectionHeader { .. } => None,
         }
     }
 
@@ -1375,7 +1374,7 @@ impl Sidebar {
                 Some(crate::drag_drop::DropHit::insertion(self.group_end(group, cx), generation))
             }
             DropTarget::Row(index) => {
-                let row = rows.into_iter().filter(|row| !matches!(row, Row::Header(..))).nth(index)?;
+                let row = rows.into_iter().nth(index)?;
                 let path = row.path()?.to_path_buf();
                 Some(crate::drag_drop::DropHit::folder(path, generation, true))
             }
@@ -1429,9 +1428,7 @@ impl Sidebar {
         let mut groups: Vec<Vec<usize>> = Vec::new();
         let mut index = 0;
         for row in rows(cx.global::<Ui>(), &self.plugin_sections) {
-            if matches!(row, Row::Header(..)) {
-                groups.push(Vec::new());
-            } else if matches!(row, Row::SectionHeader { .. }) {
+            if matches!(row, Row::SectionHeader { .. }) {
                 // Section headers are selectable, so they take an index, but an
                 // Option-Up/Down jump moves to content, not to a heading.
                 groups.push(Vec::new());
@@ -1478,7 +1475,7 @@ impl Sidebar {
 
     fn collapse_section(&mut self, _: &CollapseSection, _: &mut Window, cx: &mut Context<Self>) {
         let Some(Row::SectionHeader { id, collapsed: false, .. }) = self.cursor_row(cx) else { return };
-        ui::edit_sidebar(SidebarEdit::SetSectionCollapsed { id, collapsed: true }, cx);
+        set_collapsed(id, true, cx);
     }
 
     /// Move to `index`, or validate a plugin destination off-thread before the
@@ -1492,7 +1489,7 @@ impl Sidebar {
         let Some(row) = self.selectable(cx).into_iter().nth(index) else { return };
         if let Row::SectionHeader { id, collapsed, .. } = row {
             if nav == SidebarNav::Open && collapsed {
-                ui::edit_sidebar(SidebarEdit::SetSectionCollapsed { id, collapsed: false }, cx);
+                set_collapsed(id, false, cx);
             }
             return;
         }
@@ -1647,14 +1644,14 @@ impl Sidebar {
             Row::PluginItem { row, .. } if row.folder_path().is_some() => {
                 (SidebarMenuKind::Plugin, SidebarMenuState::default())
             }
-            Row::Header(..) | Row::SectionHeader { .. } | Row::PluginItem { .. } => return,
+            Row::SectionHeader { .. } | Row::PluginItem { .. } => return,
         };
         let target = match &row {
             Row::Favorite(_, favorite) => MenuTarget::Favorite(favorite.path.clone()),
             Row::Recent(path) => MenuTarget::Recent(path.clone()),
             Row::Volume(volume) => MenuTarget::Volume(volume.path.clone()),
             Row::PluginItem { section, row } => MenuTarget::Plugin { section: section.clone(), id: row.id.clone() },
-            Row::Header(..) | Row::SectionHeader { .. } => return,
+            Row::SectionHeader { .. } => return,
         };
         let entries = crate::context_menu::sidebar_entries(kind, state, cx);
         self.menu = Some((i, kind));
@@ -1861,7 +1858,7 @@ impl Render for Sidebar {
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
         self.stabilize_plugin_cursor(&rows);
         let focused = self.focus.is_focused(window);
-        let selectable_count = rows.iter().filter(|r| !matches!(r, Row::Header(..))).count();
+        let selectable_count = rows.len();
         self.cursor = self.cursor.min(selectable_count.saturating_sub(1));
         let section_of: Vec<Option<String>> = rows
             .iter()
@@ -1884,14 +1881,9 @@ impl Render for Sidebar {
                 Some(_) if !self.dragging_favorite.get() => None,
                 _ => self.target_at(position).filter(|target| match target {
                     DropTarget::Group(_) => true,
-                    DropTarget::Row(index) => rows
-                        .iter()
-                        .filter(|row| !matches!(row, Row::Header(..)))
-                        .nth(*index)
-                        .and_then(Row::path)
-                        .is_some_and(|path| {
-                            crate::operations::drop_would_act(crate::drag_drop::active_paths(cx), path)
-                        }),
+                    DropTarget::Row(index) => rows.get(*index).and_then(Row::path).is_some_and(|path| {
+                        crate::operations::drop_would_act(crate::drag_drop::active_paths(cx), path)
+                    }),
                 }),
             };
         } else {
@@ -1906,7 +1898,9 @@ impl Render for Sidebar {
             let first_bounds = layout.first().map(|(_, _, bounds)| *bounds);
             match (current_bounds, first_bounds) {
                 (Some(current), Some(first)) => {
-                    let top = f32::from(current.top() - first.top());
+                    // Section titles keep their gap above as a margin, outside their bounds.
+                    let gap = if matches!(rows.first(), Some(Row::SectionHeader { .. })) { HEADER_GAP } else { 0.0 };
+                    let top = f32::from(current.top() - first.top()) + gap;
                     let base = div()
                         .absolute()
                         .top(px(top))
@@ -1947,41 +1941,6 @@ impl Render for Sidebar {
             })
         };
         for row in rows {
-            if let Row::Header(title, group) = &row {
-                current_section = None;
-                let header = div()
-                    .id(SharedString::from(format!("sidebar-header-{title}")))
-                    .debug_selector({
-                        let title = title.clone();
-                        move || format!("sidebar-header-{title}")
-                    })
-                    .role(Role::Heading)
-                    .aria_level(2)
-                    .aria_label(title.clone())
-                    .px_2()
-                    .pt_3()
-                    .pb_1()
-                    .rounded_md()
-                    .relative()
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(color(muted))
-                    .child(title.clone());
-                let header = match *group {
-                    Some(g) => header
-                        .when(
-                            !self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Group(g)),
-                            |header| header.child(drop_outline(&theme).inset_0()),
-                        )
-                        .on_drop(cx.listener(move |_, dragged: &DraggedFavorite, _, cx| {
-                            ui::edit_sidebar(SidebarEdit::Move { from: dragged.slot, to: (g, 0) }, cx);
-                        })),
-                    None => header,
-                };
-                kinds.push((group.map(DropTarget::Group), None));
-                children.push(header.into_any_element());
-                continue;
-            }
             if let Row::SectionHeader { id, title, collapsed } = &row {
                 let id = id.clone();
                 let collapsed = *collapsed;
@@ -2006,7 +1965,8 @@ impl Render for Sidebar {
                     .h(px(14.))
                     .child(div().absolute().top_0().left_0().opacity(1.0 - open).child("▸"))
                     .child(div().absolute().top_0().left_0().opacity(open).child("▾"));
-                kinds.push((None, None));
+                let group = group_of_section(&id);
+                kinds.push((group.map(DropTarget::Group), None));
                 let i = index;
                 index += 1;
                 let cursor = i == self.cursor;
@@ -2025,7 +1985,7 @@ impl Render for Sidebar {
                         .aria_size_of_set(selectable_count)
                         .aria_selected(cursor)
                         .when(cursor, |header| header.aria_active_descendant().shadow(cursor_ring(&theme)))
-                        .mt(px(10.))
+                        .mt(px(HEADER_GAP))
                         .px_2()
                         .py(px(3.))
                         .rounded_md()
@@ -2040,13 +2000,21 @@ impl Render for Sidebar {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.cursor = i;
                             this.cursor_key = None;
-                            ui::edit_sidebar(
-                                SidebarEdit::SetSectionCollapsed { id: id.clone(), collapsed: !collapsed },
-                                cx,
-                            );
+                            set_collapsed(id.clone(), !collapsed, cx);
                         }))
+                        .relative()
                         .child(chevron)
                         .child(title.clone())
+                        .when_some(group, |header, g| {
+                            header
+                                .when(
+                                    !self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Group(g)),
+                                    |header| header.child(drop_outline(&theme).inset_0()),
+                                )
+                                .on_drop(cx.listener(move |_, dragged: &DraggedFavorite, _, cx| {
+                                    ui::edit_sidebar(SidebarEdit::Move { from: dragged.slot, to: (g, 0) }, cx);
+                                }))
+                        })
                         .into_any_element(),
                 );
                 // Full: the closing rows fade away while the gap shrinks. Low has no
@@ -2512,22 +2480,13 @@ mod tests {
 
     #[test]
     fn section_spans_count_the_rows_up_to_the_next_header() {
-        let rows = vec![
-            Row::Header("Favorites".into(), Some(0)),
-            recent("a"),
-            header("recent", false),
-            recent("b"),
-            recent("c"),
-            header("locations", true),
-            Row::Header("Other".into(), None),
-            recent("d"),
-        ];
+        let rows = vec![recent("a"), header("recent", false), recent("b"), recent("c"), header("locations", true)];
         let spans = section_spans(&rows);
         assert_eq!(
             spans,
             vec![
-                SectionSpan { id: "recent".into(), collapsed: false, start: 3, len: 2 },
-                SectionSpan { id: "locations".into(), collapsed: true, start: 6, len: 0 },
+                SectionSpan { id: "recent".into(), collapsed: false, start: 2, len: 2 },
+                SectionSpan { id: "locations".into(), collapsed: true, start: 5, len: 0 },
             ],
             "the favorite before and the row after a plain header belong to no section"
         );

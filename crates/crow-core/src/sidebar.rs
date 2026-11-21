@@ -75,6 +75,9 @@ pub struct Group {
     pub name: String,
     #[serde(default)]
     pub items: Vec<FavoriteItem>,
+    /// Hides the group's favorites under its title.
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -241,6 +244,10 @@ impl SidebarConfig {
 
     pub fn section_shown(&self, id: &str) -> bool {
         self.section(id).show.unwrap_or(true)
+    }
+
+    pub fn group_collapsed(&self, group: usize) -> bool {
+        self.group.get(group).is_some_and(|g| g.collapsed)
     }
 
     pub fn section_collapsed(&self, id: &str) -> bool {
@@ -413,6 +420,11 @@ pub enum SidebarEdit {
         id: String,
         collapsed: bool,
     },
+    /// Write only one favorites group's collapse flag.
+    SetGroupCollapsed {
+        group: usize,
+        collapsed: bool,
+    },
     /// Add one Projects discovery root, keeping comments and the rest of the file.
     AddProjectRoot(PathBuf),
     /// Remove one exact Projects discovery root, keeping comments.
@@ -487,6 +499,10 @@ fn apply(doc: &mut DocumentMut, edit: &SidebarEdit, home: &Path) -> Result<(), S
                     index += 1;
                 }
             }
+        }
+        SidebarEdit::SetGroupCollapsed { group, collapsed } => {
+            let table = groups(doc)?.get_mut(*group).ok_or_else(|| format!("no group {group}"))?;
+            crate::config::set_value(table, "collapsed", (*collapsed).into());
         }
         SidebarEdit::SetSectionCollapsed { id, collapsed } => {
             if id.is_empty() || id.contains('"') {
@@ -884,6 +900,21 @@ roots = ["~/code", "~/work"]
         assert_eq!(
             reparsed.project_roots(Path::new("/Users/me")),
             vec![PathBuf::from("/Users/me/code"), PathBuf::from("/Volumes/Work/src")]
+        );
+    }
+
+    #[test]
+    fn a_group_collapse_flag_is_written_in_place() {
+        let mut doc = "[[group]]\nname = \"A\"\nitems = []\n[[group]]\nname = \"B\" # mine\nitems = []\n"
+            .parse::<DocumentMut>()
+            .unwrap();
+        apply(&mut doc, &SidebarEdit::SetGroupCollapsed { group: 1, collapsed: true }, Path::new("/Users/me")).unwrap();
+        let config = SidebarConfig::parse(&doc.to_string()).unwrap();
+        assert!(!config.group_collapsed(0) && config.group_collapsed(1));
+        assert!(doc.to_string().contains("# mine"), "{doc}");
+        assert!(
+            apply(&mut doc, &SidebarEdit::SetGroupCollapsed { group: 5, collapsed: true }, Path::new("/Users/me"))
+                .is_err()
         );
     }
 }
