@@ -1436,6 +1436,64 @@ fn sidebar_twin_in_home_shows_a_tilde(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn sidebar_click_shows_fill_before_window_confirms_navigation(cx: &mut TestAppContext) {
+    let root = fixture("pending-sidebar-click");
+    let (view, mut browser) = open(cx, &root.join("alpha"));
+    write_config(&view, &mut browser, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+
+    // Render the sidebar on its own so the click emits navigation but the
+    // browser cannot confirm it before we inspect the first frame.
+    let window = cx
+        .update(|cx| {
+            cx.open_window(WindowOptions::default(), |window, cx| {
+                cx.new(|cx| {
+                    let mut sidebar = Sidebar::new(cx);
+                    sidebar.set_current(root.join("alpha"), cx);
+                    window.focus(&sidebar.focus_handle(cx), cx);
+                    sidebar
+                })
+            })
+        })
+        .expect("sidebar window");
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    let sidebar = window.root(&mut cx).expect("sidebar");
+    cx.run_until_parked();
+    let beta = cx.debug_bounds("sidebar-2").expect("beta row");
+    cx.simulate_mouse_down(beta.center(), gpui::MouseButton::Left, Default::default());
+    cx.simulate_mouse_up(beta.center(), gpui::MouseButton::Left, Default::default());
+    cx.run_until_parked();
+    let looks = cx.update(|window, cx| sidebar.read(cx).looks_for_test(window, cx));
+    assert!(looks[2].current && !looks[1].current);
+    assert!(looks.iter().all(|look| !look.ring));
+
+    cx.simulate_keystrokes("up");
+    let looks = cx.update(|window, cx| sidebar.read(cx).looks_for_test(window, cx));
+    assert!(looks[1].ring, "up shows the keyboard cursor");
+}
+
+#[gpui::test]
+fn sidebar_failed_click_restores_fill_and_keeps_the_error(cx: &mut TestAppContext) {
+    let root = fixture("failed-sidebar-click");
+    let alpha = root.join("alpha");
+    let missing = root.join("missing");
+    let (view, mut cx) = open(cx, &alpha);
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha, &missing]));
+    let target = cx.debug_bounds("sidebar-2").expect("missing favorite");
+    cx.simulate_mouse_down(target.center(), gpui::MouseButton::Left, Default::default());
+    cx.simulate_mouse_up(target.center(), gpui::MouseButton::Left, Default::default());
+    settle(&view, &mut cx);
+
+    let listing = pane(&view, &cx).read_with(&cx, |p, _| p.focused_folder_for_test());
+    listing.read_with(&cx, |listing, _| {
+        assert_eq!(listing.dir(), missing);
+        assert!(listing.error().is_some());
+    });
+    let looks = row_looks(&view, &mut cx);
+    assert!(looks[0].current && !looks[1].current);
+    assert!(looks.iter().all(|look| !look.ring));
+}
+
+#[gpui::test]
 fn sidebar_cursor_is_a_ring_and_only_the_current_folder_is_filled(cx: &mut TestAppContext) {
     let root = fixture("ring");
     let (view, mut cx) = open(cx, &root.join("alpha"));

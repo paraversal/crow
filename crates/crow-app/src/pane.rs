@@ -698,6 +698,16 @@ impl Pane {
         self.location().as_folder()
     }
 
+    pub(crate) fn sidebar_location(&self, cx: &App) -> (Location, Option<bool>) {
+        if self.folder().is_some() {
+            let folder = self.focused_folder().read(cx);
+            let loaded = (!folder.is_loading()).then(|| folder.error().is_none());
+            (Location::Folder(folder.dir().to_path_buf()), loaded)
+        } else {
+            (self.location().clone(), Some(true))
+        }
+    }
+
     /// The real folder the user is in, including the focused column in Columns.
     pub fn focused_path(&self, cx: &gpui::App) -> Option<PathBuf> {
         self.folder().map(|_| self.current_dir(cx))

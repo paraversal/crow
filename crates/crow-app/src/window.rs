@@ -2377,8 +2377,6 @@ impl CrowWindow {
                         ui::record_visit(dir, cx);
                     }
                 }
-                let dir = dir.clone();
-                self.sidebar.update(cx, |s, cx| s.set_current(dir, cx));
             }
             PaneEvent::SaveSearch => self.save_search(&SaveSearch, window, cx),
             PaneEvent::FocusSidebar => {
@@ -2390,8 +2388,6 @@ impl CrowWindow {
                 operations::clear_message(cx);
                 self.close_tip(cx);
                 self.close_path_edit(false, window, cx);
-                let location = self.pane().read(cx).location().clone();
-                self.sidebar.update(cx, |s, cx| s.set_current_location(location, cx));
                 self.announce_active_scope(cx);
                 self.sync_info_target(window, cx);
                 cx.notify();
@@ -3549,13 +3545,11 @@ impl Render for CrowWindow {
             window.request_animation_frame();
         }
         let tab_bar = (self.tabs.len() > 1).then(|| self.render_tab_bar(cx));
-        let (current, active_saved) = {
-            let pane = self.pane().read(cx);
-            let location = pane.focused_path(cx).map_or_else(|| pane.location().clone(), Location::Folder);
-            (location, pane.location().saved_query_id().cloned())
-        };
+        let pane = self.pane().read(cx);
+        let (current, loaded) = pane.sidebar_location(cx);
+        let active_saved = pane.location().saved_query_id().cloned();
         self.sidebar.update(cx, |s, cx| {
-            s.set_current_location(current, cx);
+            s.sync_current(current, loaded, cx);
             s.set_active_saved(active_saved, cx);
         });
         let sidebar_focused = self.sidebar.read(cx).focus_handle(cx).is_focused(window);

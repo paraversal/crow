@@ -527,12 +527,19 @@ fn bar_tone(used: f32) -> BarTone {
     if used >= DISK_WARNING_USED { BarTone::Warning } else { BarTone::Neutral }
 }
 
+struct PendingCurrent {
+    target: Location,
+    previous: Location,
+    rejected: bool,
+}
+
 pub struct Sidebar {
     focus: FocusHandle,
     /// Index into the selectable rows (favorites, recents, volumes).
     cursor: usize,
     /// The folder the window shows, highlighted when it's in the sidebar.
     current: Location,
+    pending_current: Option<PendingCurrent>,
     /// Where each direct child of the list sits, captured when it is prepainted.
     /// A cell so prepaint can fill it without scheduling another render.
     layout: RowLayout,
@@ -609,6 +616,7 @@ impl Sidebar {
             focus: cx.focus_handle(),
             cursor: 1,
             current: Location::Folder(PathBuf::new()),
+            pending_current: None,
             layout: Rc::default(),
             last_rows: Vec::new(),
             section_motions: Vec::new(),
@@ -940,12 +948,34 @@ impl Sidebar {
     }
 
     pub fn set_current(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        self.set_current_location(Location::Folder(dir), cx);
+        self.sync_current(Location::Folder(dir), Some(true), cx);
     }
 
-    pub fn set_current_location(&mut self, location: Location, cx: &mut Context<Self>) {
-        if self.current != location {
-            self.current = location;
+    fn visible_current(&self) -> &Location {
+        match &self.pending_current {
+            Some(pending) if pending.rejected => &pending.previous,
+            Some(pending) => &pending.target,
+            None => &self.current,
+        }
+    }
+
+    /// A folder reports None while its listing is loading, then success or failure.
+    pub fn sync_current(&mut self, location: Location, loaded: Option<bool>, cx: &mut Context<Self>) {
+        let before = self.visible_current().clone();
+        if let Some(pending) = &mut self.pending_current {
+            if pending.target == location {
+                match loaded {
+                    Some(true) => self.pending_current = None,
+                    Some(false) => pending.rejected = true,
+                    None => {}
+                }
+            } else if self.current != location {
+                self.pending_current = None;
+                self.navigation_generation = self.navigation_generation.wrapping_add(1);
+            }
+        }
+        self.current = location;
+        if *self.visible_current() != before {
             cx.notify();
         }
     }
@@ -1213,7 +1243,7 @@ impl Sidebar {
                 right,
                 badge,
                 spoken,
-                current: row.location().as_ref() == Some(&self.current),
+                current: row.location().as_ref() == Some(self.visible_current()),
                 ring: focused && i == self.cursor,
                 drop: !self.dragging_favorite.get() && self.drop_target == Some(DropTarget::Row(i)),
                 bar,
@@ -1227,7 +1257,7 @@ impl Sidebar {
     pub fn looks_for_test(&self, window: &Window, cx: &gpui::App) -> Vec<RowLook> {
         let ui = cx.global::<Ui>();
         let rows = rows(ui, &self.plugin_sections);
-        self.looks(&rows, self.focus.is_focused(window), ui)
+        self.looks(&rows, self.focus.is_focused(window) && window.last_input_was_keyboard(), ui)
     }
 
     fn cursor_row(&self, cx: &gpui::App) -> Option<Row> {
@@ -1483,10 +1513,18 @@ impl Sidebar {
     /// stale result; the live row and section revision are checked again on the
     /// main thread.
     fn navigate_row(&mut self, index: usize, nav: SidebarNav, cx: &mut Context<Self>) {
+        self.navigate(index, nav, false, cx);
+    }
+
+    fn navigate(&mut self, index: usize, nav: SidebarNav, clicked: bool, cx: &mut Context<Self>) {
+        let previous = self.pending_current.take().map_or_else(|| self.current.clone(), |pending| pending.previous);
         self.cursor_key = None;
         self.navigation_generation = self.navigation_generation.wrapping_add(1);
         let generation = self.navigation_generation;
         let Some(row) = self.selectable(cx).into_iter().nth(index) else { return };
+        if clicked {
+            self.pending_current = row.location().map(|target| PendingCurrent { target, previous, rejected: false });
+        }
         if let Row::SectionHeader { id, collapsed, .. } = row {
             if nav == SidebarNav::Open && collapsed {
                 set_collapsed(id, false, cx);
@@ -1544,7 +1582,7 @@ impl Sidebar {
         cx.spawn(async move |this, cx| {
             let matches = task.await;
             this.update(cx, |this, cx| {
-                if this.navigation_generation != generation || this.section_revision() != revision {
+                if this.navigation_generation != generation {
                     return;
                 }
                 let live = this.selectable(cx).into_iter().nth(index);
@@ -1553,13 +1591,19 @@ impl Sidebar {
                     Some(Row::PluginItem { section: s, row })
                         if s == section && row.id == row_id && row.folder_path() == Some(expected_path.as_path())
                 );
-                if !live {
+                if this.section_revision() != revision || !live {
+                    this.pending_current = None;
+                    cx.notify();
                     return;
                 }
                 if matches {
                     emit_nav(nav, Location::Folder(expected_path), cx);
-                } else if nav != SidebarNav::Show {
-                    cx.emit(SidebarEvent::Message("That folder is no longer available".into(), true));
+                } else {
+                    this.pending_current = None;
+                    cx.notify();
+                    if nav != SidebarNav::Show {
+                        cx.emit(SidebarEvent::Message("That folder is no longer available".into(), true));
+                    }
                 }
             })
             .ok();
@@ -1857,7 +1901,7 @@ impl Render for Sidebar {
         let icons = crate::icon_packs::Resolver::for_source(cx, &ui.settings.icon_pack);
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
         self.stabilize_plugin_cursor(&rows);
-        let focused = self.focus.is_focused(window);
+        let focused = self.focus.is_focused(window) && window.last_input_was_keyboard();
         let selectable_count = rows.len();
         self.cursor = self.cursor.min(selectable_count.saturating_sub(1));
         let section_of: Vec<Option<String>> = rows
@@ -1891,7 +1935,7 @@ impl Render for Sidebar {
             self.insert_slot = None;
             self.dragging_favorite.set(false);
         }
-        let current_child = rows.iter().position(|row| row.location().as_ref() == Some(&self.current));
+        let current_child = rows.iter().position(|row| row.location().as_ref() == Some(self.visible_current()));
         let fill = {
             let layout = self.layout.borrow();
             let current_bounds = current_child.and_then(|ix| layout.get(ix).map(|(_, _, bounds)| *bounds));
@@ -1984,7 +2028,8 @@ impl Render for Sidebar {
                         .aria_position_in_set(i + 1)
                         .aria_size_of_set(selectable_count)
                         .aria_selected(cursor)
-                        .when(cursor, |header| header.aria_active_descendant().shadow(cursor_ring(&theme)))
+                        .when(cursor && self.focus.is_focused(window), |header| header.aria_active_descendant())
+                        .when(look.ring, |header| header.shadow(cursor_ring(&theme)))
                         .mt(px(HEADER_GAP))
                         .px_2()
                         .py(px(3.))
@@ -2138,7 +2183,7 @@ impl Render for Sidebar {
                     }
                     this.cursor = i;
                     if navigable {
-                        this.navigate_row(i, SidebarNav::Open, cx);
+                        this.navigate(i, SidebarNav::Open, true, cx);
                     }
                     cx.notify();
                 }));
