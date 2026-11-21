@@ -213,12 +213,13 @@ enum ControlId {
     OpenExcludeToml,
     OpenPluginsToml,
     OpenSavedQueriesToml,
+    OpenKeysToml,
 }
 
 impl ControlId {
     /// Every control, used to build focus handles. Reading order comes from
     /// `catalog::units`, so a category can be reordered without touching this.
-    const ALL: [ControlId; 53] = [
+    const ALL: [ControlId; 54] = [
         ControlId::Theme,
         ControlId::TranslucentSidebar,
         ControlId::AppIcon,
@@ -272,6 +273,7 @@ impl ControlId {
         ControlId::OpenExcludeToml,
         ControlId::OpenPluginsToml,
         ControlId::OpenSavedQueriesToml,
+        ControlId::OpenKeysToml,
     ];
 
     fn key(self) -> &'static str {
@@ -329,6 +331,7 @@ impl ControlId {
             ControlId::OpenExcludeToml => "settings-open-exclude",
             ControlId::OpenPluginsToml => "settings-open-plugins",
             ControlId::OpenSavedQueriesToml => "settings-open-saved-queries",
+            ControlId::OpenKeysToml => "settings-open-keys",
         }
     }
 
@@ -427,6 +430,7 @@ impl ControlId {
             ControlId::OpenExcludeToml => "exclude.toml",
             ControlId::OpenPluginsToml => "plugins.toml",
             ControlId::OpenSavedQueriesToml => "saved-queries.toml",
+            ControlId::OpenKeysToml => "keys.toml",
         }
     }
 
@@ -475,6 +479,7 @@ impl ControlId {
             | ControlId::OpenExcludeToml
             | ControlId::OpenPluginsToml
             | ControlId::OpenSavedQueriesToml
+            | ControlId::OpenKeysToml
             | ControlId::PreviewCurrentFolder
             | ControlId::PreviewChooseFolder
             | ControlId::PreviewAddRule
@@ -585,7 +590,8 @@ impl ControlId {
             | ControlId::OpenViewsToml
             | ControlId::OpenExcludeToml
             | ControlId::OpenPluginsToml
-            | ControlId::OpenSavedQueriesToml => return None,
+            | ControlId::OpenSavedQueriesToml
+            | ControlId::OpenKeysToml => return None,
         };
         Some(text.into())
     }
@@ -603,7 +609,8 @@ impl ControlId {
             | ControlId::OpenViewsToml
             | ControlId::OpenExcludeToml
             | ControlId::OpenPluginsToml
-            | ControlId::OpenSavedQueriesToml => true,
+            | ControlId::OpenSavedQueriesToml
+            | ControlId::OpenKeysToml => true,
             ControlId::SavedQueryList => !ui.saved_queries.is_empty() && ui.file_error("saved-queries.toml").is_none(),
             ControlId::KeyboardSearch | ControlId::KeyboardList => true,
             ControlId::KeyboardResetAll => ui.file_error("keys.toml").is_none(),
@@ -746,8 +753,16 @@ enum FocusTarget {
 
 /// The files the error region covers. `plugins.toml` comes from the plugin
 /// inventory and `pack.toml` from the icon pack loader; the rest from the config loader.
-const ERROR_FILES: [&str; 7] =
-    ["settings.toml", "views.toml", "sidebar.toml", "exclude.toml", "plugins.toml", "saved-queries.toml", "pack.toml"];
+const ERROR_FILES: [&str; 8] = [
+    "settings.toml",
+    "views.toml",
+    "sidebar.toml",
+    "exclude.toml",
+    "plugins.toml",
+    "saved-queries.toml",
+    "keys.toml",
+    "pack.toml",
+];
 
 /// The preview editor's layer. The target within the layer is kept while the
 /// editor is on screen.
@@ -1597,6 +1612,7 @@ impl SettingsWindow {
             ControlId::OpenExcludeToml => ui::open_config_file("exclude.toml", cx),
             ControlId::OpenPluginsToml => ui::open_config_file("plugins.toml", cx),
             ControlId::OpenSavedQueriesToml => ui::open_config_file("saved-queries.toml", cx),
+            ControlId::OpenKeysToml => ui::open_config_file("keys.toml", cx),
             ControlId::FontSize | ControlId::WindowWidth | ControlId::WindowHeight => {
                 self.commit_stepper(id, window, cx);
             }
@@ -2751,13 +2767,14 @@ impl Render for SettingsWindow {
             .child(link(self, ControlId::OpenExcludeToml, "exclude.toml", window, &theme, cx))
             .child(link(self, ControlId::OpenPluginsToml, "plugins.toml", window, &theme, cx))
             .child(link(self, ControlId::OpenSavedQueriesToml, "saved-queries.toml", window, &theme, cx))
+            .child(link(self, ControlId::OpenKeysToml, "keys.toml", window, &theme, cx))
             .child(show_config);
         let config_row = controls::labeled(
             ControlMeta {
                 id: "settings-config-files",
                 label: "Config files",
                 description: Some(
-                    "The six TOML files stay authoritative and editable; Crow writes back only the key you change."
+                    "The seven TOML files stay authoritative and editable; Crow writes back only the key you change."
                         .into(),
                 ),
                 enabled: true,
@@ -3165,6 +3182,7 @@ fn link(
         ControlId::OpenExcludeToml => "exclude.toml",
         ControlId::OpenPluginsToml => "plugins.toml",
         ControlId::OpenSavedQueriesToml => "saved-queries.toml",
+        ControlId::OpenKeysToml => "keys.toml",
         _ => unreachable!("{id:?} is not a config-file link"),
     };
     let activate = callback(cx, move |_, _, cx| ui::open_config_file(name, cx));
@@ -5696,5 +5714,34 @@ permissions = { fs = "none" }
         show_category(&view, &mut vcx, Category::Keyboard);
         assert!(vcx.debug_bounds("settings-keyboard-list").is_some());
         assert!(vcx.debug_bounds("settings-keyboard-row-go-to-folder").is_some());
+    }
+
+    #[gpui::test]
+    fn vim_layer_captures_a_sequence_ended_with_return(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        vcx.simulate_keystrokes("right");
+        assert_eq!(view.read_with(&vcx, |v, _| v.keyboard.layer), KeymapLayer::Vim, "→ switches the layer");
+        keyboard_row_cursor(&view, &mut vcx, "Copy");
+        vcx.simulate_keystrokes("enter y c enter");
+        settle_writes(&mut vcx);
+        let keys = vcx.read(|cx| cx.global::<Ui>().keys.vim.get("copy").cloned());
+        assert_eq!(keys, Some(vec!["y c".to_owned()]));
+        assert!(vcx.read(|cx| cx.global::<Ui>().keys.finder.is_empty()), "the Finder layer is untouched");
+    }
+
+    #[gpui::test]
+    fn keyboard_page_fits_a_narrow_window_and_a_broken_file_blocks_edits(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        let dir = vcx.read(|cx| cx.global::<Ui>().config_dir.clone());
+        std::fs::write(dir.join("keys.toml"), "[finder\n").unwrap();
+        vcx.update(|_, cx| crate::ui::reload_config(cx));
+        draw(&mut vcx);
+        focus_control(&view, &mut vcx, ControlId::KeyboardList);
+        vcx.simulate_keystrokes("enter");
+        assert!(view.read_with(&vcx, |v, _| v.keyboard.capture.is_none()), "a broken keys.toml blocks capture");
+        assert!(view.read_with(&vcx, |v, _| v.keyboard.notice.is_some()));
     }
 }
