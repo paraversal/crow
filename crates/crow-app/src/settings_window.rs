@@ -137,9 +137,11 @@ fn open_window(cx: &mut App) {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
             title: Some("Settings".into()),
-            appears_transparent: false,
-            traffic_light_position: None,
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(px(14.), px(19.))),
         }),
+        // Like the main window: the band below moves the window.
+        app_owns_titlebar_drag: true,
         is_resizable: true,
         window_min_size: Some(size(px(640.), px(420.))),
         ..Default::default()
@@ -2888,6 +2890,34 @@ impl Render for SettingsWindow {
         );
         rows.insert(ControlId::EditSettings, config_row.into_any_element());
 
+        // The titlebar is transparent, so the window's own background shows through
+        // it in every theme. A press moves the window; a double-click does what
+        // the system setting says.
+        let titlebar = div()
+            .id("settings-titlebar")
+            .debug_selector(|| "settings-titlebar".to_owned())
+            .flex_none()
+            .h(px(38.))
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(13.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(color(theme.role("fg-muted")))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
+                    let effects = crate::effects::effects(cx);
+                    if event.click_count > 1 {
+                        effects.titlebar_double_click(window);
+                    } else {
+                        effects.start_window_move(window);
+                    }
+                }),
+            )
+            .child("Settings");
+
         let search_focused = self.search_handle(cx).is_focused(window);
         let search_row = div()
             .id("settings-search-row")
@@ -2896,7 +2926,7 @@ impl Render for SettingsWindow {
             .items_center()
             .gap(px(7.))
             .mx(px(16.))
-            .mt(px(10.))
+            .mt(px(2.))
             .h(px(28.))
             .pl(px(9.))
             .pr(px(8.))
@@ -3009,6 +3039,7 @@ impl Render for SettingsWindow {
             .text_color(color(theme.role("fg")))
             .font_family(font)
             .text_size(px(font_size))
+            .child(titlebar)
             .child(search_row)
             .children(error_region)
             .child(div().flex_1().min_h_0().flex().child(self.sidebar(&theme, window, cx)).child(scroll))
@@ -5091,6 +5122,18 @@ preview_providers = ["example.one.preview"]
         let calls = vcx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").take_calls());
         assert!(calls.contains(&Call::OpenInDefaultApp(config.join("settings.toml"))), "{calls:?}");
         assert!(calls.contains(&Call::OpenFolderInFinder(config)), "{calls:?}");
+    }
+
+    #[gpui::test]
+    fn the_settings_titlebar_band_moves_the_window(cx: &mut TestAppContext) {
+        use crate::effects::Call;
+        let (_view, mut vcx) = open_settings(cx);
+        draw(&mut vcx);
+        let at = vcx.debug_bounds("settings-titlebar").expect("titlebar band").center();
+        vcx.simulate_click(at, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        let calls = vcx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").take_calls());
+        assert!(calls.contains(&Call::StartWindowMove), "{calls:?}");
     }
 
     #[gpui::test]
