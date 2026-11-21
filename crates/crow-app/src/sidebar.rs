@@ -555,11 +555,10 @@ pub struct Sidebar {
     dragging_favorite: Rc<Cell<bool>>,
     /// Where a dragged favorite would be inserted: group and index before the move.
     insert_slot: Option<Slot>,
-    /// Finder's display names per path, volume first. Filled on demand; `displayNameAtPath`
-    /// runs once per path instead of once per row per render.
-    names: RefCell<HashMap<PathBuf, Rc<[String]>>>,
-    /// The paths in `names`, in row order, so a changed sidebar prunes stale entries.
-    name_paths: RefCell<Vec<PathBuf>>,
+    /// Finder's display names per destination, volume first.
+    names: HashMap<PathBuf, Rc<[String]>>,
+    name_paths: Vec<PathBuf>,
+    name_worker: Option<Task<()>>,
     /// A row pulsing because a move landed in its folder, and when it started.
     receive: Option<(PathBuf, Instant)>,
     /// Bumped per pulse, so an older timer cannot clear a newer one.
@@ -624,8 +623,9 @@ impl Sidebar {
             drop_target: None,
             dragging_favorite: Rc::new(Cell::new(false)),
             insert_slot: None,
-            names: RefCell::new(HashMap::new()),
-            name_paths: RefCell::new(Vec::new()),
+            names: HashMap::new(),
+            name_paths: Vec::new(),
+            name_worker: None,
             receive: None,
             receive_generation: 0,
             menu: None,
@@ -1005,23 +1005,73 @@ impl Sidebar {
         self.layout.borrow().get(i).map(|(_, _, bounds)| *bounds)
     }
 
-    /// Finder's display names for `path`, volume first. Cached: the ancestors are
-    /// filesystem calls on the main thread, so each path is asked once.
-    fn components(&self, path: &Path) -> Rc<[String]> {
-        if let Some(names) = self.names.borrow().get(path) {
-            return names.clone();
+    fn refresh_names(&mut self, rows: &[Row], cx: &mut Context<Self>) {
+        let paths = rows.iter().filter(|row| !matches!(row, Row::Volume(_))).filter_map(Row::path);
+        if !paths.clone().eq(self.name_paths.iter().map(PathBuf::as_path)) {
+            self.name_paths = paths.map(Path::to_path_buf).collect();
+            let keep: HashSet<_> = self.name_paths.iter().map(PathBuf::as_path).collect();
+            self.names.retain(|path, _| keep.contains(path.as_path()));
         }
-        let names: Rc<[String]> = crow_macos::display_components(path)
-            .into_iter()
-            .map(|(name, _)| display_text(&name).into_owned())
-            .collect::<Vec<_>>()
-            .into();
-        self.names.borrow_mut().insert(path.to_path_buf(), names.clone());
-        names
+        if self.name_worker.is_some() {
+            return;
+        }
+        let missing: HashSet<_> =
+            self.name_paths.iter().filter(|path| !self.names.contains_key(*path)).cloned().collect();
+        if missing.is_empty() {
+            return;
+        }
+        let load = cx.background_spawn(async move {
+            let mut ancestors = HashMap::new();
+            missing
+                .into_iter()
+                .map(|path| {
+                    let names = crow_macos::display_component_paths(&path)
+                        .into_iter()
+                        .map(|part| {
+                            ancestors
+                                .entry(part)
+                                .or_insert_with_key(|part| {
+                                    display_text(&crow_macos::localized_display_name_at(part)).into_owned()
+                                })
+                                .clone()
+                        })
+                        .collect::<Vec<_>>();
+                    (path, names)
+                })
+                .collect::<Vec<_>>()
+        });
+        self.name_worker = Some(cx.spawn(async move |this, cx| {
+            let names = load.await;
+            this.update(cx, |this, cx| {
+                let keep: HashSet<_> = this.name_paths.iter().map(PathBuf::as_path).collect();
+                this.names.extend(
+                    names
+                        .into_iter()
+                        .filter(|(path, _)| keep.contains(path.as_path()))
+                        .map(|(path, names)| (path, names.into())),
+                );
+                this.name_worker = None;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
-    /// Finder's name for a folder ("Macintosh HD" for `/`).
-    /// A label for a row that is closing away: just its words.
+    /// Use the path components while Finder's names are loading.
+    fn components(&self, path: &Path) -> Rc<[String]> {
+        self.names.get(path).cloned().unwrap_or_else(|| {
+            crow_macos::display_component_paths(path)
+                .iter()
+                .map(|part| {
+                    let name = part.file_name().map_or_else(|| part.to_string_lossy(), |name| name.to_string_lossy());
+                    display_text(&name).into_owned()
+                })
+                .collect::<Vec<_>>()
+                .into()
+        })
+    }
+
+    /// A label for a row that is closing away.
     fn ghost_label(&self, row: &Row) -> String {
         match row {
             Row::Favorite(_, f) => {
@@ -1098,20 +1148,8 @@ impl Sidebar {
         self.components(path).last().cloned().unwrap_or_else(|| display_text(&path.display().to_string()).into_owned())
     }
 
-    /// Drop cached names for paths that left the sidebar.
-    fn prune_names(&self, rows: &[Row]) {
-        let paths: Vec<PathBuf> = rows.iter().filter_map(|r| r.path().map(Path::to_path_buf)).collect();
-        if *self.name_paths.borrow() == paths {
-            return;
-        }
-        let keep: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
-        self.names.borrow_mut().retain(|path, _| keep.contains(path.as_path()));
-        *self.name_paths.borrow_mut() = paths;
-    }
-
     /// What every selectable row shows, in row order. Headers get no look.
     fn looks(&self, rows: &[Row], focused: bool, ui: &Ui) -> Vec<RowLook> {
-        self.prune_names(rows);
         let vim = ui.settings.keymap == crow_core::KeymapLayer::Vim;
         let selectable: Vec<&Row> = rows.iter().collect();
         let labels: Vec<String> = selectable
@@ -1875,6 +1913,7 @@ impl Render for Sidebar {
         self.update_plugin_sections(cx);
         self.request_inactive_counts(cx);
         let rows = rows(cx.global::<Ui>(), &self.plugin_sections);
+        self.refresh_names(&rows, cx);
         let (motion_mode, motion_now) = (cx.global::<Ui>().feedback.mode, Instant::now());
         self.track_sections(&rows, motion_mode, motion_now);
         if !self.section_motions.is_empty() || self.reorder.is_some() {
@@ -2502,6 +2541,29 @@ mod tests {
 
     fn recent(name: &str) -> Row {
         Row::Recent(PathBuf::from(format!("/{name}")))
+    }
+
+    #[gpui::test]
+    fn background_names_only_cache_sidebar_destinations_still_present(cx: &mut gpui::TestAppContext) {
+        let old = [recent("old")];
+        let new = [recent("new")];
+        let sidebar = cx.update(|cx| cx.new(Sidebar::new));
+        sidebar.update(cx, |this, cx| {
+            this.refresh_names(&old, cx);
+            assert!(this.names.is_empty(), "the first frame uses the path");
+            assert_eq!(this.display_name(Path::new("/old")), "old");
+            this.refresh_names(&new, cx);
+        });
+        cx.run_until_parked();
+        sidebar.update(cx, |this, cx| {
+            assert!(!this.names.contains_key(Path::new("/old")));
+            this.refresh_names(&new, cx);
+        });
+        cx.run_until_parked();
+        sidebar.read_with(cx, |this, _| {
+            let names = this.names.get(Path::new("/new")).expect("worker loaded the current destination");
+            assert_eq!(names.last().map(String::as_str), Some("new"));
+        });
     }
 
     #[test]
