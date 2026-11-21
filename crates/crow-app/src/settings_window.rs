@@ -2882,7 +2882,10 @@ impl Render for SettingsWindow {
         rows.insert(ControlId::SavedQueryList, self.render_saved_queries(window, &theme, cx));
         rows.insert(ControlId::PreviewScope, self.render_preview_unit(window, &theme, cx));
         rows.insert(ControlId::Plugins, plugin_row);
-        rows.insert(ControlId::KeyboardList, self.render_keyboard(window, &theme, cx));
+        rows.insert(
+            ControlId::KeyboardList,
+            self.render_keyboard(self.query.is_empty() && self.category == Category::Keyboard, window, &theme, cx),
+        );
         rows.insert(ControlId::EditSettings, config_row.into_any_element());
 
         let search_focused = self.search_handle(cx).is_focused(window);
@@ -2953,6 +2956,7 @@ impl Render for SettingsWindow {
 
         let mut scroll = div()
             .id("settings-scroll")
+            .debug_selector(|| "settings-scroll".to_owned())
             .flex_1()
             .min_w_0()
             .min_h_0()
@@ -3105,7 +3109,7 @@ fn add_category(
 ) {
     page.push(section_heading(category.label(), theme, 0.0).into_any_element());
     for unit in catalog::units_in(category) {
-        push_unit(page, indices, unit, theme, rows);
+        push_unit(page, indices, unit, theme, rows, true);
     }
 }
 
@@ -3126,7 +3130,7 @@ fn add_search_results(
         }
         page.push(section_heading(category.label(), theme, 0.0).into_any_element());
         for unit in units {
-            push_unit(page, indices, unit, theme, rows);
+            push_unit(page, indices, unit, theme, rows, false);
         }
     }
 }
@@ -3137,8 +3141,11 @@ fn push_unit(
     unit: &catalog::Unit,
     theme: &Theme,
     rows: &mut HashMap<ControlId, gpui::AnyElement>,
+    category_page: bool,
 ) {
     let Some(row) = rows.remove(&unit.id) else { return };
+    // The Keyboard list takes the page's remaining height instead of a fixed one.
+    let fill = category_page && unit.id == ControlId::KeyboardList;
     let index = page.len();
     for id in unit.controls {
         indices.insert(*id, index);
@@ -3147,6 +3154,7 @@ fn push_unit(
         div()
             .w_full()
             .max_w(px(720.))
+            .when(fill, |d| d.flex_1().min_h_0())
             .pb(px(10.))
             .mb(px(10.))
             .border_b_1()
@@ -5585,6 +5593,18 @@ permissions = { fs = "none" }
             std::thread::sleep(Duration::from_millis(5));
         }
         draw(vcx);
+    }
+
+    #[gpui::test]
+    fn keyboard_list_fills_the_page_height(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        show_category(&view, &mut vcx, Category::Keyboard);
+        draw(&mut vcx);
+        let list = vcx.debug_bounds("settings-keyboard-list").expect("list rendered");
+        let scroll = vcx.debug_bounds("settings-scroll").expect("page rendered");
+        assert!(list.size.height > px(440.), "not capped at a fixed height: {:?}", list.size.height);
+        let gap = scroll.bottom() - list.bottom();
+        assert!(gap < px(60.), "list reaches the page bottom, gap {gap:?}");
     }
 
     #[gpui::test]

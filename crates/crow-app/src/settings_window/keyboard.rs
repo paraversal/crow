@@ -444,7 +444,15 @@ impl SettingsWindow {
         }
     }
 
-    pub(super) fn render_keyboard(&self, window: &Window, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// `fill`: the Keyboard page itself, where the list takes the height left
+    /// under the controls. In search results the page scrolls, so the list is capped.
+    pub(super) fn render_keyboard(
+        &self,
+        fill: bool,
+        window: &Window,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let k = &self.keyboard;
         let rows = self.keyboard_rows(cx);
         let duplicates = self.keyboard_duplicates(cx);
@@ -693,6 +701,7 @@ impl SettingsWindow {
         let empty = rows.is_empty();
 
         div()
+            .when(fill, |d| d.size_full())
             .flex()
             .flex_col()
             .gap_2()
@@ -742,7 +751,8 @@ impl SettingsWindow {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .max_h(px(440.))
+                    .when(fill, |d| d.flex_1().min_h_0())
+                    .when(!fill, |d| d.max_h(px(440.)))
                     .overflow_y_scroll()
                     .track_scroll(&k.scroll)
                     .children(items),
