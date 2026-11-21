@@ -1007,7 +1007,11 @@ impl CrowWindow {
     fn render_title_bar(&self, title: &str, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let viewport = window.viewport_size().width;
-        let narrow = viewport < px(760.);
+        let sidebar_hidden = cx.global::<Ui>().sidebar_hidden;
+        let width = viewport - if sidebar_hidden { px(0.) } else { self.side_panes.left_width() };
+        let narrow = viewport < px(760.) || width < px(530.);
+        let search_icon_only = width < px(450.);
+        let tight = width < px(330.);
         let (back, forward, mode, back_label, forward_label) = {
             let pane = self.pane().read(cx);
             let back_label = pane
@@ -1251,15 +1255,9 @@ impl CrowWindow {
             .role(Role::Button)
             .aria_label(format!("Search {title}, Command F"))
             .aria_keyshortcuts("Command+F")
-            .w(px(240.))
-            .min_w(px(160.))
             .h(px(30.))
-            .flex_shrink(1.)
             .rounded(px(8.))
             .bg(surface)
-            .pl(px(10.))
-            .pr(px(6.))
-            .gap(px(8.))
             .flex()
             .items_center()
             .border_1()
@@ -1267,19 +1265,29 @@ impl CrowWindow {
             .hover(|style| style.border_color(color(theme.role("border"))))
             .cursor(CursorStyle::IBeam)
             .on_click(|_, window, cx| window.dispatch_action(Box::new(ShowSearch), cx))
+            .when(search_icon_only, |field| field.w(px(30.)).flex_none().justify_center())
             .child(icons::glyph(Glyph::Search, 14., "fg-muted", &theme))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(13.))
-                    .text_color(muted)
-                    .child(format!("Search {title}")),
-            )
-            .children(search_keys);
+            .when(!search_icon_only, |field| {
+                field
+                    .w(px(240.))
+                    .min_w(px(160.))
+                    .flex_shrink(1.)
+                    .pl(px(10.))
+                    .pr(px(6.))
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(13.))
+                            .text_color(muted)
+                            .child(format!("Search {title}")),
+                    )
+                    .children(search_keys)
+            });
         let search_field =
             with_action_tooltip(search_field, "Search names and contents", &ShowSearch, KeyScope::Window, cx);
 
@@ -1310,18 +1318,24 @@ impl CrowWindow {
             .h(px(BAND_HEIGHT))
             .flex_none()
             // With the sidebar hidden the traffic lights sit at the toolbar's left.
-            .pl(px(if cx.global::<Ui>().sidebar_hidden { 86. } else { 12. }))
-            .pr_3()
+            .pl(px(if sidebar_hidden {
+                86.
+            } else if tight {
+                8.
+            } else {
+                12.
+            }))
+            .pr(px(if tight { 8. } else { 12. }))
             .flex()
             .items_center()
-            .gap(px(10.))
+            .gap(px(if tight { 4. } else { 10. }))
             .border_b_1()
             .border_color(crate::style::hairline(&theme))
             .child(nav)
             .when(self.active_search(cx).is_some(), |bar| bar.when_some(band, |bar, band| bar.child(band)))
             .when(self.active_search(cx).is_none(), |bar| {
                 let search_field = match closing {
-                    Some(look) if look.widen > 0.0 => {
+                    Some(look) if look.widen > 0.0 && !search_icon_only => {
                         let wide = f32::from(window.viewport_size().width);
                         search_field.w(px(240. + (wide - 240.) * look.widen))
                     }
@@ -3611,7 +3625,6 @@ impl Render for CrowWindow {
         if self.search_motion.is_some() {
             window.request_animation_frame();
         }
-        let title_bar = self.render_title_bar(&title, window, cx);
         let tab_now = std::time::Instant::now();
         self.track_tabs(cx.global::<Ui>().feedback.mode, tab_now, cx);
         if !self.tab_motions.is_empty() {
@@ -3641,6 +3654,7 @@ impl Render for CrowWindow {
             self.info.read(cx).preferred_width,
             show_preview && active_search.is_none() && mode == ViewMode::Gallery,
         );
+        let title_bar = self.render_title_bar(&title, window, cx);
         let translucent = cx.global::<Ui>().translucent;
         let sidebar = (!cx.global::<Ui>().sidebar_hidden).then(|| {
             let tone = if translucent {

@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use crow_theme::{Rgb, Theme, Variant};
 use gpui::{
@@ -158,9 +158,10 @@ pub fn ui_font(family: &str) -> String {
     if family.is_empty() { ".SystemUIFont".to_owned() } else { family.to_owned() }
 }
 
+type NativeImages = HashMap<usize, (Weak<Vec<u8>>, Arc<Image>)>;
+
 thread_local! {
-    // crow-macos caches PNG bytes per file type; this wraps each in a GPUI image once.
-    static IMAGES: RefCell<HashMap<usize, Arc<Image>>> = RefCell::new(HashMap::new());
+    static IMAGES: RefCell<NativeImages> = RefCell::new(HashMap::new());
 }
 
 /// Finder's icon for `path` at `points`, as a GPUI image.
@@ -211,13 +212,19 @@ pub fn native_cloud_icon(status: Option<crow_fs::CloudStatus>, path: &Path) -> b
 }
 
 fn image_from_png(png: Arc<Vec<u8>>) -> Option<Arc<Image>> {
+    const MAX_CACHED_IMAGES: usize = 4096;
     let key = Arc::as_ptr(&png) as usize;
-    Some(IMAGES.with(|images| {
-        images
-            .borrow_mut()
-            .entry(key)
-            .or_insert_with(|| Arc::new(Image::from_bytes(ImageFormat::Png, png.as_ref().clone())))
-            .clone()
+    Some(IMAGES.with_borrow_mut(|images| {
+        if let Some((_, image)) = images.get(&key) {
+            return image.clone();
+        }
+        if images.len() >= MAX_CACHED_IMAGES {
+            images.clear();
+        }
+        let image = Arc::new(Image::from_bytes(ImageFormat::Png, png.as_ref().clone()));
+        // Keep the pointer identity reserved when the native cache evicts the PNG.
+        images.insert(key, (Arc::downgrade(&png), image.clone()));
+        image
     }))
 }
 

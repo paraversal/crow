@@ -3260,7 +3260,7 @@ fn gallery_stacks_a_pair_in_a_narrow_window(cx: &mut TestAppContext) {
 #[gpui::test]
 fn gallery_preserves_the_sidebar_edge_with_info_open(cx: &mut TestAppContext) {
     let root = fixture("gallery-sidebar-edge");
-    for (width, preferred) in [(640., 210), (760., 350)] {
+    for (width, preferred) in [(640., 210), (760., 350), (760., 470)] {
         let (view, mut cx) = open_sized(cx, &root, width, 500.);
         write_config(
             &view,
@@ -3272,11 +3272,14 @@ fn gallery_preserves_the_sidebar_edge_with_info_open(cx: &mut TestAppContext) {
         settle(&view, &mut cx);
         let edge = cx.debug_bounds("toolbar").unwrap().left();
         assert_eq!(edge, px(preferred as f32));
+        let search = cx.debug_bounds("toolbar-search").unwrap();
+        assert!(search.right() <= px(width), "Search fits in List: {search:?}");
         let path_edge = cx.debug_bounds("path-bar").unwrap().left();
         cx.simulate_keystrokes("cmd-4");
         settle(&view, &mut cx);
         assert_eq!(cx.debug_bounds("toolbar").unwrap().left(), edge);
         assert_eq!(cx.debug_bounds("path-bar").unwrap().left(), path_edge);
+        assert_eq!(cx.debug_bounds("toolbar-search"), Some(search), "Gallery keeps Search in the same place");
         let rail = cx.debug_bounds("gallery-rail").unwrap();
         let preview = cx.debug_bounds("gallery-preview").unwrap();
         assert_eq!(rail.left(), edge);

@@ -22,6 +22,7 @@ enum IconKey {
 
 /// PNG bytes per icon and size. A cached None means AppKit could not render it.
 type IconCache = HashMap<(IconKey, u32), Option<Arc<Vec<u8>>>>;
+const MAX_CACHED_ICONS: usize = 4096;
 
 thread_local! {
     static CACHE: RefCell<IconCache> = RefCell::new(HashMap::new());
@@ -88,7 +89,12 @@ fn cached_icon(key: IconKey, points: u32) -> Option<Arc<Vec<u8>>> {
         }
     };
     let png = png_of(&image, points * 2).map(Arc::new);
-    CACHE.with(|c| c.borrow_mut().insert(key, png.clone()));
+    CACHE.with_borrow_mut(|cache| {
+        if cache.len() >= MAX_CACHED_ICONS {
+            cache.clear();
+        }
+        cache.insert(key, png.clone());
+    });
     png
 }
 
