@@ -685,7 +685,10 @@ impl CrowWindow {
         // setting update the other windows (its own handle update fails safely).
         self.show_hidden = show;
         for (_, pane) in self.tabs.iter() {
-            pane.update(cx, |pane, cx| pane.set_show_hidden(show, cx));
+            pane.update(cx, |pane, cx| {
+                pane.begin_list_fade();
+                pane.set_show_hidden(show, cx);
+            });
         }
         if let Some(search) = &self.search {
             search.update(cx, |search, cx| search.set_show_hidden(show, cx));

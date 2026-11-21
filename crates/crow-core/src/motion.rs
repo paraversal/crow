@@ -264,6 +264,49 @@ pub mod ms {
     pub const SPRING_BLINK: u64 = 70;
     /// Low's single soft dip before a spring.
     pub const SPRING_DIP: u64 = 110;
+    /// Every duration above, by name, for the reference doc's table and its test.
+    pub const ALL: &[(&str, u64)] = &[
+        ("TRASH_SWALLOW", TRASH_SWALLOW),
+        ("TRASH_CLOSE", TRASH_CLOSE),
+        ("MOVE_FLY", MOVE_FLY),
+        ("MOVE_CLOSE", MOVE_CLOSE),
+        ("RECEIVE", RECEIVE),
+        ("ARRIVE_OPEN", ARRIVE_OPEN),
+        ("ARRIVE_IN", ARRIVE_IN),
+        ("ARRIVE_TINT", ARRIVE_TINT),
+        ("REFUSE", REFUSE),
+        ("TIP_FULL", TIP_FULL),
+        ("LOW_OUT", LOW_OUT),
+        ("LOW_IN", LOW_IN),
+        ("LOW_TINT", LOW_TINT),
+        ("STATUS", STATUS),
+        ("FIELD", FIELD),
+        ("COPY", COPY),
+        ("COPY_FADE", COPY_FADE),
+        ("DISCLOSE", DISCLOSE),
+        ("PANEL_TAB", PANEL_TAB),
+        ("VIEW_CHANGE", VIEW_CHANGE),
+        ("CHILD_COLUMN", CHILD_COLUMN),
+        ("NAVIGATION_LOW", NAVIGATION_LOW),
+        ("REVEAL", REVEAL),
+        ("SHEET_IN_LOW", SHEET_IN_LOW),
+        ("SHEET_IN", SHEET_IN),
+        ("SHEET_OUT", SHEET_OUT),
+        ("SCRIM", SCRIM),
+        ("PANE_SLIDE", PANE_SLIDE),
+        ("SECTION", SECTION),
+        ("TAB", TAB),
+        ("SEGMENT", SEGMENT),
+        ("SEARCH_BAND", SEARCH_BAND),
+        ("FILTER_ROW", FILTER_ROW),
+        ("REORDER", REORDER),
+        ("PROGRESS", PROGRESS),
+        ("PREVIEW_FADE", PREVIEW_FADE),
+        ("TOOLTIP", TOOLTIP),
+        ("FIELD_IN", FIELD_IN),
+        ("SPRING_BLINK", SPRING_BLINK),
+        ("SPRING_DIP", SPRING_DIP),
+    ];
 }
 
 /// How much of the gap closes during the trash swallow's last third.
@@ -573,6 +616,29 @@ mod tests {
             assert_eq!(band_look(Effective::Low, true, t).widen, 1.0, "Low never widens gradually");
             assert_eq!(band_look(Effective::Low, false, t).widen, 0.0);
             assert_eq!(band_look(Effective::Low, true, t).fade, t);
+        }
+    }
+
+    #[test]
+    fn ms_all_lists_every_duration() {
+        let source = include_str!("motion.rs");
+        let start = source.find("pub mod ms {").expect("the ms module");
+        let end = start + source[start..].find("\n}\n").expect("its end");
+        let declared: Vec<&str> = source[start..end]
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pub const ")?.split(':').next())
+            .filter(|name| *name != "ALL")
+            .collect();
+        let listed: Vec<&str> = ms::ALL.iter().map(|(name, _)| *name).collect();
+        assert_eq!(declared, listed, "ms::ALL names every constant, in order");
+    }
+
+    #[test]
+    fn the_reference_doc_lists_every_duration_with_its_value() {
+        let doc = include_str!("../../../docs/motion.md");
+        for (name, value) in ms::ALL {
+            let row = format!("| `{name}` | {value} |");
+            assert!(doc.contains(&row), "docs/motion.md is missing or has a stale row: {row}");
         }
     }
 

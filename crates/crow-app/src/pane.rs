@@ -472,6 +472,8 @@ pub struct Pane {
     filtering: Option<Filtering>,
     /// The filter row opening or closing (`pane_filter::row_look`).
     filter_motion: Option<pane_filter::FilterMotion>,
+    /// The list crossfading after ⌘⇧. (rows come and go at once; the fade hides the swap).
+    list_fade: Option<Instant>,
     /// An empty-space drag selecting tiles in icon view.
     marquee: Option<Marquee>,
     marquee_scroll_gen: u64,
@@ -642,6 +644,7 @@ impl Pane {
             mark_pending: None,
             filtering: None,
             filter_motion: None,
+            list_fade: None,
             marquee: None,
             marquee_scroll_gen: 0,
             tip_inset: false,
@@ -1768,6 +1771,17 @@ impl Pane {
             CommandId::ChooseTags => self.choose_tags(&ChooseTags, window, cx),
             _ => {}
         }
+    }
+
+    /// Start the list's crossfade for a change the user asked for that swaps many rows
+    /// at once (hidden files shown or hidden).
+    #[cfg(test)]
+    pub fn list_fading(&self) -> bool {
+        self.list_fade.is_some()
+    }
+
+    pub fn begin_list_fade(&mut self) {
+        self.list_fade = Some(Instant::now());
     }
 
     pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
@@ -6352,6 +6366,20 @@ impl Render for Pane {
             // Wider-than-pane tables are clipped for now; horizontal scrolling comes with view settings.
             .overflow_hidden()
             .child(body);
+        // The list crossfades after a hidden-files toggle (Low and Full alike: opacity only).
+        let list = match self
+            .list_fade
+            .and_then(|started| motion::progress(mode, started, now, motion::ms::REORDER, motion::ms::REORDER))
+        {
+            Some(t) => {
+                window.request_animation_frame();
+                div().size_full().flex().flex_col().opacity(0.4 + 0.6 * t).child(list).into_any_element()
+            }
+            None => {
+                self.list_fade = None;
+                list.into_any_element()
+            }
+        };
         if self.focus_list_after_filter {
             self.focus_list_after_filter = false;
             cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));

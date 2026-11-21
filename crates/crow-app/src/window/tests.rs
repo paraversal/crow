@@ -17955,3 +17955,27 @@ fn a_sort_the_user_asks_for_glides_visible_rows_only_in_full(cx: &mut TestAppCon
         assert_eq!(names(&view, &cx), ["alpha", "beta", "big.bin", "notes.txt"], "{mode:?}: sorted at once");
     }
 }
+
+#[gpui::test]
+fn showing_hidden_files_crossfades_the_list_unless_motion_is_off(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, fades) in [(Effective::Full, true), (Effective::Low, true), (Effective::Off, false)] {
+        let root = fixture("hidden-fade");
+        std::fs::write(root.join(".secret"), "x").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        let shown_before = names(&view, &cx).contains(&".secret".to_owned());
+        cx.simulate_keystrokes("cmd-shift-.");
+        view.update(&mut cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.list_fading()), fades, "{mode:?}");
+        finish_motion(&view, &mut cx);
+        settle(&view, &mut cx);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| !p.list_fading()), "{mode:?}: the fade ends");
+        assert_eq!(
+            names(&view, &cx).contains(&".secret".to_owned()),
+            !shown_before,
+            "{mode:?}: the toggle took effect"
+        );
+    }
+}
