@@ -86,6 +86,7 @@ impl CrowWindow {
                 let checked = picker.columns.contains(&id);
                 div()
                     .id(("column-toggle", index))
+                    .debug_selector(move || format!("column-toggle-{index}"))
                     .role(Role::CheckBox)
                     .aria_label(title.clone())
                     .aria_toggled(if checked { Toggled::True } else { Toggled::False })

@@ -1175,6 +1175,7 @@ impl SettingsWindow {
         if !self.query.is_empty() {
             out.push("settings-clear-search".to_owned());
         }
+        out.extend(Category::ALL.into_iter().map(|category| format!("settings-category-{}", category.id())));
         out.extend(self.visible_controls(cx).into_iter().map(ControlId::selector));
         for issue in self.issues(cx) {
             out.push(issue.file.to_owned());
@@ -5171,6 +5172,12 @@ fn run(ctx) { #{ kind: "copy_text", text: "x" } }
         wait_plugin_state(&mut vcx, "example.demo", PluginState::PendingApproval);
         show_category(&view, &mut vcx, Category::Plugins);
         assert!(view.read_with(&vcx, |view, cx| view.debug_selectors(cx)).iter().any(|id| id == "settings-plugins"));
+        assert!(
+            view.read_with(&vcx, |view, cx| view.debug_selectors(cx))
+                .iter()
+                .any(|id| id == "settings-category-plugins"),
+            "categories are fuzzable"
+        );
         let violations = vcx.update(|window, cx| view.read(cx).check_invariants(window, cx));
         assert!(violations.is_empty(), "{violations:?}");
 

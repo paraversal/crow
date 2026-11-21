@@ -198,6 +198,7 @@ impl CrowWindow {
             let label = if all { "Pinned Repositories" } else { "This Folder" };
             div()
                 .id(("git-review-scope", usize::from(all)))
+                .debug_selector(move || format!("git-review-scope-{}", usize::from(all)))
                 .role(Role::Tab)
                 .aria_label(label)
                 .aria_selected(all == pinned)
@@ -223,6 +224,7 @@ impl CrowWindow {
                 let label = format!("{}, {}, {}", change.display, change.group, change.kind.label());
                 div()
                     .id(("git-review-row", index))
+                    .debug_selector(move || format!("git-review-row-{index}"))
                     .role(Role::ListBoxOption)
                     .aria_label(label)
                     .aria_selected(index == cursor)

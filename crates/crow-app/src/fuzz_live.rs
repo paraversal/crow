@@ -1078,7 +1078,7 @@ async fn apply_step(
         }
         // AdvanceClock is a test-clock step; real timers run at the 16 ms pace.
         // Clicks are off for H3's first version (Q3).
-        Step::AdvanceClock(_) | Step::Click(_) | Step::RightClick(..) => {}
+        Step::AdvanceClock(_) | Step::Click(_) | Step::RightClick(..) | Step::ClickWith(..) | Step::Drag(..) => {}
     }
     bring_back(handle, tree, cx).await?;
     Ok(())
@@ -1284,6 +1284,8 @@ fn encode_step(step: &Step) -> String {
         Step::RightClick(selector, slot) => {
             format!("RightClick {} {}", slot.map_or("-".to_owned(), |slot| slot.to_string()), escape(selector))
         }
+        Step::ClickWith(selector, mods) => format!("ClickWith {mods} {}", escape(selector)),
+        Step::Drag(from, to, mods) => format!("Drag {mods} {}\u{1f}{}", escape(from), escape(to)),
         Step::Resize(width, height) => format!("Resize {width} {height}"),
         Step::Settle => "Settle".to_owned(),
         Step::AdvanceClock(ms) => format!("AdvanceClock {ms}"),
@@ -1303,6 +1305,15 @@ fn decode_step(line: &str) -> Result<Step, String> {
             let (slot, selector) = rest.split_once(' ').ok_or_else(|| format!("bad step {line:?}"))?;
             let slot = if slot == "-" { None } else { Some(number(slot)? as usize) };
             Step::RightClick(unescape(selector), slot)
+        }
+        "ClickWith" => {
+            let (mods, selector) = rest.split_once(' ').ok_or_else(|| format!("bad step {line:?}"))?;
+            Step::ClickWith(unescape(selector), number(mods)? as u8)
+        }
+        "Drag" => {
+            let (mods, paths) = rest.split_once(' ').ok_or_else(|| format!("bad step {line:?}"))?;
+            let (from, to) = paths.split_once('\u{1f}').ok_or_else(|| format!("bad step {line:?}"))?;
+            Step::Drag(unescape(from), unescape(to), number(mods)? as u8)
         }
         "Resize" => {
             let (width, height) = rest.split_once(' ').ok_or_else(|| format!("bad step {line:?}"))?;

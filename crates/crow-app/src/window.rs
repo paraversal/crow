@@ -3521,6 +3521,65 @@ impl CrowWindow {
         if self.sheet.is_some() {
             out.extend(["sheet-panel", "sheet-scrim", "sheet-confirm", "sheet-cancel"].map(str::to_owned));
         }
+        match &self.sheet {
+            Some(Sheet::Conflict { .. }) => {
+                out.extend((0..3).map(|value| format!("conflict-choice-{value}")));
+                out.push("conflict-all".to_owned());
+            }
+            Some(Sheet::SavedQuery(_)) => out.extend(
+                [
+                    "saved-query-form",
+                    "saved-exclusions-configured",
+                    "saved-exclusions-everything",
+                    "saved-hidden-enter",
+                    "saved-hidden-include",
+                    "saved-match-all",
+                    "saved-match-contents",
+                    "saved-match-names",
+                    "saved-scope-folder",
+                    "saved-scope-home",
+                    "saved-scope-this-mac",
+                    "saved-remove",
+                    "saved-cancel",
+                    "saved-save",
+                ]
+                .map(str::to_owned),
+            ),
+            Some(Sheet::BatchRename(_)) => out.extend(
+                [
+                    "batch-rename",
+                    "batch-rule-replace",
+                    "batch-rule-add",
+                    "batch-rule-number",
+                    "batch-keep-extension",
+                    "batch-cancel",
+                    "batch-rename-submit",
+                    "batch-preview-0",
+                    "batch-preview-1",
+                ]
+                .map(str::to_owned),
+            ),
+            Some(Sheet::Onboarding { .. }) => out.extend(["onboarding-no", "onboarding-show"].map(str::to_owned)),
+            _ => {}
+        }
+        if self.tag_picker.is_some() {
+            out.extend((0..8).map(|index| format!("tag-toggle-{index}")));
+            out.extend(["tags-clear", "tags-cancel", "tags-done"].map(str::to_owned));
+        }
+        if self.column_picker.is_some() {
+            out.extend((0..8).map(|index| format!("column-toggle-{index}")));
+            out.extend(["columns-default", "columns-cancel", "columns-done"].map(str::to_owned));
+        }
+        if self.git_review.is_some() {
+            out.extend((0..2).map(|index| format!("git-review-scope-{index}")));
+            out.extend((0..6).map(|index| format!("git-review-row-{index}")));
+        }
+        if self.show_activity {
+            out.extend(["activity", "activity-empty-trash"].map(str::to_owned));
+            let mut controls: Vec<_> = self.activity_controls.keys().map(|(name, id)| format!("{name}-{id}")).collect();
+            controls.sort();
+            out.extend(controls);
+        }
         if self.picker.is_some() {
             out.push("theme-list".to_owned());
         }
@@ -3537,6 +3596,19 @@ impl CrowWindow {
         }
         if let Some(edit) = &self.path_edit {
             return edit.input.read(cx).focus_handle(cx).is_focused(window);
+        }
+        match &self.sheet {
+            Some(Sheet::SavedQuery(form)) => {
+                return [&form.name, &form.root, &form.text, &form.kind, &form.days, &form.tags]
+                    .into_iter()
+                    .any(|input| input.read(cx).focus_handle(cx).is_focused(window));
+            }
+            Some(Sheet::BatchRename(sheet)) => {
+                return [&sheet.find, &sheet.replace, &sheet.add, &sheet.base, &sheet.start, &sheet.padding]
+                    .into_iter()
+                    .any(|input| input.read(cx).focus_handle(cx).is_focused(window));
+            }
+            _ => {}
         }
         if let Some(search) = &self.search {
             return search.read(cx).input_focused(window, cx);

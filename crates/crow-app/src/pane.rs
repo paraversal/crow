@@ -969,6 +969,7 @@ impl Pane {
         }
         if self.filtering.is_some() {
             out.push("filter-field".to_owned());
+            out.push("filter-tags".to_owned());
             out.push("filter-search-footer".to_owned());
         }
         out
