@@ -191,6 +191,17 @@ impl Disclosure {
 /// An opening whose child rows never showed up (an empty folder) is dropped after this.
 const DISCLOSE_WAIT: Duration = Duration::from_secs(2);
 
+/// `path` with its components re-joined: what `Path`'s own `==` compares. Listing
+/// paths are already in this form, so a row can then be matched by its bytes.
+fn normalized(path: &Path) -> std::borrow::Cow<'_, Path> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let clean = !(bytes.len() > 1 && bytes.ends_with(b"/"))
+        && !bytes.windows(2).any(|pair| pair == b"//")
+        && !bytes.windows(3).any(|triple| triple == b"/./")
+        && !bytes.ends_with(b"/.");
+    if clean { std::borrow::Cow::Borrowed(path) } else { std::borrow::Cow::Owned(path.components().collect()) }
+}
+
 /// At most this many visible rows animate per operation; the rest just go.
 const MAX_EFFECTS: usize = 20;
 /// A removed row's close may start after the effect's own phases (the watcher can
@@ -674,7 +685,12 @@ impl Folder {
     }
 
     fn index_of_path(&self, path: &Path) -> Option<usize> {
-        self.rows.iter().position(|row| Self::row_path(row, &self.entries).is_some_and(|p| p == path))
+        // `Path`'s `==` walks components: over 100k rows that was ~4 ms per call.
+        // Listing paths are normalized, so the needle is normalized once and the
+        // rows compared by their bytes.
+        let needle = normalized(path);
+        let needle = needle.as_os_str();
+        self.rows.iter().position(|row| Self::row_path(row, &self.entries).is_some_and(|p| p.as_os_str() == needle))
     }
 
     /// The visible row showing `path`, including an inline child row.
@@ -1276,16 +1292,28 @@ impl Folder {
         if motion::phases(mode, fx).is_empty() {
             return;
         }
-        let wanted: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        // Match rows by bytes and clone only the rows that match: this ran a path hash
+        // and an entry clone per row, ~15 ms on a 100k folder, in the effect's first frame.
+        let wanted: Vec<std::borrow::Cow<'_, Path>> = paths.iter().map(|path| normalized(path)).collect();
+        let hashed: Option<HashSet<&std::ffi::OsStr>> =
+            (wanted.len() > 32).then(|| wanted.iter().map(|path| path.as_os_str()).collect());
         let mut started = 0;
+        let mut seen = 0;
         for ix in 0..self.row_count() {
-            if started >= MAX_EFFECTS {
+            if started >= MAX_EFFECTS || seen >= wanted.len() {
                 break;
             }
-            let Some(entry) = self.row(ix).map(|(entry, _)| entry.clone()) else { continue };
-            if !wanted.contains(entry.path.as_path()) {
+            let Some((entry, _)) = self.row(ix) else { continue };
+            let key = entry.path.as_os_str();
+            let hit = match &hashed {
+                Some(set) => set.contains(key),
+                None => wanted.iter().any(|path| path.as_os_str() == key),
+            };
+            if !hit {
                 continue;
             }
+            seen += 1;
+            let entry = entry.clone();
             self.effects.retain(|effect| effect.path != entry.path);
             self.effects.push(RowEffect::new(entry.path.clone(), fx, mode, ix, entry));
             started += 1;
@@ -1880,7 +1908,10 @@ impl Folder {
                 if removed.len() <= 16 {
                     // The usual batch: find each path and stop at the first hit.
                     for path in &removed {
-                        if let Some(entry) = self.entries.iter().find(|entry| &entry.path == *path) {
+                        if let Some(entry) = {
+                            let needle = normalized(path);
+                            self.entries.iter().find(|entry| entry.path.as_os_str() == needle.as_os_str())
+                        } {
                             Self::subtract_totals(&mut self.selection_totals, entry);
                         }
                     }
@@ -1912,7 +1943,10 @@ impl Folder {
             if !changed.is_empty() {
                 if changed.len() <= 16 {
                     for &(path, new) in &changed {
-                        if let Some(old) = self.entries.iter().find(|entry| &entry.path == path) {
+                        if let Some(old) = {
+                            let needle = normalized(path);
+                            self.entries.iter().find(|entry| entry.path.as_os_str() == needle.as_os_str())
+                        } {
                             Self::subtract_totals(&mut self.selection_totals, old);
                         }
                         Self::add_totals(&mut self.selection_totals, new);
@@ -1945,20 +1979,35 @@ impl Folder {
             self.start_tag_scan(cx);
         }
         if !self.effects.is_empty() {
-            // Only the effect paths matter (at most MAX_EFFECTS); hashing every
-            // listing path cloned 100k paths on every apply with an effect running.
-            let present: HashSet<PathBuf> = {
-                let effect_paths: HashSet<&Path> = self.effects.iter().map(|effect| effect.path.as_path()).collect();
-                let mut present = HashSet::with_capacity(effect_paths.len());
-                for entry in self.entries.iter() {
-                    if effect_paths.contains(entry.path.as_path()) {
-                        present.insert(entry.path.clone());
-                        if present.len() == effect_paths.len() {
-                            break;
+            // A watcher batch names every path it changed, so an effect's row is gone
+            // exactly when the batch reports it removed (an effect whose row was
+            // already gone was flagged by the apply that dropped it). Only a full
+            // load has to look through the listing, and then only at the effect
+            // paths: hashing or comparing all 100k paths here was ~10 ms of the apply.
+            let present: HashSet<PathBuf> = match stats {
+                Some(stats) => {
+                    let gone: HashSet<&Path> =
+                        stats.iter().filter(|(_, entry)| entry.is_none()).map(|(path, _)| path.as_path()).collect();
+                    self.effects
+                        .iter()
+                        .filter(|effect| !gone.contains(effect.path.as_path()))
+                        .map(|effect| effect.path.clone())
+                        .collect()
+                }
+                None => {
+                    let effect_paths: HashSet<&Path> =
+                        self.effects.iter().map(|effect| effect.path.as_path()).collect();
+                    let mut present = HashSet::with_capacity(effect_paths.len());
+                    for entry in self.entries.iter() {
+                        if effect_paths.contains(entry.path.as_path()) {
+                            present.insert(entry.path.clone());
+                            if present.len() == effect_paths.len() {
+                                break;
+                            }
                         }
                     }
+                    present
                 }
-                present
             };
             let mut restored = Vec::new();
             for effect in &mut self.effects {
@@ -3142,5 +3191,17 @@ mod tests {
         // A non-ASCII query that lowercases to ASCII still matches.
         assert!(name_matches("k", "\u{212A}", "k"), "the Kelvin sign lowercases to k");
         assert_eq!(name_match("k", "\u{212A}", "k"), Some(0..1));
+    }
+
+    #[test]
+    fn normalized_paths_match_by_bytes_like_path_eq() {
+        let clean = Path::new("/d/a b");
+        assert!(matches!(normalized(clean), std::borrow::Cow::Borrowed(_)), "a clean path is not rebuilt");
+        for odd in ["/d/a b/", "/d//a b", "/d/./a b", "/d/a b/."] {
+            let odd = Path::new(odd);
+            assert_eq!(odd, clean, "Path::eq ignores {odd:?}'s noise");
+            assert_eq!(normalized(odd).as_os_str(), clean.as_os_str(), "{odd:?} is matched as its clean form");
+        }
+        assert_eq!(normalized(Path::new("/")).as_os_str(), "/");
     }
 }
