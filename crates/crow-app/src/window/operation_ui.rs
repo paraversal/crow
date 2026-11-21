@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::actions::MoveToTrash;
-use crate::operations::{self, JobPhase, Maintenance, Origin, RequestId, StopIntent};
+use crate::operations::{self, JobPhase, Maintenance, Origin, RenameMap, RequestId, StopIntent};
 use crow_core::motion::Fx;
 use crow_fs::ops::{ConflictKey, Resolution};
 
@@ -183,6 +183,16 @@ impl CrowWindow {
         }
     }
 
+    /// Keep selection and cursor on the same items after a batch rename, in the
+    /// folder pane, the saved or tag session and the window search.
+    fn apply_rename_map(&mut self, map: &RenameMap, cursor: Option<&Path>, cx: &mut Context<Self>) {
+        let pane = self.pane().downgrade();
+        pane.update(cx, |pane, cx| pane.apply_rename_map(map, cursor, cx)).ok();
+        if let Some(search) = self.search.clone() {
+            search.update(cx, |search, cx| search.apply_rename_map(map, cx));
+        }
+    }
+
     /// The head reached a terminal state: select what it produced only while the
     /// original tab still shows the original folder.
     pub(crate) fn job_finished(
@@ -202,11 +212,7 @@ impl CrowWindow {
                 .map(|entry| (entry.source.clone(), entry.target.clone()))
                 .collect();
             let cursor = cx.global_mut::<Operations>().batch_cursor.take();
-            let pane = self.pane().downgrade();
-            pane.update(cx, |pane, cx| pane.apply_rename_map(&map, cursor.as_deref(), cx)).ok();
-            if let Some(search) = self.search.clone() {
-                search.update(cx, |search, cx| search.apply_rename_map(&map, cx));
-            }
+            self.apply_rename_map(&map, cursor.as_deref(), cx);
             return;
         }
         let pane = self.pane().downgrade();
@@ -304,23 +310,17 @@ impl CrowWindow {
         }
         self.notify_views(cx);
         let pane = self.pane().downgrade();
-        operations::undo(index, cx, move |restored, cx| {
-            pane.update(cx, |pane, cx| {
-                pane.show_results(restored, false, cx);
-                pane.refresh_saved(cx);
-            })
-            .ok();
+        let search = self.search.clone();
+        operations::undo(index, cx, move |restored, renamed, cx| {
+            finish_reversal(&pane, search, restored, renamed, cx);
         });
     }
 
     pub(super) fn redo(&mut self, cx: &mut Context<Self>) {
         let pane = self.pane().downgrade();
-        operations::redo(cx, move |results, cx| {
-            pane.update(cx, |pane, cx| {
-                pane.show_results(results, false, cx);
-                pane.refresh_saved(cx);
-            })
-            .ok();
+        let search = self.search.clone();
+        operations::redo(cx, move |results, renamed, cx| {
+            finish_reversal(&pane, search, results, renamed, cx);
         });
     }
 
@@ -1113,4 +1113,31 @@ impl CrowWindow {
             .when(has_history, |list| list.child(div().h(px(1.)).bg(border).my_1()))
             .children(history)
     }
+}
+
+/// After Undo or Redo: a batch rename remaps selection and result rows to the
+/// restored names first, so a saved or tag view keeps them while Spotlight catches
+/// up; anything else just selects what came back and reruns the visible query.
+fn finish_reversal(
+    pane: &gpui::WeakEntity<Pane>,
+    search: Option<Entity<SearchView>>,
+    restored: Vec<PathBuf>,
+    renamed: RenameMap,
+    cx: &mut App,
+) {
+    if !renamed.is_empty()
+        && let Some(search) = search
+    {
+        search.update(cx, |search, cx| search.apply_rename_map(&renamed, cx));
+    }
+    pane.update(cx, |pane, cx| {
+        if renamed.is_empty() {
+            pane.show_results(restored, false, cx);
+            pane.refresh_saved(cx);
+        } else {
+            pane.apply_rename_map(&renamed, None, cx);
+            pane.show_results(restored, false, cx);
+        }
+    })
+    .ok();
 }

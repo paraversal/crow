@@ -1223,9 +1223,12 @@ pub fn stop_label(cx: &App) -> String {
     }
 }
 
+/// Old path → new path for the items an undo or redo renamed.
+pub type RenameMap = std::collections::HashMap<PathBuf, PathBuf>;
+
 /// Undo log entry `index` (the newest by default). Undo checks the disk first and
 /// refuses rather than overwrite anything that changed since.
-pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static) {
+pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, RenameMap, &mut App) + 'static) {
     let (index, record, trash) = {
         let ops = cx.global::<Operations>();
         if ops.stopping || !ops.is_idle() {
@@ -1251,12 +1254,13 @@ pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf
                         entry.undone = true;
                     }
                     let restored = reversed.results();
+                    let renamed = reversed.rename_map();
                     ops.redo_stack.push(Arc::new(reversed));
                     message(label, false, cx);
                     crate::feedback::play(crow_core::motion::Event::Undo, cx);
                     crate::plugins::notify_operation_done(cx);
                     crate::ui::refresh_volumes(cx);
-                    on_done(restored, cx);
+                    on_done(restored, renamed, cx);
                 }
                 Err(e) => {
                     message(e.to_string(), true, cx);
@@ -1271,7 +1275,7 @@ pub fn undo(index: Option<usize>, cx: &mut App, on_done: impl FnOnce(Vec<PathBuf
 }
 
 /// Redo the most recently undone operation.
-pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static) {
+pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, RenameMap, &mut App) + 'static) {
     let (reversed, trash) = {
         let ops = cx.global::<Operations>();
         if ops.stopping || !ops.is_idle() {
@@ -1292,6 +1296,7 @@ pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static
                 Ok(redone) => {
                     let label = redone.label.trim_start_matches("Undo Undo ").to_owned();
                     let results = redone.results();
+                    let renamed = redone.rename_map();
                     ops.redo_stack.pop();
                     ops.log.push(LogEntry {
                         record: Arc::new(Record { label: label.clone(), steps: redone.steps }),
@@ -1305,7 +1310,7 @@ pub fn redo(cx: &mut App, on_done: impl FnOnce(Vec<PathBuf>, &mut App) + 'static
                     crate::feedback::play(crow_core::motion::Event::Undo, cx);
                     crate::plugins::notify_operation_done(cx);
                     crate::ui::refresh_volumes(cx);
-                    on_done(results, cx);
+                    on_done(results, renamed, cx);
                 }
                 Err(e) => {
                     message(e.to_string(), true, cx);

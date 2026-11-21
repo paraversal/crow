@@ -242,6 +242,20 @@ impl Record {
         }
         results
     }
+
+    /// Old path → new path for every item a batch rename step in this record moved.
+    pub fn rename_map(&self) -> std::collections::HashMap<PathBuf, PathBuf> {
+        self.steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::BatchRenamed { moves } => Some(moves),
+                _ => None,
+            })
+            .flatten()
+            .filter(|entry| entry.source != entry.target)
+            .map(|entry| (entry.source.clone(), entry.target.clone()))
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug)]

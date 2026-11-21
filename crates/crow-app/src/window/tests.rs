@@ -11347,7 +11347,7 @@ fn a_cancelled_terminal_keeps_its_committed_prefix_undoable(cx: &mut TestAppCont
     cx.update(|window, cx| {
         window.draw(cx).clear(cx);
     });
-    cx.update(|_, cx| crate::operations::undo(None, cx, |_, _| {}));
+    cx.update(|_, cx| crate::operations::undo(None, cx, |_, _, _| {}));
     settle(&view, &mut cx);
     assert!(!copied.exists(), "Undo reverses the committed prefix");
 }
@@ -17015,6 +17015,159 @@ fn audit_batch_one_saved_query_batch_rename_updates_a_hidden_gallery_listing(cx:
     });
     settle(&view, &mut cx);
     assert!(pane(&view, &cx).read_with(&cx, |p, _| matches!(p.location(), crow_core::Location::SavedQuery(_))));
+}
+
+/// Spotlight answers nothing for a couple of seconds after a rename (measured
+/// 2.4 s): the test script has no batch left, so every rerun reports zero hits.
+fn spotlight_gap(cx: &mut VisualTestContext) {
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").set_spotlight_hits(vec![]));
+}
+
+fn spotlight_reports(cx: &mut VisualTestContext, paths: &[PathBuf]) {
+    let hits = paths
+        .iter()
+        .map(|path| crow_macos::SpotlightHit { path: path.clone(), is_dir: false, modified: None, size: 0 })
+        .collect();
+    cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").set_spotlight_hits(vec![hits]));
+}
+
+fn sorted(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths.sort();
+    paths
+}
+
+/// Rename the two selected results of the open destination to "<name> renamed".
+fn rename_selected_results(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes("down cmd-a cmd-k");
+    cx.simulate_input(">rename");
+    cx.simulate_keystrokes("enter");
+    settle(view, cx);
+    assert!(view.read_with(cx, |w, _| matches!(w.sheet, Some(Sheet::BatchRename(_)))));
+    let add = cx.debug_bounds("batch-rule-add").expect("Add Text rule").center();
+    cx.simulate_click(add, Default::default());
+    cx.simulate_input(" renamed");
+    pump_batch(cx);
+    cx.simulate_keystrokes("enter");
+    settle(view, cx);
+    pump_batch(cx);
+}
+
+#[gpui::test]
+fn a_tag_destination_keeps_renamed_rows_while_spotlight_catches_up(cx: &mut TestAppContext) {
+    let root = fixture("tag-rename-gap");
+    std::fs::write(root.join("other-notes.txt"), "other").unwrap();
+    let (view, mut cx) = open(cx, &root);
+    let (notes, other) = (root.join("notes.txt"), root.join("other-notes.txt"));
+    spotlight_reports(&mut cx, &[notes.clone(), other.clone()]);
+    view.update_in(&mut cx, |w, window, cx| {
+        w.pane().update(cx, |p, cx| p.open_tag(crow_core::TagId::new("Work"), window, cx));
+    });
+    wait_for_pane_search(&view, &mut cx);
+    let session = pane(&view, &cx).read_with(&cx, |p, _| p.saved_session()).expect("tag session");
+    assert_eq!(sorted(session.read_with(&cx, |s, _| s.result_paths())), sorted(vec![notes.clone(), other.clone()]));
+
+    spotlight_gap(&mut cx);
+    rename_selected_results(&view, &mut cx);
+    let renamed = vec![root.join("notes renamed.txt"), root.join("other-notes renamed.txt")];
+    assert!(renamed.iter().all(|path| path.is_file()));
+    assert_eq!(
+        sorted(session.read_with(&cx, |s, _| s.result_paths())),
+        sorted(renamed.clone()),
+        "the rerun that finds nothing keeps the renamed rows"
+    );
+    assert_eq!(session.read_with(&cx, |s, _| s.selected_count()), 2, "selection stays on the renamed rows");
+    assert_eq!(session.read_with(&cx, |s, _| s.pinned_count_for_test()), 2);
+
+    cx.simulate_keystrokes("cmd-z");
+    settle(&view, &mut cx);
+    pump_batch(&mut cx);
+    assert!(notes.is_file() && other.is_file(), "undo restores the names");
+    assert_eq!(
+        sorted(session.read_with(&cx, |s, _| s.result_paths())),
+        sorted(vec![notes.clone(), other.clone()]),
+        "Undo keeps the rows under their restored names"
+    );
+    assert_eq!(session.read_with(&cx, |s, _| s.selected_count()), 2, "selection survives Undo");
+
+    // Once Spotlight reports the names, the pin ends; later gaps prune normally.
+    spotlight_reports(&mut cx, &[notes.clone(), other.clone()]);
+    session.update(&mut cx, |s, cx| s.mark_dirty(cx));
+    cx.run_until_parked();
+    assert_eq!(session.read_with(&cx, |s, _| s.pinned_count_for_test()), 0, "reported rows are no longer pinned");
+    assert_eq!(session.read_with(&cx, |s, _| s.result_paths().len()), 2);
+
+    // A pin does not outlive its limit: a pinned row Spotlight never reports goes.
+    cx.simulate_keystrokes("cmd-shift-z");
+    settle(&view, &mut cx);
+    pump_batch(&mut cx);
+    assert_eq!(session.read_with(&cx, |s, _| s.pinned_count_for_test()), 2, "Redo pins the renamed rows");
+    session.update(&mut cx, |s, _| s.expire_pins_for_test());
+    spotlight_gap(&mut cx);
+    session.update(&mut cx, |s, cx| s.mark_dirty(cx));
+    cx.run_until_parked();
+    assert!(session.read_with(&cx, |s, _| s.result_paths().is_empty()), "an expired pin lets the refresh prune");
+}
+
+#[gpui::test]
+fn a_saved_spotlight_query_keeps_renamed_rows_after_rename_and_undo(cx: &mut TestAppContext) {
+    let root = fixture("saved-rename-gap");
+    std::fs::write(root.join("other-notes.txt"), "other").unwrap();
+    let (view, mut cx) = open(cx, &root);
+    let (notes, other) = (root.join("notes.txt"), root.join("other-notes.txt"));
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        "[[query]]\nid = \"notes\"\nname = \"Notes\"\nscope = \"this-mac\"\ntext = \"notes\"\nmatch = \"names\"\n",
+    );
+    spotlight_reports(&mut cx, &[notes.clone(), other.clone()]);
+    view.update_in(&mut cx, |w, window, cx| {
+        w.pane().update(cx, |p, cx| p.open_saved_query(crow_core::SavedQueryId::new("notes").unwrap(), window, cx));
+    });
+    wait_for_pane_search(&view, &mut cx);
+    let session = pane(&view, &cx).read_with(&cx, |p, _| p.saved_session()).expect("saved session");
+    assert_eq!(session.read_with(&cx, |s, _| s.result_paths().len()), 2);
+
+    spotlight_gap(&mut cx);
+    rename_selected_results(&view, &mut cx);
+    assert_eq!(
+        sorted(session.read_with(&cx, |s, _| s.result_paths())),
+        sorted(vec![root.join("notes renamed.txt"), root.join("other-notes renamed.txt")])
+    );
+    assert_eq!(session.read_with(&cx, |s, _| s.selected_count()), 2);
+
+    cx.simulate_keystrokes("cmd-z");
+    settle(&view, &mut cx);
+    pump_batch(&mut cx);
+    assert_eq!(sorted(session.read_with(&cx, |s, _| s.result_paths())), sorted(vec![notes, other]));
+    assert_eq!(session.read_with(&cx, |s, _| s.selected_count()), 2, "selection survives Undo");
+}
+
+#[gpui::test]
+fn the_empty_state_names_the_tag_or_saved_query(cx: &mut TestAppContext) {
+    let root = fixture("empty-state-names");
+    let (view, mut cx) = open(cx, &root);
+    write_config(
+        &view,
+        &mut cx,
+        "saved-queries.toml",
+        "[[query]]\nid = \"gone\"\nname = \"Gone\"\nscope = \"this-mac\"\ntext = \"nothing\"\nmatch = \"names\"\n",
+    );
+    spotlight_gap(&mut cx);
+    view.update_in(&mut cx, |w, window, cx| {
+        w.pane().update(cx, |p, cx| p.open_tag(crow_core::TagId::new("CrowFinish"), window, cx));
+    });
+    wait_for_pane_search(&view, &mut cx);
+    let session = pane(&view, &cx).read_with(&cx, |p, _| p.saved_session()).expect("tag session");
+    let message = session.read_with(&cx, |s, cx| s.empty_message_for_test(cx));
+    assert_eq!(message, "No results for tag \"CrowFinish\" in This Mac");
+    view.update_in(&mut cx, |w, window, cx| {
+        w.pane().update(cx, |p, cx| p.open_saved_query(crow_core::SavedQueryId::new("gone").unwrap(), window, cx));
+    });
+    wait_for_pane_search(&view, &mut cx);
+    let session = pane(&view, &cx).read_with(&cx, |p, _| p.saved_session()).expect("saved session");
+    let message = session.read_with(&cx, |s, cx| s.empty_message_for_test(cx));
+    assert_eq!(message, "No results for \"nothing\" in This Mac");
 }
 
 #[gpui::test]
