@@ -433,7 +433,7 @@ fn long_names_stay_in_their_rows(cx: &mut TestAppContext) {
         // The deep folder as a favorite and in the path bar.
         write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&deep]));
         let sidebar = cx.debug_bounds("sidebar").expect("sidebar");
-        let favorite = cx.debug_bounds("sidebar-0").expect("favorite row");
+        let favorite = cx.debug_bounds("sidebar-1").expect("favorite row");
         assert!(favorite.right() <= sidebar.right(), "the favorite stays inside the sidebar at {width}");
         pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(deep.clone(), cx));
         settle(&view, &mut cx);
@@ -699,6 +699,14 @@ fn open_with_before(
 }
 
 /// Folders load on real threads; wait until every tab has finished.
+/// Let a motion that runs on the real clock (a sliding column, a fading sheet)
+/// run out, so geometry assertions see the end state.
+fn finish_motion(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
+    std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::PANE_SLIDE + 40));
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+}
+
 fn settle(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) {
     for _ in 0..400 {
         // Operation events arrive through a 16 ms poll; the test clock must move
@@ -1201,6 +1209,14 @@ fn sidebar_looks(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> Vec<c
     cx.update(|window, cx| sidebar.read_with(cx, |s, cx| s.looks_for_test(window, cx)))
 }
 
+/// The sidebar's looks without the first group's title, so tests index their favorites from 0.
+fn row_looks(view: &Entity<CrowWindow>, cx: &mut VisualTestContext) -> Vec<crate::sidebar::RowLook> {
+    let mut looks = sidebar_looks(view, cx);
+    assert_eq!(looks.first().map(|look| look.spoken.as_str()), Some("Favorites section, expanded"));
+    looks.remove(0);
+    looks
+}
+
 /// Right-click sidebar row `i`, then pick the line running `id` (`None`: dismiss).
 fn sidebar_menu_choose(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, i: usize, id: Option<CommandId>) {
     let at = cx.debug_bounds(Box::leak(format!("sidebar-{i}").into_boxed_str())).expect("row on screen").center();
@@ -1228,37 +1244,37 @@ fn sidebar_context_menu_acts_on_the_clicked_favorite(cx: &mut TestAppContext) {
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
 
     // Dismissed: nothing changes, the window stays where it was.
-    sidebar_menu_choose(&view, &mut cx, 1, None);
+    sidebar_menu_choose(&view, &mut cx, 2, None);
     assert_eq!(dir(&view, &cx), root);
     let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
 
-    sidebar_menu_choose(&view, &mut cx, 1, Some(CommandId::MoveFavoriteUp));
+    sidebar_menu_choose(&view, &mut cx, 2, Some(CommandId::MoveFavoriteUp));
     settle(&view, &mut cx);
     assert_eq!(sidebar_paths(&cx), [root.join("beta"), root.join("alpha")], "beta moved up");
 
-    sidebar_menu_choose(&view, &mut cx, 1, Some(CommandId::NewTab));
+    sidebar_menu_choose(&view, &mut cx, 2, Some(CommandId::NewTab));
     settle(&view, &mut cx);
     assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2, "Open in New Tab opens a tab");
     assert_eq!(dir(&view, &cx), root.join("alpha"), "on the clicked folder");
 
-    sidebar_menu_choose(&view, &mut cx, 0, Some(CommandId::CopyPath));
+    sidebar_menu_choose(&view, &mut cx, 1, Some(CommandId::CopyPath));
     let copied = cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text()));
     assert_eq!(copied.as_deref(), Some(root.join("beta").to_string_lossy().as_ref()));
 
-    sidebar_menu_choose(&view, &mut cx, 0, Some(CommandId::Open));
+    sidebar_menu_choose(&view, &mut cx, 1, Some(CommandId::Open));
     settle(&view, &mut cx);
     assert_eq!(dir(&view, &cx), root.join("beta"));
 
-    sidebar_menu_choose(&view, &mut cx, 0, Some(CommandId::RemoveFromSidebar));
+    sidebar_menu_choose(&view, &mut cx, 1, Some(CommandId::RemoveFromSidebar));
     settle(&view, &mut cx);
     assert_eq!(sidebar_paths(&cx), [root.join("alpha")], "beta left the sidebar");
     assert!(root.join("beta").is_dir(), "the folder itself stays");
 
     // Ctrl-click opens the same menu.
-    let at = cx.debug_bounds("sidebar-0").expect("row on screen").center();
+    let at = cx.debug_bounds("sidebar-1").expect("row on screen").center();
     cx.simulate_click(at, gpui::Modifiers::control());
     let menu = sidebar.read_with(&cx, |s, _| s.menu());
-    assert_eq!(menu, Some((0, SidebarMenuKind::Favorite)));
+    assert_eq!(menu, Some((1, SidebarMenuKind::Favorite)));
     assert_eq!(dir(&view, &cx), root.join("beta"), "Ctrl-click does not open the folder");
 }
 
@@ -1268,7 +1284,7 @@ fn sidebar_menu_keeps_its_row_through_a_refresh(cx: &mut TestAppContext) {
     std::fs::create_dir_all(root.join("gamma")).expect("gamma");
     let (view, mut cx) = open(cx, &root);
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
-    let at = cx.debug_bounds("sidebar-1").expect("beta row").center();
+    let at = cx.debug_bounds("sidebar-2").expect("beta row").center();
     cx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::default());
     cx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::default());
     let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
@@ -1352,7 +1368,7 @@ fn sidebar_looks_follow_rows(cx: &mut TestAppContext) {
     let root = fixture("looks");
     let (view, mut cx) = open(cx, &root);
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     let labels: Vec<&str> = looks.iter().map(|look| look.label.as_str()).collect();
     assert_eq!(labels, ["alpha", "beta"]);
     assert!(looks.iter().all(|look| look.spoken == look.label), "no hint or mark yet: {looks:?}");
@@ -1365,7 +1381,7 @@ fn sidebar_twins_get_their_parent_in_label_and_aria(cx: &mut TestAppContext) {
     std::fs::create_dir_all(root.join("two/git")).expect("create fixture");
     let (view, mut cx) = open(cx, &root);
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("one/git"), &root.join("two/git")]));
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     let hints: Vec<Option<&str>> = looks.iter().map(|look| look.hint.as_deref()).collect();
     assert_eq!(hints, [Some("one"), Some("two")]);
     assert_eq!(looks[0].spoken, "git, in one");
@@ -1386,7 +1402,7 @@ fn sidebar_twins_span_favorites_and_recent(cx: &mut TestAppContext) {
     );
     pane(&view, &cx).update(&mut cx, |pane, cx| pane.navigate(root.join("two/git"), cx));
     settle(&view, &mut cx);
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     let git: Vec<&crate::sidebar::RowLook> = looks.iter().filter(|look| look.label == "git").collect();
     assert_eq!(git.len(), 2, "one favorite, one recent: {looks:?}");
     assert_eq!(git[0].hint.as_deref(), Some("one"));
@@ -1400,7 +1416,7 @@ fn sidebar_twins_walk_up(cx: &mut TestAppContext) {
     std::fs::create_dir_all(root.join("y/a/git")).expect("create fixture");
     let (view, mut cx) = open(cx, &root);
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("x/a/git"), &root.join("y/a/git")]));
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     let hints: Vec<Option<&str>> = looks.iter().map(|look| look.hint.as_deref()).collect();
     assert_eq!(hints, [Some("x"), Some("y")]);
 }
@@ -1413,7 +1429,7 @@ fn sidebar_twin_in_home_shows_a_tilde(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root);
     cx.update(|_, cx| cx.global_mut::<Ui>().home = root.to_path_buf());
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("git"), &root.join("other/git")]));
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     assert_eq!(looks[0].hint.as_deref(), Some("~"));
     assert_eq!(looks[1].hint.as_deref(), Some("other"));
     assert_eq!(looks[0].spoken, format!("git, in {}", root.file_name().unwrap().to_string_lossy()));
@@ -1425,23 +1441,23 @@ fn sidebar_cursor_is_a_ring_and_only_the_current_folder_is_filled(cx: &mut TestA
     let (view, mut cx) = open(cx, &root.join("alpha"));
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
 
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     assert!(looks[0].current && !looks[0].ring, "unfocused: the current folder is filled: {looks:?}");
     assert!(!looks[1].current && !looks[1].ring);
 
     cx.simulate_keystrokes("tab");
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     assert!(looks[0].current && looks[0].ring, "cursor 0 on the current folder: fill and ring");
     assert!(!looks[1].ring);
 
     cx.simulate_keystrokes("down");
     settle(&view, &mut cx);
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     assert!(!looks[0].current && !looks[0].ring, "the fill left alpha with the pane");
     assert!(looks[1].current && looks[1].ring, "beta is current and carries the cursor ring");
 
     cx.simulate_keystrokes("tab");
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     assert!(looks.iter().all(|look| !look.ring), "no ring while the list has focus");
     assert!(looks[1].current, "the current folder stays filled");
 }
@@ -1461,8 +1477,8 @@ fn sidebar_fill_glides_in_full_and_jumps_in_off(cx: &mut TestAppContext) {
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
     }
-    let alpha = cx.debug_bounds("sidebar-0").expect("alpha row");
-    let beta = cx.debug_bounds("sidebar-1").expect("beta row");
+    let alpha = cx.debug_bounds("sidebar-1").expect("alpha row");
+    let beta = cx.debug_bounds("sidebar-2").expect("beta row");
     let fill = cx.debug_bounds("sidebar-fill").expect("the fill");
     assert!((fill.top() - alpha.top()).abs() <= px(1.), "the fill starts on alpha: {fill:?} vs {alpha:?}");
 
@@ -1492,7 +1508,7 @@ fn sidebar_fill_glides_in_full_and_jumps_in_off(cx: &mut TestAppContext) {
 
     // Low: no glide; the fill appears on the new row and fades.
     set_motion(&mut cx, "low");
-    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("down down");
     let fill = cx.debug_bounds("sidebar-fill").expect("the fill");
     assert!((fill.top() - beta.top()).abs() <= px(1.), "Low jumps to beta: {fill:?} vs {beta:?}");
 }
@@ -1504,7 +1520,7 @@ fn sidebar_vim_j_moves_the_ring(cx: &mut TestAppContext) {
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
     use_vim(&view, &mut cx);
     cx.simulate_keystrokes("tab j");
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     assert!(looks[1].ring && !looks[0].ring, "j moves the ring: {looks:?}");
 }
 
@@ -1553,11 +1569,11 @@ fn vim_marks_show_as_letters_in_the_sidebar(cx: &mut TestAppContext) {
         root.join("beta").display()
     );
     write_config(&view, &mut cx, "sidebar.toml", &toml);
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     assert!(looks.iter().all(|look| look.right.is_none()), "the Finder layer shows no letters: {looks:?}");
 
     use_vim(&view, &mut cx);
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     assert_eq!(looks[0].right.as_deref(), Some("a"));
     assert!(looks[1].right.is_none(), "only the marked favorite shows a letter");
 
@@ -1566,7 +1582,7 @@ fn vim_marks_show_as_letters_in_the_sidebar(cx: &mut TestAppContext) {
     assert_eq!(dir(&view, &cx), root.join("beta"));
     cx.simulate_keystrokes("m a");
     settle(&view, &mut cx);
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     assert!(looks[0].right.is_none(), "the mark moved away from alpha");
     assert_eq!(looks[1].right.as_deref(), Some("a"), "beta now shows the mark");
 }
@@ -1586,7 +1602,7 @@ fn symlinked_twin_says_alias(cx: &mut TestAppContext) {
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let looks = sidebar_looks(&view, &mut cx);
+    let looks = row_looks(&view, &mut cx);
     assert_eq!(looks[0].hint.as_deref(), Some("real"));
     assert_eq!(looks[1].hint.as_deref(), Some("link · alias"));
     assert_eq!(looks[1].spoken, "git, in link, alias");
@@ -1606,7 +1622,7 @@ fn same_keys_mean_different_things_in_sidebar_and_list(cx: &mut TestAppContext) 
     cx.simulate_keystrokes("tab down");
     settle(&view, &mut cx);
     let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
-    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1, "Down in the sidebar moves its cursor");
+    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 2, "Down in the sidebar moves its cursor");
     assert_eq!(dir(&view, &cx), root.join("beta"), "…and shows beta in the center");
     assert_eq!(selected(&view, &cx).as_deref(), Some("b.txt"), "the list follows the sidebar cursor");
 
@@ -1712,20 +1728,20 @@ fn option_arrows_jump_between_sidebar_groups(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("tab alt-down");
     settle(&view, &mut cx);
     let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
-    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1, "the first row of the next group");
+    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 3, "the first row of the next group");
     assert_eq!(dir(&view, &cx), root.join("beta"));
 
     cx.simulate_keystrokes("alt-down");
     settle(&view, &mut cx);
-    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 3, "Recent's first row is after its heading");
+    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 5, "Recent's first row is after its heading");
     assert_eq!(dir(&view, &cx), root);
 
     cx.simulate_keystrokes("alt-up");
     settle(&view, &mut cx);
-    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1);
+    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 3);
     cx.simulate_keystrokes("alt-up");
     settle(&view, &mut cx);
-    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 0);
+    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1);
 }
 
 #[gpui::test]
@@ -1869,7 +1885,7 @@ fn walking_recent_keeps_the_cursor_on_the_shown_folder(cx: &mut TestAppContext) 
         settle(&view, &mut cx);
         assert_eq!(dir(&view, &cx), want);
         let looks = sidebar_looks(&view, &mut cx);
-        assert!(looks[step + 2].ring && looks[step + 2].current, "Recent kept its order under the cursor: {looks:?}");
+        assert!(looks[step + 3].ring && looks[step + 3].current, "Recent kept its order under the cursor: {looks:?}");
     }
     assert_eq!(
         sidebar_paths(&cx),
@@ -1934,7 +1950,7 @@ fn favorites_reorder_remove_and_add_from_the_keyboard(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert_eq!(sidebar_paths(&cx), [beta.clone(), alpha.clone()], "Cmd-Option-Down moves the favorite down");
     let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
-    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 1, "…and the cursor goes with it");
+    assert_eq!(sidebar.read_with(&cx, |s, _| s.cursor()), 2, "…and the cursor goes with it");
     let text = std::fs::read_to_string(config_dir(&cx).join("sidebar.toml")).unwrap();
     assert!(text.find("beta").unwrap() < text.find("alpha").unwrap(), "saved in sidebar.toml: {text}");
 
@@ -1957,8 +1973,8 @@ fn dragging_a_favorite_down_inserts_below_the_row(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root);
     let (alpha, beta) = (root.join("alpha"), root.join("beta"));
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha, &beta]));
-    let from = cx.debug_bounds("sidebar-0").expect("first favorite row");
-    let to = cx.debug_bounds("sidebar-1").expect("second favorite row");
+    let from = cx.debug_bounds("sidebar-1").expect("first favorite row");
+    let to = cx.debug_bounds("sidebar-2").expect("second favorite row");
     let start = gpui::point(from.left() + gpui::px(20.), from.top() + gpui::px(6.));
     let over = gpui::point(to.left() + gpui::px(20.), to.bottom() - gpui::px(3.));
 
@@ -1971,9 +1987,9 @@ fn dragging_a_favorite_down_inserts_below_the_row(cx: &mut TestAppContext) {
     assert_eq!(sidebar_paths(&cx), [beta.clone(), alpha.clone()], "the lower half of a row drops after it");
 
     // And the upper half of a row is the single slot before it.
-    let alpha_row = cx.debug_bounds("sidebar-1").expect("alpha row");
+    let alpha_row = cx.debug_bounds("sidebar-2").expect("alpha row");
     let start = gpui::point(alpha_row.left() + gpui::px(20.), alpha_row.center().y);
-    let beta_row = cx.debug_bounds("sidebar-0").expect("beta row");
+    let beta_row = cx.debug_bounds("sidebar-1").expect("beta row");
     let top = gpui::point(beta_row.left() + gpui::px(20.), beta_row.top() + gpui::px(6.));
     cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
     cx.simulate_mouse_move(top, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
@@ -2019,7 +2035,7 @@ fn dropping_on_a_favorite_in_full_motion_pulses_it(cx: &mut TestAppContext) {
     set_motion(&mut cx, "full");
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("beta")]));
     let sidebar = view.read_with(&cx, |window, _| window.sidebar.clone());
-    drop_on(&mut cx, "sidebar-0", vec![root.join("notes.txt")]);
+    drop_on(&mut cx, "sidebar-1", vec![root.join("notes.txt")]);
     for _ in 0..200 {
         if sidebar.read_with(&cx, |sidebar, _| sidebar.receiving(&root.join("beta"))) {
             break;
@@ -2037,14 +2053,14 @@ fn dropping_on_a_favorite_moves_into_it(cx: &mut TestAppContext) {
     let root = fixture("drop-favorite");
     let (view, mut cx) = open(cx, &root);
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("beta")]));
-    drop_on(&mut cx, "sidebar-0", vec![root.join("notes.txt")]);
+    drop_on(&mut cx, "sidebar-1", vec![root.join("notes.txt")]);
     settle(&view, &mut cx);
     assert!(root.join("beta/notes.txt").exists());
 
     assert_eq!(sidebar_paths(&cx), [root.join("beta")], "the middle of a row is not an insertion point");
 
     // Folders dropped on a group's title become favorites.
-    drop_on(&mut cx, "sidebar-header-Favorites", vec![root.join("alpha")]);
+    drop_on(&mut cx, "sidebar-header-favorites-group-0", vec![root.join("alpha")]);
     settle(&view, &mut cx);
     assert_eq!(sidebar_paths(&cx), [root.join("beta"), root.join("alpha")]);
     assert!(root.join("alpha").is_dir(), "added, not moved");
@@ -2065,7 +2081,7 @@ fn dropping_between_favorites_adds_a_favorite_there(cx: &mut TestAppContext) {
 
     // A folder from another app over the lower edge of the first favorite: the line
     // marks the boundary before the second, and no row takes the drop fill.
-    let first = cx.debug_bounds("sidebar-0").expect("first favorite row");
+    let first = cx.debug_bounds("sidebar-1").expect("first favorite row");
     let edge = gpui::point(first.left() + gpui::px(20.), first.bottom() - gpui::px(2.));
     let paths = gpui::ExternalPaths(vec![gamma.clone()].into());
     cx.simulate_event(gpui::FileDropEvent::Entered {
@@ -2094,7 +2110,7 @@ fn dropping_between_favorites_adds_a_favorite_there(cx: &mut TestAppContext) {
 
     // A folder dragged from the list onto the upper edge of the first favorite goes first.
     let from = cx.debug_bounds("row-delta").expect("delta row").center();
-    let first = cx.debug_bounds("sidebar-0").expect("first favorite row");
+    let first = cx.debug_bounds("sidebar-1").expect("first favorite row");
     let edge = gpui::point(first.left() + gpui::px(20.), first.top() + gpui::px(2.));
     cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::default());
     cx.simulate_mouse_move(edge, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
@@ -2105,7 +2121,7 @@ fn dropping_between_favorites_adds_a_favorite_there(cx: &mut TestAppContext) {
     assert!(delta.is_dir(), "added, not moved");
 
     // A file can't be a favorite: dropped between rows it is left where it is.
-    let last = cx.debug_bounds("sidebar-3").expect("last favorite row");
+    let last = cx.debug_bounds("sidebar-4").expect("last favorite row");
     drop_at(
         &mut cx,
         gpui::point(last.left() + gpui::px(20.), last.bottom() - gpui::px(2.)),
@@ -2235,6 +2251,7 @@ fn icon_grid_arrows_follow_the_tile_geometry(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     // Hide Preview so the 600 pt window leaves a three-column pane.
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     let bounds = |cx: &VisualTestContext, name: &str| {
         view.read_with(cx, |window, cx| window.debug_selector_bounds(&format!("tile-{name}"), cx)).expect("tile")
@@ -2296,6 +2313,7 @@ fn marquee_selects_columns_and_restores_the_start_on_escape(cx: &mut TestAppCont
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     let bounds = |cx: &VisualTestContext, name: &str| {
         view.read_with(cx, |window, cx| window.debug_selector_bounds(&format!("tile-{name}"), cx)).expect("tile")
@@ -2346,6 +2364,7 @@ fn cmd_marquee_keeps_the_starting_selection(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     let list = cx.debug_bounds("file-list").expect("icon viewport");
     let tile = |cx: &VisualTestContext, name: &str| {
@@ -2380,6 +2399,7 @@ fn a_watch_update_mid_marquee_cancels_and_restores_the_start(cx: &mut TestAppCon
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     let list = cx.debug_bounds("file-list").expect("icon viewport");
     let tile = |cx: &VisualTestContext, name: &str| {
@@ -2424,6 +2444,7 @@ fn marquee_edge_autoscroll_reaches_rows_below_the_viewport(cx: &mut TestAppConte
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     let list = cx.debug_bounds("file-list").expect("icon viewport");
     let start = gpui::point(list.right() - px(2.), list.bottom() - px(80.));
@@ -2775,6 +2796,7 @@ fn focus_and_tab_changes_cancel_a_marquee(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-1");
     settle(&view, &mut cx);
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     let list = cx.debug_bounds("file-list").expect("icon viewport");
     let tile = |cx: &VisualTestContext, name: &str| {
@@ -3817,8 +3839,8 @@ fn sidebar_favorites_and_recent_use_the_board_icons(cx: &mut TestAppContext) {
     );
     cx.simulate_keystrokes("down cmd-down");
     settle(&view, &mut cx);
-    assert!(cx.debug_bounds("sidebar-folder-icon-0").is_some(), "the favorite's folder is a line icon");
-    assert!(cx.debug_bounds("sidebar-clock-icon-2").is_some(), "Recent's clock is a line icon");
+    assert!(cx.debug_bounds("sidebar-folder-icon-1").is_some(), "the favorite's folder is a line icon");
+    assert!(cx.debug_bounds("sidebar-clock-icon-3").is_some(), "Recent's clock is a line icon");
 }
 
 #[gpui::test]
@@ -3842,13 +3864,13 @@ fn sidebar_favorites_use_a_pack_unless_they_have_their_own_icon(cx: &mut TestApp
     });
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&alpha]));
     settle(&view, &mut cx);
-    assert!(cx.debug_bounds("sidebar-pack-icon-0").is_some(), "the favorite uses the pack's folder glyph");
-    assert!(cx.debug_bounds("sidebar-folder-icon-0").is_none(), "the line folder glyph is replaced");
+    assert!(cx.debug_bounds("sidebar-pack-icon-1").is_some(), "the favorite uses the pack's folder glyph");
+    assert!(cx.debug_bounds("sidebar-folder-icon-1").is_none(), "the line folder glyph is replaced");
 
     let own = favorites_toml(&[&alpha]).replace("{ path =", "{ icon = \"★\", path =");
     write_config(&view, &mut cx, "sidebar.toml", &own);
     settle(&view, &mut cx);
-    assert!(cx.debug_bounds("sidebar-pack-icon-0").is_none(), "a favorite's own icon wins");
+    assert!(cx.debug_bounds("sidebar-pack-icon-1").is_none(), "a favorite's own icon wins");
 }
 
 #[gpui::test]
@@ -4596,6 +4618,7 @@ fn search_empty_offers_all_match(cx: &mut TestAppContext) {
     let root = corpus_fixture("search-empty-all-match");
     let (view, mut cx) = open(cx, &root.join("backup"));
     cx.simulate_keystrokes("cmd-f");
+    finish_motion(&view, &mut cx);
     click_selector(&mut cx, "search-match-names");
     cx.simulate_input("needle");
     wait_for_search(&view, &mut cx);
@@ -7802,7 +7825,7 @@ fn list_columns_fit_with_preview_open_at_launch(cx: &mut TestAppContext) {
     let root = fixture("preview-list-width");
     let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1200.), px(760.)));
     let options = WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
-    let (_view, mut cx) = open_with_before(cx, &root, options, |cx| {
+    let (view, mut cx) = open_with_before(cx, &root, options, |cx| {
         let config = &cx.global::<Ui>().config_dir;
         std::fs::write(config.join("settings.toml"), "show_preview = true\n[window]\nsidebar_width = 294\n")
             .expect("write settings");
@@ -7823,11 +7846,15 @@ fn list_columns_fit_with_preview_open_at_launch(cx: &mut TestAppContext) {
     assert_eq!(row_name.right() + px(8.), name.right(), "the name cell ends at the same divider");
 
     cx.simulate_keystrokes("cmd-shift-p");
+
+    finish_motion(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_none());
     assert!(header(&mut cx, "column-header-0").size.width > name.size.width);
     assert!(header(&mut cx, "column-header-3").size.width > kind.size.width);
 
     cx.simulate_keystrokes("cmd-shift-p");
+
+    finish_motion(&view, &mut cx);
     assert_eq!(header(&mut cx, "column-header-0"), name);
     assert_eq!(header(&mut cx, "column-header-3"), kind);
 }
@@ -8299,6 +8326,7 @@ fn filter_tag_control_opens_a_picker_and_applies_every_tag(cx: &mut TestAppConte
 
     cx.simulate_keystrokes("/");
     settle(&view, &mut cx);
+    finish_motion(&view, &mut cx);
     let control = cx.debug_bounds("filter-tags").expect("the visible tag control");
     cx.simulate_click(control.center(), gpui::Modifiers::default());
     settle(&view, &mut cx);
@@ -8591,6 +8619,7 @@ fn filter_field_opens_above_the_list_rows(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root);
     cx.simulate_keystrokes("/");
     settle(&view, &mut cx);
+    finish_motion(&view, &mut cx);
     let header = cx.debug_bounds("table-header").expect("header");
     let field = cx.debug_bounds("filter-field").expect("field");
     let row = cx.debug_bounds("row-alpha").expect("first row");
@@ -10009,6 +10038,7 @@ fn preview_toggle_hides_it_in_list_and_columns(cx: &mut TestAppContext) {
     let (view, mut cx) = open(cx, &root);
     assert!(cx.debug_bounds("preview").is_some(), "list view shows the preview");
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_none(), "hiding removes the list preview");
     assert!(!cx.read(|cx| cx.global::<Ui>().settings.show_preview), "the setting is off");
@@ -10021,6 +10051,8 @@ fn preview_toggle_hides_it_in_list_and_columns(cx: &mut TestAppContext) {
     );
 
     cx.simulate_keystrokes("cmd-shift-p");
+
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_some(), "showing it again");
 
@@ -10030,6 +10062,7 @@ fn preview_toggle_hides_it_in_list_and_columns(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview-column").is_some(), "a file's preview is the last column");
     cx.simulate_keystrokes("cmd-shift-p");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview-column").is_none(), "hiding removes the preview column");
     assert_eq!(view.read_with(&cx, |w, cx| w.pane().read(cx).mode()), ViewMode::Columns);
@@ -10044,6 +10077,8 @@ fn cmd_i_opens_info_and_a_second_closes_it(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Preview);
 
     cx.simulate_keystrokes("cmd-i");
+
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_some(), "⌘I keeps the column open");
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
@@ -10066,9 +10101,12 @@ fn cmd_i_opens_info_and_a_second_closes_it(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("preview").is_some());
 
     cx.simulate_keystrokes("cmd-i");
+
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
     cx.simulate_keystrokes("cmd-i");
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_none(), "a second ⌘I closes the column");
     assert!(cx.read(|cx| cx.global::<Ui>().settings.show_preview), "the setting is still the default");
@@ -10084,17 +10122,23 @@ fn info_opens_when_the_default_is_off(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("preview").is_none(), "the default hides the column");
 
     cx.simulate_keystrokes("cmd-i");
+
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_some(), "⌘I opens it anyway");
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Info);
     assert!(!cx.read(|cx| cx.global::<Ui>().settings.show_preview), "the default stays off");
 
     cx.simulate_keystrokes("cmd-shift-p");
+
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_none(), "⇧⌘P hides the explicit column");
     assert!(!cx.read(|cx| cx.global::<Ui>().settings.show_preview));
 
     cx.simulate_keystrokes("cmd-shift-p");
+
+    finish_motion(&view, &mut cx);
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("preview").is_some(), "⇧⌘P shows it again");
     assert_eq!(view.read_with(&cx, |w, cx| w.info.read(cx).tab()), InfoTab::Preview, "⇧⌘P shows the Preview tab");
@@ -11725,9 +11769,9 @@ fn sidebar_drop_highlight_is_steady_while_the_pointer_stays_on_a_row(cx: &mut Te
     write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
-    let first = cx.debug_bounds("sidebar-0").expect("first favorite row").center();
-    let second = cx.debug_bounds("sidebar-1").expect("second favorite row").center();
-    let header = cx.debug_bounds("sidebar-header-Favorites").expect("favorites title").center();
+    let first = cx.debug_bounds("sidebar-1").expect("first favorite row").center();
+    let second = cx.debug_bounds("sidebar-2").expect("second favorite row").center();
+    let header = cx.debug_bounds("sidebar-header-favorites-group-0").expect("favorites title").center();
     let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
     let target = |cx: &VisualTestContext| sidebar.read_with(cx, |s, _| s.drop_target());
 
@@ -11744,8 +11788,8 @@ fn sidebar_drop_highlight_is_steady_while_the_pointer_stays_on_a_row(cx: &mut Te
         operations: Default::default(),
     });
     cx.run_until_parked();
-    assert_eq!(target(&cx), Some((true, 1)), "the row under the pointer is highlighted");
-    assert!(sidebar_looks(&view, &mut cx)[1].drop, "the row's look carries the drop mark");
+    assert_eq!(target(&cx), Some((true, 2)), "the row under the pointer is highlighted");
+    assert!(sidebar_looks(&view, &mut cx)[2].drop, "the row's look carries the drop mark");
     let outlined = |cx: &mut VisualTestContext, selector: &'static str| {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
@@ -11753,7 +11797,7 @@ fn sidebar_drop_highlight_is_steady_while_the_pointer_stays_on_a_row(cx: &mut Te
         let row = cx.debug_bounds(selector).expect("target");
         cx.debug_bounds("drop-outline").is_some_and(|outline| outline == row)
     };
-    assert!(outlined(&mut cx, "sidebar-1"), "the target row is outlined, like list and column targets");
+    assert!(outlined(&mut cx, "sidebar-2"), "the target row is outlined, like list and column targets");
     for _ in 0..8 {
         cx.simulate_event(gpui::FileDropEvent::Pending {
             position: second,
@@ -11761,7 +11805,7 @@ fn sidebar_drop_highlight_is_steady_while_the_pointer_stays_on_a_row(cx: &mut Te
             operations: Default::default(),
         });
         cx.run_until_parked();
-        assert_eq!(target(&cx), Some((true, 1)), "…and stays highlighted while the pointer rests on it");
+        assert_eq!(target(&cx), Some((true, 2)), "…and stays highlighted while the pointer rests on it");
     }
     cx.simulate_event(gpui::FileDropEvent::Pending {
         position: first,
@@ -11769,7 +11813,7 @@ fn sidebar_drop_highlight_is_steady_while_the_pointer_stays_on_a_row(cx: &mut Te
         operations: Default::default(),
     });
     cx.run_until_parked();
-    assert_eq!(target(&cx), Some((true, 0)), "moving to another row moves the highlight");
+    assert_eq!(target(&cx), Some((true, 1)), "moving to another row moves the highlight");
     cx.simulate_event(gpui::FileDropEvent::Pending {
         position: header,
         modifiers: Default::default(),
@@ -11777,7 +11821,7 @@ fn sidebar_drop_highlight_is_steady_while_the_pointer_stays_on_a_row(cx: &mut Te
     });
     cx.run_until_parked();
     assert_eq!(target(&cx), Some((false, 0)), "a group title highlights as a drop target");
-    assert!(outlined(&mut cx, "sidebar-header-Favorites"), "…with the same outline");
+    assert!(outlined(&mut cx, "sidebar-header-favorites-group-0"), "…with the same outline");
     cx.simulate_event(gpui::FileDropEvent::Exited);
     cx.run_until_parked();
     assert_eq!(target(&cx), None, "leaving the window clears it");
@@ -11792,7 +11836,7 @@ fn dragging_a_row_onto_a_sidebar_favorite_moves_it(cx: &mut TestAppContext) {
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     let from = cx.debug_bounds("row-notes.txt").expect("notes.txt row").center();
-    let to = cx.debug_bounds("sidebar-0").expect("beta favorite row").center();
+    let to = cx.debug_bounds("sidebar-1").expect("beta favorite row").center();
     cx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::default());
     cx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
     cx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::default());
@@ -15806,7 +15850,7 @@ fn tag_destination_searches_spotlight_and_survives_history(cx: &mut TestAppConte
         crate::effects::recording(cx).expect("recording effects").set_spotlight_hits(vec![vec![hit.clone()]])
     });
 
-    let row = cx.debug_bounds("sidebar-2").expect("the pinned tag row");
+    let row = cx.debug_bounds("sidebar-3").expect("the pinned tag row");
     cx.simulate_click(row.center(), gpui::Modifiers::default());
     wait_for_pane_search(&view, &mut cx);
     let tag = crow_core::TagId::new("Work");
@@ -16087,13 +16131,13 @@ fn saved_sidebar_rows_open_independently_by_mouse_and_keyboard(cx: &mut TestAppC
             ("text", "Text", &root.display().to_string(), Some("text")),
         ]),
     );
-    wait_for_selector(&view, &mut cx, "sidebar-3");
-    click_selector(&mut cx, "sidebar-2");
+    wait_for_selector(&view, &mut cx, "sidebar-4");
+    click_selector(&mut cx, "sidebar-3");
     wait_for_pane_search(&view, &mut cx);
     let active_id =
         |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |pane, _| pane.location().saved_query_id().cloned());
     assert_eq!(active_id(&cx).unwrap().as_str(), "pdfs");
-    click_selector(&mut cx, "sidebar-3");
+    click_selector(&mut cx, "sidebar-4");
     wait_for_pane_search(&view, &mut cx);
     assert_eq!(active_id(&cx).unwrap().as_str(), "text");
 
@@ -17752,4 +17796,321 @@ fn search_results_keep_the_selection_cursor_and_shift_arrows_in_step(cx: &mut Te
     assert_eq!(search.read_with(&cx, |s, _| s.selected_count()), 2);
     let active = search.read_with(&cx, |s, _| s.selected_entry().map(|(path, _)| path)).expect("an active row");
     assert!(search.read_with(&cx, |s, _| s.result_paths()).contains(&active));
+}
+
+#[gpui::test]
+fn a_closed_palette_fades_out_in_full_and_is_gone_at_once_in_off(cx: &mut TestAppContext) {
+    for (mode, lingers) in [
+        (crow_core::motion::Effective::Full, true),
+        (crow_core::motion::Effective::Low, true),
+        (crow_core::motion::Effective::Off, false),
+    ] {
+        let root = fixture("palette-exit");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("sheet-panel").is_some(), "{mode:?}: open");
+        cx.simulate_keystrokes("escape");
+        // The state is closed at once, whatever is still drawn.
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "{mode:?}: closed");
+        assert_eq!(
+            cx.debug_bounds("sheet-panel").is_some(),
+            lingers,
+            "{mode:?}: its last picture lingers only with motion"
+        );
+        // Esc again neither reopens nor double-closes.
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "{mode:?}: still closed");
+        // After the fade the picture is dropped.
+        std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::SHEET_OUT + 40));
+        view.update(&mut cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sheet-panel").is_none(), "{mode:?}: gone after the fade");
+        assert!(view.read_with(&cx, |w, _| w.exits.palette.is_none()), "{mode:?}: the holder is dropped");
+    }
+}
+
+#[gpui::test]
+fn the_palette_highlight_glides_only_in_full(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, glides) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("palette-glide");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("palette-glide").is_some(), glides, "{mode:?}: a gliding fill");
+        let first = cx.debug_bounds("palette-row-0").expect("the first row");
+        if glides {
+            let fill = cx.debug_bounds("palette-glide").unwrap();
+            assert_eq!(fill.size.height, first.size.height, "{mode:?}: the fill is as tall as its row");
+        }
+        // Moving the cursor moves the logical cursor at once; the fill only follows.
+        cx.simulate_keystrokes("down");
+        assert_eq!(view.read_with(&cx, |w, _| w.palette.as_ref().map(|p| p.cursor)), Some(1), "{mode:?}");
+    }
+}
+
+#[test]
+fn the_right_column_slide_looks() {
+    use crow_core::motion::Effective::{Full, Low};
+    let at = |mode, opening, t| super::slide_look(mode, opening, t);
+    let open_start = at(Full, true, 0.0);
+    assert_eq!((open_start.width, open_start.opacity), (0.0, 0.0));
+    let open_end = at(Full, true, 1.0);
+    assert_eq!((open_end.width, open_end.opacity), (1.0, 1.0));
+    assert_eq!(at(Full, true, 0.5).opacity, 0.0, "content fades in after half the slide");
+    let closing = at(Full, false, 0.5);
+    assert_eq!((closing.width, closing.opacity), (0.5, 0.0), "content is gone by the half way point");
+    assert_eq!(at(Full, false, 1.0).width, 0.0);
+    // Low never changes the width gradually.
+    for t in [0.0, 0.3, 0.9] {
+        assert_eq!(at(Low, true, t).width, 1.0, "opening: the list gives way at once");
+        assert_eq!(at(Low, false, t).width, 0.0, "closing: the list takes the room at once");
+        assert!(at(Low, false, t).overlay && !at(Low, true, t).overlay);
+    }
+    assert_eq!(at(Low, true, 0.25).opacity, 0.25);
+}
+
+#[gpui::test]
+fn toggling_the_right_column_slides_in_full_and_is_instant_in_off(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, slides) in [(Effective::Full, true), (Effective::Low, true), (Effective::Off, false)] {
+        let root = fixture("column-slide");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        settle(&view, &mut cx);
+        let was_visible = view.read_with(&cx, |w, cx| w.info.read(cx).visible());
+        cx.simulate_keystrokes("cmd-shift-p");
+        let now_visible = view.read_with(&cx, |w, cx| w.info.read(cx).visible());
+        assert_ne!(was_visible, now_visible, "{mode:?}: the toggle takes effect at once");
+        assert_eq!(
+            view.read_with(&cx, |w, _| w.pane_slide.is_some()),
+            slides,
+            "{mode:?}: a slide starts only with motion"
+        );
+        if !now_visible && slides {
+            assert!(cx.debug_bounds("preview").is_some(), "{mode:?}: the hiding column is still drawn");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::PANE_SLIDE + 40));
+        view.update(&mut cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(view.read_with(&cx, |w, _| w.pane_slide.is_none()), "{mode:?}: the slide ends");
+        assert_eq!(cx.debug_bounds("preview").is_some(), now_visible, "{mode:?}: the end state");
+    }
+}
+
+#[gpui::test]
+fn a_favorites_group_collapses_by_click_and_by_key_and_remembers_it(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-group-collapse");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[&root.join("alpha"), &root.join("beta")]));
+    cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = crow_core::motion::Effective::Off);
+    assert_eq!(sidebar_paths(&cx), [root.join("alpha"), root.join("beta")]);
+
+    click_selector(&mut cx, "sidebar-header-favorites-group-0");
+    settle(&view, &mut cx);
+    assert!(sidebar_paths(&cx).is_empty(), "the group's favorites are hidden");
+    assert!(
+        sidebar_looks(&view, &mut cx).iter().any(|look| look.spoken == "Favorites section, collapsed"),
+        "…and its title says so"
+    );
+    let saved =
+        std::fs::read_to_string(cx.update(|_, cx| cx.global::<crate::ui::Ui>().config_dir.join("sidebar.toml")))
+            .expect("sidebar.toml");
+    assert!(saved.contains("collapsed = true"), "{saved}");
+
+    // The title is a cursor stop: Return on it expands the group again.
+    if !sidebar_focused(&view, &mut cx) {
+        cx.simulate_keystrokes("tab");
+    }
+    let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+    sidebar.update(&mut cx, |sidebar, cx| sidebar.set_cursor_for_test(0, cx));
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(sidebar_paths(&cx), [root.join("alpha"), root.join("beta")]);
+
+    cx.simulate_keystrokes("left");
+    settle(&view, &mut cx);
+    assert!(sidebar_paths(&cx).is_empty(), "Left on the open title collapses it");
+}
+
+#[gpui::test]
+fn a_collapsing_sidebar_section_leaves_fading_rows_only_in_full(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, ghost) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("sidebar-section-motion");
+        let (view, mut cx) = open(cx, &root);
+        write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]).replace("show = false", "show = true"));
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        cx.simulate_keystrokes("tab");
+        let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+        let recent = sidebar
+            .read_with(&cx, |sidebar, cx| sidebar.index_of_section_for_test("recent", cx))
+            .expect("Recent heading");
+        sidebar.update(&mut cx, |sidebar, cx| sidebar.set_cursor_for_test(recent, cx));
+        cx.simulate_keystrokes("left");
+        assert_eq!(
+            cx.debug_bounds("sidebar-section-ghost").is_some(),
+            ghost,
+            "{mode:?}: the collapsed rows' last picture"
+        );
+        assert!(
+            sidebar_looks(&view, &mut cx).iter().any(|look| look.spoken.contains("Recent section, collapsed")),
+            "{mode:?}: the logical state changes at once"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::SECTION + 40));
+        sidebar.update(&mut cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-section-ghost").is_none(), "{mode:?}: gone after the motion");
+    }
+}
+
+#[gpui::test]
+fn window_tabs_grow_in_and_shrink_away_only_with_motion(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, moves) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("tab-motion");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        cx.simulate_keystrokes("cmd-t");
+        let (first, second) = (cx.debug_bounds("tab-0").expect("tab 0"), cx.debug_bounds("tab-1").expect("tab 1"));
+        if moves {
+            assert!(second.size.width < first.size.width, "{mode:?}: the new tab starts narrow: {second:?} {first:?}");
+        } else {
+            assert_eq!(second.size.width, first.size.width, "{mode:?}: equal tabs at once");
+        }
+        finish_motion(&view, &mut cx);
+        let (first, second) = (cx.debug_bounds("tab-0").expect("tab 0"), cx.debug_bounds("tab-1").expect("tab 1"));
+        assert_eq!(second.size.width, first.size.width, "{mode:?}: equal tabs after the motion");
+        // A third tab, then close the active one: a ghost keeps its place while it shrinks.
+        cx.simulate_keystrokes("cmd-t");
+        finish_motion(&view, &mut cx);
+        cx.simulate_keystrokes("cmd-w");
+        let ghosts = usize::from(cx.debug_bounds("tab-ghost").is_some());
+        assert_eq!(ghosts, usize::from(moves), "{mode:?}: the closing tab's picture");
+        assert_eq!(view.read_with(&cx, |w, _| w.tabs.len()), 2, "{mode:?}: closed at once");
+        finish_motion(&view, &mut cx);
+        assert!(cx.debug_bounds("tab-ghost").is_none(), "{mode:?}: ghost gone");
+    }
+}
+
+#[gpui::test]
+fn the_view_switcher_fill_glides_only_in_full(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, glides) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("view-glide");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        view.update(&mut cx, |_, cx| cx.notify());
+        settle(&view, &mut cx);
+        assert_eq!(cx.debug_bounds("view-glide").is_some(), glides, "{mode:?}");
+        cx.simulate_keystrokes("cmd-1");
+        settle(&view, &mut cx);
+        let icons = cx.debug_bounds("view-icons").expect("icons button");
+        if glides {
+            let fill = cx.debug_bounds("view-glide").expect("fill");
+            assert_eq!(fill.size, icons.size, "{mode:?}: the fill is a button's size");
+        }
+    }
+}
+
+#[gpui::test]
+fn the_search_band_widens_across_the_toolbar_in_full_only(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    let mut finals = Vec::new();
+    for (mode, widens) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("band-motion");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        cx.simulate_keystrokes("cmd-f");
+        let started = cx.debug_bounds("search-field").expect("the field is there from the first frame").size.width;
+        // Typing works at once, mid-motion.
+        cx.simulate_input("ab");
+        assert_eq!(
+            view.read_with(&cx, |w, cx| w.search.as_ref().map(|s| s.read(cx).query_text(cx))),
+            Some("ab".to_owned()),
+            "{mode:?}: the first letters are not lost"
+        );
+        finish_motion(&view, &mut cx);
+        let full = cx.debug_bounds("search-field").expect("the field").size.width;
+        finals.push(full);
+        assert_eq!(started < full, widens, "{mode:?}: widens while opening ({started:?} -> {full:?})");
+    }
+    assert!(finals.windows(2).all(|w| w[0] == w[1]), "every mode ends on the same band: {finals:?}");
+}
+
+#[gpui::test]
+fn the_filter_row_opens_and_closes_its_height_in_full_only(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, moves) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("filter-motion");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        cx.simulate_keystrokes("/");
+        let field = cx.debug_bounds("filter-field").expect("the field exists from the first frame");
+        cx.simulate_input("al");
+        assert_eq!(
+            pane(&view, &cx).read_with(&cx, |pane, cx| pane.filter_query(cx)),
+            Some("al".to_owned()),
+            "{mode:?}: typed letters land during the motion"
+        );
+        finish_motion(&view, &mut cx);
+        let settled = cx.debug_bounds("filter-field").expect("the field").size.height;
+        assert_eq!(field.size.height, settled, "{mode:?}: the field itself keeps its size; the row's wrapper moves");
+        cx.simulate_keystrokes("escape");
+        assert_eq!(
+            cx.debug_bounds("filter-ghost").is_some(),
+            moves,
+            "{mode:?}: the closing row's picture lingers only in Full"
+        );
+        assert!(pane(&view, &cx).read_with(&cx, |pane, _| !pane.is_filtering()), "{mode:?}: closed at once");
+        finish_motion(&view, &mut cx);
+        assert!(cx.debug_bounds("filter-ghost").is_none(), "{mode:?}: ghost gone");
+    }
+}
+
+#[gpui::test]
+fn a_sort_the_user_asks_for_glides_visible_rows_only_in_full(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, captured) in [(Effective::Full, true), (Effective::Low, false), (Effective::Off, false)] {
+        let root = fixture("sort-glide");
+        std::fs::write(root.join("big.bin"), vec![0u8; 5000]).expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        settle(&view, &mut cx);
+        view.update(&mut cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        pane(&view, &cx)
+            .update(&mut cx, |p, cx| p.set_sort(crow_fs::Sort::default().toggled(crow_fs::SortKey::Size), cx));
+        let origin = pane(&view, &cx).read_with(&cx, |p, _| p.view_motion_origin(&root.join("notes.txt")));
+        assert_eq!(origin.is_some(), captured, "{mode:?}: rows are captured from where they were");
+        settle(&view, &mut cx);
+        assert_eq!(names(&view, &cx), ["alpha", "beta", "big.bin", "notes.txt"], "{mode:?}: sorted at once");
+    }
+}
+
+#[gpui::test]
+fn showing_hidden_files_crossfades_the_list_unless_motion_is_off(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    for (mode, fades) in [(Effective::Full, true), (Effective::Low, true), (Effective::Off, false)] {
+        let root = fixture("hidden-fade");
+        std::fs::write(root.join(".secret"), "x").expect("create fixture");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        let shown_before = names(&view, &cx).contains(&".secret".to_owned());
+        cx.simulate_keystrokes("cmd-shift-.");
+        view.update(&mut cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.list_fading()), fades, "{mode:?}");
+        finish_motion(&view, &mut cx);
+        settle(&view, &mut cx);
+        assert!(pane(&view, &cx).read_with(&cx, |p, _| !p.list_fading()), "{mode:?}: the fade ends");
+        assert_eq!(
+            names(&view, &cx).contains(&".secret".to_owned()),
+            !shown_before,
+            "{mode:?}: the toggle took effect"
+        );
+    }
 }

@@ -243,6 +243,7 @@ impl SettingsWindow {
                     .child(content),
                 theme,
                 cx.global::<Ui>().feedback.mode,
+                None,
                 cx.listener(|this, _, window, cx| this.close_saved_query_editor(window, cx)),
             )
             .into_any_element(),

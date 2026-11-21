@@ -813,6 +813,8 @@ pub struct SettingsWindow {
     saved_query_scroll: ScrollHandle,
     saved_query_form: Option<Box<crate::window::saved_query_form::SavedQueryForm>>,
     content_motion: Option<ContentMotion>,
+    /// The motion mode of the last draw, for the shared controls.
+    motion_mode: crow_core::motion::Effective,
     /// The drop-down whose menu is open.
     menu: Option<ControlId>,
     /// The menu a mouse-down outside it just closed, so the click that lands on
@@ -1038,6 +1040,7 @@ impl SettingsWindow {
             saved_query_scroll: ScrollHandle::new(),
             saved_query_form: None,
             content_motion: None,
+            motion_mode: crow_core::motion::Effective::Off,
             menu: None,
             dismissed_by_mouse: None,
             theme_type_ahead: TypeAhead::default(),
@@ -1060,6 +1063,7 @@ impl SettingsWindow {
             focus: self.handles.get(&id).expect("control handle"),
             focused: self.is_focused(id, window),
             theme,
+            mode: self.motion_mode,
         }
     }
 
@@ -2407,6 +2411,7 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.motion_mode = cx.global::<Ui>().feedback.mode;
         let (theme, font, font_size, settings) = {
             let ui = cx.global::<Ui>();
             (ui.theme.clone(), ui_font(&ui.settings.font_family), ui.settings.font_size, ui.settings.clone())
@@ -2726,7 +2731,12 @@ impl Render for SettingsWindow {
             for (index, issue) in issues.iter().enumerate() {
                 self.error_items.insert(issue.file, index);
                 let focus = self.error_handles[issue.file].clone();
-                let style = controls::ControlStyle { focus: &focus, focused: focus.is_focused(window), theme: &theme };
+                let style = controls::ControlStyle {
+                    focus: &focus,
+                    focused: focus.is_focused(window),
+                    theme: &theme,
+                    mode: self.motion_mode,
+                };
                 let file = issue.file;
                 let path = issue.path.clone();
                 let open = controls::link_button(
@@ -2855,6 +2865,7 @@ impl Render for SettingsWindow {
                     focus: &self.clear_search,
                     focused: self.clear_search.is_focused(window),
                     theme: &theme,
+                    mode: self.motion_mode,
                 },
                 callback(cx, |this, window, cx| this.clear_query(true, window, cx)),
             );

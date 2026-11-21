@@ -354,7 +354,7 @@ impl CrowWindow {
         match form.spec(cx) {
             Ok(query) => {
                 ui::save_saved_query(query, None, cx);
-                self.sheet = None;
+                retire!(self, cx, sheet);
                 self.focus_center(window, cx);
                 cx.notify();
             }
@@ -371,7 +371,7 @@ impl CrowWindow {
         let Some(Sheet::SavedQuery(form)) = &self.sheet else { return };
         let Some(id) = form.id.clone() else { return };
         ui::remove_saved_query(id, None, cx);
-        self.sheet = None;
+        retire!(self, cx, sheet);
         self.focus_center(window, cx);
         cx.notify();
     }

@@ -221,8 +221,8 @@ impl Default for Look {
 
 /// Base durations in ms. The lab multiplies them by five in slow motion.
 pub mod ms {
-    pub const TRASH_SWALLOW: u64 = 180;
-    pub const TRASH_CLOSE: u64 = 140;
+    pub const TRASH_SWALLOW: u64 = 200;
+    pub const TRASH_CLOSE: u64 = 130;
     pub const MOVE_FLY: u64 = 260;
     pub const MOVE_CLOSE: u64 = 140;
     pub const RECEIVE: u64 = 360;
@@ -244,11 +244,73 @@ pub mod ms {
     pub const CHILD_COLUMN: u64 = 145;
     pub const NAVIGATION_LOW: u64 = 120;
     pub const REVEAL: u64 = 300;
+    /// A sheet or the palette opening: Low fades, Full fades a little slower.
+    pub const SHEET_IN_LOW: u64 = 120;
+    pub const SHEET_IN: u64 = 140;
+    pub const SHEET_OUT: u64 = 110;
+    pub const SCRIM: u64 = 120;
+    pub const PANE_SLIDE: u64 = 180;
+    pub const SECTION: u64 = 160;
+    pub const TAB: u64 = 150;
+    pub const SEGMENT: u64 = 155;
+    pub const SEARCH_BAND: u64 = 200;
+    pub const FILTER_ROW: u64 = 140;
+    pub const REORDER: u64 = 220;
+    pub const PROGRESS: u64 = 250;
+    pub const PREVIEW_FADE: u64 = 120;
+    pub const TOOLTIP: u64 = 100;
+    pub const FIELD_IN: u64 = 100;
     /// One half of the double blink before a folder springs open.
     pub const SPRING_BLINK: u64 = 70;
     /// Low's single soft dip before a spring.
     pub const SPRING_DIP: u64 = 110;
+    /// Every duration above, by name, for the reference doc's table and its test.
+    pub const ALL: &[(&str, u64)] = &[
+        ("TRASH_SWALLOW", TRASH_SWALLOW),
+        ("TRASH_CLOSE", TRASH_CLOSE),
+        ("MOVE_FLY", MOVE_FLY),
+        ("MOVE_CLOSE", MOVE_CLOSE),
+        ("RECEIVE", RECEIVE),
+        ("ARRIVE_OPEN", ARRIVE_OPEN),
+        ("ARRIVE_IN", ARRIVE_IN),
+        ("ARRIVE_TINT", ARRIVE_TINT),
+        ("REFUSE", REFUSE),
+        ("TIP_FULL", TIP_FULL),
+        ("LOW_OUT", LOW_OUT),
+        ("LOW_IN", LOW_IN),
+        ("LOW_TINT", LOW_TINT),
+        ("STATUS", STATUS),
+        ("FIELD", FIELD),
+        ("COPY", COPY),
+        ("COPY_FADE", COPY_FADE),
+        ("DISCLOSE", DISCLOSE),
+        ("PANEL_TAB", PANEL_TAB),
+        ("VIEW_CHANGE", VIEW_CHANGE),
+        ("CHILD_COLUMN", CHILD_COLUMN),
+        ("NAVIGATION_LOW", NAVIGATION_LOW),
+        ("REVEAL", REVEAL),
+        ("SHEET_IN_LOW", SHEET_IN_LOW),
+        ("SHEET_IN", SHEET_IN),
+        ("SHEET_OUT", SHEET_OUT),
+        ("SCRIM", SCRIM),
+        ("PANE_SLIDE", PANE_SLIDE),
+        ("SECTION", SECTION),
+        ("TAB", TAB),
+        ("SEGMENT", SEGMENT),
+        ("SEARCH_BAND", SEARCH_BAND),
+        ("FILTER_ROW", FILTER_ROW),
+        ("REORDER", REORDER),
+        ("PROGRESS", PROGRESS),
+        ("PREVIEW_FADE", PREVIEW_FADE),
+        ("TOOLTIP", TOOLTIP),
+        ("FIELD_IN", FIELD_IN),
+        ("SPRING_BLINK", SPRING_BLINK),
+        ("SPRING_DIP", SPRING_DIP),
+    ];
 }
+
+/// How much of the gap closes during the trash swallow's last third.
+const TRASH_OVERLAP: f32 = 0.25;
 
 pub fn ease_in(t: f32) -> f32 {
     t * t * t
@@ -262,16 +324,22 @@ pub fn ease_in_out(t: f32) -> f32 {
     if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
 }
 
-/// Eased progress of an in-flight transition. Low uses the shorter fade time.
-pub fn navigation_progress(mode: Effective, started: Instant, now: Instant, full_ms: u64) -> Option<f32> {
+/// Eased progress (ease-out) of an in-flight transition, or `None` when it is
+/// over or the mode is Off. Full runs `full_ms`, Low `low_ms`.
+pub fn progress(mode: Effective, started: Instant, now: Instant, full_ms: u64, low_ms: u64) -> Option<f32> {
     let ms = match mode {
         Effective::Off => return None,
-        Effective::Low => ms::NAVIGATION_LOW,
+        Effective::Low => low_ms,
         Effective::Full => full_ms,
     };
     let elapsed = now.saturating_duration_since(started);
     let duration = Duration::from_millis(ms);
     (elapsed < duration).then(|| ease_out(elapsed.as_secs_f32() / duration.as_secs_f32()))
+}
+
+/// Eased progress of an in-flight transition. Low uses the shorter fade time.
+pub fn navigation_progress(mode: Effective, started: Instant, now: Instant, full_ms: u64) -> Option<f32> {
+    progress(mode, started, now, full_ms, ms::NAVIGATION_LOW)
 }
 
 /// How row effect `fx` looks in phase `phase` at progress `t` (already eased per phase).
@@ -280,18 +348,23 @@ pub fn look(mode: Effective, fx: Fx, phase: usize, t: f32) -> Look {
     match (mode, fx, phase) {
         (_, Fx::Idle, _) | (Effective::Off, _, _) => {}
         // Full trash: the icon turns into a trash, the name slides into it, the trash gulps, the gap closes.
+        // The name's slide and fade ease in and out, so the motion fills the whole swallow
+        // instead of idling and then snapping. The gulp happens while the row is still
+        // visible, and the gap starts closing in the swallow's last third (the close then
+        // carries on from there), so there is no dead beat between the two phases.
         (Effective::Full, Fx::Trash, 0) => {
-            let e = ease_in(t);
-            look.trash = (t * 2.5).min(1.0);
+            let e = ease_in_out(t);
+            look.trash = (t * 3.0).min(1.0);
+            look.trash_size = 16.0 + 3.0 * (((t - 0.3) / 0.6).clamp(0.0, 1.0) * std::f32::consts::PI).sin();
             look.dx = -22.0 * e;
             look.opacity = 1.0 - e;
+            look.height = 1.0 - TRASH_OVERLAP * ease_in(((t - 0.66) / 0.34).clamp(0.0, 1.0));
         }
         (Effective::Full, Fx::Trash, _) => {
-            let e = ease_out(t);
-            look.trash = 1.0 - e;
-            look.trash_size = 16.0 + 3.0 * (t * std::f32::consts::PI).sin();
+            look.trash = 1.0;
+            look.dx = -22.0;
             look.opacity = 0.0;
-            look.height = 1.0 - e;
+            look.height = (1.0 - TRASH_OVERLAP) * (1.0 - ease_out(t));
         }
         // Full move: the ghost flies; the row stays as an empty slot, then closes.
         (Effective::Full, Fx::MoveOut, 0) => look.opacity = 0.0,
@@ -372,6 +445,32 @@ pub fn phases(mode: Effective, fx: Fx) -> Vec<Duration> {
         (Effective::Full | Effective::Low, Fx::Reveal) => vec![d(ms::REVEAL)],
         (Effective::Low, Fx::Trash | Fx::MoveOut) => vec![d(ms::LOW_OUT)],
         (Effective::Low, Fx::Receive | Fx::Arrive | Fx::Refuse) => vec![d(ms::LOW_TINT)],
+    }
+}
+
+/// How the toolbar looks while the search band opens (`opening`) or closes, at
+/// eased progress `t`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BandLook {
+    /// How far the field has widened across the band (0 = the toolbar's own search
+    /// field, 1 = the full band).
+    pub widen: f32,
+    /// The match, Save and Done controls' opacity.
+    pub controls: f32,
+    /// The opacity of what is changing in (Low fades; Full draws at once).
+    pub fade: f32,
+}
+
+/// Full: the field widens across the band, then the controls fade in; closing
+/// reverses it. Low: the band and the toolbar swap at once and fade in.
+pub fn band_look(mode: Effective, opening: bool, t: f32) -> BandLook {
+    let t = t.clamp(0.0, 1.0);
+    match mode {
+        Effective::Full => {
+            let widen = if opening { t } else { 1.0 - t };
+            BandLook { widen, controls: ((widen - 0.5) * 2.0).clamp(0.0, 1.0), fade: 1.0 }
+        }
+        _ => BandLook { widen: if opening { 1.0 } else { 0.0 }, controls: 1.0, fade: t },
     }
 }
 
@@ -489,6 +588,61 @@ mod tests {
     }
 
     #[test]
+    fn progress_is_none_when_off_or_done_and_eased_in_between() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        assert_eq!(progress(Effective::Off, start, start, 200, 100), None);
+        assert_eq!(progress(Effective::Full, start, at(200), 200, 100), None);
+        assert_eq!(progress(Effective::Low, start, at(100), 200, 100), None);
+        assert!(progress(Effective::Low, start, at(150), 100, 300).is_some(), "Low uses its own duration");
+        assert_eq!(progress(Effective::Full, start, start, 200, 100), Some(0.0));
+        assert_eq!(progress(Effective::Full, start, at(100), 200, 100), Some(ease_out(0.5)));
+        assert_eq!(
+            navigation_progress(Effective::Low, start, at(119), 999),
+            progress(Effective::Low, start, at(119), 0, 120)
+        );
+    }
+
+    #[test]
+    fn the_search_band_widens_then_shows_its_controls_and_reverses() {
+        let start = band_look(Effective::Full, true, 0.0);
+        assert_eq!((start.widen, start.controls), (0.0, 0.0));
+        let half = band_look(Effective::Full, true, 0.5);
+        assert_eq!(half.controls, 0.0, "the controls wait for the field");
+        assert_eq!(band_look(Effective::Full, true, 1.0), BandLook { widen: 1.0, controls: 1.0, fade: 1.0 });
+        let closing = band_look(Effective::Full, false, 0.25);
+        assert_eq!((closing.widen, closing.controls), (0.75, 0.5), "closing is the reverse");
+        for t in [0.0, 0.4, 1.0] {
+            assert_eq!(band_look(Effective::Low, true, t).widen, 1.0, "Low never widens gradually");
+            assert_eq!(band_look(Effective::Low, false, t).widen, 0.0);
+            assert_eq!(band_look(Effective::Low, true, t).fade, t);
+        }
+    }
+
+    #[test]
+    fn ms_all_lists_every_duration() {
+        let source = include_str!("motion.rs");
+        let start = source.find("pub mod ms {").expect("the ms module");
+        let end = start + source[start..].find("\n}\n").expect("its end");
+        let declared: Vec<&str> = source[start..end]
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pub const ")?.split(':').next())
+            .filter(|name| *name != "ALL")
+            .collect();
+        let listed: Vec<&str> = ms::ALL.iter().map(|(name, _)| *name).collect();
+        assert_eq!(declared, listed, "ms::ALL names every constant, in order");
+    }
+
+    #[test]
+    fn the_reference_doc_lists_every_duration_with_its_value() {
+        let doc = include_str!("../../../docs/motion.md");
+        for (name, value) in ms::ALL {
+            let row = format!("| `{name}` | {value} |");
+            assert!(doc.contains(&row), "docs/motion.md is missing or has a stale row: {row}");
+        }
+    }
+
+    #[test]
     fn auto_follows_reduce_motion() {
         assert_eq!(MotionMode::Auto.resolve(false), Effective::Full);
         assert_eq!(MotionMode::Auto.resolve(true), Effective::Low);
@@ -527,6 +681,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn phases_join_without_a_jump() {
+        // A phase's last look must be (nearly) the next phase's first look, so
+        // no effect pops at a phase boundary. Opacity, height and slide are
+        // checked; icon swaps (trash, tint, badge) are meant to change.
+        for mode in MODES {
+            for fx in FX {
+                let count = phases(mode, fx).len();
+                for phase in 1..count {
+                    let end = look(mode, fx, phase - 1, 1.0);
+                    let start = look(mode, fx, phase, 0.0);
+                    assert!(
+                        (end.height - start.height).abs() < 0.02,
+                        "{mode:?} {fx:?} height at {phase}: {end:?} {start:?}"
+                    );
+                    assert!(
+                        (end.opacity - start.opacity).abs() < 0.02,
+                        "{mode:?} {fx:?} opacity at {phase}: {end:?} {start:?}"
+                    );
+                    // A slide is only seen when the row is.
+                    if end.opacity > 0.0 || start.opacity > 0.0 {
+                        assert!((end.dx - start.dx).abs() < 1.0, "{mode:?} {fx:?} dx at {phase}: {end:?} {start:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_trash_gulps_while_visible_and_never_grows_back() {
+        let mut last_height = 1.0;
+        for step in 0..=40 {
+            let t = step as f32 / 40.0;
+            let look = look(Effective::Full, Fx::Trash, 0, t);
+            assert!(look.height <= last_height + 1e-6, "the gap only closes, t {t}");
+            last_height = look.height;
+        }
+        let mid = look(Effective::Full, Fx::Trash, 0, 0.6);
+        assert!(mid.opacity > 0.05 && mid.trash_size > 16.0, "the gulp shows while the row does: {mid:?}");
     }
 
     #[test]

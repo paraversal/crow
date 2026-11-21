@@ -154,7 +154,7 @@ impl CrowWindow {
     }
 
     fn close_git_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.git_review = None;
+        retire!(self, cx, git_review);
         self.focus_center(window, cx);
         cx.notify();
     }
@@ -172,7 +172,7 @@ impl CrowWindow {
 
     pub(super) fn render_git_review(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         if self.git_review.is_some() && !crate::git::provider_enabled(cx) {
-            self.git_review = None;
+            retire!(self, cx, git_review);
         }
         let review = self.git_review.as_ref()?;
         let (folder, pinned) = (review.folder.clone(), review.pinned);
@@ -307,6 +307,7 @@ impl CrowWindow {
                 }),
             &theme,
             mode,
+            self.exit_fade.get(),
             cx.listener(|this, _, window, cx| this.close_git_review(window, cx)),
         ))
     }

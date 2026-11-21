@@ -103,6 +103,9 @@ pub struct MotionLab {
     tip: Option<u64>,
     /// Whether the mock sheet (Q3) is open.
     sheet: bool,
+    /// When the sheet last closed (it fades out for `SHEET_OUT`), and the demo progress bar.
+    sheet_closed: Option<std::time::Instant>,
+    progress: f32,
     /// Copy progress: its generation and whether it finished.
     copy: Option<(u64, bool)>,
     ui_sounds: bool,
@@ -164,6 +167,8 @@ impl MotionLab {
             status_generation: 0,
             tip: None,
             sheet: false,
+            sheet_closed: None,
+            progress: 0.0,
             copy: None,
             ui_sounds: crow_macos::ui_sounds_enabled(),
             sound_generation: 0,
@@ -486,6 +491,14 @@ impl MotionLab {
         };
     }
 
+    /// Open or close the mock sheet; closing starts its fade-out.
+    fn set_sheet(&mut self, open: bool) {
+        if self.sheet && !open {
+            self.sheet_closed = Some(std::time::Instant::now());
+        }
+        self.sheet = open;
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let ks = &event.keystroke;
         let m = &ks.modifiers;
@@ -515,8 +528,8 @@ impl MotionLab {
             }
             "x" if plain => self.slow = !self.slow,
             "g" if plain => self.glide = !self.glide,
-            "p" if plain => self.sheet = !self.sheet,
-            "escape" => self.sheet = false,
+            "p" if plain => self.set_sheet(!self.sheet),
+            "escape" => self.set_sheet(false),
             _ => return,
         }
         cx.stop_propagation();
@@ -669,7 +682,7 @@ fn caption(text: &'static str, theme: &Theme) -> Div {
 }
 
 impl Render for MotionLab {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = cx.global::<Ui>();
         let theme = ui.theme.clone();
         let font = ui_font(&ui.settings.font_family);
@@ -782,7 +795,13 @@ impl Render for MotionLab {
             .child(event_button("Copy", "c", |this, cx| this.copy(cx), cx))
             .child(event_button("Tip", "t", |this, _| this.toggle_tip(), cx))
             .child(event_button("Empty Trash", "⇧⌘⌫", |this, cx| this.empty_trash(cx), cx))
-            .child(event_button("Sheet", "p", |this, _| this.sheet = !this.sheet, cx));
+            .child(event_button("Sheet", "p", |this, _| this.set_sheet(!this.sheet), cx))
+            .child(event_button(
+                "Progress +25%",
+                "",
+                |this, _| this.progress = if this.progress >= 1.0 { 0.0 } else { this.progress + 0.25 },
+                cx,
+            ));
 
         // The list: a glide highlight under the rows (Full), the rows, and flying ghosts on top.
         let cursor_y = self.index_of(self.cursor).map_or(0.0, |i| self.settled_y(i));
@@ -932,7 +951,17 @@ impl Render for MotionLab {
             })
             .child(div().pl(px(10.)).border_l_1().border_color(color(theme.role("border"))).child(trash_label));
 
-        let sheet = self.sheet.then(|| {
+        let leaving = self
+            .sheet_closed
+            .filter(|_| !self.sheet)
+            .and_then(|closed| {
+                crow_core::motion::progress(self.mode, closed, std::time::Instant::now(), ms::SHEET_OUT, ms::SHEET_OUT)
+            })
+            .map(|t| 1.0 - t);
+        if leaving.is_some() {
+            window.request_animation_frame();
+        }
+        let sheet = (self.sheet || leaving.is_some()).then(|| {
             let panel = crate::chrome::sheet_panel("lab-sheet", crate::chrome::SheetWidth::Narrow, &theme)
                 .p_4()
                 .flex()
@@ -944,8 +973,9 @@ impl Render for MotionLab {
                 panel,
                 &theme,
                 self.mode,
+                leaving,
                 cx.listener(|this, _, _, cx| {
-                    this.sheet = false;
+                    this.set_sheet(false);
                     cx.notify();
                 }),
             )
@@ -967,6 +997,18 @@ impl Render for MotionLab {
             .text_size(px(13.))
             .child(header)
             .child(events)
+            .child({
+                let bar = div().h(px(2.)).bg(color(theme.role("accent")));
+                let bar = if self.mode == Effective::Full {
+                    bar.with_spring("lab-progress", crate::motion_ui::ease_progress(self.progress), |el, fraction| {
+                        el.w(gpui::relative(fraction))
+                    })
+                    .into_any_element()
+                } else {
+                    bar.w(gpui::relative(self.progress)).into_any_element()
+                };
+                div().w_full().h(px(2.)).child(bar)
+            })
             .child(
                 div().id("lab-list").role(Role::List).aria_label("Lab folder").flex_1().overflow_y_scroll().child(list),
             )

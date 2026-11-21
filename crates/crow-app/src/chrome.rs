@@ -137,7 +137,7 @@ impl Render for Tooltip {
         let theme = &ui.theme;
         let label = self.label.clone();
         let keys = self.keys.clone();
-        div()
+        let tip = div()
             .id("tooltip")
             .debug_selector(|| "tooltip".into())
             .role(Role::Tooltip)
@@ -153,7 +153,17 @@ impl Render for Tooltip {
             .items_center()
             .gap(px(8.))
             .child(div().text_color(color(theme.role("fg"))).child(label))
-            .children(keys.map(|keys| Keycap::text(keys, KeycapWeight::Text)))
+            .children(keys.map(|keys| Keycap::text(keys, KeycapWeight::Text)));
+        // Fades in; a tooltip is a fresh view each time, so the clock starts as it shows.
+        // It goes at once. Opacity only, so Low and Full are alike.
+        match ui.feedback.mode {
+            Effective::Off => tip.into_any_element(),
+            _ => tip
+                .with_animation("tooltip-in", Animation::new(Duration::from_millis(motion::ms::TOOLTIP)), |el, t| {
+                    el.opacity(motion::ease_out(t))
+                })
+                .into_any_element(),
+        }
     }
 }
 
@@ -266,6 +276,9 @@ impl SheetWidth {
     }
 }
 
+/// How far a leaving sheet's panel sinks in Full, in px.
+const SHEET_SINK: f32 = 4.0;
+
 /// The panel inside a sheet: 12 px radius, raised border, deep shadow. Callers
 /// add their padding, context, actions and children.
 pub fn sheet_panel(id: impl Into<gpui::ElementId>, width: SheetWidth, theme: &crow_theme::Theme) -> Stateful<Div> {
@@ -324,26 +337,43 @@ pub fn cycle_focus(controls: &[gpui::FocusHandle], forward: bool, window: &mut W
 
 /// A full-window scrim with a centered panel. A left mouse-down outside the
 /// panel runs the overlay's own cancel path (`on_dismiss`), exactly like Esc.
+///
+/// `leaving` is `Some(opacity)` (1 → 0) while a closed sheet's last picture
+/// fades out (`motion_ui::Leaving`): it takes no clicks, then, and in Full the
+/// panel sinks 4 px. The scrim fades in on open and out on close in Low and Full.
 pub fn sheet(
     panel: impl IntoElement + gpui::Styled + 'static,
     theme: &crow_theme::Theme,
     mode: Effective,
+    leaving: Option<f32>,
     on_dismiss: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
-    let panel: gpui::AnyElement = match mode {
-        Effective::Off => panel.into_any_element(),
-        Effective::Low => panel
-            .with_animation("sheet-open", Animation::new(Duration::from_millis(120)), |el, t| {
+    let panel: gpui::AnyElement = match (mode, leaving) {
+        (Effective::Off, _) => panel.into_any_element(),
+        (Effective::Low, Some(o)) => panel.opacity(o).into_any_element(),
+        (Effective::Full, Some(o)) => panel.relative().top(px(SHEET_SINK * (1.0 - o))).opacity(o).into_any_element(),
+        (Effective::Low, None) => panel
+            .with_animation("sheet-open", Animation::new(Duration::from_millis(motion::ms::SHEET_IN_LOW)), |el, t| {
                 el.opacity(motion::ease_out(t))
             })
             .into_any_element(),
-        Effective::Full => panel
-            .with_animation("sheet-open", Animation::new(Duration::from_millis(140)), |el, t| {
+        (Effective::Full, None) => panel
+            .with_animation("sheet-open", Animation::new(Duration::from_millis(motion::ms::SHEET_IN)), |el, t| {
                 el.opacity(motion::ease_out(t))
             })
             .into_any_element(),
     };
-    div()
+    let scrim = div().absolute().top_0().left_0().right_0().bottom_0().bg(crate::style::scrim(theme));
+    let scrim = match (mode, leaving) {
+        (Effective::Off, _) => scrim.into_any_element(),
+        (_, Some(o)) => scrim.opacity(o).into_any_element(),
+        (_, None) => scrim
+            .with_animation("sheet-scrim", Animation::new(Duration::from_millis(motion::ms::SCRIM)), |el, t| {
+                el.opacity(motion::ease_out(t))
+            })
+            .into_any_element(),
+    };
+    let root = div()
         .id("sheet-scrim")
         .debug_selector(|| "sheet-scrim".into())
         .absolute()
@@ -351,12 +381,16 @@ pub fn sheet(
         .left_0()
         .right_0()
         .bottom_0()
-        .bg(crate::style::scrim(theme))
-        .occlude()
         .flex()
         .flex_col()
         .items_center()
         .pt(px(BAND_HEIGHT))
-        .on_mouse_down(gpui::MouseButton::Left, on_dismiss)
-        .child(panel)
+        .child(scrim)
+        .child(panel);
+    if leaving.is_some() {
+        // Its focus and state moved on already: nothing here takes input.
+        root
+    } else {
+        root.occlude().on_mouse_down(gpui::MouseButton::Left, on_dismiss)
+    }
 }
