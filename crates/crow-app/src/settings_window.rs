@@ -5596,6 +5596,16 @@ permissions = { fs = "none" }
     }
 
     #[gpui::test]
+    fn keyboard_rows_show_each_key_once(cx: &mut TestAppContext) {
+        let (_view, vcx) = open_settings(cx);
+        let rows = vcx.read(|cx| crate::keymap::rows(crow_core::KeymapLayer::Finder, cx));
+        for row in rows {
+            let mut seen = std::collections::HashSet::new();
+            assert!(row.keys.iter().all(|k| seen.insert(k.clone())), "{}: {:?}", row.label, row.keys);
+        }
+    }
+
+    #[gpui::test]
     fn keyboard_list_fills_the_page_height(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
         show_category(&view, &mut vcx, Category::Keyboard);

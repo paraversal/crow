@@ -141,7 +141,15 @@ pub struct ShortcutRow {
 }
 
 fn keys_of(bindings: &[KeyBinding], command: &crate::palette::Command) -> Vec<String> {
-    bindings.iter().filter(|b| b.action().partial_eq(command.action)).map(key_text).collect()
+    // One command is often bound in several focus contexts (list, columns,
+    // sidebar) with the same key; the page shows each key once.
+    let mut keys: Vec<String> = Vec::new();
+    for text in bindings.iter().filter(|b| b.action().partial_eq(command.action)).map(key_text) {
+        if !keys.contains(&text) {
+            keys.push(text);
+        }
+    }
+    keys
 }
 
 /// Every command with the keys it has in `layer`, in menu order.
