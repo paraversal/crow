@@ -1548,7 +1548,7 @@ fn vim_marks_show_as_letters_in_the_sidebar(cx: &mut TestAppContext) {
     let root = fixture("marks-letters");
     let (view, mut cx) = open(cx, &root);
     let toml = format!(
-        "pinned_tags = [\"Red\"]\n[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\", key = \"a\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n",
+        "[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\", key = \"a\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n",
         root.join("alpha").display(),
         root.join("beta").display()
     );
@@ -13523,7 +13523,7 @@ fn reset_tree(root: &Path, files: usize, edge: &EdgeTree, seed: u64) {
 
 fn fuzz_sidebar_toml(root: &Path) -> String {
     format!(
-        "[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n[locations]\nshow = false\n",
+        "pinned_tags = [\"Red\"]\n[[group]]\nname = \"Favorites\"\nitems = [\n  {{ path = \"{}\" }},\n  {{ path = \"{}\" }},\n]\n[recent]\nshow = false\n[locations]\nshow = false\n",
         root.join("alpha").display(),
         root.join("beta").display()
     )
