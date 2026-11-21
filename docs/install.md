@@ -28,7 +28,9 @@ brew install --cask paraversal/tap/crow
 ```
 
 The cask installs the same unsigned app, so the first open is blocked the same way; follow
-steps 3 to 5 above.
+steps 3 to 5 above. It also links the `crow` command into your PATH. Recent Homebrew versions
+refuse casks from taps you haven't trusted when you only look at them (`brew info`); naming the
+cask in `brew install` trusts it, or run `brew trust --cask paraversal/tap/crow` first.
 
 ## Updating
 
