@@ -2182,9 +2182,8 @@ impl Render for Sidebar {
             .px_2()
             .pb_2()
             .overflow_y_scroll()
-            // The window paints the column's tone, so the traffic lights' strip above shares it.
-            .border_r_1()
-            .border_color(color(theme.role("border")))
+            // The window paints the column's tone and its right border, so the traffic lights'
+            // strip above shares both.
             .flex()
             .flex_col()
             .gap(px(1.))

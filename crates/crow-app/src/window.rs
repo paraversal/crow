@@ -3312,6 +3312,9 @@ impl Render for CrowWindow {
                 )
                 .child(div().flex_1().min_h_0().w_full().child(self.sidebar.clone()))
                 .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme))
+                // One unbroken divider from the top of the window to the bottom, drawn over the
+                // column's edge so the sidebar keeps its width.
+                .child(div().absolute().top_0().bottom_0().right_0().w(px(1.)).bg(color(theme.role("border"))))
         });
         let search_preview = active_search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);
