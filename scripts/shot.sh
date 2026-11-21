@@ -14,6 +14,14 @@
 #   cmd:f            press the letter with Command (cmdshift:a, cmdfn:… likewise)
 #   key:escape       return, escape, tab, space, up, down, left, right, delete
 #   wait:1.5         sleep that many seconds (a search settling, a tip appearing)
+# CROW_SHOT_HOME=<dir> runs Crow with HOME set to <dir> (scripts/demo/make-demo.sh builds
+# one), so the path bar reads ~/... and the sidebar lists that home's folders.
+# Tags and Locations come from this Mac (Spotlight, mounted volumes), so a demo-home
+# shot hides them; its Projects folder is the Git projects root.
+# CROW_SHOT_CUSTOM=1 (with CROW_SHOT_HOME) dresses the window up: emoji and colours in
+# the sidebar, a second group, and the demo icon pack (scripts/demo/icon-pack).
+# CROW_SHOT_SIDEBAR sets the sidebar width in points (default 300: Projects rows fit).
+# CROW_SHOT_SETTINGS adds lines to settings.toml (e.g. 'show_preview = true').
 # Without [keys] the script waits for Return: set up the state by hand, then
 # press Return and it captures. Driving keys needs Accessibility permission for
 # the terminal. Needs Screen Recording permission; the script never changes
@@ -50,9 +58,12 @@ theme = "$theme"
 keymap = "$keymap"
 hints = "always"
 motion = "off"
+${CROW_SHOT_SETTINGS:-}
+$( [ -n "${CROW_SHOT_CUSTOM:-}" ] && [ -n "${CROW_SHOT_HOME:-}" ] && echo 'icon_pack = "linework"' )
 [window]
 width = 1280
 height = 800
+sidebar_width = ${CROW_SHOT_SIDEBAR:-300}
 EOF
 # Column view for every state: the boards are column-view windows.
 cat >"$work/config/views.toml" <<'EOF'
@@ -63,23 +74,66 @@ EOF
 # CROW_SHOT_ROOT points them at a copy of the repo (a neutral path, used when the
 # shots are committed: the window's path bar then shows no home folder).
 favs=$(cd "${CROW_SHOT_ROOT:-$root}" && pwd -P)
+if [ -n "${CROW_SHOT_HOME:-}" ]; then
+  shot_home=$(cd "$CROW_SHOT_HOME" && pwd -P)
+  fav_items=""
+  for d in Desktop Documents Downloads Pictures Projects; do
+    [ -d "$shot_home/$d" ] && fav_items="$fav_items  { path = \"$shot_home/$d\" },
+"
+  done
+  if [ -n "${CROW_SHOT_CUSTOM:-}" ]; then
+    # "What your Crow could look like": emoji and colours on favorites, a second
+    # group, and the demo icon pack.
+    fav_items="  { path = \"$shot_home/Desktop\", icon = \"🖥️\" },
+  { path = \"$shot_home/Documents\", icon = \"📚\", color = \"yellow\" },
+  { path = \"$shot_home/Downloads\", icon = \"📥\", color = \"green\" },
+  { path = \"$shot_home/Pictures\", icon = \"🌄\", color = \"purple\" },
+  { path = \"$shot_home/Projects\", icon = \"🛠️\", color = \"orange\" },
+]
+
+[[group]]
+name = \"Trips\"
+items = [
+  { path = \"$shot_home/Pictures/Trips\", name = \"Photos\", icon = \"📷\", color = \"pink\" },
+  { path = \"$shot_home/Documents/Travel\", name = \"Plans\", icon = \"🧭\", color = \"cyan\" },
+"
+    mkdir -p "$work/config/icon-packs"
+    cp -R "$root/scripts/demo/icon-pack" "$work/config/icon-packs/linework"
+  fi
+  shot_locations=false
+  shot_sections="[section.\"tags\"]
+show = false
+
+[projects]
+roots = [\"$shot_home/Projects\"]"
+else
+  shot_home=$HOME
+  fav_items="  { path = \"$favs\" },
+  { path = \"$favs/crates\" },
+  { path = \"$favs/docs\" },
+  { path = \"$favs/scripts\" },
+"
+fi
 cat >"$work/config/sidebar.toml" <<EOF
 [[group]]
 name = "Favorites"
 items = [
-  { path = "$favs" },
-  { path = "$favs/crates" },
-  { path = "$favs/docs" },
-  { path = "$favs/scripts" },
-]
+$fav_items]
 
 [recent]
 show = true
 count = 6
 
 [locations]
-show = true
+show = ${shot_locations:-true}
+${shot_sections:-}
 EOF
+
+# The bundled Git package runs only with a grant for its exact digest; a demo-home
+# shot copies just that record from your config, so badges and Projects show.
+if [ -n "${CROW_SHOT_HOME:-}" ] && [ -f "$HOME/.config/crow/plugins.toml" ]; then
+  awk '/^\[/{keep = ($0 == "[plugin.git]")} keep && !/^#/' "$HOME/.config/crow/plugins.toml" >"$work/config/plugins.toml"
+fi
 
 # No zoxide on PATH: Recent must not pick up folders this run never visited.
 # PATH alone is not enough (recent.rs also probes /opt/homebrew/bin and friends),
@@ -87,7 +141,7 @@ EOF
 mkdir -p "$work/bin"
 printf '#!/bin/sh\nexit 1\n' >"$work/bin/zoxide"
 chmod +x "$work/bin/zoxide"
-CROW_CONFIG_DIR="$work/config" CROW_STATE_DIR="$work/state" PATH="$work/bin:/usr/bin:/bin" \
+HOME="$shot_home" CROW_CONFIG_DIR="$work/config" CROW_STATE_DIR="$work/state" PATH="$work/bin:/usr/bin:/bin" \
   "$app" "$(cd "$start_dir" && pwd -P)" >"$work/log" 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT

@@ -1,9 +1,40 @@
 # Crow
 
-A Finder-style file explorer for macOS, written in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui).
-It keeps Finder's directness and aims to be faster, more predictable and keyboard-first.
+**Everything you like about Finder. Nothing you’ve learned to put up with.**
 
-Phase 1 is complete, including the Finder parity and search reliability passes. Phase 2's first milestone (M9) is complete: plugins, Git Projects and review, iCloud download status, icon packs, the icon grid and Gallery, saved queries and Finder tags, the copy queue, batch rename, the Explorer-style path bar, and drops from other apps with spring-loaded folders. See the [roadmap](docs/ROADMAP.md) for milestone status and upcoming work.
+<picture>
+  <source srcset="docs/media/hero-dark.webp" media="(prefers-color-scheme: dark)">
+  <img src="docs/media/hero-light.webp" alt="Crow in column view, previewing a photo">
+</picture>
+
+Crow is a file explorer for macOS that keeps what Finder gets right and fixes the parts that get in the way.
+It’s built in Rust on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), the GPU-accelerated UI framework behind the Zed editor.
+[Download](https://github.com/paraversal/file-crow/releases/latest) · [Install guide](docs/install.md) · [Website](https://paraversal.github.io/file-crow/)
+
+## Why Crow
+
+**Fast, and it stays fast.** Rendering runs on the GPU, so a folder with 100,000 files opens and scrolls as smoothly as one with ten.
+Search uses ripgrep’s own libraries for walking and matching and an fzf-style fuzzy matcher from the Helix editor, in-process, with nothing extra to install.
+
+**Keyboard first, mouse welcome.** ⌘K jumps to any folder, file or command. `/` filters the folder you’re in as you type.
+⌘Z undoes every file operation, trash and batch rename included. Turn on the Vim layer for `hjkl`, `gg`/`G`, `yy`/`p` and marks.
+The mouse still works the way you’d expect.
+
+**Search that skips the junk.** You’ll never wait on `node_modules` again. Folders are skipped only when a sibling file proves what they
+are (`node_modules` beside `package.json`, `target` beside `Cargo.toml`), the same idea asimeow uses to keep them out of Time Machine.
+Add your own globs, see every skipped folder and the rule that skipped it, or search everything with ⇧⌘A.
+
+**Finder++, not Finder-but-different.** Sidebar, tabs, icon, list, column and gallery views, Quick Look, trash by default:
+it all works where your hands expect it to. You won’t have to relearn anything; you’ll just get more.
+
+**Nothing you’ve learned to put up with.** New files from the context menu. Folder sizes in the list. Conflicts shown before a copy starts,
+in a queue you can pause. A path bar you can type into. Open Terminal here. Nothing is ever overwritten in place.
+
+**Plugins are first-class.** See each Git repository’s status right in the listing, with a diff beside the file. Give your pet projects their own
+sidebar section. Plugins use the same building blocks as Crow’s own features, not a bolted-on extension API ([docs/plugins.md](docs/plugins.md)).
+
+**Yours to theme.** Crow ships Finder, Catppuccin, Gruvbox and Solarized themes, reads Base24 themes from `~/.config/themes` and works out of the box
+with the mood-engine theme manager. Change your theme and Crow updates live. Icon packs and sidebar emoji do the rest.
 
 ## Build and run
 

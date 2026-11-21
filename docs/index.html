@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crow — a file explorer for macOS</title>
+<meta name="description" content="Everything you like about Finder. Nothing you've learned to put up with. A fast, keyboard-first file explorer for macOS, free and open source.">
+<meta property="og:title" content="Crow">
+<meta property="og:description" content="Everything you like about Finder. Nothing you've learned to put up with.">
+<meta property="og:image" content="media/hero-light.webp">
+<link rel="icon" href="media/favicon.png">
+<style>
+:root {
+  --bg: #f3f1ec;
+  --raised: #fbfaf7;
+  --ink: #17171a;
+  --muted: #6c6963;
+  --line: #e0dcd3;
+  --amber: #e8a23c;
+  --amber-ink: #7a4f0e;
+  --shadow: rgba(40, 32, 20, .16);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131315;
+    --raised: #1c1c1f;
+    --ink: #eeeae2;
+    --muted: #9b978f;
+    --line: #2b2b2f;
+    --amber: #eaa847;
+    --amber-ink: #f0be6e;
+    --shadow: rgba(0, 0, 0, .5);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 17px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-weight: 400;
+}
+a { color: inherit; }
+img { display: block; max-width: 100%; height: auto; }
+.wrap { width: min(1180px, 100% - 32px); margin-inline: auto; }
+kbd {
+  font: inherit;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 1.9em; padding: .05em .45em;
+  border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px;
+  background: var(--raised);
+  font-size: .9em;
+}
+code { font: inherit; }
+.shot { filter: drop-shadow(0 18px 36px var(--shadow)); }
+:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; border-radius: 6px; }
+
+/* Header */
+header { padding: 18px 0; }
+header .wrap { display: flex; align-items: center; gap: 24px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 600; font-size: 19px; }
+.brand img { width: 34px; height: 34px; }
+nav { margin-left: auto; display: flex; align-items: center; gap: 22px; }
+nav a { text-decoration: none; color: var(--muted); }
+nav a:hover { color: var(--ink); }
+.button {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 11px 20px; border-radius: 10px;
+  background: var(--ink); color: var(--bg);
+  text-decoration: none; font-weight: 600;
+}
+.button:hover { background: color-mix(in srgb, var(--ink) 85%, var(--amber)); }
+nav .button { padding: 7px 14px; color: var(--bg); }
+nav .button:hover { color: var(--bg); }
+
+/* Hero */
+.hero { padding: 56px 0 0; text-align: center; }
+h1 {
+  margin: 0 auto; max-width: 15em;
+  font-size: clamp(36px, 6.4vw, 72px); line-height: 1.04; letter-spacing: -.025em; font-weight: 600;
+  text-wrap: balance;
+}
+h1 span { display: inline-block; }
+h1 span { color: var(--muted); }
+.lede { margin: 22px auto 0; color: var(--muted); font-size: 19px; }
+.get { margin-top: 34px; display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 14px; }
+.brew {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 4px 4px 16px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--raised);
+  font-size: 15px; max-width: 100%;
+}
+.brew code { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brew button {
+  font: inherit; font-size: 14px; cursor: pointer;
+  border: 0; border-radius: 7px; padding: 7px 12px;
+  background: transparent; color: var(--muted);
+}
+.brew button:hover { background: var(--bg); color: var(--ink); }
+.meta { margin-top: 16px; color: var(--muted); font-size: 14px; }
+.meta a { color: var(--muted); }
+.hero-shot { position: relative; margin: 56px auto 0; max-width: 1180px; }
+.hero-shot .peek {
+  position: absolute; width: clamp(64px, 9vw, 112px); right: -1.5%; top: clamp(-56px, -4.5vw, -32px);
+  transform: rotate(8deg);
+  filter: drop-shadow(0 8px 14px var(--shadow));
+}
+
+/* Sections */
+section.block { padding: 120px 0 0; }
+h2 { margin: 0; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; letter-spacing: -.02em; font-weight: 600; }
+.head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 18px 32px; margin-bottom: 36px; }
+
+/* Views */
+.tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+.tab {
+  font: inherit; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 8px 14px 8px 8px; border-radius: 10px;
+  border: 1px solid transparent; background: transparent; color: var(--muted);
+}
+.tab:hover { color: var(--ink); }
+.tab[aria-selected="true"] { color: var(--ink); border-color: var(--line); background: var(--raised); }
+.tab[aria-selected="true"] kbd { background: var(--amber); border-color: var(--amber); color: #1b1408; }
+.stage { display: grid; }
+.stage > img { grid-area: 1 / 1; transition: opacity .18s ease; }
+.stage > img[hidden] { display: block; opacity: 0; visibility: hidden; }
+@media (prefers-reduced-motion: reduce) { .stage > img { transition: none; } }
+
+/* Keys */
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; }
+.pair figure { margin: 0; }
+.pair .key { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; font-size: 22px; font-weight: 600; }
+.pair .key kbd { font-size: 20px; }
+.keys {
+  margin: 56px 0 0; padding: 0; list-style: none;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px 32px;
+}
+.keys li { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.keys li span:last-child { color: var(--muted); }
+.keys .k { display: inline-flex; gap: 4px; min-width: 92px; }
+
+/* Speed */
+.numbers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px; margin: 0; }
+.numbers div { margin: 0; }
+.numbers dt { font-size: clamp(48px, 8vw, 96px); font-weight: 600; letter-spacing: -.04em; line-height: 1; }
+.numbers dt small { font-size: .38em; letter-spacing: 0; color: var(--muted); font-weight: 400; margin-left: .12em; }
+.numbers dd { margin: 12px 0 0; color: var(--muted); }
+
+/* Git */
+.split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 56px; align-items: center; }
+.split ul { margin: 28px 0 0; padding: 0; list-style: none; }
+.split li { padding: 12px 0; border-bottom: 1px solid var(--line); display: flex; gap: 14px; align-items: baseline; }
+.split li b { font-weight: 600; min-width: 5.5em; }
+.split li span { color: var(--muted); }
+
+/* Themes */
+.swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.swatch {
+  font: inherit; font-size: 15px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 8px 14px 8px 10px; border-radius: 10px;
+  border: 1px solid transparent; background: transparent; color: var(--muted);
+}
+.swatch:hover { color: var(--ink); }
+.swatch[aria-selected="true"] { color: var(--ink); border-color: var(--line); background: var(--raised); }
+.dots { display: inline-flex; }
+.dots i { width: 14px; height: 14px; border-radius: 50%; margin-left: -4px; box-shadow: 0 0 0 2px var(--bg); }
+.dots i:first-child { margin-left: 0; }
+.swatch[aria-selected="true"] .dots i { box-shadow: 0 0 0 2px var(--raised); }
+.path { color: var(--muted); font-size: 15px; }
+.path code { color: var(--ink); }
+
+/* Install */
+.install { display: grid; grid-template-columns: repeat(3, 1fr); gap: 48px; }
+.install h3 { margin: 0 0 10px; font-size: 19px; font-weight: 600; }
+.install p { margin: 0 0 12px; color: var(--muted); }
+.install pre {
+  margin: 0; padding: 12px 14px; border-radius: 10px; overflow-x: auto;
+  background: var(--raised); border: 1px solid var(--line);
+  font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+footer { margin-top: 140px; padding: 28px 0 44px; border-top: 1px solid var(--line); color: var(--muted); font-size: 15px; }
+footer .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px; }
+footer img { width: 22px; height: 22px; }
+footer nav { gap: 22px; }
+
+@media (max-width: 820px) {
+  nav a:not(.button) { display: none; }
+  .hero { padding-top: 32px; }
+  .pair, .split, .install { grid-template-columns: 1fr; }
+  .numbers { grid-template-columns: 1fr; gap: 28px; }
+  section.block { padding-top: 88px; }
+  .pair .key { font-size: 19px; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <a class="brand" href="./"><img src="media/icon-256.png" alt="" width="34" height="34">Crow</a>
+    <nav aria-label="Main">
+      <a href="manual/">Manual</a>
+      <a href="https://github.com/paraversal/file-crow">GitHub</a>
+      <a class="button" href="https://github.com/paraversal/file-crow/releases/latest">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <h1>Everything you like about Finder. <span>Nothing you’ve learned to put up with.</span></h1>
+      <p class="lede">A file explorer for macOS, built in Rust on the GPU.</p>
+      <div class="get">
+        <a class="button" href="https://github.com/paraversal/file-crow/releases/latest">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
+          Download for Mac
+        </a>
+        <div class="brew">
+          <code id="brew">brew install --cask paraversal/tap/crow</code>
+          <button type="button" data-copy="brew" aria-label="Copy the Homebrew command">Copy</button>
+        </div>
+      </div>
+      <p class="meta">v0.1.0 · macOS 14+ · Apple Silicon &amp; Intel · free and open source · <a href="https://github.com/paraversal/file-crow/blob/main/docs/install.md">first open</a></p>
+      <div class="hero-shot">
+        <picture>
+          <source srcset="media/hero-dark.webp" media="(prefers-color-scheme: dark)">
+          <img class="shot" src="media/hero-light.webp" width="2560" height="1600" alt="Crow in column view: the Pictures folder, a Wallpapers subfolder and a photo of a snowy forest in the preview pane.">
+        </picture>
+        <img class="peek" src="media/icon-256.png" alt="" width="112" height="112">
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="views" aria-labelledby="views-h">
+    <div class="wrap">
+      <div class="head">
+        <h2 id="views-h">One folder, four ways.</h2>
+        <div class="tabs" role="tablist" aria-label="Views">
+          <button class="tab" role="tab" aria-selected="false" aria-controls="v-icons" data-view="icons"><kbd>⌘1</kbd>Icons</button>
+          <button class="tab" role="tab" aria-selected="false" aria-controls="v-list" data-view="list"><kbd>⌘2</kbd>List</button>
+          <button class="tab" role="tab" aria-selected="true" aria-controls="v-columns" data-view="columns"><kbd>⌘3</kbd>Columns</button>
+          <button class="tab" role="tab" aria-selected="false" aria-controls="v-gallery" data-view="gallery"><kbd>⌘4</kbd>Gallery</button>
+        </div>
+      </div>
+      <div class="stage">
+        <img class="shot" id="v-icons" role="tabpanel" hidden loading="lazy" src="media/view-icons.webp" width="2560" height="1600" alt="Icon view of a Trips folder with photo thumbnails.">
+        <img class="shot" id="v-list" role="tabpanel" hidden loading="lazy" src="media/view-list.webp" width="2560" height="1600" alt="List view of the same folder with name, date, size and kind columns.">
+        <img class="shot" id="v-columns" role="tabpanel" loading="lazy" src="media/view-columns.webp" width="2560" height="1600" alt="Column view of the same folder with a preview of the selected photo.">
+        <img class="shot" id="v-gallery" role="tabpanel" hidden loading="lazy" src="media/view-gallery.webp" width="2560" height="1600" alt="Gallery view: a filename rail beside a large photo.">
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="keys" aria-labelledby="keys-h">
+    <div class="wrap">
+      <div class="head"><h2 id="keys-h">Keyboard first. Mouse welcome.</h2></div>
+      <div class="pair">
+        <figure>
+          <div class="key"><kbd>⌘K</kbd>Go anywhere</div>
+          <img class="shot" loading="lazy" src="media/palette.webp" width="2560" height="1600" alt="The command palette listing folders that match “pro”.">
+        </figure>
+        <figure>
+          <div class="key"><kbd>⌘F</kbd>Find anything</div>
+          <img class="shot" loading="lazy" src="media/search.webp" width="2560" height="1600" alt="Search for “raven” listing file names and matching lines inside files, with skipped folders counted.">
+        </figure>
+      </div>
+      <ul class="keys">
+        <li><span class="k"><kbd>/</kbd></span><span>Filter this folder</span></li>
+        <li><span class="k"><kbd>⌘Z</kbd></span><span>Undo, even a trash</span></li>
+        <li><span class="k"><kbd>⌥⌘N</kbd></span><span>New file</span></li>
+        <li><span class="k"><kbd>Space</kbd></span><span>Quick Look</span></li>
+        <li><span class="k"><kbd>⌘J</kbd></span><span>Why this view?</span></li>
+        <li><span class="k"><kbd>h</kbd><kbd>j</kbd><kbd>k</kbd><kbd>l</kbd></span><span>Vim layer, if you like</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="block" id="speed" aria-labelledby="speed-h">
+    <div class="wrap">
+      <div class="head"><h2 id="speed-h">Fast, and it stays fast.</h2></div>
+      <dl class="numbers">
+        <div><dt>100k</dt><dd>files in one folder, no stutter</dd></div>
+        <div><dt>10<small>ms</small></dt><dd>to the first rows on screen</dd></div>
+        <div><dt>120<small>fps</small></dt><dd>scrolling on a ProMotion display</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="block" id="git" aria-labelledby="git-h">
+    <div class="wrap split">
+      <div>
+        <h2 id="git-h">Your repos, right in the listing.</h2>
+        <ul>
+          <li><b>M&ensp;?</b><span>changed and new files, badged</span></li>
+          <li><b>main&ensp;2</b><span>branch and changes per project</span></li>
+          <li><b>Git Diff</b><span>staged and unstaged, beside the file</span></li>
+          <li><b>Plugins</b><span>Git is one; write your own in Rhai</span></li>
+        </ul>
+      </div>
+      <img class="shot" loading="lazy" src="media/git-list.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, and the sidebar lists Git projects with their branch.">
+    </div>
+  </section>
+
+  <section class="block" id="themes" aria-labelledby="themes-h">
+    <div class="wrap">
+      <div class="head">
+        <h2 id="themes-h">Make it yours.</h2>
+        <div class="swatches" role="tablist" aria-label="Themes">
+          <button class="swatch" role="tab" aria-selected="true" aria-controls="t-mocha" data-theme-shot="mocha"><span class="dots"><i style="background:#1e1e2e"></i><i style="background:#cba6f7"></i><i style="background:#f5c2e7"></i><i style="background:#a6e3a1"></i></span>Catppuccin Mocha</button>
+          <button class="swatch" role="tab" aria-selected="false" aria-controls="t-gruvbox" data-theme-shot="gruvbox"><span class="dots"><i style="background:#fbf1c7"></i><i style="background:#d65d0e"></i><i style="background:#98971a"></i><i style="background:#458588"></i></span>Gruvbox Light</button>
+          <button class="swatch" role="tab" aria-selected="false" aria-controls="t-latte" data-theme-shot="latte"><span class="dots"><i style="background:#eff1f5"></i><i style="background:#8839ef"></i><i style="background:#ea76cb"></i><i style="background:#40a02b"></i></span>Catppuccin Latte</button>
+          <button class="swatch" role="tab" aria-selected="false" aria-controls="t-finder" data-theme-shot="finder"><span class="dots"><i style="background:#1e1e1e"></i><i style="background:#0a84ff"></i><i style="background:#ff9f0a"></i><i style="background:#30d158"></i></span>Finder Dark</button>
+        </div>
+      </div>
+      <div class="stage">
+        <img class="shot" id="t-mocha" role="tabpanel" loading="lazy" src="media/theme-catppuccin-mocha.webp" width="2560" height="1600" alt="Catppuccin Mocha theme with emoji favorites, a custom Trips group and a line icon pack.">
+        <img class="shot" id="t-gruvbox" role="tabpanel" hidden loading="lazy" src="media/theme-gruvbox-light.webp" width="2560" height="1600" alt="Gruvbox Light theme in list view with tinted line icons.">
+        <img class="shot" id="t-latte" role="tabpanel" hidden loading="lazy" src="media/theme-catppuccin-latte.webp" width="2560" height="1600" alt="Catppuccin Latte theme in icon view.">
+        <img class="shot" id="t-finder" role="tabpanel" hidden loading="lazy" src="media/hero-dark.webp" width="2560" height="1600" alt="Finder Dark theme in column view.">
+      </div>
+      <p class="path">Any Base24 theme in <code>~/.config/themes</code> shows up live, icon packs and sidebar emoji included.</p>
+    </div>
+  </section>
+
+  <section class="block" id="install" aria-labelledby="install-h">
+    <div class="wrap">
+      <div class="head"><h2 id="install-h">Get Crow.</h2></div>
+      <div class="install">
+        <div>
+          <h3>Download</h3>
+          <p>The DMG from GitHub Releases. Crow isn’t notarized yet, so macOS asks once:
+            <a href="https://github.com/paraversal/file-crow/blob/main/docs/install.md">how to open it</a>.</p>
+        </div>
+        <div>
+          <h3>Homebrew</h3>
+          <p>Also puts the <code>crow</code> command on your PATH.</p>
+          <pre>brew install --cask paraversal/tap/crow</pre>
+        </div>
+        <div>
+          <h3>From source</h3>
+          <p>Rust stable and Xcode’s command line tools.</p>
+          <pre>./scripts/fetch-gpui.sh
+./scripts/bundle.sh --install</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <img src="media/icon-256.png" alt="" width="22" height="22">
+    <span>Crow is free software under the GPL-3.0-or-later.</span>
+    <nav aria-label="Footer">
+      <a href="manual/">Manual</a>
+      <a href="https://github.com/paraversal/file-crow/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/paraversal/file-crow">Source</a>
+      <a href="https://github.com/paraversal/file-crow/issues">Report a bug</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+// Tabs: click, arrow keys within a tablist, and 1–4 anywhere for the views.
+function tabs(list, attr, prefix) {
+  const buttons = [...list.querySelectorAll('[role="tab"]')];
+  const select = (b, focus) => {
+    buttons.forEach(x => {
+      const on = x === b;
+      x.setAttribute('aria-selected', on);
+      x.tabIndex = on ? 0 : -1;
+      document.getElementById(x.getAttribute('aria-controls')).hidden = !on;
+    });
+    if (focus) b.focus();
+  };
+  buttons.forEach((b, i) => {
+    b.tabIndex = b.getAttribute('aria-selected') === 'true' ? 0 : -1;
+    b.addEventListener('click', () => select(b));
+    b.addEventListener('keydown', e => {
+      const d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (d) { e.preventDefault(); select(buttons[(i + d + buttons.length) % buttons.length], true); }
+    });
+  });
+  return select;
+}
+const viewTabs = document.querySelector('#views [role="tablist"]');
+const selectView = tabs(viewTabs);
+tabs(document.querySelector('#themes [role="tablist"]'));
+document.addEventListener('keydown', e => {
+  if (e.altKey || e.ctrlKey || e.target.closest('input, textarea')) return;
+  const n = '1234'.indexOf(e.key);
+  if (n < 0) return;
+  // ⌘1–4 is the browser's tab switching; plain 1–4 works while the views are on screen.
+  if (e.metaKey) return;
+  const r = document.getElementById('views').getBoundingClientRect();
+  if (r.bottom < 0 || r.top > innerHeight) return;
+  selectView(viewTabs.querySelectorAll('[role="tab"]')[n]);
+});
+document.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(document.getElementById(b.dataset.copy).textContent);
+    b.textContent = 'Copied';
+    setTimeout(() => (b.textContent = 'Copy'), 1400);
+  } catch { /* clipboard blocked: the text stays selectable */ }
+}));
+</script>
+</body>
+</html>

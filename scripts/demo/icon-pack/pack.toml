@@ -1,0 +1,35 @@
+# Demo icon pack for screenshots ("what your Crow could look like").
+# Line glyphs drawn for Crow, tinted with the theme's palette hues.
+api = 1
+id = "linework"
+name = "Linework"
+
+[folder_name]
+"Desktop" = { icon = "desktop.svg", color = "base0D" }
+"Documents" = { icon = "document.svg", color = "base0A" }
+"Downloads" = { icon = "download.svg", color = "base0B" }
+"Pictures" = { icon = "pictures.svg", color = "base0E" }
+"Projects" = { icon = "projects.svg", color = "base09" }
+"Music" = { icon = "music.svg", color = "base08" }
+"Movies" = { icon = "film.svg", color = "base0C" }
+
+[extension]
+"md" = { icon = "text.svg", color = "base0D" }
+"txt" = { icon = "text.svg" }
+"rtf" = { icon = "text.svg" }
+"pdf" = { icon = "pdf.svg", color = "base08" }
+"jpg" = { icon = "image.svg", color = "base0E" }
+"png" = { icon = "image.svg", color = "base0E" }
+"csv" = { icon = "table.svg", color = "base0B" }
+"zip" = { icon = "archive.svg", color = "base09" }
+"rs" = { icon = "code.svg", color = "base09" }
+"ts" = { icon = "code.svg", color = "base0D" }
+"py" = { icon = "code.svg", color = "base0A" }
+"html" = { icon = "code.svg", color = "base08" }
+"css" = { icon = "code.svg", color = "base0C" }
+"json" = { icon = "code.svg", color = "base0A" }
+"toml" = { icon = "code.svg", color = "base0C" }
+
+[generic]
+folder = { icon = "folder.svg", color = "base0D" }
+file = { icon = "file.svg" }
