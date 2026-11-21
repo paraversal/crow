@@ -6066,7 +6066,11 @@ fn shipped_fixture_command_runs_through_the_real_service(cx: &mut TestAppContext
     let run = |cx: &mut VisualTestContext, saved_context: &crate::plugins::FileCommandContext| {
         effect_calls(cx);
         // Wait for this run's write, not the previous run's text.
-        cx.update(|_, cx| crate::effects::recording(cx).expect("tests install recording effects").clear_text());
+        cx.update(|_, cx| {
+            let recorder = crate::effects::recording(cx).expect("tests install recording effects");
+            recorder.clear_text();
+            recorder.take_written();
+        });
         cx.simulate_keystrokes("cmd-k");
         cx.run_until_parked();
         assert!(view.read_with(cx, |view, _| view.palette.is_some()), "⌘K opens the palette");
@@ -6117,10 +6121,11 @@ fn shipped_fixture_command_runs_through_the_real_service(cx: &mut TestAppContext
         }
         let calls = effect_calls(cx);
         let status = cx.read(|cx| cx.global::<crate::operations::Operations>().message.clone());
+        let written = cx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").take_written());
         assert_eq!(
             calls.iter().filter(|call| matches!(call, Call::WriteText)).count(),
             1,
-            "one command activation writes once: {calls:?}; status={status:?}"
+            "one command activation writes once: {calls:?}; written={written:?}; status={status:?}"
         );
         assert_eq!(
             cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text())).as_deref(),

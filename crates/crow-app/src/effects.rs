@@ -337,6 +337,8 @@ struct Script {
     finder_trash_error: Option<String>,
     /// The recorder's stand-in for the pasteboard's text.
     text: Option<String>,
+    /// Every text written since the last `take_written`, in order.
+    written: Vec<String>,
     /// Scripted Spotlight answers, one batch queue per call. Empty means no hits.
     spotlight_hits: std::collections::VecDeque<Vec<SpotlightHit>>,
 }
@@ -450,9 +452,16 @@ impl RecordingEffects {
         self.script.lock().expect("the effect script is not poisoned").text = None;
     }
 
+    /// Every text written since the last call, so a test can say what a stray write held.
+    pub fn take_written(&self) -> Vec<String> {
+        std::mem::take(&mut self.script.lock().expect("the effect script is not poisoned").written)
+    }
+
     fn write_text(&self, text: String) {
         self.record(Call::WriteText);
-        self.script.lock().expect("the effect script is not poisoned").text = Some(text);
+        let mut script = self.script.lock().expect("the effect script is not poisoned");
+        script.written.push(text.clone());
+        script.text = Some(text);
     }
 
     fn read_text(&self) -> Option<String> {
