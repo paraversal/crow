@@ -1216,7 +1216,6 @@ impl CrowWindow {
                 })),
             );
 
-        let go_to_keys = Keycap::for_action(&ShowCommandPalette, KeyScope::Window, KeycapWeight::Outline, cx);
         let go_to = div()
             .id("toolbar-go-to")
             .debug_selector(|| "toolbar-go-to".into())
@@ -1226,15 +1225,18 @@ impl CrowWindow {
             .flex_none()
             .h(px(30.))
             .rounded(px(8.))
+            .bg(surface)
             .flex()
             .items_center()
             .text_size(px(13.))
             .text_color(muted)
             .group("go-to")
-            .hover(move |style| style.bg(surface))
+            .border_1()
+            .border_color(transparent_black())
+            .hover(|style| style.border_color(color(theme.role("border"))))
             .on_click(|_, window, cx| window.dispatch_action(Box::new(ShowCommandPalette), cx))
             .when(narrow, |button| button.w(px(30.)).justify_center())
-            .when(!narrow, |button| button.pl(px(10.)).pr(px(8.)).gap(px(6.)))
+            .when(!narrow, |button| button.px(px(10.)).gap(px(6.)))
             .child(
                 icons::glyph(Glyph::GoTo, 15., "fg-muted", &theme)
                     .id("go-to-icon")
@@ -1244,8 +1246,7 @@ impl CrowWindow {
                 button.child(
                     div().id("go-to-label").group_hover("go-to", move |style| style.text_color(fg)).child("Go to"),
                 )
-            })
-            .when(!narrow, |button| button.children(go_to_keys));
+            });
         let go_to = with_action_tooltip(go_to, "Go to folder or command", &ShowCommandPalette, KeyScope::Window, cx);
 
         let search_keys = Keycap::for_action(&ShowSearch, KeyScope::Window, KeycapWeight::Outline, cx);

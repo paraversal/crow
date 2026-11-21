@@ -107,7 +107,7 @@ Logs go to `~/Library/Logs/Crow/crow.log`.
 ## Toolbar
 
 The top band holds Back and Forward (drawn chevrons, faded at the ends of history), the folder
-title, the icons/list/columns/gallery switch, "Go to ⌘K" and the search field "Search <folder> ⌘F". Every
+title, the icons/list/columns/gallery switch, "Go to" and the search field "Search <folder> ⌘F". Every
 control has a tooltip that names it and its key; a disabled control is the same icon at 40 %
 opacity. While searching, the field grows across the band with All / Names / Contents and Done esc.
 Toolbar icons are [Lucide](https://lucide.dev) 1.72.0, ISC-licensed; the notice is at
