@@ -170,6 +170,9 @@ macro_rules! retire {
     };
 }
 
+/// How far the title's name slides right when the folder icon shows.
+const TITLE_ICON_ROOM: f32 = 22.;
+
 /// A tab growing in or shrinking away.
 struct TabMotion {
     id: crow_core::TabId,
@@ -251,6 +254,8 @@ pub struct CrowWindow {
     /// Cmd-F opening or closing the search band, and whether search was open last draw.
     search_motion: Option<(bool, std::time::Instant)>,
     last_search_open: bool,
+    /// The title's folder icon sliding in on hover: from, target (0 hidden, 1 shown), since.
+    title_hover: Option<(f32, f32, std::time::Instant)>,
     /// A ⇧⌘P / ⌘I show or hide of the right column that is still moving.
     pane_slide: Option<PaneSlide>,
     /// Set while a leaving overlay renders: its opacity (1 → 0).
@@ -441,6 +446,7 @@ impl CrowWindow {
             exits: Exits::default(),
             search_motion: None,
             last_search_open: false,
+            title_hover: None,
             last_tabs: Vec::new(),
             tab_motions: Vec::new(),
             pane_slide: None,
@@ -1004,6 +1010,29 @@ impl CrowWindow {
 
     // ----- rendering -----
 
+    /// How far the title's folder icon has slid in, and whether it is still moving.
+    fn title_slide(&self, mode: crow_core::motion::Effective, now: std::time::Instant) -> (f32, bool) {
+        let Some((from, target, since)) = self.title_hover else { return (0.0, false) };
+        match crow_core::motion::progress(
+            mode,
+            since,
+            now,
+            crow_core::motion::ms::SECTION,
+            crow_core::motion::ms::LOW_IN,
+        ) {
+            Some(t) => (from + (target - from) * t, true),
+            None => (target, false),
+        }
+    }
+
+    fn set_title_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        let mode = cx.global::<Ui>().feedback.mode;
+        let now = std::time::Instant::now();
+        let (from, _) = self.title_slide(mode, now);
+        self.title_hover = Some((from, f32::from(hovered), now));
+        cx.notify();
+    }
+
     fn render_title_bar(&self, title: &str, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.global::<Ui>().theme.clone();
         let viewport = window.viewport_size().width;
@@ -1092,6 +1121,74 @@ impl CrowWindow {
                     ),
             );
 
+        // Finder's proxy icon: hovering the name slides it right and reveals the folder's
+        // icon at its left, which drags the folder out. The name rests where it always
+        // was; only the text moves, so nothing else in the toolbar shifts.
+        let title_content = {
+            let mode = cx.global::<Ui>().feedback.mode;
+            let (slide, _) = self.title_slide(mode, std::time::Instant::now());
+            let folder = {
+                let pane = self.pane().read(cx);
+                pane.folder().is_some().then(|| pane.current_dir(cx))
+            };
+            let mut content = div()
+                .id("title-content")
+                .debug_selector(|| "title-content".into())
+                .relative()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .when(folder.is_some(), |content| {
+                    content.on_hover(cx.listener(|this, hovered: &bool, _, cx| this.set_title_hover(*hovered, cx)))
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .pl(px(TITLE_ICON_ROOM * slide))
+                        .child(title.to_owned()),
+                );
+            if let Some(folder) = folder.filter(|_| slide > 0.0 || self.title_hover.is_some_and(|h| h.1 > 0.0)) {
+                let source = crate::icon_packs::effective_icon_source(cx.global::<Ui>(), &folder);
+                let resolver = crate::icon_packs::Resolver::for_source(cx, &source);
+                let is_package = crow_fs::is_package_path(&folder);
+                let proxy = preview::path_icon(&resolver, &folder, true, is_package, None, &theme, 16.);
+                let drag_icon = crate::style::icon(&folder, true, 22);
+                let drag_label: SharedString = title.to_owned().into();
+                let drag_entries = Arc::new(vec![(folder, true)]);
+                let handoff = crate::pane::DragHandoff::new();
+                content = content.child(
+                    div()
+                        .id("title-proxy-icon")
+                        .debug_selector(|| "title-proxy-icon".into())
+                        .role(Role::Button)
+                        .aria_label(format!("Drag {title} folder"))
+                        .absolute()
+                        .left(px(-4. * (1.0 - slide)))
+                        .top_0()
+                        .bottom_0()
+                        .flex()
+                        .items_center()
+                        .opacity(slide)
+                        .cursor(CursorStyle::OpenHand)
+                        // A press on the icon drags the folder, not the window.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(proxy)
+                        .on_drag(DraggedSelection { entries: drag_entries }, {
+                            let handoff = handoff.clone();
+                            move |_value, offset, window, cx| {
+                                crate::pane::drag_combo(drag_icon.clone(), &drag_label, offset, &handoff, window, cx)
+                            }
+                        })
+                        .external_drag_payload::<DraggedSelection>(move |selection, window, cx| {
+                            crate::pane::promote_drag(selection, &handoff, window, cx)
+                        }),
+                );
+            }
+            content
+        };
         let title_label = div()
             .id("title")
             .debug_selector(|| "band-drag".into())
@@ -1100,9 +1197,8 @@ impl CrowWindow {
             .aria_label(title.to_owned())
             .flex_1()
             .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
+            .flex()
+            .items_center()
             .font_weight(FontWeight::SEMIBOLD)
             .text_size(px(15.))
             .text_color(fg)
@@ -1120,7 +1216,7 @@ impl CrowWindow {
                     }
                 }),
             )
-            .child(title.to_owned());
+            .child(title_content);
         // Full: the selected segment's fill glides to the new mode (a spring) while the
         // buttons themselves stay unfilled; the slots are 32 px wide with a 2 px gap.
         let glide_views = cx.global::<Ui>().feedback.mode == crow_core::motion::Effective::Full;
@@ -1249,7 +1345,6 @@ impl CrowWindow {
             });
         let go_to = with_action_tooltip(go_to, "Go to folder or command", &ShowCommandPalette, KeyScope::Window, cx);
 
-        let search_keys = Keycap::for_action(&ShowSearch, KeyScope::Window, KeycapWeight::Outline, cx);
         let search_field = div()
             .id("toolbar-search")
             .debug_selector(|| "toolbar-search".into())
@@ -1269,25 +1364,17 @@ impl CrowWindow {
             .when(search_icon_only, |field| field.w(px(30.)).flex_none().justify_center())
             .child(icons::glyph(Glyph::Search, 14., "fg-muted", &theme))
             .when(!search_icon_only, |field| {
-                field
-                    .w(px(240.))
-                    .min_w(px(160.))
-                    .flex_shrink(1.)
-                    .pl(px(10.))
-                    .pr(px(6.))
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(13.))
-                            .text_color(muted)
-                            .child(format!("Search {title}")),
-                    )
-                    .children(search_keys)
+                field.w(px(240.)).min_w(px(160.)).flex_shrink(1.).pl(px(10.)).pr(px(6.)).gap(px(8.)).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(13.))
+                        .text_color(muted)
+                        .child(format!("Search {title}")),
+                )
             });
         let search_field =
             with_action_tooltip(search_field, "Search names and contents", &ShowSearch, KeyScope::Window, cx);
@@ -1337,12 +1424,24 @@ impl CrowWindow {
             .when(self.active_search(cx).is_none(), |bar| {
                 let search_field = match closing {
                     Some(look) if look.widen > 0.0 && !search_icon_only => {
-                        let wide = f32::from(window.viewport_size().width);
-                        search_field.w(px(240. + (wide - 240.) * look.widen))
+                        // Narrowing back: the field keeps its 240 px basis and gives up a
+                        // share of the free space (see Search::render_band).
+                        let mut field = search_field.flex_basis(px(240.));
+                        field.style().flex_grow = Some(look.widen);
+                        field
                     }
                     _ => search_field,
                 };
                 let fade = closing.map_or(1.0, |look| look.fade);
+                // The title gives back exactly the share the field takes (shares sum to 1).
+                let title_label = match closing {
+                    Some(look) if look.widen > 0.0 && !search_icon_only => {
+                        let mut title_label = title_label;
+                        title_label.style().flex_grow = Some(1.0 - look.widen);
+                        title_label
+                    }
+                    _ => title_label,
+                };
                 bar.child(title_label.when(fade < 1.0, |el| el.opacity(fade)))
                     .child(views.when(fade < 1.0, |el| el.opacity(fade)))
                     .child(go_to.when(fade < 1.0, |el| el.opacity(fade)))
@@ -3629,7 +3728,7 @@ impl Render for CrowWindow {
             self.search_motion =
                 (band_mode != crow_core::motion::Effective::Off).then(|| (search_open, std::time::Instant::now()));
         }
-        if self.search_motion.is_some() {
+        if self.search_motion.is_some() || self.title_slide(band_mode, std::time::Instant::now()).1 {
             window.request_animation_frame();
         }
         let tab_now = std::time::Instant::now();

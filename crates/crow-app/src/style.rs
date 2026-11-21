@@ -125,6 +125,24 @@ pub fn content_opacity(hidden: bool, renaming: bool) -> f32 {
     if hidden && !renaming { HIDDEN_DIM } else { 1.0 }
 }
 
+/// Dimmed like a hidden item, but lighter: a plugin's `dim` decoration (Git's ignored
+/// paths). Those names also turn italic, so ignored and hidden never look alike.
+pub const IGNORED_DIM: f32 = 0.65;
+
+/// A row's icon and text opacity: hidden items dim to `HIDDEN_DIM`, ignored ones to
+/// `IGNORED_DIM` (the stronger dim wins), and a row being renamed reads at full contrast.
+pub fn row_opacity(hidden: bool, ignored: bool, renaming: bool) -> f32 {
+    if renaming {
+        1.0
+    } else if hidden {
+        HIDDEN_DIM
+    } else if ignored {
+        IGNORED_DIM
+    } else {
+        1.0
+    }
+}
+
 /// The fill a feedback effect puts over a row: accent for a receive, error for a
 /// refuse. `None` when the effect has no tint at this moment.
 pub fn effect_tint(look: crow_core::motion::Look, theme: &Theme) -> Option<Rgba> {
@@ -507,6 +525,9 @@ mod tests {
 
     #[test]
     fn hidden_items_are_dimmed_except_while_renamed() {
+        assert_eq!(row_opacity(false, true, false), IGNORED_DIM, "ignored is lighter than hidden");
+        assert_eq!(row_opacity(true, true, false), HIDDEN_DIM, "the stronger dim wins");
+        assert_eq!(row_opacity(false, true, true), 1.0, "a renamed row is at full contrast");
         assert_eq!(content_opacity(true, false), HIDDEN_DIM, "a hidden item is dimmed, like Finder");
         assert_eq!(content_opacity(true, true), 1.0, "its rename field reads at full contrast");
         assert_eq!(content_opacity(false, false), 1.0);

@@ -18321,6 +18321,10 @@ fn the_search_band_widens_across_the_toolbar_in_full_only(cx: &mut TestAppContex
         let full = cx.debug_bounds("search-field").expect("the field").size.width;
         finals.push(full);
         assert_eq!(started < full, widens, "{mode:?}: widens while opening ({started:?} -> {full:?})");
+        if widens {
+            // It starts at the toolbar field's width and grows; it never begins wider or overshoots.
+            assert!(started <= px(260.), "{mode:?}: starts near the toolbar field's 240 px ({started:?})");
+        }
     }
     assert!(finals.windows(2).all(|w| w[0] == w[1]), "every mode ends on the same band: {finals:?}");
 }
@@ -18491,4 +18495,207 @@ fn a_moved_window_key_is_still_nulled_in_a_sheet(cx: &mut TestAppContext) {
         });
         assert!(nulls_new_key, "the sheet swallows the new key");
     });
+}
+
+/// The cursor row's name in the focused folder.
+fn cursor_name(view: &Entity<CrowWindow>, cx: &VisualTestContext) -> Option<String> {
+    pane(view, cx).read_with(cx, |p, cx| p.cursor_name_in(0, cx))
+}
+
+/// Alpha, beta, f1..f6, notes.txt: nine rows with the cursor on alpha.
+fn extend_fixture(name: &str) -> TestRoot {
+    let root = fixture(name);
+    for n in 1..=6 {
+        std::fs::write(root.join(format!("f{n}")), "").expect("create fixture");
+    }
+    root
+}
+
+#[gpui::test]
+fn shift_option_down_extends_from_the_cursor_through_the_last_row_in_every_view(cx: &mut TestAppContext) {
+    for (mode, keys) in [
+        (ViewMode::List, "cmd-2"),
+        (ViewMode::Icons, "cmd-1"),
+        (ViewMode::Gallery, "cmd-4"),
+        (ViewMode::Columns, "cmd-3"),
+    ] {
+        let root = extend_fixture("extend-last");
+        let (view, mut cx) = open(cx, &root);
+        // Three selected: f1..f3, the anchor f1 and the cursor f3.
+        cx.simulate_keystrokes("down down shift-down shift-down");
+        assert_eq!(selected_names(&view, &cx), ["f1", "f2", "f3"], "{mode:?}");
+        cx.simulate_keystrokes(keys);
+        settle(&view, &mut cx);
+        assert_eq!(selected_names(&view, &cx), ["f1", "f2", "f3"], "{mode:?}: the view keeps the selection");
+        cx.simulate_keystrokes("alt-shift-down");
+        assert_eq!(
+            selected_names(&view, &cx),
+            ["f1", "f2", "f3", "f4", "f5", "f6", "notes.txt"],
+            "{mode:?}: through the last row, the three stay selected"
+        );
+        assert_eq!(cursor_name(&view, &cx).as_deref(), Some("notes.txt"), "{mode:?}");
+        // The anchor stayed on f1: Shift-Up shrinks the range from the far end. (The icon
+        // grid's Shift-Up moves a whole tile row instead.)
+        if mode != ViewMode::Icons {
+            cx.simulate_keystrokes("shift-up");
+            assert_eq!(selected_names(&view, &cx), ["f1", "f2", "f3", "f4", "f5", "f6"], "{mode:?}");
+        }
+    }
+}
+
+#[gpui::test]
+fn shift_option_up_extends_from_the_cursor_through_the_first_row_in_every_view(cx: &mut TestAppContext) {
+    for (mode, keys) in [
+        (ViewMode::List, "cmd-2"),
+        (ViewMode::Icons, "cmd-1"),
+        (ViewMode::Gallery, "cmd-4"),
+        (ViewMode::Columns, "cmd-3"),
+    ] {
+        let root = extend_fixture("extend-first");
+        let (view, mut cx) = open(cx, &root);
+        cx.simulate_keystrokes("down down shift-down shift-down");
+        assert_eq!(selected_names(&view, &cx), ["f1", "f2", "f3"], "{mode:?}");
+        cx.simulate_keystrokes(keys);
+        settle(&view, &mut cx);
+        cx.simulate_keystrokes("alt-shift-up");
+        assert_eq!(
+            selected_names(&view, &cx),
+            ["alpha", "beta", "f1", "f2", "f3"],
+            "{mode:?}: from the first row through the cursor, the three stay selected"
+        );
+        assert_eq!(cursor_name(&view, &cx).as_deref(), Some("alpha"), "{mode:?}");
+        if mode != ViewMode::Icons {
+            // The anchor stayed on f1, so one Shift-Down from alpha pivots on it.
+            cx.simulate_keystrokes("shift-down");
+            assert_eq!(selected_names(&view, &cx), ["beta", "f1"], "{mode:?}");
+        }
+    }
+}
+
+#[gpui::test]
+fn shift_option_arrows_with_the_cursor_in_the_middle_keep_everything_selected(cx: &mut TestAppContext) {
+    let root = extend_fixture("extend-middle");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("down down down cmd-a");
+    assert_eq!(selected_names(&view, &cx).len(), 9);
+    assert_eq!(cursor_name(&view, &cx).as_deref(), Some("f2"), "select-all keeps the cursor in the middle");
+    cx.simulate_keystrokes("alt-shift-down");
+    assert_eq!(selected_names(&view, &cx).len(), 9, "nothing is dropped");
+    assert_eq!(cursor_name(&view, &cx).as_deref(), Some("notes.txt"));
+    cx.simulate_keystrokes("up up up cmd-a alt-shift-up");
+    assert_eq!(selected_names(&view, &cx).len(), 9);
+    assert_eq!(cursor_name(&view, &cx).as_deref(), Some("alpha"));
+
+    // A lone selection in the middle: the run from the cursor to the end.
+    cx.simulate_keystrokes("down down down");
+    assert_eq!(selected_names(&view, &cx), ["f2"]);
+    cx.simulate_keystrokes("alt-shift-down");
+    assert_eq!(selected_names(&view, &cx), ["f2", "f3", "f4", "f5", "f6", "notes.txt"]);
+    cx.simulate_keystrokes("alt-shift-up");
+    assert_eq!(selected_names(&view, &cx).len(), 9, "then the same from the new cursor row up");
+}
+
+#[gpui::test]
+fn shift_option_arrows_work_with_the_vim_layer_on_and_are_menu_and_palette_commands(cx: &mut TestAppContext) {
+    use crate::palette::{COMMANDS, CommandId};
+    let root = extend_fixture("extend-vim");
+    let (view, mut cx) = open(cx, &root);
+    use_vim(&view, &mut cx);
+    cx.simulate_keystrokes("j j");
+    assert_eq!(cursor_name(&view, &cx).as_deref(), Some("f1"));
+    cx.simulate_keystrokes("alt-shift-down");
+    assert_eq!(selected_names(&view, &cx), ["f1", "f2", "f3", "f4", "f5", "f6", "notes.txt"]);
+    cx.simulate_keystrokes("alt-shift-up");
+    assert_eq!(selected_names(&view, &cx).len(), 9);
+    for id in [CommandId::ExtendSelectionToStart, CommandId::ExtendSelectionToEnd] {
+        let command = COMMANDS.iter().find(|command| command.id == id).expect("registered");
+        assert!(command.palette && command.menu.is_some(), "{id:?} is in the palette and the Edit menu");
+        assert_eq!(CommandId::from_key(id.key()), Some(id), "{id:?} is rebindable by its key");
+    }
+    assert!(action_available(&crate::actions::ExtendToLast, &mut cx), "list: the menu item is live");
+    cx.simulate_keystrokes("tab");
+    assert!(!action_available(&crate::actions::ExtendToLast, &mut cx), "sidebar: it is not");
+}
+
+#[gpui::test]
+fn the_palette_runs_extend_selection_to_end(cx: &mut TestAppContext) {
+    let root = extend_fixture("extend-palette");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("down down");
+    cx.simulate_keystrokes("cmd-k");
+    settle_palette(&view, &mut cx);
+    cx.simulate_input(">extend selection to end");
+    settle_palette(&view, &mut cx);
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(selected_names(&view, &cx), ["f1", "f2", "f3", "f4", "f5", "f6", "notes.txt"]);
+}
+
+#[gpui::test]
+fn shift_option_arrows_extend_search_results(cx: &mut TestAppContext) {
+    let root = fixture("extend-results");
+    for n in 1..=6 {
+        std::fs::write(root.join(format!("xf{n}")), "").expect("create fixture");
+    }
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    cx.simulate_input("xf");
+    wait_for_search(&view, &mut cx);
+    cx.simulate_keystrokes("tab");
+    let selected = |view: &Entity<CrowWindow>, cx: &VisualTestContext| {
+        view.read_with(cx, |w, cx| w.search.as_ref().map(|s| s.read(cx).selected_count()))
+    };
+    cx.simulate_keystrokes("down down");
+    assert_eq!(selected(&view, &cx), Some(1));
+    cx.simulate_keystrokes("alt-shift-down");
+    assert_eq!(selected(&view, &cx), Some(4), "from the cursor (third of six) through the last");
+    cx.simulate_keystrokes("alt-shift-up");
+    assert_eq!(selected(&view, &cx), Some(6), "the four stay, and the first two join");
+}
+
+#[gpui::test]
+fn a_sidebar_heading_slides_its_title_over_when_the_chevron_shows_on_hover(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    let root = fixture("heading-hover");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Off);
+    view.update(&mut cx, |_, cx| cx.notify());
+    settle(&view, &mut cx);
+    let header = cx.debug_bounds("sidebar-header-favorites-group-0").expect("heading");
+    let rest = cx.debug_bounds("sidebar-heading-favorites-group-0").expect("title box");
+    let (sidebar_row, row_height) = (cx.debug_bounds("sidebar-0"), header.size.height);
+    cx.simulate_mouse_move(point(px(900.), px(400.)), None, gpui::Modifiers::none());
+    settle(&view, &mut cx);
+    assert_eq!(cx.debug_bounds("sidebar-heading-favorites-group-0"), Some(rest), "at rest the title is where it was");
+    cx.simulate_mouse_move(header.center(), None, gpui::Modifiers::none());
+    settle(&view, &mut cx);
+    let hovered = cx.debug_bounds("sidebar-heading-favorites-group-0").expect("title box");
+    assert_eq!(hovered.left(), rest.left(), "the box keeps its place; its content moves right");
+    assert!(hovered.size.width > rest.size.width, "the room for the chevron opens inside it");
+    assert_eq!(cx.debug_bounds("sidebar-header-favorites-group-0").unwrap().size.height, row_height, "no height jump");
+    assert_eq!(cx.debug_bounds("sidebar-0"), sidebar_row, "the rows below do not move");
+    assert!(cx.debug_bounds("sidebar-chevron-favorites-group-0").is_some());
+    cx.simulate_mouse_move(point(px(900.), px(400.)), None, gpui::Modifiers::none());
+    settle(&view, &mut cx);
+    assert_eq!(cx.debug_bounds("sidebar-heading-favorites-group-0"), Some(rest), "leaving puts it back");
+}
+
+#[gpui::test]
+fn the_title_reveals_a_draggable_folder_icon_on_hover(cx: &mut TestAppContext) {
+    use crow_core::motion::Effective;
+    let root = fixture("title-proxy");
+    let (view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = Effective::Off);
+    view.update(&mut cx, |_, cx| cx.notify());
+    settle(&view, &mut cx);
+    let content = cx.debug_bounds("title-content").expect("title");
+    assert!(cx.debug_bounds("title-proxy-icon").is_none(), "no icon until the pointer is on the name");
+    cx.simulate_mouse_move(content.center(), None, gpui::Modifiers::none());
+    settle(&view, &mut cx);
+    let icon = cx.debug_bounds("title-proxy-icon").expect("the folder icon slides in");
+    let content = cx.debug_bounds("title-content").expect("title");
+    assert!(icon.left() >= content.left() - px(1.), "it sits at the name's left edge: {icon:?} {content:?}");
+    cx.simulate_mouse_move(point(px(900.), px(500.)), None, gpui::Modifiers::none());
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("title-proxy-icon").is_none(), "gone again when the pointer leaves");
 }

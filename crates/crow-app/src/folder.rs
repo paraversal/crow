@@ -2627,6 +2627,34 @@ impl Folder {
         self.set_cursor(ix, cx);
     }
 
+    /// Shift-Option-↓/↑: extend the selection from the cursor through the last (or first)
+    /// row. What is already selected stays and the anchor is unchanged; with no cursor the
+    /// run covers every row.
+    pub fn extend_through(&mut self, to_last: bool, cx: &mut Context<Self>) {
+        if self.rows.is_empty() || !self.rows_match_entries() {
+            return;
+        }
+        let last = self.rows.len() - 1;
+        let from = self.cursor_ix.unwrap_or(if to_last { 0 } else { last }).min(last);
+        let (lo, hi, target) = if to_last { (from, last, last) } else { (0, from, 0) };
+        let mut keys = Vec::with_capacity(hi - lo + 1);
+        let mut added = (0u64, 0usize);
+        for i in lo..=hi {
+            let Some((entry, _)) = self.row(i) else { continue };
+            if !self.selection.contains(&entry.path) {
+                Self::add_totals(&mut added, entry);
+            }
+            keys.push(entry.path.clone());
+        }
+        let Some(start) = self.row(from).map(|(entry, _)| entry.path.clone()) else { return };
+        let Some(end) = self.row(target).map(|(entry, _)| entry.path.clone()) else { return };
+        self.selection.extend_through(keys, start, end);
+        self.selection_totals.0 += added.0;
+        self.selection_totals.1 += added.1;
+        self.selection_changed(cx);
+        self.set_cursor(target, cx);
+    }
+
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         if !self.rows_match_entries() {
             return;

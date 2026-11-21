@@ -28,9 +28,9 @@ use gpui::{
 };
 
 use crate::actions::{
-    CloseSearch, CopyFiles, CopyPath, CutFiles, CycleMatch, DeletePermanently, ExtendDown, ExtendUp, MoveDown,
-    MoveToFirst, MoveToLast, MoveToTrash, MoveUp, OpenSelection, QuickLook, Rename, SearchEverything, SearchFocusField,
-    SearchFocusResults, SearchHome, SearchReveal, SelectAll,
+    CloseSearch, CopyFiles, CopyPath, CutFiles, CycleMatch, DeletePermanently, ExtendDown, ExtendToFirst, ExtendToLast,
+    ExtendUp, MoveDown, MoveToFirst, MoveToLast, MoveToTrash, MoveUp, OpenSelection, QuickLook, Rename,
+    SearchEverything, SearchFocusField, SearchFocusResults, SearchHome, SearchReveal, SelectAll,
 };
 use crate::chrome::{Keycap, KeycapWeight, with_action_tooltip, with_tooltip};
 use crate::cloud_status::{self, CloudStatusService};
@@ -42,8 +42,8 @@ use crate::operations::Operations;
 use crate::pane::{DraggedSelection, island_edges};
 use crate::preview::{self, Preview};
 use crate::style::{
-    active_selection, cloud_icon, color, color_alpha, content_opacity, cut_outline, display_text, field_ring,
-    format_time, format_time_short, highlight_text, inactive_selection, map_range, truncate_middle_parts,
+    active_selection, cloud_icon, color, color_alpha, cut_outline, display_text, field_ring, format_time,
+    format_time_short, highlight_text, inactive_selection, map_range, truncate_middle_parts,
 };
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::trash::PRIVACY_SETTINGS_URL;
@@ -2572,6 +2572,37 @@ impl SearchView {
         self.extend_by(1, window, cx);
     }
 
+    /// ⇧⌥↑/↓: add every result from the cursor through the first (or last), keeping
+    /// what is selected and the anchor.
+    fn extend_through(&mut self, to_last: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.results.is_empty() {
+            return;
+        }
+        let last = self.results.len() - 1;
+        let from = self.selection.cursor().is_some().then_some(self.cursor);
+        let from = from.unwrap_or(if to_last { 0 } else { last }).min(last);
+        let (lo, hi, target) = if to_last { (from, last, last) } else { (0, from, 0) };
+        let keys: Vec<_> = self.results[lo..=hi].iter().map(|row| row.path.clone()).collect();
+        let start = self.results[from].path.clone();
+        let end = self.results[target].path.clone();
+        self.selection.extend_through(keys, start, end);
+        self.cursor = target;
+        self.bump_selection(cx);
+        self.user_moved = true;
+        window.focus(&self.focus, cx);
+        self.scroll.scroll_to_item(target, ScrollStrategy::Top);
+        self.load_preview(cx);
+        cx.notify();
+    }
+
+    fn extend_to_first(&mut self, _: &ExtendToFirst, window: &mut Window, cx: &mut Context<Self>) {
+        self.extend_through(false, window, cx);
+    }
+
+    fn extend_to_last(&mut self, _: &ExtendToLast, window: &mut Window, cx: &mut Context<Self>) {
+        self.extend_through(true, window, cx);
+    }
+
     fn extend_by(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(target) = self.cursor.checked_add_signed(delta).filter(|target| *target < self.results.len()) else {
             return;
@@ -2687,6 +2718,8 @@ impl SearchView {
             CommandId::MoveToTrash => self.trash_selected(false, cx),
             CommandId::DeletePermanently => self.trash_selected(true, cx),
             CommandId::SelectAll => self.select_all(&SelectAll, window, cx),
+            CommandId::ExtendSelectionToStart => self.extend_to_first(&ExtendToFirst, window, cx),
+            CommandId::ExtendSelectionToEnd => self.extend_to_last(&ExtendToLast, window, cx),
             _ => {}
         }
     }
@@ -2702,7 +2735,6 @@ impl SearchView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let viewport = f32::from(window.viewport_size().width);
         let theme = cx.global::<Ui>().theme.clone();
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let ring = if focused { field_ring(&theme) } else { color(theme.role("surface")) };
@@ -2733,8 +2765,16 @@ impl SearchView {
             .child(icons::glyph(Glyph::Search, 15., "fg-muted", &theme))
             .child(div().flex_1().min_w_0().child(self.input.clone()))
             .child(div().opacity(look.map_or(1.0, |look| look.controls)).child(self.render_match_control(focused, cx)));
+        // Widening: the field starts at the toolbar field's 240 px and takes a share of
+        // the band's free space. A flex factor under 1 hands out only that share, so
+        // the width runs linearly to the settled one without a clamp that ends the
+        // motion early or a width guess that overshoots.
         let field = match look {
-            Some(look) if look.widen < 1.0 => field.max_w(px(240. + (viewport - 240.) * look.widen)),
+            Some(look) if look.widen < 1.0 => {
+                let mut field = field.flex_basis(px(240.)).flex_shrink(1.);
+                field.style().flex_grow = Some(look.widen);
+                field
+            }
             _ => field,
         };
         let title_color = color(theme.role("fg-muted"));
@@ -3449,6 +3489,8 @@ impl SearchView {
             .on_action(cx.listener(Self::extend_down))
             .on_action(cx.listener(Self::focus_field_from_results))
             .on_action(cx.listener(Self::move_to_first))
+            .on_action(cx.listener(Self::extend_to_first))
+            .on_action(cx.listener(Self::extend_to_last))
             .on_action(cx.listener(Self::move_to_last))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::rename))
@@ -3719,17 +3761,21 @@ impl SearchView {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().size(px(16.)).flex_none().opacity(content_opacity(row.hidden, false)).child(
-                                crate::preview::path_icon(
-                                    &icons,
-                                    &row.path,
-                                    row.is_dir,
-                                    row.is_package,
-                                    cloud,
-                                    theme,
-                                    16.,
-                                ),
-                            ))
+                            .child(
+                                div()
+                                    .size(px(16.))
+                                    .flex_none()
+                                    .opacity(crate::style::row_opacity(row.hidden, presentation.dim, false))
+                                    .child(crate::preview::path_icon(
+                                        &icons,
+                                        &row.path,
+                                        row.is_dir,
+                                        row.is_package,
+                                        cloud,
+                                        theme,
+                                        16.,
+                                    )),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -3757,7 +3803,12 @@ impl SearchView {
                                                             .tint
                                                             .map_or(fg, |tint| color(theme.role(tint.key())))
                                                     })
-                                                    .opacity(content_opacity(row.hidden || presentation.dim, false))
+                                                    .opacity(crate::style::row_opacity(
+                                                        row.hidden,
+                                                        presentation.dim,
+                                                        false,
+                                                    ))
+                                                    .when(presentation.dim, |name| name.italic())
                                                     .child(name),
                                             )
                                             .children(cloud_status::badge(cloud, theme))

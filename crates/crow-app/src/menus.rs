@@ -345,6 +345,8 @@ mod tests {
                 "Move Item Here",
                 "Copy Path",
                 "Select All",
+                "Extend Selection to Start",
+                "Extend Selection to End",
                 "—",
                 "Filter This Folder",
                 "Filter by Tag…",

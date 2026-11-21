@@ -378,6 +378,8 @@ mod tests {
                 (CommandId::PasteMove, "⌥⌘V"),
                 (CommandId::CopyPath, "⌥⌘C"),
                 (CommandId::SelectAll, "⌘A"),
+                (CommandId::ExtendSelectionToStart, "⌥⇧↑"),
+                (CommandId::ExtendSelectionToEnd, "⌥⇧↓"),
                 (CommandId::StartFilter, "/"),
                 (CommandId::ShowSearch, "⌘F"),
                 (CommandId::SearchEverything, "⇧⌘A"),

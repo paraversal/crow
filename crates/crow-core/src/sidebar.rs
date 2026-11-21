@@ -13,7 +13,8 @@ pub const DEFAULT_SIDEBAR: &str = r##"# Crow sidebar. Crow updates this file whe
 # and remove them; your comments stay.
 #
 # Each [[group]] is a section of favorites. A group takes `collapsed = true` to
-# hide its items under the title (Crow writes it when you collapse the group).
+# hide its items under the title (Crow writes it when you collapse the group) and
+# an optional `icon` (a short text or emoji shown before the title; none by default).
 # Items take:
 #   path   the folder ("~" is your home folder)
 #   name   label, if not the folder's own name
@@ -54,6 +55,7 @@ show = true
 # [section."example.p1b-fixture.folders"]
 # show = true
 # collapsed = false
+# icon = "📁"   # a short text or emoji before the section title; none by default
 
 # Project roots. Crow scans these folders for Git repositories; empty by default.
 # The native section is "crow.projects" in [sections]/[section] like any other.
@@ -80,6 +82,9 @@ pub struct Group {
     /// Hides the group's favorites under its title.
     #[serde(default)]
     pub collapsed: bool,
+    /// A short text or emoji shown before the title.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -112,6 +117,8 @@ impl Default for LocationsConfig {
 pub struct SectionConfig {
     pub show: Option<bool>,
     pub collapsed: Option<bool>,
+    /// A short text or emoji shown before the section title.
+    pub icon: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -250,6 +257,16 @@ impl SidebarConfig {
 
     pub fn group_collapsed(&self, group: usize) -> bool {
         self.group.get(group).is_some_and(|g| g.collapsed)
+    }
+
+    /// The icon before a favorites group's title, if configured and not blank.
+    pub fn group_icon(&self, group: usize) -> Option<&str> {
+        self.group.get(group)?.icon.as_deref().filter(|icon| !icon.trim().is_empty())
+    }
+
+    /// The icon before a section's title, if configured and not blank.
+    pub fn section_icon(&self, id: &str) -> Option<&str> {
+        self.section.get(id)?.icon.as_deref().filter(|icon| !icon.trim().is_empty())
     }
 
     pub fn section_collapsed(&self, id: &str) -> bool {
@@ -860,6 +877,22 @@ show = true
             TwinInput { label: "git", path: Path::new("/Volumes/B/git"), ancestors: &backup },
         ];
         assert_eq!(twin_hints(&rows), [Some(usize::MAX), Some(usize::MAX)]);
+    }
+
+    #[test]
+    fn group_and_section_icons_parse_and_blank_ones_are_ignored() {
+        let config = SidebarConfig::parse(
+            "[[group]]\nname = \"A\"\nicon = \"⭐\"\n[[group]]\nname = \"B\"\nicon = \"  \"\n[[group]]\nname = \"C\"\n[section.recent]\nicon = \"R\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.group_icon(0), Some("⭐"));
+        assert_eq!(config.group_icon(1), None);
+        assert_eq!(config.group_icon(2), None);
+        assert_eq!(config.group_icon(9), None);
+        assert_eq!(config.section_icon("recent"), Some("R"));
+        assert_eq!(config.section_icon("locations"), None);
+        let default = SidebarConfig::parse(DEFAULT_SIDEBAR).unwrap();
+        assert_eq!(default.group_icon(0), None);
     }
 
     #[test]
