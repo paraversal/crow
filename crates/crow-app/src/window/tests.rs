@@ -3559,11 +3559,11 @@ fn the_bar_names_the_queue_and_opens_activity(cx: &mut TestAppContext) {
         cx.global_mut::<Operations>().active.as_mut().unwrap().phase = crate::operations::JobPhase::AwaitingConflict;
         cx.refresh_windows();
     });
-    cx.simulate_resize(size(px(640.), px(640.)));
+    cx.simulate_resize(size(px(760.), px(640.)));
     cx.run_until_parked();
     let cancel = cx.debug_bounds("bar-cancel").expect("Cancel remains available");
     let transient = cx.debug_bounds("bar-transient").expect("the operation status region");
-    assert!(cancel.right() <= transient.right(), "the cancel button fits at 640 points");
+    assert!(cancel.right() <= transient.right(), "the cancel button fits at the 760 point minimum width");
     let bounds = cx.debug_bounds("bar-activity").expect("the bar offers Activity");
     cx.simulate_click(bounds.center(), gpui::Modifiers::default());
     assert!(view.read_with(&cx, |this, _| this.show_activity), "the affordance opens Activity");
@@ -4534,7 +4534,7 @@ fn theme_index(cx: &mut VisualTestContext) -> TestRoot {
     let root = TestRoot::new("crow-app-theme-index-");
     let dir = root.join("themes");
     std::fs::create_dir_all(dir.join("schemes")).unwrap();
-    let base = include_str!("../../../crow-theme/src/fallback.json");
+    let base = include_str!("../../../crow-theme/tests-data/firebox.json");
     std::fs::write(dir.join("schemes/firebox.json"), base).unwrap();
     let light = base.replace("\"dark\"", "\"light\"").replace("FireBox", "Paper").replace("#111111", "#fafafa");
     std::fs::write(dir.join("schemes/paper.json"), light).unwrap();
@@ -7370,6 +7370,18 @@ fn palette_recent_commands_setting_false_hides_and_stops_recording(cx: &mut Test
     assert_eq!(rows.get(1).map(String::as_str), Some("View as Columns"), "only the earlier run: {rows:?}");
 }
 
+/// Press Down until the picker's cursor is on theme `id`.
+fn picker_move_to(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, id: &str) {
+    let (cursor, target) = view.read_with(cx, |w, _| {
+        let choice = &w.picker.as_ref().expect("the picker is open").choice;
+        (choice.cursor, (0..choice.entries.len()).find(|i| choice.id(*i) == id).expect("the theme is listed"))
+    });
+    assert!(target >= cursor, "{id} is above the cursor");
+    for _ in cursor..target {
+        cx.simulate_keystrokes("down");
+    }
+}
+
 #[gpui::test]
 fn theme_picker_previews_reverts_and_saves(cx: &mut TestAppContext) {
     let root = fixture("themes");
@@ -7381,15 +7393,15 @@ fn theme_picker_previews_reverts_and_saves(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-alt-t");
     settle(&view, &mut cx);
     assert!(view.read_with(&cx, |w, _| w.picker.is_some()));
-    // System, then FireBox (dark), then Paper (light).
-    cx.simulate_keystrokes("down down");
+    picker_move_to(&view, &mut cx, "paper");
     assert_eq!(theme(&cx), "Paper", "moving the cursor shows the theme");
     cx.simulate_keystrokes("escape");
     assert_eq!(theme(&cx), start, "Escape goes back");
 
     cx.simulate_keystrokes("cmd-alt-t");
     settle(&view, &mut cx);
-    cx.simulate_keystrokes("down down enter");
+    picker_move_to(&view, &mut cx, "paper");
+    cx.simulate_keystrokes("enter");
     settle(&view, &mut cx);
     assert_eq!(theme(&cx), "Paper");
     let settings = std::fs::read_to_string(config_dir(&cx).join("settings.toml")).unwrap();
@@ -7404,12 +7416,92 @@ fn apply_everywhere_writes_the_test_theme_state(cx: &mut TestAppContext) {
     let themes = theme_index(&mut cx);
     cx.simulate_keystrokes("cmd-alt-t");
     settle(&view, &mut cx);
-    cx.simulate_keystrokes("down down cmd-enter");
+    picker_move_to(&view, &mut cx, "paper");
+    cx.simulate_keystrokes("cmd-enter");
     settle(&view, &mut cx);
     let current = std::fs::read_to_string(themes.join("state/current.json")).expect("the test theme state");
     assert!(current.contains("\"light\": \"paper\""), "{current}");
     assert!(view.read_with(&cx, |w, _| w.picker.is_none()));
     assert_eq!(cx.read(|cx| cx.global::<Ui>().settings.theme.clone()), "system", "Crow follows System");
+}
+
+#[gpui::test]
+fn without_a_theme_index_the_picker_lists_the_builtins_and_cannot_apply_to_all_apps(cx: &mut TestAppContext) {
+    let root = fixture("theme-no-index");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-alt-t");
+    settle(&view, &mut cx);
+    let (ids, index) = view.read_with(&cx, |w, _| {
+        let choice = &w.picker.as_ref().expect("the picker opens").choice;
+        ((0..choice.entries.len()).map(|i| choice.id(i)).collect::<Vec<_>>(), choice.index)
+    });
+    assert_eq!(ids[0], "system");
+    assert_eq!(ids.len(), 9, "{ids:?}");
+    assert!(ids.contains(&"finder-light".to_owned()) && ids.contains(&"solarized-dark".to_owned()));
+    assert!(!index);
+    assert!(cx.debug_bounds("theme-everywhere").is_none(), "no Apply to All Apps without an index");
+    let state = cx.read(|cx| cx.global::<Ui>().themes_state_dir.clone());
+    cx.simulate_keystrokes("cmd-enter");
+    settle(&view, &mut cx);
+    assert!(view.read_with(&cx, |w, _| w.picker.is_some()), "the key does nothing");
+    assert!(!state.exists(), "nothing was written");
+}
+
+#[gpui::test]
+fn a_theme_index_created_while_running_shows_in_the_picker(cx: &mut TestAppContext) {
+    let root = fixture("theme-index-later");
+    let (view, mut cx) = open(cx, &root);
+    let _themes = theme_index(&mut cx);
+    cx.simulate_keystrokes("cmd-alt-t");
+    settle(&view, &mut cx);
+    let (has_paper, index) = view.read_with(&cx, |w, _| {
+        let choice = &w.picker.as_ref().expect("the picker opens").choice;
+        ((0..choice.entries.len()).any(|i| choice.id(i) == "paper"), choice.index)
+    });
+    assert!(has_paper && index);
+    assert!(cx.debug_bounds("theme-everywhere").is_some(), "Apply to All Apps appears with an index");
+}
+
+#[gpui::test]
+fn system_in_light_appearance_is_finder_light(cx: &mut TestAppContext) {
+    let root = fixture("theme-system-light");
+    let (_view, mut cx) = open(cx, &root);
+    cx.update(|_, cx| {
+        let (dir, state) = {
+            let ui = cx.global::<Ui>();
+            (ui.themes_dir.clone(), ui.themes_state_dir.clone())
+        };
+        let id = crow_theme::resolve_theme_id(Some("system"), crow_theme::Variant::Light, &dir, &state);
+        assert_eq!(id, "finder-light");
+    });
+}
+
+#[gpui::test]
+fn the_translucent_sidebar_is_opt_in_and_follows_the_setting(cx: &mut TestAppContext) {
+    let root = fixture("translucent");
+    let (_view, mut cx) = open(cx, &root);
+    assert!(!cx.read(|cx| cx.global::<Ui>().translucent), "off by default, even for the Finder themes");
+    cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::TranslucentSidebar(true), cx));
+    assert!(cx.read(|cx| cx.global::<Ui>().translucent));
+    cx.update(|_, cx| crate::ui::set_setting(crate::ui::SettingChange::TranslucentSidebar(false), cx));
+    assert!(!cx.read(|cx| cx.global::<Ui>().translucent));
+}
+
+#[gpui::test]
+fn control_command_s_hides_and_shows_the_sidebar(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-toggle");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    let toolbar = |cx: &mut VisualTestContext| cx.debug_bounds("toolbar").expect("the toolbar is drawn");
+    let sidebar = cx.debug_bounds("sidebar").expect("the sidebar shows at first");
+    assert_eq!(toolbar(&mut cx).left(), sidebar.right(), "the toolbar sits right of the full-height sidebar");
+    cx.simulate_keystrokes("ctrl-cmd-s");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("sidebar").is_none(), "the sidebar is gone");
+    assert_eq!(toolbar(&mut cx).left(), px(0.), "the toolbar takes the whole width");
+    cx.simulate_keystrokes("ctrl-cmd-s");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("sidebar").is_some(), "the same key brings it back");
 }
 
 #[gpui::test]

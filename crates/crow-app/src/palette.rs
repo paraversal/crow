@@ -18,7 +18,8 @@ use crate::actions::{
     OpenTerminal, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, RemoveSavedSearch, Rename,
     ResetFolderView, SaveSearch, SearchEverything, SearchHome, SearchReveal, SelectAll, ShowCommandPalette,
     ShowInFinder, ShowInfo, ShowSearch, ShowThemePicker, StartFilter, SwitchFocus, ToggleActivity, ToggleHiddenFiles,
-    TogglePreview, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList, WhyThisView,
+    TogglePreview, ToggleSidebar, Undo, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList,
+    WhyThisView,
 };
 use crate::keys::KeyScope;
 
@@ -76,6 +77,7 @@ pub enum CommandId {
     SwitchFocus,
     ToggleHiddenFiles,
     TogglePreview,
+    ToggleSidebar,
     ShowInfo,
     CalculateFolderSizes,
     ReviewGitChanges,
@@ -184,6 +186,7 @@ impl CommandId {
             CommandId::SwitchFocus => "switch-focus",
             CommandId::ToggleHiddenFiles => "toggle-hidden-files",
             CommandId::TogglePreview => "toggle-preview",
+            CommandId::ToggleSidebar => "toggle-sidebar",
             CommandId::ShowInfo => "show-info",
             CommandId::CalculateFolderSizes => "calculate-folder-sizes",
             CommandId::ReviewGitChanges => "review-git-changes",
@@ -648,6 +651,15 @@ pub const COMMANDS: &[Command] = &[
         scope: KeyScope::Window,
         // menus::app_menus turns this into "Hide Preview" while the preview shows.
         menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Preview" }),
+        palette: true,
+    },
+    Command {
+        id: CommandId::ToggleSidebar,
+        label: "Show or Hide Sidebar",
+        action: &ToggleSidebar,
+        scope: KeyScope::Window,
+        // menus::app_menus turns this into "Hide Sidebar" while the sidebar shows.
+        menu: Some(MenuSlot { menu: MenuName::View, section: 2, title: "Show Sidebar" }),
         palette: true,
     },
     Command {

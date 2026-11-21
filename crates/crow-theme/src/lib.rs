@@ -1,8 +1,9 @@
-//! Reader for the global theme index (`~/.config/themes`).
+//! Built-in themes plus a reader for the optional global theme index (`~/.config/themes`).
 //!
 //! Implements the reader protocol: Base24 palettes plus a fixed set of semantic
-//! roles. Crow only ever reads the theme directory; the global "apply to all
-//! apps" selection lives in the state directory and is written atomically.
+//! roles. The built-in themes are compiled in; the index is read when it exists
+//! and wins on a shared id. Crow never writes theme files: only "apply to all
+//! apps" writes the selection into the state directory, atomically.
 
 use std::collections::{BTreeSet, HashMap};
 use std::env;
@@ -33,9 +34,19 @@ pub const ROLES: [&str; 16] = [
     "error",
 ];
 
-/// The theme compiled into the binary, used when the index is missing or broken.
-const FALLBACK_SCHEME: &str = include_str!("fallback.json");
-const FALLBACK_ROLES: &str = r##"{
+/// The themes compiled into the binary: `(id, scheme JSON)`.
+const BUILTIN: [(&str, &str); 8] = [
+    ("finder-light", include_str!("../themes/finder-light.json")),
+    ("finder-dark", include_str!("../themes/finder-dark.json")),
+    ("catppuccin-latte", include_str!("../themes/catppuccin-latte.json")),
+    ("catppuccin-mocha", include_str!("../themes/catppuccin-mocha.json")),
+    ("gruvbox-light", include_str!("../themes/gruvbox-light.json")),
+    ("gruvbox-dark", include_str!("../themes/gruvbox-dark.json")),
+    ("solarized-light", include_str!("../themes/solarized-light.json")),
+    ("solarized-dark", include_str!("../themes/solarized-dark.json")),
+];
+/// The base role mapping, used when the index has no (valid) `roles.json`.
+const BASE_ROLES: &str = r##"{
   "bg": "base00", "bg-inset": "base10", "surface": "base01", "surface-raised": "base02",
   "border": "base02", "selection": "base02", "fg": "base05", "fg-muted": "base04",
   "fg-subtle": "base03", "accent": "base0D", "on-accent": "base00", "link": "base0D",
@@ -79,9 +90,28 @@ pub struct Theme {
     pub variant: Variant,
     pub palette: HashMap<String, Rgb>,
     roles: HashMap<String, Rgb>,
+    /// Roles that follow the system (`"system:accent"`, `"system:selection"`), by role.
+    /// Until `resolve_system` runs they hold their palette stand-in color.
+    system: HashMap<String, String>,
 }
 
 impl Theme {
+    /// Roles that follow a system color, with the reference (`"system:accent"`).
+    pub fn system_refs(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.system.iter().map(|(role, reference)| (role.as_str(), reference.as_str()))
+    }
+
+    /// Apply the system colors: `resolver` maps a reference such as `"system:accent"` to a
+    /// color. References it doesn't know keep their stand-in.
+    pub fn resolve_system(mut self, resolver: &dyn Fn(&str) -> Option<Rgb>) -> Theme {
+        for (role, reference) in self.system.clone() {
+            if let Some(color) = resolver(&reference) {
+                self.roles.insert(role, color);
+            }
+        }
+        self
+    }
+
     /// The color for a role. Roles missing from an older index fall back to the
     /// embedded theme, so this never fails.
     pub fn role(&self, role: &str) -> Rgb {
@@ -112,6 +142,7 @@ impl Theme {
             variant: to.variant,
             palette: blend(&self.palette, &to.palette),
             roles,
+            system: to.system.clone(),
         }
     }
 
@@ -165,33 +196,65 @@ fn from_oklab([l, a, b]: [f32; 3]) -> Rgb {
     Rgb(from_linear(r) << 16 | from_linear(g) << 8 | from_linear(bl))
 }
 
+/// Where a theme comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Builtin,
+    Index,
+}
+
 /// What the theme picker shows for one theme.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThemeInfo {
     pub id: String,
     pub name: String,
     pub variant: Variant,
+    pub source: Source,
 }
 
-/// Every theme in the index with its display name and variant, sorted by name.
-/// Files that don't parse are left out.
+#[derive(Deserialize)]
+struct Head {
+    name: String,
+    variant: String,
+}
+
+fn variant_of(name: &str) -> Variant {
+    if name == "light" { Variant::Light } else { Variant::Dark }
+}
+
+/// Every available theme, sorted by name: the built-ins, with the index's themes added.
+/// An index theme with a built-in's id replaces it. Index files that don't parse are left out.
 pub fn list_theme_infos(dir: &Path) -> Vec<ThemeInfo> {
-    #[derive(Deserialize)]
-    struct Head {
-        name: String,
-        variant: String,
-    }
-    let mut infos: Vec<ThemeInfo> = list_themes(dir)
-        .into_iter()
-        .filter_map(|id| {
-            let text = fs::read_to_string(dir.join("schemes").join(format!("{id}.json"))).ok()?;
-            let head: Head = serde_json::from_str(&text).ok()?;
-            let variant = if head.variant == "light" { Variant::Light } else { Variant::Dark };
-            Some(ThemeInfo { id, name: head.name, variant })
+    let mut infos: Vec<ThemeInfo> = BUILTIN
+        .iter()
+        .filter_map(|(id, text)| {
+            let head: Head = serde_json::from_str(text).ok()?;
+            Some(ThemeInfo {
+                id: (*id).to_owned(),
+                name: head.name,
+                variant: variant_of(&head.variant),
+                source: Source::Builtin,
+            })
         })
         .collect();
+    for id in list_themes(dir) {
+        let Some(head) = fs::read_to_string(dir.join("schemes").join(format!("{id}.json")))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Head>(&text).ok())
+        else {
+            continue;
+        };
+        infos.retain(|info| info.id != id);
+        infos.push(ThemeInfo { id, name: head.name, variant: variant_of(&head.variant), source: Source::Index });
+    }
     infos.sort_by_key(|i| i.name.to_lowercase());
     infos
+}
+
+/// True when the theme index has at least one scheme file. A missing, unreadable or
+/// empty index is the same as none.
+pub fn index_exists(dir: &Path) -> bool {
+    !list_themes(dir).is_empty()
 }
 
 #[derive(Deserialize)]
@@ -259,65 +322,110 @@ pub fn list_themes(dir: &Path) -> Vec<String> {
 }
 
 fn parse_theme(id: &str, scheme_json: &str, roles_json: &str) -> Result<Theme, String> {
-    let scheme: SchemeFile = serde_json::from_str(scheme_json).map_err(|e| format!("{id}: {e}"))?;
+    let scheme: SchemeFile = serde_json::from_str(scheme_json).map_err(|e| format!("{id}.json: {e}"))?;
     let base: HashMap<String, String> = serde_json::from_str(roles_json).map_err(|e| format!("roles.json: {e}"))?;
     let palette: HashMap<String, Rgb> =
         scheme.palette.iter().filter_map(|(k, v)| Some((k.clone(), Rgb::parse(v)?))).collect();
     let mut mapping = base;
     mapping.extend(scheme.roles);
+    let mut system = HashMap::new();
     let roles = mapping
         .into_iter()
         .filter_map(|(role, reference)| {
-            let color =
-                if reference.starts_with('#') { Rgb::parse(&reference) } else { palette.get(&reference).copied() };
+            let color = if reference.starts_with('#') {
+                Rgb::parse(&reference)
+            } else if let Some(name) = reference.strip_prefix("system:") {
+                // Stand-in until the app resolves it: accent is the palette's blue, selection its grey.
+                let stand_in = if name == "selection" { "base02" } else { "base0D" };
+                system.insert(role.clone(), reference.clone());
+                palette.get(stand_in).copied()
+            } else {
+                palette.get(&reference).copied()
+            };
             color.map(|c| (role, c))
         })
         .collect();
-    let variant = if scheme.variant == "light" { Variant::Light } else { Variant::Dark };
-    Ok(Theme { id: id.to_owned(), name: scheme.name, variant, palette, roles })
+    Ok(Theme { id: id.to_owned(), name: scheme.name, variant: variant_of(&scheme.variant), palette, roles, system })
 }
 
-/// Load one theme: `roles.json` merged with the theme's own `roles` (theme wins).
+/// The index's `roles.json`, or the base mapping when it is missing or not a role map.
+fn index_roles(dir: &Path) -> String {
+    fs::read_to_string(dir.join("roles.json"))
+        .ok()
+        .filter(|text| serde_json::from_str::<HashMap<String, String>>(text).is_ok())
+        .unwrap_or_else(|| BASE_ROLES.into())
+}
+
+fn builtin(id: &str) -> Option<Theme> {
+    let (_, text) = BUILTIN.iter().find(|(builtin_id, _)| *builtin_id == id)?;
+    Some(parse_theme(id, text, BASE_ROLES).expect("built-in theme parses"))
+}
+
+/// Load one theme. The index's file wins over a built-in with the same id; its `roles.json`
+/// is merged under the theme's own `roles`. A broken index file is an error, never the
+/// built-in of that id.
 pub fn load_theme(dir: &Path, id: &str) -> Result<Theme, String> {
-    let scheme =
-        fs::read_to_string(dir.join("schemes").join(format!("{id}.json"))).map_err(|e| format!("{id}: {e}"))?;
-    let roles = fs::read_to_string(dir.join("roles.json")).unwrap_or_else(|_| FALLBACK_ROLES.into());
-    parse_theme(id, &scheme, &roles)
+    let path = dir.join("schemes").join(format!("{id}.json"));
+    match fs::read_to_string(&path) {
+        Ok(scheme) => parse_theme(id, &scheme, &index_roles(dir)),
+        Err(_) => builtin(id).ok_or_else(|| format!("{id}: not found")),
+    }
 }
 
-/// The embedded fallback theme (FireBox).
+/// The built-in theme for an appearance: Finder Light or Finder Dark.
+pub fn fallback_for(appearance: Variant) -> Theme {
+    builtin(match appearance {
+        Variant::Light => "finder-light",
+        Variant::Dark => "finder-dark",
+    })
+    .expect("Finder themes are built in")
+}
+
+/// The embedded fallback theme (Finder Dark).
 pub fn fallback() -> Theme {
-    parse_theme("firebox", FALLBACK_SCHEME, FALLBACK_ROLES).expect("embedded theme parses")
+    fallback_for(Variant::Dark)
 }
 
 fn read_selection(path: &Path) -> Selection {
     fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
-/// Which theme to show. `saved` is the app's stored choice: an id, `"system"` or `None`.
-/// Order: saved id → `current.json[appearance]` → `defaults.json[appearance]` → first theme.
-pub fn resolve_theme_id(saved: Option<&str>, appearance: Variant, dir: &Path, state: &Path) -> Option<String> {
-    let ids = list_themes(dir);
-    if let Some(s) = saved
-        && s != "system"
-        && ids.iter().any(|i| i == s)
-    {
-        return Some(s.to_owned());
-    }
-    for sel in [read_selection(&state.join("current.json")), read_selection(&dir.join("defaults.json"))] {
-        if let Some(id) = sel.get(appearance)
-            && ids.iter().any(|i| i == id)
-        {
-            return Some(id.to_owned());
-        }
-    }
-    ids.into_iter().next()
+/// True if `id` is a built-in or an index theme.
+pub fn theme_exists(dir: &Path, id: &str) -> bool {
+    BUILTIN.iter().any(|(builtin_id, _)| *builtin_id == id) || dir.join("schemes").join(format!("{id}.json")).is_file()
 }
 
-/// Resolve and load in one step, falling back to the embedded theme on any failure.
+/// Which theme to show. `saved` is the app's stored choice: an id, `"system"` or `None`.
+/// Order: saved id → (index) `current.json[appearance]` → (index) `defaults.json[appearance]`
+/// → Finder Light or Dark.
+pub fn resolve_theme_id(saved: Option<&str>, appearance: Variant, dir: &Path, state: &Path) -> String {
+    if let Some(s) = saved
+        && s != "system"
+        && theme_exists(dir, s)
+    {
+        return s.to_owned();
+    }
+    if index_exists(dir) {
+        for sel in [read_selection(&state.join("current.json")), read_selection(&dir.join("defaults.json"))] {
+            if let Some(id) = sel.get(appearance)
+                && theme_exists(dir, id)
+            {
+                return id.to_owned();
+            }
+        }
+    }
+    fallback_for(appearance).id
+}
+
+/// The saved id when it names a theme that no longer exists (not `"system"`), for the notice.
+pub fn missing_saved<'a>(saved: Option<&'a str>, dir: &Path) -> Option<&'a str> {
+    saved.filter(|s| *s != "system" && !theme_exists(dir, s))
+}
+
+/// Resolve and load in one step, falling back to Finder on any failure.
 pub fn current(saved: Option<&str>, appearance: Variant) -> Theme {
     let (dir, state) = (themes_dir(), state_dir());
-    resolve_theme_id(saved, appearance, &dir, &state).and_then(|id| load_theme(&dir, &id).ok()).unwrap_or_else(fallback)
+    load_theme(&dir, &resolve_theme_id(saved, appearance, &dir, &state)).unwrap_or_else(|_| fallback_for(appearance))
 }
 
 /// "Apply to all apps": merge `id` into `<state>/current.json` under its variant, atomically.
@@ -332,47 +440,90 @@ pub fn set_global(theme: &Theme, state: &Path) -> std::io::Result<()> {
     fs::rename(tmp, target)
 }
 
-/// Directories to watch so that every change to the resolved theme fires an
-/// event: the index, `schemes/`, the state dir, and the real (de-symlinked)
-/// directories behind each loaded file. Edits made through a stow symlink only
-/// show up at the real path.
+/// Directories to watch so that every change to the resolved theme fires an event: the
+/// nearest existing ancestor of the index (so creating or removing `themes/` is seen), and,
+/// when the index exists, the index, `schemes/`, the state dir and the real (de-symlinked)
+/// directories behind each loaded file. Edits made through a stow symlink only show up at
+/// the real path. Nothing is created.
 pub fn watch_dirs() -> BTreeSet<PathBuf> {
     let (dir, state) = (themes_dir(), state_dir());
-    // Created so a later first write of current.json is seen; failure just means no state dir to watch.
-    fs::create_dir_all(&state).ok();
-    let mut dirs: BTreeSet<PathBuf> = [dir.clone(), dir.join("schemes"), state].into_iter().collect();
-    let files = ["roles.json".to_owned(), "defaults.json".to_owned()]
-        .into_iter()
-        .chain(list_themes(&dir).into_iter().map(|id| format!("schemes/{id}.json")));
-    for f in files {
-        if let Ok(real) = fs::canonicalize(dir.join(f))
-            && let Some(parent) = real.parent()
-        {
-            dirs.insert(parent.to_path_buf());
+    let mut dirs = BTreeSet::new();
+    if let Some(ancestor) = dir.ancestors().skip(1).find(|a| a.is_dir()) {
+        dirs.insert(ancestor.to_path_buf());
+    }
+    if index_exists(&dir) {
+        dirs.extend([dir.clone(), dir.join("schemes")]);
+        if let Some(ancestor) = state.ancestors().find(|a| a.is_dir()) {
+            dirs.insert(ancestor.to_path_buf());
+        }
+        let files = ["roles.json".to_owned(), "defaults.json".to_owned()]
+            .into_iter()
+            .chain(list_themes(&dir).into_iter().map(|id| format!("schemes/{id}.json")));
+        for f in files {
+            if let Ok(real) = fs::canonicalize(dir.join(f))
+                && let Some(parent) = real.parent()
+            {
+                dirs.insert(parent.to_path_buf());
+            }
         }
     }
     dirs.retain(|d| d.is_dir());
     dirs
 }
 
-/// Watch the theme index. Every event sends `()`; the receiver debounces
-/// (about 100 ms) and reloads, keeping the last good theme if parsing fails.
-/// Drop the returned watcher to stop. Recreate it if `watch_dirs()` changes.
-pub fn watch(tx: Sender<()>) -> notify::Result<RecommendedWatcher> {
+/// Watches the theme index. Every event sends `()`; the receiver debounces (about 100 ms)
+/// and reloads, keeping the last good theme if parsing fails. Drop it to stop.
+pub struct ThemeWatcher {
+    watcher: RecommendedWatcher,
+    tx: Sender<()>,
+    dirs: BTreeSet<PathBuf>,
+}
+
+fn start(tx: &Sender<()>) -> notify::Result<(RecommendedWatcher, BTreeSet<PathBuf>)> {
+    let sender = tx.clone();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if res.is_ok() {
-            let _ = tx.send(());
+            let _ = sender.send(());
         }
     })?;
-    for d in watch_dirs() {
-        watcher.watch(&d, RecursiveMode::NonRecursive)?;
+    let dirs = watch_dirs();
+    for d in &dirs {
+        // A folder that vanished since `watch_dirs` looked is not worth failing the rest for.
+        let _ = watcher.watch(d, RecursiveMode::NonRecursive);
     }
-    Ok(watcher)
+    Ok((watcher, dirs))
+}
+
+/// Watch the theme index (and where it will appear).
+pub fn watch(tx: Sender<()>) -> notify::Result<ThemeWatcher> {
+    let (watcher, dirs) = start(&tx)?;
+    Ok(ThemeWatcher { watcher, tx, dirs })
+}
+
+impl ThemeWatcher {
+    /// Re-aim the watcher after an event: the index may have appeared, vanished or gained
+    /// folders. True if the watched set changed.
+    pub fn refresh(&mut self) -> bool {
+        let dirs = watch_dirs();
+        if dirs == self.dirs {
+            return false;
+        }
+        match start(&self.tx) {
+            Ok((watcher, dirs)) => {
+                self.watcher = watcher;
+                self.dirs = dirs;
+                true
+            }
+            Err(_) => false,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FIREBOX: &str = include_str!("../tests-data/firebox.json");
 
     fn write(dir: &Path, rel: &str, body: &str) {
         let p = dir.join(rel);
@@ -380,20 +531,29 @@ mod tests {
         fs::write(p, body).unwrap();
     }
 
+    /// An index with FireBox (dark) and Light One, like a user's `~/.config/themes`.
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let root = tempfile::Builder::new().prefix("crow-theme-test-").tempdir().expect("theme fixture");
         let (dir, state) = (root.path().join("themes"), root.path().join("state"));
-        write(&dir, "roles.json", FALLBACK_ROLES);
-        write(&dir, "schemes/firebox.json", FALLBACK_SCHEME);
-        let light = FALLBACK_SCHEME.replace("\"dark\"", "\"light\"").replace("FireBox", "Light One");
+        write(&dir, "roles.json", BASE_ROLES);
+        write(&dir, "schemes/firebox.json", FIREBOX);
+        let light = FIREBOX.replace("\"dark\"", "\"light\"").replace("FireBox", "Light One");
         write(&dir, "schemes/light-one.json", &light);
         write(&dir, "defaults.json", r#"{"dark":"firebox","light":"light-one"}"#);
         (root, dir, state)
     }
 
+    /// Empty directories: no index at all.
+    fn no_index() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::Builder::new().prefix("crow-theme-test-").tempdir().expect("theme fixture");
+        let (dir, state) = (root.path().join("nothing-here"), root.path().join("state"));
+        (root, dir, state)
+    }
+
     #[test]
-    fn theme_roles_override_base_roles() {
-        let t = fallback();
+    fn index_theme_roles_override_base_roles() {
+        let (_root, dir, _) = fixture();
+        let t = load_theme(&dir, "firebox").unwrap();
         // FireBox maps accent to base09 instead of base0D.
         assert_eq!(t.role("accent"), Rgb(0xfe8019));
         // Literal hex override.
@@ -403,21 +563,192 @@ mod tests {
     }
 
     #[test]
-    fn resolution_order() {
-        let (_root, dir, state) = fixture();
-        assert_eq!(resolve_theme_id(Some("light-one"), Variant::Dark, &dir, &state).as_deref(), Some("light-one"));
-        assert_eq!(resolve_theme_id(Some("system"), Variant::Light, &dir, &state).as_deref(), Some("light-one"));
-        assert_eq!(resolve_theme_id(Some("missing"), Variant::Dark, &dir, &state).as_deref(), Some("firebox"));
-        write(&state, "current.json", r#"{"dark":"light-one"}"#);
-        assert_eq!(resolve_theme_id(None, Variant::Dark, &dir, &state).as_deref(), Some("light-one"));
+    fn no_index_lists_exactly_the_builtins() {
+        let (_root, dir, state) = no_index();
+        let ids: Vec<_> = list_theme_infos(&dir).into_iter().map(|i| i.id).collect();
+        assert_eq!(ids.len(), 8);
+        for id in BUILTIN.map(|(id, _)| id) {
+            assert!(ids.iter().any(|i| i == id), "{id}");
+        }
+        assert!(list_theme_infos(&dir).iter().all(|i| i.source == Source::Builtin));
+        assert!(!index_exists(&dir));
+        assert_eq!(resolve_theme_id(None, Variant::Light, &dir, &state), "finder-light");
+        assert_eq!(resolve_theme_id(Some("system"), Variant::Dark, &dir, &state), "finder-dark");
     }
 
     #[test]
-    fn broken_scheme_is_an_error_not_a_panic() {
+    fn system_in_light_appearance_is_finder_light_not_a_dark_theme() {
+        let (_root, dir, state) = no_index();
+        let theme = load_theme(&dir, &resolve_theme_id(None, Variant::Light, &dir, &state)).unwrap();
+        assert_eq!((theme.id.as_str(), theme.variant), ("finder-light", Variant::Light));
+    }
+
+    #[test]
+    fn empty_or_odd_schemes_folders_are_no_index() {
+        for setup in [
+            |dir: &Path| fs::create_dir_all(dir.join("schemes")).unwrap(),
+            |dir: &Path| write(dir, "schemes", "a file where a folder should be"),
+            |dir: &Path| write(dir, "schemes/readme.txt", "not a scheme"),
+        ] {
+            let (_root, dir, state) = no_index();
+            setup(&dir);
+            assert!(!index_exists(&dir));
+            assert_eq!(list_theme_infos(&dir).len(), 8);
+            assert_eq!(resolve_theme_id(None, Variant::Dark, &dir, &state), "finder-dark");
+        }
+    }
+
+    #[test]
+    fn resolution_order_with_an_index() {
+        let (_root, dir, state) = fixture();
+        assert_eq!(resolve_theme_id(Some("light-one"), Variant::Dark, &dir, &state), "light-one");
+        assert_eq!(resolve_theme_id(Some("system"), Variant::Light, &dir, &state), "light-one");
+        assert_eq!(resolve_theme_id(Some("missing"), Variant::Dark, &dir, &state), "firebox");
+        write(&state, "current.json", r#"{"dark":"light-one"}"#);
+        assert_eq!(resolve_theme_id(None, Variant::Dark, &dir, &state), "light-one");
+        // A built-in id works as saved and in current.json.
+        assert_eq!(resolve_theme_id(Some("gruvbox-dark"), Variant::Light, &dir, &state), "gruvbox-dark");
+        write(&state, "current.json", r#"{"light":"catppuccin-latte"}"#);
+        assert_eq!(resolve_theme_id(None, Variant::Light, &dir, &state), "catppuccin-latte");
+        // A defaults.json naming nothing that exists falls through to Finder.
+        write(&state, "current.json", "{}");
+        write(&dir, "defaults.json", r#"{"dark":"gone","light":"gone"}"#);
+        assert_eq!(resolve_theme_id(None, Variant::Light, &dir, &state), "finder-light");
+    }
+
+    #[test]
+    fn a_missing_saved_theme_is_reported_once_and_resolves_like_system() {
+        let (_root, dir, state) = no_index();
+        assert_eq!(missing_saved(Some("gone"), &dir), Some("gone"));
+        assert_eq!(missing_saved(Some("system"), &dir), None);
+        assert_eq!(missing_saved(Some("gruvbox-dark"), &dir), None);
+        assert_eq!(missing_saved(None, &dir), None);
+        assert_eq!(resolve_theme_id(Some("gone"), Variant::Light, &dir, &state), "finder-light");
+    }
+
+    #[test]
+    fn the_index_wins_a_shared_id_and_the_picker_shows_it_once() {
+        let (_root, dir, _) = fixture();
+        let own = FIREBOX.replace("FireBox", "My Solarized");
+        write(&dir, "schemes/solarized-dark.json", &own);
+        let infos = list_theme_infos(&dir);
+        let shared: Vec<_> = infos.iter().filter(|i| i.id == "solarized-dark").collect();
+        assert_eq!(shared.len(), 1);
+        assert_eq!((shared[0].name.as_str(), shared[0].source), ("My Solarized", Source::Index));
+        assert_eq!(load_theme(&dir, "solarized-dark").unwrap().name, "My Solarized");
+        assert_eq!(infos.len(), 10);
+    }
+
+    #[test]
+    fn broken_scheme_is_an_error_not_a_panic_and_not_listed() {
         let (_root, dir, _) = fixture();
         write(&dir, "schemes/broken.json", "{ not json");
-        assert!(load_theme(&dir, "broken").is_err());
+        let error = load_theme(&dir, "broken").unwrap_err();
+        assert!(error.contains("broken.json"), "{error}");
         assert!(list_themes(&dir).contains(&"broken".to_owned()));
+        assert!(!list_theme_infos(&dir).iter().any(|i| i.id == "broken"));
+        // A broken file shadowing a built-in id is an error too, not a silent built-in.
+        write(&dir, "schemes/finder-dark.json", "{");
+        assert!(load_theme(&dir, "finder-dark").is_err());
+    }
+
+    #[test]
+    fn broken_roles_json_uses_the_base_mapping() {
+        let (_root, dir, _) = fixture();
+        write(&dir, "roles.json", "[1, 2");
+        assert_eq!(load_theme(&dir, "light-one").unwrap().role("fg"), Rgb(0xebdbb2));
+        write(&dir, "roles.json", r#"{"fg": 5}"#);
+        assert!(load_theme(&dir, "light-one").is_ok());
+    }
+
+    #[test]
+    fn current_json_may_name_a_builtin() {
+        let (_root, dir, state) = no_index();
+        write(&state, "current.json", r#"{"dark":"gruvbox-dark"}"#);
+        // No index: current.json is ignored, the built-in for the appearance wins.
+        assert_eq!(resolve_theme_id(None, Variant::Dark, &dir, &state), "finder-dark");
+    }
+
+    #[test]
+    fn system_references_resolve_through_the_resolver() {
+        let t = fallback_for(Variant::Light);
+        let stand_in = t.role("accent");
+        assert_eq!(stand_in, Rgb(0x007aff));
+        assert_eq!(t.system_refs().count(), 3);
+        assert_eq!(t.role("selection"), Rgb(0xdcdcdc), "the unfocused selection grey is not the accent");
+        let fake = |reference: &str| match reference {
+            "system:accent" => Some(Rgb(0xf74f9e)),
+            _ => None,
+        };
+        let resolved = t.resolve_system(&fake);
+        assert_eq!(resolved.role("accent"), Rgb(0xf74f9e));
+        assert_eq!(resolved.role("selection"), Rgb(0xdcdcdc), "unknown reference keeps its stand-in");
+        assert_eq!(resolved.role("link"), Rgb(0xf74f9e));
+        // Unknown references keep the stand-in; other themes have none.
+        let unknown = fallback_for(Variant::Dark).resolve_system(&|_| None);
+        assert_eq!(unknown.role("accent"), Rgb(0x0091ff));
+        assert_eq!(builtin("gruvbox-dark").unwrap().system_refs().count(), 0);
+    }
+
+    #[test]
+    fn every_builtin_parses_with_all_roles_and_the_ids_match() {
+        let infos = list_theme_infos(Path::new("/nonexistent"));
+        for (id, _) in BUILTIN {
+            let t = builtin(id).unwrap();
+            for role in ROLES {
+                assert!(t.roles.contains_key(role), "{id} lacks {role}");
+            }
+            for slot in 0..=0x17 {
+                assert!(t.slot(&format!("base{slot:02X}")).is_some(), "{id} lacks base{slot:02X}");
+            }
+            assert!(infos.iter().any(|i| i.id == id));
+        }
+        let variants: Vec<_> = infos.iter().map(|i| i.variant).collect();
+        assert_eq!(variants.iter().filter(|v| **v == Variant::Light).count(), 4);
+    }
+
+    /// WCAG relative luminance contrast ratio.
+    fn contrast(a: Rgb, b: Rgb) -> f32 {
+        let lum = |c: Rgb| {
+            0.2126 * to_linear(c.0 >> 16 & 0xff) + 0.7152 * to_linear(c.0 >> 8 & 0xff) + 0.0722 * to_linear(c.0 & 0xff)
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// Pairs below the threshold on purpose, with why. `(theme id, foreground role, background role)`.
+    /// Finder's accent is the user's system accent colour, resolved at run time;
+    /// the stand-in only approximates the default blue.
+    const CONTRAST_EXCEPTIONS: &[(&str, &str, &str)] =
+        &[("finder-light", "on-accent", "accent"), ("finder-dark", "on-accent", "accent")];
+
+    #[test]
+    fn builtin_contrast_meets_wcag_aa() {
+        // (foreground, background, minimum): text 4.5, UI 3.
+        let pairs = [
+            ("fg", "bg", 4.5),
+            ("fg", "bg-inset", 4.5),
+            ("fg-muted", "bg", 4.5),
+            ("fg-muted", "bg-inset", 4.5),
+            ("on-accent", "accent", 4.5),
+            ("accent", "bg", 3.0),
+            ("error", "bg", 4.5),
+            ("warning", "bg", 3.0),
+            ("success", "bg", 3.0),
+            ("info", "bg", 3.0),
+            ("fg", "selection", 4.5),
+        ];
+        let mut failures = Vec::new();
+        for (id, _) in BUILTIN {
+            let t = builtin(id).unwrap();
+            for (fg, bg, min) in pairs {
+                let ratio = contrast(t.role(fg), t.role(bg));
+                if ratio < min && !CONTRAST_EXCEPTIONS.contains(&(id, fg, bg)) {
+                    failures.push(format!("{id}: {fg} on {bg} is {ratio:.2}:1, needs {min}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
@@ -437,12 +768,24 @@ mod tests {
     }
 
     #[test]
-    fn theme_infos_have_names_and_variants() {
+    fn theme_infos_have_names_variants_and_sources() {
         let (_root, dir, _) = fixture();
         write(&dir, "schemes/broken.json", "{");
         let infos = list_theme_infos(&dir);
-        let names: Vec<_> = infos.iter().map(|i| (i.name.as_str(), i.variant)).collect();
-        assert_eq!(names, [("FireBox", Variant::Dark), ("Light One", Variant::Light)]);
+        let find = |id: &str| infos.iter().find(|i| i.id == id).map(|i| (i.name.as_str(), i.variant, i.source));
+        assert_eq!(find("firebox"), Some(("FireBox", Variant::Dark, Source::Index)));
+        assert_eq!(find("light-one"), Some(("Light One", Variant::Light, Source::Index)));
+        assert_eq!(find("finder-light"), Some(("Finder Light", Variant::Light, Source::Builtin)));
+    }
+
+    #[test]
+    fn watching_creates_nothing() {
+        let (_root, dir, state) = no_index();
+        assert!(!dir.exists() && !state.exists());
+        // `watch_dirs` reads the process environment, so only the pure parts are checked here:
+        // an absent index and state dir stay absent after listing and resolving.
+        let _ = (list_theme_infos(&dir), resolve_theme_id(None, Variant::Dark, &dir, &state));
+        assert!(!dir.exists() && !state.exists());
     }
 
     #[test]

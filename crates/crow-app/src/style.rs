@@ -45,6 +45,21 @@ pub fn active_selection(theme: &Theme) -> Rgba {
     color_alpha(theme.role("accent"), 0x55)
 }
 
+/// How solid the sidebar stays while the window is translucent: enough of the blurred desktop
+/// shows to read as glass, enough tone stays for the labels to keep their contrast on any backdrop.
+pub const TRANSLUCENT_SIDEBAR_ALPHA: u8 = 0xcc;
+
+/// The thin lines that frame the window: the sidebar edge, the bars, the preview edge. Mixed from
+/// `bg` toward `fg` so every theme gets a Finder-like hairline; a theme's `border` role is often a
+/// selection-grade slot (Solarized's `base02`), far too heavy for a 1 px frame line.
+pub fn hairline(theme: &Theme) -> Rgba {
+    color(theme.role("bg").mix(theme.role("fg"), HAIRLINE_MIX))
+}
+
+/// How far from `bg` to `fg` the hairline sits: Finder's own lines (#d9d9d9 on white, #3d3d3d on
+/// #1e1e1e) are about this far.
+const HAIRLINE_MIX: f32 = 0.15;
+
 /// A selection without focus.
 pub fn inactive_selection(theme: &Theme) -> Rgba {
     color(theme.role("selection"))
@@ -497,6 +512,18 @@ mod tests {
         let past_end = 0..99;
         let _ = highlight_text("\u{e9}", std::slice::from_ref(&mid_char), &theme, false);
         let _ = highlight_text("alpha", std::slice::from_ref(&past_end), &theme, true);
+    }
+
+    #[test]
+    fn the_frame_hairline_is_subtle_in_every_builtin_theme() {
+        let lum = |c: Rgba| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+        for info in crow_theme::list_theme_infos(std::path::Path::new("/nonexistent")) {
+            let theme = crow_theme::load_theme(std::path::Path::new("/nonexistent"), &info.id).unwrap();
+            let (line, bg) = (lum(hairline(&theme)), lum(color(theme.role("bg"))));
+            // Finder's own lines are about 0.14 apart in sRGB lightness; none may get heavy.
+            assert!((line - bg).abs() < 0.2, "{} hairline too heavy: {line} vs {bg}", info.id);
+            assert!((line - bg).abs() > 0.02, "{} hairline vanishes", info.id);
+        }
     }
 
     #[test]

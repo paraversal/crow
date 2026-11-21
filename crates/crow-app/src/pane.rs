@@ -4199,6 +4199,9 @@ impl Pane {
                     .when(shift != 0.0, |row| row.top(px(shift)))
                     .when(look.opacity * reveal * fade < 1.0, |row| row.opacity(look.opacity * reveal * fade))
                     .when(ix % 2 == 1 && !(selected && glide && cursor == Some(ix)), |row| row.bg(stripe))
+                    // The stripe is rounded like the selection fill (Finder's are); a selected row keeps its
+                    // island's rounding so a multi-row selection stays joined.
+                    .when(rounds_stripe(ix, selected), |row| row.rounded_md())
                     .when(moving_fill.is_none() && draws_selection_fill(selected, glide, cursor == Some(ix)), |row| {
                         row.bg(selection_bg)
                     })
@@ -5728,6 +5731,12 @@ fn draws_selection_fill(selected: bool, glide: bool, is_cursor: bool) -> bool {
     selected && !(glide && is_cursor)
 }
 
+/// Whether row `ix` rounds its stripe: striped (odd) rows that aren't selected. A selected row
+/// takes its rounding from its island instead.
+fn rounds_stripe(ix: usize, selected: bool) -> bool {
+    ix % 2 == 1 && !selected
+}
+
 /// Contiguous runs of selected rows in display order: one rounded box per run.
 fn selection_islands(rows: usize, selected: impl Fn(usize) -> bool) -> Vec<Range<usize>> {
     let mut islands = Vec::new();
@@ -6645,6 +6654,13 @@ mod tests {
         assert!(selection_islands(0, |_| true).is_empty());
         assert_eq!(selection_islands(3, |_| true), vec![0..3]);
         assert!(selection_islands(2, |_| false).is_empty());
+    }
+
+    #[test]
+    fn only_unselected_striped_rows_round_their_stripe() {
+        assert!(!super::rounds_stripe(0, false), "even rows have no stripe");
+        assert!(super::rounds_stripe(1, false));
+        assert!(!super::rounds_stripe(1, true), "a selected row takes its island's rounding");
     }
 
     #[test]

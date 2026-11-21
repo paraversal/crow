@@ -23,8 +23,8 @@ use crate::actions::{
     KeyboardShortcuts, Minimize, MoveDown, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover,
     PathUnhover, PluginCommand, PluginCommandResult, PreviousTab, RemoveSavedSearch, ResetFolderView, SaveSearch,
     SearchEverything, SearchHome, ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus,
-    ToggleHiddenFiles, TogglePreview, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList,
-    WhyThisView, Zoom,
+    ToggleHiddenFiles, TogglePreview, ToggleSidebar, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons,
+    ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -84,8 +84,9 @@ pub fn open(
         // The band draws its own titlebar and starts the move itself, so a drag on
         // a toolbar control never moves the window (D3).
         app_owns_titlebar_drag: true,
-        // Sidebar 210 plus a usable center; below this the band's parts no longer fit.
-        window_min_size: Some(size(px(640.), px(400.))),
+        // The toolbar sits right of the sidebar column: below this its parts no longer fit.
+        window_min_size: Some(size(px(760.), px(400.))),
+        window_background: ui::window_background(cx.global::<Ui>().translucent),
         ..Default::default()
     };
     cx.open_window(options, |window, cx| cx.new(|cx| CrowWindow::new(dir, bench, bench_filter, window, cx)))
@@ -714,6 +715,17 @@ impl CrowWindow {
         cx.notify();
     }
 
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
+        let hide = !cx.global::<Ui>().sidebar_hidden;
+        cx.global_mut::<Ui>().sidebar_hidden = hide;
+        // Focus must not stay in a column that is gone.
+        if hide && self.sidebar.read(cx).focus_handle(cx).contains_focused(window, cx) {
+            self.focus_center(window, cx);
+        }
+        crate::menus::refresh(cx);
+        cx.refresh_windows();
+    }
+
     /// Start the right column's slide if its visibility changed since `was_visible`.
     fn begin_pane_slide(&mut self, was_visible: bool, cx: &mut Context<Self>) {
         let visible = self.info.read(cx).visible();
@@ -1280,13 +1292,14 @@ impl CrowWindow {
             .aria_label("Toolbar")
             .h(px(BAND_HEIGHT))
             .flex_none()
-            .pl(px(86.))
+            // With the sidebar hidden the traffic lights sit at the toolbar's left.
+            .pl(px(if cx.global::<Ui>().sidebar_hidden { 86. } else { 12. }))
             .pr_3()
             .flex()
             .items_center()
             .gap(px(10.))
             .border_b_1()
-            .border_color(color(theme.role("border")))
+            .border_color(crate::style::hairline(&theme))
             .child(nav)
             .when(self.active_search(cx).is_some(), |bar| bar.when_some(band, |bar, band| bar.child(band)))
             .when(self.active_search(cx).is_none(), |bar| {
@@ -1398,7 +1411,7 @@ impl CrowWindow {
                 .justify_center()
                 .text_size(px(12.))
                 .border_r_1()
-                .border_color(color(theme.role("border")))
+                .border_color(crate::style::hairline(&theme))
                 .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
                 .when(selected && !glide, |tab| tab.bg(color(theme.role("bg"))));
             let mut tab = tab.when(fade < 1.0, |tab| tab.opacity(fade));
@@ -1462,7 +1475,7 @@ impl CrowWindow {
             .relative()
             .flex()
             .border_b_1()
-            .border_color(color(theme.role("border")))
+            .border_color(crate::style::hairline(&theme))
             .bg(color(theme.role("bg-inset")))
             .children(fill)
             .children(items)
@@ -1537,7 +1550,7 @@ impl CrowWindow {
             .flex()
             .flex_col()
             .border_l_1()
-            .border_color(color(theme.role("border")))
+            .border_color(crate::style::hairline(theme))
             .child(info_pane::tab_strip(&self.info, theme, cx))
             .child(side_panes::splitter(side_panes::Side::Right, self.info.read(cx).splitter_focus(), theme))
             .child(info_pane::tab_body(&self.info, body, cx))
@@ -1699,7 +1712,8 @@ impl CrowWindow {
             }
         }
         // Narrow windows lose hints from the right and fold the path's middle (I7).
-        bottom_bar::fit_to_window(&mut state, window);
+        let left = if cx.global::<Ui>().sidebar_hidden { px(0.) } else { self.side_panes.left_width() };
+        bottom_bar::fit_to_window(&mut state, window, left);
         state
     }
 
@@ -2852,7 +2866,8 @@ impl CrowWindow {
     /// "Apply to All Apps": the chosen theme becomes the global pick for its variant,
     /// and Crow follows "System" from then on.
     fn apply_everywhere(&mut self, _: &ApplyThemeEverywhere, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(picker) = &self.picker else { return };
+        // Without a theme index no other app reads the choice, so there is nothing to apply to.
+        let Some(picker) = self.picker.as_ref().filter(|picker| picker.choice.index) else { return };
         let chosen = picker.choice.entries.get(picker.choice.cursor).cloned();
         retire!(self, cx, picker);
         let dir = cx.global::<Ui>().themes_dir.clone();
@@ -3249,6 +3264,7 @@ impl CrowWindow {
             CommandId::SwitchFocus => self.switch_focus(&SwitchFocus, window, cx),
             CommandId::ToggleHiddenFiles => self.toggle_hidden(&ToggleHiddenFiles, window, cx),
             CommandId::TogglePreview => self.toggle_preview(&TogglePreview, window, cx),
+            CommandId::ToggleSidebar => self.toggle_sidebar(&ToggleSidebar, window, cx),
             CommandId::ShowInfo => self.show_info(&ShowInfo, window, cx),
             CommandId::ShowGitDiff => self.show_git_diff(&crate::actions::ShowGitDiff, window, cx),
             CommandId::ChooseListColumns => self.choose_list_columns(&crate::actions::ChooseListColumns, window, cx),
@@ -3325,11 +3341,19 @@ impl CrowWindow {
         let (fg, muted, accent) = (theme.role("fg"), theme.role("fg-muted"), theme.role("accent"));
         let count = picker.choice.entries.len();
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
-        let mut last_variant = None;
+        let mut last_group = None;
         for (i, entry) in picker.choice.entries.iter().enumerate() {
-            let variant = entry.as_ref().map(|e| e.variant);
-            if variant.is_some() && variant != last_variant {
-                let title = if variant == Some(crow_theme::Variant::Light) { "Light" } else { "Dark" };
+            let group = entry.as_ref().map(|e| (e.source, e.variant));
+            if let Some((source, variant)) = group
+                && group != last_group
+            {
+                let kind = if variant == crow_theme::Variant::Light { "Light" } else { "Dark" };
+                // The source is named only when there are two: with no index, "Dark" and "Light" say it all.
+                let title = if source == crow_theme::Source::Index && picker.choice.index {
+                    format!("Theme index · {kind}")
+                } else {
+                    kind.to_owned()
+                };
                 rows.push(
                     div()
                         .px_2()
@@ -3340,7 +3364,7 @@ impl CrowWindow {
                         .child(title)
                         .into_any_element(),
                 );
-                last_variant = variant;
+                last_group = group;
             }
             let label = picker.choice.label(i);
             let selected = i == picker.choice.cursor;
@@ -3381,12 +3405,14 @@ impl CrowWindow {
         };
         let keep = keys::text(&crate::actions::SheetConfirm, KeyScope::ThemePicker, cx);
         let everywhere = keys::text(&ApplyThemeEverywhere, KeyScope::ThemePicker, cx);
-        let hint = match (keep, everywhere) {
-            (Some(keep), Some(everywhere)) => format!(
+        let hint = match (keep, everywhere, picker.choice.index) {
+            (Some(keep), Some(everywhere), true) => format!(
                 "{keep} keeps it for Crow. Apply to All Apps ({everywhere}) sets it for every app that reads the theme index."
             ),
-            _ => "Apply to All Apps sets it for every app that reads the theme index.".to_owned(),
+            (_, _, true) => "Apply to All Apps sets it for every app that reads the theme index.".to_owned(),
+            (..) => String::new(),
         };
+        let index = picker.choice.index;
         Some(chrome::sheet(
             chrome::sheet_panel("theme-picker", SheetWidth::Compact, &theme)
                 .aria_label("Theme")
@@ -3419,14 +3445,20 @@ impl CrowWindow {
                         .gap(px(1.))
                         .children(rows),
                 )
-                .child(div().text_size(px(12.)).text_color(color(muted)).child(hint))
+                .when(index, |panel| panel.child(div().text_size(px(12.)).text_color(color(muted)).child(hint)))
                 .child(
                     div()
                         .flex()
                         .gap_2()
-                        .child(button("theme-everywhere", "Apply to All Apps", false).on_click(
-                            cx.listener(|this, _, window, cx| this.apply_everywhere(&ApplyThemeEverywhere, window, cx)),
-                        ))
+                        .when(index, |row| {
+                            row.child(
+                                button("theme-everywhere", "Apply to All Apps", false)
+                                    .debug_selector(|| "theme-everywhere".into())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.apply_everywhere(&ApplyThemeEverywhere, window, cx)
+                                    })),
+                            )
+                        })
                         .child(div().flex_1())
                         .child(
                             button("theme-cancel", "Cancel", false)
@@ -3542,13 +3574,42 @@ impl Render for CrowWindow {
             self.info.read(cx).preferred_width,
             show_preview && active_search.is_none() && mode == ViewMode::Gallery,
         );
-        let sidebar = div()
-            .relative()
-            .h_full()
-            .flex_none()
-            .w(self.side_panes.left_width())
-            .child(self.sidebar.clone())
-            .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme));
+        let translucent = cx.global::<Ui>().translucent;
+        let sidebar = (!cx.global::<Ui>().sidebar_hidden).then(|| {
+            let tone = if translucent {
+                // See-through enough for the blurred desktop to read, solid enough for the labels.
+                color_alpha(theme.role("bg-inset"), crate::style::TRANSLUCENT_SIDEBAR_ALPHA)
+            } else {
+                color(theme.role("bg-inset"))
+            };
+            div()
+                .relative()
+                .h_full()
+                .flex_none()
+                .w(self.side_panes.left_width())
+                .flex()
+                .flex_col()
+                .bg(tone)
+                .child(
+                    // The traffic lights' strip: it moves the window like the toolbar does.
+                    div().h(px(BAND_HEIGHT)).flex_none().w_full().on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
+                            let effects = crate::effects::effects(cx);
+                            if event.click_count > 1 {
+                                effects.titlebar_double_click(window);
+                            } else {
+                                effects.start_window_move(window);
+                            }
+                        }),
+                    ),
+                )
+                .child(div().flex_1().min_h_0().w_full().child(self.sidebar.clone()))
+                .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme))
+                // One unbroken divider from the top of the window to the bottom, drawn over the
+                // column's edge so the sidebar keeps its width.
+                .child(div().absolute().top_0().bottom_0().right_0().w(px(1.)).bg(crate::style::hairline(&theme)))
+        });
         let search_preview = active_search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);
         // A narrow search hides the column by default; ⌘I or ⇧⌘P still opens it.
@@ -3720,6 +3781,7 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::switch_focus))
             .on_action(cx.listener(Self::toggle_hidden))
             .on_action(cx.listener(Self::toggle_preview))
+            .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::show_info))
             .when(crate::git::provider_enabled(cx), |root| {
                 root.on_action(cx.listener(Self::review_git_command))
@@ -3828,14 +3890,29 @@ impl Render for CrowWindow {
             .size_full()
             .flex()
             .flex_col()
-            .bg(color(theme.role("bg")))
+            // Translucent: the window shows the blurred desktop, so every part but the
+            // sidebar column paints itself solid.
+            .when(!translucent, |root| root.bg(color(theme.role("bg"))))
             .text_color(color(theme.role("fg")))
             .font_family(font)
             .text_size(px(font_size))
-            .child(title_bar)
-            .children(tab_bar)
-            .child(div().relative().flex_1().min_h_0().flex().child(sidebar).child(center).children(preview))
-            .child(path_bar)
+            .child(
+                // Finder's layout: the sidebar is a full-height column (the traffic lights sit
+                // at its top) and the toolbar, tabs, folder and path bar share the column to its right.
+                div().relative().flex_1().min_h_0().w_full().flex().children(sidebar).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .bg(color(theme.role("bg")))
+                        .child(title_bar)
+                        .children(tab_bar)
+                        .child(div().relative().flex_1().min_h_0().flex().child(center).children(preview))
+                        .child(path_bar),
+                ),
+            )
             .children(tip)
             .children(behind)
             .children(sheet)

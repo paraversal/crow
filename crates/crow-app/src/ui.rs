@@ -120,6 +120,14 @@ pub struct Ui {
     pub volumes_refresh: u64,
     pub themes_dir: PathBuf,
     pub themes_state_dir: PathBuf,
+    /// The saved theme id last reported as missing, so the notice shows once.
+    pub missing_theme_notice: Option<String>,
+    /// Whether windows are blurred and the sidebar translucent right now.
+    pub translucent: bool,
+    /// View ▸ Hide Sidebar: the left column is collapsed in every window. Not saved.
+    pub sidebar_hidden: bool,
+    /// The last theme load error shown, so it isn't repeated on every reload.
+    pub theme_error: Option<String>,
     pub config_dir: PathBuf,
     config_writes: [Option<ConfigWrite>; SAVED_QUERIES + 1],
     config_write_revision: [u64; SAVED_QUERIES + 1],
@@ -224,6 +232,10 @@ impl Ui {
             volumes_refresh: 0,
             themes_dir: crow_theme::themes_dir(),
             themes_state_dir: crow_theme::state_dir(),
+            missing_theme_notice: None,
+            translucent: false,
+            sidebar_hidden: false,
+            theme_error: None,
             config_dir,
             config_writes: Default::default(),
             config_write_revision: Default::default(),
@@ -404,7 +416,9 @@ struct Watchers {
     config_rx: Receiver<()>,
     icon_rx: Receiver<()>,
     mounts_rx: Receiver<()>,
-    _theme: Option<RecommendedWatcher>,
+    _theme: Option<crow_theme::ThemeWatcher>,
+    colors_rx: Receiver<()>,
+    _colors: Option<crow_macos::SystemColorWatcher>,
     _config: Option<RecommendedWatcher>,
     _icon: Option<RecommendedWatcher>,
     _mounts: Option<crow_macos::MountWatcher>,
@@ -431,9 +445,11 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     std::fs::create_dir_all(&icon_packs_dir).ok();
     let mut ui = Ui::new(config_dir.clone(), state_dir, home, crow_theme::fallback(), true);
     let theme = crow_theme::current(ui.settings.theme_id(), variant_of(cx.window_appearance()));
+    let theme = resolve_system_colors(theme);
     tracing::info!(theme = %theme.name, "starting");
     ui.target = theme.clone();
     ui.theme = theme;
+    ui.translucent = translucency_wanted(&ui.settings);
     cx.set_global(ui);
     cx.on_app_quit(|cx| {
         let pending = cx.global::<Ui>().config_writes.clone();
@@ -454,6 +470,8 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     feedback::preload(feedback.sound, cx);
     // After the first frame: decoding the icon is not worth delaying first paint for.
     cx.defer(refresh_app_icon);
+    // A saved theme that no longer exists is said once, which needs the message list.
+    cx.defer(reload_theme);
     crate::usage::init(cx);
     crate::tips::init(cx);
     crate::onboarding::init(cx);
@@ -483,7 +501,13 @@ pub fn init_at(cx: &mut App, config_dir: PathBuf, state_dir: PathBuf, home: Path
     let mounts = crow_macos::watch_mounts(move || {
         mounts_tx.send(()).ok();
     });
+    let (colors_tx, colors_rx) = mpsc::channel();
+    let colors = crow_macos::watch_system_colors(move || {
+        colors_tx.send(()).ok();
+    });
     cx.set_global(Watchers {
+        colors_rx,
+        _colors: colors,
         theme_rx,
         config_rx,
         icon_rx,
@@ -557,9 +581,13 @@ pub fn init_for_tests(cx: &mut App) -> PathBuf {
     std::fs::create_dir_all(&state_dir).ok();
     // io-ok: test-only state
     std::fs::write(state_dir.join(crow_core::ONBOARDING_FILE), "{\"tips_choice\": true}\n").ok();
-    cx.default_global::<TestRoots>().0.push(root);
-    let ui = Ui::new(config_dir.clone(), state_dir, crow_core::home(), crow_theme::fallback(), false);
+    // No theme index unless a test installs one: never the developer's own `~/.config/themes`.
+    let (themes_dir, themes_state_dir) = (root.path().join("no-themes"), root.path().join("no-themes-state"));
+    let mut ui = Ui::new(config_dir.clone(), state_dir, crow_core::home(), crow_theme::fallback(), false);
+    ui.themes_dir = themes_dir;
+    ui.themes_state_dir = themes_state_dir;
     cx.set_global(ui);
+    cx.default_global::<TestRoots>().0.push(root);
     crate::extensions::init(cx);
     crate::icon_packs::install(cx);
     crate::cloud_status::init_for_tests(cx);
@@ -579,7 +607,9 @@ fn poll(cx: &mut App) {
     let watchers = cx.global::<Watchers>();
     let config_changed = watchers.config_rx.try_iter().count() > 0;
     let icon_packs_changed = watchers.icon_rx.try_iter().count() > 0;
-    let theme_changed = watchers.theme_rx.try_iter().count() > 0;
+    let index_changed = watchers.theme_rx.try_iter().count() > 0;
+    let colors_changed = watchers.colors_rx.try_iter().count() > 0;
+    let theme_changed = index_changed || colors_changed;
     let mounts_changed = watchers.mounts_rx.try_iter().count() > 0;
     if config_changed {
         reload_config(cx);
@@ -591,7 +621,12 @@ fn poll(cx: &mut App) {
     crate::git::poll(cx);
     // Reduce Motion and the UI-sounds switch can change without a config edit.
     refresh_feedback(cx);
+    refresh_translucency(cx);
     refresh_clipboard(cx);
+    if index_changed && let Some(watcher) = cx.global_mut::<Watchers>()._theme.as_mut() {
+        // The index may have appeared or vanished: watch where it is now.
+        watcher.refresh();
+    }
     if config_changed || theme_changed {
         reload_theme(cx);
     }
@@ -639,6 +674,37 @@ pub fn refresh_feedback(cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// Whether the sidebar should be translucent now: the setting, unless macOS Reduce
+/// Transparency is on.
+pub fn translucency_wanted(settings: &crow_core::Settings) -> bool {
+    #[cfg(test)]
+    {
+        settings.translucent_sidebar
+    }
+    #[cfg(not(test))]
+    {
+        settings.translucent_sidebar && !crow_macos::reduce_transparency()
+    }
+}
+
+/// Make every window's background match `translucent_sidebar`, if that changed since the last call.
+pub fn refresh_translucency(cx: &mut App) {
+    let want = translucency_wanted(&cx.global::<Ui>().settings);
+    if cx.global::<Ui>().translucent == want {
+        return;
+    }
+    cx.global_mut::<Ui>().translucent = want;
+    for handle in cx.windows() {
+        handle.update(cx, |_, window, _| window.set_background_appearance(window_background(want))).ok();
+    }
+    cx.refresh_windows();
+}
+
+/// The window background for a translucency choice: blurred only while the sidebar needs it.
+pub fn window_background(translucent: bool) -> gpui::WindowBackgroundAppearance {
+    if translucent { gpui::WindowBackgroundAppearance::Blurred } else { gpui::WindowBackgroundAppearance::Opaque }
+}
+
 /// Reload every config file. Views always count as changed (cheap, and panes only
 /// re-apply what differs); the others only when their contents did.
 pub fn reload_config(cx: &mut App) {
@@ -667,6 +733,7 @@ pub fn reload_config(cx: &mut App) {
     }
     reload_saved_queries(cx);
     refresh_feedback(cx);
+    refresh_translucency(cx);
     refresh_app_icon(cx);
     crate::plugins::reload(cx);
     cx.refresh_windows();
@@ -717,6 +784,7 @@ pub enum SettingChange {
     SearchMatch(SearchMatch),
     ShowPreview(bool),
     PaletteRecentCommands(bool),
+    TranslucentSidebar(bool),
     ViewPerFolder(bool),
     WindowWidth(u32),
     WindowHeight(u32),
@@ -748,6 +816,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
             SettingChange::SearchMatch(value) => replace(&mut settings.search_match, *value),
             SettingChange::ShowPreview(value) => replace(&mut settings.show_preview, *value),
             SettingChange::PaletteRecentCommands(value) => replace(&mut settings.palette_recent_commands, *value),
+            SettingChange::TranslucentSidebar(value) => replace(&mut settings.translucent_sidebar, *value),
             SettingChange::ViewPerFolder(value) => replace(&mut settings.view_per_folder, *value),
             SettingChange::WindowWidth(value) => replace(&mut settings.window.width, *value),
             SettingChange::WindowHeight(value) => replace(&mut settings.window.height, *value),
@@ -767,6 +836,7 @@ pub fn set_setting(change: SettingChange, cx: &mut App) {
         SettingChange::ShowHiddenFiles(show) => crate::window::apply_show_hidden(*show, cx),
         SettingChange::SearchIncludesHidden(include) => crate::window::apply_search_includes_hidden(*include, cx),
         SettingChange::ShowPreview(_) => crate::menus::refresh(cx),
+        SettingChange::TranslucentSidebar(_) => refresh_translucency(cx),
         _ => {}
     }
     cx.refresh_windows();
@@ -848,6 +918,13 @@ fn write_setting(change: SettingChange, cx: &mut App) {
         }
         SettingChange::ShowPreview(value) => {
             write_config(SETTINGS, move |config, _| crow_core::save_bool_setting(config, "show_preview", value), cx);
+        }
+        SettingChange::TranslucentSidebar(value) => {
+            write_config(
+                SETTINGS,
+                move |config, _| crow_core::save_bool_setting(config, "translucent_sidebar", value),
+                cx,
+            );
         }
         SettingChange::PaletteRecentCommands(value) => {
             write_config(
@@ -939,12 +1016,58 @@ pub fn reload_theme(cx: &mut App) {
         Some(id) => Some(id.clone()),
         None => ui.settings.theme_id().map(str::to_owned),
     };
-    let loaded = crow_theme::resolve_theme_id(saved.as_deref(), variant, &dir, &state)
-        .ok_or_else(|| "no themes in the index".to_owned())
-        .and_then(|id| crow_theme::load_theme(&dir, &id));
-    match loaded {
-        Ok(theme) => set_theme(theme, cx),
-        Err(e) => tracing::warn!("theme reload skipped: {e}"),
+    let id = crow_theme::resolve_theme_id(saved.as_deref(), variant, &dir, &state);
+    let missing = crow_theme::missing_saved(saved.as_deref(), &dir).map(str::to_owned);
+    match crow_theme::load_theme(&dir, &id) {
+        Ok(theme) => {
+            let theme = resolve_system_colors(theme);
+            // Said once per missing id, not on every reload.
+            cx.global_mut::<Ui>().theme_error = None;
+            if cx.global::<Ui>().missing_theme_notice != missing && cx.has_global::<crate::operations::Operations>() {
+                cx.global_mut::<Ui>().missing_theme_notice = missing.clone();
+                if let Some(missing) = missing {
+                    crate::operations::message(format!("Theme ‘{missing}’ not found; using {}", theme.name), false, cx);
+                    cx.refresh_windows();
+                }
+            }
+            set_theme(theme, cx);
+        }
+        Err(e) => {
+            tracing::warn!("theme reload skipped: {e}");
+            // The last good theme stays; the file and line are said once per distinct error.
+            if cx.global::<Ui>().theme_error.as_deref() != Some(e.as_str())
+                && cx.has_global::<crate::operations::Operations>()
+            {
+                cx.global_mut::<Ui>().theme_error = Some(e.clone());
+                crate::operations::message(e, true, cx);
+                cx.refresh_windows();
+            }
+        }
+    }
+}
+
+/// Apply the system colours as they look in the theme's own variant, not the OS's.
+fn resolve_system_colors(theme: Theme) -> Theme {
+    let variant = theme.variant;
+    theme.resolve_system(&|reference| system_color(reference, variant))
+}
+
+/// A system colour for a theme's `system:*` role (Finder follows the accent colour).
+fn system_color(reference: &str, variant: crow_theme::Variant) -> Option<crow_theme::Rgb> {
+    #[cfg(test)]
+    {
+        let _ = (reference, variant);
+        None
+    }
+    #[cfg(not(test))]
+    {
+        let dark = variant == crow_theme::Variant::Dark;
+        let rgb = match reference {
+            "system:accent" => crow_macos::accent_color(dark),
+            "system:selection" => crow_macos::unfocused_selection_color(dark),
+            _ => None,
+        };
+        rgb.map(crow_theme::Rgb)
     }
 }
 
