@@ -56,17 +56,18 @@ impl CrowWindow {
     }
 
     fn close_column_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.column_picker = None;
+        retire!(self, cx, column_picker);
         self.focus_center(window, cx);
         cx.notify();
     }
 
     fn save_columns(&mut self, defaults: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(picker) = self.column_picker.take() else { return };
+        let Some(picker) = &self.column_picker else { return };
+        let (folder, columns) = (picker.folder.clone(), picker.columns.clone());
         if defaults {
-            ui::save_default_columns(picker.folder, picker.columns, cx);
+            ui::save_default_columns(folder, columns, cx);
         } else {
-            ui::save_view_change(picker.folder, crow_core::ViewChange::Columns(picker.columns), cx);
+            ui::save_view_change(folder, crow_core::ViewChange::Columns(columns), cx);
         }
         self.close_column_picker(window, cx);
     }
@@ -165,6 +166,7 @@ impl CrowWindow {
                 ),
             &theme,
             mode,
+            self.exit_fade.get(),
             cx.listener(|this, _, window, cx| this.close_column_picker(window, cx)),
         ))
     }

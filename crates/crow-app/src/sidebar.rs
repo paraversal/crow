@@ -20,8 +20,8 @@ use crow_core::motion::{self, Effective, Fx};
 use crow_core::{Favorite, Location, SavedQueryId, Section, SectionDestination, SectionRow, SidebarEdit, Slot, TagId};
 use gpui::{
     Animation, AnimationExt, Bounds, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight,
-    IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, Role, SharedString, SpringAnimation, SpringConfig,
-    Task, Window, div, img, prelude::*, px,
+    IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, Role, SharedString, Task, Window, div, img,
+    prelude::*, px,
 };
 
 use crate::actions::{
@@ -1716,12 +1716,9 @@ impl Render for Sidebar {
                         .debug_selector(|| "sidebar-fill".into());
                     match mode {
                         Effective::Full => base
-                            .with_spring(
-                                "sidebar-fill",
-                                SpringAnimation::new(SpringConfig::new(2500.0, 2.0 * 2500.0f32.sqrt(), 1.0))
-                                    .to(px(top)),
-                                |el, y| el.top(px(f32::from(y))),
-                            )
+                            .with_spring("sidebar-fill", crate::motion_ui::glide(px(top)), |el, y| {
+                                el.top(px(f32::from(y)))
+                            })
                             .into_any_element(),
                         Effective::Low => base
                             .with_animation(

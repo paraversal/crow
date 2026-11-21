@@ -17661,3 +17661,36 @@ fn search_results_keep_the_selection_cursor_and_shift_arrows_in_step(cx: &mut Te
     let active = search.read_with(&cx, |s, _| s.selected_entry().map(|(path, _)| path)).expect("an active row");
     assert!(search.read_with(&cx, |s, _| s.result_paths()).contains(&active));
 }
+
+#[gpui::test]
+fn a_closed_palette_fades_out_in_full_and_is_gone_at_once_in_off(cx: &mut TestAppContext) {
+    for (mode, lingers) in [
+        (crow_core::motion::Effective::Full, true),
+        (crow_core::motion::Effective::Low, true),
+        (crow_core::motion::Effective::Off, false),
+    ] {
+        let root = fixture("palette-exit");
+        let (view, mut cx) = open(cx, &root);
+        cx.update(|_, cx| cx.global_mut::<crate::ui::Ui>().feedback.mode = mode);
+        cx.simulate_keystrokes("cmd-k");
+        settle(&view, &mut cx);
+        assert!(cx.debug_bounds("sheet-panel").is_some(), "{mode:?}: open");
+        cx.simulate_keystrokes("escape");
+        // The state is closed at once, whatever is still drawn.
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "{mode:?}: closed");
+        assert_eq!(
+            cx.debug_bounds("sheet-panel").is_some(),
+            lingers,
+            "{mode:?}: its last picture lingers only with motion"
+        );
+        // Esc again neither reopens nor double-closes.
+        cx.simulate_keystrokes("escape");
+        assert!(view.read_with(&cx, |w, _| w.palette.is_none()), "{mode:?}: still closed");
+        // After the fade the picture is dropped.
+        std::thread::sleep(std::time::Duration::from_millis(crow_core::motion::ms::SHEET_OUT + 40));
+        view.update(&mut cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sheet-panel").is_none(), "{mode:?}: gone after the fade");
+        assert!(view.read_with(&cx, |w, _| w.exits.palette.is_none()), "{mode:?}: the holder is dropped");
+    }
+}

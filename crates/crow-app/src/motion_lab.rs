@@ -944,6 +944,7 @@ impl Render for MotionLab {
                 panel,
                 &theme,
                 self.mode,
+                None,
                 cx.listener(|this, _, _, cx| {
                     this.sheet = false;
                     cx.notify();

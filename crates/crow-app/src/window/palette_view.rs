@@ -570,7 +570,7 @@ impl CrowWindow {
     }
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.take().is_none() {
+        if !retire!(self, cx, palette) {
             return;
         }
         self.focus_center(window, cx);
@@ -602,7 +602,7 @@ impl CrowWindow {
         // Typing a whole path for a folder the palette already offers is the slow way.
         let path_mode = palette.path.is_some();
         let plugin_context = palette.plugin_context.clone();
-        self.palette = None;
+        retire!(self, cx, palette);
         self.focus_center(window, cx);
         match item {
             Some(Item::Command { command, .. }) => {
@@ -676,7 +676,7 @@ impl CrowWindow {
                 }
                 match found {
                     Some((is_dir, target, typed)) if palette.input.read(cx).text() == typed => {
-                        this.palette = None;
+                        retire!(this, cx, palette);
                         this.focus_center(window, cx);
                         if is_dir {
                             let known = this.known_folder(&target, cx);
@@ -824,6 +824,7 @@ impl CrowWindow {
                 .child(footer),
             &theme,
             cx.global::<Ui>().feedback.mode,
+            self.exit_fade.get(),
             cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
         ))
     }

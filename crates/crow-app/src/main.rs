@@ -48,6 +48,7 @@ mod keys;
 mod logging;
 mod menus;
 mod motion_lab;
+mod motion_ui;
 mod onboarding;
 mod operations;
 mod palette;

@@ -270,7 +270,7 @@ impl CrowWindow {
             }
             Some(Sheet::Conflict { .. }) => {
                 // A newer attempt (or job) replaced the question; show that one.
-                self.sheet = None;
+                retire!(self, cx, sheet);
                 self.show_conflict(window, cx)
             }
             Some(_) => false,
@@ -293,7 +293,7 @@ impl CrowWindow {
         if !matches {
             return;
         }
-        self.sheet = None;
+        retire!(self, cx, sheet);
         if let Some(prompt) = cx.global_mut::<Operations>().prompt.as_mut()
             && prompt.host == Some(window.window_handle().window_id())
         {
@@ -417,21 +417,34 @@ impl CrowWindow {
             self.confirm_saved_query_form(window, cx);
             return;
         }
-        match self.sheet.take() {
+        // The answer is read from the sheet, then the sheet retires (its picture fades
+        // while the operation starts at once).
+        match &self.sheet {
             Some(Sheet::Conflict { job, key, choice, all, .. }) => {
+                let (job, key, choice, all) = (*job, *key, *choice, *all);
+                retire!(self, cx, sheet);
                 operations::resolve_prompt(job, key, choice, all, cx);
             }
             Some(Sheet::ConfirmDelete { paths, .. }) => {
+                let paths = paths.clone();
+                retire!(self, cx, sheet);
                 operations::enqueue(Request::DeletePermanently { paths }, self.origin(window, cx), cx);
             }
-            Some(Sheet::ConfirmEmptyTrash { folders, finder, .. }) => self.run_empty_trash(folders, finder, cx),
+            Some(Sheet::ConfirmEmptyTrash { folders, finder, .. }) => {
+                let (folders, finder) = (folders.clone(), *finder);
+                retire!(self, cx, sheet);
+                self.run_empty_trash(folders, finder, cx);
+            }
             Some(Sheet::StopOperation { intent, .. }) => {
+                let intent = *intent;
+                retire!(self, cx, sheet);
                 let handle = window.window_handle().downcast::<CrowWindow>();
                 stop_then(intent, handle, cx);
                 return;
             }
-            Some(Sheet::SavedQuery(_)) => {}
-            Some(Sheet::BatchRename(_)) => {}
+            Some(Sheet::SavedQuery(_) | Sheet::BatchRename(_)) => {
+                retire!(self, cx, sheet);
+            }
             Some(Sheet::Onboarding { no, .. }) => {
                 // Return activates the focused choice; the panel focus means the
                 // default, Show tips.
@@ -842,6 +855,7 @@ impl CrowWindow {
                 .child(body),
                 &theme,
                 cx.global::<Ui>().feedback.mode,
+                self.exit_fade.get(),
                 cx.listener(|this, _, window, cx| this.close_sheet(window, cx)),
             )
             .into_any_element(),

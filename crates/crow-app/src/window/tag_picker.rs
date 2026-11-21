@@ -50,7 +50,7 @@ impl CrowWindow {
     }
 
     fn close_tag_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.tag_picker = None;
+        retire!(self, cx, tag_picker);
         if let Some(focus) = self.pane().read(cx).filter_focus(cx) {
             window.focus(&focus, cx);
         } else {
@@ -73,8 +73,10 @@ impl CrowWindow {
     }
 
     fn apply_tag_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(picker) = self.tag_picker.take() else { return };
-        self.pane().update(cx, |pane, cx| pane.set_folder_tag_filter(picker.selected, cx));
+        let Some(picker) = &self.tag_picker else { return };
+        let selected = picker.selected.clone();
+        retire!(self, cx, tag_picker);
+        self.pane().update(cx, |pane, cx| pane.set_folder_tag_filter(selected, cx));
         if let Some(focus) = self.pane().read(cx).filter_focus(cx) {
             window.focus(&focus, cx);
         } else {
@@ -225,6 +227,7 @@ impl CrowWindow {
                 ),
             &theme,
             mode,
+            self.exit_fade.get(),
             cx.listener(|this, _, window, cx| this.close_tag_picker(window, cx)),
         ))
     }

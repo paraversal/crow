@@ -244,6 +244,22 @@ pub mod ms {
     pub const CHILD_COLUMN: u64 = 145;
     pub const NAVIGATION_LOW: u64 = 120;
     pub const REVEAL: u64 = 300;
+    /// A sheet or the palette opening: Low fades, Full fades a little slower.
+    pub const SHEET_IN_LOW: u64 = 120;
+    pub const SHEET_IN: u64 = 140;
+    pub const SHEET_OUT: u64 = 110;
+    pub const SCRIM: u64 = 120;
+    pub const PANE_SLIDE: u64 = 180;
+    pub const SECTION: u64 = 160;
+    pub const TAB: u64 = 150;
+    pub const SEGMENT: u64 = 155;
+    pub const SEARCH_BAND: u64 = 200;
+    pub const FILTER_ROW: u64 = 140;
+    pub const REORDER: u64 = 220;
+    pub const PROGRESS: u64 = 250;
+    pub const PREVIEW_FADE: u64 = 120;
+    pub const TOOLTIP: u64 = 100;
+    pub const FIELD_IN: u64 = 100;
     /// One half of the double blink before a folder springs open.
     pub const SPRING_BLINK: u64 = 70;
     /// Low's single soft dip before a spring.
@@ -265,16 +281,22 @@ pub fn ease_in_out(t: f32) -> f32 {
     if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
 }
 
-/// Eased progress of an in-flight transition. Low uses the shorter fade time.
-pub fn navigation_progress(mode: Effective, started: Instant, now: Instant, full_ms: u64) -> Option<f32> {
+/// Eased progress (ease-out) of an in-flight transition, or `None` when it is
+/// over or the mode is Off. Full runs `full_ms`, Low `low_ms`.
+pub fn progress(mode: Effective, started: Instant, now: Instant, full_ms: u64, low_ms: u64) -> Option<f32> {
     let ms = match mode {
         Effective::Off => return None,
-        Effective::Low => ms::NAVIGATION_LOW,
+        Effective::Low => low_ms,
         Effective::Full => full_ms,
     };
     let elapsed = now.saturating_duration_since(started);
     let duration = Duration::from_millis(ms);
     (elapsed < duration).then(|| ease_out(elapsed.as_secs_f32() / duration.as_secs_f32()))
+}
+
+/// Eased progress of an in-flight transition. Low uses the shorter fade time.
+pub fn navigation_progress(mode: Effective, started: Instant, now: Instant, full_ms: u64) -> Option<f32> {
+    progress(mode, started, now, full_ms, ms::NAVIGATION_LOW)
 }
 
 /// How row effect `fx` looks in phase `phase` at progress `t` (already eased per phase).
@@ -494,6 +516,22 @@ mod tests {
 
     fn resting(look: &Look) -> bool {
         look.height == 1.0 && look.opacity == 1.0 && look.dx == 0.0 && look.tint == 0.0
+    }
+
+    #[test]
+    fn progress_is_none_when_off_or_done_and_eased_in_between() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        assert_eq!(progress(Effective::Off, start, start, 200, 100), None);
+        assert_eq!(progress(Effective::Full, start, at(200), 200, 100), None);
+        assert_eq!(progress(Effective::Low, start, at(100), 200, 100), None);
+        assert!(progress(Effective::Low, start, at(150), 100, 300).is_some(), "Low uses its own duration");
+        assert_eq!(progress(Effective::Full, start, start, 200, 100), Some(0.0));
+        assert_eq!(progress(Effective::Full, start, at(100), 200, 100), Some(ease_out(0.5)));
+        assert_eq!(
+            navigation_progress(Effective::Low, start, at(119), 999),
+            progress(Effective::Low, start, at(119), 0, 120)
+        );
     }
 
     #[test]

@@ -29,8 +29,8 @@ use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, EventEmitter,
     ExternalDragPayload, FileDragPaths, FocusHandle, Focusable, Image, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, Render, Role, ScrollHandle,
-    ScrollStrategy, SharedString, SpringAnimation, SpringConfig, Subscription, UniformListScrollHandle, Window, canvas,
-    div, img, point, prelude::*, px, size, uniform_list,
+    ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window, canvas, div, img, point, prelude::*,
+    px, size, uniform_list,
 };
 
 use crate::actions::{
@@ -5443,12 +5443,9 @@ impl Pane {
                                 .bg(active_selection(&theme));
                             with_island_rounding(fill, edges)
                                 .debug_selector(move || format!("column-glide-{k}"))
-                                .with_spring(
-                                    ("glide", k),
-                                    SpringAnimation::new(SpringConfig::new(2500.0, 2.0 * 2500.0f32.sqrt(), 1.0))
-                                        .to(px(y)),
-                                    move |el, y| el.top(px(f32::from(y) + offset)),
-                                )
+                                .with_spring(("glide", k), crate::motion_ui::glide(px(y)), move |el, y| {
+                                    el.top(px(f32::from(y) + offset))
+                                })
                         })
                     } else {
                         None
@@ -6158,12 +6155,7 @@ impl Render for Pane {
                                             .bg(active_selection(&theme));
                                         with_island_rounding(fill, edges).debug_selector(|| "glide".into()).with_spring(
                                             "glide",
-                                            SpringAnimation::new(SpringConfig::new(
-                                                2500.0,
-                                                2.0 * 2500.0f32.sqrt(),
-                                                1.0,
-                                            ))
-                                            .to(px(y)),
+                                            crate::motion_ui::glide(px(y)),
                                             move |el, y| el.top(px(f32::from(y) + offset + LIST_TOP_INSET)),
                                         )
                                     })

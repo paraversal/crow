@@ -154,6 +154,32 @@ pub struct SearchStart {
     pub everything: bool,
 }
 
+/// Closes a sheet-like overlay by `retire`ing its state into `exits`, so its
+/// last picture can fade out (`motion_ui::Leaving`) while focus has moved on.
+macro_rules! retire {
+    ($this:ident, $cx:expr, $field:ident) => {
+        $crate::motion_ui::retire(
+            &mut $this.$field,
+            &mut $this.exits.$field,
+            $cx.global::<$crate::ui::Ui>().feedback.mode,
+            crow_core::motion::ms::SHEET_OUT,
+            crow_core::motion::ms::SHEET_OUT,
+        )
+    };
+}
+
+/// Closed overlays whose last picture is still fading out.
+#[derive(Default)]
+struct Exits {
+    sheet: Option<crate::motion_ui::Leaving<Sheet>>,
+    why: Option<crate::motion_ui::Leaving<FocusHandle>>,
+    picker: Option<crate::motion_ui::Leaving<ThemePicker>>,
+    palette: Option<crate::motion_ui::Leaving<palette_view::Palette>>,
+    git_review: Option<crate::motion_ui::Leaving<git_review::GitReview>>,
+    column_picker: Option<crate::motion_ui::Leaving<column_picker::ColumnPicker>>,
+    tag_picker: Option<crate::motion_ui::Leaving<tag_picker::TagPicker>>,
+}
+
 pub struct CrowWindow {
     tabs: Tabs<Entity<Pane>>,
     sidebar: Entity<Sidebar>,
@@ -170,6 +196,9 @@ pub struct CrowWindow {
     search_includes_hidden: bool,
     /// A sheet asking before an operation runs (conflicts, permanent delete).
     sheet: Option<Sheet>,
+    exits: Exits,
+    /// Set while a leaving overlay renders: its opacity (1 → 0).
+    exit_fade: std::cell::Cell<Option<f32>>,
     show_activity: bool,
     activity_focus: FocusHandle,
     activity_controls: HashMap<(&'static str, u64), FocusHandle>,
@@ -350,6 +379,8 @@ impl CrowWindow {
             show_hidden,
             search_includes_hidden,
             sheet,
+            exits: Exits::default(),
+            exit_fade: std::cell::Cell::new(None),
             show_activity: false,
             activity_focus: cx.focus_handle(),
             activity_controls: HashMap::new(),
@@ -2150,14 +2181,14 @@ impl CrowWindow {
             // The job keeps waiting; Activity can bring the sheet back.
             prompt.host = None;
         }
-        self.sheet = None;
+        retire!(self, cx, sheet);
         self.focus_center(window, cx);
         cx.notify();
     }
 
     /// The first-launch sheet's answer: record it, write `tips`, close.
     fn choose_tips(&mut self, show: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.sheet = None;
+        retire!(self, cx, sheet);
         crate::onboarding::answer(show, cx);
         ui::set_setting(SettingChange::Tips(if show { TipsMode::Auto } else { TipsMode::Off }), cx);
         self.focus_center(window, cx);
@@ -2319,7 +2350,7 @@ impl CrowWindow {
         if self.pane().read(cx).folder().is_none() {
             return;
         }
-        if self.why.take().is_some() {
+        if retire!(self, cx, why) {
             self.focus_center(window, cx);
         } else {
             let focus = cx.focus_handle();
@@ -2330,7 +2361,7 @@ impl CrowWindow {
     }
 
     fn close_why(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.why = None;
+        retire!(self, cx, why);
         self.focus_center(window, cx);
         cx.notify();
     }
@@ -2511,6 +2542,7 @@ impl CrowWindow {
                 ),
             &theme,
             cx.global::<Ui>().feedback.mode,
+            self.exit_fade.get(),
             cx.listener(|this, _, window, cx| this.close_why(window, cx)),
         ))
     }
@@ -2557,14 +2589,16 @@ impl CrowWindow {
     }
 
     fn confirm_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(picker) = self.picker.take() else { return };
-        ui::choose_theme(&picker.choice.current_id(), cx);
+        let Some(picker) = &self.picker else { return };
+        let id = picker.choice.current_id();
+        retire!(self, cx, picker);
+        ui::choose_theme(&id, cx);
         self.focus_center(window, cx);
         cx.notify();
     }
 
     fn cancel_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.picker = None;
+        retire!(self, cx, picker);
         crate::theme_choice::clear_preview(cx);
         self.focus_center(window, cx);
         cx.notify();
@@ -2573,9 +2607,11 @@ impl CrowWindow {
     /// "Apply to All Apps": the chosen theme becomes the global pick for its variant,
     /// and Crow follows "System" from then on.
     fn apply_everywhere(&mut self, _: &ApplyThemeEverywhere, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(picker) = self.picker.take() else { return };
+        let Some(picker) = &self.picker else { return };
+        let chosen = picker.choice.entries.get(picker.choice.cursor).cloned();
+        retire!(self, cx, picker);
         let dir = cx.global::<Ui>().themes_dir.clone();
-        match picker.choice.entries.get(picker.choice.cursor) {
+        match chosen {
             Some(Some(info)) => match crow_theme::load_theme(&dir, &info.id) {
                 Ok(theme) => ui::apply_theme_everywhere(&theme, cx),
                 Err(e) => operations::message(e, true, cx),
@@ -3158,6 +3194,7 @@ impl CrowWindow {
                 ),
             &theme,
             cx.global::<Ui>().feedback.mode,
+            self.exit_fade.get(),
             cx.listener(|this, _, window, cx| this.cancel_picker(window, cx)),
         ))
     }
@@ -3166,7 +3203,7 @@ impl CrowWindow {
 impl Render for CrowWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.why.is_some() && self.pane().read(cx).folder().is_none() {
-            self.why = None;
+            retire!(self, cx, why);
         }
         let active = window.is_window_active();
         if active
@@ -3300,14 +3337,38 @@ impl Render for CrowWindow {
             }),
             None => None,
         };
-        let sheet = self.render_sheet(window, cx);
+        // A closed overlay's last picture is lent back to its slot for this render
+        // (`motion_ui::lend`) and fades out; it takes no input.
+        let (mode, now) = (cx.global::<Ui>().feedback.mode, std::time::Instant::now());
+        // Leaving pictures are drawn under the live overlays, so a new sheet's
+        // buttons are never covered by an old panel that is still fading.
+        let mut behind: Vec<gpui::AnyElement> = Vec::new();
+        macro_rules! lend {
+            ($field:ident, $render:expr) => {{
+                match crate::motion_ui::lend(&mut self.$field, &mut self.exits.$field, mode, now) {
+                    None => $render.map(IntoElement::into_any_element),
+                    Some(loan) => {
+                        self.exit_fade.set(Some(loan.fade));
+                        let out = $render;
+                        self.exit_fade.set(None);
+                        crate::motion_ui::reclaim(&mut self.$field, &mut self.exits.$field, loan);
+                        behind.extend(out.map(IntoElement::into_any_element));
+                        None
+                    }
+                }
+            }};
+        }
+        let sheet = lend!(sheet, self.render_sheet(window, cx));
         let activity = self.show_activity.then(|| self.render_activity(window, cx));
-        let why = self.render_why(cx);
-        let picker = self.render_picker(cx);
-        let git_review = self.render_git_review(cx);
-        let column_picker = self.render_column_picker(cx);
-        let tag_picker = self.render_tag_picker(cx);
-        let palette = self.render_palette(window, cx);
+        let why = lend!(why, self.render_why(cx));
+        let picker = lend!(picker, self.render_picker(cx));
+        let git_review = lend!(git_review, self.render_git_review(cx));
+        let column_picker = lend!(column_picker, self.render_column_picker(cx));
+        let tag_picker = lend!(tag_picker, self.render_tag_picker(cx));
+        let palette = lend!(palette, self.render_palette(window, cx));
+        if !behind.is_empty() {
+            window.request_animation_frame();
+        }
         let center: gpui::AnyElement = match &self.search {
             Some(search) => div().flex_1().min_w_0().h_full().child(search.clone()).into_any_element(),
             None => {
@@ -3478,6 +3539,7 @@ impl Render for CrowWindow {
             .child(div().relative().flex_1().min_h_0().flex().child(sidebar).child(center).children(preview))
             .child(path_bar)
             .children(tip)
+            .children(behind)
             .children(sheet)
             .children(activity)
             .children(why)

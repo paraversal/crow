@@ -301,7 +301,7 @@ impl CrowWindow {
         let batch_cursor = cursor.and_then(|cursor| {
             moves.iter().find(|entry| entry.source == cursor).map(|entry| entry.target.clone()).or(Some(cursor))
         });
-        self.sheet = None;
+        retire!(self, cx, sheet);
         self.focus_center(window, cx);
         cx.global_mut::<Operations>().batch_cursor = batch_cursor;
         self.run_request(Request::BatchRename { moves }, window, cx);
@@ -635,6 +635,7 @@ impl CrowWindow {
                 .child(body),
             &theme,
             cx.global::<Ui>().feedback.mode,
+            self.exit_fade.get(),
             cx.listener(|this, _, window, cx| this.close_sheet(window, cx)),
         )
         .into_any_element()
