@@ -6,10 +6,12 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSBezierPath, NSColor, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession,
-    NSDraggingSource, NSEvent, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSStringDrawing,
-    NSView,
+    NSDraggingSource, NSEvent, NSEventModifierFlags, NSEventType, NSFont, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSImage, NSStringDrawing, NSView,
 };
-use objc2_foundation::{NSArray, NSAttributedStringKey, NSData, NSDictionary, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSArray, NSAttributedStringKey, NSData, NSDictionary, NSPoint, NSProcessInfo, NSRect, NSSize, NSString,
+};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{main_thread, ns_url};
@@ -260,10 +262,25 @@ fn resume_session() {
     if !primary_button_down() {
         return;
     }
-    let Some(event) = LAST_MOUSE_DOWN.with(|down| down.borrow().clone()) else { return };
-    // AppKit keeps the image at a fixed offset from the cursor, measured against the event's
-    // location, so the frame is placed from the same event the first session used.
-    let at = resume.view.convertPoint_fromView(event.locationInWindow(), None);
+    let Some(window) = resume.view.window() else { return };
+    // A fresh drag event at the pointer: AppKit draws the image at the frame, then keeps it at
+    // that offset from the event's location. With the old mouse-down as the event the image
+    // showed over the dragged item for a frame or two before it followed the cursor.
+    let location = window.convertPointFromScreen(NSEvent::mouseLocation());
+    let Some(event) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        NSEventType::LeftMouseDragged,
+        location,
+        NSEventModifierFlags::empty(),
+        NSProcessInfo::processInfo().systemUptime(),
+        window.windowNumber(),
+        None,
+        0,
+        1,
+        1.0,
+    ) else {
+        return;
+    };
+    let at = resume.view.convertPoint_fromView(location, None);
     if start_session(&resume.view, &resume.drag.as_combo(), at, &event) {
         RESUME.with(|slot| *slot.borrow_mut() = Some(resume));
     }
