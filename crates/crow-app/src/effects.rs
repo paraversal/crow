@@ -445,6 +445,11 @@ impl RecordingEffects {
         self.script.lock().expect("the effect script is not poisoned").text.clone()
     }
 
+    /// Forget the recorded pasteboard text, so a test can wait for a new write.
+    pub fn clear_text(&self) {
+        self.script.lock().expect("the effect script is not poisoned").text = None;
+    }
+
     fn write_text(&self, text: String) {
         self.record(Call::WriteText);
         self.script.lock().expect("the effect script is not poisoned").text = Some(text);

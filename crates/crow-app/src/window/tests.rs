@@ -5996,6 +5996,8 @@ fn shipped_fixture_command_runs_through_the_real_service(cx: &mut TestAppContext
 
     let run = |cx: &mut VisualTestContext, saved_context: &crate::plugins::FileCommandContext| {
         effect_calls(cx);
+        // Wait for this run's write, not the previous run's text.
+        cx.update(|_, cx| crate::effects::recording(cx).expect("tests install recording effects").clear_text());
         cx.simulate_keystrokes("cmd-k");
         cx.run_until_parked();
         assert!(view.read_with(cx, |view, _| view.palette.is_some()), "⌘K opens the palette");
@@ -6036,6 +6038,12 @@ fn shipped_fixture_command_runs_through_the_real_service(cx: &mut TestAppContext
             {
                 break;
             }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // A duplicate activation would land right behind the first write.
+        for _ in 0..30 {
+            cx.cx.update(crate::plugins::poll);
+            cx.run_until_parked();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let calls = effect_calls(cx);
