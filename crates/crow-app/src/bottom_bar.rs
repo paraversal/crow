@@ -785,7 +785,7 @@ pub fn render(
     let drop_on = |target: &PathBuf| drop.as_ref().filter(|(path, _)| path == target).map(|(_, opacity)| *opacity);
     let ui = cx.global::<Ui>();
     let theme = ui.theme.clone();
-    let border = color(theme.role("border"));
+    let border = crate::style::hairline(&theme);
     let fg = color(theme.role("fg"));
     let muted = color(theme.role("fg-muted"));
     let hover = color(theme.role("surface-raised"));

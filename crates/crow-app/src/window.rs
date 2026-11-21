@@ -1142,7 +1142,7 @@ impl CrowWindow {
             .items_center()
             .gap(px(10.))
             .border_b_1()
-            .border_color(color(theme.role("border")))
+            .border_color(crate::style::hairline(&theme))
             .child(nav)
             .when(self.active_search(cx).is_some(), |bar| bar.when_some(band, |bar, band| bar.child(band)))
             .when(self.active_search(cx).is_none(), |bar| {
@@ -1171,7 +1171,7 @@ impl CrowWindow {
             .flex_none()
             .flex()
             .border_b_1()
-            .border_color(color(theme.role("border")))
+            .border_color(crate::style::hairline(&theme))
             .bg(color(theme.role("bg-inset")))
             .children(tabs.into_iter().map(|(i, name)| {
                 let selected = i == active;
@@ -1189,7 +1189,7 @@ impl CrowWindow {
                     .justify_center()
                     .text_size(px(12.))
                     .border_r_1()
-                    .border_color(color(theme.role("border")))
+                    .border_color(crate::style::hairline(&theme))
                     .text_color(color(if selected { theme.role("fg") } else { theme.role("fg-muted") }))
                     .when(selected, |tab| tab.bg(color(theme.role("bg"))))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1276,7 +1276,7 @@ impl CrowWindow {
             .flex()
             .flex_col()
             .border_l_1()
-            .border_color(color(theme.role("border")))
+            .border_color(crate::style::hairline(theme))
             .child(info_pane::tab_strip(&self.info, theme, cx))
             .child(side_panes::splitter(side_panes::Side::Right, self.info.read(cx).splitter_focus(), theme))
             .child(info_pane::tab_body(&self.info, body, cx))
@@ -3314,7 +3314,7 @@ impl Render for CrowWindow {
                 .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme))
                 // One unbroken divider from the top of the window to the bottom, drawn over the
                 // column's edge so the sidebar keeps its width.
-                .child(div().absolute().top_0().bottom_0().right_0().w(px(1.)).bg(color(theme.role("border"))))
+                .child(div().absolute().top_0().bottom_0().right_0().w(px(1.)).bg(crate::style::hairline(&theme)))
         });
         let search_preview = active_search.as_ref().and_then(|search| search.read(cx).preview_parts());
         let narrow = window.viewport_size().width < px(900.);

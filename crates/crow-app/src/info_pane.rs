@@ -701,7 +701,7 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
         .gap_2()
         .px_2()
         .border_b_1()
-        .border_color(color(theme.role("border")))
+        .border_color(crate::style::hairline(theme))
         .child(tab("info-tab-preview", "Preview", InfoTab::Preview))
         .child(tab("info-tab-info", "Info", InfoTab::Info))
         .when(git, |tabs| tabs.child(tab("info-tab-git-diff", "Git Diff", InfoTab::GitDiff)));
@@ -932,7 +932,7 @@ fn field(label: &str, value: impl IntoElement, theme: &Theme) -> Div {
         .gap_3()
         .py_1()
         .border_b_1()
-        .border_color(color(theme.role("border")))
+        .border_color(crate::style::hairline(theme))
         .child(
             div()
                 .w(px(84.))
