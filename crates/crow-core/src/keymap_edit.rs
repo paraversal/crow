@@ -214,6 +214,16 @@ pub fn parse_keys(text: &str) -> Result<KeyOverrides, String> {
     Ok(out)
 }
 
+/// Read `keys.toml`, writing the documented default on first launch.
+pub fn load_keys(config_dir: &Path) -> Result<KeyOverrides, String> {
+    let path = config_dir.join("keys.toml");
+    if !path.exists() {
+        crate::write_atomic(&path, DEFAULT_KEYS).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    parse_keys(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 fn layer_table(doc: &mut DocumentMut, layer: KeymapLayer) -> Result<&mut Table, String> {
     let name = match layer {
         KeymapLayer::Finder => "finder",

@@ -715,10 +715,7 @@ fn open_with_before(
     cx.update(|cx| {
         crate::ui::init_for_tests(cx);
         crate::operations::init(cx, std::sync::Arc::new(crate::operations::FolderTrash(trash)));
-        cx.bind_keys(crate::actions::finder_keymap());
-        cx.bind_keys(crate::actions::vim_keymap());
-        cx.bind_keys(crate::text_input::keymap());
-        cx.bind_keys(crate::settings_window::keymap());
+        crate::keymap::install(cx);
         before(cx);
     });
     let dir = dir.to_path_buf();
@@ -18285,4 +18282,98 @@ fn showing_hidden_files_crossfades_the_list_unless_motion_is_off(cx: &mut TestAp
             "{mode:?}: the toggle took effect"
         );
     }
+}
+
+fn keys_toml(view: &Entity<CrowWindow>, cx: &mut VisualTestContext, body: &str) {
+    write_config(view, cx, "keys.toml", body);
+}
+
+#[gpui::test]
+fn keys_toml_moves_a_command_to_a_new_key_live(cx: &mut TestAppContext) {
+    use crate::actions::ViewAsColumns;
+    use crate::keys::{KeyScope, text};
+    let root = fixture("keys-rebind");
+    let (view, mut cx) = open(cx, &root);
+    let mode = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.mode());
+    keys_toml(&view, &mut cx, "[finder]\nview-as-columns = [\"shift-cmd-9\"]\n");
+    cx.simulate_keystrokes("cmd-3");
+    assert_ne!(mode(&cx), ViewMode::Columns, "the old key stopped working");
+    cx.simulate_keystrokes("cmd-shift-9");
+    settle(&view, &mut cx);
+    assert_eq!(mode(&cx), ViewMode::Columns, "the new key fires the command");
+    let shown = cx.update(|_, cx| text(&ViewAsColumns, KeyScope::Window, cx).map(|s| s.to_string()));
+    assert_eq!(shown.as_deref(), Some("⇧⌘9"), "hints follow the rebind");
+    // Deleting the override restores the default.
+    cx.simulate_keystrokes("cmd-2");
+    keys_toml(&view, &mut cx, "");
+    cx.simulate_keystrokes("cmd-3");
+    settle(&view, &mut cx);
+    assert_eq!(mode(&cx), ViewMode::Columns, "defaults are back");
+}
+
+#[gpui::test]
+fn keys_toml_can_unbind_a_command(cx: &mut TestAppContext) {
+    let root = fixture("keys-unbind");
+    let (view, mut cx) = open(cx, &root);
+    keys_toml(&view, &mut cx, "[finder]\nview-as-columns = []\n");
+    cx.simulate_keystrokes("cmd-3");
+    settle(&view, &mut cx);
+    assert_ne!(pane(&view, &cx).read_with(&cx, |p, _| p.mode()), ViewMode::Columns);
+}
+
+#[gpui::test]
+fn keys_toml_errors_reach_the_status_line_and_keep_the_last_good_keys(cx: &mut TestAppContext) {
+    let root = fixture("keys-error");
+    let (view, mut cx) = open(cx, &root);
+    keys_toml(&view, &mut cx, "[finder]\nview-as-columns = [\"cmd-9\"]\n");
+    keys_toml(&view, &mut cx, "[finder]\nview-as-columns = [\"cmd-banana\"]\n");
+    let error = cx.read(|cx| cx.global::<Ui>().file_error("keys.toml").map(|e| e.to_string()));
+    assert!(error.as_deref().is_some_and(|e| e.contains("unknown key")), "{error:?}");
+    cx.simulate_keystrokes("cmd-9");
+    settle(&view, &mut cx);
+    assert_eq!(pane(&view, &cx).read_with(&cx, |p, _| p.mode()), ViewMode::Columns, "last good keys stay");
+    keys_toml(&view, &mut cx, "[finder]\nnot-a-command = [\"cmd-8\"]\n");
+    let error = cx.read(|cx| cx.global::<Ui>().file_error("keys.toml").map(|e| e.to_string()));
+    assert!(error.as_deref().is_some_and(|e| e.contains("unknown command")), "{error:?}");
+}
+
+#[gpui::test]
+fn keys_toml_first_launch_writes_the_documented_default(cx: &mut TestAppContext) {
+    let root = fixture("keys-default");
+    let (_view, cx) = open(cx, &root);
+    let text = std::fs::read_to_string(config_dir(&cx).join("keys.toml")).expect("keys.toml exists");
+    assert!(text.contains("# Crow keyboard shortcuts"));
+}
+
+#[gpui::test]
+fn vim_sequences_can_be_rebound(cx: &mut TestAppContext) {
+    let root = fixture("keys-vim");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "settings.toml", "keymap = \"vim\"\n");
+    keys_toml(&view, &mut cx, "[vim]\nrename = [\"c r\"]\n");
+    let renaming = |cx: &VisualTestContext| pane(&view, cx).read_with(cx, |p, _| p.is_renaming());
+    cx.simulate_keystrokes("j");
+    cx.simulate_keystrokes("c w");
+    assert!(!renaming(&cx), "the old sequence is gone");
+    cx.simulate_keystrokes("c r");
+    assert!(renaming(&cx), "the new sequence renames");
+}
+
+#[gpui::test]
+fn a_moved_window_key_is_still_nulled_in_a_sheet(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        crate::ui::init_for_tests(cx);
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("empty-trash".to_owned(), vec!["cmd-shift-9".to_owned()]);
+        let (bindings, problems) =
+            crate::keymap::apply_layer(crate::actions::finder_keymap(), crow_core::KeymapLayer::Finder, &overrides, cx);
+        assert!(problems.is_empty(), "{problems:?}");
+        let sheet = [gpui::KeyContext::parse("Crow").unwrap(), gpui::KeyContext::parse("Sheet").unwrap()];
+        let nulls_new_key = bindings.iter().any(|b| {
+            b.action().partial_eq(&gpui::NoAction {})
+                && b.predicate().is_some_and(|p| p.eval(&sheet))
+                && b.keystrokes().iter().any(|k| k.key() == "9")
+        });
+        assert!(nulls_new_key, "the sheet swallows the new key");
+    });
 }
