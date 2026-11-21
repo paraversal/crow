@@ -5,7 +5,7 @@
   "palette": {
     "base00": "#1e1e1e",
     "base01": "#2a2a2a",
-    "base02": "#3a3a3a",
+    "base02": "#464646",
     "base03": "#6e6e6e",
     "base04": "#a0a0a0",
     "base05": "#dedede",
@@ -29,7 +29,7 @@
     "base17": "#bf5af2"
   },
   "roles": {
-    "selection": "system:accent",
+    "selection": "system:selection",
     "accent": "system:accent",
     "link": "system:accent",
     "on-accent": "#ffffff",

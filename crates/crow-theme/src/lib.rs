@@ -675,13 +675,14 @@ mod tests {
         let stand_in = t.role("accent");
         assert_eq!(stand_in, Rgb(0x007aff));
         assert_eq!(t.system_refs().count(), 3);
+        assert_eq!(t.role("selection"), Rgb(0xdcdcdc), "the unfocused selection grey is not the accent");
         let fake = |reference: &str| match reference {
             "system:accent" => Some(Rgb(0xf74f9e)),
             _ => None,
         };
         let resolved = t.resolve_system(&fake);
         assert_eq!(resolved.role("accent"), Rgb(0xf74f9e));
-        assert_eq!(resolved.role("selection"), Rgb(0xf74f9e));
+        assert_eq!(resolved.role("selection"), Rgb(0xdcdcdc), "unknown reference keeps its stand-in");
         assert_eq!(resolved.role("link"), Rgb(0xf74f9e));
         // Unknown references keep the stand-in; other themes have none.
         let unknown = fallback_for(Variant::Dark).resolve_system(&|_| None);
@@ -716,14 +717,10 @@ mod tests {
     }
 
     /// Pairs below the threshold on purpose, with why. `(theme id, foreground role, background role)`.
-    /// Finder's accent and selection are the user's system accent colour, resolved at run time;
-    /// the stand-in colours here only approximate the default blue.
-    const CONTRAST_EXCEPTIONS: &[(&str, &str, &str)] = &[
-        ("finder-light", "on-accent", "accent"),
-        ("finder-dark", "on-accent", "accent"),
-        ("finder-light", "fg", "selection"),
-        ("finder-dark", "fg", "selection"),
-    ];
+    /// Finder's accent is the user's system accent colour, resolved at run time;
+    /// the stand-in only approximates the default blue.
+    const CONTRAST_EXCEPTIONS: &[(&str, &str, &str)] =
+        &[("finder-light", "on-accent", "accent"), ("finder-dark", "on-accent", "accent")];
 
     #[test]
     fn builtin_contrast_meets_wcag_aa() {
