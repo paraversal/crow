@@ -3376,6 +3376,7 @@ impl CrowWindow {
             CommandId::ShowThemePicker => self.show_theme_picker(&ShowThemePicker, window, cx),
             CommandId::OpenSettings => crate::settings_window::open_for_folder(self.focused_folder(cx), cx),
             CommandId::EditSettings => crate::ui::edit_settings_file(cx),
+            CommandId::Acknowledgements => crate::ui::open_acknowledgements(cx),
             CommandId::ShowSearch => self.show_search(&ShowSearch, window, cx),
             CommandId::SearchEverything => self.search_everything(&SearchEverything, window, cx),
             CommandId::SearchHome => self.search_home(&SearchHome, window, cx),
@@ -3958,6 +3959,9 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::show_theme_picker))
             .on_action(cx.listener(|this, _: &crate::actions::OpenSettings, _, cx| {
                 crate::settings_window::open_for_folder(this.focused_folder(cx), cx);
+            }))
+            .on_action(cx.listener(|_, _: &crate::actions::Acknowledgements, _, cx| {
+                crate::ui::open_acknowledgements(cx);
             }))
             .on_action(cx.listener(Self::show_palette))
             .on_action(cx.listener(Self::show_search))

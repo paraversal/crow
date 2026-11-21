@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! crow [DIR]                       open a window on DIR (default: home)
+//! crow --version                    print the version, build and commit
 //! crow --bench DIR                 auto-scroll DIR for 600 frames, print frame times, quit
 //! crow --bench-filter QUERY DIR    the same, with the name filter applied first
 //! crow --fuzz [DIR --dir-is-scratch] [--seed N] [--minutes M]  drive a real window
@@ -70,6 +71,7 @@ mod tips;
 mod trash;
 mod ui;
 mod usage;
+mod version;
 mod window;
 
 use std::path::PathBuf;
@@ -462,7 +464,13 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if matches!(args.first().map(String::as_str), Some("--version" | "-V")) {
+        println!("{}", version::line());
+        return ExitCode::SUCCESS;
+    }
+
     let _log_guard = logging::init();
+    tracing::info!("{}", version::line());
 
     if args.first().map(String::as_str) == Some("--make-fixture") {
         let Some(dir) = args.get(1).map(PathBuf::from) else {

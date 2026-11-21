@@ -213,6 +213,7 @@ actions!(
         Minimize,
         Zoom,
         KeyboardShortcuts,
+        Acknowledgements,
         Quit,
         // App menu
         About,

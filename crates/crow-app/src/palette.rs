@@ -11,9 +11,9 @@ use crow_search::FuzzyMatcher;
 use gpui::{Action, SharedString};
 
 use crate::actions::{
-    AddToSidebar, CalculateFolderSizes, ChooseTags, CloseTab, CopyFiles, CopyPath, CutFiles, DeletePermanently,
-    Duplicate, EditPath, EditSavedSearch, EditSettings, Eject, EmptyTrash, GoBack, GoForward, GoToFolder,
-    IconCaptionLines, IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard, MoveFavoriteDown,
+    Acknowledgements, AddToSidebar, CalculateFolderSizes, ChooseTags, CloseTab, CopyFiles, CopyPath, CutFiles,
+    DeletePermanently, Duplicate, EditPath, EditSavedSearch, EditSettings, Eject, EmptyTrash, GoBack, GoForward,
+    GoToFolder, IconCaptionLines, IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard, MoveFavoriteDown,
     MoveFavoriteUp, MoveToTrash, NewFile, NewFolder, NewTab, NewWindow, OpenParent, OpenSelection, OpenSettings,
     OpenTerminal, PasteFiles, PasteMoveFiles, QuickLook, Quit, Redo, RemoveFromSidebar, RemoveSavedSearch, Rename,
     ResetFolderView, SaveSearch, SearchEverything, SearchHome, SearchReveal, SelectAll, ShowCommandPalette,
@@ -133,6 +133,7 @@ pub enum CommandId {
     ShowThemePicker,
     OpenSettings,
     EditSettings,
+    Acknowledgements,
     ToggleActivity,
     RemoveFromSidebar,
     MoveFavoriteUp,
@@ -242,6 +243,7 @@ impl CommandId {
             CommandId::ShowThemePicker => "show-theme-picker",
             CommandId::OpenSettings => "open-settings",
             CommandId::EditSettings => "edit-settings",
+            CommandId::Acknowledgements => "acknowledgements",
             CommandId::ToggleActivity => "toggle-activity",
             CommandId::RemoveFromSidebar => "remove-from-sidebar",
             CommandId::MoveFavoriteUp => "move-favorite-up",
@@ -716,6 +718,14 @@ pub const COMMANDS: &[Command] = &[
         action: &EditSettings,
         scope: KeyScope::Window,
         menu: None,
+        palette: true,
+    },
+    Command {
+        id: CommandId::Acknowledgements,
+        label: "Acknowledgements",
+        action: &Acknowledgements,
+        scope: KeyScope::Window,
+        menu: Some(MenuSlot { menu: MenuName::Help, section: 0, title: "Acknowledgements" }),
         palette: true,
     },
     // Go

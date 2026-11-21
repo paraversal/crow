@@ -149,6 +149,7 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &act::About, cx| crate::effects::effects(cx).show_about_panel());
     cx.on_action(|_: &act::OpenSettings, cx| crate::settings_window::open(cx));
     cx.on_action(|_: &act::EditSettings, cx| crate::ui::edit_settings_file(cx));
+    cx.on_action(|_: &act::Acknowledgements, cx| crate::ui::open_acknowledgements(cx));
     cx.on_action(|_: &act::HideApp, cx| cx.hide());
     cx.on_action(|_: &act::HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &act::ShowAll, cx| cx.unhide_other_apps());
@@ -389,6 +390,6 @@ mod tests {
             ["About Crow", "Settings…", "—", "Services", "—", "Hide Crow", "Hide Others", "Show All", "—", "Quit Crow",]
         );
         assert_eq!(by_name("Window"), ["Minimize", "Zoom", "—", "Show Previous Tab", "Show Next Tab", "Close Tab"]);
-        assert_eq!(by_name("Help"), ["Crow Keyboard Shortcuts"]);
+        assert_eq!(by_name("Help"), ["Crow Keyboard Shortcuts", "Acknowledgements"]);
     }
 }

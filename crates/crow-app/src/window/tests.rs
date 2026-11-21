@@ -6697,6 +6697,22 @@ fn window_menu_tab_items_switch_tabs(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn help_acknowledgements_opens_the_notices_in_the_text_editor(cx: &mut TestAppContext) {
+    use crate::effects::Call;
+    let root = fixture("menu-acknowledgements");
+    let (_view, mut cx) = open(cx, &root);
+    let window = cx.update(|_, cx| cx.windows()[0]);
+    cx.update_window(window, |_, window, cx| window.dispatch_action(Box::new(crate::actions::Acknowledgements), cx))
+        .expect("dispatch Help item");
+    cx.run_until_parked();
+    let calls = effect_calls(&mut cx);
+    assert!(
+        calls.iter().any(|call| matches!(call, Call::OpenText(path) if path.ends_with("THIRD-PARTY-NOTICES.md"))),
+        "{calls:?}"
+    );
+}
+
+#[gpui::test]
 fn help_opens_palette_in_command_mode(cx: &mut TestAppContext) {
     let root = fixture("menu-help");
     let (view, mut cx) = open(cx, &root);
