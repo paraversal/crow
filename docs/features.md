@@ -22,7 +22,7 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 - Key hints and one-time tips that retire as you use the keys.
 
 ## Search
-- Names and contents, live, in the folder, Home or This Mac (Spotlight, names only). All, Names or Contents modes.
+- Names and contents, live, in the folder, Home or This Mac (Spotlight, names only). All, Names or Contents modes. Matching ignores case; wrapping the query in slashes (`/fn \w+_view/`) makes it a case-sensitive regular expression, flagged by a badge in the field. An empty search shows one quiet line; the scopes and modes explain themselves in tooltips.
 - ripgrep's libraries and an fzf-style matcher run in-process; nothing to install.
 - Skipped folders are visible with the rule that skipped them; `dev` set on by default (`node_modules`, `target`, `.git`, ...), more sets in `exclude.toml`; Find Everything turns them all off.
 - Saved searches with kind, age and tag predicates become live sidebar places.

@@ -120,6 +120,11 @@ fn query_parts(text: &str, matching: Match) -> (Option<String>, Option<String>) 
     }
 }
 
+/// Whether the query is wrapped in slashes (`/pattern/`), which the engine reads as a regex.
+fn is_regex_query(query: &str) -> bool {
+    query.len() >= 3 && query.starts_with('/') && query.ends_with('/')
+}
+
 /// Spotlight indexes names only, so the match control never applies there.
 fn effective_match_for(scope: Scope, matching: Match) -> Match {
     if scope == Scope::ThisMac { Match::Names } else { matching }
@@ -332,14 +337,6 @@ struct Row {
     content: Option<(u64, String, Vec<Range<usize>>)>,
     /// The line as drawn: excerpted around the match, ranges shifted. Built once in `Row::new`.
     content_shown: Option<(u64, String, Vec<Range<usize>>)>,
-}
-
-#[derive(Clone, Copy)]
-enum ExampleAction {
-    Fill(&'static str),
-    ThisMac,
-    Home,
-    Everything,
 }
 
 /// Names every batch and completion. The session id separates tabs, the location
@@ -2799,8 +2796,13 @@ impl SearchView {
             .border_color(ring)
             .text_size(px(14.))
             .text_color(color(theme.role("fg")))
-            .child(icons::glyph(Glyph::Search, 15., "fg-muted", &theme))
+            .child(with_tooltip(
+                div().id("search-field-icon").flex_none().child(icons::glyph(Glyph::Search, 15., "fg-muted", &theme)),
+                "Wrap the query in slashes for a regular expression, like /fn \\w+_view/",
+                None,
+            ))
             .child(div().flex_1().min_w_0().child(self.input.clone()))
+            .children(self.render_regex_badge(cx))
             .child(div().opacity(look.map_or(1.0, |look| look.controls)).child(self.render_match_control(focused, cx)));
         // Widening: the field starts at the toolbar field's 240 px and takes a share of
         // the band's free space. A flex factor under 1 hands out only that share, so
@@ -2836,8 +2838,20 @@ impl SearchView {
             .on_click(cx.listener(|_, _, _, cx| cx.emit(SearchEvent::Close)))
             .child("Done")
             .child(Keycap::text("esc", KeycapWeight::Outline));
-        let mut band = div().flex_1().min_w_0().flex().items_center().gap(px(10.)).child(field);
+        // Opening: the field grows out of the toolbar's own (right-aligned) one, so the band
+        // packs to the right while it is still narrower than the toolbar, and its buttons
+        // take room only as they fade in.
+        let growing = look.is_some_and(|look| look.widen < 1.0);
+        let mut band = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .when(growing, |band| band.justify_end())
+            .child(field);
         let controls = look.map_or(1.0, |look| look.controls);
+        let reveal = move |natural: f32| (look.is_some() && controls < 1.0).then(|| px(natural * controls));
         let save_label = if self.saved.is_some() { "Update…" } else { "Save…" };
         band = band.child(
             div()
@@ -2856,6 +2870,7 @@ impl SearchView {
                 .hover(move |style| style.bg(save_surface))
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(SearchEvent::Save)))
                 .opacity(controls)
+                .when_some(reveal(64.), |save, width| save.w(width).overflow_hidden().whitespace_nowrap())
                 .child(save_label),
         );
         if self.saved.is_some() || self.tag.is_some() {
@@ -2874,9 +2889,45 @@ impl SearchView {
                     .child(self.title.clone()),
             );
         } else {
-            band = band.child(done.opacity(controls));
+            band = band.child(
+                done.opacity(controls)
+                    .when_some(reveal(84.), |done, width| done.w(width).overflow_hidden().whitespace_nowrap()),
+            );
         }
         band.opacity(look.map_or(1.0, |look| look.fade))
+    }
+
+    /// "regex" in the field while the query is a `/pattern/`: the accent when it parses,
+    /// the error color when it doesn't. Nothing otherwise.
+    fn render_regex_badge(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if self.scope == Scope::ThisMac || !is_regex_query(self.input.read(cx).text()) {
+            return None;
+        }
+        let theme = cx.global::<Ui>().theme.clone();
+        let invalid = self.error.as_deref().is_some_and(|error| error.starts_with("Invalid pattern"));
+        let tone = color(theme.role(if invalid { "error" } else { "accent" }));
+        let (label, tip) = if invalid {
+            ("Invalid regular expression", "The pattern doesn't parse; remove the slashes to search literally")
+        } else {
+            ("Regular expression", "Regular expression, case-sensitive; remove the slashes to search literally")
+        };
+        let badge = div()
+            .id("search-regex")
+            .debug_selector(|| "search-regex".into())
+            .role(Role::Status)
+            .aria_label(label)
+            .flex_none()
+            .h(px(18.))
+            .px(px(6.))
+            .flex()
+            .items_center()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(tone)
+            .text_size(px(11.))
+            .text_color(tone)
+            .child("regex");
+        Some(with_tooltip(badge, tip, None))
     }
 
     fn render_match_control(&self, focused: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -2936,9 +2987,9 @@ impl SearchView {
             .rounded(px(6.))
             .bg(color(theme.role("bg")))
             .when(spotlight, |control| control.opacity(0.4))
-            .child(button(Match::All, "All", "Names and contents"))
-            .child(button(Match::Names, "Names", "Names only: no file is read"))
-            .child(button(Match::Contents, "Contents", "Contents only"))
+            .child(button(Match::All, "All", "Names and contents, any case"))
+            .child(button(Match::Names, "Names", "Names only, any case: no file is read"))
+            .child(button(Match::Contents, "Contents", "Contents only, any case"))
     }
 
     fn render_scope_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -3089,9 +3140,9 @@ impl SearchView {
         if scope == Scope::Folder {
             with_tooltip(segment, folder_path.unwrap_or_default(), None)
         } else if scope == Scope::Home {
-            with_action_tooltip(segment, "Search Home", &SearchHome, KeyScope::Search, cx)
+            with_action_tooltip(segment, "Search your whole home folder", &SearchHome, KeyScope::Search, cx)
         } else {
-            segment
+            with_tooltip(segment, "Search names only, through Spotlight", None)
         }
     }
 
@@ -3245,146 +3296,27 @@ impl SearchView {
         )
     }
 
+    /// Nothing typed yet: one quiet line, so an empty list reads as intended. The scope,
+    /// the match control and the regex syntax explain themselves on hover.
     fn render_idle(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let ui = cx.global::<Ui>();
-        let theme = ui.theme.clone();
-        let (fg, subtle) = (color(theme.role("fg")), color(theme.role("fg-subtle")));
-        let heading = match (self.scope, self.effective_match()) {
-            (Scope::ThisMac, _) => "Search names on this Mac".to_owned(),
-            (_, Match::All) => format!("Search names and contents in {}", self.scope_label()),
-            (_, Match::Names) => format!("Search names in {}", self.scope_label()),
-            (_, Match::Contents) => format!("Search contents in {}", self.scope_label()),
+        let theme = cx.global::<Ui>().theme.clone();
+        let hint = match (self.scope, self.effective_match()) {
+            (Scope::ThisMac, _) => "Type to search names on this Mac…".to_owned(),
+            (_, Match::All) => format!("Type to search names and contents in {}…", self.scope_label()),
+            (_, Match::Names) => format!("Type to search names in {}…", self.scope_label()),
+            (_, Match::Contents) => format!("Type to search contents in {}…", self.scope_label()),
         };
-        let keycap = Keycap::for_action(&SearchEverything, KeyScope::Search, KeycapWeight::Text, cx)
-            .map(|keycap| keycap.text_role("fg").into_any_element())
-            .unwrap_or_else(|| div().text_color(fg).child("⇧⌘A").into_any_element());
-        let spoken =
-            keys::spoken_for(&SearchEverything, KeyScope::Search, cx).unwrap_or_else(|| "Shift Command A".to_owned());
-        let home_spoken =
-            keys::spoken_for(&SearchHome, KeyScope::Search, cx).unwrap_or_else(|| "Shift Command H".to_owned());
-        let examples = div()
-            .flex()
-            .flex_col()
-            .gap(px(14.))
-            .child(self.render_example(
-                0,
-                div().child("config").into_any_element(),
-                "names and file contents, any case",
-                ExampleAction::Fill("config"),
-                "Search for config".to_owned(),
-                cx,
-            ))
-            .child(self.render_example(
-                1,
-                div().child("/fn \\w+_view/").into_any_element(),
-                "slashes make it a regular expression",
-                ExampleAction::Fill("/fn \\w+_view/"),
-                "Search for the regular expression fn backslash w plus underscore view".to_owned(),
-                cx,
-            ))
-            .child(self.render_example(
-                2,
-                div().child("This Mac").into_any_element(),
-                "names only, through Spotlight",
-                ExampleAction::ThisMac,
-                "Search This Mac".to_owned(),
-                cx,
-            ))
-            .child(self.render_example(
-                3,
-                div().child("Home").into_any_element(),
-                "your whole home folder",
-                ExampleAction::Home,
-                format!("Search Home, {home_spoken}"),
-                cx,
-            ))
-            .when(self.skip_label.is_some(), |examples| {
-                examples.child(self.render_example(
-                    4,
-                    keycap,
-                    "also look inside node_modules, target, .git …",
-                    ExampleAction::Everything,
-                    format!("Search everything, {spoken}"),
-                    cx,
-                ))
-            });
-        let close = keys::text(&CloseSearch, KeyScope::Search, cx).unwrap_or_else(|| "esc".into());
-        let reveal = keys::text(&SearchReveal, KeyScope::SearchResults, cx).unwrap_or_else(|| "⌘R".into());
-        let quick = keys::text(&QuickLook, KeyScope::SearchResults, cx).unwrap_or_else(|| "Space".into());
         div()
             .id("search-idle")
             .debug_selector(|| "search-idle".into())
             .flex_1()
             .min_h_0()
-            .pt(px(34.))
-            .px(px(48.))
-            .flex()
-            .flex_col()
-            .gap(px(14.))
-            .text_color(fg)
-            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(heading))
-            .child(examples)
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(subtle)
-                    .child(format!("{close} returns to {} · {reveal} reveals · {quick} previews", self.folder_label)),
-            )
-            .into_any_element()
-    }
-
-    fn render_example(
-        &self,
-        index: usize,
-        face: gpui::AnyElement,
-        description: &'static str,
-        action: ExampleAction,
-        aria: String,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let theme = cx.global::<Ui>().theme.clone();
-        let surface = color(theme.role("surface"));
-        let raised = color(theme.role("surface-raised"));
-        div()
             .flex()
             .items_center()
-            .gap(px(14.))
-            .child(
-                div()
-                    .id(("search-example", index))
-                    .debug_selector(move || format!("search-example-{index}"))
-                    .role(Role::Button)
-                    .aria_label(aria)
-                    .min_w(px(150.))
-                    .h(px(26.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(raised)
-                    .bg(surface)
-                    .hover(move |style| style.bg(raised))
-                    .font_family("Menlo")
-                    .text_size(px(12.))
-                    .text_color(color(theme.role("fg")))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        match action {
-                            ExampleAction::Fill(text) => {
-                                let input = this.input.clone();
-                                input.update(cx, |input, cx| input.set_text(text, window, cx));
-                            }
-                            ExampleAction::ThisMac => this.set_scope(Scope::ThisMac, cx),
-                            ExampleAction::Home => this.search_home(cx),
-                            ExampleAction::Everything => {
-                                this.search_everything(&SearchEverything, window, cx);
-                            }
-                        }
-                        this.focus_input(window, cx);
-                    }))
-                    .child(face),
-            )
-            .child(div().text_color(color(theme.role("fg-muted"))).child(description))
+            .justify_center()
+            .text_size(px(14.))
+            .text_color(color(theme.role("fg-subtle")))
+            .child(hint)
             .into_any_element()
     }
 

@@ -5939,54 +5939,6 @@ fn search_shift_cmd_m_cycles_the_match_mode(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn search_idle_example_fills_the_query(cx: &mut TestAppContext) {
-    let root = fixture("search-idle");
-    let (view, mut cx) = open(cx, &root);
-    cx.simulate_keystrokes("cmd-f");
-    settle(&view, &mut cx);
-    click_selector(&mut cx, "search-example-0");
-    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
-    assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "config");
-    let focus = search.read_with(&cx, |search, cx| search.input_focus_handle(cx));
-    assert!(cx.update(|window, _| focus.is_focused(window)), "focus returns to the field");
-}
-
-#[gpui::test]
-fn search_idle_example_this_mac_switches_scope(cx: &mut TestAppContext) {
-    let root = fixture("search-idle-scope");
-    let (view, mut cx) = open(cx, &root);
-    cx.simulate_keystrokes("cmd-f");
-    settle(&view, &mut cx);
-    click_selector(&mut cx, "search-example-2");
-    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
-    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::ThisMac);
-    assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "", "the field stays empty");
-}
-
-#[gpui::test]
-fn search_idle_example_home_switches_scope(cx: &mut TestAppContext) {
-    let root = fixture("search-idle-home");
-    let (view, mut cx) = open(cx, &root);
-    cx.simulate_keystrokes("cmd-f");
-    settle(&view, &mut cx);
-    click_selector(&mut cx, "search-example-3");
-    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
-    assert_eq!(search.read_with(&cx, |search, _| search.scope()), crate::search::Scope::Home);
-    assert_eq!(search.read_with(&cx, |search, cx| search.query_text(cx)), "", "the field stays empty");
-}
-
-#[gpui::test]
-fn search_idle_example_everything_flips_rules(cx: &mut TestAppContext) {
-    let root = fixture("search-idle-everything");
-    let (view, mut cx) = open(cx, &root);
-    cx.simulate_keystrokes("cmd-f");
-    settle(&view, &mut cx);
-    click_selector(&mut cx, "search-example-4");
-    let search = view.read_with(&cx, |w, _| w.search.clone()).expect("search opens");
-    assert!(search.read_with(&cx, |search, _| search.everything()));
-}
-
-#[gpui::test]
 fn search_idle_shows_for_empty_query(cx: &mut TestAppContext) {
     let root = fixture("search-idle-again");
     let (view, mut cx) = open(cx, &root);
@@ -5994,10 +5946,26 @@ fn search_idle_shows_for_empty_query(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     cx.simulate_input("x");
     wait_for_search(&view, &mut cx);
-    assert!(cx.debug_bounds("search-example-0").is_none());
+    assert!(cx.debug_bounds("search-idle").is_none());
     cx.simulate_keystrokes("backspace");
     settle(&view, &mut cx);
-    assert!(cx.debug_bounds("search-example-0").is_some());
+    assert!(cx.debug_bounds("search-idle").is_some(), "an empty query shows the quiet hint");
+}
+
+#[gpui::test]
+fn search_field_flags_a_regular_expression_only_when_slashes_wrap_it(cx: &mut TestAppContext) {
+    let root = fixture("search-regex-badge");
+    let (view, mut cx) = open(cx, &root);
+    cx.simulate_keystrokes("cmd-f");
+    settle(&view, &mut cx);
+    cx.simulate_input("fn");
+    wait_for_search(&view, &mut cx);
+    assert!(cx.debug_bounds("search-regex").is_none(), "a plain query has no badge");
+    cx.simulate_input("/");
+    cx.simulate_keystrokes("home");
+    cx.simulate_input("/");
+    wait_for_search(&view, &mut cx);
+    assert!(cx.debug_bounds("search-regex").is_some(), "/fn/ is a regular expression");
 }
 
 #[gpui::test]

@@ -1053,14 +1053,19 @@ impl Element for TextElement {
         // lands just before the first glyph instead of on it.
         let caret_x = |index| bounds.left() + line.x_for_index(index) - scroll_x;
         let text_x = bounds.left() + px(TEXT_INSET) - scroll_x;
+        // The caret and the selection follow the glyphs, not the whole line box: from just
+        // above the ascenders to just under the descenders, around the baseline the text
+        // is drawn on (the line box is taller and, with the text lifted to center the
+        // lowercase band, ran far below it).
+        let glyph_height = line.ascent + line.descent.abs();
+        let baseline = bounds.top() + text_top + (window.line_height() - glyph_height) / 2. + line.ascent;
+        let (caret_top, caret_bottom) =
+            ((baseline - x_height * 1.5).max(bounds.top()), (baseline + font_size * 0.18).min(bounds.bottom()));
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
-                    Bounds::new(
-                        point(caret_x(cursor_offset), bounds.top()),
-                        size(px(2.), bounds.bottom() - bounds.top()),
-                    ),
+                    Bounds::new(point(caret_x(cursor_offset), caret_top), size(px(2.), caret_bottom - caret_top)),
                     cursor_color,
                 )),
             )
@@ -1068,8 +1073,8 @@ impl Element for TextElement {
             (
                 Some(fill(
                     Bounds::from_corners(
-                        point(text_x + line.x_for_index(selected_range.start), bounds.top()),
-                        point(text_x + line.x_for_index(selected_range.end), bounds.bottom()),
+                        point(text_x + line.x_for_index(selected_range.start), caret_top),
+                        point(text_x + line.x_for_index(selected_range.end), caret_bottom),
                     ),
                     selection_color,
                 )),
