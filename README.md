@@ -46,6 +46,8 @@ AirDrop and Share, iCloud sharing, Quick Actions and Services, Get Info editing 
 
 ## Fast
 
+<!-- Speed clips: upload docs/media/big-folder.mp4 and docs/media/search-speed.mp4 through GitHub's web editor and put the two user-attachments links here, one per line (a committed .mp4 only shows as a link). -->
+
 Rendering is on the GPU: a folder of 100,000 files paints its first rows in about 10 ms and scrolls with a 99th-percentile frame of about 9 ms at 120 Hz (the project’s own bench, [docs/testing.md](docs/testing.md#performance)). Search walks 200,000 nested files in about 1.5 s with the first hit in a millisecond or two. Matching uses ripgrep’s libraries and an fzf-style matcher, in-process.
 
 ## Install

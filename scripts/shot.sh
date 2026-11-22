@@ -12,8 +12,9 @@
 # [keys] drives the state from the command line, `|`-separated, each step one of:
 #   text:vi          type the text
 #   cmd:f            press the letter with Command (cmdshift:a, cmdfn:… likewise)
-#   key:escape       return, escape, tab, space, up, down, left, right, delete, f2
+#   key:escape       return, escape, tab, space, up, down, left, right, delete, f2, home, end
 #   shift:down       the same keys with Shift (extend a selection)
+#   hold:down:40     press the key 40 times, 50 a second (a held key, for scrolling)
 #   wait:1.5         sleep that many seconds (a search settling, a tip appearing)
 # CROW_SHOT_HOME=<dir> runs Crow with HOME set to <dir> (scripts/demo/make-demo.sh builds
 # one), so the path bar reads ~/... and the sidebar lists that home's folders.
@@ -29,6 +30,9 @@
 # CROW_SHOT_SETTINGS adds lines to settings.toml (e.g. 'show_preview = true').
 # CROW_SHOT_OTHER_WINDOW=1 captures the window the keys opened (Settings) instead of
 # the browser window.
+# CROW_SHOT_RECORD=1 records the window while the keys run instead of a screenshot:
+# target/shots/<state>-<theme>.mov, at 60 fps, without the pointer
+# (scripts/record-window.swift). Motion stays as configured (Full by default).
 # Without [keys] the script waits for Return: set up the state by hand, then
 # press Return and it captures. Driving keys needs Accessibility permission for
 # the terminal. Needs Screen Recording permission; the script never changes
@@ -73,10 +77,11 @@ width = 1280
 height = 800
 sidebar_width = ${CROW_SHOT_SIDEBAR:-300}
 EOF
-# Column view for every state: the boards are column-view windows.
-cat >"$work/config/views.toml" <<'EOF'
+# Column view for every state unless CROW_SHOT_VIEW says otherwise: the boards are
+# column-view windows.
+cat >"$work/config/views.toml" <<EOF
 [defaults]
-view = "columns"
+view = "${CROW_SHOT_VIEW:-columns}"
 EOF
 # Favorites inside the repo, so no private folder names reach a shot.
 # CROW_SHOT_ROOT points them at a copy of the repo (a neutral path, used when the
@@ -198,8 +203,10 @@ echo "Crow pid $pid, window $id ($size), theme $theme, keymap $keymap"
 press() {
   case $1 in
     text:*) osascript -e "tell application \"System Events\" to keystroke \"${1#text:}\"" ;;
-    key:* | shift:*)
-      case ${1#*:} in
+    key:* | shift:* | hold:*)
+      local name=${1#*:}
+      name=${name%%:*}
+      case $name in
         return) code=36 ;;
         escape) code=53 ;;
         tab) code=48 ;;
@@ -210,6 +217,8 @@ press() {
         left) code=123 ;;
         right) code=124 ;;
         f2) code=120 ;;
+        home) code=115 ;;
+        end) code=119 ;;
         pageup) code=116 ;;
         pagedown) code=121 ;;
         *)
@@ -217,7 +226,10 @@ press() {
           return 1
           ;;
       esac
-      if [ "${1%%:*}" = shift ]; then
+      if [ "${1%%:*}" = hold ]; then
+        osascript -e "tell application \"System Events\" to repeat ${1##*:} times" \
+          -e "key code $code" -e "delay 0.02" -e "end repeat"
+      elif [ "${1%%:*}" = shift ]; then
         osascript -e "tell application \"System Events\" to key code $code using shift down"
       else
         osascript -e "tell application \"System Events\" to key code $code"
@@ -234,6 +246,25 @@ press() {
       ;;
   esac
 }
+
+recorder=""
+if [ -n "${CROW_SHOT_RECORD:-}" ]; then
+  rec_bin="$root/target/shots/record-window"
+  if [ ! -x "$rec_bin" ] || [ "$root/scripts/record-window.swift" -nt "$rec_bin" ]; then
+    swiftc -O -o "$rec_bin" "$root/scripts/record-window.swift"
+  fi
+  movie="$root/target/shots/$state-$theme.mov"
+  rm -f "$movie"
+  osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null 2>&1 || true
+  sleep 0.8
+  "$rec_bin" "$id" "$movie" >"$work/rec" 2>&1 &
+  recorder=$!
+  for _ in $(seq 1 40); do
+    grep -q recording "$work/rec" 2>/dev/null && break
+    kill -0 "$recorder" 2>/dev/null || { cat "$work/rec" >&2; exit 1; }
+    sleep 0.1
+  done
+fi
 
 if [ -n "$keys" ]; then
   sleep 0.8
@@ -256,6 +287,14 @@ if [ -n "${CROW_SHOT_OTHER_WINDOW:-}" ]; then
     exit 1
   fi
   id=${other%% *}
+fi
+
+if [ -n "$recorder" ]; then
+  kill -INT "$recorder"
+  wait "$recorder" || true
+  [ -s "$movie" ] || { echo "shot.sh: no recording" >&2; cat "$work/rec" >&2; exit 1; }
+  echo "wrote $movie"
+  exit 0
 fi
 
 out="$root/target/shots/$state-$theme.png"

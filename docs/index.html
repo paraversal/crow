@@ -126,6 +126,8 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .numbers dt { font-size: clamp(48px, 8vw, 96px); font-weight: 600; letter-spacing: -.04em; line-height: 1; }
 .numbers dt small { font-size: .38em; letter-spacing: 0; color: var(--muted); font-weight: 400; margin-left: .12em; }
 .numbers dd { margin: 12px 0 0; color: var(--muted); }
+.clips { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px; margin-top: 56px; }
+.clips video { display: block; width: 100%; height: auto; border-radius: .8% / 1.28%; background: #1e1e1e; }
 
 /* Git */
 .split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 56px; align-items: center; }
@@ -188,6 +190,7 @@ footer img { width: 22px; height: 22px; }
 footer nav { gap: 22px; }
 
 @media (max-width: 820px) {
+  .clips { grid-template-columns: 1fr; }
   nav a:not(.button) { display: none; }
   .hero { padding-top: 32px; }
   .pair, .split, .install, .rows { grid-template-columns: 1fr; }
@@ -286,6 +289,10 @@ footer nav { gap: 22px; }
         <div><dt>10<small>ms</small></dt><dd>to the first rows on screen</dd></div>
         <div><dt>120<small>fps</small></dt><dd>scrolling on a ProMotion display</dd></div>
       </dl>
+      <div class="clips">
+        <video class="shot" src="media/big-folder.mp4" width="1280" height="800" autoplay muted loop playsinline preload="metadata" aria-label="Opening a folder of 100,000 files, scrolling, jumping to the last file and switching to icons and columns, each without a wait."></video>
+        <video class="shot" src="media/search-speed.mp4" width="1280" height="800" autoplay muted loop playsinline preload="metadata" aria-label="Typing “unsafe impl Send” over 54,000 source files: 11,912 matching lines in 1,262 files arrive while it is typed."></video>
+      </div>
     </div>
   </section>
 
@@ -381,6 +388,8 @@ footer nav { gap: 22px; }
 // Theme swatches: click, or arrow keys within the list.
 const buttons = [...document.querySelectorAll('#themes [role="tab"]')];
 const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Reduce Motion: the clips wait for a click on Play.
+if (calm) document.querySelectorAll('video[autoplay]').forEach(v => { v.removeAttribute('autoplay'); v.pause(); v.controls = true; });
 const panel = b => document.getElementById(b.getAttribute('aria-controls'));
 const select = (b, focus) => {
   const from = buttons.find(x => x.getAttribute('aria-selected') === 'true');

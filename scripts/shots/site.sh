@@ -5,6 +5,7 @@
 #   scripts/demo/make-demo.sh /Users/Shared/Demo
 #   scripts/demo/make-personas.sh /Users/Shared
 #   scripts/bundle.sh
+#   scripts/demo/make-big.sh /Users/Shared/Demo-big   (the speed clips' big folders)
 #   scripts/shots/site.sh               every shot
 #   scripts/shots/site.sh search info   only those (the <webp name> before -light/-dark)
 #
@@ -19,6 +20,7 @@ PARENT=${CROW_PERSONAS_PARENT:-/Users/Shared}
 [ -d "$PARENT/Demo-photographer" ] || { echo "no persona homes in $PARENT; run scripts/demo/make-personas.sh $PARENT" >&2; exit 1; }
 [ -d "$D/Pictures/Trips" ] || { echo "no demo home at $D; run scripts/demo/make-demo.sh $D" >&2; exit 1; }
 command -v cwebp >/dev/null || { echo "cwebp missing: brew install webp" >&2; exit 1; }
+BIG=${CROW_DEMO_BIG:-/Users/Shared/Demo-big}
 
 export CROW_SHOT_HOME=$D
 preview_on='show_preview = true
@@ -92,3 +94,21 @@ CROW_SHOT_KEYMAP=vim CROW_SHOT_OTHER_WINDOW=1 \
   both keys keys "$D/Documents" finder-light finder-dark 'wait:2.5|cmd:,|wait:2|text:keyboard|wait:1.5'
 CROW_SHOT_OTHER_WINDOW=1 \
   both settings settings "$D/Documents" finder-light finder-dark 'wait:2.5|cmd:,|wait:2.5'
+
+# Speed clips, in Finder Dark: recordings of the window (scripts/shot.sh CROW_SHOT_RECORD),
+# list view and no preview pane, encoded by encode-clip.sh to docs/media/<name>.mp4.
+[ -d "$BIG/100000 files" ] || { echo "no big folders at $BIG; run scripts/demo/make-big.sh $BIG" >&2; exit 1; }
+clip() { # <name> <start dir> <keys>
+  [ "$only" = "  " ] || [[ $only == *" $1 "* ]] || return 0
+  CROW_SHOT_RECORD=1 CROW_SHOT_VIEW=list CROW_SHOT_SETTINGS=$preview_off \
+    ./scripts/shot.sh "$1" "$2" finder-dark finder "$3" >/dev/null
+  ./scripts/shots/encode-clip.sh "target/shots/$1-finder-dark.mov" "docs/media/$1.mp4"
+}
+# Open a folder of 100,000 files, scroll, jump to the end, switch views.
+clip big-folder "$BIG" \
+  'wait:0.3|text:1|wait:0.4|cmd:o|wait:0.8|hold:down:60|wait:0.2|key:end|wait:0.8|hold:up:25|wait:0.4|cmd:1|wait:0.8|cmd:3|wait:1'
+# Names and contents of ~54,000 source files, results arriving as you type.
+clip search-speed "$BIG/crates" 'wait:0.3|cmd:f|wait:0.4|text:unsafe impl Send|wait:2.5'
+# Three jumps with Cmd-K.
+clip palette-jump "$D" \
+  'wait:0.3|cmd:k|wait:0.3|text:tide|wait:0.4|key:return|wait:0.8|cmd:k|wait:0.3|text:pic|wait:0.4|key:return|wait:0.8|cmd:k|wait:0.3|text:raven|wait:0.4|key:return|wait:1'
