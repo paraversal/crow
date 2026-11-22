@@ -437,7 +437,8 @@ background batch and the settled snapshot. It reads no real metadata, so it meas
 classification and row-build work; the tag predicate itself is read through the injected reader.
 The idle cost is the ordinary `--bench` run, since the tag control only exists inside `/`.
 
-`--bench` scrolls 600 frames and prints first paint, load time and frame times.
+`--bench` scrolls 600 frames, 3 rows a frame, and prints first paint, load time and frame times.
+`CROW_BENCH_ROWS=N` scrolls N rows a frame instead (the site's speed clip uses 6: with an even step the row stripes hold still).
 `CROW_BENCH_TRASH=N crow --bench DIR` instead swallows N rows in the middle of the folder (the
 row effect only) and prints `BENCH-TRASH` with the idle frame interval, the live p50/p95/max and
 the hitches (intervals over 1.5 x idle) with their ms since the start. Add

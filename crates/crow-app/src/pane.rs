@@ -524,6 +524,9 @@ struct Bench {
     /// `CROW_BENCH_TRASH=N`: swallow N rows in the middle of the folder (the effect
     /// only, nothing is deleted) and time the frames while it runs.
     trash: Option<TrashBench>,
+    /// Rows scrolled per frame: 3 (a fast trackpad flick) unless `CROW_BENCH_ROWS`
+    /// says otherwise. The speed clip uses an even step so the row stripes hold still.
+    rows: usize,
 }
 
 /// The motion bench: frame intervals before, during and after a trash effect.
@@ -608,6 +611,11 @@ impl Pane {
                 last: None,
                 scrolled: None,
                 filter: bench_filter,
+                rows: std::env::var("CROW_BENCH_ROWS")
+                    .ok()
+                    .and_then(|n| n.parse().ok())
+                    .filter(|&n| n > 0)
+                    .unwrap_or(3),
                 trash: std::env::var("CROW_BENCH_TRASH").ok().and_then(|n| n.parse().ok()).map(|rows| TrashBench {
                     rows,
                     started: None,
@@ -3863,17 +3871,17 @@ impl Pane {
             bench.intervals.push((now - prev).as_secs_f64() * 1000.0);
         }
         bench.frame += 1;
-        // About 3 rows per frame: a fast, continuous trackpad scroll.
+        let step = bench.frame * bench.rows;
         if mode == ViewMode::Icons {
             if icon_rows > 0 {
-                icon_scroll.scroll_to_item_strict((bench.frame * 3) % icon_rows, ScrollStrategy::Top);
+                icon_scroll.scroll_to_item_strict(step % icon_rows, ScrollStrategy::Top);
             }
         } else if mode == ViewMode::Gallery {
             if shown > 0 {
-                self.gallery.scroll.scroll_to_item_strict((bench.frame * 3) % shown, ScrollStrategy::Top);
+                self.gallery.scroll.scroll_to_item_strict(step % shown, ScrollStrategy::Top);
             }
         } else {
-            folder.scroll_strict((bench.frame * 3) % shown);
+            folder.scroll_strict(step % shown);
         }
         if bench.frame == 600 {
             let mut v = std::mem::take(&mut bench.intervals);
