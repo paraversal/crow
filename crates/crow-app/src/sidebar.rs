@@ -2214,7 +2214,7 @@ impl Render for Sidebar {
                     .bottom_0()
                     .left(px(8. - 6. * (1.0 - slide)
                         + if pills {
-                            8.
+                            11.
                         } else if cards {
                             4.
                         } else {
@@ -2237,9 +2237,9 @@ impl Render for Sidebar {
                         let id = id.clone();
                         move || format!("sidebar-heading-{id}")
                     })
-                    .pl(px(CHEVRON_ROOM * slide + if pills { 8. } else { 0. }))
+                    .pl(px(CHEVRON_ROOM * slide + if pills { 11. } else { 0. }))
                     .when(pills, |lead| {
-                        lead.pr(px(8.)).py(px(1.)).rounded_full().bg(color_alpha(theme.role("accent"), 42))
+                        lead.pr(px(11.)).py(px(1.)).rounded_full().bg(color_alpha(theme.role("accent"), 42))
                     })
                     .when_some(icon_text, |lead, text| {
                         lead.child(

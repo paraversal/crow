@@ -941,7 +941,7 @@ api = 1
             "api = 1\n[generic]\nfile = { icon = \"x.svg\", color = \"nope\" }",
             "api = 1\n[generic]\nfile = { icon = \"../x.svg\" }",
             "api = 1\n[generic]\nfile = { icon = \"/tmp/x.svg\" }",
-            "api = 1\n[generic]\nfile = { icon = \"x.png\" }",
+            "api = 1\n[generic]\nfile = { icon = \"x.gif\" }",
             "api = 1\n[generic]\nfile = { icon = \"a//b.svg\" }",
             "api = 2\n",
         ] {

@@ -45,7 +45,7 @@ both() {
 export CROW_SHOT_SETTINGS=$preview_on
 # The hero is the photographer's setup: groups, emoji, the Lucide pack, big thumbnails.
 PH=$PARENT/Demo-photographer
-CROW_SHOT_HOME=$PH CROW_SHOT_PERSONA=photographer \
+CROW_SHOT_HOME=$PH CROW_SHOT_PERSONA=photographer CROW_SHOT_SIDEBAR_STYLE=ledger \
   both hero hero "$PH/Pictures/Shoots/2026/2026-07 Faroe Islands/Selects" finder-light finder-dark \
   'wait:2.5|cmd:1|key:down|key:right|key:right|wait:3'
 

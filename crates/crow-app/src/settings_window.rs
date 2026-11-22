@@ -4284,9 +4284,12 @@ mod tests {
     fn category_changes_fade_the_content_and_motion_off_skips_it(cx: &mut TestAppContext) {
         let (view, mut vcx) = open_settings(cx);
         vcx.update(|_, cx| ui::set_setting(SettingChange::Motion(MotionMode::Full), cx));
+        // Asked at a moment before the change: a slow runner can spend longer than PANEL_TAB inside
+        // `show_category`, and the check must not depend on that.
+        let before = Instant::now();
         show_category(&view, &mut vcx, Category::Behaviour);
         assert!(
-            view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Full, Instant::now())).is_some(),
+            view.read_with(&vcx, |view, _| view.content_motion_for_tests(Effective::Full, before)).is_some(),
             "a category change starts a content transition"
         );
         let later = Instant::now() + Duration::from_millis(300);

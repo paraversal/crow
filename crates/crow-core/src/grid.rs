@@ -40,7 +40,7 @@ impl IconSize {
                 tile_width: 74.0,
                 tile_height: 84.0,
                 icon_size: 40.0,
-                gap: 4.0,
+                gap: 2.0,
                 inset_x: 6.0,
                 inset_y: 0.0,
             },
@@ -48,7 +48,7 @@ impl IconSize {
                 tile_width: 94.0,
                 tile_height: 100.0,
                 icon_size: 56.0,
-                gap: 4.0,
+                gap: 2.0,
                 inset_x: 6.0,
                 inset_y: 0.0,
             },
@@ -56,7 +56,7 @@ impl IconSize {
                 tile_width: 134.0,
                 tile_height: 136.0,
                 icon_size: 92.0,
-                gap: 6.0,
+                gap: 4.0,
                 inset_x: 6.0,
                 inset_y: 0.0,
             },
@@ -304,9 +304,9 @@ mod tests {
 
     #[test]
     fn columns_are_derived_from_width_and_clamped_to_one() {
-        // Standard tiles are 94 wide with a 4 pt gap and minimum 6 pt insets.
+        // Standard tiles are 94 wide with a 2 pt gap and minimum 6 pt insets.
         assert_eq!(geometry(8, 751.0).columns(), 7);
-        let grid = geometry(8, 784.0);
+        let grid = geometry(8, 700.0);
         assert_eq!(grid.columns(), 7);
         let first = grid.tile_rect(0).unwrap();
         assert_eq!(first.x, grid.width() - grid.tile_rect(6).unwrap().right());
@@ -362,9 +362,9 @@ mod tests {
         assert_eq!(hits, vec![0, 1, 2, 3]);
         // A rectangle only in the vertical gap between columns hits none.
         let gap = GridRect {
-            x: grid.tile_rect(0).unwrap().right() + 1.0,
+            x: grid.tile_rect(0).unwrap().right() + 0.5,
             y: row.y + 1.0,
-            width: 2.0,
+            width: 1.0,
             height: row.height - 2.0,
         };
         hits.clear();

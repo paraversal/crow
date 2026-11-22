@@ -6355,6 +6355,10 @@ fn shipped_fixture_command_runs_through_the_real_service(cx: &mut TestAppContext
             cx.read(|cx| crate::effects::recording(cx).and_then(|recorder| recorder.text())).as_deref(),
             Some("notes.txt")
         );
+        if view.read_with(cx, |view, _| view.palette.is_some()) {
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
     };
 
     let commands = cx.read(crate::plugins::command_items);
@@ -6374,6 +6378,12 @@ fn shipped_fixture_command_runs_through_the_real_service(cx: &mut TestAppContext
     use_vim(&view, &mut cx);
     click_selector(&mut cx, "row-notes.txt");
     settle(&view, &mut cx);
+    // Switching the layer reloads the settings; let the fixture's hook settle again.
+    for _ in 0..30 {
+        cx.cx.update(crate::plugins::poll);
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     run(&mut cx, &saved_context);
 }
 

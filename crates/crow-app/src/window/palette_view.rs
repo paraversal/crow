@@ -68,7 +68,9 @@ impl Palette {
 }
 
 /// Palette layout, in points. U10 tunes these against the assembled boards.
-const PALETTE_TOP: f32 = BAND_HEIGHT;
+/// A little below the top bar's lower border, so the two lines never coincide.
+const PALETTE_DROP: f32 = 14.;
+const PALETTE_TOP: f32 = BAND_HEIGHT + PALETTE_DROP;
 const PALETTE_WIDTH: f32 = 620.;
 const PALETTE_MARGIN: f32 = 16.;
 const PALETTE_BOTTOM: f32 = 24.;
@@ -843,6 +845,7 @@ impl CrowWindow {
         let list = div().relative().h(px(height)).children(fill).child(list.h_full());
         Some(chrome::sheet(
             chrome::sheet_panel("palette", SheetWidth::Wide, &theme)
+                .mt(px(PALETTE_DROP))
                 .w(px(width))
                 .aria_label("Go to or Command Palette")
                 // keys::context_stack (KeyScope::Palette/ThemePicker) mirrors this.

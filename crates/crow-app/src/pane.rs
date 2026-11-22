@@ -75,7 +75,7 @@ pub(crate) const ROW_HEIGHT: f32 = 24.0;
 const CAPTION_LINE_HEIGHT: f32 = 16.0;
 const ICON_TILE_TOP: f32 = 3.0;
 const ICON_TILE_GAP: f32 = 2.0;
-const ICON_BOX_PADDING: f32 = 4.0;
+const ICON_BOX_PADDING: f32 = 2.0;
 /// A tile's status badge keeps this far from the tile's left edge.
 const ICON_BADGE_INSET: f32 = 2.0;
 

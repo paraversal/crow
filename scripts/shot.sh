@@ -23,6 +23,7 @@
 # the sidebar, a second group, and the demo icon pack (scripts/demo/icon-pack).
 # CROW_SHOT_PERSONA=<id> (with CROW_SHOT_HOME, a make-personas.sh home) uses that persona's
 # sidebar groups, settings and the Lucide icon pack instead of the generic demo setup.
+# CROW_SHOT_SIDEBAR_STYLE overrides the persona's sidebar_style.
 # CROW_SHOT_SIDEBAR sets the sidebar width in points (default 300: Projects rows fit).
 # CROW_SHOT_SETTINGS adds lines to settings.toml (e.g. 'show_preview = true').
 # Without [keys] the script waits for Return: set up the state by hand, then
@@ -63,7 +64,7 @@ hints = "always"
 motion = "off"
 ${CROW_SHOT_SETTINGS:-}
 $( [ -n "${CROW_SHOT_CUSTOM:-}" ] && [ -n "${CROW_SHOT_HOME:-}" ] && echo 'icon_pack = "linework"' )
-$( [ -n "${CROW_SHOT_PERSONA:-}" ] && cat "$(dirname "$0")/demo/personas/$CROW_SHOT_PERSONA/settings.toml" )
+$( [ -n "${CROW_SHOT_PERSONA:-}" ] && sed "s|^sidebar_style = .*|sidebar_style = \"${CROW_SHOT_SIDEBAR_STYLE:-}\"|;" "$(dirname "$0")/demo/personas/$CROW_SHOT_PERSONA/settings.toml" | { if [ -n "${CROW_SHOT_SIDEBAR_STYLE:-}" ]; then cat; else cat "$(dirname "$0")/demo/personas/$CROW_SHOT_PERSONA/settings.toml"; fi; } )
 [window]
 width = 1280
 height = 800
