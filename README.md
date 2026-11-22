@@ -83,7 +83,7 @@ From source:
 | [Motion](docs/motion.md) | What moves, and in which mode |
 | [Architecture](docs/architecture.md) | Crates, threads, file operations |
 | [Testing](docs/testing.md) | Tests, fuzzing, bench, hand checks |
-| [Roadmap](docs/ROADMAP.md) · [Changelog](CHANGELOG.md) | What shipped, what’s next |
+| [Changelog](CHANGELOG.md) | What shipped |
 
 ## Status
 

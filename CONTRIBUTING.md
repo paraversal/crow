@@ -22,6 +22,21 @@ cargo test --workspace
 
 CI runs the same on macOS. Run the 100k-file bench (`cargo run --release -p crow-app -- --bench target/fixture-100k`, see [docs/testing.md](docs/testing.md)) when a change touches listing, scrolling or first paint, and compare with `main`.
 
+## Principles
+Ranked. When two conflict, the higher one wins.
+
+| # | Principle | Rule | Consequence |
+| --- | --- | --- | --- |
+| 1 | Correct | No operation loses data; every change can be undone or is clearly marked as permanent | Journaled operation engine; trash by default; copy to a temp file, then rename |
+| 2 | Fast | No frame ever waits on the disk | All I/O on background tasks; the UI renders a snapshot and applies diffs |
+| 3 | Predictable | Same input, same layout | One view-settings model; no free icon placement; fixed window geometry rules |
+| 4 | Legible | Every action shows its target and its effect before it runs | Focused pane is always marked; live queries shown as text; batch operations preview their result |
+| 5 | Keyboard-first, mouse-complete | Finder shortcuts work unchanged; Vim-style motions sit on top | Every command reachable by key, by menu and by command palette |
+| 6 | Reuse before build | Use proven crates first; replace one only for a measured reason | ripgrep's libraries for walking and search, a Helix-derived matcher for fuzzy search |
+| 7 | Extensible | Anything outside the core ships as a plugin on the public API | Git integration is the first plugin, not core code |
+| 8 | Yours | Theme, icons, keymap and settings are files you own | Reads `~/.config/themes`; settings and keymap in TOML |
+| 9 | Fun | Polish and motion where they help understanding | No captions or explanatory text in the UI: show, don't tell |
+
 ## Rules of the house
 - No disk I/O on the main thread; every file operation goes through `crow_fs::ops` and nothing is overwritten in place.
 - Every new keyboard behaviour gets a GPUI keystroke test; every interactive element has a role and an aria label.

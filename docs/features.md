@@ -54,4 +54,4 @@ Everything Crow does today, by area. A change that adds or removes a feature upd
 - VoiceOver roles and labels on every interactive element.
 
 ## Not in Crow yet
-AirDrop and the Share menu, iCloud sharing and collaboration, Quick Actions and Services, tag editing beyond what the Info pane offers, Get Info editing (permissions, default app), Spotlight smart folders, compress and archive, Connect to Server, Time Machine, Finder extensions (Dropbox and similar badges), and a signed, notarized build. See the [roadmap](ROADMAP.md).
+AirDrop and the Share menu, iCloud sharing and collaboration, Quick Actions and Services, tag editing beyond what the Info pane offers, Get Info editing (permissions, default app), Spotlight smart folders, compress and archive, Connect to Server, Time Machine, Finder extensions (Dropbox and similar badges), and a signed, notarized build.

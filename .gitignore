@@ -4,18 +4,5 @@
 /ignore
 /.pi
 
-# Keep implementation plans and progress logs local. Track shared references.
-/docs/plans/*
-!/docs/plans/inbox.md
-!/docs/plans/ui-overhaul/
-/docs/plans/ui-overhaul/*
-!/docs/plans/ui-overhaul/README.md
-!/docs/plans/ui-overhaul/img/
-!/docs/plans/done/
-/docs/plans/done/*
-!/docs/plans/done/m7/
-/docs/plans/done/m7/*
-!/docs/plans/done/m7/findings.md
-!/docs/plans/done/m9/
-/docs/plans/done/m9/*
-!/docs/plans/done/m9/README.md
+# Plans, progress logs, the roadmap and design boards stay local.
+/docs/plans/

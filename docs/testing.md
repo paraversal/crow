@@ -293,7 +293,7 @@ fn regression(cx: &mut TestAppContext) {
 }
 ```
 
-The runner prints the row for `docs/plans/done/m7/findings.md`. Deduplicate by violation
+The runner prints a row for the milestone's local findings list (`docs/plans/…/findings.md`). Deduplicate by violation
 and place, not by seed; H4 fixes rows and adds the named regression test. For an
 edge-tree or churn finding, replay with the same tree and churn setting:
 `replay_with(cx, &tree, 200, &EdgeTree::single(EdgeKind::LongName), seed, churn, script)`.
@@ -388,7 +388,7 @@ step, a violation or a freeze removes the tree and keeps the support folder (`ke
 for replay:`). A paused run, a `HANG` and a killed run leave both (`crow-fuzz-*` in
 the system temp folder); remove them by hand, with `chmod -R u+rwx` first because
 the edge tree has an unreadable folder. Slow steps go into
-`docs/plans/done/m7/findings.md` with their replay command; `findings.md` is the input
+the local findings list with their replay command; `findings.md` is the input
 to the next H4 batch. This runner needs a real GUI session, so it is local only;
 the scheduled workflow runs H1's `fuzz_long`.
 
@@ -657,14 +657,14 @@ Run on a bundle built from the branch, in light and dark, at the native minimum 
 
 | Check | How |
 | --- | --- |
-| App icon | `./scripts/bundle.sh --open`: Finder, the Dock and ⌘Tab show the icon named by `app_icon` (refined when unset). Change `app_icon` in `settings.toml` to sun, graphite and bone while Crow runs: the Dock icon follows each save; a bad value shows the error in the status line and keeps the icon. Rebundle: Finder shows the new choice. Check the 16 px icon in a Finder list. |
+| App icon | `./scripts/bundle.sh --open`: Finder, the Dock and ⌘Tab show `assets/app-icon.png` with the Dock's margin. Check the 16 px icon in a Finder list. |
 | `crow` shim | `./scripts/bundle.sh --install` installs the app and the `crow` command into `~/.local/bin` (or `CROW_BIN_DIR`). With Crow running, `crow ~/Downloads` opens a new window there, `crow notes.txt` opens its folder with the file selected, and `crow` brings Crow forward. Quit Crow and repeat: the requested path is the first window, not Home. Paths with spaces work. |
 
 ### Whole window, themes, VoiceOver
 
 | Check | How |
 | --- | --- |
-| Whole window | `scripts/shot.sh filter crates/crow-core/src firebox finder 'text:/|text:vi'` and the same with `solarized-light`: compare with `docs/plans/ui-overhaul/img/assembled-filter.png`; then `search crates` with `cmd:f|text:config`. One accent fill on screen (the focused column's cursor, or the field's ring while filtering); band, sidebar, rows, filter field, scope bar and bottom bar at the heights in the plan's table. |
+| Whole window | `scripts/shot.sh filter crates/crow-core/src firebox finder 'text:/|text:vi'` and the same with `solarized-light`: compare with the UI-overhaul board `assembled-filter.png` (local, under `docs/plans/`); then `search crates` with `cmd:f|text:config`. One accent fill on screen (the focused column's cursor, or the field's ring while filtering); band, sidebar, rows, filter field, scope bar and bottom bar at the heights in the plan's table. |
 | Live theme | Switch macOS light/dark, or edit a scheme in the theme index: colors fade over about half a second (faster with Reduce Motion). |
 | VoiceOver | Cmd-F5: the band reads as a toolbar; the field announces "Search <folder>, Command F"; Done reads "Done, close search, Escape"; rows read name, details and "n of N"; the count reads "18 items in <folder>"; the filter count is announced once typing pauses; the search footer reads once when a search settles; a tip is read once and "Got it" and "Don't show tips" are buttons; the first-launch sheet reads "Show tips as you go?" with Show tips and No tips; an error reads "Error: …" once and Open and Cancel read as buttons; every sheet reads its title. |
 | Privacy prompts | Open Desktop, Documents, Downloads: the prompt names Crow. |
