@@ -122,6 +122,10 @@ actions!(
         SheetCancel,
         // Sidebar
         AddToSidebar,
+        AddToShelf,
+        MoveShelfHere,
+        CopyShelfHere,
+        ClearShelf,
         RemoveFromSidebar,
         MoveFavoriteUp,
         MoveFavoriteDown,

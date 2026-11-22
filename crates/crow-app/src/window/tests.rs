@@ -18680,3 +18680,118 @@ fn the_title_reveals_a_draggable_folder_icon_on_hover(cx: &mut TestAppContext) {
     settle(&view, &mut cx);
     assert!(cx.debug_bounds("title-proxy-icon").is_none(), "gone again when the pointer leaves");
 }
+
+#[gpui::test]
+fn group_cards_draw_one_body_per_expanded_group_only_when_on(cx: &mut TestAppContext) {
+    let root = fixture("group-cards");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("sidebar-card-0").is_none(), "off by default");
+    write_config(
+        &view,
+        &mut cx,
+        "sidebar.toml",
+        "cards = true\n[[group]]\nname = \"One\"\nitems = [{ path = \"/tmp\" }]\n",
+    );
+    view.update(&mut cx, |_, cx| cx.notify());
+    settle(&view, &mut cx);
+    view.update(&mut cx, |_, cx| cx.notify());
+    settle(&view, &mut cx);
+    let card = cx.debug_bounds("sidebar-card-0").expect("the group's body is drawn");
+    let header = cx.debug_bounds("sidebar-header-favorites-group-0").expect("heading");
+    assert!(card.top() >= header.bottom() - px(1.), "the body starts under the heading strip: {card:?} {header:?}");
+    let row = cx.debug_bounds("sidebar-1").expect("first row");
+    assert!(card.contains(&row.center()), "the rows sit inside the card");
+}
+
+#[gpui::test]
+fn the_shelf_is_opt_in_and_shows_only_with_files_or_a_drag(cx: &mut TestAppContext) {
+    let root = fixture("shelf-visible");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    cx.update(|_, cx| {
+        crate::ui::edit_shelf(cx, |shelf| {
+            shelf.add([(root.join("notes.txt"), false)]);
+        })
+    });
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("shelf").is_none(), "off by default, even holding files");
+    write_config(&view, &mut cx, "sidebar.toml", "[shelf]\nshow = true\n");
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("shelf").is_some(), "on and holding a file");
+    assert!(cx.debug_bounds("shelf-item-0").is_some());
+    cx.update(|_, cx| crate::ui::edit_shelf(cx, |shelf| shelf.clear()));
+    settle(&view, &mut cx);
+    assert!(cx.debug_bounds("shelf").is_none(), "empty and nothing being dragged");
+}
+
+#[gpui::test]
+fn add_to_shelf_takes_the_selection_and_the_shelf_is_saved_in_the_state_folder(cx: &mut TestAppContext) {
+    let root = fixture("shelf-add");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", "[shelf]\nshow = true\n");
+    cx.simulate_keystrokes("down down down");
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">add to shelf");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    let (items, file) = cx.read(|cx| {
+        let ui = cx.global::<Ui>();
+        (ui.shelf.paths(), ui.state_dir.join("shelf.json"))
+    });
+    assert_eq!(items, vec![root.join("notes.txt")], "the selected file is on the shelf");
+    assert_eq!(crow_core::Shelf::load(&file).paths(), items, "and saved, so it survives a restart");
+}
+
+#[gpui::test]
+fn moving_the_shelf_here_moves_files_off_it_and_copying_keeps_them(cx: &mut TestAppContext) {
+    let root = fixture("shelf-move");
+    std::fs::write(root.join("beta/b.txt"), "b").expect("fixture");
+    std::fs::write(root.join("beta/c.txt"), "c").expect("fixture");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    cx.update(|_, cx| {
+        crate::ui::edit_shelf(cx, |shelf| {
+            shelf.add([(root.join("beta/b.txt"), false), (root.join("beta/c.txt"), false)]);
+        })
+    });
+    view.update(&mut cx, |view, cx| {
+        let pane = view.pane().clone();
+        pane.update(cx, |pane, cx| pane.navigate(root.join("alpha"), cx));
+    });
+    settle(&view, &mut cx);
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">copy shelf here");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("alpha/b.txt").exists() && root.join("beta/b.txt").exists(), "copied: both places have it");
+    assert_eq!(cx.read(|cx| cx.global::<Ui>().shelf.len()), 2, "copied files stay on the shelf");
+    std::fs::remove_file(root.join("alpha/b.txt")).expect("reset");
+    std::fs::remove_file(root.join("alpha/c.txt")).expect("reset");
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">move shelf here");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(root.join("alpha/b.txt").exists() && !root.join("beta/b.txt").exists(), "moved");
+    assert!(cx.read(|cx| cx.global::<Ui>().shelf.is_empty()), "moved files leave the shelf");
+}
+
+#[gpui::test]
+fn dropping_files_on_the_shelf_adds_them_and_clear_shelf_empties_it(cx: &mut TestAppContext) {
+    let root = fixture("shelf-drop");
+    let (view, mut cx) = open(cx, &root);
+    settle(&view, &mut cx);
+    let paths = vec![root.join("notes.txt"), root.join("alpha")];
+    view.update_in(&mut cx, |view, window, cx| view.drop_onto_shelf(paths, window, cx));
+    settle(&view, &mut cx);
+    cx.run_until_parked();
+    let items = cx.read(|cx| cx.global::<Ui>().shelf.items().to_vec());
+    assert_eq!(items.len(), 2);
+    assert!(!items[0].is_dir && items[1].is_dir, "folders are remembered as folders");
+    cx.simulate_keystrokes("cmd-k");
+    cx.simulate_input(">clear shelf");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(cx.read(|cx| cx.global::<Ui>().shelf.is_empty()));
+}

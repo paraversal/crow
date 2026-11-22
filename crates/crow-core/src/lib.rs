@@ -19,6 +19,7 @@ mod recent_commands;
 mod saved_queries;
 mod selection;
 mod settings;
+pub mod shelf;
 mod sidebar;
 mod table;
 mod tabs;
@@ -59,6 +60,7 @@ pub use settings::{
     SettingsError, TipsMode, ViewMode, WindowDefaults, config_dir, load_settings, save_bool_setting,
     save_number_setting, save_setting, save_table_number,
 };
+pub use shelf::{Shelf, ShelfItem};
 pub use sidebar::{
     DEFAULT_SIDEBAR, Favorite, FavoriteItem, Group, Section, SectionDestination, SectionRow, SidebarConfig,
     SidebarEdit, Slot, TwinInput, edit_sidebar, load_sidebar, sidebar_path, twin_hints,

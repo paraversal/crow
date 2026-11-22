@@ -331,6 +331,11 @@ mod tests {
                 "Open Terminal Here",
                 "—",
                 "Save Search…",
+                "—",
+                "Add to Shelf",
+                "Move Shelf Here",
+                "Copy Shelf Here",
+                "Clear Shelf",
             ]
         );
         assert_eq!(

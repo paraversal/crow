@@ -193,6 +193,40 @@ fn section_spans(rows: &[Row]) -> Vec<SectionSpan> {
     spans
 }
 
+/// How a row sits in its group's card when `cards` is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CardPart {
+    /// The tinted heading strip; `alone` when the group has no rows to show (collapsed).
+    Strip {
+        alone: bool,
+    },
+    Body {
+        first: bool,
+        last: bool,
+    },
+}
+
+/// The card part of each row: headings are strips, their rows the body.
+fn card_parts(rows: &[Row]) -> Vec<Option<CardPart>> {
+    let mut parts = vec![None; rows.len()];
+    for span in section_spans(rows) {
+        let header = span.start - 1;
+        parts[header] = Some(CardPart::Strip { alone: span.len == 0 });
+        for k in 0..span.len {
+            parts[span.start + k] = Some(CardPart::Body { first: k == 0, last: k + 1 == span.len });
+        }
+    }
+    parts
+}
+
+/// Card corner radius, the strip's and the body's.
+const CARD_RADIUS: f32 = 10.;
+/// Space inside a card above its first row and below its last.
+const CARD_PAD_TOP: f32 = 3.;
+const CARD_PAD_BOTTOM: f32 = 4.;
+/// Rows inside a card are inset this far from its edge.
+const CARD_ROW_INSET: f32 = 4.;
+
 /// Sections whose collapsed flag changed between two draws: `(id, opening, old
 /// span)`. A section that appears or disappears is not a transition.
 fn section_transitions(before: &[SectionSpan], now: &[SectionSpan]) -> Vec<(String, bool, SectionSpan)> {
@@ -2029,8 +2063,8 @@ impl Render for Sidebar {
                     let base = div()
                         .absolute()
                         .top(px(top))
-                        .left(px(8.))
-                        .right(px(8.))
+                        .left(px(if ui.sidebar.cards { 8. + CARD_ROW_INSET } else { 8. }))
+                        .right(px(if ui.sidebar.cards { 8. + CARD_ROW_INSET } else { 8. }))
                         .h(current.size.height)
                         .rounded_md()
                         .bg(current_location(&theme))
@@ -2054,6 +2088,45 @@ impl Render for Sidebar {
                 _ => div().absolute().size(px(0.)).debug_selector(|| "sidebar-fill".into()).into_any_element(),
             }
         };
+        let cards = ui.sidebar.cards;
+        let parts = if cards { card_parts(&rows) } else { vec![None; rows.len()] };
+        let (card_body, card_strip) = (theme.role("bg"), theme.role("surface"));
+        let card_border = theme.role("border");
+        // Each card's body is drawn behind the rows from the last layout, like the fill.
+        let backdrops: Vec<gpui::AnyElement> = {
+            let layout = self.layout.borrow();
+            let first = layout.first().map(|(_, _, bounds)| *bounds);
+            let gap = if matches!(rows.first(), Some(Row::SectionHeader { .. })) { HEADER_GAP } else { 0.0 };
+            section_spans(&rows)
+                .into_iter()
+                .filter(|span| span.len > 0)
+                .enumerate()
+                .filter_map(|(n, span)| {
+                    let first = first?;
+                    let header = layout.get(span.start - 1)?.2;
+                    let last = layout.get(span.start + span.len - 1)?.2;
+                    let top = f32::from(header.bottom() - first.top()) + gap;
+                    let height = f32::from(last.bottom() - header.bottom()) + CARD_PAD_BOTTOM;
+                    Some(
+                        div()
+                            .absolute()
+                            .top(px(top))
+                            .left(px(8.))
+                            .right(px(8.))
+                            .h(px(height))
+                            .bg(color(card_body))
+                            .border_1()
+                            .border_color(color(card_border))
+                            .rounded_bl(px(CARD_RADIUS))
+                            .rounded_br(px(CARD_RADIUS))
+                            .debug_selector(move || format!("sidebar-card-{n}"))
+                            .into_any_element(),
+                    )
+                })
+                .filter(|_| cards)
+                .collect()
+        };
+        let backdrop_count = backdrops.len();
         let mut kinds: Vec<(Option<DropTarget>, Option<Slot>)> = Vec::with_capacity(rows.len());
         let mut looks = self.looks(&rows, focused, ui).into_iter();
         let mut index = 0;
@@ -2153,14 +2226,28 @@ impl Render for Sidebar {
                         .when(look.ring, |header| header.shadow(cursor_ring(&theme)))
                         .mt(px(HEADER_GAP))
                         .px_2()
-                        .py(px(3.))
-                        .rounded_md()
+                        .py(px(if cards { 2. } else { 3. }))
+                        .when(!cards, |header| header.rounded_md())
+                        .when_some(parts[i].filter(|_| cards), |header, part| {
+                            let alone = matches!(part, CardPart::Strip { alone: true });
+                            let header = header
+                                .bg(color(card_strip))
+                                .border_1()
+                                .border_color(color(card_border))
+                                .rounded_tl(px(CARD_RADIUS))
+                                .rounded_tr(px(CARD_RADIUS));
+                            if alone {
+                                header.rounded_bl(px(CARD_RADIUS)).rounded_br(px(CARD_RADIUS))
+                            } else {
+                                header.border_b_0()
+                            }
+                        })
                         .flex()
                         .items_center()
                         .gap_1()
-                        .text_size(px(11.))
+                        .text_size(px(if cards { 12. } else { 11. }))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(color(muted))
+                        .text_color(color(if cards { fg } else { muted }))
                         .cursor_pointer()
                         .hover(move |style| style.text_color(color(fg)))
                         .on_hover({
@@ -2287,6 +2374,13 @@ impl Render for Sidebar {
                 .aria_selected(cursor)
                 .when(look.current, |row| row.aria_description(current_description))
                 .when(cursor, |row| row.aria_active_descendant())
+                .when_some(parts[i], |row, part| match part {
+                    CardPart::Body { first, last } => row
+                        .mx(px(CARD_ROW_INSET))
+                        .when(first, |row| row.mt(px(CARD_PAD_TOP)))
+                        .when(last, |row| row.mb(px(CARD_PAD_BOTTOM))),
+                    CardPart::Strip { .. } => row,
+                })
                 .px_2()
                 .py(px(3.))
                 .rounded_md()
@@ -2571,6 +2665,9 @@ impl Render for Sidebar {
             .on_children_prepainted(move |bounds, window, _| {
                 // The first child is the current-folder fill; the rest are rows.
                 let mut bounds = bounds.into_iter();
+                for _ in 0..backdrop_count {
+                    bounds.next();
+                }
                 let _fill = bounds.next();
                 let was_empty = layout.borrow().is_empty();
                 let mut bounds: Vec<_> = bounds.collect();
@@ -2630,7 +2727,8 @@ impl Render for Sidebar {
             // strip above shares both.
             .flex()
             .flex_col()
-            .gap(px(1.))
+            .gap(px(if cards { 0. } else { 1. }))
+            .children(backdrops)
             .child(fill)
             .children(children)
     }
@@ -2687,6 +2785,24 @@ mod tests {
             reorder_offsets(&before, &[path("a")], &tops, &heights, 2.0).is_empty(),
             "added or removed rows don't glide"
         );
+    }
+
+    #[test]
+    fn card_parts_make_headings_strips_and_rows_the_body() {
+        let rows =
+            vec![header("a", false), recent("1"), recent("2"), header("b", true), header("c", false), recent("3")];
+        assert_eq!(
+            card_parts(&rows),
+            vec![
+                Some(CardPart::Strip { alone: false }),
+                Some(CardPart::Body { first: true, last: false }),
+                Some(CardPart::Body { first: false, last: true }),
+                Some(CardPart::Strip { alone: true }),
+                Some(CardPart::Strip { alone: false }),
+                Some(CardPart::Body { first: true, last: true }),
+            ]
+        );
+        assert_eq!(card_parts(&[recent("x")]), vec![None], "a row outside any group has no card");
     }
 
     #[test]

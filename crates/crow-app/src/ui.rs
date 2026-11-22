@@ -109,6 +109,8 @@ pub struct Ui {
     zoxide: Vec<(f64, PathBuf)>,
     /// The folders Recent shows, best first (computed off the main thread).
     pub recent_list: Vec<PathBuf>,
+    /// Files set aside on the shelf (state folder, `shelf.json`).
+    pub shelf: crow_core::Shelf,
     /// More of the same ranking for the command palette (favorites included).
     pub palette_recents: Vec<PathBuf>,
     pub volumes: Vec<crow_macos::Volume>,
@@ -203,6 +205,7 @@ const KEYS: usize = 5;
 impl Ui {
     fn new(config_dir: PathBuf, state_dir: PathBuf, home: PathBuf, theme: Theme, fade_enabled: bool) -> Ui {
         let recent = Recent::load(&state_dir.join("recent.json"));
+        let shelf = crow_core::Shelf::load(&state_dir.join("shelf.json"));
         let recent_commands = RecentCommands::load(&state_dir.join("palette-commands.json"));
         // io-ok: startup: the last Settings category is one small read before the first window
         let settings_category = std::fs::read_to_string(state_dir.join("settings-category"))
@@ -227,6 +230,7 @@ impl Ui {
             recent_commands,
             zoxide: Vec::new(),
             recent_list: Vec::new(),
+            shelf,
             palette_recents: Vec::new(),
             volumes: Vec::new(),
             aliases: HashSet::new(),
@@ -593,6 +597,20 @@ struct TestRoots(Vec<tempfile::TempDir>);
 
 #[cfg(test)]
 impl gpui::Global for TestRoots {}
+
+/// Change the shelf and save it to the state folder in the background.
+pub fn edit_shelf(cx: &mut App, edit: impl FnOnce(&mut crow_core::Shelf)) {
+    let ui = cx.global_mut::<Ui>();
+    edit(&mut ui.shelf);
+    let (shelf, file) = (ui.shelf.clone(), ui.state_dir.join("shelf.json"));
+    cx.background_spawn(async move {
+        if let Err(e) = shelf.save(&file) {
+            tracing::warn!("{}: {e}", file.display());
+        }
+    })
+    .detach();
+    cx.refresh_windows();
+}
 
 /// Default settings and the embedded theme, with config files in a fresh temp folder
 /// and nothing watched.

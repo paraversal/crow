@@ -18,13 +18,13 @@ use gpui::{
 };
 
 use crate::actions::{
-    AddToSidebar, ApplyThemeEverywhere, CalculateFolderSizes, CloseTab, EditPath, EditSavedSearch, EmptyTrash, GoBack,
-    GoForward, GoToFolder, IconCaptionLines, IconCaptionOff, IconSizeCompact, IconSizeLarge, IconSizeStandard,
-    KeyboardShortcuts, Minimize, MoveDown, MoveUp, NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover,
-    PathUnhover, PluginCommand, PluginCommandResult, PreviousTab, RemoveSavedSearch, ResetFolderView, SaveSearch,
-    SearchEverything, SearchHome, ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus,
-    ToggleHiddenFiles, TogglePreview, ToggleSidebar, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons,
-    ViewAsList, WhyThisView, Zoom,
+    AddToShelf, AddToSidebar, ApplyThemeEverywhere, CalculateFolderSizes, ClearShelf, CloseTab, CopyShelfHere,
+    EditPath, EditSavedSearch, EmptyTrash, GoBack, GoForward, GoToFolder, IconCaptionLines, IconCaptionOff,
+    IconSizeCompact, IconSizeLarge, IconSizeStandard, KeyboardShortcuts, Minimize, MoveDown, MoveShelfHere, MoveUp,
+    NewTab, NewWindow, NextTab, OpenParent, PaletteOpenInTab, PathHover, PathUnhover, PluginCommand,
+    PluginCommandResult, PreviousTab, RemoveSavedSearch, ResetFolderView, SaveSearch, SearchEverything, SearchHome,
+    ShowCommandPalette, ShowInfo, ShowSearch, ShowThemePicker, SwitchFocus, ToggleHiddenFiles, TogglePreview,
+    ToggleSidebar, UseViewAsDefaults, ViewAsColumns, ViewAsGallery, ViewAsIcons, ViewAsList, WhyThisView, Zoom,
 };
 use crate::bottom_bar::{
     self, BarError, BarFocus, BarState, Count, Path as BarPath, Primary, RunningView, search_count, sidebar_count,
@@ -311,6 +311,8 @@ pub struct CrowWindow {
     path_hits: bottom_bar::PathHits,
     /// The Back button's bounds from the last frame, for springing back.
     back_bounds: Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
+    /// Where the shelf strip was last drawn, for drops onto it.
+    shelf_bounds: Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
     /// The destination under the pointer during a drag, for surfaces whose
     /// hover outline the window draws (Back, path bar, search results).
     drop_hover: Option<DropHit>,
@@ -478,6 +480,7 @@ impl CrowWindow {
             drop_pending: false,
             path_hits: Default::default(),
             back_bounds: Default::default(),
+            shelf_bounds: Default::default(),
             drop_hover: None,
             drag_devices: DragDevices::default(),
             _subscriptions: subscriptions,
@@ -1903,6 +1906,9 @@ impl CrowWindow {
         if self.back_bounds.get().is_some_and(|bounds| bounds.contains(&pointer)) {
             return Some(DropHit::back(self.drag.can_spring_back()));
         }
+        if let Some(hit) = self.shelf_hit_at(pointer, cx) {
+            return Some(hit);
+        }
         let hit = self
             .sidebar
             .read(cx)
@@ -2277,6 +2283,12 @@ impl CrowWindow {
         };
         match hit.location {
             DropLocation::Back => {}
+            DropLocation::Shelf => {
+                if let (true, Some(pane)) = (sprung, owner) {
+                    self.restore_spring(&pane, window, cx);
+                }
+                self.drop_onto_shelf(paths, window, cx);
+            }
             DropLocation::SidebarInsertion(slot) => {
                 if let (true, Some(pane)) = (sprung, owner) {
                     self.restore_spring(&pane, window, cx);
@@ -3474,6 +3486,10 @@ impl CrowWindow {
             CommandId::Undo => self.undo(None, cx),
             CommandId::Redo => self.redo(cx),
             CommandId::AddToSidebar => self.add_to_sidebar(&AddToSidebar, window, cx),
+            CommandId::AddToShelf => self.add_to_shelf(&AddToShelf, window, cx),
+            CommandId::MoveShelfHere => self.move_shelf_here(&MoveShelfHere, window, cx),
+            CommandId::CopyShelfHere => self.copy_shelf_here(&CopyShelfHere, window, cx),
+            CommandId::ClearShelf => self.clear_shelf(&ClearShelf, window, cx),
             CommandId::WhyThisView => self.why_this_view(&WhyThisView, window, cx),
             CommandId::UseViewAsDefaults => self.use_view_as_defaults(&UseViewAsDefaults, window, cx),
             CommandId::ResetFolderView => self.reset_folder_view(&ResetFolderView, window, cx),
@@ -3762,6 +3778,7 @@ impl Render for CrowWindow {
         );
         let title_bar = self.render_title_bar(&title, window, cx);
         let translucent = cx.global::<Ui>().translucent;
+        let shelf = (!cx.global::<Ui>().sidebar_hidden).then(|| self.render_shelf(&theme, cx)).flatten();
         let sidebar = (!cx.global::<Ui>().sidebar_hidden).then(|| {
             let tone = if translucent {
                 // See-through enough for the blurred desktop to read, solid enough for the labels.
@@ -3792,6 +3809,7 @@ impl Render for CrowWindow {
                     ),
                 )
                 .child(div().flex_1().min_h_0().w_full().child(self.sidebar.clone()))
+                .children(shelf)
                 .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme))
                 // One unbroken divider from the top of the window to the bottom, drawn over the
                 // column's edge so the sidebar keeps its width.
@@ -3961,6 +3979,10 @@ impl Render for CrowWindow {
             .on_action(cx.listener(Self::minimize))
             .on_action(cx.listener(Self::zoom))
             .on_action(cx.listener(Self::empty_trash))
+            .on_action(cx.listener(Self::add_to_shelf))
+            .on_action(cx.listener(Self::move_shelf_here))
+            .on_action(cx.listener(Self::copy_shelf_here))
+            .on_action(cx.listener(Self::clear_shelf))
             .on_action(cx.listener(Self::keyboard_shortcuts))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
@@ -4400,8 +4422,9 @@ pub(crate) mod operation_ui;
 mod palette_view;
 mod path_edit;
 pub(crate) mod saved_query_form;
+pub(crate) mod shelf;
 pub(crate) mod side_panes;
-pub(crate) mod tag_picker;
+mod tag_picker;
 
 #[cfg(test)]
 mod tests;
