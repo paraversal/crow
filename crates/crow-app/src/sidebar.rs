@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crow_core::motion::{self, Effective, Fx};
-use crow_core::{Favorite, Location, SavedQueryId, Section, SectionDestination, SectionRow, SidebarEdit, Slot, TagId};
+use crow_core::{
+    Favorite, Location, SavedQueryId, Section, SectionDestination, SectionRow, SidebarEdit, SidebarStyle, Slot, TagId,
+};
 use gpui::{
     Animation, AnimationExt, Bounds, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight,
     IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, Role, SharedString, Task, Window, div, img,
@@ -31,7 +33,7 @@ use crate::actions::{
 use crate::chrome::with_tooltip;
 use crate::context_menu::{SidebarMenuKind, SidebarMenuState};
 use crate::palette::CommandId;
-use crate::style::{color, current_location, cursor_ring, display_text, drop_outline, effect_tint, icon};
+use crate::style::{color, color_alpha, current_location, cursor_ring, display_text, drop_outline, effect_tint, icon};
 use crate::ui::{self, Ui};
 
 pub enum SidebarEvent {
@@ -222,10 +224,10 @@ fn card_parts(rows: &[Row]) -> Vec<Option<CardPart>> {
 /// Card corner radius, the strip's and the body's.
 const CARD_RADIUS: f32 = 10.;
 /// Space inside a card above its first row and below its last.
-const CARD_PAD_TOP: f32 = 3.;
-const CARD_PAD_BOTTOM: f32 = 4.;
+const CARD_PAD_TOP: f32 = 5.;
+const CARD_PAD_BOTTOM: f32 = 6.;
 /// Rows inside a card are inset this far from its edge.
-const CARD_ROW_INSET: f32 = 4.;
+const CARD_ROW_INSET: f32 = 6.;
 
 /// Sections whose collapsed flag changed between two draws: `(id, opening, old
 /// span)`. A section that appears or disappears is not a transition.
@@ -369,6 +371,9 @@ fn section_order(ui: &Ui, sections: &[Section]) -> Vec<String> {
 
 /// Space above a section title, a margin so the cursor ring hugs the label.
 const HEADER_GAP: f32 = 10.;
+
+/// The same gap when groups are cards: they need more air between them.
+const CARD_GAP: f32 = 14.;
 
 /// How far a heading's title slides right when its chevron shows.
 const CHEVRON_ROOM: f32 = 20.;
@@ -2050,6 +2055,15 @@ impl Render for Sidebar {
             self.insert_slot = None;
             self.dragging_favorite.set(false);
         }
+        let style = ui.settings.sidebar_style;
+        let (cards, accordion, pills) =
+            (style == SidebarStyle::Cards, style == SidebarStyle::Accordion, style == SidebarStyle::Pills);
+        let ledger = style == SidebarStyle::Ledger;
+        let header_gap = match style {
+            SidebarStyle::Cards => CARD_GAP,
+            SidebarStyle::Accordion => 0.,
+            _ => HEADER_GAP,
+        };
         let current_child = rows.iter().position(|row| row.location().as_ref() == Some(self.visible_current()));
         let fill = {
             let layout = self.layout.borrow();
@@ -2058,15 +2072,27 @@ impl Render for Sidebar {
             match (current_bounds, first_bounds) {
                 (Some(current), Some(first)) => {
                     // Section titles keep their gap above as a margin, outside their bounds.
-                    let gap = if matches!(rows.first(), Some(Row::SectionHeader { .. })) { HEADER_GAP } else { 0.0 };
+                    let gap = if matches!(rows.first(), Some(Row::SectionHeader { .. })) { header_gap } else { 0.0 };
                     let top = f32::from(current.top() - first.top()) + gap;
                     let base = div()
                         .absolute()
                         .top(px(top))
-                        .left(px(if ui.sidebar.cards { 8. + CARD_ROW_INSET } else { 8. }))
-                        .right(px(if ui.sidebar.cards { 8. + CARD_ROW_INSET } else { 8. }))
+                        .left(px(if cards {
+                            8. + CARD_ROW_INSET
+                        } else if accordion {
+                            0.
+                        } else {
+                            8.
+                        }))
+                        .right(px(if cards {
+                            8. + CARD_ROW_INSET
+                        } else if accordion {
+                            0.
+                        } else {
+                            8.
+                        }))
                         .h(current.size.height)
-                        .rounded_md()
+                        .when(!accordion, |fill| fill.rounded_md())
                         .bg(current_location(&theme))
                         .debug_selector(|| "sidebar-fill".into());
                     match mode {
@@ -2088,15 +2114,16 @@ impl Render for Sidebar {
                 _ => div().absolute().size(px(0.)).debug_selector(|| "sidebar-fill".into()).into_any_element(),
             }
         };
-        let cards = ui.sidebar.cards;
-        let parts = if cards { card_parts(&rows) } else { vec![None; rows.len()] };
+        let parts = if cards || accordion { card_parts(&rows) } else { vec![None; rows.len()] };
+        let section_counts: HashMap<String, usize> =
+            section_spans(&rows).into_iter().map(|span| (span.id, span.len)).collect();
         let (card_body, card_strip) = (theme.role("bg"), theme.role("surface"));
         let card_border = theme.role("border");
         // Each card's body is drawn behind the rows from the last layout, like the fill.
         let backdrops: Vec<gpui::AnyElement> = {
             let layout = self.layout.borrow();
             let first = layout.first().map(|(_, _, bounds)| *bounds);
-            let gap = if matches!(rows.first(), Some(Row::SectionHeader { .. })) { HEADER_GAP } else { 0.0 };
+            let gap = if matches!(rows.first(), Some(Row::SectionHeader { .. })) { header_gap } else { 0.0 };
             section_spans(&rows)
                 .into_iter()
                 .filter(|span| span.len > 0)
@@ -2159,7 +2186,12 @@ impl Render for Sidebar {
                 let group = group_of_section(&id);
                 let cursor_here = self.cursor == index;
                 let ring_here = cursor_here && focused;
-                let slide = self.header_amount(&id, mode, now).max(f32::from(ring_here));
+                let section_count = section_counts.get(&id).copied().unwrap_or(0);
+                let slide = if accordion || style == SidebarStyle::FloatingPanel {
+                    1.0
+                } else {
+                    self.header_amount(&id, mode, now).max(f32::from(ring_here))
+                };
                 let icon_text = match group {
                     Some(g) => ui.sidebar.group_icon(g),
                     None => ui.sidebar.section_icon(&id),
@@ -2190,7 +2222,10 @@ impl Render for Sidebar {
                         let id = id.clone();
                         move || format!("sidebar-heading-{id}")
                     })
-                    .pl(px(CHEVRON_ROOM * slide))
+                    .pl(px(CHEVRON_ROOM * slide + if pills { 8. } else { 0. }))
+                    .when(pills, |lead| {
+                        lead.pr(px(8.)).py(px(1.)).rounded_full().bg(color_alpha(theme.role("accent"), 42))
+                    })
                     .when_some(icon_text, |lead, text| {
                         lead.child(
                             div()
@@ -2224,10 +2259,21 @@ impl Render for Sidebar {
                         .aria_selected(cursor)
                         .when(cursor && self.focus.is_focused(window), |header| header.aria_active_descendant())
                         .when(look.ring, |header| header.shadow(cursor_ring(&theme)))
-                        .mt(px(HEADER_GAP))
+                        .mt(px(header_gap))
                         .px_2()
-                        .py(px(if cards { 2. } else { 3. }))
+                        .py(px(if cards { 5. } else { 3. }))
                         .when(!cards, |header| header.rounded_md())
+                        .when(accordion, |header| {
+                            header
+                                .ml(px(-8.))
+                                .mr(px(-8.))
+                                .px(px(12.))
+                                .py(px(4.))
+                                .rounded_none()
+                                .bg(color(card_strip))
+                                .border_t_1()
+                                .border_color(color(card_border))
+                        })
                         .when_some(parts[i].filter(|_| cards), |header, part| {
                             let alone = matches!(part, CardPart::Strip { alone: true });
                             let header = header
@@ -2245,9 +2291,9 @@ impl Render for Sidebar {
                         .flex()
                         .items_center()
                         .gap_1()
-                        .text_size(px(if cards { 12. } else { 11. }))
+                        .text_size(px(if cards || accordion { 12. } else { 11. }))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(color(if cards { fg } else { muted }))
+                        .text_color(color(if cards || accordion { fg } else { muted }))
                         .cursor_pointer()
                         .hover(move |style| style.text_color(color(fg)))
                         .on_hover({
@@ -2262,6 +2308,18 @@ impl Render for Sidebar {
                         .relative()
                         .child(chevron)
                         .child(lead)
+                        .when(ledger, |header| {
+                            header.child(div().flex_1().h(px(1.)).ml_1().bg(crate::style::hairline(&theme)))
+                        })
+                        .when(accordion, |header| {
+                            header.child(
+                                div()
+                                    .ml_auto()
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(color(muted))
+                                    .child(section_count.to_string()),
+                            )
+                        })
                         .when_some(group, |header, g| {
                             header
                                 .when(
@@ -2384,6 +2442,9 @@ impl Render for Sidebar {
                 .px_2()
                 .py(px(3.))
                 .rounded_md()
+                .when(accordion && matches!(parts[i], Some(CardPart::Body { .. })), |row| {
+                    row.ml(px(-8.)).mr(px(-8.)).pl(px(26.)).pr(px(12.)).rounded_none()
+                })
                 .flex()
                 .flex_col()
                 .relative()

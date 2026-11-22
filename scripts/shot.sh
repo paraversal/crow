@@ -236,8 +236,15 @@ else
 fi
 
 out="$root/target/shots/$state-$theme.png"
-if ! screencapture -x -o -l "$id" "$out"; then
-  echo "shot.sh: screencapture failed; grant the terminal Screen Recording permission" >&2
-  exit 1
-fi
+# Grey traffic lights mean another app took focus; bring Crow forward and retake (a few times).
+for attempt in 1 2 3 4; do
+  osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" >/dev/null 2>&1 || true
+  sleep 0.6
+  if ! screencapture -x -o -l "$id" "$out"; then
+    echo "shot.sh: screencapture failed; grant the terminal Screen Recording permission" >&2
+    exit 1
+  fi
+  if swift "$root/scripts/lights-active.swift" "$out" 2>/dev/null; then break; fi
+  echo "shot.sh: the window was not active (attempt $attempt); retrying" >&2
+done
 echo "wrote $out"

@@ -61,6 +61,13 @@ icon_pack = "native"
 # field with a Go button; Return, Escape and Tab work the same in both.
 path_bar = "crow"
 
+# How the sidebar draws its groups: "ledger" (default) is plain headings with a hairline,
+# "cards" puts each group on a surface under a tinted heading strip, "accordion" uses
+# full-width heading bars, "floating-panel" lifts the whole sidebar into one rounded panel,
+# and "pills" shows each heading as a small colored pill. Any group takes an `icon` in
+# sidebar.toml.
+sidebar_style = "ledger"
+
 # Let the sidebar show the blurred desktop behind it, like Finder's. Off by default.
 # It stays opaque while macOS Reduce Transparency is on. Themes can't turn it on.
 translucent_sidebar = false
@@ -244,6 +251,54 @@ impl FolderSizesMode {
 }
 
 /// How the bottom bar shows its path.
+/// How the sidebar draws its groups.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidebarStyle {
+    /// Plain headings with a hairline running out to the right.
+    #[default]
+    Ledger,
+    /// Each group on a surface under a tinted heading strip.
+    Cards,
+    /// Full-width heading bars with a count, rows edge to edge.
+    Accordion,
+    /// The whole sidebar lifted into one rounded, bordered panel.
+    FloatingPanel,
+    /// Each heading a small colored pill.
+    Pills,
+}
+
+impl SidebarStyle {
+    pub const ALL: [SidebarStyle; 5] = [
+        SidebarStyle::Ledger,
+        SidebarStyle::Cards,
+        SidebarStyle::Accordion,
+        SidebarStyle::FloatingPanel,
+        SidebarStyle::Pills,
+    ];
+
+    /// The value in `settings.toml`.
+    pub fn key(self) -> &'static str {
+        match self {
+            SidebarStyle::Ledger => "ledger",
+            SidebarStyle::Cards => "cards",
+            SidebarStyle::Accordion => "accordion",
+            SidebarStyle::FloatingPanel => "floating-panel",
+            SidebarStyle::Pills => "pills",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SidebarStyle::Ledger => "Ledger lines",
+            SidebarStyle::Cards => "Cards",
+            SidebarStyle::Accordion => "Accordion",
+            SidebarStyle::FloatingPanel => "Floating panel",
+            SidebarStyle::Pills => "Pills",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PathBarMode {
@@ -302,6 +357,7 @@ pub struct Settings {
     #[serde(default = "native_icon_pack", deserialize_with = "icon_pack_value")]
     pub icon_pack: String,
     pub path_bar: PathBarMode,
+    pub sidebar_style: SidebarStyle,
     pub translucent_sidebar: bool,
     pub font_family: String,
     pub font_size: f32,
@@ -328,6 +384,7 @@ impl Default for Settings {
             sound: SoundSet::Crow,
             icon_pack: native_icon_pack(),
             path_bar: PathBarMode::Crow,
+            sidebar_style: SidebarStyle::Ledger,
             translucent_sidebar: false,
             font_family: String::new(),
             font_size: 13.0,
@@ -484,6 +541,16 @@ mod tests {
         assert_eq!(parsed.icon_pack, "example.pack.theme");
         assert!(toml::from_str::<Settings>("icon_pack = \"My Pack\"").is_err());
         assert!(toml::from_str::<Settings>("icon_pack = \"\"").is_err());
+    }
+
+    #[test]
+    fn sidebar_styles_parse_and_default_to_ledger() {
+        let parse = |text: &str| toml::from_str::<Settings>(text).expect("parses");
+        for style in SidebarStyle::ALL {
+            assert_eq!(parse(&format!("sidebar_style = \"{}\"", style.key())).sidebar_style, style);
+        }
+        assert_eq!(parse("theme = \"system\"").sidebar_style, SidebarStyle::Ledger, "an old config is Ledger");
+        assert!(toml::from_str::<Settings>("sidebar_style = \"tabs\"").is_err(), "an unknown style is an error");
     }
 
     #[test]

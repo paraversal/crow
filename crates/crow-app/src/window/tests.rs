@@ -7634,7 +7634,7 @@ fn without_a_theme_index_the_picker_lists_the_builtins_and_cannot_apply_to_all_a
         ((0..choice.entries.len()).map(|i| choice.id(i)).collect::<Vec<_>>(), choice.index)
     });
     assert_eq!(ids[0], "system");
-    assert_eq!(ids.len(), 9, "{ids:?}");
+    assert_eq!(ids.len(), 11, "{ids:?}");
     assert!(ids.contains(&"finder-light".to_owned()) && ids.contains(&"solarized-dark".to_owned()));
     assert!(!index);
     assert!(cx.debug_bounds("theme-everywhere").is_none(), "no Apply to All Apps without an index");
@@ -18682,17 +18682,13 @@ fn the_title_reveals_a_draggable_folder_icon_on_hover(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn group_cards_draw_one_body_per_expanded_group_only_when_on(cx: &mut TestAppContext) {
+fn group_cards_are_one_of_the_sidebar_styles_and_draw_a_body_per_expanded_group(cx: &mut TestAppContext) {
     let root = fixture("group-cards");
     let (view, mut cx) = open(cx, &root);
     settle(&view, &mut cx);
-    assert!(cx.debug_bounds("sidebar-card-0").is_none(), "off by default");
-    write_config(
-        &view,
-        &mut cx,
-        "sidebar.toml",
-        "cards = true\n[[group]]\nname = \"One\"\nitems = [{ path = \"/tmp\" }]\n",
-    );
+    assert!(cx.debug_bounds("sidebar-card-0").is_none(), "the default style, Ledger, has no cards");
+    write_config(&view, &mut cx, "sidebar.toml", "[[group]]\nname = \"One\"\nitems = [{ path = \"/tmp\" }]\n");
+    write_config(&view, &mut cx, "settings.toml", "sidebar_style = \"cards\"\n");
     view.update(&mut cx, |_, cx| cx.notify());
     settle(&view, &mut cx);
     view.update(&mut cx, |_, cx| cx.notify());

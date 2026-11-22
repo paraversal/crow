@@ -3778,6 +3778,7 @@ impl Render for CrowWindow {
         );
         let title_bar = self.render_title_bar(&title, window, cx);
         let translucent = cx.global::<Ui>().translucent;
+        let floating = cx.global::<Ui>().settings.sidebar_style == crow_core::SidebarStyle::FloatingPanel;
         let shelf = (!cx.global::<Ui>().sidebar_hidden).then(|| self.render_shelf(&theme, cx)).flatten();
         let sidebar = (!cx.global::<Ui>().sidebar_hidden).then(|| {
             let tone = if translucent {
@@ -3808,8 +3809,34 @@ impl Render for CrowWindow {
                         }),
                     ),
                 )
-                .child(div().flex_1().min_h_0().w_full().child(self.sidebar.clone()))
-                .children(shelf)
+                .child(if floating {
+                    // One rounded, bordered panel lifted off the column, holding the rows and the shelf.
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .mx(px(8.))
+                        .mb(px(8.))
+                        .rounded(px(14.))
+                        .border_1()
+                        .border_color(crate::style::hairline(&theme))
+                        .bg(color(theme.role("bg")))
+                        .overflow_hidden()
+                        .flex()
+                        .flex_col()
+                        .child(div().flex_1().min_h_0().w_full().child(self.sidebar.clone()))
+                        .children(shelf)
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(div().flex_1().min_h_0().w_full().child(self.sidebar.clone()))
+                        .children(shelf)
+                        .into_any_element()
+                })
                 .child(side_panes::splitter(side_panes::Side::Left, &self.side_panes.left_focus, &theme))
                 // One unbroken divider from the top of the window to the bottom, drawn over the
                 // column's edge so the sidebar keeps its width.

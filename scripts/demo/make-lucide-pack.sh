@@ -25,8 +25,9 @@ if [ ! -d "$icons" ]; then
 fi
 
 rm -rf "$out"
-mkdir -p "$out"
+mkdir -p "$out/icons"
 cp "$cache/package/LICENSE" "$out/LICENSE-lucide.txt"
+cp "$(dirname "$0")/lucide-pack-readme.md" "$out/README.md"
 {
   echo '# Lucide icons (https://lucide.dev, ISC licence), tinted with the theme palette.'
   echo 'api = 1'
@@ -43,13 +44,13 @@ add() {
   if [ "$sec" != "$section" ]; then printf '\n[%s]\n' "$sec" >>"$out/pack.toml"; section=$sec; fi
   case " $used " in *" $icon "*) ;; *)
     # Plain SVG: no comment, no class, so the pack loader sees only drawing elements.
-    sed -e '/<!--/d' -e 's/ class="[^"]*"//' "$icons/$icon.svg" >"$out/$icon.svg"
+    sed -e '/<!--/d' -e 's/ class="[^"]*"//' "$icons/$icon.svg" >"$out/icons/$icon.svg"
     used="$used $icon" ;;
   esac
   if [ -n "$color" ]; then
-    printf '"%s" = { icon = "%s.svg", color = "%s" }\n' "$key" "$icon" "$color" >>"$out/pack.toml"
+    printf '"%s" = { icon = "icons/%s.svg", color = "%s" }\n' "$key" "$icon" "$color" >>"$out/pack.toml"
   else
-    printf '"%s" = { icon = "%s.svg" }\n' "$key" "$icon" >>"$out/pack.toml"
+    printf '"%s" = { icon = "icons/%s.svg" }\n' "$key" "$icon" >>"$out/pack.toml"
   fi
 }
 
@@ -169,10 +170,10 @@ add extension stl box base0B
 printf '\n[generic]\n' >>"$out/pack.toml"
 add_generic() { # name icon color  (add() writes a [section]; generic keys are bare)
   [ -f "$icons/$2.svg" ] || { echo "make-lucide-pack: no Lucide icon '$2'" >&2; exit 1; }
-  sed -e '/<!--/d' -e 's/ class="[^"]*"//' "$icons/$2.svg" >"$out/$2.svg"
-  printf '%s = { icon = "%s.svg", color = "%s" }\n' "$1" "$2" "$3" >>"$out/pack.toml"
+  sed -e '/<!--/d' -e 's/ class="[^"]*"//' "$icons/$2.svg" >"$out/icons/$2.svg"
+  printf '%s = { icon = "icons/%s.svg", color = "%s" }\n' "$1" "$2" "$3" >>"$out/pack.toml"
 }
 add_generic folder folder base0D
 add_generic file file fg-muted
 
-echo "built $out ($(ls "$out"/*.svg | wc -l | tr -d ' ') icons)"
+echo "built $out ($(ls "$out"/icons/*.svg | wc -l | tr -d ' ') icons)"

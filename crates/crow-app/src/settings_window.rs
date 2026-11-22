@@ -163,6 +163,7 @@ enum ControlId {
     Theme,
     IconPack,
     PathBar,
+    SidebarStyle,
     TranslucentSidebar,
     FontFamily,
     FontSize,
@@ -218,11 +219,12 @@ enum ControlId {
 impl ControlId {
     /// Every control, used to build focus handles. Reading order comes from
     /// `catalog::units`, so a category can be reordered without touching this.
-    const ALL: [ControlId; 53] = [
+    const ALL: [ControlId; 54] = [
         ControlId::Theme,
         ControlId::TranslucentSidebar,
         ControlId::IconPack,
         ControlId::PathBar,
+        ControlId::SidebarStyle,
         ControlId::FontFamily,
         ControlId::FontSize,
         ControlId::Keymap,
@@ -279,6 +281,7 @@ impl ControlId {
             ControlId::Theme => "settings-theme",
             ControlId::IconPack => "settings-icon-pack",
             ControlId::PathBar => "settings-path-bar",
+            ControlId::SidebarStyle => "settings-sidebar-style",
             ControlId::FontFamily => "settings-font-family",
             ControlId::FontSize => "settings-font-size",
             ControlId::Terminal => "settings-terminal",
@@ -348,6 +351,7 @@ impl ControlId {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::PathBar
+            | ControlId::SidebarStyle
             | ControlId::ShowHidden
             | ControlId::SearchHidden
             | ControlId::SearchMatch
@@ -376,6 +380,7 @@ impl ControlId {
             ControlId::Theme => "Theme",
             ControlId::IconPack => "Icon pack",
             ControlId::PathBar => "Path bar",
+            ControlId::SidebarStyle => "Sidebar style",
             ControlId::FontFamily => "Font",
             ControlId::FontSize => "Font size",
             ControlId::Terminal => "Terminal app",
@@ -444,6 +449,7 @@ impl ControlId {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::PathBar
+            | ControlId::SidebarStyle
             | ControlId::Motion
             | ControlId::Sound
             | ControlId::SearchMatch
@@ -491,6 +497,7 @@ impl ControlId {
                 "Native, local icon-packs and approved plugin packs; a folder's views.toml source wins."
             }
             ControlId::PathBar => "Crow fades in an editor over the breadcrumb; Explorer keeps a visible path field.",
+            ControlId::SidebarStyle => "How the sidebar draws its groups. Any group can carry an icon in sidebar.toml.",
             ControlId::FontFamily => "Installed families; System follows macOS.",
             ControlId::FontSize => "10 to 24 points.",
             ControlId::Terminal => {
@@ -1617,6 +1624,7 @@ impl SettingsWindow {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::PathBar
+            | ControlId::SidebarStyle
             | ControlId::Motion
             | ControlId::Sound
             | ControlId::SearchMatch
@@ -1634,6 +1642,7 @@ impl SettingsWindow {
             | ControlId::Tips
             | ControlId::FolderSizes
             | ControlId::PathBar
+            | ControlId::SidebarStyle
             | ControlId::Motion
             | ControlId::SearchMatch
             | ControlId::Sound => {
@@ -1909,6 +1918,7 @@ impl SettingsWindow {
             ControlId::Tips => (tips_index(cx.global::<Ui>().settings.tips), 2),
             ControlId::FolderSizes => (folder_sizes_index(cx.global::<Ui>().settings.folder_sizes), 2),
             ControlId::PathBar => (path_bar_index(cx.global::<Ui>().settings.path_bar), 2),
+            ControlId::SidebarStyle => (sidebar_style_index(cx.global::<Ui>().settings.sidebar_style), 5),
             ControlId::SearchMatch => (search_match_index(cx.global::<Ui>().settings.search_match), 3),
             ControlId::Motion => (motion_index(cx.global::<Ui>().settings.motion), 4),
             ControlId::Sound => (sound_index(cx.global::<Ui>().settings.sound), 3),
@@ -1936,6 +1946,7 @@ impl SettingsWindow {
             ControlId::PathBar => {
                 SettingChange::PathBar(if index == 0 { PathBarMode::Crow } else { PathBarMode::Explorer })
             }
+            ControlId::SidebarStyle => SettingChange::SidebarStyle(crow_core::SidebarStyle::ALL[index.min(4)]),
             ControlId::SearchMatch => SettingChange::SearchMatch(match index {
                 0 => SearchMatch::All,
                 1 => SearchMatch::Names,
@@ -2392,6 +2403,7 @@ impl SettingsWindow {
                 ControlId::Tips => Some(tips_index(settings.tips)),
                 ControlId::FolderSizes => Some(folder_sizes_index(settings.folder_sizes)),
                 ControlId::PathBar => Some(path_bar_index(settings.path_bar)),
+                ControlId::SidebarStyle => Some(sidebar_style_index(settings.sidebar_style)),
                 ControlId::SearchMatch => Some(search_match_index(settings.search_match)),
                 ControlId::Motion => Some(motion_index(settings.motion)),
                 ControlId::Sound => Some(sound_index(settings.sound)),
@@ -2541,6 +2553,19 @@ impl Render for SettingsWindow {
             path_bar_index(settings.path_bar),
             self.style(ControlId::PathBar, window, &theme),
             path_bar_select,
+            None,
+        );
+
+        let sidebar_style_select = select_callback(cx, |this, index, window, cx| {
+            this.select_segment(ControlId::SidebarStyle, index, window, cx)
+        });
+        let sidebar_style_labels = crow_core::SidebarStyle::ALL.map(crow_core::SidebarStyle::label);
+        let sidebar_style_row = controls::segmented(
+            self.meta(ControlId::SidebarStyle, cx),
+            &sidebar_style_labels,
+            sidebar_style_index(settings.sidebar_style),
+            self.style(ControlId::SidebarStyle, window, &theme),
+            sidebar_style_select,
             None,
         );
 
@@ -2815,6 +2840,7 @@ impl Render for SettingsWindow {
         rows.insert(ControlId::Theme, theme_row.into_any_element());
         rows.insert(ControlId::IconPack, icon_row.into_any_element());
         rows.insert(ControlId::PathBar, path_bar_row.into_any_element());
+        rows.insert(ControlId::SidebarStyle, sidebar_style_row.into_any_element());
         rows.insert(ControlId::FontFamily, font_row.into_any_element());
         rows.insert(ControlId::FontSize, font_size_row.into_any_element());
         rows.insert(ControlId::Keymap, keymap_row.into_any_element());
@@ -3327,6 +3353,10 @@ fn path_bar_index(value: PathBarMode) -> usize {
         PathBarMode::Crow => 0,
         PathBarMode::Explorer => 1,
     }
+}
+
+fn sidebar_style_index(value: crow_core::SidebarStyle) -> usize {
+    crow_core::SidebarStyle::ALL.iter().position(|style| *style == value).unwrap_or(0)
 }
 
 fn search_match_index(value: SearchMatch) -> usize {
@@ -4936,6 +4966,20 @@ preview_providers = ["example.one.preview"]
         vcx.simulate_keystrokes("enter");
         assert_eq!(font(&vcx), "Zed Mono");
         wait_for(&vcx, "font_family = \"Zed Mono\"");
+    }
+
+    #[gpui::test]
+    fn sidebar_style_is_a_five_way_choice_that_starts_on_ledger_lines(cx: &mut TestAppContext) {
+        let (view, mut vcx) = open_settings(cx);
+        focus_control(&view, &mut vcx, ControlId::SidebarStyle);
+        assert_eq!(state(&view, &vcx, ControlId::SidebarStyle).selected, Some(0), "Ledger lines is the default");
+        vcx.simulate_keystrokes("right right");
+        assert_eq!(
+            vcx.read_global::<Ui, _>(|ui, _| ui.settings.sidebar_style),
+            crow_core::SidebarStyle::Accordion,
+            "two steps right is the third style"
+        );
+        wait_for(&vcx, "sidebar_style = \"accordion\"");
     }
 
     #[gpui::test]

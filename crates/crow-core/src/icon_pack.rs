@@ -639,6 +639,23 @@ fn check_css_references(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pack shipped in docs/examples/icon-pack must keep loading: the parser accepts
+    /// pack.toml and every glyph it names is a valid SVG inside the pack's icons/ folder.
+    #[test]
+    fn the_example_icon_pack_in_the_docs_is_valid() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/icon-pack");
+        let text = std::fs::read_to_string(dir.join("pack.toml")).expect("pack.toml");
+        let pack = IconPack::parse(&text, std::path::Path::new("/home/example")).expect("the example parses");
+        assert_eq!(pack.id(), Some("lucide"));
+        let assets: Vec<&str> = pack.assets().collect();
+        assert!(assets.len() >= 60, "the example maps many icons");
+        for asset in assets {
+            assert!(asset.starts_with("icons/"), "{asset} lives in the icons subfolder");
+            let bytes = std::fs::read(dir.join(asset)).unwrap_or_else(|e| panic!("{asset}: {e}"));
+            validate_svg(&bytes).unwrap_or_else(|e| panic!("{asset}: {e}"));
+        }
+    }
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 

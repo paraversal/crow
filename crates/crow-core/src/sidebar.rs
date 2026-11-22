@@ -12,9 +12,6 @@ use crate::config::{abbreviate_home, edit_toml, expand_home};
 pub const DEFAULT_SIDEBAR: &str = r##"# Crow sidebar. Crow updates this file when you drag favorites around or add
 # and remove them; your comments stay.
 #
-# `cards = true` draws every group as a card with a tinted heading strip (off by default).
-# cards = false
-#
 # Each [[group]] is a section of favorites. A group takes `collapsed = true` to
 # hide its items under the title (Crow writes it when you collapse the group) and
 # an optional `icon` (a short text or emoji shown before the title; none by default).
@@ -156,8 +153,6 @@ pub struct ShelfConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct SidebarConfig {
-    /// Draw each group as a card with a tinted heading strip. Off by default.
-    pub cards: bool,
     pub group: Vec<Group>,
     pub recent: RecentConfig,
     pub locations: LocationsConfig,
@@ -658,12 +653,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cards_and_the_shelf_are_opt_in() {
+    fn the_shelf_is_opt_in() {
         let config = SidebarConfig::parse(DEFAULT_SIDEBAR).expect("the default parses");
-        assert!(!config.cards, "group cards are off by default");
         assert!(!config.shelf.show, "the shelf is off by default");
-        let on = SidebarConfig::parse("cards = true\n[shelf]\nshow = true\n").expect("parses");
-        assert!(on.cards && on.shelf.show);
+        let on = SidebarConfig::parse("[shelf]\nshow = true\n").expect("parses");
+        assert!(on.shelf.show);
     }
 
     const HOME: &str = "/Users/me";

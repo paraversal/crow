@@ -113,6 +113,14 @@ pub(super) const UNITS: &[Unit] = &[
         &[ControlId::PathBar],
     ),
     unit(
+        ControlId::SidebarStyle,
+        Category::Appearance,
+        "Sidebar style",
+        &["sidebar", "groups", "cards", "ledger", "accordion", "pills", "floating", "headings"],
+        &["sidebar_style"],
+        &[ControlId::SidebarStyle],
+    ),
+    unit(
         ControlId::TranslucentSidebar,
         Category::Appearance,
         "Translucent sidebar",

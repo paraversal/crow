@@ -1,5 +1,3 @@
-cards = true
-
 [[group]]
 name = "Favorites"
 items = [
