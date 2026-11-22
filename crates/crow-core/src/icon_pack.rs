@@ -40,8 +40,36 @@ const ALLOWED_SLOTS: [&str; 14] = [
     "base15", "base16", "base17",
 ];
 
-/// `native`, a local pack id, or a plugin pack's `<plugin>.<local>` id.
+/// Most packs a source can layer.
+pub const MAX_LAYERED_SOURCES: usize = 8;
+
+/// The sources in a (possibly layered) source string: `"lucide, linework"` is two packs,
+/// tried in order. A single id is a list of one.
+pub fn split_sources(source: &str) -> impl Iterator<Item = &str> {
+    source.split(',').map(str::trim).filter(|part| !part.is_empty())
+}
+
+/// `native`, a local pack id, or a plugin pack's `<plugin>.<local>` id; or a comma-separated
+/// list of them, which Crow tries in order (the first pack with an icon for an item wins, and
+/// `native` ends the list early).
 pub fn validate_source(source: &str) -> Result<(), String> {
+    if source.trim().is_empty() {
+        return Err("icon source is empty".into());
+    }
+    let parts: Vec<&str> = source.split(',').map(str::trim).collect();
+    if parts.len() > MAX_LAYERED_SOURCES {
+        return Err(format!("icon sources are limited to {MAX_LAYERED_SOURCES} packs"));
+    }
+    for (i, part) in parts.iter().enumerate() {
+        validate_one_source(part)?;
+        if parts[..i].contains(part) {
+            return Err(format!("icon source \"{part}\" is listed twice"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_one_source(source: &str) -> Result<(), String> {
     if source == NATIVE_ICON_SOURCE {
         return Ok(());
     }
@@ -63,8 +91,26 @@ pub fn validate_source(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The source string after the user picks `id` in the pack list: picking a pack that is
+/// not on the list adds it after the others, picking one that is removes it, and picking
+/// Native clears the list. An empty list is Native.
+pub fn toggle_source(current: &str, id: &str) -> String {
+    if id == NATIVE_ICON_SOURCE {
+        return NATIVE_ICON_SOURCE.to_owned();
+    }
+    let mut parts: Vec<&str> = split_sources(current).filter(|part| *part != NATIVE_ICON_SOURCE).collect();
+    match parts.iter().position(|part| *part == id) {
+        Some(at) => {
+            parts.remove(at);
+        }
+        None if parts.len() < MAX_LAYERED_SOURCES => parts.push(id),
+        None => {}
+    }
+    if parts.is_empty() { NATIVE_ICON_SOURCE.to_owned() } else { parts.join(",") }
+}
+
 pub fn is_native(source: &str) -> bool {
-    source == NATIVE_ICON_SOURCE
+    split_sources(source).all(|part| part == NATIVE_ICON_SOURCE)
 }
 
 /// A theme role or one of the spec's palette hues.
@@ -639,6 +685,22 @@ fn check_css_references(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layered_sources_validate_split_and_toggle() {
+        assert!(validate_source("lucide, linework").is_ok());
+        assert!(validate_source("lucide,native").is_ok());
+        assert!(validate_source("lucide,lucide").is_err(), "a pack twice");
+        assert!(validate_source("lucide,").is_err());
+        assert!(validate_source("a,b,c,d,e,f,g,h,i").is_err(), "more than eight");
+        assert_eq!(split_sources("a, b ,c").collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert!(is_native("native") && !is_native("native,lucide"));
+        assert_eq!(toggle_source("native", "lucide"), "lucide", "the first pick replaces Native");
+        assert_eq!(toggle_source("lucide", "linework"), "lucide,linework", "later picks are added after");
+        assert_eq!(toggle_source("lucide,linework", "lucide"), "linework", "picking a member removes it");
+        assert_eq!(toggle_source("lucide", "lucide"), "native", "an empty list is Native");
+        assert_eq!(toggle_source("lucide,linework", "native"), "native");
+    }
 
     /// The pack shipped in docs/examples/icon-pack must keep loading: the parser accepts
     /// pack.toml and every glyph it names is a valid SVG inside the pack's icons/ folder.

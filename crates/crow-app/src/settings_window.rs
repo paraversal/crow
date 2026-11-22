@@ -424,7 +424,7 @@ impl ControlId {
             ControlId::PreviewClear => "Clear preview override",
             ControlId::Plugins => "Plugins",
             ControlId::EditSettings => "Edit settings.toml…",
-            ControlId::ShowConfig => "Show config folder in Finder",
+            ControlId::ShowConfig => "Open config folder",
             ControlId::OpenSidebarToml => "sidebar.toml",
             ControlId::OpenViewsToml => "views.toml",
             ControlId::OpenExcludeToml => "exclude.toml",
@@ -2004,7 +2004,27 @@ impl SettingsWindow {
             ids.push(choice.id.clone());
             labels.push(label);
         }
-        if !ids.iter().any(|id| id == &saved) {
+        let layered: Vec<&str> = crow_core::split_sources(&saved).collect();
+        if layered.len() > 1 {
+            // Several packs are layered: members are ticked, picking one adds or removes it, and
+            // the saved list is its own row so the closed menu names every pack.
+            for (id, label) in ids.iter().zip(labels.iter_mut()) {
+                if layered.contains(&id.as_str()) {
+                    *label = format!("✓ {label}");
+                }
+            }
+            for part in &layered {
+                if !ids.iter().any(|id| id == part) {
+                    ids.push((*part).to_owned());
+                    labels.push(format!("✓ {part} (not installed)"));
+                }
+            }
+            let names = cx
+                .try_global::<crate::icon_packs::IconPacks>()
+                .map_or_else(|| saved.clone(), |packs| packs.display_name(&saved));
+            ids.push(saved.clone());
+            labels.push(names);
+        } else if !ids.iter().any(|id| id == &saved) {
             let label = if saved == crow_core::NATIVE_ICON_SOURCE {
                 "Native".to_owned()
             } else {
@@ -2177,8 +2197,11 @@ impl SettingsWindow {
         if !self.icon_pack_ids.iter().any(|candidate| candidate == &id) {
             return;
         }
-        if cx.global::<Ui>().settings.icon_pack != id {
-            ui::set_setting(SettingChange::IconPack(id), cx);
+        // Picking a pack adds it to (or removes it from) the layered list; Native clears it.
+        let next = crow_core::toggle_source(&cx.global::<Ui>().settings.icon_pack, &id);
+        let layered_row = crow_core::split_sources(&id).count() > 1;
+        if !layered_row && cx.global::<Ui>().settings.icon_pack != next {
+            ui::set_setting(SettingChange::IconPack(next), cx);
         }
     }
 
@@ -2737,7 +2760,7 @@ impl Render for SettingsWindow {
         );
         let show_config = controls::button(
             ControlId::ShowConfig.key(),
-            "Show config folder in Finder",
+            "Open config folder",
             false,
             true,
             self.style(ControlId::ShowConfig, window, &theme),
@@ -5090,7 +5113,11 @@ preview_providers = ["example.one.preview"]
         click(&view, &mut vcx, ControlId::ShowConfig, "settings-show-config");
         let calls = vcx.update(|_, cx| crate::effects::recording(cx).expect("recording effects").take_calls());
         assert!(calls.contains(&Call::OpenInDefaultApp(config.join("settings.toml"))), "{calls:?}");
-        assert!(calls.contains(&Call::OpenFolderInFinder(config)), "{calls:?}");
+        assert!(!calls.iter().any(|call| matches!(call, Call::OpenFolderInFinder(_))), "it opens in Crow: {calls:?}");
+        let opened = vcx.update(|_, cx| {
+            cx.windows().iter().filter_map(|handle| handle.downcast::<crate::window::CrowWindow>()).count()
+        });
+        assert!(opened >= 1, "a Crow window opened on the config folder");
     }
 
     #[gpui::test]

@@ -1230,7 +1230,7 @@ pub fn open_config_path(path: &Path, cx: &mut App) {
     }
 }
 
-/// Show `<config>/plugins` in Finder, creating it if this is the first visit.
+/// Open `<config>/plugins` in a Crow window, creating it if this is the first visit.
 pub fn open_plugins_folder(cx: &mut App) {
     let dir = cx.global::<Ui>().config_dir.join("plugins");
     let create = cx.background_spawn(async move {
@@ -1247,23 +1247,15 @@ pub fn open_plugins_folder(cx: &mut App) {
                 return;
             }
         };
-        cx.update(|cx| {
-            if !crate::effects::effects(cx).open_folder_in_finder(&dir) {
-                crate::operations::message(format!("Couldn't open {}", dir.display()), true, cx);
-                cx.refresh_windows();
-            }
-        });
+        cx.update(|cx| crate::window::open_path(dir, true, cx));
     })
     .detach();
 }
 
-/// Show the config folder in Finder.
+/// Open the config folder in a Crow window.
 pub fn open_config_folder(cx: &mut App) {
     let dir = cx.global::<Ui>().config_dir.clone();
-    if !crate::effects::effects(cx).open_folder_in_finder(&dir) {
-        crate::operations::message(format!("Couldn't open {} in Finder", dir.display()), true, cx);
-        cx.refresh_windows();
-    }
+    crate::window::open_path(dir, true, cx);
 }
 
 /// "Apply to all apps": make `theme` the global choice for its variant and follow it here.

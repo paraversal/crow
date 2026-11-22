@@ -43,7 +43,7 @@ pub use grid::{GridGeometry, GridMetrics, GridRect, IconSize};
 pub use history::History;
 pub use icon_pack::{
     ICON_PACK_API, IconColor, IconEntry, IconPack, MAX_ASSET_REF_BYTES, MAX_GLYPH_BYTES, MAX_GLYPHS, MAX_PACK_BYTES,
-    NATIVE_ICON_SOURCE, is_native, validate_asset_ref, validate_source, validate_svg,
+    NATIVE_ICON_SOURCE, is_native, split_sources, toggle_source, validate_asset_ref, validate_source, validate_svg,
 };
 pub use location::Location;
 pub use onboarding::{ONBOARDING_FILE, OnboardingState};

@@ -337,8 +337,18 @@ fn native_icon_pack() -> String {
     crate::icon_pack::NATIVE_ICON_SOURCE.to_owned()
 }
 
+/// `icon_pack` is one source, a comma-separated string, or a list: `["lucide", "linework"]`.
 fn icon_pack_value<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    let value = String::deserialize(deserializer)?;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    let value = match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(value) => value,
+        OneOrMany::Many(values) => values.join(","),
+    };
     crate::icon_pack::validate_source(&value).map_err(serde::de::Error::custom)?;
     Ok(value)
 }
@@ -541,6 +551,16 @@ mod tests {
         assert_eq!(parsed.icon_pack, "example.pack.theme");
         assert!(toml::from_str::<Settings>("icon_pack = \"My Pack\"").is_err());
         assert!(toml::from_str::<Settings>("icon_pack = \"\"").is_err());
+    }
+
+    #[test]
+    fn icon_pack_takes_a_list_and_layers_packs_in_order() {
+        let one: Settings = toml::from_str("icon_pack = \"lucide, linework\"").unwrap();
+        assert_eq!(one.icon_pack, "lucide, linework");
+        let list: Settings = toml::from_str("icon_pack = [\"lucide\", \"linework\"]").unwrap();
+        assert_eq!(list.icon_pack, "lucide,linework");
+        assert!(toml::from_str::<Settings>("icon_pack = [\"lucide\", \"lucide\"]").is_err());
+        assert!(toml::from_str::<Settings>("icon_pack = []").is_err(), "an empty list is an error");
     }
 
     #[test]

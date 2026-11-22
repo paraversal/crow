@@ -62,9 +62,20 @@ impl IconSnapshot {
     /// The first matching pack entry for this path, with the exact bytes the
     /// snapshot loaded. `None` means "draw the native icon".
     pub fn resolve(&self, source: &str, path: &Path, is_dir: bool, is_package: bool) -> Option<ResolvedIcon> {
-        if source == NATIVE_ICON_SOURCE {
-            return None;
+        // Layered sources: the first pack with an icon for this item wins; `native` ends the
+        // list, and a pack that is not installed is skipped.
+        for part in crow_core::split_sources(source) {
+            if part == NATIVE_ICON_SOURCE {
+                return None;
+            }
+            if let Some(icon) = self.resolve_in(part, path, is_dir, is_package) {
+                return Some(icon);
+            }
         }
+        None
+    }
+
+    fn resolve_in(&self, source: &str, path: &Path, is_dir: bool, is_package: bool) -> Option<ResolvedIcon> {
         let pack = self.packs.get(source)?;
         let type_ids = if pack.pack.uses_type() {
             let folder_like = is_dir && !is_package;
@@ -83,13 +94,18 @@ impl IconSnapshot {
 
     /// A display name for a configured source, including the missing case.
     pub fn display_name(&self, source: &str) -> String {
-        if source == NATIVE_ICON_SOURCE {
-            return "Native".into();
-        }
-        match self.packs.get(source) {
-            Some(pack) => pack.name.clone(),
-            None => format!("{source} (not installed)"),
-        }
+        let names: Vec<String> = crow_core::split_sources(source)
+            .map(|part| {
+                if part == NATIVE_ICON_SOURCE {
+                    return "Native".to_owned();
+                }
+                match self.packs.get(part) {
+                    Some(pack) => pack.name.clone(),
+                    None => format!("{part} (not installed)"),
+                }
+            })
+            .collect();
+        names.join(" + ")
     }
 }
 
@@ -115,7 +131,7 @@ pub fn effective_icon_source(ui: &Ui, dir: &Path) -> String {
 
 impl Resolver {
     pub fn for_source(cx: &App, source: &str) -> Self {
-        if source == NATIVE_ICON_SOURCE {
+        if crow_core::is_native(source) {
             return Self::default();
         }
         let snapshot = cx.try_global::<IconPacks>().map(IconPacks::snapshot);

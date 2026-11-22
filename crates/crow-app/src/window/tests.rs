@@ -18791,3 +18791,40 @@ fn dropping_files_on_the_shelf_adds_them_and_clear_shelf_empties_it(cx: &mut Tes
     settle(&view, &mut cx);
     assert!(cx.read(|cx| cx.global::<Ui>().shelf.is_empty()));
 }
+
+#[gpui::test]
+fn layered_icon_packs_try_each_pack_in_order_and_fall_back_to_native(cx: &mut TestAppContext) {
+    const GLYPH: &str =
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/></svg>"#;
+    let root = fixture("icon-packs-layered");
+    std::fs::create_dir(root.join("src")).expect("fixture");
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("fixture");
+    let (view, mut cx) = open_with_before(cx, &root, Default::default(), |cx| {
+        let config = cx.global::<Ui>().config_dir.clone();
+        let home = cx.global::<Ui>().home.clone();
+        for (id, map) in [
+            ("first", "[folder_name]\n\"src\" = { icon = \"g.svg\" }\n"),
+            ("second", "[file_name]\n\"Cargo.toml\" = { icon = \"g.svg\" }\n"),
+        ] {
+            let pack = config.join(format!("icon-packs/{id}"));
+            std::fs::create_dir_all(&pack).expect("pack dir");
+            std::fs::write(pack.join("pack.toml"), format!("api = 1\nname = \"{id}\"\n{map}")).expect("pack");
+            std::fs::write(pack.join("g.svg"), GLYPH).expect("glyph");
+        }
+        std::fs::write(config.join("settings.toml"), "icon_pack = [\"first\", \"second\"]\n").expect("settings");
+        crate::ui::reload_config(cx);
+        let snapshot = crate::icon_packs::load_catalog(&config, &home).expect("catalog");
+        cx.global_mut::<crate::icon_packs::IconPacks>().install_for_tests(snapshot);
+    });
+    settle(&view, &mut cx);
+    assert_eq!(cx.read(|cx| cx.global::<Ui>().settings.icon_pack.clone()), "first,second");
+    let snapshot = cx.read(|cx| cx.global::<crate::icon_packs::IconPacks>().snapshot());
+    let resolves = |source: &str, path: &Path, is_dir: bool| snapshot.resolve(source, path, is_dir, false).is_some();
+    assert!(resolves("first,second", &root.join("src"), true), "src comes from the first pack");
+    assert!(resolves("first,second", &root.join("Cargo.toml"), false), "Cargo.toml falls through to the second");
+    assert!(!resolves("first", &root.join("Cargo.toml"), false), "the first pack alone has no icon for it");
+    assert!(resolves("missing,second", &root.join("Cargo.toml"), false), "a pack that is not installed is skipped");
+    assert!(!resolves("native,first", &root.join("src"), true), "native ends the list");
+    let names = cx.read(|cx| cx.global::<crate::icon_packs::IconPacks>().display_name("first,second"));
+    assert_eq!(names, "first + second");
+}
