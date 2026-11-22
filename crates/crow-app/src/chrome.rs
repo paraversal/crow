@@ -178,8 +178,8 @@ fn tooltip<E: StatefulInteractiveElement>(
     })
 }
 
-/// The small chevron at a sidebar's edge that hides it: it points the way the column
-/// leaves, stays quiet until hovered, and runs `action` (the same command as the key and
+/// The small chevron at a sidebar's edge that hides it (or, in the toolbar, brings it back):
+/// it points the way the column goes, stays quiet until hovered, and runs `action` (the same command as the key and
 /// the menu item). `label` is the tooltip and the aria label.
 pub fn collapse_chevron(
     id: &'static str,

@@ -3040,6 +3040,19 @@ fn the_chevrons_hide_the_left_and_right_sidebars(cx: &mut TestAppContext) {
     cx.simulate_click(right.center(), gpui::Modifiers::default());
     settle(&view, &mut cx);
     assert!(!right_visible(&cx), "its chevron hides the right sidebar");
+    let show_right =
+        cx.debug_bounds("show-right-sidebar").expect("a button in the toolbar brings the right sidebar back");
+    cx.simulate_click(show_right.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert!(right_visible(&cx), "the toolbar button shows the right sidebar");
+    // The slides run on the wall clock: let both finish so the bounds are the resting ones.
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    cx.update(|window, _| window.refresh());
+    settle(&view, &mut cx);
+    let show_left = cx.debug_bounds("show-left-sidebar").expect("a button in the toolbar brings the left sidebar back");
+    cx.simulate_click(show_left.center(), gpui::Modifiers::default());
+    settle(&view, &mut cx);
+    assert!(!cx.read(|cx| cx.global::<Ui>().sidebar_hidden), "the toolbar button shows the left sidebar");
 }
 
 #[gpui::test]

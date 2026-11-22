@@ -1470,13 +1470,27 @@ impl CrowWindow {
             .debug_selector(|| "toolbar".into())
             .role(Role::Toolbar)
             .aria_label("Toolbar")
+            .relative()
             .h(px(BAND_HEIGHT))
             .flex_none()
-            // With the sidebar hidden the traffic lights sit at the toolbar's left.
+            // With the sidebar hidden the traffic lights sit at the toolbar's left, and the
+            // button that brings the sidebar back sits right after them.
             .pl(px({
                 let base = if tight { 8. } else { 12. };
-                base + (86. - base) * (1.0 - left_share)
+                base + (86. + 28. - base) * (1.0 - left_share)
             }))
+            .when(left_share < 1.0, |bar| {
+                bar.child(div().absolute().top(px(14.)).left(px(84.)).opacity(1.0 - left_share).child(
+                    chrome::collapse_chevron(
+                        "show-left-sidebar",
+                        "Show Left Sidebar",
+                        icons::Glyph::CollapseRight,
+                        &ToggleSidebar,
+                        &theme,
+                        cx,
+                    ),
+                ))
+            })
             .pr(px(if tight { 8. } else { 12. }))
             .flex()
             .items_center()
@@ -1510,6 +1524,16 @@ impl CrowWindow {
                     .child(views.when(fade < 1.0, |el| el.opacity(fade)))
                     .child(go_to.when(fade < 1.0, |el| el.opacity(fade)))
                     .child(search_field)
+            })
+            .when(!self.info.read(cx).visible(), |bar| {
+                bar.child(chrome::collapse_chevron(
+                    "show-right-sidebar",
+                    "Show Right Sidebar",
+                    icons::Glyph::CollapseLeft,
+                    &TogglePreview,
+                    &theme,
+                    cx,
+                ))
             })
     }
 
@@ -3875,7 +3899,7 @@ impl Render for CrowWindow {
                         .child(div().absolute().top(px(14.)).right(px(8.)).child(chrome::collapse_chevron(
                             "hide-left-sidebar",
                             "Hide Left Sidebar",
-                            icons::Glyph::Back,
+                            icons::Glyph::CollapseLeft,
                             &ToggleSidebar,
                             &theme,
                             cx,

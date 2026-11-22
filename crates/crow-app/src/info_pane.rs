@@ -708,7 +708,7 @@ pub fn tab_strip(info: &Entity<InfoPane>, theme: &Theme, cx: &mut App) -> gpui::
         .child(div().flex_1().min_w_0().flex().items_center().justify_end().child(crate::chrome::collapse_chevron(
             "hide-right-sidebar",
             "Hide Right Sidebar",
-            crate::icons::Glyph::Forward,
+            crate::icons::Glyph::CollapseRight,
             &crate::actions::TogglePreview,
             theme,
             cx,
