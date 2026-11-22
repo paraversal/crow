@@ -375,6 +375,9 @@ const HEADER_GAP: f32 = 10.;
 /// The same gap when groups are cards: they need more air between them.
 const CARD_GAP: f32 = 14.;
 
+/// Space above the first heading in the ledger, card and pill styles.
+const TOP_GAP: f32 = 2.;
+
 /// How far a heading's title slides right when its chevron shows.
 const CHEVRON_ROOM: f32 = 20.;
 
@@ -1609,8 +1612,8 @@ impl Sidebar {
             self.pending_current = row.location().map(|target| PendingCurrent { target, previous, rejected: false });
         }
         if let Row::SectionHeader { id, collapsed, .. } = row {
-            if nav == SidebarNav::Open && collapsed {
-                set_collapsed(id, false, cx);
+            if nav == SidebarNav::Open {
+                set_collapsed(id, !collapsed, cx);
             }
             return;
         }
@@ -2064,6 +2067,11 @@ impl Render for Sidebar {
             SidebarStyle::Accordion => 0.,
             _ => HEADER_GAP,
         };
+        // The first heading sits closer to the top in the styles that float their headings.
+        let first_gap = match style {
+            SidebarStyle::Ledger | SidebarStyle::Cards | SidebarStyle::Pills => TOP_GAP,
+            _ => header_gap,
+        };
         let current_child = rows.iter().position(|row| row.location().as_ref() == Some(self.visible_current()));
         let fill = {
             let layout = self.layout.borrow();
@@ -2072,7 +2080,7 @@ impl Render for Sidebar {
             match (current_bounds, first_bounds) {
                 (Some(current), Some(first)) => {
                     // Section titles keep their gap above as a margin, outside their bounds.
-                    let gap = if matches!(rows.first(), Some(Row::SectionHeader { .. })) { header_gap } else { 0.0 };
+                    let gap = if matches!(rows.first(), Some(Row::SectionHeader { .. })) { first_gap } else { 0.0 };
                     let top = f32::from(current.top() - first.top()) + gap;
                     let base = div()
                         .absolute()
@@ -2123,7 +2131,7 @@ impl Render for Sidebar {
         let backdrops: Vec<gpui::AnyElement> = {
             let layout = self.layout.borrow();
             let first = layout.first().map(|(_, _, bounds)| *bounds);
-            let gap = if matches!(rows.first(), Some(Row::SectionHeader { .. })) { header_gap } else { 0.0 };
+            let gap = if matches!(rows.first(), Some(Row::SectionHeader { .. })) { first_gap } else { 0.0 };
             section_spans(&rows)
                 .into_iter()
                 .filter(|span| span.len > 0)
@@ -2204,7 +2212,14 @@ impl Render for Sidebar {
                     .absolute()
                     .top_0()
                     .bottom_0()
-                    .left(px(8. - 6. * (1.0 - slide)))
+                    .left(px(8. - 6. * (1.0 - slide)
+                        + if pills {
+                            8.
+                        } else if cards {
+                            4.
+                        } else {
+                            0.
+                        }))
                     .flex()
                     .items_center()
                     .opacity(slide)
@@ -2259,10 +2274,12 @@ impl Render for Sidebar {
                         .aria_selected(cursor)
                         .when(cursor && self.focus.is_focused(window), |header| header.aria_active_descendant())
                         .when(look.ring, |header| header.shadow(cursor_ring(&theme)))
-                        .mt(px(header_gap))
+                        .mt(px(if i == 0 { first_gap } else { header_gap }))
+                        .mb(px(if pills { 5. } else { 0. }))
                         .px_2()
                         .py(px(if cards { 5. } else { 3. }))
                         .when(!cards, |header| header.rounded_md())
+                        .when(cards, |header| header.pl(px(12.)).pb(px(7.)))
                         .when(accordion, |header| {
                             header
                                 .ml(px(-8.))

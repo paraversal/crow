@@ -1934,6 +1934,25 @@ fn section_headers_collapse_and_expand_from_the_keyboard(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn enter_on_a_sidebar_heading_collapses_an_open_group_and_opens_a_closed_one(cx: &mut TestAppContext) {
+    let root = fixture("sidebar-heading-enter");
+    let (view, mut cx) = open(cx, &root);
+    write_config(&view, &mut cx, "sidebar.toml", &favorites_toml(&[]).replace("show = false", "show = true"));
+    cx.simulate_keystrokes("tab");
+    let sidebar = view.read_with(&cx, |w, _| w.sidebar.clone());
+    let recent =
+        sidebar.read_with(&cx, |sidebar, cx| sidebar.index_of_section_for_test("recent", cx)).expect("Recent heading");
+    sidebar.update(&mut cx, |sidebar, cx| sidebar.set_cursor_for_test(recent, cx));
+    let before = sidebar_looks(&view, &mut cx).len();
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert!(sidebar_looks(&view, &mut cx).len() < before, "Enter collapses the open group");
+    cx.simulate_keystrokes("enter");
+    settle(&view, &mut cx);
+    assert_eq!(sidebar_looks(&view, &mut cx).len(), before, "and opens it again");
+}
+
+#[gpui::test]
 fn walking_recent_keeps_the_cursor_on_the_shown_folder(cx: &mut TestAppContext) {
     let root = fixture("recent-walk");
     let (view, mut cx) = open(cx, &root);

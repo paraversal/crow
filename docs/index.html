@@ -145,11 +145,12 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .swatch:hover { color: var(--ink); }
 .swatch[aria-selected="true"] { color: var(--ink); border-color: var(--ink); }
 .dots { display: inline-flex; }
-.dots i { width: 14px; height: 14px; border-radius: 50%; margin-left: -4px; box-shadow: 0 0 0 2px var(--bg); }
+.dots i { width: 14px; height: 14px; border-radius: 50%; margin-left: -4px; box-shadow: 0 0 0 2px var(--bg); background: var(--l); }
+@media (prefers-color-scheme: dark) { .dots i { background: var(--d); } }
 .dots i:first-child { margin-left: 0; }
 .stage { display: grid; }
-.stage > img { grid-area: 1 / 1; transition: opacity .3s ease, transform .3s ease, visibility .3s; }
-.stage > img[hidden] { display: block; opacity: 0; visibility: hidden; }
+.stage > picture { display: block; grid-area: 1 / 1; transition: opacity .3s ease, transform .3s ease, visibility .3s; }
+.stage > picture[hidden] { display: block; opacity: 0; visibility: hidden; }
 /* The hero settles in on load: a short rise and fade, one element after another. */
 @keyframes rise { from { opacity: 0; transform: translateY(14px); } }
 .hero h1, .hero .lede, .hero .get, .hero-shot { animation: rise .6s cubic-bezier(.2, .7, .2, 1) both; }
@@ -157,7 +158,7 @@ h2 { margin: 0 0 40px; font-size: clamp(28px, 4vw, 44px); line-height: 1.1; lett
 .hero .get { animation-delay: .16s; }
 .hero-shot { animation-delay: .26s; }
 @media (prefers-reduced-motion: reduce) {
-  .stage > img { transition: none; }
+  .stage > picture { transition: none; }
   .hero h1, .hero .lede, .hero .get, .hero-shot { animation: none; }
 }
 .after { margin: 28px 0 0; color: var(--muted); font-size: 15px; }
@@ -242,11 +243,11 @@ footer nav { gap: 22px; }
       <div class="pair">
         <figure>
           <div class="key"><kbd>⌘K</kbd>Folders, files, every command</div>
-          <img class="shot" loading="lazy" src="media/palette.webp" width="2560" height="1600" alt="The command palette listing folders that match “pro”.">
+          <picture><source srcset="media/palette-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/palette-light.webp" width="2560" height="1600" alt="The command palette listing folders that match “pro”."></picture>
         </figure>
         <figure>
           <div class="key"><kbd>⌘F</kbd>Names and contents, as you type</div>
-          <img class="shot" loading="lazy" src="media/search.webp" width="2560" height="1600" alt="Search for “raven” listing file names and matching lines inside files, with skipped folders counted.">
+          <picture><source srcset="media/search-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/search-light.webp" width="2560" height="1600" alt="Search for “raven” listing file names and matching lines inside files, with skipped folders counted."></picture>
         </figure>
       </div>
       <ul class="rows">
@@ -300,7 +301,7 @@ footer nav { gap: 22px; }
           <li><span class="k">Plugins</span><span>write your own in Rhai</span></li>
         </ul>
       </div>
-      <img class="shot" loading="lazy" src="media/git-list.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, and the sidebar lists Git projects with their branch.">
+      <picture><source srcset="media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/git-list-light.webp" width="2560" height="1600" alt="A Rust project in list view: changed files carry Git badges, and the sidebar lists Git projects with their branch."></picture>
     </div>
   </section>
 
@@ -309,17 +310,17 @@ footer nav { gap: 22px; }
       <div class="themes-head">
         <h2 id="themes-h">Make it yours.</h2>
         <div class="swatches" role="tablist" aria-label="Setups">
-          <button class="swatch" role="tab" aria-selected="true" aria-controls="t-dev"><span class="dots"><i style="background:#1e1e2e"></i><i style="background:#cba6f7"></i><i style="background:#f5c2e7"></i><i style="background:#a6e3a1"></i></span>The zealous developer</button>
-          <button class="swatch" role="tab" aria-selected="false" aria-controls="t-photo"><span class="dots"><i style="background:#eff1f5"></i><i style="background:#8839ef"></i><i style="background:#ea76cb"></i><i style="background:#40a02b"></i></span>The photographer</button>
-          <button class="swatch" role="tab" aria-selected="false" aria-controls="t-writer"><span class="dots"><i style="background:#fbf1c7"></i><i style="background:#d65d0e"></i><i style="background:#98971a"></i><i style="background:#458588"></i></span>The writer</button>
-          <button class="swatch" role="tab" aria-selected="false" aria-controls="t-producer"><span class="dots"><i style="background:#002b36"></i><i style="background:#268bd2"></i><i style="background:#b58900"></i><i style="background:#2aa198"></i></span>The producer</button>
+          <button class="swatch" role="tab" aria-selected="true" aria-controls="t-dev"><span class="dots"><i style="--l:#eff1f5;--d:#1e1e2e"></i><i style="--l:#8839ef;--d:#cba6f7"></i><i style="--l:#ea76cb;--d:#f5c2e7"></i><i style="--l:#40a02b;--d:#a6e3a1"></i></span>The zealous developer</button>
+          <button class="swatch" role="tab" aria-selected="false" aria-controls="t-photo"><span class="dots"><i style="--l:#faf4ed;--d:#191724"></i><i style="--l:#907aa9;--d:#c4a7e7"></i><i style="--l:#d7827e;--d:#ebbcba"></i><i style="--l:#286983;--d:#31748f"></i></span>The photographer</button>
+          <button class="swatch" role="tab" aria-selected="false" aria-controls="t-writer"><span class="dots"><i style="--l:#fbf1c7;--d:#282828"></i><i style="--l:#d65d0e;--d:#fe8019"></i><i style="--l:#98971a;--d:#b8bb26"></i><i style="--l:#458588;--d:#83a598"></i></span>The writer</button>
+          <button class="swatch" role="tab" aria-selected="false" aria-controls="t-producer"><span class="dots"><i style="--l:#fdf6e3;--d:#002b36"></i><i style="--l:#268bd2;--d:#268bd2"></i><i style="--l:#b58900;--d:#b58900"></i><i style="--l:#2aa198;--d:#2aa198"></i></span>The producer</button>
         </div>
       </div>
       <div class="stage">
-        <img class="shot" id="t-dev" role="tabpanel" loading="lazy" src="media/persona-developer.webp" width="2560" height="1600" alt="A developer’s Crow in Catppuccin Mocha: a Rust project in list view with Git badges, sidebar groups for work servers, toy projects and external drives, and Lucide file icons.">
-        <img class="shot" id="t-photo" role="tabpanel" hidden loading="lazy" src="media/persona-photographer.webp" width="2560" height="1600" alt="A photographer’s Crow in Catppuccin Latte: a Lofoten shoot in gallery view, sidebar groups for shoots, clients and camera cards.">
-        <img class="shot" id="t-writer" role="tabpanel" hidden loading="lazy" src="media/persona-writer.webp" width="2560" height="1600" alt="A writer’s Crow in Gruvbox Light: the chapters of a novel in list view, with groups for what is being written and read.">
-        <img class="shot" id="t-producer" role="tabpanel" hidden loading="lazy" src="media/persona-producer.webp" width="2560" height="1600" alt="A music producer’s Crow in Solarized Dark: a sample library in column view, with groups for sessions, sounds and drives.">
+        <picture id="t-dev" role="tabpanel"><source srcset="media/persona-developer-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/persona-developer-light.webp" width="2560" height="1600" alt="A developer’s Crow in Catppuccin: a Rust project in list view with Git badges, sidebar groups for work servers, toy projects and external drives, and Lucide file icons."></picture>
+        <picture id="t-photo" role="tabpanel" hidden><source srcset="media/persona-photographer-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/persona-photographer-light.webp" width="2560" height="1600" alt="A photographer’s Crow in Rosé Pine: a Lofoten shoot in gallery view, sidebar groups for shoots, clients and camera cards."></picture>
+        <picture id="t-writer" role="tabpanel" hidden><source srcset="media/persona-writer-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/persona-writer-light.webp" width="2560" height="1600" alt="A writer’s Crow in Gruvbox: the chapters of a novel in list view, with groups for what is being written and read."></picture>
+        <picture id="t-producer" role="tabpanel" hidden><source srcset="media/persona-producer-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/persona-producer-light.webp" width="2560" height="1600" alt="A music producer’s Crow in Solarized: a sample library in column view, with groups for sessions, sounds and drives."></picture>
       </div>
       <p class="after">Base24 themes from <code>~/.config/themes</code> show up live. Icon packs, sidebar groups and emoji do the rest.</p>
     </div>
@@ -329,10 +330,10 @@ footer nav { gap: 22px; }
     <div class="wrap">
       <h2 id="finder-h">And all the Finder you know.</h2>
       <ul class="views">
-        <li><figure><img class="shot" loading="lazy" src="media/view-icons.webp" width="2560" height="1600" alt="Icon view"><figcaption><kbd>⌘1</kbd>Icons</figcaption></figure></li>
-        <li><figure><img class="shot" loading="lazy" src="media/view-list.webp" width="2560" height="1600" alt="List view"><figcaption><kbd>⌘2</kbd>List</figcaption></figure></li>
-        <li><figure><img class="shot" loading="lazy" src="media/view-columns.webp" width="2560" height="1600" alt="Column view"><figcaption><kbd>⌘3</kbd>Columns</figcaption></figure></li>
-        <li><figure><img class="shot" loading="lazy" src="media/view-gallery.webp" width="2560" height="1600" alt="Gallery view"><figcaption><kbd>⌘4</kbd>Gallery</figcaption></figure></li>
+        <li><figure><picture><source srcset="media/view-icons-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-icons-light.webp" width="2560" height="1600" alt="Icon view"></picture><figcaption><kbd>⌘1</kbd>Icons</figcaption></figure></li>
+        <li><figure><picture><source srcset="media/view-list-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-list-light.webp" width="2560" height="1600" alt="List view"></picture><figcaption><kbd>⌘2</kbd>List</figcaption></figure></li>
+        <li><figure><picture><source srcset="media/view-columns-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-columns-light.webp" width="2560" height="1600" alt="Column view"></picture><figcaption><kbd>⌘3</kbd>Columns</figcaption></figure></li>
+        <li><figure><picture><source srcset="media/view-gallery-dark.webp" media="(prefers-color-scheme: dark)"><img class="shot" loading="lazy" src="media/view-gallery-light.webp" width="2560" height="1600" alt="Gallery view"></picture><figcaption><kbd>⌘4</kbd>Gallery</figcaption></figure></li>
       </ul>
       <p class="also"><b>Sidebar</b> · <b>Tabs</b> · <b>Quick Look</b> · <b>Finder tags</b> · <b>Trash by default</b> · <b>Spring-loaded folders</b> · <b>iCloud status</b> · <b>Drag and drop</b></p>
     </div>
