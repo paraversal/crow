@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crow manual</title>
+<meta name="description" content="How to use Crow, task by task.">
+<link rel="icon" href="../media/favicon.png">
+<style>
+:root { --bg:#fbfbfc; --raised:#f1f1f3; --ink:#111113; --muted:#6a6a72; --line:#e4e4e8; --eye:#b9770e; --shadow:rgba(16,16,24,.14); color-scheme: light; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0e0e10; --raised:#1a1a1d; --ink:#f3f3f5; --muted:#9898a1; --line:#26262b; --eye:#eaa847; --shadow:rgba(0,0,0,.55); color-scheme: dark; } }
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 20px; }
+body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+a { color: var(--eye); text-decoration: none; } a:hover { text-decoration: underline; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px; display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 48px; }
+nav.toc { position: sticky; top: 0; align-self: start; max-height: 100vh; overflow-y: auto; padding: 28px 0; font-size: 14px; }
+nav.toc .brand { font-weight: 600; font-size: 17px; color: var(--ink); display: block; margin-bottom: 14px; }
+nav.toc .part { margin: 18px 0 4px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+nav.toc ul { list-style: none; margin: 0; padding: 0; }
+nav.toc li a { display: block; padding: 3px 0; color: var(--ink); }
+nav.toc li a.on { color: var(--eye); font-weight: 600; }
+main { padding: 28px 0 96px; min-width: 0; }
+h1 { font-size: 34px; letter-spacing: -.02em; margin: 0 0 6px; }
+.lede { color: var(--muted); margin: 0 0 8px; }
+h2.part { margin: 56px 0 0; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+section { margin-top: 28px; }
+h3 { font-size: 24px; margin: 0 0 8px; letter-spacing: -.01em; }
+h4 { font-size: 16px; margin: 22px 0 4px; }
+code { font: 13px ui-monospace, "SF Mono", Menlo, monospace; background: var(--raised); padding: 1px 5px; border-radius: 4px; }
+kbd { font: 12px ui-monospace, "SF Mono", Menlo, monospace; background: var(--raised); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; white-space: nowrap; }
+ul { padding-left: 22px; } li { margin: 4px 0; }
+figure { margin: 16px 0; }
+figure img { width: 100%; height: auto; border-radius: 10px; box-shadow: 0 10px 30px var(--shadow); cursor: zoom-in; display: block; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; } th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+dialog { border: 0; padding: 0; background: transparent; max-width: 96vw; max-height: 96vh; } dialog::backdrop { background: rgba(0,0,0,.7); }
+dialog img { max-width: 96vw; max-height: 96vh; border-radius: 10px; cursor: zoom-out; display: block; }
+@media (max-width: 800px) { .wrap { display: block; } nav.toc { position: static; max-height: none; padding-bottom: 0; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav class="toc" aria-label="Contents"><a class="brand" href="../index.html">Crow</a><p class="part">Basics</p><ul><li><a href="#start">Getting started</a></li><li><a href="#window">The window</a></li><li><a href="#moving">Moving around</a></li><li><a href="#views">Views</a></li></ul><p class="part">Working with files</p><ul><li><a href="#select">Selecting, copying and moving</a></li><li><a href="#rename">Renaming</a></li><li><a href="#drag">Drag and drop</a></li><li><a href="#look">Quick Look, Info and the terminal</a></li></ul><p class="part">Finding things</p><ul><li><a href="#filter">Filtering</a></li><li><a href="#search">Search</a></li><li><a href="#saved">Saved searches and tags</a></li></ul><p class="part">Making it yours</p><ul><li><a href="#settings">Settings</a></li><li><a href="#themes">Themes and icon packs</a></li><li><a href="#sidebar">The sidebar</a></li><li><a href="#vim">The Vim layer and your own keys</a></li><li><a href="#motion">Motion and sound</a></li><li><a href="#config">Config files</a></li></ul><p class="part">Extending</p><ul><li><a href="#git">Git and Projects</a></li><li><a href="#plugins">Plugins and the command line</a></li></ul><p class="part">Appendix</p><ul><li><a href="#trouble">Troubleshooting</a></li><li><a href="#files">Where Crow keeps its files</a></li></ul></nav>
+<main>
+<h1>Crow manual</h1>
+<p class="lede">How to use Crow, task by task. Keys are Finder's unless noted; the full list is in <a href="../keys.md">keys.md</a>.</p>
+<h2 class="part">Basics</h2><section id="start"><h3>Getting started</h3>
+<p>Crow needs macOS 14 or later. Download the DMG from <a href="https://github.com/paraversal/crow/releases/latest">Releases</a> or run <code>brew install --cask paraversal/tap/crow</code>. Crow is not signed or notarized yet, so macOS blocks the first open once per version; the <a href="../install.md">install guide</a> has the steps.</p>
+<p>On first launch Crow asks "Show tips as you go?" once. Grant the folders you want it to read (Desktop, Documents, Downloads, or Full Disk Access) in System Settings ▸ Privacy &amp; Security; macOS names Crow, not your terminal, when it asks.</p>
+<p>The <code>crow</code> command opens folders from a terminal: <code>crow ~/Downloads</code> opens a window there, <code>crow notes.txt</code> opens its folder with the file selected, and <code>crow</code> alone brings Crow forward. <figure><picture><source srcset="../media/hero-dark.webp" media="(prefers-color-scheme: dark)"><img src="../media/hero-light.webp" alt="Crow in column view with a preview" loading="lazy"></picture></figure></p></section><section id="window"><h3>The window</h3>
+<p>The <strong>sidebar</strong> on the left holds favorites in groups, Recent folders, Projects, Tags, saved searches and Locations. The <strong>top band</strong> has Back and Forward, the folder name, the view switch (icons, list, columns, gallery), <em>Go to</em> and the search field. The <strong>right pane</strong> shows Preview and Info for the selection. The <strong>bottom bar</strong> shows the path, hints, progress and counts.</p>
+<ul>
+<li>Every toolbar control has a tooltip with its name and key; a disabled control is the same icon at 40 % opacity.</li>
+<li><kbd>⇧⌘P</kbd> shows or hides the right pane; <kbd>⌃⌘S</kbd> collapses the sidebar. Drag a divider to resize; double-click to reset. The sidebar width is saved.</li>
+<li>The menu bar (File, Edit, View, Go, Window, Help) lists every command with its Finder key, also while the Vim layer is on, and greys out what the focused view cannot do.</li>
+<li>Sheets (Why This View?, the theme picker, <kbd>⌘K</kbd>, delete and conflict questions) dim the window; a click outside cancels them like <kbd>esc</kbd>.</li>
+</ul></section><section id="moving"><h3>Moving around</h3>
+<p>Crow uses Finder's keys: arrows (with <kbd>⇧</kbd> to extend), <kbd>⌥↑</kbd>/<kbd>⌥↓</kbd> for first and last, <kbd>⌘↑</kbd> for the enclosing folder, <kbd>⌘↓</kbd> to open, <kbd>⌘[</kbd> and <kbd>⌘]</kbd> for history, <kbd>⌘T</kbd> and <kbd>⌘W</kbd> for tabs, <kbd>⇧⌘.</kbd> for hidden files, and <kbd>Space</kbd> for Quick Look. Typing a name selects it and the bottom bar shows the letters. <kbd>⇥</kbd> moves focus between the sidebar and the list.</p>
+<ul>
+<li><strong>Go to a folder.</strong> <kbd>⇧⌘G</kbd> opens the palette on this folder's path: type a name, <kbd>⇥</kbd> completes, <kbd>↩</kbd> goes there or selects a file. A pasted path may be quoted, shell-escaped or a <code>file://</code> URL.</li>
+<li><strong>Edit the path.</strong> <kbd>⌘L</kbd>, a click on the bar's empty space or the pencil edits the path in place. Each segment drags the folder it shows. When room runs short the middle folds into "…"; click it for the deepest hidden folder.</li>
+<li><strong>Extend the selection.</strong> <kbd>⇧⌥↑</kbd> and <kbd>⇧⌥↓</kbd> extend from the cursor to the first or last item, like Finder.</li>
+</ul>
+<h4>The palette</h4>
+<p><kbd>⌘K</kbd> opens the palette. Folders are grouped into Recent, Favorites and In &lt;folder&gt;, each with its abbreviated path so two folders called <code>git</code> are told apart. <kbd>↩</kbd> goes there, <kbd>⌘↩</kbd> opens it in a new tab, <kbd>⇥</kbd> appends the folder's path and <code>/</code> so the next letters search inside it. A typed query also matches files in the current folder.</p>
+<p>Start with <code>&gt;</code> for commands: rows show the menu, the label, an on/off chip for toggles and their keys. Commands you run are remembered under Recently used (<code>palette_recent_commands = false</code> turns that off). With Show Hidden Files off, dot-named entries still match while <code>search_includes_hidden</code> is on; they are dimmed and ranked last. <figure><picture><source srcset="../media/palette-dark.webp" media="(prefers-color-scheme: dark)"><img src="../media/palette-light.webp" alt="The command palette" loading="lazy"></picture></figure></p>
+<h4>Hints and tips</h4>
+<p>The bottom bar's hints follow focus: the path field (<kbd>↩</kbd> go, <kbd>⇥</kbd> complete, <kbd>esc</kbd> cancel), the filter, the sidebar, search. The idle hint shows <code>/</code> filter and retires after you have used it three times. <code>hints = "always"</code> keeps every hint and <code>"off"</code> hides hints and tips; <code>tips = "off"</code> mutes only the tips. A tip appears once when you do something the slow way, such as scrolling 200+ items instead of typing <code>/</code>.</p></section><section id="views"><h3>Views</h3>
+<p><kbd>⌘1</kbd> icons, <kbd>⌘2</kbd> list, <kbd>⌘3</kbd> columns, <kbd>⌘4</kbd> gallery. A window shows each folder in that folder's own view, so moving into a folder with its own view switches it; with <code>view_per_folder = false</code> a window keeps the view you give it.</p>
+<ul>
+<li><strong>List.</strong> <kbd>→</kbd> opens a folder inline (again to go in); <kbd>←</kbd> closes it or goes up. Sort by clicking a header, again to reverse; drag dividers to resize. Right-click the header, or View ▸ Choose List Columns, to pick columns for this folder or as the default. The Name column takes the width the window gives.</li>
+<li><strong>Columns.</strong> <kbd>←</kbd> and <kbd>→</kbd> move between columns; <kbd>←</kbd> in the leftmost goes up. Clicking empty space closes the columns to the right.</li>
+<li><strong>Icons.</strong> Arrows follow the tile grid; drag from empty space for a selection rectangle (<kbd>⌘</kbd> keeps the starting selection, <kbd>esc</kbd> restores it). View ▸ Icon Size: Compact, Standard, Large; View ▸ Icon Caption shows a plugin column under each name. Quick Look thumbnails replace icons when they can.</li>
+<li><strong>Gallery.</strong> A filename rail beside a large preview. A selected folder previews its children; exactly two selected files compare side by side.</li>
+<li><strong>Why This View?</strong> <kbd>⌘J</kbd> shows which layer of <code>views.toml</code> (default, rule or folder) decided each setting. Use as Defaults and Reset View for This Folder change them.</li>
+</ul>
+<figure><picture><source srcset="../media/view-icons-dark.webp" media="(prefers-color-scheme: dark)"><img src="../media/view-icons-light.webp" alt="The icon view with thumbnails" loading="lazy"></picture></figure>
+<p>The right pane has Preview and Info tabs. <kbd>⌘I</kbd> opens Info, a second press closes it. Info shows name, kind, size, where, created, modified and added dates, tags, permissions and owner; a multi-selection shows its count, total size, common kind and shared tags.</p></section><h2 class="part">Working with files</h2><section id="select"><h3>Selecting, copying and moving</h3>
+<p>Selection works as in Finder: <kbd>⇧</kbd> extends, <kbd>⌘</kbd>-click toggles, <kbd>⌘A</kbd> selects all, clicking empty space deselects. <kbd>⌘C</kbd>, <kbd>⌘X</kbd> and <kbd>⌘V</kbd> copy, cut and paste, also to and from Finder; <kbd>⌥⌘V</kbd> moves. Copying or cutting more than 1000 items keeps them in Crow's own clipboard (the status says "Crow only"). <kbd>⌥⌘C</kbd> copies the selected paths, one per line.</p>
+<ul>
+<li><kbd>⌘D</kbd> duplicates; <kbd>⇧⌘N</kbd> makes a folder; <kbd>⌥⌘N</kbd> a file.</li>
+<li><kbd>⌘⌫</kbd> moves to the Trash; <kbd>⌥⌘⌫</kbd> deletes permanently after asking; <kbd>⇧⌘⌫</kbd> empties the Trash (home and every mounted volume) after asking.</li>
+<li><strong>Undo.</strong> <kbd>⌘Z</kbd> and <kbd>⇧⌘Z</kbd> undo and redo every operation, trash and batch rename included. <kbd>⌥⌘L</kbd> shows Activity, where older steps can be undone.</li>
+<li><strong>Nothing is overwritten.</strong> A name clash asks first; Replace moves the old item to the Trash.</li>
+</ul>
+<h4>The copy queue</h4>
+<p>Copies and moves run as jobs. Conflicts are shown before the copy starts, and you can decide later. While one runs, a 2 px accent line along the bar's top edge and "Copying … · n %" with Cancel <kbd>esc</kbd> replace the hints. Quitting or closing the last window during a job asks first: <kbd>esc</kbd> keeps it running, <kbd>↩</kbd> stops it cleanly (finished items stay; the item in progress is never left half done).</p></section><section id="rename"><h3>Renaming</h3>
+<p><kbd>↩</kbd> renames the selected item (with <code>enter = "open"</code> it opens instead; <kbd>F2</kbd> always renames). Select two or more items and press <kbd>F2</kbd> to rename them together: one sheet applies literal find and replace, adds text before or after the name, or numbers the selection in display order, with a live old → new preview and one Undo for the whole batch. Extensions are kept by default, and a swap or other cycle is staged safely.</p></section><section id="drag"><h3>Drag and drop</h3>
+<p>Drag within Crow or between Crow and Finder or other apps; <kbd>⌥</kbd> copies. Dropping works on folder rows, search results, sidebar folders, path segments and real folders found by search.</p>
+<p>Holding still over a folder for a moment springs it open (its highlight blinks twice first). Release to drop there, or leave to restore the folder, selection and scroll you started from. Holding over the Back button steps back out of opened folders, then through history. Afterwards Back returns to the starting folder.</p>
+<p>In the sidebar, drag favorites to reorder them (or <kbd>⌥⌘↑</kbd>/<kbd>⌥⌘↓</kbd>), drop files on a row to move or copy them there, and drop folders between favorites (a line shows where) or on a group's title to add them. <kbd>⌃⌘T</kbd> adds the selected folder.</p>
+<h4>The Shelf</h4>
+<p>Turn on <code>[shelf] show = true</code> in <code>sidebar.toml</code> for a Shelf at the bottom of the sidebar. Drag files onto it, or use Add to Shelf, carry them to another folder, then Move Shelf Here or Copy Shelf Here (palette and File menu). It holds references, is saved in the state folder and shows only while it holds files or a drag is in flight.</p></section><section id="look"><h3>Quick Look, Info and the terminal</h3>
+<p><kbd>Space</kbd> opens Quick Look. Preview shows the selection in the right pane, at the hit line for search results; text is syntax-highlighted. Cloud placeholders keep their download badge.</p>
+<p><strong>Open Terminal Here</strong> (context menu, File menu, palette) opens the folder in the app set by <code>terminal</code> in <code>settings.toml</code> (a name like <code>"iTerm"</code> or a path). A folder opens itself; a file opens its parent; a multi-selection has no single "here", so the line is disabled. Right-click or Ctrl-click opens a native menu with the same names and keys as the menu bar.</p></section><h2 class="part">Finding things</h2><section id="filter"><h3>Filtering</h3>
+<p>Type <kbd>/</kbd> to filter the focused folder as you type. The field opens as the first row of the column (or under the list header) with the query, a Tags control and "n of N"; matching letters are highlighted. <kbd>esc</kbd> clears it, arrows move within the matches, <kbd>↩</kbd> moves focus into them, and <kbd>⌘↓</kbd> opens the selected one. <kbd>⌘F</kbd> carries the text into a search of that folder.</p>
+<p>The Tags control opens a multi-select sheet; every selected tag must be present. Edit ▸ Filter by Tag… reaches it from anywhere in the list.</p></section><section id="search"><h3>Search</h3>
+<p><kbd>⌘F</kbd> searches names and contents in the current folder (in columns, the focused column; press <kbd>→</kbd> first to search the folder previewed beside it). The field moves into the top band, where All / Names / Contents choose what to match (<kbd>⇧⌘M</kbd> cycles them); Names reads no file contents. <code>search_match</code> sets the mode each new search starts in.</p>
+<ul>
+<li><strong>Scope.</strong> The scope bar switches between the folder, Home and This Mac (Spotlight, names only).</li>
+<li><strong>Skipped folders.</strong> The footer counts results and files and lists every skipped folder with the rule that skipped it. The <code>dev</code> set (<code>node_modules</code>, <code>target</code> beside <code>Cargo.toml</code>, <code>.git</code>, …) is on by default; Find Everything (<kbd>⇧⌘A</kbd>) turns every set off. Hidden files are searched, dimmed, while <code>search_includes_hidden</code> is on.</li>
+<li><strong>Results.</strong> Name matches come first with their letters highlighted; a content hit shows its line number and line under the name. The right pane previews the selected result at the hit line. <kbd>↩</kbd> opens, <kbd>⌘R</kbd> reveals, <kbd>Space</kbd> Quick Looks, and the usual copy, cut and trash keys work. <kbd>⇥</kbd> goes field → results → sidebar; <kbd>esc</kbd> closes.</li>
+</ul>
+<figure><picture><source srcset="../media/search-dark.webp" media="(prefers-color-scheme: dark)"><img src="../media/search-light.webp" alt="Search results with content hits" loading="lazy"></picture></figure></section><section id="saved"><h3>Saved searches and tags</h3>
+<p>File ▸ Save Search… writes the open search to <code>saved-queries.toml</code>. A saved search is a live destination in the sidebar with its own result list; <kbd>⌘F</kbd> inside one edits a temporary query without changing the record. Its context menu edits or removes it, and Settings ▸ Search lists them all, with optional kind, age and tag predicates.</p>
+<p>The sidebar's Tags section shows Finder tags discovered from Spotlight's index plus <code>pinned_tags</code> from <code>sidebar.toml</code>. A tag row opens every indexed item carrying it.</p></section><h2 class="part">Making it yours</h2><section id="settings"><h3>Settings</h3>
+<p><kbd>⌘,</kbd> opens one resizable window with Appearance, Behavior, Keyboard, Views &amp; Preview, Search, Plugins and Config Files. Search Settings (<kbd>⌘F</kbd>) finds controls by name, by plain words ("Vim", "hidden", "icon pack") or by TOML key. Every control edits the same file the text editor would; the files stay authoritative and the window follows edits made elsewhere. A broken file adds a row naming it and the line, with an Open button.</p></section><section id="themes"><h3>Themes and icon packs</h3>
+<p>Ten themes ship with Crow, and "System" follows macOS. View ▸ Theme… (<kbd>⌥⌘T</kbd>) previews each as you move through the list; <kbd>⌘↩</kbd> applies it to every app that reads <code>~/.config/themes</code>. Any Base24 scheme dropped into <code>~/.config/themes/schemes/</code> appears at once. See <a href="../themes.md">themes.md</a>.</p>
+<p>Icon packs replace Finder's icons with SVG (tinted) or PNG (full colour) files; pick several in Settings ▸ Appearance ▸ Icon pack to layer them. <a href="../examples/icon-pack">A complete Lucide pack</a> is in the repository to copy.</p>
+<figure><picture><source srcset="../media/persona-photographer-dark.webp" media="(prefers-color-scheme: dark)"><img src="../media/persona-photographer-light.webp" alt="A photographer setup: Rosé Pine Dawn, a floating-panel sidebar and Lucide icons" loading="lazy"></picture></figure></section><section id="sidebar"><h3>The sidebar</h3>
+<p>Groups of favorites live in <code>sidebar.toml</code> (drag folders in, or add them by hand). A group takes an <code>icon</code> (short text or emoji); favorites take <code>name</code>, <code>icon</code>, <code>color</code> and a Vim mark <code>key</code>. Same-named folders show their parent. Locations show free space and a bar that warns near full.</p>
+<p><code>sidebar_style</code> in <code>settings.toml</code> picks the look: <code>ledger</code> (default), <code>cards</code>, <code>accordion</code>, <code>floating-panel</code> or <code>pills</code>. <kbd>↩</kbd> on a group heading collapses it; <kbd>⌥↑</kbd>/<kbd>⌥↓</kbd> jump between groups; <kbd>⌘⌫</kbd> removes a favorite or forgets a recent folder; <kbd>⌘E</kbd> ejects a disk. <figure><picture><source srcset="../media/persona-developer-dark.webp" media="(prefers-color-scheme: dark)"><img src="../media/persona-developer-light.webp" alt="A developer setup with card groups" loading="lazy"></picture></figure></p></section><section id="vim"><h3>The Vim layer and your own keys</h3>
+<p><code>keymap = "vim"</code> adds <code>j</code>/<code>k</code>, <code>h</code>/<code>l</code>, <code>gg</code>/<code>G</code>, <code>yy</code>/<code>dd</code>/<code>p</code>, <code>u</code> and <kbd>⌃R</kbd>, <code>cw</code> to rename, <code>-</code> to go up, <code>m x</code> to mark the folder as favorite <code>x</code> and <code>'x</code> to jump there. Letters no longer select by name in this layer. The menus keep the Finder keys.</p>
+<p>Settings ▸ Keyboard lists every command with its shortcut for either layer. Click a row (or <kbd>↩</kbd>), type the new keys; a Vim sequence ends with <kbd>↩</kbd> or a one-second pause. <kbd>esc</kbd> cancels, Backspace while typing removes the shortcut, and <kbd>⌫</kbd> on a row restores the default. A key another command uses asks Replace, Keep both or Cancel; keys macOS owns are refused with the reason. The same edits can be made in <code>keys.toml</code>. Every key is in <a href="../keys.md">keys.md</a>.</p></section><section id="motion"><h3>Motion and sound</h3>
+<p><code>motion = "auto"</code> uses Full unless macOS Reduce Motion is on, then Low. <code>"off"</code> changes state in one frame; <code>"low"</code> fades only; <code>"full"</code> also moves: a trashed row's icon becomes a trash and swallows the name, a move pulses its target, and the selection fill glides between rows. <code>sound</code> is <code>"crow"</code> (Finder's trash sounds plus soft ticks), <code>"finder"</code> or <code>"off"</code>. Details are in <a href="../motion.md">motion.md</a>.</p></section><section id="config"><h3>Config files</h3>
+<p>Seven TOML files in <code>~/.config/crow/</code>, each written on first launch with every option documented. Edits apply immediately and Crow keeps your comments when it writes. <a href="../configuration.md">configuration.md</a> shows each file as shipped.</p></section><h2 class="part">Extending</h2><section id="git"><h3>Git and Projects</h3>
+<p>The bundled Git package is optional and read-only: approve it once in Settings ▸ Plugins. Changed files show badges and folders show the highest-priority badge beneath them; ignored files are dimmed. The status bar shows the branch, ahead/behind and changed count; Info shows Git details; the Git Diff tab shows staged and unstaged text changes for the selected file.</p>
+<p>For the <strong>Lines</strong> column, add <code>"git.lines-changed"</code> to <code>columns</code> in <code>views.toml</code> and press <kbd>⌘2</kbd>. Pin a worktree root to follow it, and select a badge to open Review Git Changes, where Pinned Repositories shows all pins at once.</p>
+<p>Projects lists the repositories under <code>[projects] roots</code> in <code>sidebar.toml</code>, with branch and changed count. Use the palette's Add Current Folder as Project Root. <figure><picture><source srcset="../media/git-list-dark.webp" media="(prefers-color-scheme: dark)"><img src="../media/git-list-light.webp" alt="A list with Git badges" loading="lazy"></picture></figure></p></section><section id="plugins"><h3>Plugins and the command line</h3>
+<p>Plugins are Rhai packages that add commands, sidebar sections, preview providers and columns, each with an explicit grant. A running plugin's commands appear in File ▸ Plugins and the palette. See <a href="../plugins.md">plugins.md</a>.</p>
+<p><code>crow</code> is installed by <code>./scripts/bundle.sh --install</code> (and by the Homebrew cask). It is a small script that runs <code>open -a /Applications/Crow.app</code>; set <code>CROW_APP</code> if you move Crow.</p></section><h2 class="part">Appendix</h2><section id="trouble"><h3>Troubleshooting</h3>
+<ul>
+<li><strong>macOS says Crow can't be verified.</strong> See the <a href="../install.md">install guide</a>: Privacy &amp; Security ▸ Open Anyway.</li>
+<li><strong>A folder looks empty or asks for permission.</strong> Grant Crow the folder (or Full Disk Access) in System Settings ▸ Privacy &amp; Security. Each new version is a new app to macOS, so permissions must be granted again after updating.</li>
+<li><strong>A setting has no effect.</strong> A broken config file shows an error pill with its name and line; fix it and the change applies at once. Deleting a line restores its default.</li>
+<li><strong>Logs</strong> are in <code>~/Library/Logs/Crow/crow.log</code>.</li>
+<li><strong>Reset.</strong> Delete <code>~/.config/crow/</code> (settings) and/or <code>~/.local/state/crow/</code> (recent folders, usage, Shelf).</li>
+</ul></section><section id="files"><h3>Where Crow keeps its files</h3>
+<table>
+<tr><th>Path</th><th>Holds</th></tr>
+<tr><td><code>~/.config/crow/</code></td><td>settings, views, sidebar, exclude, saved queries, keys, plugin grants, icon packs, plugins</td></tr>
+<tr><td><code>~/.local/state/crow/</code></td><td>recent folders, palette history, key-use counts, tips seen, the Shelf</td></tr>
+<tr><td><code>~/Library/Logs/Crow/</code></td><td>the log</td></tr>
+<tr><td><code>~/Library/Caches/crow/</code></td><td>caches</td></tr>
+<tr><td><code>~/.config/themes/</code></td><td>the optional shared theme index</td></tr>
+</table></section>
+</main>
+</div>
+<dialog id="lightbox" aria-label="Enlarged screenshot"><img alt=""></dialog>
+<script>
+const box = document.getElementById('lightbox'), big = box.querySelector('img');
+document.querySelectorAll('figure img').forEach(img => img.addEventListener('click', () => { big.src = img.currentSrc || img.src; big.alt = img.alt; box.showModal(); }));
+box.addEventListener('click', () => box.close());
+const links = [...document.querySelectorAll('nav.toc li a')];
+const seen = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) links.forEach(a => a.classList.toggle('on', a.hash === '#' + e.target.id)); }), { rootMargin: '0px 0px -70% 0px' });
+document.querySelectorAll('section').forEach(s => seen.observe(s));
+</script>
+</body>
+</html>
